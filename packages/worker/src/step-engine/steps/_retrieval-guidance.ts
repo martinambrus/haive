@@ -1,3 +1,5 @@
+import { KB_DIR } from '@haive/shared/knowledge-paths';
+
 /** Shared retrieval guidance spliced into the workflow prompt builders (discovery,
  *  spec-quality, spec-audit, resolve-warnings, dag-execute, implement, ...).
  *
@@ -27,7 +29,7 @@ const RETRIEVAL_GUIDANCE_WITH_LSP = [
   '   disk: LSP (when available) for go-to-definition / find-references / hover types, and grep /',
   '   ripgrep for exact usage sweeps. A rag_search snippet is a lead, never the source of truth.',
   '3. On a rag_search miss, go straight to LSP + grep (and read the relevant',
-  '   `.claude/knowledge_base/` files directly if rag is unavailable). A miss is an index gap,',
+  `   \`${KB_DIR}/\` files directly if rag is unavailable). A miss is an index gap,`,
   '   not a reason to stop searching.',
 ] as const;
 
@@ -45,7 +47,7 @@ const RETRIEVAL_GUIDANCE_WITHOUT_LSP = [
   '   disk: use grep / ripgrep for exact usage sweeps and read the relevant files. A rag_search',
   '   snippet is a lead, never the source of truth.',
   '3. On a rag_search miss, go straight to grep + direct file reads (and read the relevant',
-  '   `.claude/knowledge_base/` files directly if rag is unavailable). A miss is an index gap,',
+  `   \`${KB_DIR}/\` files directly if rag is unavailable). A miss is an index gap,`,
   '   not a reason to stop searching.',
 ] as const;
 

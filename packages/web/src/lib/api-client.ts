@@ -245,7 +245,7 @@ export interface Repository {
    *  stays hidden until then. */
   scopeExcludeGlobs: string[] | null;
   /** True once all onboarding markers exist on disk (.claude/agents, skills,
-   *  knowledge_base, workflow-config.json). Sent by the list endpoint only
+   *  workflow-config.json, .haive-data/knowledge_base). Sent by the list endpoint only
    *  (undefined on the single-repo detail payload); false for non-ready repos. */
   onboarded?: boolean;
   sizeBytes: number | null;

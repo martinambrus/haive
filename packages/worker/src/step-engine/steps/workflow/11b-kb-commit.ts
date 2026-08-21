@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
+import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
@@ -20,7 +21,7 @@ const FALLBACK_GIT_IDENTITY = {
 // durable knowledge that must travel ON the feature branch: committed here →
 // pushed (11a) → merged (12) → and so reaching a fresh clone (the file fallback
 // when another instance has no shared RAG/DB). Pathspecs are repo-relative.
-const KB_PATHSPECS = ['.claude/knowledge_base', '.claude/learnings'] as const;
+const KB_PATHSPECS = [KB_DIR, LEARNINGS_DIR] as const;
 
 const DEFAULT_KB_COMMIT_MESSAGE = 'docs: update knowledge base from workflow';
 

@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
@@ -60,7 +61,8 @@ interface KnowledgeDetect {
 }
 
 interface ExistingKbFile {
-  /** Path under `.claude/knowledge_base/`, e.g. `ARCHITECTURE.md` or `old/notes.md`. */
+  /** Path under the knowledge-base root (`KB_DIR`), e.g. `ARCHITECTURE.md` or
+   *  `old/notes.md`. */
   relPath: string;
   title: string;
 }
@@ -95,7 +97,7 @@ interface KbEntry {
   tech?: string;
   /** Routing decision (plan §5.4). `global` promotes the entry to the cross-repo
    *  KB as a draft instead of writing it into this repo's
-   *  `.claude/knowledge_base/`. Defaults to `local`. */
+   *  the knowledge-base root. Defaults to `local`. */
   scope?: 'local' | 'global';
   /** Version/variant facets for a `global` entry (defaulted from the detected
    *  stack when the LLM omits them). Ignored for `local` entries. */
@@ -160,7 +162,7 @@ async function readReadmeExcerpt(repoPath: string): Promise<string | null> {
  *  Reuses listFilesMatching + readFile (already imported); deliberately
  *  self-contained so it doesn't couple to the skill/qa steps. */
 async function scanExistingKb(repoPath: string): Promise<ExistingKbFile[]> {
-  const kbDir = path.join(repoPath, '.claude', 'knowledge_base');
+  const kbDir = path.join(repoPath, KB_DIR);
   if (!(await pathExists(kbDir))) return [];
   const rels = await listFilesMatching(kbDir, (rel, isDir) => !isDir && rel.endsWith('.md'), 6);
   const out: ExistingKbFile[] = [];
@@ -450,7 +452,7 @@ export function parseKbEntries(raw: unknown): KbEntry[] {
 }
 
 export interface KbPlacement {
-  /** relPath under `.claude/knowledge_base/` of an existing file to re-place. */
+  /** relPath under the knowledge-base root of an existing file to re-place. */
   path: string;
   canonical?: string;
   category?: KbCategory;
@@ -503,7 +505,7 @@ export function parseKbPlacements(raw: unknown): KbPlacement[] {
 }
 
 export interface KbUpdate {
-  /** relPath under `.claude/knowledge_base/` of the existing file to improve. */
+  /** relPath under the knowledge-base root of the existing file to improve. */
   path: string;
   title: string;
   canonical?: string;
@@ -1005,7 +1007,7 @@ function normalizeCanonical(raw: string | undefined): string | null {
 
 export interface RoutedEntry {
   entry: KbEntry;
-  /** Path relative to `.claude/knowledge_base/` — includes subdirs. */
+  /** Path relative to the knowledge-base root — includes subdirs. */
   relPath: string;
   bucket: 'core' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference' | 'topic';
   /** Canonical stem for core entries, tech slug for tech/anti/best/quick entries, entry id for topic. */
@@ -1125,7 +1127,7 @@ export function kbIndexMarkdown(routed: RoutedEntry[], projectName: string | nul
   return lines.join('\n');
 }
 
-/** Destination relPath (under .claude/knowledge_base/) for re-placing an existing
+/** Destination relPath (under the knowledge-base root) for re-placing an existing
  *  file, mirroring routeEntries' canonical/tech routing. Null when the placement
  *  names no canonical/tech target — the file is then left exactly where it is. */
 export function routePlacement(p: KbPlacement): string | null {
@@ -1488,7 +1490,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     delete (detected as unknown as Record<string, unknown>).__readmeExcerpt;
     delete (detected as unknown as Record<string, unknown>).__existingKb;
 
-    const kbDir = path.join(ctx.repoPath, '.claude', 'knowledge_base');
+    const kbDir = path.join(ctx.repoPath, KB_DIR);
     await mkdir(kbDir, { recursive: true });
 
     const entries = extractEntries(args.llmOutput ?? null);
@@ -1697,7 +1699,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       }
 
       // Global-routed entries become DRAFT rows in the cross-repo KB and are NEVER
-      // written to .claude/knowledge_base/, so they never feed this repo's RAG. The
+      // written to the repo knowledge base, so they never feed this repo's RAG. The
       // source-files footer is stripped — a portable article must not list repo files.
       for (const { entry: e, facets } of globalChosen) {
         const category = e.category ?? 'general';

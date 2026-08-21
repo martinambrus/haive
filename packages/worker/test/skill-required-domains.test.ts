@@ -11,7 +11,7 @@ function kb(relPath: string, title: string, sectionHeadings: string[]): KbFileSu
   return {
     id: relPath.replace(/\.md$/, ''),
     title,
-    relPath: `.claude/knowledge_base/${relPath}`,
+    relPath: `.haive-data/knowledge_base/${relPath}`,
     sectionHeadings,
   };
 }

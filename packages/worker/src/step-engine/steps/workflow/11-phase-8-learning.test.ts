@@ -201,7 +201,7 @@ describe('parseKbSync', () => {
       kbSync: {
         classification: 'new_feature',
         changes: [
-          { file: '.claude/knowledge_base/BUSINESS_LOGIC.md', op: 'insert', summary: 'adds X' },
+          { file: '.haive-data/knowledge_base/BUSINESS_LOGIC.md', op: 'insert', summary: 'adds X' },
           { file: 'bad.md', op: 'frobnicate', summary: 'invalid op dropped' },
           { file: '', op: 'update', summary: 'no file dropped' },
         ],
@@ -211,7 +211,7 @@ describe('parseKbSync', () => {
     expect(ks!.classification).toBe('new_feature');
     expect(ks!.changes).toHaveLength(1);
     expect(ks!.changes[0]).toEqual({
-      file: '.claude/knowledge_base/BUSINESS_LOGIC.md',
+      file: '.haive-data/knowledge_base/BUSINESS_LOGIC.md',
       op: 'insert',
       summary: 'adds X',
     });
@@ -496,7 +496,7 @@ describe('learningOpsToDiffFiles', () => {
     ]);
     expect(files.map((f) => f.status)).toEqual(['added', 'modified', 'deleted']);
     expect(files[0]).toMatchObject({
-      path: path.join('.claude', 'learnings', 'a.md'),
+      path: path.join('.haive-data', 'learnings', 'a.md'),
       oldContent: '',
       newContent: 'na',
     });
@@ -508,7 +508,7 @@ describe('applyLearningOps + readExistingLearnings', () => {
   it('inserts without overwriting a colliding file, updates the target, deletes by id', async () => {
     const ws = await mkdtemp(path.join(tmpdir(), 'learn-'));
     try {
-      const dir = path.join(ws, '.claude', 'learnings');
+      const dir = path.join(ws, '.haive-data', 'learnings');
       await mkdir(dir, { recursive: true });
       await writeFile(path.join(dir, 'dup.md'), '# Dup\n\nORIGINAL', 'utf8');
       await writeFile(path.join(dir, 'old.md'), '# Old\n\nold body', 'utf8');

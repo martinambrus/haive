@@ -3,9 +3,15 @@ import path from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  HAIVE_DATA_DIR,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
 } from '@haive/shared';
+import {
+  INVESTIGATIONS_DIR,
+  KNOWLEDGE_SOURCE_PREFIXES,
+  LEARNINGS_DIR,
+} from '@haive/shared/knowledge-paths';
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -45,7 +51,7 @@ import { indexTaskEmbedding, TASK_EMBED_SOURCE_TYPE } from './_task-embedding.js
 
 export type RagSourceType = 'kb' | 'code' | 'learning' | 'runbook';
 
-export const SOURCE_PREFIXES = ['.claude/knowledge_base/', '.claude/learnings/'];
+export const SOURCE_PREFIXES: readonly string[] = KNOWLEDGE_SOURCE_PREFIXES;
 
 const CODE_IGNORE_DIRS = new Set([
   'node_modules',
@@ -55,6 +61,9 @@ const CODE_IGNORE_DIRS = new Set([
   // second time under a `.haive/worktrees/<branch>/` prefix — doubling the index
   // and never matching onboarding's clean paths. Exclude the whole tree.
   '.haive',
+  // The committed onboarding mirror. Holds the knowledge base + learnings, which
+  // collectKbFiles picks up through SOURCE_PREFIXES — as knowledge, never as code.
+  HAIVE_DATA_DIR,
   'vendor',
   '__pycache__',
   '.next',
@@ -71,8 +80,8 @@ const CODE_IGNORE_DIRS = new Set([
 /** Type a markdown source by its path so RAG can filter/boost by knowledge kind:
  *  bug run-books (investigations), durable learnings, and general KB articles. */
 export function classifyKbSourceType(relPath: string): RagSourceType {
-  if (relPath.startsWith('.claude/knowledge_base/investigations/')) return 'runbook';
-  if (relPath.startsWith('.claude/learnings/')) return 'learning';
+  if (relPath.startsWith(`${INVESTIGATIONS_DIR}/`)) return 'runbook';
+  if (relPath.startsWith(`${LEARNINGS_DIR}/`)) return 'learning';
   return 'kb';
 }
 

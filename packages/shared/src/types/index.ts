@@ -201,10 +201,15 @@ export interface OnboardingExclusionsMirror {
   scopeExcludeGlobs: string[];
 }
 
-/** Relative paths of the committed onboarding-mirror files under `.haive-data/`.
- *  Written at 12-post-onboarding from the repo's onboarding_* columns; read back
- *  on clone by persistDetection. Kept here so both the writer (worker) and any
- *  reader share one source of truth for the filenames. */
+/** The committed, clone-restored Haive data dir. Holds the onboarding mirror
+ *  files below AND the project knowledge base + learnings (see
+ *  `knowledge-paths.ts` for those). Distinct from `.haive/`, which workflow tasks
+ *  add to `.git/info/exclude` and which therefore never travels with a clone.
+ *
+ *  HAIVE_DATA_FILES are the mirror files specifically: written at
+ *  12-post-onboarding from the repo's onboarding_* columns and read back on clone
+ *  by persistDetection. Kept here so both the writer (worker) and any reader share
+ *  one source of truth for the filenames. */
 export const HAIVE_DATA_DIR = '.haive-data';
 export const HAIVE_DATA_FILES = {
   environment: `${HAIVE_DATA_DIR}/environment.json`,

@@ -19,8 +19,8 @@ describe('sanitizeKbRelPath', () => {
     expect(out.ok).toBe(true);
     if (out.ok) expect(out.normalized).toBe('QA/foo.md');
   });
-  it('strips a leading .claude/knowledge_base/ prefix', () => {
-    const out = sanitizeKbRelPath('.claude/knowledge_base/BUSINESS_LOGIC.md');
+  it('strips a leading .haive-data/knowledge_base/ prefix', () => {
+    const out = sanitizeKbRelPath('.haive-data/knowledge_base/BUSINESS_LOGIC.md');
     expect(out.ok).toBe(true);
     if (out.ok) expect(out.normalized).toBe('BUSINESS_LOGIC.md');
   });
@@ -47,7 +47,7 @@ describe('applyKbWrites', () => {
 
   beforeEach(async () => {
     tmpRoot = await mkdtemp(path.join(tmpdir(), 'kb-write-'));
-    kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
     await mkdir(kbDir, { recursive: true });
   });
 
@@ -68,7 +68,7 @@ describe('applyKbWrites', () => {
     expect(final).toContain('## Order delivery');
     expect(final).toContain('New body.');
     expect(written).toHaveLength(1);
-    expect(written[0]!.relPath).toBe('.claude/knowledge_base/BUSINESS_LOGIC.md');
+    expect(written[0]!.relPath).toBe('.haive-data/knowledge_base/BUSINESS_LOGIC.md');
   });
 
   it('creates a new KB file (and parent dir) when the path does not exist', async () => {
@@ -93,7 +93,7 @@ describe('applyKbWrites', () => {
       nowIso,
     );
     expect(written).toHaveLength(1);
-    expect(written[0]!.relPath).toBe('.claude/knowledge_base/OK.md');
+    expect(written[0]!.relPath).toBe('.haive-data/knowledge_base/OK.md');
     expect(skipped).toHaveLength(1);
     expect(skipped[0]!.relPath).toBe('../escape.md');
   });

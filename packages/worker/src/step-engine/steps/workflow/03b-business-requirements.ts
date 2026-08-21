@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { FormSchema } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -58,7 +59,7 @@ const PERSONA = [
   'matters, the current state and pain points, the proposed change in business terms (a before/after',
   'user journey), and measurable acceptance criteria with who is affected. Keep ALL implementation',
   'detail out (no code, files, schema, or jargon). Detect the input language and write the ENTIRE',
-  'document in it — never auto-translate. Use `rag_search` / `.claude/knowledge_base/` (especially',
+  `document in it — never auto-translate. Use \`rag_search\` / \`${KB_DIR}/\` (especially`,
   'BUSINESS_LOGIC.md) for current-state context. Do NOT edit code and do NOT run git.',
 ] as const;
 

@@ -110,9 +110,9 @@ async function createGitFixture(): Promise<string> {
       2,
     ),
   );
-  await mkdir(path.join(dir, '.claude', 'knowledge_base'), { recursive: true });
+  await mkdir(path.join(dir, '.haive-data', 'knowledge_base'), { recursive: true });
   await writeFile(
-    path.join(dir, '.claude', 'knowledge_base', 'testing.md'),
+    path.join(dir, '.haive-data', 'knowledge_base', 'testing.md'),
     '# Testing conventions\n\nUnit tests live under __tests__. Use vitest.\n',
   );
   await git(dir, ['init', '-q', '-b', 'main']);

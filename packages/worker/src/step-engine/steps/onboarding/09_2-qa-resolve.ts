@@ -1,4 +1,5 @@
 import type { FormField, FormSchema } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import {
@@ -246,7 +247,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '      "question": "<the user question or agent question text>",',
     '      "answer": "<the actual answer>",',
     '      "source": "kb | code | user",',
-    '      "citedFile": ".claude/knowledge_base/BUSINESS_LOGIC.md",',
+    `      "citedFile": "${KB_DIR}/BUSINESS_LOGIC.md",`,
     '      "proposedWrite": {',
     '        "relPath": "BUSINESS_LOGIC.md",',
     '        "section": "Order partial-delivery semantics",',
@@ -266,7 +267,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '- answers.source: `kb` if the answer was already in the KB (then OMIT proposedWrite); `code` if you',
     '  found it in the code; `user` for agent questions answered by the user.',
     '- answers.proposedWrite: REQUIRED for source `code` and `user`; OMITTED for source `kb`.',
-    '- proposedWrite.relPath: path RELATIVE to `.claude/knowledge_base/`. No `..`, no leading `/`.',
+    `- proposedWrite.relPath: path RELATIVE to \`${KB_DIR}/\`. No \`..\`, no leading \`/\`.`,
     '  Pick an existing file when possible (see list above); only create new files when no existing',
     '  file fits. New files belong under `QA/<slug>.md` unless a canonical home is obvious.',
     '- proposedWrite.section: an H2 heading that will be appended to the file (do not include the `## ` prefix).',

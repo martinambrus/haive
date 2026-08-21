@@ -312,7 +312,7 @@ describe('parseQaResolveOutput', () => {
           question: 'Where is auth?',
           answer: 'See KB.',
           source: 'kb',
-          citedFile: '.claude/knowledge_base/AUTH.md',
+          citedFile: '.haive-data/knowledge_base/AUTH.md',
         },
       ],
       unanswered: [],
@@ -378,7 +378,7 @@ describe('knowledgeQaResolveStep.apply', () => {
 
   beforeEach(async () => {
     tmpRoot = await mkdtemp(path.join(tmpdir(), 'qa-resolve-'));
-    kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
     await mkdir(kbDir, { recursive: true });
   });
 

@@ -340,7 +340,9 @@ async function main(): Promise<void> {
     if (agentCount < 10) {
       throw new Error(`expected at least 10 agent files, got ${agentCount}`);
     }
-    const kbCount = await countMarkdownFiles(path.join(fixtureDir, '.claude', 'knowledge_base'));
+    const kbCount = await countMarkdownFiles(
+      path.join(fixtureDir, '.haive-data', 'knowledge_base'),
+    );
     if (kbCount < 3) {
       throw new Error(`expected at least 3 knowledge base files, got ${kbCount}`);
     }

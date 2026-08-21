@@ -205,7 +205,7 @@ describe('knowledgeAcquisitionStep.apply', () => {
     expect(result.written).toHaveLength(1);
     expect(result.written[0]!.source).toBe('llm');
     const md = await readFile(
-      path.join(tmpRoot, '.claude', 'knowledge_base', 'architecture.md'),
+      path.join(tmpRoot, '.haive-data', 'knowledge_base', 'architecture.md'),
       'utf8',
     );
     expect(md).toContain('# Architecture');
@@ -226,7 +226,7 @@ describe('knowledgeAcquisitionStep.apply', () => {
     expect(result.written).toHaveLength(2);
     expect(result.written[0]!.source).toBe('stub');
     const md = await readFile(
-      path.join(tmpRoot, '.claude', 'knowledge_base', 'testing-strategy.md'),
+      path.join(tmpRoot, '.haive-data', 'knowledge_base', 'testing-strategy.md'),
       'utf8',
     );
     expect(md).toContain('# Testing strategy');
@@ -291,7 +291,7 @@ describe('parseKbPlacements', () => {
 describe('knowledgeAcquisitionStep.apply — existing KB reuse', () => {
   it('re-places an existing file into its canonical slot (verbatim) and fills gaps', async () => {
     const ctx = makeCtx(tmpRoot);
-    const kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
     await mkdir(kbDir, { recursive: true });
     const original = '# Legacy Architecture\n\nHand-written notes.\n';
     await writeFile(path.join(kbDir, 'old-arch.md'), original, 'utf8');
@@ -329,7 +329,7 @@ describe('knowledgeAcquisitionStep.apply — existing KB reuse', () => {
 
   it('never overwrites an existing file when a gap entry targets the same slot', async () => {
     const ctx = makeCtx(tmpRoot);
-    const kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
     await mkdir(kbDir, { recursive: true });
     const kept = '# Kept\n\nOriginal, do not clobber.\n';
     await writeFile(path.join(kbDir, 'ARCHITECTURE.md'), kept, 'utf8');
@@ -400,7 +400,7 @@ describe('parseKbUpdates', () => {
 describe('knowledgeAcquisitionStep.apply — improve stale KB files', () => {
   it('writes improved content to the canonical slot and removes the stale source', async () => {
     const ctx = makeCtx(tmpRoot);
-    const kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
     await mkdir(kbDir, { recursive: true });
     await writeFile(path.join(kbDir, 'old-arch.md'), '# Stale Architecture\n\nOutdated.\n', 'utf8');
     const raw = [
@@ -434,7 +434,7 @@ describe('knowledgeAcquisitionStep.apply — improve stale KB files', () => {
 
   it('lets an update win over a placement for the same file', async () => {
     const ctx = makeCtx(tmpRoot);
-    const kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
     await mkdir(kbDir, { recursive: true });
     await writeFile(path.join(kbDir, 'dep.md'), '# Old Deploy\n\nverbatim-marker.\n', 'utf8');
     const raw = [

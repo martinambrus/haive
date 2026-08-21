@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { INVESTIGATIONS_DIR, KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
@@ -48,7 +49,7 @@ interface LearningDetect {
   /** The per-task worktree (feature branch) the pipeline operates in — loaded from
    *  01-worktree-setup, where KB/learnings are written. */
   worktreePath: string;
-  /** Bounded summary of the existing .claude/learnings/ entries (id + title +
+  /** Bounded summary of the existing learnings entries (id + title +
    *  excerpt) so the agent can reconcile (dedup / update / delete) against them. */
   existingLearnings: { id: string; title: string; excerpt: string }[];
   /** Bounded summary of the installed skills (id + title + description) so the agent
@@ -83,7 +84,7 @@ interface LearningEntry {
   id: string;
   title: string;
   body: string;
-  /** Reconciliation op against the existing .claude/learnings/ set. Defaults to
+  /** Reconciliation op against the existing learnings set. Defaults to
    *  'insert'. 'update'/'delete' require targetId to name an existing entry. */
   op: 'insert' | 'update' | 'delete';
   /** For update/delete: the existing learning id (filename slug) to act on. */
@@ -412,21 +413,12 @@ export function parseGlobalCandidates(raw: unknown): GlobalCandidate[] {
 
 /** Discard the learning agent's structured-KB edits (Feature KB Sync) when the user
  *  rejects them: `checkout` restores tracked modifications + deletions, `clean` removes
- *  new files. Scoped to `.claude/knowledge_base` — investigations/ is written AFTER this
+ *  new files. Scoped to the knowledge-base root — investigations/ is written AFTER this
  *  and learnings live elsewhere, so neither is affected. Best-effort (a brand-new repo
  *  with no tracked KB makes checkout a no-op). */
 async function revertKbSync(worktree: string): Promise<void> {
-  await execFileP('git', [
-    '-C',
-    worktree,
-    'checkout',
-    'HEAD',
-    '--',
-    '.claude/knowledge_base',
-  ]).catch(() => undefined);
-  await execFileP('git', ['-C', worktree, 'clean', '-fdq', '--', '.claude/knowledge_base']).catch(
-    () => undefined,
-  );
+  await execFileP('git', ['-C', worktree, 'checkout', 'HEAD', '--', KB_DIR]).catch(() => undefined);
+  await execFileP('git', ['-C', worktree, 'clean', '-fdq', '--', KB_DIR]).catch(() => undefined);
 }
 
 interface ImplementOutput {
@@ -534,7 +526,7 @@ function stubLearning(detect: LearningDetect): LearningEntry[] {
   return [entry];
 }
 
-/** A learning already present in .claude/learnings/ (filename slug = id). */
+/** A learning already present in LEARNINGS_DIR (filename slug = id). */
 interface ExistingLearning {
   id: string;
   title: string;
@@ -560,7 +552,7 @@ interface PlannedLearningOp {
 /** Read the existing learnings so the agent can reconcile against them and the
  *  diff/apply can update/delete by id. Missing dir -> []. */
 export async function readExistingLearnings(worktree: string): Promise<ExistingLearning[]> {
-  const dir = path.join(worktree, '.claude', 'learnings');
+  const dir = path.join(worktree, LEARNINGS_DIR);
   let names: string[];
   try {
     names = await readdir(dir);
@@ -659,7 +651,7 @@ export function planLearningReconciliation(
  *  learning files are not written until apply). */
 export function learningOpsToDiffFiles(plan: PlannedLearningOp[]): CommitDiffFile[] {
   return plan.map((p) => ({
-    path: path.join('.claude', 'learnings', `${p.id}.md`),
+    path: path.join(LEARNINGS_DIR, `${p.id}.md`),
     status: p.op === 'insert' ? 'added' : p.op === 'delete' ? 'deleted' : 'modified',
     binary: false,
     truncated: false,
@@ -674,7 +666,7 @@ export async function applyLearningOps(
   worktree: string,
   plan: PlannedLearningOp[],
 ): Promise<{ written: string[]; deleted: string[] }> {
-  const dir = path.join(worktree, '.claude', 'learnings');
+  const dir = path.join(worktree, LEARNINGS_DIR);
   await mkdir(dir, { recursive: true });
   const written: string[] = [];
   const deleted: string[] = [];
@@ -702,7 +694,7 @@ export async function writeInvestigation(
   feature: string | null,
   affectedClients: string[],
 ): Promise<string> {
-  const dir = path.join(workspace, '.claude', 'knowledge_base', 'investigations');
+  const dir = path.join(workspace, INVESTIGATIONS_DIR);
   await mkdir(dir, { recursive: true });
   const file = path.join(dir, `${slugify(inv.title)}.md`);
   const content = [
@@ -734,8 +726,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     workflowType: 'workflow',
     index: 11,
     title: 'Phase 8: Learning capture',
-    description:
-      'Collects durable learnings from the completed workflow run and writes them to .claude/learnings/ for future reference.',
+    description: `Collects durable learnings from the completed workflow run and writes them to ${LEARNINGS_DIR}/ for future reference.`,
     requiresCli: false,
   },
 
@@ -894,9 +885,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         'KNOWLEDGE BASE SYNC — before emitting the JSON, keep the project knowledge base in sync with what this task changed:',
         '1. CLASSIFY the task: new_feature (adds capability) | feature_update (changes existing behavior) | feature_removal (removes capability) | bug_fix | refactor.',
         '2. bug_fix / refactor → SKIP KB edits (documented behavior is unchanged); set "changes": []. (A bug fix is still captured by the investigation below.)',
-        '3. new_feature / feature_update / feature_removal → find where the feature belongs (search `rag_search` FIRST, then `.claude/knowledge_base/INDEX.md`), then EDIT the structured `.claude/knowledge_base/*.md` files IN PLACE with your file tools: INSERT a section for a new feature, UPDATE the existing section for a change (correct now-stale text; leave no contradictions), DELETE the section for a removal. Document business purpose, key rules, tables/fields, and access control using the target file’s conventions. Keep `INDEX.md` in sync when you add or remove a file.',
+        `3. new_feature / feature_update / feature_removal → find where the feature belongs (search \`rag_search\` FIRST, then \`${KB_DIR}/INDEX.md\`), then EDIT the structured \`${KB_DIR}/*.md\` files IN PLACE with your file tools: INSERT a section for a new feature, UPDATE the existing section for a change (correct now-stale text; leave no contradictions), DELETE the section for a removal. Document business purpose, key rules, tables/fields, and access control using the target file’s conventions. Keep \`INDEX.md\` in sync when you add or remove a file.`,
         '4. KB GAP DETECTION: if the run surfaced domain knowledge that was MISSING from the KB (a rule discovered from code, a constraint, an edge case), append it to the right KB file.',
-        '5. Report EVERY knowledge_base file you changed in `kbSync.changes`. Do NOT edit `.claude/knowledge_base/investigations/` — that is recorded separately below.',
+        `5. Report EVERY knowledge_base file you changed in \`kbSync.changes\`. Do NOT edit \`${INVESTIGATIONS_DIR}/\` — that is recorded separately below.`,
         '',
         'SKILL SYNC — after classifying the task above, keep the project SKILLS (capability guides under `.claude/skills/`) in sync with what this task changed. DECIDE ONLY here: do NOT create, edit, or write any skill file and do NOT emit skill bodies — a later step regenerates the affected skill from your decision. Add a `"skillSync": { "ops": [ ... ] }` field to the JSON:',
         '- new_feature (the task ADDED a capability that no existing skill covers) → { "op": "new_feature", "capability": "<the capability name>", "rationale": "<one line: what it does>" }.',
@@ -949,7 +940,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
               '=== REVISION REQUESTED — this is a RE-RUN of the learning capture ===',
               'A human reviewed your PRIOR drafts (shown below) and asks for a specific change. This OVERRIDES the defaults above wherever they conflict.',
               `REVIEWER INSTRUCTION: ${detected.refineInstruction}`,
-              'Apply it to whatever artifact it concerns — a learning entry, the investigation, a `.claude/knowledge_base` file (edit it on disk with your tools), or a global-candidate body (e.g. scope an article to a specific version). Treat a clear command as a directive; if the reviewer gives literal text to add, fold it into the most relevant artifact. Re-emit the FULL JSON and leave every draft the instruction does NOT touch byte-for-byte as below.',
+              `Apply it to whatever artifact it concerns — a learning entry, the investigation, a \`${KB_DIR}\` file (edit it on disk with your tools), or a global-candidate body (e.g. scope an article to a specific version). Treat a clear command as a directive; if the reviewer gives literal text to add, fold it into the most relevant artifact. Re-emit the FULL JSON and leave every draft the instruction does NOT touch byte-for-byte as below.`,
               detected.priorDrafts ? '--- YOUR PRIOR DRAFTS (revise these) ---' : '',
               detected.priorDrafts ?? '',
             ]
@@ -1107,8 +1098,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           id: 'writeFiles',
           label:
             entries.length > 0
-              ? `Apply learning changes (${insertCount} new, ${updateCount} updated, ${deleteCount} removed) to .claude/learnings/`
-              : 'Write learning entries to .claude/learnings/',
+              ? `Apply learning changes (${insertCount} new, ${updateCount} updated, ${deleteCount} removed) to ${LEARNINGS_DIR}/`
+              : `Write learning entries to ${LEARNINGS_DIR}/`,
           default: true,
         },
         ...(kbChanged && kbSync
@@ -1146,7 +1137,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
               {
                 type: 'checkbox' as const,
                 id: 'writeInvestigation',
-                label: 'Write the bug investigation to .claude/knowledge_base/investigations/',
+                label: `Write the bug investigation to ${INVESTIGATIONS_DIR}/`,
                 default: true,
               },
               {
@@ -1235,7 +1226,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const worktreePath =
       (worktree?.output as { worktreePath?: string } | null)?.worktreePath ?? ctx.workspacePath;
 
-    // Feature KB Sync: the agent edited .claude/knowledge_base/*.md in the worktree during
+    // Feature KB Sync: the agent edited the knowledge base in the worktree during
     // the LLM phase. Revert those edits when the reviewer unticked "keep KB sync". Done
     // BEFORE writing the investigation (which lands under knowledge_base/investigations/),
     // so a kept investigation survives the revert.

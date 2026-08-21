@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
   type CommitDiffArtifact,
   type CommitDiffFile,
@@ -19,7 +20,7 @@ export const KNOWLEDGE_DIFF_ARTIFACT_NAME = 'learning-knowledge-diff.json';
  *  `<workspacePath>/.haive/learning-knowledge-diff.json`.
  *
  *  The git side is the agent's Feature KB Sync edits — the working tree vs HEAD,
- *  scoped to `.claude/knowledge_base` (old content from the HEAD blob, new from the
+ *  scoped to the knowledge-base root (old content from the HEAD blob, new from the
  *  working tree, reusing the gate-3 builder internals). `extraFiles` are
  *  caller-synthesized entries (the learning insert/update/delete ops, added in
  *  slice 2) that have no git working-tree representation yet.
@@ -31,13 +32,7 @@ export async function buildKnowledgeDiffArtifact(
   gitRun: GitRun,
   extraFiles: CommitDiffFile[] = [],
 ): Promise<string> {
-  const statusRes = await gitRun(workspacePath, [
-    'status',
-    '--porcelain',
-    '-z',
-    '--',
-    '.claude/knowledge_base',
-  ]);
+  const statusRes = await gitRun(workspacePath, ['status', '--porcelain', '-z', '--', KB_DIR]);
   const entries = parsePorcelainZ(statusRes.stdout).slice(0, MAX_FILES);
 
   const headShaRes = await gitRun(workspacePath, ['rev-parse', 'HEAD']);

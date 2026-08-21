@@ -4,6 +4,7 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { FRAMEWORK_PATTERNS, type FrameworkName, type DetectResult } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition, LlmBuildArgs } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import {
@@ -1175,7 +1176,7 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
     }
 
     const created: string[] = [];
-    for (const dir of ['.claude', path.join('.claude', 'knowledge_base')]) {
+    for (const dir of ['.claude', KB_DIR]) {
       const full = path.join(ctx.repoPath, dir);
       await mkdir(full, { recursive: true });
       created.push(dir);

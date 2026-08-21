@@ -47,15 +47,15 @@ describe('buildAgentFileMarkdown frontmatter', () => {
     const md = buildAgentFileMarkdown({
       ...baseSpec,
       kbReferences: {
-        patterns: '.claude/knowledge_base/TECH_PATTERNS/foo/',
-        standards: '.claude/knowledge_base/STANDARDS/foo.md',
-        reference: '.claude/knowledge_base/QUICK_REFERENCE/foo.md',
+        patterns: '.haive-data/knowledge_base/TECH_PATTERNS/foo/',
+        standards: '.haive-data/knowledge_base/STANDARDS/foo.md',
+        reference: '.haive-data/knowledge_base/QUICK_REFERENCE/foo.md',
       },
     });
     expect(md).toContain('kb-references:');
-    expect(md).toContain('  patterns: .claude/knowledge_base/TECH_PATTERNS/foo/');
-    expect(md).toContain('  standards: .claude/knowledge_base/STANDARDS/foo.md');
-    expect(md).toContain('  reference: .claude/knowledge_base/QUICK_REFERENCE/foo.md');
+    expect(md).toContain('  patterns: .haive-data/knowledge_base/TECH_PATTERNS/foo/');
+    expect(md).toContain('  standards: .haive-data/knowledge_base/STANDARDS/foo.md');
+    expect(md).toContain('  reference: .haive-data/knowledge_base/QUICK_REFERENCE/foo.md');
     expect(md).not.toMatch(/^\s*antipatterns:/m);
   });
 

@@ -14,6 +14,7 @@ import {
   type ArchiveFormat,
 } from '@haive/shared';
 import { buildScopeTree } from '@haive/shared/scope-tree';
+import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -639,7 +640,7 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
 });
 
 const ONBOARDING_MARKERS = [
-  '.claude/knowledge_base',
+  KB_DIR,
   '.claude/agents',
   '.claude/skills',
   '.claude/workflow-config.json',
@@ -660,7 +661,7 @@ async function checkOnboardingMarkers(
   };
 }
 
-const ONBOARDING_RESET_DIRS = ['.claude'];
+const ONBOARDING_RESET_DIRS = ['.claude', KB_DIR, LEARNINGS_DIR];
 const ONBOARDING_RESET_FILES = ['.ripgreprc'];
 const ONBOARDING_RULES_FILES = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
 const HAIVE_MARKER_PAIRS: Array<[string, string]> = [

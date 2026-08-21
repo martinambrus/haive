@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { FormSchema, InfoSection } from '@haive/shared';
+import { INVESTIGATIONS_DIR, KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
@@ -40,7 +41,7 @@ function kbHeading(text: string): string | null {
 }
 
 async function resolveKbReferences(repoPath: string, ids: string[]): Promise<KbReference[]> {
-  const dir = path.join(repoPath, '.claude', 'knowledge_base');
+  const dir = path.join(repoPath, KB_DIR);
   const out: KbReference[] = [];
   for (const id of ids) {
     const full = path.join(dir, `${id}.md`);
@@ -290,11 +291,11 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         '',
         'Knowledge retrieval — use the `rag_search` MCP tool; it returns ranked, TYPED snippets:',
         '- KB articles + indexed code: the project’s documented behavior and the real implementation.',
-        '- LEARNINGS (paths under `.claude/learnings/`): durable lessons from PRIOR runs. Search them to',
+        `- LEARNINGS (paths under \`${LEARNINGS_DIR}/\`): durable lessons from PRIOR runs. Search them to`,
         '  avoid repeating past mistakes on similar work and fold the relevant ones into the Risks section.',
         detected.isBugFix
-          ? '- RUN-BOOKS (`.claude/knowledge_base/investigations/`): past bug investigations (symptom → root cause → fix). This task is a BUG FIX — search them FIRST for this class of bug; quote the prior symptom/root cause and ground the Approach in what resolved it before.'
-          : '- RUN-BOOKS (`.claude/knowledge_base/investigations/`): past bug investigations. Lower priority for this NEW-FEATURE task, but still worth checking when extending a historically-buggy area.',
+          ? `- RUN-BOOKS (\`${INVESTIGATIONS_DIR}/\`): past bug investigations (symptom → root cause → fix). This task is a BUG FIX — search them FIRST for this class of bug; quote the prior symptom/root cause and ground the Approach in what resolved it before.`
+          : `- RUN-BOOKS (\`${INVESTIGATIONS_DIR}/\`): past bug investigations. Lower priority for this NEW-FEATURE task, but still worth checking when extending a historically-buggy area.`,
         'Then GROUND every lead with LSP + grep against the CURRENT files on disk (on hits too, not as a fallback): the index can be stale, so a rag_search snippet is a lead to confirm, never the source of truth.',
         '',
         'Presentation conventions for the spec body (the Haive web renderer detects and upgrades these):',

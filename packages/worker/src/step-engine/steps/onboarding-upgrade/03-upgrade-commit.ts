@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, FormField, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
+import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { Database } from '@haive/database';
 import type { StepDefinition } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
@@ -33,7 +34,8 @@ const BASE_STAGE_PATHS = [
   '.gitignore',
   '.claude/agents/',
   '.claude/skills/',
-  '.claude/knowledge_base/',
+  `${KB_DIR}/`,
+  `${LEARNINGS_DIR}/`,
   '.claude/workflow/',
   '.claude/mcp_settings.json',
   '.claude/workflow-checkpoint.json',

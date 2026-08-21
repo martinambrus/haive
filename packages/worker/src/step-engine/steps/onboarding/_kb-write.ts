@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { pathExists } from './_helpers.js';
 
 /* ------------------------------------------------------------------ */
@@ -11,14 +12,20 @@ import { pathExists } from './_helpers.js';
 /* appendSection.                                                       */
 /* ------------------------------------------------------------------ */
 
-export const KB_ROOT = path.join('.claude', 'knowledge_base');
-
 export interface KbWrite {
-  /** Path relative to `.claude/knowledge_base/`. Sanitized in apply. */
+  /** Path relative to the knowledge-base root (`KB_DIR`). Sanitized in apply. */
   relPath: string;
   section: string;
   content: string;
 }
+
+/** Matches a leading `<KB_DIR>/` written with either separator. Derived from the
+ *  constant so the pattern cannot drift from the path it strips: dots are escaped
+ *  and each `/` becomes a separator class. Safe because KB_DIR holds only
+ *  alphanumerics, `.`, `-`, `_` and `/`. */
+const KB_ROOT_PREFIX_RE = new RegExp(
+  `^${KB_DIR.replace(/\./g, '\\.').replace(/\//g, '[/\\\\]')}[/\\\\]`,
+);
 
 export interface SafeRelPath {
   ok: true;
@@ -38,8 +45,8 @@ export function sanitizeKbRelPath(rel: string): RelPathCheck {
   if (rel.startsWith('/') || rel.startsWith('\\')) {
     return { ok: false, reason: 'absolute path not allowed' };
   }
-  // Strip a leading `.claude/knowledge_base/` if the LLM included it.
-  let normalized = rel.replace(/^\.claude[/\\]knowledge_base[/\\]/, '');
+  // Strip a leading knowledge-base root if the LLM included it.
+  let normalized = rel.replace(KB_ROOT_PREFIX_RE, '');
   if (normalized.length === 0) {
     return { ok: false, reason: 'empty after stripping KB prefix' };
   }
@@ -79,7 +86,7 @@ export async function applyKbWrites(
 }> {
   const written: { relPath: string; section: string }[] = [];
   const skipped: { relPath: string; reason: string }[] = [];
-  const kbDir = path.join(repoRoot, KB_ROOT);
+  const kbDir = path.join(repoRoot, KB_DIR);
 
   for (const write of writes) {
     const check = sanitizeKbRelPath(write.relPath);
@@ -103,7 +110,7 @@ export async function applyKbWrites(
         ? `# ${check.normalized.replace(/\.md$/, '').replace(/[/\\]/g, ' / ')}\n\n## ${write.section} (added ${nowIso.slice(0, 10)})\n\n${write.content.trim()}\n`
         : appendSection(existing, write.section, write.content, nowIso);
     await writeFile(fullPath, next, 'utf8');
-    written.push({ relPath: path.join(KB_ROOT, check.normalized), section: write.section });
+    written.push({ relPath: path.join(KB_DIR, check.normalized), section: write.section });
   }
   return { written, skipped };
 }

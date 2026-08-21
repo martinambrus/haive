@@ -26,7 +26,7 @@ function detect(overrides: Partial<QaReviewDetect> = {}): QaReviewDetect {
         question: 'Where is auth configured?',
         answer: 'See the KB.',
         source: 'kb',
-        citedFile: '.claude/knowledge_base/AUTH.md',
+        citedFile: '.haive-data/knowledge_base/AUTH.md',
       },
     ],
     unanswered: [{ key: '0', question: 'Why a nightly cron?', reason: 'no scheduler found' }],
@@ -116,7 +116,7 @@ describe('collectReview', () => {
 describe('parseQaReviewOutput', () => {
   it('parses a valid write summary', () => {
     const out = parseQaReviewOutput(
-      fence({ kbWrites: [{ relPath: '.claude/knowledge_base/X.md', section: 'S' }] }),
+      fence({ kbWrites: [{ relPath: '.haive-data/knowledge_base/X.md', section: 'S' }] }),
     );
     expect(out.kbWrites).toHaveLength(1);
     expect(out.kbWrites[0]!.section).toBe('S');
@@ -139,7 +139,7 @@ describe('knowledgeQaReviewStep.apply', () => {
 
   beforeEach(async () => {
     tmpRoot = await mkdtemp(path.join(tmpdir(), 'qa-review-'));
-    kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
     await mkdir(kbDir, { recursive: true });
   });
 
@@ -185,7 +185,9 @@ describe('knowledgeQaReviewStep.apply', () => {
       detected: detect(),
       formValues: { review__0: 'Corrected.', unanswered__0: 'A new answer.' },
       llmOutput: fence({
-        kbWrites: [{ relPath: '.claude/knowledge_base/BUSINESS_LOGIC.md', section: 'Delivery' }],
+        kbWrites: [
+          { relPath: '.haive-data/knowledge_base/BUSINESS_LOGIC.md', section: 'Delivery' },
+        ],
       }),
     });
     // Deterministic: passthrough only (the corrected code answer is no longer confirmed).
@@ -194,7 +196,7 @@ describe('knowledgeQaReviewStep.apply', () => {
     expect(out.newlyAnsweredCount).toBe(1);
     expect(out.stillUnansweredCount).toBe(0);
     expect(out.kbWritten.map((w) => w.relPath)).toContain(
-      '.claude/knowledge_base/BUSINESS_LOGIC.md',
+      '.haive-data/knowledge_base/BUSINESS_LOGIC.md',
     );
   });
 });

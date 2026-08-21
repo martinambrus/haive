@@ -1,4 +1,5 @@
 import type { FormField, FormSchema } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -256,11 +257,11 @@ function buildPrompt(args: LlmBuildArgs): string {
     '  2. Write the answer into the knowledge base, citing the specific file paths you read so the',
     "     entry is grounded. Keep the user's meaning; add code references and detail.",
     '  3. Write the files DIRECTLY with your edit tools (you are inside the repository):',
-    '     - Knowledge base files live under `.claude/knowledge_base/`.',
+    `     - Knowledge base files live under \`${KB_DIR}/\`.`,
     '     - For a correction of an answer that came from an EXISTING knowledge base file, EDIT that',
     '       file in place (replace the stale content) — do NOT append a duplicate section.',
     '     - Otherwise append a new `## <section>` to a fitting file, or create one under',
-    '       `.claude/knowledge_base/QA/<slug>.md`.',
+    `       \`${KB_DIR}/QA/<slug>.md\`.`,
     '',
     'Call your tools DIRECTLY — issue the actual tool calls; do NOT narrate intent and then stop.',
     '',
@@ -275,7 +276,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     'AFTER you have written the files, emit exactly ONE JSON object inside a ```json fenced block',
     'summarizing what you wrote:',
     '```',
-    '{ "kbWrites": [ { "relPath": ".claude/knowledge_base/BUSINESS_LOGIC.md", "section": "Order delivery" } ] }',
+    `{ "kbWrites": [ { "relPath": "${KB_DIR}/BUSINESS_LOGIC.md", "section": "Order delivery" } ] }`,
     '```',
     '- relPath: the knowledge base file you wrote.',
     '- section: the H2 heading you added or edited.',

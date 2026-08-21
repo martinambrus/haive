@@ -52,9 +52,9 @@ function applyArgs(
 
 describe('11b hasKbToCommit (shouldRun gate)', () => {
   it('is true when learnings were written or a LOCAL investigation file was written', () => {
-    expect(hasKbToCommit({ written: ['.claude/learnings/x.md'] })).toBe(true);
+    expect(hasKbToCommit({ written: ['.haive-data/learnings/x.md'] })).toBe(true);
     expect(
-      hasKbToCommit({ investigationWritten: '.claude/knowledge_base/investigations/x.md' }),
+      hasKbToCommit({ investigationWritten: '.haive-data/knowledge_base/investigations/x.md' }),
     ).toBe(true);
   });
 
@@ -71,8 +71,8 @@ describe('11b form', () => {
     const schema = kbCommitStep.form!(stubCtx, {
       hasGit: true,
       workspacePath: '/ws',
-      dirtyFiles: ['.claude/knowledge_base/investigations/x.md'],
-      statusSummary: '?? .claude/knowledge_base/investigations/x.md',
+      dirtyFiles: ['.haive-data/knowledge_base/investigations/x.md'],
+      statusSummary: '?? .haive-data/knowledge_base/investigations/x.md',
     });
     const commit = schema!.fields.find((f) => f.id === 'commit') as { default?: boolean };
     expect(commit.default).toBe(true);
@@ -94,7 +94,7 @@ describe('11b apply', () => {
   it('stages and commits the knowledge-base files in the worktree', async () => {
     const dir = await initRepo();
     try {
-      const kbDir = path.join(dir, '.claude', 'knowledge_base', 'investigations');
+      const kbDir = path.join(dir, '.haive-data', 'knowledge_base', 'investigations');
       await mkdir(kbDir, { recursive: true });
       await writeFile(path.join(kbDir, 'null-deref.md'), '# Null deref\n', 'utf8');
 
@@ -104,8 +104,8 @@ describe('11b apply', () => {
           {
             hasGit: true,
             workspacePath: dir,
-            dirtyFiles: ['.claude/knowledge_base/investigations/null-deref.md'],
-            statusSummary: '?? .claude/knowledge_base/investigations/null-deref.md',
+            dirtyFiles: ['.haive-data/knowledge_base/investigations/null-deref.md'],
+            statusSummary: '?? .haive-data/knowledge_base/investigations/null-deref.md',
           },
           { commit: true, commitMessage: 'docs: kb' },
         ),
@@ -115,7 +115,7 @@ describe('11b apply', () => {
       expect(out.commitSha).toBeTruthy();
       // The KB file is in the new commit on the branch.
       const show = await git(dir, ['show', '--stat', '--name-only', 'HEAD']);
-      expect(show).toContain('.claude/knowledge_base/investigations/null-deref.md');
+      expect(show).toContain('.haive-data/knowledge_base/investigations/null-deref.md');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

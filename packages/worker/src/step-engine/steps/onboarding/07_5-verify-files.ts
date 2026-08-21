@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, pathExists } from './_helpers.js';
 
@@ -107,10 +108,10 @@ export const verifyFilesStep: StepDefinition<
       detail: `found ${skillsCount}`,
     });
 
-    const kbCount = await countMatching(repo, '.claude/knowledge_base/', '.md');
+    const kbCount = await countMatching(repo, `${KB_DIR}/`, '.md');
     checks.push({
       id: 'knowledge_base_dir',
-      label: '.claude/knowledge_base has at least 3 markdown files',
+      label: `${KB_DIR} has at least 3 markdown files`,
       passed: kbCount >= 3,
       detail: `found ${kbCount}`,
     });

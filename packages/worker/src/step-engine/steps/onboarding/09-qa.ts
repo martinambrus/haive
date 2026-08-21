@@ -1,6 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { DetectResult } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
 import {
@@ -81,7 +82,7 @@ function parseKbFile(text: string): { title: string; sectionHeadings: string[] }
 }
 
 async function listKbFiles(repoRoot: string): Promise<KbFileSummary[]> {
-  const kbDir = path.join(repoRoot, '.claude', 'knowledge_base');
+  const kbDir = path.join(repoRoot, KB_DIR);
   if (!(await pathExists(kbDir))) return [];
   const out: KbFileSummary[] = [];
   await collectKbDir(kbDir, kbDir, out);
@@ -114,7 +115,7 @@ async function collectKbDir(rootDir: string, current: string, out: KbFileSummary
     out.push({
       id: relInsideKb.replace(/\.md$/, ''),
       title: parsed.title || relInsideKb,
-      relPath: path.join('.claude', 'knowledge_base', relInsideKb),
+      relPath: path.join(KB_DIR, relInsideKb),
       sectionHeadings: parsed.sectionHeadings,
     });
   }
@@ -208,7 +209,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '      "topic": "Short title (1-6 words)",',
     '      "question": "Full question sentence ending with ?",',
     '      "context": "1-3 sentences citing file paths and what you read that triggered the question.",',
-    '      "suggestedKbFile": ".claude/knowledge_base/BUSINESS_LOGIC.md"',
+    `      "suggestedKbFile": "${KB_DIR}/BUSINESS_LOGIC.md"`,
     '    }',
     '  ],',
     '  "explicitNoQuestions": false',

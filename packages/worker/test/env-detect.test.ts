@@ -290,9 +290,9 @@ describe('envDetectStep', () => {
       detected: { summary: '', data: {}, warnings: [] } as DetectResult,
       formValues: {},
     })) as { directoriesCreated: string[] };
-    expect(result.directoriesCreated).toEqual(['.claude', '.claude/knowledge_base']);
+    expect(result.directoriesCreated).toEqual(['.claude', '.haive-data/knowledge_base']);
     const { stat } = await import('node:fs/promises');
-    const claudeStat = await stat(path.join(tmpRoot, '.claude', 'knowledge_base'));
+    const claudeStat = await stat(path.join(tmpRoot, '.haive-data', 'knowledge_base'));
     expect(claudeStat.isDirectory()).toBe(true);
   });
 });

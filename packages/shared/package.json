@@ -55,6 +55,10 @@
       "types": "./dist/repo/scope-tree.d.ts",
       "import": "./dist/repo/scope-tree.js"
     },
+    "./knowledge-paths": {
+      "types": "./dist/knowledge-paths.d.ts",
+      "import": "./dist/knowledge-paths.js"
+    },
     "./claude-oauth": {
       "types": "./dist/cli-providers/claude-oauth.d.ts",
       "import": "./dist/cli-providers/claude-oauth.js"

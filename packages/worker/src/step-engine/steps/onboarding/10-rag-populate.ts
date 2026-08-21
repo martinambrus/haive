@@ -2,7 +2,9 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { HAIVE_DATA_DIR } from '@haive/shared';
 import type { FormSchema } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
 import { loadScopeExcludeGlobs } from './_scope.js';
@@ -84,7 +86,7 @@ export interface RagPopulateApply {
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-const SOURCE_PREFIXES = ['.claude/knowledge_base/'];
+const SOURCE_PREFIXES = [`${KB_DIR}/`];
 
 const CODE_IGNORE_DIRS = new Set([
   'node_modules',
@@ -92,6 +94,9 @@ const CODE_IGNORE_DIRS = new Set([
   // Haive's per-task git worktrees (<repo>/.haive/worktrees/) are full repo
   // copies — never index them as project source.
   '.haive',
+  // The committed onboarding mirror. Holds the knowledge base + learnings, which
+  // collectKbFiles picks up through SOURCE_PREFIXES — as knowledge, never as code.
+  HAIVE_DATA_DIR,
   'vendor',
   '__pycache__',
   '.next',

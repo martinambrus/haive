@@ -1,3 +1,4 @@
+import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { AgentColor, AgentExpertise, AgentKbRefs, AgentModel, AgentSpec } from '@haive/shared';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { retrievalGuidanceLinesFor } from '../_retrieval-guidance.js';
@@ -251,7 +252,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Search for conventions and prior art',
-        body: 'Query the knowledge base under `.claude/knowledge_base/` for patterns relevant to the touched files. If the change introduces a new pattern, look for existing places that do the same thing differently and flag the inconsistency.',
+        body: `Query the knowledge base under \`${KB_DIR}/\` for patterns relevant to the touched files. If the change introduces a new pattern, look for existing places that do the same thing differently and flag the inconsistency.`,
       },
       {
         title: 'Review per file',
@@ -745,7 +746,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       '**Pattern detection** — Find recurring idioms, utility usage, naming conventions.',
       '**Vocabulary capture** — Record domain terms that mean something specific in this repo.',
       '**Anti-pattern tracking** — Note patterns the codebase explicitly avoids (via comments, lint rules, reviews).',
-      '**Propose KB entries** — Draft additions under `.claude/knowledge_base/` with concrete examples.',
+      `**Propose KB entries** — Draft additions under \`${KB_DIR}/\` with concrete examples.`,
     ],
     whenInvoked: [
       'During onboarding for a new repository',
@@ -755,7 +756,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Survey the existing KB',
-        body: 'Read the current `.claude/knowledge_base/` so you do not duplicate or contradict entries already there.',
+        body: `Read the current \`${KB_DIR}/\` so you do not duplicate or contradict entries already there.`,
       },
       {
         title: 'Scan for recurring patterns',
@@ -767,13 +768,13 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Draft KB entries',
-        body: 'Propose a new file under `.claude/knowledge_base/` per pattern, with name, description, evidence, and when to apply / avoid.',
+        body: `Propose a new file under \`${KB_DIR}/\` per pattern, with name, description, evidence, and when to apply / avoid.`,
       },
     ],
     outputFormat: [
       '```',
       'proposed_entries:',
-      '  - path: .claude/knowledge_base/<file>.md',
+      `  - path: ${KB_DIR}/<file>.md`,
       '    title: <pattern name>',
       '    evidence: [<file>:<line>, ...]',
       '    summary: <1-line description>',
@@ -803,7 +804,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     coreMission:
       'Capture what actually happened — what worked, what failed, which assumptions broke — so the next run benefits. Never overwrite prior entries.',
     responsibilities: [
-      '**Append, never overwrite** — `.claude/knowledge_base/learnings.md` is a log; new entries go at the top with a date.',
+      `**Add, never overwrite** — learnings live under \`${LEARNINGS_DIR}/\`, one markdown file per learning id. A new lesson is a NEW file; never rewrite an existing one.`,
       '**Record the surprise, not the summary** — If the task went exactly as expected, there is nothing to record.',
       '**Link to artifacts** — Reference the task id, PR, or commit so the lesson is verifiable.',
       '**Blameless** — Focus on "what did we learn" not "who was wrong".',
@@ -815,8 +816,8 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     ],
     executionSteps: [
       {
-        title: 'Read the existing learnings.md',
-        body: 'Load the current file. Note its format (heading style, date format). New entries match exactly.',
+        title: 'Read the existing learnings',
+        body: `List \`${LEARNINGS_DIR}/\` and read the entries already there. Note their format (heading style, date format) and match it exactly, so a new entry neither clashes with nor duplicates one that exists.`,
       },
       {
         title: 'Identify the actual surprise',
@@ -827,8 +828,8 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
         body: 'Date heading, one-line title, three paragraphs max: what we expected, what actually happened, what to do next time.',
       },
       {
-        title: 'Prepend (do not append)',
-        body: 'Insert at the top of the file so newest is first. Preserve every prior entry byte-for-byte.',
+        title: 'Write the entry to its own file',
+        body: `Name it \`<slug>.md\` under \`${LEARNINGS_DIR}/\`, the slug being the learning id. Leave every prior entry byte-for-byte.`,
       },
     ],
     outputFormat: [
@@ -843,13 +844,13 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       '```',
     ].join('\n'),
     qualityCriteria: [
-      'New entry prepended; no prior content modified',
+      'New entry written as its own file; no prior entry modified',
       'Title captures a genuine surprise, not a bland summary',
       'At least one linked artifact for traceability',
       'Next-time action is concrete, not "be more careful"',
     ],
     antiPatterns: [
-      'Append to the bottom — users scan the top of the file',
+      'Fold a new lesson into an existing entry — one file per lesson',
       'Record "the sprint was hard" — record a specific broken assumption',
       'Blame a person or agent — lessons are about the process',
       'Overwrite a prior entry to "clean it up"',
@@ -1250,7 +1251,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Locate the target',
-        body: 'Pin the symbol to its canonical definition. Consult `rag_search` and `.claude/knowledge_base/` for prior art, then use `grep`/`Glob` to find the exact file and line. Verify the name is unique before tracing.',
+        body: `Pin the symbol to its canonical definition. Consult \`rag_search\` and \`${KB_DIR}/\` for prior art, then use \`grep\`/\`Glob\` to find the exact file and line. Verify the name is unique before tracing.`,
       },
       {
         title: 'Trace callers and callees',
@@ -1319,7 +1320,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Consult conventions',
-        body: 'Query `rag_search` and `.claude/knowledge_base/` for the patterns and standards relevant to the touched files so feedback aligns with the project rather than generic style.',
+        body: `Query \`rag_search\` and \`${KB_DIR}/\` for the patterns and standards relevant to the touched files so feedback aligns with the project rather than generic style.`,
       },
       {
         title: 'Evaluate per category',
@@ -1399,7 +1400,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Apply security checks',
-        body: 'Check parameterized queries, output encoding, CSRF protection, authorization checks, secret handling, and safe file/path handling, using project conventions from `rag_search` and `.claude/knowledge_base/`.',
+        body: `Check parameterized queries, output encoding, CSRF protection, authorization checks, secret handling, and safe file/path handling, using project conventions from \`rag_search\` and \`${KB_DIR}/\`.`,
       },
       {
         title: 'Report every finding in full',
@@ -1464,7 +1465,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Consult conventions',
-        body: "Query `rag_search` and `.claude/knowledge_base/` for the project's logging, migration, config, and compatibility conventions so feedback aligns with the project rather than generic advice.",
+        body: `Query \`rag_search\` and \`${KB_DIR}/\` for the project's logging, migration, config, and compatibility conventions so feedback aligns with the project rather than generic advice.`,
       },
       {
         title: 'Audit each operational dimension',
@@ -1529,7 +1530,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Consult conventions',
-        body: "Query `rag_search` and `.claude/knowledge_base/` for the project's data-access and indexing conventions and any known hot paths so feedback is grounded in the project.",
+        body: `Query \`rag_search\` and \`${KB_DIR}/\` for the project's data-access and indexing conventions and any known hot paths so feedback is grounded in the project.`,
       },
       {
         title: 'Audit each performance dimension',
@@ -1590,7 +1591,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Locate the reference implementation',
-        body: 'Use `rag_search` and `.claude/knowledge_base/` first, then `grep`/`Glob`, to find every file that makes up the reference feature — including secondary assets (styles, templates, tests, config).',
+        body: `Use \`rag_search\` and \`${KB_DIR}/\` first, then \`grep\`/\`Glob\`, to find every file that makes up the reference feature — including secondary assets (styles, templates, tests, config).`,
       },
       {
         title: 'Analyze the pattern',
@@ -1722,7 +1723,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Map the access surface',
-        body: "Enumerate routes/actions that require auth and the role each demands. Use `rag_search` and `.claude/knowledge_base/` for the project's auth model, then `grep`/`Glob` to find every entry point.",
+        body: `Enumerate routes/actions that require auth and the role each demands. Use \`rag_search\` and \`${KB_DIR}/\` for the project's auth model, then \`grep\`/\`Glob\` to find every entry point.`,
       },
       {
         title: 'Attempt bypass',
@@ -1786,7 +1787,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Find the failure points',
-        body: "Identify external calls, transactions, and multi-step operations in the change. Use `rag_search`/`.claude/knowledge_base/` for the project's error-handling conventions.",
+        body: `Identify external calls, transactions, and multi-step operations in the change. Use \`rag_search\`/\`${KB_DIR}/\` for the project's error-handling conventions.`,
       },
       {
         title: 'Reason through each failure mode',
@@ -1914,7 +1915,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Find the sinks',
-        body: "Locate query builders, output rendering, shell calls, and template evaluation in the change. Use `rag_search`/`.claude/knowledge_base/` for the project's data-access and escaping conventions.",
+        body: `Locate query builders, output rendering, shell calls, and template evaluation in the change. Use \`rag_search\`/\`${KB_DIR}/\` for the project's data-access and escaping conventions.`,
       },
       {
         title: 'Trace inputs to sinks',
@@ -1978,7 +1979,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Model the intended rules',
-        body: "State the business rules the feature is supposed to enforce. Use `rag_search`/`.claude/knowledge_base/` for the project's domain rules and the relevant skill.",
+        body: `State the business rules the feature is supposed to enforce. Use \`rag_search\`/\`${KB_DIR}/\` for the project's domain rules and the relevant skill.`,
       },
       {
         title: 'Probe for gaps',
@@ -2042,7 +2043,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Map shared state and steps',
-        body: "Identify shared resources and the ordered steps of the flow. Use `rag_search`/`.claude/knowledge_base/` for the project's locking and transaction conventions.",
+        body: `Identify shared resources and the ordered steps of the flow. Use \`rag_search\`/\`${KB_DIR}/\` for the project's locking and transaction conventions.`,
       },
       {
         title: 'Reason through interleavings',
@@ -2107,7 +2108,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Understand the request and its language',
-        body: 'Read the task description and discovery findings; detect the document language. Use `rag_search`/`.claude/knowledge_base/` (especially BUSINESS_LOGIC.md) for the current-state context.',
+        body: `Read the task description and discovery findings; detect the document language. Use \`rag_search\`/\`${KB_DIR}/\` (especially BUSINESS_LOGIC.md) for the current-state context.`,
       },
       {
         title: 'Draft in business terms',
@@ -2250,7 +2251,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Consult prior art',
-        body: "Use `rag_search` and `.claude/knowledge_base/` for the project's accessibility patterns and standards before reading code, then `grep`/`Glob` to find the relevant markup and components.",
+        body: `Use \`rag_search\` and \`${KB_DIR}/\` for the project's accessibility patterns and standards before reading code, then \`grep\`/\`Glob\` to find the relevant markup and components.`,
       },
       {
         title: 'Audit against WCAG POUR',
@@ -2320,7 +2321,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Review all inputs',
-        body: 'Read the discovery summary, any mining findings, the business requirements (if present), and the relevant KB standards (CODING_STANDARDS/ARCHITECTURE/TESTING_STANDARDS). Use `rag_search`/`.claude/knowledge_base/` for current-state patterns.',
+        body: `Read the discovery summary, any mining findings, the business requirements (if present), and the relevant KB standards (CODING_STANDARDS/ARCHITECTURE/TESTING_STANDARDS). Use \`rag_search\`/\`${KB_DIR}/\` for current-state patterns.`,
       },
       {
         title: 'Synthesize and resolve conflicts',

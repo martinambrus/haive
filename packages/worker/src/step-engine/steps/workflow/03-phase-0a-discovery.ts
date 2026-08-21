@@ -1,6 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { FormSchema, InfoSection } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type {
   AgentMiningDispatch,
   AgentMiningResult,
@@ -53,7 +54,7 @@ function firstHeading(text: string): string | null {
 }
 
 async function collectKbSnippets(repo: string): Promise<KbSnippet[]> {
-  const dir = path.join(repo, '.claude', 'knowledge_base');
+  const dir = path.join(repo, KB_DIR);
   if (!(await pathExists(dir))) return [];
   try {
     const entries = await readdir(dir, { withFileTypes: true });

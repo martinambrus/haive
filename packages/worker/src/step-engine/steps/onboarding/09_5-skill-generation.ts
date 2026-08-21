@@ -3,6 +3,7 @@ import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { skillEntrySchema } from '@haive/shared';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
 import {
@@ -186,7 +187,7 @@ function parseKbSectionBodies(text: string): Record<string, string> {
 }
 
 export async function listKbFiles(repoRoot: string): Promise<KbFileSummary[]> {
-  const kbDir = path.join(repoRoot, '.claude', 'knowledge_base');
+  const kbDir = path.join(repoRoot, KB_DIR);
   if (!(await pathExists(kbDir))) return [];
   const out: KbFileSummary[] = [];
   await collectKbDir(kbDir, kbDir, out);
@@ -282,7 +283,7 @@ async function collectKbDir(rootDir: string, current: string, out: KbFileSummary
     out.push({
       id: relInsideKb.replace(/\.md$/, ''),
       title: parsed.title || relInsideKb,
-      relPath: path.join('.claude', 'knowledge_base', relInsideKb),
+      relPath: path.join(KB_DIR, relInsideKb),
       sectionHeadings: parsed.sectionHeadings,
     });
   }

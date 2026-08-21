@@ -124,9 +124,9 @@ async function createFixtureRepo(): Promise<string> {
     path.join(dir, 'package.json'),
     JSON.stringify({ name: 'fix-loop-smoke-fixture', scripts: { test: 'echo no-tests' } }, null, 2),
   );
-  await mkdir(path.join(dir, '.claude', 'knowledge_base'), { recursive: true });
+  await mkdir(path.join(dir, '.haive-data', 'knowledge_base'), { recursive: true });
   await writeFile(
-    path.join(dir, '.claude', 'knowledge_base', 'architecture.md'),
+    path.join(dir, '.haive-data', 'knowledge_base', 'architecture.md'),
     '# Architecture\n\nMonolith with API, worker, and web layers.\n',
   );
   const git = (args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });

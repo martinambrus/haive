@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from './_helpers.js';
 
@@ -80,7 +81,7 @@ export async function collectReviewFindings(
   repo: string,
   activeAgentsTarget: ActiveAgentsTarget | null = { dir: '.claude/agents', ext: '.md' },
 ): Promise<FinalReviewDetect> {
-  const kbDir = path.join(repo, '.claude', 'knowledge_base');
+  const kbDir = path.join(repo, KB_DIR);
   const skillsDir = path.join(repo, '.claude', 'skills');
   const agentsDir = activeAgentsTarget ? path.join(repo, activeAgentsTarget.dir) : null;
   const agentExt = activeAgentsTarget?.ext ?? '.md';
@@ -96,7 +97,7 @@ export async function collectReviewFindings(
       id: 'empty-knowledge-base',
       severity: 'warn',
       label: 'Knowledge base is empty',
-      detail: 'No .claude/knowledge_base/*.md files were produced.',
+      detail: `No ${KB_DIR}/*.md files were produced.`,
     });
   }
   if (skills === 0) {

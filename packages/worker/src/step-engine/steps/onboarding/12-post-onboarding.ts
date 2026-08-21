@@ -12,6 +12,7 @@ import type {
   OnboardingExclusionsMirror,
   OnboardingToolingMirror,
 } from '@haive/shared';
+import { HAIVE_DATA_DIR } from '@haive/shared';
 import {
   buildCliRulesBlock,
   CLI_RULES_DISK_PATH,
@@ -50,7 +51,8 @@ const exec = promisify(execFile);
 const DEFAULT_COMMIT_MESSAGE = [
   'add: agentic workflow setup',
   '',
-  'Generated .claude/ (agents, skills, knowledge base) and the updated .gitignore.',
+  'Generated .claude/ (agents, skills), the updated .gitignore, and',
+  `${HAIVE_DATA_DIR}/ (knowledge base, learnings, onboarding metadata).`,
 ].join('\n');
 
 /** Default for the no-git case, where the commit is also the repository's first and
@@ -59,23 +61,25 @@ const INIT_COMMIT_MESSAGE = [
   'add: initial commit with agentic workflow setup',
   '',
   'Initializes the repository with the existing project files plus the generated',
-  '.claude/ (agents, skills, knowledge base) and the updated .gitignore.',
+  '.claude/ (agents, skills), the updated .gitignore, and',
+  `${HAIVE_DATA_DIR}/ (knowledge base, learnings, onboarding metadata).`,
 ].join('\n');
 
 const BASE_STAGE_PATHS = [
   '.gitignore',
   '.claude/agents/',
   '.claude/skills/',
-  '.claude/knowledge_base/',
   '.claude/workflow/',
   '.claude/mcp_settings.json',
   '.claude/workflow-checkpoint.json',
   '.claude/project-config.yaml',
   '.haive/install.json',
-  // Committed onboarding mirror (environment/tooling/exclusions), so a fresh
-  // clone restores its onboarding-derived DB state. A distinct dir from `.haive/`
-  // (which workflow tasks add to `.git/info/exclude`), so it is never excluded.
-  '.haive-data/',
+  // Committed onboarding mirror (environment/tooling/exclusions) plus the
+  // knowledge base and learnings, so a fresh clone restores both its
+  // onboarding-derived DB state and its project knowledge. A distinct dir from
+  // `.haive/` (which workflow tasks add to `.git/info/exclude`), so it is never
+  // excluded.
+  `${HAIVE_DATA_DIR}/`,
 ];
 
 // Rules files onboarding writes that are NOT tracked as onboarding_artifacts, so
