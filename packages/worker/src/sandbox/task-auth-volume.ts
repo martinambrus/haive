@@ -655,44 +655,74 @@ export async function syncRefreshedAuthToUserVolumes(
     });
     if (!provider) continue;
 
-    const source = CLI_CREDENTIAL_FILES[provider.name];
-    if (!source) continue;
+    await syncProviderAuthBack(taskId, provider, runner);
+  }
+}
 
-    const ctx: ProviderAuthCtx = {
-      userId: provider.userId,
-      providerId: provider.id,
-      providerName: provider.name,
-      authMode: provider.authMode,
-      isolateAuth: provider.isolateAuth,
-    };
-    const taskVol = cliAuthTaskVolumeName(taskId, provider.name, source.authPathIdx);
-    const userVol = userVolumeForCtx(ctx, source.authPathIdx);
+/** Provider identity the auth sync needs: enough to resolve the user volume
+ *  (resolveCliAuthUserVolumeName) and to pick the credential file out of the registry. */
+export interface AuthSyncProvider {
+  id: string;
+  userId: string;
+  name: CliProviderName;
+  authMode: AuthMode;
+  isolateAuth: boolean;
+}
 
-    try {
-      const taskRaw = await readVolumeFile(taskVol, source.relPath, runner);
-      if (!taskRaw) continue;
-      const taskToken = extractToken(source.extract, taskRaw);
-      const userRaw = await readVolumeFile(userVol, source.relPath, runner);
-      const userToken = userRaw ? extractToken(source.extract, userRaw) : null;
-      const [taskMtime, userMtime] = await Promise.all([
-        readVolumeFileMtimeMs(taskVol, source.relPath, runner),
-        readVolumeFileMtimeMs(userVol, source.relPath, runner),
-      ]);
-      if (!shouldSyncAuthBack(taskToken, userToken, taskMtime, userMtime)) continue;
+/** Carry ONE provider's in-task credential back to its user volume, when the in-task CLI
+ *  rotated it. Returns true only when bytes were actually written.
+ *
+ *  Split out of syncRefreshedAuthToUserVolumes so the mid-task harvest
+ *  (usage-window/credential-harvest.ts) runs the identical rules. The guard ORDER is the
+ *  whole safety argument — the task token must parse, then last-writer-wins by mtime, then
+ *  copyAuthFileBack re-checks that ordering with `-nt` inside the container doing the copy —
+ *  and a second copy of it elsewhere would drift from this one.
+ *
+ *  Best-effort by contract: every failure is logged and swallowed. */
+export async function syncProviderAuthBack(
+  taskId: string,
+  provider: AuthSyncProvider,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<boolean> {
+  const source = CLI_CREDENTIAL_FILES[provider.name];
+  if (!source) return false;
 
-      const copied = await copyAuthFileBack(taskVol, userVol, source.relPath, runner);
-      if (copied) {
-        log.info(
-          { taskId, provider: provider.name, taskVol, userVol, relPath: source.relPath },
-          'synced CLI-refreshed credential back to the user auth volume',
-        );
-      }
-    } catch (err) {
-      log.warn(
-        { err, taskId, provider: provider.name, relPath: source.relPath },
-        'auth sync-back failed; user volume left as-is',
+  const ctx: ProviderAuthCtx = {
+    userId: provider.userId,
+    providerId: provider.id,
+    providerName: provider.name,
+    authMode: provider.authMode,
+    isolateAuth: provider.isolateAuth,
+  };
+  const taskVol = cliAuthTaskVolumeName(taskId, provider.name, source.authPathIdx);
+  const userVol = userVolumeForCtx(ctx, source.authPathIdx);
+
+  try {
+    const taskRaw = await readVolumeFile(taskVol, source.relPath, runner);
+    if (!taskRaw) return false;
+    const taskToken = extractToken(source.extract, taskRaw);
+    const userRaw = await readVolumeFile(userVol, source.relPath, runner);
+    const userToken = userRaw ? extractToken(source.extract, userRaw) : null;
+    const [taskMtime, userMtime] = await Promise.all([
+      readVolumeFileMtimeMs(taskVol, source.relPath, runner),
+      readVolumeFileMtimeMs(userVol, source.relPath, runner),
+    ]);
+    if (!shouldSyncAuthBack(taskToken, userToken, taskMtime, userMtime)) return false;
+
+    const copied = await copyAuthFileBack(taskVol, userVol, source.relPath, runner);
+    if (copied) {
+      log.info(
+        { taskId, provider: provider.name, taskVol, userVol, relPath: source.relPath },
+        'synced CLI-refreshed credential back to the user auth volume',
       );
     }
+    return copied;
+  } catch (err) {
+    log.warn(
+      { err, taskId, provider: provider.name, relPath: source.relPath },
+      'auth sync-back failed; user volume left as-is',
+    );
+    return false;
   }
 }
 

@@ -29,6 +29,7 @@ import {
   readProviderSecretToken,
   writeProviderSecret,
 } from '../usage-window/token-source.js';
+import { harvestInTaskCredentials } from '../usage-window/credential-harvest.js';
 import { refreshExpiringCliCredentials } from '../usage-window/credential-refresh.js';
 import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
@@ -631,12 +632,21 @@ export function startUsagePollWorker(): Worker {
     QUEUE_NAMES.USAGE_POLL,
     async (_job: Job) => {
       const db = getDb();
+      // Ahead of the refresher, because a harvest can only make the user volume FRESHER, and
+      // the refresher's yield rule (some task holds a copy -> do not rotate) is exactly the
+      // case a harvest covers. Landing it first also means resolveToken later in this same
+      // tick reads the harvested token, so a meter killed by an expired credential recovers
+      // on this tick rather than the next — deadUsageFetchToken is keyed on the token string,
+      // so a harvest lifts that gate by itself.
+      await harvestInTaskCredentials(db).catch((err) => {
+        log.warn({ err }, 'in-task credential harvest failed');
+      });
       // Credential rotation rides this tick because the poll worker is the only singleton
       // that runs between tasks — a second refresher racing it would spend the same
       // single-use refresh token twice. It is NOT part of the poll: it must still run when
       // USAGE_WINDOW_ENABLED is off (a user who hides the meters still expects to stay
-      // signed in), and it must not be skipped when the poll throws. Hence: first, and
-      // separately caught.
+      // signed in), and it must not be skipped when the poll throws. Hence: ahead of the
+      // poll, and separately caught.
       await refreshExpiringCliCredentials(db).catch((err) => {
         log.warn({ err }, 'cli credential refresh sweep failed');
       });
