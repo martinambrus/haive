@@ -1,4 +1,4 @@
-import { FRAMEWORK_PATTERNS } from '@haive/shared';
+import { CLI_PROVIDER_LIST, FRAMEWORK_PATTERNS } from '@haive/shared';
 import { NO_RECURSE_DIRS } from '@haive/shared/scope-tree';
 import { trimGlobSlashes } from '@haive/shared/knowledge-paths';
 
@@ -55,6 +55,50 @@ export function gitignoreExcludeDirs(gitignore: string | null | undefined): stri
   return [...out];
 }
 
+/** AI-assistant dirs Haive does not drive, so the provider catalog cannot name
+ *  them. Same reasoning as the catalog-derived half below: agent instructions,
+ *  not project code. */
+const EXTERNAL_AGENT_TOOLING_DIRS = [
+  '.cursor',
+  '.windsurf',
+  '.opencode',
+  '.aider',
+  '.continue',
+  '.cline',
+  '.roo',
+] as const;
+
+/** Directory NAMES that hold AI-agent tooling — the agent, skill and command
+ *  definitions a CLI auto-loads — rather than the project's own code. Seeded as
+ *  pre-unticked in both scope pickers: mining an agent's own instructions costs
+ *  tokens and documents nothing about the project, and RAG indexing them
+ *  (hook scripts, `.claude/plugins/**`) pollutes code search with tooling.
+ *
+ *  Derived from the provider catalog's `projectSkillsDir`/`projectAgentsDir`
+ *  (`.claude/skills` -> `.claude`, `.codex/agents` -> `.codex`) so a new provider
+ *  brings its dir with it instead of needing a second list kept in lockstep.
+ *  Only DOTTED segments are taken: a hypothetical provider that dropped the dot
+ *  (`agents/`, `skills/`) would otherwise pre-exclude a project's own
+ *  same-named source dir, which is the one mistake this list must not make.
+ *
+ *  Never `.haive-data`: the KB and learnings ARE indexed knowledge (and are
+ *  immune regardless — see stripManagedKnowledgeGlobs). */
+export const AGENT_TOOLING_DIRS: ReadonlySet<string> = new Set<string>([
+  ...CLI_PROVIDER_LIST.flatMap((p) => [p.projectSkillsDir, p.projectAgentsDir])
+    .filter((d): d is string => typeof d === 'string')
+    .map((d) => trimGlobSlashes(d).split('/')[0] ?? '')
+    .filter((d) => d.startsWith('.')),
+  ...EXTERNAL_AGENT_TOOLING_DIRS,
+]);
+
+/** Every path in `treePaths` whose own directory name is an agent-tooling dir.
+ *  Matched by NAME anywhere in the tree — unlike the other seeds, which are
+ *  exact paths — so a monorepo package's own `.claude` is caught as well as the
+ *  repo-root one. */
+export function agentToolingDirsInTree(treePaths: readonly string[]): string[] {
+  return treePaths.filter((p) => AGENT_TOOLING_DIRS.has(p.slice(p.lastIndexOf('/') + 1)));
+}
+
 export interface SeedSources {
   /** Parsed composer.json (or null). */
   composer?: unknown;
@@ -76,7 +120,9 @@ export interface SeedSources {
  *     drupal, rails, laravel, nodejs, nextjs, python, ...),
  *   - the repo's own `.gitignore` directory rules (authoritative for ANY language),
  *   - Composer `installer-paths` (the one ecosystem whose vendored code lives
- *     beside custom code and needs the manifest to disambiguate).
+ *     beside custom code and needs the manifest to disambiguate),
+ *   - the AI-agent tooling dirs (`.claude`, `.codex`, `.gemini`, ... — see
+ *     AGENT_TOOLING_DIRS), matched by directory name at any depth.
  *
  *  Filtered to entries that correspond to a real directory node in `treePaths`, so
  *  a pattern that doesn't match this repo's actual layout (e.g. top-level
@@ -101,6 +147,7 @@ export function computeSeedExcludeGlobs(sources: SeedSources): string[] {
 
   for (const d of gitignoreExcludeDirs(gitignore)) candidates.add(d);
   for (const d of composerExcludeDirs(composer)) candidates.add(d);
+  for (const d of agentToolingDirsInTree(treePaths)) candidates.add(d);
 
   const out: string[] = [];
   for (const c of candidates) {

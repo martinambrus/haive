@@ -105,7 +105,7 @@ export const scopeSelectionStep: StepDefinition<ScopeSelectionDetect, ScopeSelec
       description: [
         `Found ${detected.totalCodeFiles} code files.`,
         'Ticked directories are what the knowledge-base and skill mining steps analyse.',
-        'Built-in framework code (Drupal core/contrib, vendor, node_modules, ...) is pre-unticked — leave it off to keep onboarding fast and focused on this project’s own code.',
+        'Built-in framework code (Drupal core/contrib, vendor, node_modules, ...) and AI-agent tooling dirs (.claude, .codex, .gemini, .cursor, ...) are pre-unticked — leave them off to keep onboarding fast and focused on this project’s own code.',
         'Un-ticked directories are skipped by the mining steps for this onboarding run; new folders added by later tasks are included automatically.',
       ].join(' '),
       fields: [

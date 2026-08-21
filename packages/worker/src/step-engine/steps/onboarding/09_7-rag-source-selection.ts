@@ -9,7 +9,7 @@ import {
   stripManagedKnowledgeGlobs,
   tagManagedKnowledgeNodes,
 } from '@haive/shared/knowledge-paths';
-import { computeSeedExcludeGlobs } from './_scope-seed.js';
+import { agentToolingDirsInTree, computeSeedExcludeGlobs } from './_scope-seed.js';
 import {
   collectAllPaths,
   collectDefaults,
@@ -90,18 +90,28 @@ export const ragSourceSelectionStep: StepDefinition<
     const miningExclude = (miningPrev?.output as { excludeGlobs?: string[] } | null)?.excludeGlobs;
     const composer = await readComposerJson(ctx.repoPath);
     const gitignore = await readGitignore(ctx.repoPath);
+    const treePaths = collectAllPaths(tree);
     const seedExclude = computeSeedExcludeGlobs({
       composer,
       gitignore,
       framework,
-      treePaths: collectAllPaths(tree),
+      treePaths,
     });
-    const defaultExcludeGlobs =
-      repoRaw ?? (Array.isArray(miningExclude) ? miningExclude : seedExclude);
+    // The AI-agent tooling dirs are unioned onto the INHERITED default. The
+    // mining pick answers a different question ("what should the agents read"),
+    // and one made before those dirs were seeded carries them as included — so
+    // inheriting it verbatim re-ticks `.claude`/`.codex`/... here. A no-op on the
+    // seed branch, which already contains them. Deliberately NOT applied to
+    // `repoRaw`: that IS a saved answer to THIS question, and overriding it would
+    // undo a deliberate re-tick on every re-onboarding.
+    const agentDirs = agentToolingDirsInTree(treePaths);
+    const defaultExcludeGlobs = repoRaw ?? [
+      ...new Set([...(Array.isArray(miningExclude) ? miningExclude : seedExclude), ...agentDirs]),
+    ];
 
     const totalCodeFiles = sumFileCount(tree);
     await ctx.emitProgress(
-      `Found ${totalCodeFiles} code files across ${collectAllPaths(tree).length} directories.`,
+      `Found ${totalCodeFiles} code files across ${treePaths.length} directories.`,
     );
     ctx.logger.info(
       { framework, totalCodeFiles, defaultExcludeCount: defaultExcludeGlobs.length },
@@ -132,7 +142,7 @@ export const ragSourceSelectionStep: StepDefinition<
       description: [
         `Found ${detected.totalCodeFiles} code files.`,
         'Ticked directories are indexed into the RAG semantic-search index reused across every task.',
-        'Built-in framework code (Drupal core/contrib, vendor, node_modules, ...) is pre-unticked — leave it off to keep the RAG index focused on this project’s own code.',
+        'Built-in framework code (Drupal core/contrib, vendor, node_modules, ...) and AI-agent tooling dirs (.claude, .codex, .gemini, .cursor, ...) are pre-unticked — leave them off to keep the RAG index focused on this project’s own code.',
         'This is the repository’s global RAG scope: it is saved on the repo (editable later in repository settings). It defaults to your onboarding mining selection — adjust it if RAG should cover more or less.',
         'Un-ticked directories become the repo RAG exclusion list; new folders added by later tasks are included automatically.',
       ].join(' '),

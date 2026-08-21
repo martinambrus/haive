@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AGENT_TOOLING_DIRS,
+  agentToolingDirsInTree,
   composerExcludeDirs,
   computeSeedExcludeGlobs,
   gitignoreExcludeDirs,
@@ -116,5 +118,44 @@ describe('computeSeedExcludeGlobs', () => {
     expect(seed).toContain('build'); // NO_RECURSE + gitignore
     expect(seed).toContain('public/assets'); // gitignore-only, project-specific
     expect(seed).not.toContain('src'); // custom code stays in scope
+  });
+});
+
+describe('agentToolingDirsInTree', () => {
+  it('covers the dirs the provider catalog declares', () => {
+    for (const dir of ['.claude', '.codex', '.gemini', '.agents', '.grok']) {
+      expect(AGENT_TOOLING_DIRS.has(dir)).toBe(true);
+    }
+  });
+
+  it('never carries an undotted segment (a project dir named agents/skills stays in scope)', () => {
+    for (const dir of AGENT_TOOLING_DIRS) expect(dir.startsWith('.')).toBe(true);
+    expect(agentToolingDirsInTree(['agents', 'skills', 'src'])).toEqual([]);
+  });
+
+  it('matches by directory name at any depth, not just the repo root', () => {
+    expect(
+      agentToolingDirsInTree(['.claude', '.claude/skills', 'packages/web/.claude', 'src']),
+    ).toEqual(['.claude', 'packages/web/.claude']);
+  });
+
+  it('leaves the managed knowledge dirs alone', () => {
+    expect(agentToolingDirsInTree(['.haive-data', '.haive-data/knowledge_base'])).toEqual([]);
+  });
+});
+
+describe('computeSeedExcludeGlobs — agent tooling', () => {
+  it('pre-excludes the agent-tooling dirs present in the tree', () => {
+    const treePaths = ['.claude', '.claude/agents', '.codex', '.cursor', 'src', 'vendor'];
+    const seed = computeSeedExcludeGlobs({ framework: 'nodejs', treePaths });
+    expect(seed).toContain('.claude');
+    expect(seed).toContain('.codex');
+    expect(seed).toContain('.cursor');
+    expect(seed).not.toContain('src');
+  });
+
+  it('does not invent an agent dir the repo does not have', () => {
+    const seed = computeSeedExcludeGlobs({ framework: 'nodejs', treePaths: ['src'] });
+    expect(seed).not.toContain('.claude');
   });
 });
