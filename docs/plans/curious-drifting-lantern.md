@@ -185,6 +185,84 @@ the step with `message: 'push skipped'` instead of failing.
 
 ---
 
+## F7 — 08a reports `passed: true` when browser testing was impossible
+
+**Severity: HIGH. Not fixed. Found on the DAG verification run.**
+
+MEASURED on task `de2b313d` (repo `rs_glm_53_max`, `browserMode: mcp`):
+
+    method=mcp  passed=true  ran=true  screenshots=0
+
+and the tester's own notes say:
+
+    "Chrome DevTools MCP server never connected during this session — no
+     browser-based testing was possible. curl and WebFetch also cannot reach the
+     DDEV container from this sandbox (ECONNREFUSED). All testing was performed via
+     static code analysis of the changed files. ... LIMITATION: No runtime/browser
+     testing was performed — AC-1 through AC-15 are verified at code structure level
+     only, not end-to-end."
+
+So the BROWSER-verification step passed without a browser, on static reading alone,
+and gate 2 downstream sees a green browser check. That is worse than failing: it
+manufactures evidence of a verification that did not happen. Login-gated surfaces
+(admin forms, the audit-log viewer, the upload UI) were never exercised at all.
+
+`parseBrowserTestOutput` takes the agent's `passed` at face value. The agent is being
+honest in `notes` — the step just does not read it.
+
+**Fix direction (decide before implementing):**
+
+- The step knows its own mode. When `method === 'mcp'` and the run produced NO evidence
+  of browser use (zero screenshots AND no console/network probe results), `passed: true`
+  is not a credible outcome. Treat it as a failed/incomplete verification rather than a
+  pass — mirroring `reviewIncomplete` in 08c, which already distinguishes "the reviewer
+  failed" from "the code is wrong" so it does not burn a fix round.
+- Do NOT key on the notes text — that is model prose and will drift. Key on the
+  structural evidence: screenshots emitted, probe results present, or an explicit
+  MCP-availability signal captured at dispatch.
+- Prefer surfacing at gate 2 (like `reviewIncomplete` / `advisoryVerdict`, which hold the
+  gate off its approve default) over routing a fix round: the code may be fine; what
+  failed is the verification.
+
+**Related, separate:** why the MCP did not connect at all. See F8.
+
+---
+
+## F8 — chrome-devtools MCP never connected in 08a mcp mode
+
+**Severity: medium. Root cause NOT determined. Found on the DAG verification run.**
+
+Everything that should have made it work checks out, verified live while the runner was
+still up:
+
+- CDP endpoint live on the runner: `Chrome/151.0.7922.137` on `:9223`.
+- Reachable from the sandbox network: a throwaway container on `haive-sandbox` got a
+  200 from `http://172.21.0.6:9223/json/version`.
+- The prompt DID advertise chrome-devtools.
+- No race: Chrome started 22:52:00, the invocation dispatched 22:56:22.
+- Provider egress is `mode: full`.
+- All three launch flags exist on `chrome-devtools-mcp@latest`
+  (`--allowUnrestrictedPaths`, `--browserUrl`, `--executablePath`); Haive passes the
+  kebab-case spelling, which yargs' default camel-case expansion should alias.
+
+What could not be recovered: the transcript. `cli_invocations.raw_output` holds only the
+final JSON, and the Redis `cli-stream:<id>` had already been trimmed (`XLEN 0`).
+
+CONTEXT THAT MATTERS: this was the FIRST EVER `mcp`-mode 08a run in this install. The
+only two prior 08a runs (June) were `interactive`. So the path has no history of
+working — this is an untested path surfacing, not a regression.
+
+Separately and NOT a bug: `curl`/`WebFetch` cannot reach `https://<project>.ddev.site`
+from the sandbox — MEASURED, returns 000. `.ddev.site` resolves to 127.0.0.1, which
+inside the sandbox is the sandbox. Agents are meant to reach the app through the
+CDP-wired MCP, not by URL. Do not "fix" this by exposing the app URL to the sandbox.
+
+**Next step:** run `chrome-devtools-mcp` with Haive's exact args against a live runner
+CDP from a container on both networks, and capture stderr. If it starts cleanly, the
+fault is in delivery (the MCP config the CLI actually loaded) rather than the server.
+
+---
+
 ## F5 — Runbook: `docker inspect StartedAt` does not detect a tsx reload
 
 **Severity: none (process note). Worth recording so it is not re-learned.**
