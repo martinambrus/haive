@@ -128,6 +128,46 @@ Read-side coercion stays as the compatibility path for rows already written.
 
 ---
 
+## F6 — Gate 4 makes `remoteUrl` required on a path its own `apply()` supports
+
+**Severity: medium. Genuine product bug, hit live.**
+
+`11a-gate-4-push` `form()` builds a no-origin branch whose `remoteUrl` field is
+`required: true` with NO `visibleWhen` gate, alongside a `push` checkbox defaulting to
+false. But `apply()` opens with:
+
+    if (!values.push) {
+      return { pushed: false, remote: null, branch: detected.branch, message: 'push skipped' };
+    }
+
+So `push: false` is an explicitly supported input that the form's own validation refuses
+to produce. Submitting `{"push": false}` on a repo with no origin fails with
+`validation failed: remoteUrl: required`, and the step — plus the task — goes to `failed`.
+
+MEASURED on task `153a3437` (repo `rs_opus_4_6_low`, `repositories.remote_url` is null).
+Every earlier workflow task SKIPPED this step, so the path had never been exercised;
+this is the first task to park on it.
+
+The intended escape hatch is the Skip button (`allowSkip: true`, with a comment reading
+"Local-only projects have no remote to push to; allow the user to Skip this gate so the
+task can still finish"). Skip does recover it. But an unchecked `push` box that fails
+validation is a trap: the form offers a control whose only outcome is a failed task.
+
+**Fix (pick one):**
+
+- Gate the field: `visibleWhen: { field: 'push', equals: true }` and drop `required`, so
+  declining the push submits cleanly and reaches the `!values.push` branch; or
+- Drop the `push` checkbox from the no-origin branch entirely, making Skip the only way
+  out and matching what the metadata comment already says.
+
+The first is better — it makes the form agree with `apply()` rather than removing a
+control the apply path handles.
+
+**Verify:** on a repo with no origin, submitting with the push box unchecked completes
+the step with `message: 'push skipped'` instead of failing.
+
+---
+
 ## F5 — Runbook: `docker inspect StartedAt` does not detect a tsx reload
 
 **Severity: none (process note). Worth recording so it is not re-learned.**
@@ -150,11 +190,12 @@ MEASURED: those two moments were about four minutes apart on this run.
 
 ## Ordering
 
-1. F1 (agreed; unblocks the compaction path and closes the 03/04 gap)
-2. F4 (trivial, same file as F1)
-3. F2 (independent; needs orchestrator diagnosis, do not fold into F1)
-4. Then the DAG verification run — see below
-5. F3 folds into a `full_workflow` run whenever one is next needed
+1. F6 (smallest, self-contained, and it currently fails a task outright)
+2. F1 (agreed; unblocks the compaction path and closes the 03/04 gap)
+3. F4 (trivial, same file as F1)
+4. F2 (independent; needs orchestrator diagnosis, do not fold into F1)
+5. Then the DAG verification run — see below
+6. F3 folds into a `full_workflow` run whenever one is next needed
 
 ## Still outstanding from the original plan
 
