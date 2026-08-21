@@ -2,13 +2,12 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { HAIVE_DATA_DIR } from '@haive/shared';
 import type { FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
 import { loadScopeExcludeGlobs } from './_scope.js';
-import { ROOT_FILES_SCOPE } from '@haive/shared/scope-tree';
+import { collectCodeFiles as collectCodeFilePaths } from './_rag-collect.js';
 import {
   resolveRagConnection,
   ensureRagSchema,
@@ -23,8 +22,6 @@ import {
   chunkSection,
   capChunks,
   contextHeader,
-  CODE_EXTENSIONS,
-  isMinifiedPath,
   MAX_FILE_BYTES,
   type RagChunk,
 } from './_rag-chunkers.js';
@@ -88,28 +85,6 @@ export interface RagPopulateApply {
 
 const SOURCE_PREFIXES = [`${KB_DIR}/`];
 
-const CODE_IGNORE_DIRS = new Set([
-  'node_modules',
-  '.git',
-  // Haive's per-task git worktrees (<repo>/.haive/worktrees/) are full repo
-  // copies — never index them as project source.
-  '.haive',
-  // The committed onboarding mirror. Holds the knowledge base + learnings, which
-  // collectKbFiles picks up through SOURCE_PREFIXES — as knowledge, never as code.
-  HAIVE_DATA_DIR,
-  'vendor',
-  '__pycache__',
-  '.next',
-  'dist',
-  'build',
-  '.ddev',
-  '.cache',
-  'coverage',
-  '.tox',
-  '.venv',
-  'venv',
-]);
-
 /* ------------------------------------------------------------------ */
 /* File collection                                                     */
 /* ------------------------------------------------------------------ */
@@ -140,50 +115,24 @@ async function collectKbFiles(repo: string): Promise<RagSourceFile[]> {
   return out;
 }
 
+/** Shared collector (see `_rag-collect.ts`) plus the byte sizes this step's
+ *  form reports. The predicate itself is NOT duplicated here: 02-pre-rag-sync
+ *  and 11c-rag-reindex reconcile against whatever this collects, so a second
+ *  copy is a silent drift the orphan sweep turns into deletions. */
 async function collectCodeFiles(
   repo: string,
   excludePaths: readonly string[],
   selectedDirs?: readonly string[],
-  extensionSet?: ReadonlySet<string>,
+  extensionSet?: readonly string[],
 ): Promise<RagSourceFile[]> {
-  const codeExts = extensionSet ?? new Set(Object.keys(CODE_EXTENSIONS));
-  const excludeSet = new Set(excludePaths.map((p) => p.replace(/\/$/, '')));
-  const dirFilter = selectedDirs && selectedDirs.length > 0 ? new Set(selectedDirs) : null;
-
-  const files = await listFilesMatching(
-    repo,
-    (rel, isDir) => {
-      const parts = rel.split('/');
-      // Skip ignored directories
-      if (parts.some((p) => CODE_IGNORE_DIRS.has(p))) return false;
-      // Skip user-excluded paths
-      for (const ex of excludeSet) {
-        if (rel.startsWith(ex + '/') || rel === ex) return false;
-      }
-      // Skip the repo's own root-level files when the root-files token is set
-      // (root files have no directory prefix, so the loop above can't match them).
-      if (!isDir && !rel.includes('/') && excludeSet.has(ROOT_FILES_SCOPE)) return false;
-      if (isDir) return false;
-      // Filter to selected directories when available
-      if (dirFilter) {
-        const topDir = parts.length === 1 ? '.' : parts[0]!;
-        // Check against both top-level and nested dir selections (e.g. 'modules/custom')
-        let inSelected = dirFilter.has(topDir);
-        if (!inSelected && parts.length > 2) {
-          inSelected = dirFilter.has(parts.slice(0, 2).join('/'));
-        }
-        if (!inSelected) return false;
-      }
-      // Skip minified / generated bundles even when their extension matches.
-      if (isMinifiedPath(rel)) return false;
-      const ext = path.extname(rel).toLowerCase();
-      return codeExts.has(ext);
-    },
-    8,
-  );
+  const rels = await collectCodeFilePaths(repo, {
+    exclude: excludePaths,
+    selectedDirs,
+    extensionSet,
+  });
 
   const out: RagSourceFile[] = [];
-  for (const rel of files) {
+  for (const rel of rels) {
     try {
       const text = await readFile(path.join(repo, rel), 'utf8');
       out.push({ relPath: rel, sizeBytes: Buffer.byteLength(text, 'utf8') });
@@ -538,9 +487,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       extensionSet?: string[];
     } | null;
     const selectedDirs = ragSourceOutput?.selectedDirs;
-    const resolvedExtSet = ragSourceOutput?.extensionSet
-      ? new Set(ragSourceOutput.extensionSet)
-      : undefined;
+    const resolvedExtSet = ragSourceOutput?.extensionSet;
 
     // Collect KB files
     await ctx.emitProgress('Scanning for knowledge base files...');

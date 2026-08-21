@@ -32,7 +32,7 @@ describe('collectCodeFiles', () => {
       'assets/site.min.css',
     ]);
 
-    expect(await collectCodeFiles(repo, [])).toEqual(['src/a.js']);
+    expect(await collectCodeFiles(repo)).toEqual(['src/a.js']);
   });
 
   it('skips the ignored dirs and the repo scope deny list', async () => {
@@ -44,6 +44,22 @@ describe('collectCodeFiles', () => {
       'docs/x.js',
     ]);
 
-    expect(await collectCodeFiles(repo, ['docs'])).toEqual(['src/a.js']);
+    expect(await collectCodeFiles(repo, { exclude: ['docs'] })).toEqual(['src/a.js']);
+  });
+
+  it('honors 09_7 extension and folder picks so the orphan sweep cannot delete them', async () => {
+    // The workflow steps reconcile against whatever this collects: an extension
+    // onboarding indexed but this call misses is swept out of RAG, not skipped.
+    await seed(['app/a.php', 'app/tpl.phtml', 'app/a.js', 'other/b.php']);
+
+    expect(await collectCodeFiles(repo, { extensionSet: ['.php', '.phtml'] })).toEqual([
+      'app/a.php',
+      'app/tpl.phtml',
+      'other/b.php',
+    ]);
+    expect(await collectCodeFiles(repo, { selectedDirs: ['app'] })).toEqual([
+      'app/a.js',
+      'app/a.php',
+    ]);
   });
 });

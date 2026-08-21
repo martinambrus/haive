@@ -3,7 +3,6 @@ import path from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
-  HAIVE_DATA_DIR,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
 } from '@haive/shared';
@@ -15,7 +14,8 @@ import {
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { isDeniedFile, loadScopeExcludeGlobs } from '../onboarding/_scope.js';
+import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
+import { collectCodeFiles, type CodeCollectOptions } from '../onboarding/_rag-collect.js';
 import {
   resolveRagConnection,
   ensureRagSchema,
@@ -29,8 +29,6 @@ import {
   chunkSection,
   capChunks,
   contextHeader,
-  CODE_EXTENSIONS,
-  isMinifiedPath,
   MAX_FILE_BYTES,
   type RagChunk,
 } from '../onboarding/_rag-chunkers.js';
@@ -53,30 +51,6 @@ import { indexTaskEmbedding, TASK_EMBED_SOURCE_TYPE } from './_task-embedding.js
 export type RagSourceType = 'kb' | 'code' | 'learning' | 'runbook';
 
 export const SOURCE_PREFIXES: readonly string[] = KNOWLEDGE_SOURCE_PREFIXES;
-
-const CODE_IGNORE_DIRS = new Set([
-  'node_modules',
-  '.git',
-  // Haive's own per-task git worktrees live under <repo>/.haive/worktrees/. They
-  // are full copies of the repo, so indexing them would re-ingest every file a
-  // second time under a `.haive/worktrees/<branch>/` prefix — doubling the index
-  // and never matching onboarding's clean paths. Exclude the whole tree.
-  '.haive',
-  // The committed onboarding mirror. Holds the knowledge base + learnings, which
-  // collectKbFiles picks up through SOURCE_PREFIXES — as knowledge, never as code.
-  HAIVE_DATA_DIR,
-  'vendor',
-  '__pycache__',
-  '.next',
-  'dist',
-  'build',
-  '.ddev',
-  '.cache',
-  'coverage',
-  '.tox',
-  '.venv',
-  'venv',
-]);
 
 /** Type a markdown source by its path so RAG can filter/boost by knowledge kind:
  *  bug run-books (investigations), durable learnings, and general KB articles. */
@@ -101,31 +75,11 @@ export async function collectKbFiles(repo: string): Promise<string[]> {
   return out.sort();
 }
 
-export async function collectCodeFiles(
-  repo: string,
-  exclude: readonly string[] = [],
-): Promise<string[]> {
-  const codeExts = new Set(Object.keys(CODE_EXTENSIONS));
-  const files = await listFilesMatching(
-    repo,
-    (rel, isDir) => {
-      const parts = rel.split('/');
-      if (parts.some((p) => CODE_IGNORE_DIRS.has(p))) return false;
-      // Per-repo onboarding scope deny list (06_7): keep task-end re-index scoped
-      // to this project's own code, same as onboarding. New folders not on the
-      // list stay in scope. Empty list → no-op.
-      if (isDeniedFile(rel, isDir, exclude)) return false;
-      if (isDir) return false;
-      // Same exclusion onboarding applies (10-rag-populate). Without it every
-      // workflow run re-ingests the repo's minified bundles under paths
-      // onboarding deliberately skipped.
-      if (isMinifiedPath(rel)) return false;
-      return codeExts.has(path.extname(rel).toLowerCase());
-    },
-    8,
-  );
-  return files.sort();
-}
+/** Code-file collection is SHARED with onboarding's 10-rag-populate — see
+ *  `../onboarding/_rag-collect.ts`. Re-exported here so the two steps that
+ *  consume it keep importing from this module. */
+export { collectCodeFiles };
+export type { CodeCollectOptions };
 
 export interface RagSyncResult {
   performed: boolean;
@@ -144,6 +98,9 @@ export interface RagSyncResolved {
   ragMode: RagMode;
   ragToolingPrefs: RagToolingPrefs | null;
   projectName: string;
+  /** The SAME collector inputs onboarding's 10-rag-populate used, so a workflow
+   *  re-index collects the set onboarding indexed rather than its own. */
+  codeCollect: CodeCollectOptions;
 }
 
 /** Map a persisted 04-tooling `tooling` object to RAG sync prefs. Shared by the
@@ -163,7 +120,13 @@ export function toRagPrefs(t: Record<string, unknown>): RagToolingPrefs {
  *  which survives a clone to another machine; falls back to the most recent
  *  onboarding task's step outputs (04-tooling-infrastructure + 01-env-detect)
  *  for repos onboarded before the mirror columns existed. Shared by both steps'
- *  detect phases. */
+ *  detect phases.
+ *
+ *  Also resolves the code-collector inputs. Those have NO repo-level mirror, so
+ *  the onboarding task is read for them unconditionally: 09_7's folder and
+ *  extension picks plus 01-env-detect's custom-code exclude heuristic. Anything
+ *  absent stays undefined, which the collector reads as "no restriction" — the
+ *  behaviour a repo onboarded before 09_7 existed already had. */
 export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncResolved> {
   const taskRow = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
@@ -172,6 +135,11 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
 
   let ragPrefs: RagToolingPrefs | null = null;
   let projectName = 'default';
+  // The per-repo scope deny list is authoritative and lives on the repository
+  // row, so it is available even when no onboarding task survives.
+  const exclude: string[] = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
+  let selectedDirs: string[] | undefined;
+  let extensionSet: string[] | undefined;
 
   if (repositoryId) {
     // Col-first: the repo mirror is authoritative when present.
@@ -193,36 +161,52 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
       projectName = p?.name ?? 'default';
     }
 
-    // Fallback to the onboarding task outputs for whatever the mirror lacked
-    // (legacy repos, or a mirror missing the project name).
-    if (!ragPrefs || projectName === 'default') {
-      const onboardingTask = await ctx.db.query.tasks.findFirst({
-        where: and(
-          eq(schema.tasks.repositoryId, repositoryId),
-          eq(schema.tasks.type, 'onboarding'),
-        ),
-        orderBy: [desc(schema.tasks.createdAt)],
-      });
+    // The onboarding task is always read: it is the ONLY source of 09_7's
+    // selection, and it also backfills whatever the mirror lacked (legacy
+    // repos, or a mirror missing the project name).
+    const onboardingTask = await ctx.db.query.tasks.findFirst({
+      where: and(eq(schema.tasks.repositoryId, repositoryId), eq(schema.tasks.type, 'onboarding')),
+      orderBy: [desc(schema.tasks.createdAt)],
+    });
 
-      if (onboardingTask) {
-        if (!ragPrefs) {
-          const toolingPrev = await loadPreviousStepOutput(
-            ctx.db,
-            onboardingTask.id,
-            '04-tooling-infrastructure',
-          );
-          if (toolingPrev?.output) {
-            const o = toolingPrev.output as { tooling?: Record<string, unknown> };
-            ragPrefs = toRagPrefs(o.tooling ?? {});
-          }
-        }
-        if (projectName === 'default') {
-          const envPrev = await loadPreviousStepOutput(ctx.db, onboardingTask.id, '01-env-detect');
-          const envData = (envPrev?.detect as { data?: { project?: { name?: string } } } | null)
-            ?.data;
-          projectName = envData?.project?.name ?? 'default';
+    if (onboardingTask) {
+      if (!ragPrefs) {
+        const toolingPrev = await loadPreviousStepOutput(
+          ctx.db,
+          onboardingTask.id,
+          '04-tooling-infrastructure',
+        );
+        if (toolingPrev?.output) {
+          const o = toolingPrev.output as { tooling?: Record<string, unknown> };
+          ragPrefs = toRagPrefs(o.tooling ?? {});
         }
       }
+
+      const envPrev = await loadPreviousStepOutput(ctx.db, onboardingTask.id, '01-env-detect');
+      const envData = (
+        envPrev?.detect as {
+          data?: {
+            project?: { name?: string };
+            paths?: { customCodePaths?: { exclude?: string[] } };
+          };
+        } | null
+      )?.data;
+      if (projectName === 'default') {
+        projectName = envData?.project?.name ?? 'default';
+      }
+      exclude.push(...(envData?.paths?.customCodePaths?.exclude ?? []));
+
+      const ragSourcePrev = await loadPreviousStepOutput(
+        ctx.db,
+        onboardingTask.id,
+        '09_7-rag-source-selection',
+      );
+      const ragSourceOutput = ragSourcePrev?.output as {
+        selectedDirs?: string[];
+        extensionSet?: string[];
+      } | null;
+      selectedDirs = ragSourceOutput?.selectedDirs;
+      extensionSet = ragSourceOutput?.extensionSet;
     }
   }
 
@@ -231,6 +215,7 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
     ragMode: ragPrefs?.ragMode ?? 'none',
     ragToolingPrefs: ragPrefs,
     projectName,
+    codeCollect: { exclude, selectedDirs, extensionSet },
   };
 }
 
@@ -241,6 +226,10 @@ export interface RunRagIndexOpts {
   prefs: RagToolingPrefs;
   projectName: string;
   ollamaReachable: boolean;
+  /** From `resolveRagSyncPrefs`. Must be the same value the caller's detect
+   *  counted with — a narrower set here than at detect time means the orphan
+   *  sweep below deletes the difference. */
+  codeCollect: CodeCollectOptions;
 }
 
 const EMPTY_RESULT = (reason: string): RagSyncResult => ({
@@ -260,7 +249,7 @@ export async function runRagIndexSync(
   ctx: StepContext,
   opts: RunRagIndexOpts,
 ): Promise<RagSyncResult> {
-  const { repoPath, prefs, projectName, ollamaReachable } = opts;
+  const { repoPath, prefs, projectName, ollamaReachable, codeCollect } = opts;
 
   await ctx.emitProgress('Connecting to RAG database...');
   const conn = await resolveRagConnection(prefs, ctx.db, projectName);
@@ -315,9 +304,8 @@ export async function runRagIndexSync(
     let skipped = 0;
     let deleted = 0;
 
-    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
     const kbFiles = await collectKbFiles(repoPath);
-    const codeFiles = await collectCodeFiles(repoPath, scopeExclude);
+    const codeFiles = await collectCodeFiles(repoPath, codeCollect);
 
     const allFiles: Array<{ relPath: string; sourceType: RagSourceType }> = [
       ...kbFiles.map((r) => ({ relPath: r, sourceType: classifyKbSourceType(r) })),

@@ -1,13 +1,13 @@
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { probeOllama } from '../onboarding/_rag-embed.js';
-import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import type { RagMode, RagToolingPrefs } from '../onboarding/_rag-connection.js';
 import {
   collectKbFiles,
   collectCodeFiles,
   resolveRagSyncPrefs,
   runRagIndexSync,
+  type CodeCollectOptions,
 } from './_rag-index.js';
 
 /* ------------------------------------------------------------------ */
@@ -19,6 +19,7 @@ interface RagSyncDetect {
   ragMode: RagMode;
   ragToolingPrefs: RagToolingPrefs | null;
   projectName: string;
+  codeCollect: CodeCollectOptions;
   kbFileCount: number;
   codeFileCount: number;
   ollamaReachable: boolean;
@@ -59,9 +60,8 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
 
     if (resolved.ragConfigured && resolved.ragToolingPrefs) {
       await ctx.emitProgress('Counting source files...');
-      const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
       kbFileCount = (await collectKbFiles(ctx.repoPath)).length;
-      codeFileCount = (await collectCodeFiles(ctx.repoPath, scopeExclude)).length;
+      codeFileCount = (await collectCodeFiles(ctx.repoPath, resolved.codeCollect)).length;
 
       if (resolved.ragToolingPrefs.ollamaUrl) {
         await ctx.emitProgress('Testing Ollama connectivity...');
@@ -74,6 +74,7 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
       ragMode: resolved.ragMode,
       ragToolingPrefs: resolved.ragToolingPrefs,
       projectName: resolved.projectName,
+      codeCollect: resolved.codeCollect,
       kbFileCount,
       codeFileCount,
       ollamaReachable,
@@ -132,6 +133,7 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
       prefs: detected.ragToolingPrefs,
       projectName: detected.projectName,
       ollamaReachable: detected.ollamaReachable,
+      codeCollect: detected.codeCollect,
     });
   },
 };
