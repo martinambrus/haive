@@ -22,6 +22,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | Plan | Subject | Status |
 |---|---|---|
 | `amber-fencing-hopper` | Onboarding scope + LSP + mirror + retrieval | **In progress.** Slices 1-2 done (`e0bee51`); slice 3 partial (`5ca82ac`, 3b/3d open); slice 4 not started. Header `Status:` line is stale — see its amendment. |
+| `bright-doodling-catmull` | Scope-fence the blocking reviewers | **Shipped** `3415278`. Its end-to-end benchmark re-runs are unmeasured — see its amendment. |
 | `functional-knitting-fairy` | Global KB title digest at dispatch | **Shipped** `e9c2dfe` |
 | `glinting-strolling-magpie` | Browser-verification screenshot gallery | **Shipped** `34df4ef` |
 | `glistening-percolating-snowflake` | Relocate KB + learnings to `.haive-data/` | **Shipped** `2b4c3ad`, `16550ae` |
@@ -30,7 +31,6 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `tidal-yielding-hoare` | Vote scoring for the runtime (DDEV) pool | **Shipped** `8b6b3a9` |
 | `valiant-dancing-parrot` | Task up/down vote scoring | **Shipped** `c4d9acb` |
 | `yielding-preempting-dijkstra` | Vote-driven agent-slot preemption | **Shipped** `19bf74e` |
-| `bright-doodling-catmull` | Scope-fence the blocking reviewers | Not started |
 | `kind-riding-dream` | Deep project analysis — resellable module | Not started; depends optionally on `purring-marinating-peacock` phase 2b |
 | `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | Not started |
 | `parsed-churning-yeti` | Project plan canvas | Not started |
