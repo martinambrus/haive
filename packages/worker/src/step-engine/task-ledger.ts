@@ -67,9 +67,14 @@ export interface LedgerEntry {
   round: number;
   text: string;
   /** 'change' = work this step DID (a code change); 'finding' (default) = a fact it
-   *  established about the workspace, tooling or runtime. The fix-loop context block
-   *  presents the two under different headings. */
-  kind?: 'change' | 'finding';
+   *  established about the workspace, tooling or runtime; 'summary' = the step's whole
+   *  recap, already compacted by the best-effort summarizer. The fix-loop context block
+   *  presents change and finding under different headings; the budget path below prefers
+   *  a step's summary over its raw entries. */
+  kind?: 'change' | 'finding' | 'summary';
+  /** The step row this came from. Null for an entry recorded outside a step. Used only to
+   *  tell which raw entries a summary supersedes. */
+  taskStepId?: string | null;
 }
 
 /** Record what one step established, so later steps do not re-derive it. Best-effort:
@@ -103,7 +108,7 @@ interface StoredEntry extends LedgerEntry {
  *  round it was learned in is the informative one). */
 export async function loadLedgerEntries(db: Database, taskId: string): Promise<LedgerEntry[]> {
   const rows = await db
-    .select({ payload: schema.taskEvents.payload })
+    .select({ payload: schema.taskEvents.payload, taskStepId: schema.taskEvents.taskStepId })
     .from(schema.taskEvents)
     .where(and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, LEDGER_EVENT)))
     .orderBy(asc(schema.taskEvents.createdAt));
@@ -121,7 +126,8 @@ export async function loadLedgerEntries(db: Database, taskId: string): Promise<L
       stepId: p.stepId,
       round: p.round ?? 0,
       text,
-      kind: p.kind === 'change' ? 'change' : 'finding',
+      kind: p.kind === 'change' || p.kind === 'summary' ? p.kind : 'finding',
+      taskStepId: r.taskStepId,
     });
   }
   return out;
@@ -148,20 +154,45 @@ export async function augmentPromptWithLedger(
     log.warn({ err, taskId }, 'failed to load the task ledger for prompt context');
     return prompt;
   }
-  if (entries.length === 0) return prompt;
+  // A step that renders a ledger fact in its OWN prompt body (07's fix-round context
+  // block) must not be handed the same text again here. Exact identity on strings this
+  // module produced, so there is nothing to drift.
+  let kept = entries.filter((e) => !prompt.includes(e.text));
+  if (kept.length === 0) return prompt;
 
-  const lines = entries.map((e) => `- ${e.stepId} (round ${e.round}): ${e.text}`);
-  // Drop WHOLE oldest entries rather than slicing mid-sentence: a truncated fact reads as
-  // a complete one, and the newest entries are the ones the current step is downstream of.
+  const render = (e: LedgerEntry): string => `- ${e.stepId} (round ${e.round}): ${e.text}`;
+  const size = (list: LedgerEntry[]): number =>
+    LEDGER_HEADER.length + list.reduce((n, e) => n + render(e).length + 1, 0);
+
+  if (size(kept) > LEDGER_BLOCK_TARGET) {
+    // Compact before discarding: where a step produced a summary, its raw entries are what
+    // that summary already condenses, so the summary carries the same ground in less room.
+    const summarised = new Set(
+      kept.filter((e) => e.kind === 'summary' && e.taskStepId).map((e) => e.taskStepId),
+    );
+    const compacted = kept.filter(
+      (e) => e.kind === 'summary' || !e.taskStepId || !summarised.has(e.taskStepId),
+    );
+    if (compacted.length < kept.length) {
+      log.info(
+        { taskId, replaced: kept.length - compacted.length },
+        'task ledger over budget; preferred step summaries over the raw entries they cover',
+      );
+      kept = compacted;
+    }
+  }
+
+  // Still over: drop WHOLE oldest entries rather than slicing mid-sentence — a truncated
+  // fact reads as a complete one, and the newest are what the current step is downstream of.
   let dropped = 0;
-  let size = LEDGER_HEADER.length + lines.reduce((n, l) => n + l.length + 1, 0);
-  while (lines.length > 1 && size > LEDGER_BLOCK_TARGET) {
-    size -= lines[0]!.length + 1;
-    lines.shift();
+  let total = size(kept);
+  while (kept.length > 1 && total > LEDGER_BLOCK_TARGET) {
+    total -= render(kept[0]!).length + 1;
+    kept = kept.slice(1);
     dropped++;
   }
   if (dropped > 0) {
-    log.info({ taskId, dropped, kept: lines.length }, 'task ledger over budget; dropped oldest');
+    log.info({ taskId, dropped, kept: kept.length }, 'task ledger over budget; dropped oldest');
   }
-  return `${[LEDGER_HEADER, ...lines].join('\n')}\n\n${prompt}`;
+  return `${[LEDGER_HEADER, ...kept.map(render)].join('\n')}\n\n${prompt}`;
 }

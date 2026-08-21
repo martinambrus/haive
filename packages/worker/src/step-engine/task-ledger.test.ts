@@ -12,7 +12,10 @@ import {
 type StoredPayload = LedgerEntry & { fingerprint?: string };
 
 /** Mimics the drizzle chain loadLedgerEntries uses: select().from().where().orderBy(). */
-function mockDb(rows: Array<{ payload: StoredPayload | null }>, opts: { throws?: boolean } = {}) {
+function mockDb(
+  rows: Array<{ payload: StoredPayload | null; taskStepId?: string | null }>,
+  opts: { throws?: boolean } = {},
+) {
   const inserted: unknown[] = [];
   const orderBy = opts.throws
     ? () => {
@@ -157,6 +160,40 @@ describe('augmentPromptWithLedger', () => {
     const { db } = mockDb([entry('port 8080 is taken'), entry('port 9090 is taken')]);
     const out = await augmentPromptWithLedger(db, 't1', 'P');
     expect(out.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(1);
+  });
+
+  it('prefers a step summary over the raw entries it covers when over budget', async () => {
+    const big = 'z'.repeat(1500);
+    const rows = [
+      { payload: { stepId: '08c', round: 0, text: `raw one ${big}` }, taskStepId: 'step-a' },
+      { payload: { stepId: '08c', round: 0, text: `raw two ${big}` }, taskStepId: 'step-a' },
+      {
+        payload: { stepId: '08c', round: 0, text: 'the recap', kind: 'summary' },
+        taskStepId: 'step-a',
+      },
+      { payload: { stepId: '08d', round: 0, text: `other ${big}` }, taskStepId: 'step-b' },
+    ];
+    const { db } = mockDb(rows as never);
+    const out = await augmentPromptWithLedger(db, 't1', 'ORIGINAL');
+
+    // step-a's two raw entries collapse into its summary; step-b has no summary so it stays.
+    expect(out).toContain('the recap');
+    expect(out).not.toContain('raw one');
+    expect(out).not.toContain('raw two');
+    expect(out).toContain('other');
+  });
+
+  it('does not repeat a fact the prompt already renders itself', async () => {
+    const { db } = mockDb([entry('ddev is not on PATH')]);
+    const prompt = 'PRIOR CONTEXT: ddev is not on PATH\n\nDo the work.';
+    expect(await augmentPromptWithLedger(db, 't1', prompt)).toBe(prompt);
+  });
+
+  it('still injects the entries the prompt does not already carry', async () => {
+    const { db } = mockDb([entry('already here'), entry('brand new fact')]);
+    const out = await augmentPromptWithLedger(db, 't1', 'already here — do the work');
+    expect(out).toContain('brand new fact');
+    expect(out.split('already here').length - 1).toBe(1);
   });
 
   it('keeps at least one entry even when a single entry blows the budget', async () => {

@@ -35,6 +35,7 @@ import {
 } from '@haive/shared';
 import { resolveAgentConcurrency } from '../../sandbox/runtime-admission.js';
 import { resolvePause } from '../../orchestrator/pause.js';
+import { recordLedgerEntry } from '../../step-engine/task-ledger.js';
 import {
   refreshAllCliVersions,
   refreshAllToolVersions,
@@ -230,10 +231,22 @@ export async function handleCliExecJob(
     if (payload.purpose === 'step_summary') {
       const summaryText = (result.rawOutput ?? '').trim().slice(0, 2000);
       if (payload.summaryForStepId && result.exitCode === 0 && summaryText) {
-        await db
+        const [step] = await db
           .update(schema.taskSteps)
           .set({ summary: summaryText, updatedAt: new Date() })
-          .where(eq(schema.taskSteps.id, payload.summaryForStepId));
+          .where(eq(schema.taskSteps.id, payload.summaryForStepId))
+          .returning({ stepId: schema.taskSteps.stepId, round: schema.taskSteps.round });
+        // Mirror it into the task ledger so later steps inherit the recap. This pass
+        // already ran and is unlinked from token totals, so compaction for the ledger
+        // costs no extra call, prompt or tokens.
+        if (step) {
+          await recordLedgerEntry(db, payload.taskId, payload.summaryForStepId, {
+            stepId: step.stepId,
+            round: step.round,
+            text: summaryText,
+            kind: 'summary',
+          });
+        }
       }
       return;
     }
