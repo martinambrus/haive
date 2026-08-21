@@ -140,6 +140,14 @@ export const repositories = pgTable(
      *  credential with a forge provider) surfaces the option without the user having to
      *  find the tooling-page toggle. Turn it off per repo to suppress the option there. */
     prWorkflowEnabled: boolean('pr_workflow_enabled').notNull().default(true),
+    /** Per-repo opt-OUT for learned step guidance. When true (and the global
+     *  CONFIG_KEYS.STEP_GUIDANCE_ENABLED is on), approved guidance items for this
+     *  repo are appended to the relevant step prompts, and 11e-prompt-guidance
+     *  offers new candidates at the end of a run. Default TRUE for the same reason
+     *  as prWorkflowEnabled above: the global switch is the real gate (staged
+     *  rollout, default off), so per-repo exists to silence one noisy repo without
+     *  turning the feature off everywhere. */
+    stepGuidanceEnabled: boolean('step_guidance_enabled').notNull().default(true),
     /** Deterministic form login for browser testing (default: absent = disabled).
      *
      *  Holds only the SHAPE of the login — where it is and how to recognise success.

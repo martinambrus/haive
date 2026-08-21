@@ -9,6 +9,8 @@ import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
+import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
+import { isStepGuidanceEnabled } from '../../guidance-context.js';
 import {
   changedFilesBlock,
   collectImplementationFiles,
@@ -74,6 +76,12 @@ interface BrowserVerifyDetect {
   /** Spec + changed files for the MCP tester / manual-checklist prompts. */
   spec: string;
   implementationFiles: ImplementationFileSet;
+  /** Learned-guidance capture is on for this task: the MCP tester is invited to name an
+   *  INSTRUCTION defect behind the failures it found. Resolved in detect() and carried
+   *  on the payload because the prompt builders are pure. Only the TESTER carries it —
+   *  the fixer is not the pass that rejects, and the manual checklist is written for a
+   *  human to follow, not parsed for defects. */
+  promptDefectCapture: boolean;
   /** Live headed browser for the interactive gate: brought up + navigated in
    *  detect (idempotent, mirrors 09-gate-2) so the noVNC panel shows the running
    *  app during the form, with the probe verdict to pre-set the approve/reject
@@ -569,6 +577,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       skipReason: rt.skipReason,
       mode,
       directAccess,
+      promptDefectCapture: await isStepGuidanceEnabled(ctx.db, ctx.taskId),
     };
     if (!rt.available || mode === 'skip') {
       return {
@@ -1159,6 +1168,7 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
     '',
     '=== Spec (acceptance criteria) ===',
     d.spec || '(no spec recorded)',
+    d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
   ]
     .filter(Boolean)
     .join('\n');

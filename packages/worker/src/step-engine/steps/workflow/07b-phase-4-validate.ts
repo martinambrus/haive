@@ -14,6 +14,8 @@ import {
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { loadHonoredConstraints } from './_fix-loop.js';
+import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
+import { isStepGuidanceEnabled } from '../../guidance-context.js';
 import { coerceReviewSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 import { recordReviewFindings, splitLocation } from './_review-findings.js';
@@ -58,6 +60,10 @@ interface ValidateDetect {
   /** Env template ready with browserTesting on → a chrome-devtools MCP is wired to the
    *  running app's browser; the fixer pass verifies runtime-affecting fixes in-browser. */
   browserTesting: boolean;
+  /** Learned-guidance capture is on for this task: the validator is invited to name an
+   *  INSTRUCTION defect behind the issues it found. Resolved in detect() and carried on
+   *  the payload because buildPrompt is pure and has no ctx. */
+  promptDefectCapture: boolean;
 }
 
 export type ValidationVerdict = 'VALID' | 'ISSUES_FOUND' | 'UNPARSEABLE';
@@ -468,6 +474,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       debtBlock,
       honoredBlock: await loadHonoredConstraints(ctx),
       browserTesting,
+      promptDefectCapture: await isStepGuidanceEnabled(ctx.db, ctx.taskId),
     };
   },
 
@@ -513,6 +520,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         '',
         '=== Spec (what the implementation must deliver) ===',
         d.spec || '(no spec recorded)',
+        d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
       ]
         .filter(Boolean)
         .join('\n');
@@ -599,6 +607,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         '',
         '=== Spec (what the implementation must deliver) ===',
         d.spec || '(no spec recorded)',
+        d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
       ]
         .filter(Boolean)
         .join('\n');

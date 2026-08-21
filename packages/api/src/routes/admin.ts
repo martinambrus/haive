@@ -809,6 +809,26 @@ adminRoutes.put('/config/terseness', async (c) => {
   return c.json({ level });
 });
 
+const stepGuidanceSchema = z.object({ enabled: z.boolean() });
+
+// Master switch for learned per-step prompt guidance (default OFF, staged rollout).
+// On: the CLI-driven steps that can send a round back invite the agent to name an
+// INSTRUCTION defect, 11e-prompt-guidance triages the candidates at the end of the run,
+// and approved items are APPENDED to the target step's prompt on later runs. Flipping
+// it off is the whole feature's rollback and needs no redeploy -- guidance is only ever
+// appended, so every prompt returns to byte-identical. Also gated per-repo.
+adminRoutes.get('/config/step-guidance', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.STEP_GUIDANCE_ENABLED, false);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/step-guidance', async (c) => {
+  const { enabled } = stepGuidanceSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.STEP_GUIDANCE_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global step-guidance switch updated');
+  return c.json({ enabled });
+});
+
 const reviewFanoutDistillSchema = z.object({ enabled: z.boolean() });
 
 // Opt-in (default off): condense the spec passed to the 08c code-review fan-out (full

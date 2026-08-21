@@ -37,7 +37,24 @@ interface ToolingConfig {
   } | null;
   appAuthCredentialsSet: boolean;
   prWorkflowEnabled: boolean;
+  stepGuidanceEnabled: boolean;
+  stepGuidance: GuidanceItem[];
   lspOptions: LspOption[];
+}
+
+/** One learned guidance item currently appended to a step's prompt for this repo. */
+interface GuidanceItem {
+  id: string;
+  stepId: string;
+  scope: 'repo' | 'global';
+  cause: string;
+  guidance: string;
+  /** CLI family the defect was observed under. Recorded but NOT filtered on: an item
+   *  learned under one family is applied to all of them, so this is shown precisely so
+   *  a wrong-family item can be spotted and turned off by hand. */
+  providerFamily: string | null;
+  occurrences: number;
+  updatedAt: string;
 }
 
 function VersionSelect({
@@ -98,6 +115,9 @@ export default function RepoToolingPage() {
   const [appAuthPassword, setAppAuthPassword] = useState('');
   const [appAuthCredsSet, setAppAuthCredsSet] = useState(false);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState(false);
+  const [stepGuidanceEnabled, setStepGuidanceEnabled] = useState(true);
+  const [guidance, setGuidance] = useState<GuidanceItem[]>([]);
+  const [archiving, setArchiving] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -125,6 +145,8 @@ export default function RepoToolingPage() {
         setAppAuthCondValue(cfg.appAuth?.successCondition?.value ?? '');
         setAppAuthCredsSet(cfg.appAuthCredentialsSet ?? false);
         setPrWorkflowEnabled(cfg.prWorkflowEnabled);
+        setStepGuidanceEnabled(cfg.stepGuidanceEnabled ?? true);
+        setGuidance(cfg.stepGuidance ?? []);
       } catch (err) {
         if (!cancelled) setError((err as Error).message ?? 'Failed to load tooling config');
       }
@@ -136,6 +158,24 @@ export default function RepoToolingPage() {
 
   function markDirty() {
     setSaved(false);
+  }
+
+  // Applies immediately -- an item that is steering runs right now should not need a
+  // "Save tooling" round-trip to be switched off. Archive, never delete: the row is
+  // what a later run's fingerprint matches against, so deleting it would let the same
+  // defect be re-offered as brand new.
+  async function archiveGuidance(id: string) {
+    if (archiving) return;
+    setArchiving(id);
+    setError(null);
+    try {
+      await api.post(`/repositories/${repositoryId}/step-guidance/${id}/archive`, {});
+      setGuidance((prev) => prev.filter((g) => g.id !== id));
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to deactivate guidance');
+    } finally {
+      setArchiving(null);
+    }
   }
 
   async function handleSave() {
@@ -166,6 +206,7 @@ export default function RepoToolingPage() {
           .map((l) => l.trim())
           .filter(Boolean),
         prWorkflowEnabled,
+        stepGuidanceEnabled,
         appAuth: {
           enabled: appAuthEnabled,
           loginUrl: appAuthLoginUrl,
@@ -533,6 +574,71 @@ export default function RepoToolingPage() {
                 Offer &quot;create a pull request&quot; at task close
               </Label>
             </div>
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-semibold text-neutral-100">Learned step guidance</h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Lessons about how Haive ASKED for the work, named by review agents during a run and
+              approved by you at the triage step. Approved items are appended to that step&apos;s
+              prompt on future runs &mdash; never substituted for it. Requires the global
+              step-guidance switch (admin settings). Nothing here is statistically validated: a
+              repeat count means the problem recurred, not that the guidance works.
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                id="stepGuidanceEnabled"
+                type="checkbox"
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500"
+                checked={stepGuidanceEnabled}
+                onChange={(e) => {
+                  setStepGuidanceEnabled(e.target.checked);
+                  markDirty();
+                }}
+              />
+              <Label htmlFor="stepGuidanceEnabled">
+                Capture and apply learned guidance for this repository
+              </Label>
+            </div>
+
+            {guidance.length === 0 ? (
+              <p className="mt-4 text-xs text-neutral-600">
+                No guidance is steering this repository yet.
+              </p>
+            ) : (
+              <ul className="mt-4 space-y-2">
+                {guidance.map((g) => (
+                  <li
+                    key={g.id}
+                    className="flex items-start justify-between gap-3 rounded border border-neutral-800 bg-neutral-950 p-3"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm text-neutral-200">{g.guidance}</p>
+                      <p className="mt-1 text-xs text-neutral-500">
+                        {g.stepId} ·{' '}
+                        {g.scope === 'global' ? 'every repo on this stack' : 'this repo'} ·{' '}
+                        {g.cause}
+                        {g.providerFamily ? ` · seen on ${g.providerFamily}` : ''}
+                        {g.occurrences > 1 ? ` · observed ${g.occurrences}x` : ''}
+                      </p>
+                      {g.scope === 'global' && (
+                        <p className="mt-1 text-xs text-amber-600">
+                          Deactivating this turns it off for every repository on this stack, not
+                          just here.
+                        </p>
+                      )}
+                    </div>
+                    <Button
+                      variant="secondary"
+                      onClick={() => void archiveGuidance(g.id)}
+                      disabled={archiving === g.id}
+                    >
+                      {archiving === g.id ? 'Deactivating...' : 'Deactivate'}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </Card>
 
           <div className="flex items-center gap-3">

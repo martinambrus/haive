@@ -325,6 +325,20 @@ export const CONFIG_KEYS = {
   // config cache); a flip needs no redeploy.
   PR_WORKFLOW_ENABLED: 'config:pr:workflowEnabled',
 
+  // --- Learned step guidance ----------------------------------------------
+  // Master switch for learned per-step prompt guidance (plan lexical-jingling-dawn).
+  // When on, the CLI-driven steps that can route a run back to implementation carry a
+  // short instruction inviting them to name an INSTRUCTION defect that caused the
+  // rejection; 11e-prompt-guidance triages the candidates at the end of the run; and
+  // approved items are APPENDED to the target step's prompt on later runs.
+  //
+  // Default 'false' (staged rollout, as PR_WORKFLOW_ENABLED does). Flipping it back to
+  // false is the rollback for the whole feature and needs no deploy: guidance is only
+  // ever appended, so every prompt returns to byte-identical. Also gated per-repo by
+  // repositories.step_guidance_enabled. Read per cli dispatch and per step detect
+  // (~30s config cache); a flip needs no redeploy.
+  STEP_GUIDANCE_ENABLED: 'config:guidance:stepGuidanceEnabled',
+
   // Master kill-switch for the machine-aware runtime resource governor (default ON).
   // When 'true', every per-task DDEV/app runner and CLI-exec sandbox is spawned with
   // Docker resource caps (--memory + swap-off + --cpus + --pids-limit), and an
@@ -502,6 +516,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.REVIEW_REFUTE_ENABLED]: 'true',
   [CONFIG_KEYS.REVIEW_REFUTE_LENSES]: '3',
   [CONFIG_KEYS.PR_WORKFLOW_ENABLED]: 'false',
+  [CONFIG_KEYS.STEP_GUIDANCE_ENABLED]: 'false',
   // Runtime resource governor: ON by default; the numeric caps default to 0 (auto-derive
   // from host RAM/CPU via deriveRuntimeCaps) so a fresh install self-tunes to its machine.
   [CONFIG_KEYS.RESOURCE_LIMITS_ENABLED]: 'true',

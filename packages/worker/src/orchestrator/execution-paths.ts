@@ -79,6 +79,7 @@ const PLAN_TASKLIST_EXTRA: readonly string[] = [
   '11-phase-8-learning',
   '11b-kb-commit',
   '11c-rag-reindex',
+  '11e-prompt-guidance',
 ];
 
 export const PATH_STEP_SETS: Record<

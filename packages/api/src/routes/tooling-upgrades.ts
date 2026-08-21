@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { TOOL_INSTALL_METADATA, userSecretsService, type ToolName } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -247,6 +247,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       secretMaskDenyExtend: true,
       appAuth: true,
       prWorkflowEnabled: true,
+      stepGuidanceEnabled: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -298,8 +299,80 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       (await userSecretsService.get(userId, `app_auth:${repositoryId}:password`)),
     ),
     prWorkflowEnabled: repo.prWorkflowEnabled,
+    stepGuidanceEnabled: repo.stepGuidanceEnabled,
+    // Guidance currently steering this repo's runs -- both its own items and the
+    // stack-global ones, since a global item is just as invisible and just as
+    // permanent. Rejected tombstones and archived items are NOT listed: a tombstone
+    // records a decision already made and archived is already off, so showing either
+    // would turn an off-switch into a browsable history nobody asked for.
+    stepGuidance: (
+      await db
+        .select({
+          id: schema.stepGuidance.id,
+          stepId: schema.stepGuidance.stepId,
+          scope: schema.stepGuidance.scope,
+          cause: schema.stepGuidance.cause,
+          guidance: schema.stepGuidance.guidance,
+          providerFamily: schema.stepGuidance.providerFamily,
+          occurrences: schema.stepGuidance.occurrences,
+          updatedAt: schema.stepGuidance.updatedAt,
+        })
+        .from(schema.stepGuidance)
+        .where(
+          and(
+            eq(schema.stepGuidance.status, 'active'),
+            or(
+              eq(schema.stepGuidance.repositoryId, repositoryId),
+              isNull(schema.stepGuidance.repositoryId),
+            ),
+          ),
+        )
+        .orderBy(desc(schema.stepGuidance.occurrences), desc(schema.stepGuidance.updatedAt))
+        .limit(100)
+    ).map((g) => ({ ...g, updatedAt: g.updatedAt.toISOString() })),
     lspOptions,
   });
+});
+
+/** Turn one guidance item off (status -> 'archived'). The off-switch for an item that
+ *  is already steering runs; kept out of the tooling PATCH because it is a different
+ *  object and must work without saving the whole tooling form.
+ *
+ *  Archive, never delete: the row is what a later run's fingerprint matches against, so
+ *  deleting it would let the same defect be re-offered as brand new. A GLOBAL item is
+ *  archivable from here too -- it steers this repo's runs, so this is where its owner
+ *  discovers it -- and archiving it turns it off everywhere, which is stated in the UI. */
+toolingUpgradeRoutes.post('/:id/step-guidance/:guidanceId/archive', async (c) => {
+  const userId = c.get('userId');
+  const repositoryId = c.req.param('id');
+  const guidanceId = c.req.param('guidanceId');
+  const db = getDb();
+
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
+    columns: { id: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+
+  const updated = await db
+    .update(schema.stepGuidance)
+    .set({ status: 'archived', updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.stepGuidance.id, guidanceId),
+        eq(schema.stepGuidance.status, 'active'),
+        // Scoped exactly like the list above: this repo's own items plus the global
+        // ones it is subject to. A row belonging to another repository is not this
+        // caller's to switch off.
+        or(
+          eq(schema.stepGuidance.repositoryId, repositoryId),
+          isNull(schema.stepGuidance.repositoryId),
+        ),
+      ),
+    )
+    .returning({ id: schema.stepGuidance.id });
+  if (updated.length === 0) throw new HttpError(404, 'Guidance item not found');
+  return c.json({ id: guidanceId, status: 'archived' });
 });
 
 /** Update per-repo tooling: enable/disable RTK + LSP servers and pin versions.
@@ -358,6 +431,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     secretMaskAllow?: string[];
     secretMaskDenyExtend?: string[];
     prWorkflowEnabled?: boolean;
+    stepGuidanceEnabled?: boolean;
     appAuth?: unknown;
     /** Write-only. Stored in user_secrets, never on the repositories row and never
      *  returned by the GET above. */
@@ -398,6 +472,9 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   }
   if (typeof body.prWorkflowEnabled === 'boolean') {
     updates.prWorkflowEnabled = body.prWorkflowEnabled;
+  }
+  if (typeof body.stepGuidanceEnabled === 'boolean') {
+    updates.stepGuidanceEnabled = body.stepGuidanceEnabled;
   }
   if (body.appAuth !== undefined) {
     updates.appAuth = normalizeAppAuth(body.appAuth);

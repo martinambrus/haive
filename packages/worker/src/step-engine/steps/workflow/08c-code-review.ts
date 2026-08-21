@@ -29,6 +29,8 @@ import {
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
+import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
+import { isStepGuidanceEnabled } from '../../guidance-context.js';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { CONFIG_KEYS, configService } from '@haive/shared';
@@ -72,6 +74,10 @@ interface CodeReviewDetect {
   /** Condensed spec for the review fan-out, set only when REVIEW_FANOUT_DISTILL is on
    *  and the spec was actually trimmed; reviewers fall back to the full `spec`. */
   specForReview?: string;
+  /** Learned-guidance capture is on for this task: every reviewer in the fan-out is
+   *  invited to name an INSTRUCTION defect behind the findings it raised. Resolved in
+   *  detect() and carried on the payload because the prompt builders are pure. */
+  promptDefectCapture: boolean;
 }
 
 interface PeerFinding {
@@ -826,6 +832,7 @@ function reviewAssignment(d: CodeReviewDetect): string {
     d.specForReview || d.spec || '(no spec recorded)',
     '',
     INSIGHTS_INSTRUCTION,
+    d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -1079,6 +1086,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
       debtBlock,
       level,
+      promptDefectCapture: await isStepGuidanceEnabled(ctx.db, ctx.taskId),
     };
   },
 

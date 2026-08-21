@@ -27,6 +27,8 @@ import {
 } from './_impl-changes.js';
 import { loadAppBootOutput } from './_task-meta.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
+import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
+import { isStepGuidanceEnabled } from '../../guidance-context.js';
 import { coerceReviewSeverity, isBlockingSeverity, severityRank } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 import { recordReviewFindings, splitLocation } from './_review-findings.js';
@@ -109,6 +111,10 @@ interface AdversarialDetect {
    *  is inherited rather than established — it only has to be stated. */
   appLogin: AppLoginOutcome | null;
   debtBlock: string;
+  /** Learned-guidance capture is on for this task: each adversary is invited to name an
+   *  INSTRUCTION defect behind what it found. Resolved in detect() and carried on the
+   *  payload because the prompt builder is pure. */
+  promptDefectCapture: boolean;
 }
 
 interface AdversarialFinding {
@@ -217,6 +223,7 @@ function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
     d.spec || '(no spec recorded)',
     '',
     INSIGHTS_INSTRUCTION,
+    d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -305,6 +312,7 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       appUrl,
       appLogin,
       debtBlock,
+      promptDefectCapture: await isStepGuidanceEnabled(ctx.db, ctx.taskId),
     };
   },
 

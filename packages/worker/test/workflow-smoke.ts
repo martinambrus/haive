@@ -329,6 +329,11 @@ async function main(): Promise<void> {
         commitMessage: '',
       },
       '11c-rag-reindex': { runReindex: false },
+      // Prompt-guidance triage. Only surfaces when STEP_GUIDANCE_ENABLED is on AND an
+      // agent actually named an instruction defect, so under the default-off switch the
+      // smoke never reaches it. Canned anyway: keeping nothing is the neutral answer,
+      // and a run with the switch on must not stall here waiting for a form.
+      '11e-prompt-guidance': { keep: [], global: [] },
       '11a-gate-4-push': {
         push: false,
         remoteUrl: 'https://smoke.invalid/repo.git',

@@ -36,6 +36,7 @@ import { codeAuditStep } from './08c2-code-audit.js';
 import { adversarialQaStep } from './08d-adversarial-qa.js';
 import { adversarialQaReviewStep } from './08d2-adversarial-qa-review.js';
 import { insightsTriageStep } from './08e-insights-triage.js';
+import { promptGuidanceStep } from './11e-prompt-guidance.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 import { gate3CommitStep } from './10-gate-3-commit.js';
 import { phase8LearningStep } from './11-phase-8-learning.js';
@@ -89,6 +90,7 @@ export {
   skillSyncStep,
   kbCommitStep,
   ragReindexStep,
+  promptGuidanceStep,
   gate4PushStep,
   worktreeCleanupStep,
   prWaitStep,
@@ -138,6 +140,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(skillSyncStep);
   registry.register(kbCommitStep);
   registry.register(ragReindexStep);
+  registry.register(promptGuidanceStep);
   registry.register(gate4PushStep);
   registry.register(worktreeCleanupStep);
   registry.register(prWaitStep);

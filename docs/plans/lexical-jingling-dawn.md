@@ -209,3 +209,77 @@ The hand-written lesson the plan generalises from is intact but moved:
 doc comment). That comment has also grown two further rules since the body was written, which
 strengthens rather than weakens the argument — the manual list is accumulating by hand, which is
 exactly the cost this plan removes.
+
+---
+
+# Amendment — 2026-08-21: shipped
+
+Built and verified on the dev stack. Five deviations from the plan as written, each forced by
+what the code actually does:
+
+1. **`08-phase-5-verify` cannot carry the capture instruction; `08a-browser-verify` does instead.**
+   The plan picked the four steps "that can route a run back to implementation and that emit their
+   verdict from a CLI call". 08 satisfies only the first half: it has no `llm` and no `agentMining`
+   block (`08-phase-5-verify.ts:385-403`) — it runs test/lint/typecheck deterministically and emits
+   no prompt at all. `08a-browser-verify` satisfies both (an `llm` tester/fixer loop plus fixLoop +
+   restartLoop + fixLoopOnError), so it took the fourth slot. Capture sites are therefore
+   **07b / 08a / 08c / 08d**. On 07b the instruction rides BOTH validator prompts (pass 0 and the
+   re-validation pass) and neither fixer prompt; on 08a only the tester, not the fixer and not the
+   human-facing manual checklist.
+
+2. **Migration `0123`, not `0109`.** 0109 has been `cli_provider_model_limits.sql` since before this
+   plan was written; the series is at 0122.
+
+3. **Step index `11.8`, not `11.5`.** 11.5 is `11b-kb-commit` (11.4 is 11d, 11.7 is 11c). 11.8 puts
+   triage at the end of the learning phase, ahead of the 11a push gate at 12.
+
+4. **Two partial unique indexes, not one `coalesce()` expression index over a sentinel uuid.**
+   `repository_id` is genuinely NULL for a global item; a partial index says so without inventing a
+   magic value a future join could match. Drizzle expresses both directly, so `drizzle-kit push`
+   owns the schema and the `.sql` stays the idempotent parity record (verified: re-running it is a
+   clean no-op). The upsert names the matching predicate via `targetWhere`, which was probed
+   against the live database because a partial-index conflict target only fails at runtime (42P10).
+
+5. **An already-active candidate is a recurrence, not a re-decision — the plan's tombstone rule
+   would have destroyed approved guidance.** The plan says every unkept candidate becomes a
+   `rejected` tombstone. But a defect that is already `active` can be re-reported on a later run,
+   and under that rule leaving it unchecked deactivates guidance the user previously approved —
+   silently, and by DEFAULT, since an unticked multi-select is the resting state and an
+   auto-continued run submits exactly that empty payload. Candidates now carry a `disposition`:
+   `new` (the only class put to the user), `active` (not offered; the run only bumps
+   `occurrences`), `display_only` (`task_description_defect`, shown and never stored). `rejected`
+   still means never re-offer. The off-switch for an active item is the explicit Deactivate action
+   on the repo tooling page. Consequence, stated in the code: a run whose only candidates are
+   already active does not park a form, so its recurrences go uncounted — acceptable because
+   `occurrences` is a ranking hint, never a metric.
+
+Also worth knowing, and commented at `augmentPromptWithLearnedGuidance`: injection is wired to the
+step-runner's `llm` dispatch only. It reaches `07-phase-2-implement` (the sole guidance target) on a
+normal run and on every fix round, but NOT the DAG coder prompts (`dag-executor.ts` builds those)
+nor the agent-mining fan-outs. A DAG-mode run gets the guidance only once the fix loop routes back
+to 07.
+
+## Verified
+
+- `pnpm typecheck` and the full Vitest suite in each package's own container: 3717 tests pass
+  (worker 2941, shared 383, api 169, web 224), Prettier clean.
+- 33 new unit assertions across `prompt-defect-parse`, `guidance-context` and
+  `prompt-guidance-triage`, covering the parser, the fingerprint's id/path/digit normalisation, the
+  5-item / 1500-char caps, global facet overlap and non-overlap, and byte-identical output when the
+  switch is off, when the repo opted out, when nothing matches and when the query throws.
+- `workflow-smoke.ts` passes (`WORKFLOW_OK`) with `11e-prompt-guidance` correctly `skipped` under
+  the default-off switch.
+- End-to-end on the dev stack, worker stopped for the smoke rather than bounced mid-CLI: a seeded
+  `## PROMPT-DEFECT` block flows through 11e's shouldRun/detect/form/apply into an `active`
+  `step_guidance` row, appears in a LATER task's `07-phase-2-implement` prompt, leaves an unrelated
+  step untouched, and returns byte-identical the moment the admin switch is flipped off. A declined
+  new defect is never re-offered; an empty submit against an active item bumps `occurrences` to 2
+  and leaves it active.
+- Admin `GET`/`PUT /admin/config/step-guidance` round-trip and reject a bad body with 400. The
+  per-repo toggle round-trips through `tooling-config`/`PATCH tooling`, and
+  `POST /repositories/:id/step-guidance/:id/archive` archives rather than deletes, 404s on an
+  already-archived or unknown id.
+
+Note for anyone cleaning up after a probe: `step_guidance.source_task_id` is `ON DELETE SET NULL`
+by design — a lesson outlives the task that produced it — so deleting a task does NOT remove its
+guidance rows.

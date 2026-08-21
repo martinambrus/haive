@@ -153,6 +153,8 @@ export default function AdminPage() {
   const [savingTerseness, setSavingTerseness] = useState(false);
   const [reviewDistillEnabled, setReviewDistillEnabled] = useState<boolean | null>(null);
   const [savingReviewDistill, setSavingReviewDistill] = useState(false);
+  const [stepGuidanceEnabled, setStepGuidanceEnabled] = useState<boolean | null>(null);
+  const [savingStepGuidance, setSavingStepGuidance] = useState(false);
   const [reviewRefuteLenses, setReviewRefuteLenses] = useState<number>(3);
   const [reviewRefuteEnabled, setReviewRefuteEnabled] = useState<boolean | null>(null);
   const [savingReviewRefute, setSavingReviewRefute] = useState(false);
@@ -211,6 +213,7 @@ export default function AdminPage() {
         pricingData,
         tersenessData,
         reviewDistillData,
+        stepGuidanceData,
         reviewRefuteData,
         usageWindowData,
         usageAlertData,
@@ -245,6 +248,7 @@ export default function AdminPage() {
         ),
         api.get<{ level: string }>('/admin/config/terseness'),
         api.get<{ enabled: boolean }>('/admin/config/review-fanout-distill'),
+        api.get<{ enabled: boolean }>('/admin/config/step-guidance'),
         api.get<{ enabled: boolean; lenses: number }>('/admin/config/review-refute'),
         api.get<{ enabled: boolean }>('/admin/config/usage-window'),
         api.get<{ enabled: boolean; thresholdPct: number }>('/admin/config/usage-alert'),
@@ -278,6 +282,7 @@ export default function AdminPage() {
       setPricing(pricingData);
       setTersenessLevel(tersenessData.level);
       setReviewDistillEnabled(reviewDistillData.enabled);
+      setStepGuidanceEnabled(stepGuidanceData.enabled);
       setReviewRefuteEnabled(reviewRefuteData.enabled);
       setReviewRefuteLenses(reviewRefuteData.lenses ?? 3);
       setUsageWindowEnabled(usageWindowData.enabled);
@@ -681,6 +686,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update review distill');
     } finally {
       setSavingReviewDistill(false);
+    }
+  }
+
+  async function setStepGuidance(next: boolean) {
+    setSavingStepGuidance(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/step-guidance', {
+        enabled: next,
+      });
+      setStepGuidanceEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update step guidance');
+    } finally {
+      setSavingStepGuidance(false);
     }
   }
 
@@ -1701,6 +1721,38 @@ export default function AdminPage() {
             />
             {reviewDistillEnabled ? 'Enabled' : 'Disabled'}
             {savingReviewDistill && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {stepGuidanceEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Learned step guidance</CardTitle>
+            <CardDescription>
+              Opt-in (default OFF). When on, the steps that can send a round back to implementation
+              (validate, browser verify, code review, adversarial QA) may name an INSTRUCTION defect
+              behind their rejection &mdash; a case where the wording Haive gave the agent, not the
+              code, caused the round. A triage step at the end of the run asks you which of those to
+              keep; kept items are APPENDED to that step&apos;s prompt on future runs, scoped to the
+              repository or to the stack. No extra CLI calls: the agent that was already going to
+              reject is the one that reports. Nothing here is statistically validated &mdash; a
+              repeat count means the problem recurred, not that the guidance works. Turning this off
+              stops injection entirely and every prompt returns to byte-identical. Also gated
+              per-repository on the repo tooling page. Takes effect within ~30s; persists across
+              restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={stepGuidanceEnabled}
+              disabled={savingStepGuidance}
+              onChange={(e) => void setStepGuidance(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {stepGuidanceEnabled ? 'Enabled' : 'Disabled'}
+            {savingStepGuidance && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}
