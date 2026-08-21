@@ -5,6 +5,7 @@ import { schema } from '@haive/database';
 import type { Database } from '@haive/database';
 import type { TreeNode } from '@haive/shared';
 import { ROOT_FILES_SCOPE } from '@haive/shared/scope-tree';
+import { stripManagedKnowledgeGlobs } from '@haive/shared/knowledge-paths';
 import { loadPreviousStepOutput } from './_helpers.js';
 
 /** Load the per-repo onboarding scope deny list (`repositories.scope_exclude_globs`)
@@ -16,7 +17,11 @@ import { loadPreviousStepOutput } from './_helpers.js';
  *  whole repo minus the step's own hardcoded IGNORE_DIRS.
  *
  *  Defensive by design: the query is wrapped so a step-runner test with a mock db
- *  (no tasks/repositories tables) degrades to `[]` instead of throwing. */
+ *  (no tasks/repositories tables) degrades to `[]` instead of throwing.
+ *
+ *  Managed knowledge dirs are stripped on the way out (see
+ *  stripManagedKnowledgeGlobs) so a pre-existing or hand-edited list can never
+ *  exclude the KB/learnings from mining or indexing. */
 export async function loadScopeExcludeGlobs(db: Database, taskId: string): Promise<string[]> {
   try {
     const rows = await db
@@ -25,7 +30,7 @@ export async function loadScopeExcludeGlobs(db: Database, taskId: string): Promi
       .innerJoin(schema.repositories, eq(schema.tasks.repositoryId, schema.repositories.id))
       .where(eq(schema.tasks.id, taskId))
       .limit(1);
-    return rows[0]?.globs ?? [];
+    return stripManagedKnowledgeGlobs(rows[0]?.globs ?? []);
   } catch {
     return [];
   }
@@ -149,7 +154,8 @@ export async function loadRepoScopeExcludeGlobs(
       .innerJoin(schema.repositories, eq(schema.tasks.repositoryId, schema.repositories.id))
       .where(eq(schema.tasks.id, taskId))
       .limit(1);
-    return rows[0]?.globs ?? null;
+    const globs = rows[0]?.globs;
+    return globs ? stripManagedKnowledgeGlobs(globs) : null;
   } catch {
     return null;
   }
@@ -164,7 +170,7 @@ export async function loadRepoScopeExcludeGlobs(
 export async function loadMiningScopeExcludeGlobs(db: Database, taskId: string): Promise<string[]> {
   const prev = await loadPreviousStepOutput(db, taskId, '06_7-scope-selection');
   const globs = (prev?.output as { excludeGlobs?: string[] } | null)?.excludeGlobs;
-  if (Array.isArray(globs)) return globs;
+  if (Array.isArray(globs)) return stripManagedKnowledgeGlobs(globs);
   return loadScopeExcludeGlobs(db, taskId);
 }
 

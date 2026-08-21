@@ -3,6 +3,10 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import { buildFullExtensionSet, type ExtensionInfo } from './_extension-registry.js';
 import { buildScopeTree } from '@haive/shared/scope-tree';
+import {
+  stripManagedKnowledgeGlobs,
+  tagManagedKnowledgeNodes,
+} from '@haive/shared/knowledge-paths';
 import { computeSeedExcludeGlobs } from './_scope-seed.js';
 import {
   collectAllPaths,
@@ -61,9 +65,8 @@ export const scopeSelectionStep: StepDefinition<ScopeSelectionDetect, ScopeSelec
     const extensionSet = buildFullExtensionSet(rgOutput?.extensions ?? []);
 
     await ctx.emitProgress('Scanning directories...');
-    const tree = await buildScopeTree(
-      ctx.repoPath,
-      extensionSet.size > 0 ? { extensions: extensionSet } : {},
+    const tree = tagManagedKnowledgeNodes(
+      await buildScopeTree(ctx.repoPath, extensionSet.size > 0 ? { extensions: extensionSet } : {}),
     );
 
     const composer = await readComposerJson(ctx.repoPath);
@@ -126,8 +129,10 @@ export const scopeSelectionStep: StepDefinition<ScopeSelectionDetect, ScopeSelec
     // Task-scoped: the mining deny list lives ONLY in this step's output, read by
     // the KB + skill mining steps. It is NOT written to the repo — the repo-level
     // scope_exclude_globs is the RAG scope, owned by 09_7-rag-source-selection.
-    const excludeGlobs: string[] = [];
-    collectDenyFrontier(detected.tree, selected, excludeGlobs);
+    const frontier: string[] = [];
+    collectDenyFrontier(detected.tree, selected, frontier);
+    // The knowledge dirs are never excludable, however the user ticks the tree.
+    const excludeGlobs = stripManagedKnowledgeGlobs(frontier);
     excludeGlobs.sort();
 
     ctx.logger.info(

@@ -5,6 +5,10 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import { buildFullExtensionSet, type ExtensionInfo } from './_extension-registry.js';
 import { buildScopeTree } from '@haive/shared/scope-tree';
+import {
+  stripManagedKnowledgeGlobs,
+  tagManagedKnowledgeNodes,
+} from '@haive/shared/knowledge-paths';
 import { computeSeedExcludeGlobs } from './_scope-seed.js';
 import {
   collectAllPaths,
@@ -73,9 +77,8 @@ export const ragSourceSelectionStep: StepDefinition<
     const extensionSet = buildFullExtensionSet(rgOutput?.extensions ?? []);
 
     await ctx.emitProgress('Scanning directories...');
-    const tree = await buildScopeTree(
-      ctx.repoPath,
-      extensionSet.size > 0 ? { extensions: extensionSet } : {},
+    const tree = tagManagedKnowledgeNodes(
+      await buildScopeTree(ctx.repoPath, extensionSet.size > 0 ? { extensions: extensionSet } : {}),
     );
 
     // Default the RAG deny list to (in order): the repo's stored RAG scope
@@ -151,8 +154,12 @@ export const ragSourceSelectionStep: StepDefinition<
     const values = args.formValues as { selectedDirs?: string[] };
     const selected = new Set(values.selectedDirs ?? []);
 
-    const excludeGlobs: string[] = [];
-    collectDenyFrontier(detected.tree, selected, excludeGlobs);
+    const frontier: string[] = [];
+    collectDenyFrontier(detected.tree, selected, frontier);
+    // The knowledge dirs are never excludable, however the user ticks the tree —
+    // this is the repo-level list, so an unticked `.haive-data` would otherwise
+    // persist and follow the repo into every later task.
+    const excludeGlobs = stripManagedKnowledgeGlobs(frontier);
     excludeGlobs.sort();
 
     const repositoryId = await resolveRepositoryId(ctx.db, ctx.taskId);

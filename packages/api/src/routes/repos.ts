@@ -14,7 +14,12 @@ import {
   type ArchiveFormat,
 } from '@haive/shared';
 import { buildScopeTree } from '@haive/shared/scope-tree';
-import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
+import {
+  KB_DIR,
+  LEARNINGS_DIR,
+  stripManagedKnowledgeGlobs,
+  tagManagedKnowledgeNodes,
+} from '@haive/shared/knowledge-paths';
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -604,7 +609,7 @@ repoRoutes.get('/:id/scope-tree', async (c) => {
   if (!repo) throw new HttpError(404, 'Repository not found');
   const root = repo.storagePath ?? repo.localPath;
   if (!root) throw new HttpError(409, 'Repository has no on-disk path yet');
-  const tree = await buildScopeTree(root);
+  const tree = tagManagedKnowledgeNodes(await buildScopeTree(root));
   return c.json({ tree, scopeExcludeGlobs: repo.scopeExcludeGlobs ?? [] });
 });
 
@@ -624,9 +629,16 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
   // allowed and NOT validated against the tree: the deny list tolerates a glob
   // that matches nothing (isDeniedPath simply won't fire), matching how the
   // onboarding scope-picker (06_7) persists its frontier.
-  const scopeExcludeGlobs = Array.from(
-    new Set(
-      body.scopeExcludeGlobs.map((p) => p.replace(/^\/+|\/+$/g, '')).filter((p) => p.length > 0),
+  //
+  // The managed knowledge dirs are then dropped unconditionally: they must stay
+  // readable/indexable however the editor (or a hand-rolled request) ticks the
+  // tree. This is the server-side backstop for the same strip the picker steps
+  // and the repos page apply.
+  const scopeExcludeGlobs = stripManagedKnowledgeGlobs(
+    Array.from(
+      new Set(
+        body.scopeExcludeGlobs.map((p) => p.replace(/^\/+|\/+$/g, '')).filter((p) => p.length > 0),
+      ),
     ),
   ).sort();
 

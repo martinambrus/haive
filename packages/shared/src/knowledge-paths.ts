@@ -1,3 +1,4 @@
+import type { TreeNode } from './schemas/form.js';
 import { HAIVE_DATA_DIR } from './types/index.js';
 
 /* ------------------------------------------------------------------ */
@@ -22,3 +23,64 @@ export const INVESTIGATIONS_DIR = `${KB_DIR}/investigations`;
 /** Path prefixes the RAG collectors walk to pick knowledge markdown out of a
  *  repo. Trailing slash so the test is an anchored directory-prefix match. */
 export const KNOWLEDGE_SOURCE_PREFIXES = [`${KB_DIR}/`, `${LEARNINGS_DIR}/`] as const;
+
+/** Dirs that must never be scope-excluded, regardless of picker state.
+ *
+ *  The scope pickers (06_7 mining, 09_7 RAG) and the repos-page scope editor
+ *  build their tree over the whole repo INCLUDING dotfolders, so a user can
+ *  untick `.haive-data` and cascade a deny glob over the knowledge tree. The KB
+ *  survives today only because both RAG collectors read it through a hardcoded
+ *  prefix that ignores the deny list — accidental safety that a later refactor
+ *  would silently remove. These dirs are immune by construction instead. */
+export const MANAGED_KNOWLEDGE_DIRS = [KB_DIR, LEARNINGS_DIR] as const;
+
+/** Strip surrounding slashes so a hand-edited or legacy glob (`/.haive-data/`)
+ *  compares the same as a picker-produced one. */
+function normalizeGlob(glob: string): string {
+  return glob.replace(/^\/+|\/+$/g, '');
+}
+
+/** True when the `glob` subtree and the `dir` subtree overlap in either
+ *  direction — the glob IS the dir, covers it (an ancestor), or lives inside it
+ *  (a descendant). All three stop some part of the knowledge tree being read. */
+function overlaps(glob: string, dir: string): boolean {
+  return glob === dir || glob.startsWith(`${dir}/`) || dir.startsWith(`${glob}/`);
+}
+
+/** Drop every deny glob that would exclude any part of a managed knowledge dir.
+ *
+ *  Applied at each point a deny frontier is persisted AND inside the loaders, so
+ *  the guarantee holds against hand-edited and pre-existing lists too. Purely
+ *  subtractive: globs that touch nothing managed are returned unchanged, in
+ *  order, so this is a no-op for the overwhelmingly common case. */
+export function stripManagedKnowledgeGlobs(globs: readonly string[]): string[] {
+  return globs.filter((glob) => {
+    const normalized = normalizeGlob(glob);
+    if (normalized.length === 0) return true;
+    return !MANAGED_KNOWLEDGE_DIRS.some((dir) => overlaps(normalized, dir));
+  });
+}
+
+/** Badge copy for a managed knowledge dir in the scope pickers. */
+export const MANAGED_KNOWLEDGE_BADGE = 'always indexed';
+
+/** Tag the managed knowledge dirs in a scope tree so the picker shows WHY
+ *  unticking them has no effect. Purely cosmetic — the functional immunity is
+ *  `stripManagedKnowledgeGlobs`; this only stops the tick-box looking broken.
+ *
+ *  Kept out of `buildScopeTree`, which is documented as a pure structural walk
+ *  with badges applied by the caller. Pure: nodes with nothing to change are
+ *  returned by reference. */
+export function tagManagedKnowledgeNodes(nodes: readonly TreeNode[]): TreeNode[] {
+  const managedDirs: readonly string[] = MANAGED_KNOWLEDGE_DIRS;
+  return nodes.map((node) => {
+    const children = node.children ? tagManagedKnowledgeNodes(node.children) : undefined;
+    const isManaged = managedDirs.includes(node.path);
+    if (!isManaged && !children) return node;
+    return {
+      ...node,
+      ...(children ? { children } : {}),
+      ...(isManaged ? { badge: MANAGED_KNOWLEDGE_BADGE, badgeColor: 'green' as const } : {}),
+    };
+  });
+}

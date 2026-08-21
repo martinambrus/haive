@@ -10,6 +10,7 @@ import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 import { ToolingUpgradeBanner } from '@/components/tooling-upgrade-banner';
 import { usePageTitle } from '@/lib/use-page-title';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
+import { stripManagedKnowledgeGlobs } from '@haive/shared/knowledge-paths';
 
 function statusVariant(status: Repository['status']) {
   if (status === 'ready') return 'success' as const;
@@ -190,8 +191,11 @@ export default function ReposPage() {
     setScope((s) => (s ? { ...s, included } : s));
     const deny: string[] = [];
     denyFromIncluded(tree, included, deny);
+    // The knowledge dirs are never excludable, so never send a glob covering
+    // one. The api strips them again as a backstop.
+    const sendable = stripManagedKnowledgeGlobs(deny).sort();
     try {
-      await api.patch(`/repos/${repoId}/exclusions`, { scopeExcludeGlobs: deny.sort() });
+      await api.patch(`/repos/${repoId}/exclusions`, { scopeExcludeGlobs: sendable });
       await reload();
     } catch (err) {
       setError((err as Error).message ?? 'Failed to update exclusions');
