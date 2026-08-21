@@ -218,3 +218,22 @@ does not have to hand-assemble it in the composer to get the thing they paid for
 - An admin may **disable** a module-seeded definition but not delete it: deletion would simply be
   undone at the next boot upsert, and a control that silently reverts is worse than no control.
   Removing it for real means removing the module.
+
+---
+
+# Amendment — 2026-08-21: unbuilt; and how the two puffin files relate
+
+Unbuilt — none of `schema/task-types.ts`, `routes/task-types.ts`, `task-type-manifest.ts`,
+`composable-catalog.ts`, `routes/custom-mcp.ts` or the admin task-types page exists.
+
+**Two files describe this feature and neither supersedes the other.** This file is the whole design
+and the locked user decisions. `rippling-wibbling-puffin-agent-a233cf7f9b59974f6.md` is a
+subagent-written **half A** — data model, `buildRunList`, pgEnum, migration and seed — grounded
+line-by-line against the tree at the time. They are complementary: read this one for the design and
+the amendment on module-contributed steps, and half A for the migration mechanics and the
+`findIndex` invariant. Half A covers only the first slice; it is not an alternative plan.
+
+Anchor drift shared by both: `buildRunList` is now `task-queue.ts:152` (half A says 112-130) and
+`buildRunAppRunList` is `:186` (says 146-178). Both `execution-paths.ts:98`
+(`PATH_REQUIRED_TARGETS`) and `:133` (`orderWorkflowRunList`) still resolve exactly as cited, in
+`packages/worker/src/orchestrator/execution-paths.ts`.

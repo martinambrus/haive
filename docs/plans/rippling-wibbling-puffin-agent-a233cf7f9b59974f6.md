@@ -317,3 +317,16 @@ Enable/disable interaction with the New-Task form:
 - worker/src/step-engine/step-runner.ts:1791-1802 (document custom-slug offset gap; no code change required).
 ```
 ```
+
+---
+
+# Amendment — 2026-08-21: still unbuilt; two of the verified refs have drifted
+
+This file is **half A** of the feature designed in `rippling-wibbling-puffin.md` — data model,
+`buildRunList`, pgEnum, migration, seed. It does not supersede that plan and that plan does not
+supersede it; read both.
+
+Section 0's "all line refs verified read" was true when written and is now partly stale:
+`buildRunList` is at `task-queue.ts:152` (body says 112-130) and `buildRunAppRunList` at `:186`
+(body says 146-178). The `execution-paths.ts:98` and `:133` refs still resolve as cited. The
+`findIndex` invariant the section establishes is unaffected — only the coordinates moved.

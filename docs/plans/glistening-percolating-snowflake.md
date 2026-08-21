@@ -179,3 +179,22 @@ simply restores the old behavior. No data to undo (demo data; no migration perfo
 6. Docs (CLAUDE.md, shared comment, api-client comment) + tests + `stripManagedKnowledgeGlobs` unit
    test.
 7. Build/typecheck/test/e2e verify per the section above.
+
+---
+
+# Amendment — 2026-08-21: unbuilt, but its precondition has landed
+
+Still unbuilt: `KB_ROOT` is `path.join('.claude', 'knowledge_base')` (`_kb-write.ts:14`, unchanged),
+learnings are still written under `.claude/learnings/`, and `packages/shared/src/knowledge-paths.ts`
+does not exist.
+
+What DID land is the directory this plan rides on. `.haive-data/` shipped with the onboarding mirror
+(`e0bee51`, slice 2 of `amber-fencing-hopper.md`), and `HAIVE_DATA_DIR` / `HAIVE_DATA_FILES` live in
+`packages/shared/src/types/index.ts`. `HAIVE_DATA_FILES` currently lists only `environment`,
+`tooling` and `exclusions`, so this plan now ADDS the knowledge entries to an existing, already
+committed and clone-restored dir rather than establishing it. Step 12 already stages `.haive-data/`
+via `BASE_STAGE_PATHS`, as the body assumes.
+
+The accidental-safety premise is confirmed, at drifted anchors: `10-rag-populate.ts:87` still reads
+`const SOURCE_PREFIXES = ['.claude/knowledge_base/'];` with its `collectKbFiles` at `:112` (body says
+`:83`), and the workflow-side `collectKbFiles` is `_rag-index.ts:79` (body says `:44`).

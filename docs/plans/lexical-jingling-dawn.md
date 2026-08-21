@@ -195,3 +195,17 @@ until the libs rebuild lands.
   an item stale; there is no reaper. Archive by hand.
 - **Global scope carries repo-authored text across repos.** Mitigated by explicit per-item human
   selection, the project-name scrub, the length cap, and facet scoping — not eliminated.
+
+---
+
+# Amendment — 2026-08-21: unbuilt; the worked example moved
+
+Unbuilt — none of the proposed files exist (`schema/step-guidance.ts`,
+`step-engine/guidance-context.ts`, `steps/workflow/_prompt-defect.ts`,
+`steps/workflow/11e-prompt-guidance.ts`, migration `0109_step_guidance.sql`).
+
+The hand-written lesson the plan generalises from is intact but moved:
+`ddevConfigGuidanceLines` is `_retrieval-guidance.ts:176`, not `:162` (line 162 now falls inside its
+doc comment). That comment has also grown two further rules since the body was written, which
+strengthens rather than weakens the argument — the manual list is accumulating by hand, which is
+exactly the cost this plan removes.

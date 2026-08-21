@@ -148,3 +148,19 @@ commit and restart the worker — the next review round reverts to today's behav
 `review_findings` rows are unaffected either way (`blocking` is historical telemetry, never re-read
 as state). The one visible residue is upgrade-status reporting the four agent templates as changed;
 reverting flips their `contentHash` back on the next worker boot.
+
+---
+
+# Amendment — 2026-08-21: unbuilt; premise intact, anchor moved
+
+Unbuilt — no `_scope-fence.ts` exists anywhere in the tree.
+
+The instruction the whole plan rests on is still present verbatim, but has moved: it is at
+`08c-code-review.ts:655-657`, not `:498-501` (which is now the refuter prompt builder added by the
+later refutation pass). The text is unchanged — "Report EVERY finding in full — including
+pre-existing, low-severity, and dead-code ones". `08c-code-review.ts:674` and
+`_agent-templates.ts:1379` still resolve as cited.
+
+Note the interaction the body predates: 08c now runs a refutation wave over blocking findings, so
+some of the noise this plan targets is already being filtered — but refutation only disproves a
+finding, it never suppresses one for being out of scope, so the plan is not made redundant.

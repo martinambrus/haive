@@ -209,3 +209,11 @@ not be skipped.
 Runtime/DDEV admission (`runtime-admission.ts`), preemption ordering (`pickPreemptibleRunner`) and
 the runner-holder yield rule (`agent-reserve.ts`) keep their current behaviour. Each is a separate
 gate with its own failure modes; a boosted task waiting on a DDEV slot still waits its turn.
+
+---
+
+# Amendment — 2026-08-21: shipped
+
+Landed as `c4d9acb` (`feat(tasks): up/down vote scoring to prioritise a task’s AI agents`). This file is a historical record, not pending work — do not
+re-implement from it. Line numbers in the body are as of writing and have since drifted; resolve
+any reference by symbol name.

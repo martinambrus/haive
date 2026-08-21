@@ -216,3 +216,11 @@ Ordering and operational constraints:
 - Any worker src edit triggers a tsx reload that kills in-flight CLI runs. Land both slices while
   the onboarding tasks sit at a form/gate, not mid-fan-out.
 - No DB migration, no schema change, no new container image in either slice.
+
+---
+
+# Amendment — 2026-08-21: shipped
+
+Landed as `8130dcd + d65d83f` (`feat(runtime): size the agent pool from measured host memory` and `fix(runtime): charge the browser surcharge only while the desktop is up`). This file is a historical record, not pending work — do not
+re-implement from it. Line numbers in the body are as of writing and have since drifted; resolve
+any reference by symbol name.

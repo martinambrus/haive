@@ -240,3 +240,20 @@ entries always survive.
   nothing here builds it.
 - Routing attachments/terseness through the DAG dispatch path (pre-existing gap,
   surfaced in slice 3, not fixed here).
+
+---
+
+# Amendment — 2026-08-21: premises re-checked and hold; three anchors stale
+
+Unbuilt — no `task-ledger.ts`, `_doc-view.ts` or `_spec-artifact.ts` exists. All three defects in
+the body were re-verified and still hold; the citations behind two of them have moved.
+
+- **Defect 1 confirmed, anchors stale.** `condenseSpecForReview` is at `08c-code-review.ts:757`, not
+  `:601`. `CONFIG_KEYS.REVIEW_FANOUT_DISTILL` still defaults to `'false'`, but the default is at
+  `config.service.ts:496`, not `:394` — so "in practice it never runs" is still true.
+- **Count drifted, conclusion unchanged.** A `=== Spec` block now appears 20 times across 12 workflow
+  step files; the body says 19 across 13.
+- **Defect 2 confirmed.** `DagCoderContext` is `step-definition.ts:183`.
+- **The no-resume premise holds.** `sessionId` is still declared at `cli-adapters/types.ts:12` and
+  set nowhere on the adapter path. The `sessionId` in `terminal/terminal-session-manager.ts` is the
+  terminal session's and is unrelated — do not mistake it for CLI resume support.

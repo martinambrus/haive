@@ -142,3 +142,11 @@ invocation sits queued; fix 2 needs a fan-out step with failed mining rows plus 
 non-mining invocation. A clean re-run produces neither, spends real CLI budget, and destroys the
 one fixture that does reproduce the bug. Use it afterwards as a regression check that nothing
 else broke, not as the proof these fixes work.
+
+---
+
+# Amendment — 2026-08-21: shipped
+
+Landed as `d4fedf0 + 7ed0378` (`fix(worker): only orphan CLI invocations that actually started` and `fix(api): fan-out Resume clears the invocation blocking it`). This file is a historical record, not pending work — do not
+re-implement from it. Line numbers in the body are as of writing and have since drifted; resolve
+any reference by symbol name.
