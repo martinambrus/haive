@@ -124,6 +124,24 @@ describe('buildDefaultMcpServers', () => {
     }
   });
 
+  it('redacts credential headers out of the model-visible network dumps', () => {
+    // A different leak from the Google flags: get_network_request otherwise returns raw
+    // Cookie/Authorization headers into the model's context, and _app-auth.ts has agents
+    // log into the real app, so a session cookie exists by the time browser-verify runs.
+    // Upstream is an allow-list, so it fails closed on header names nobody enumerated.
+    for (const opts of [
+      { repoPath: '/workspace/repo', includeChromeDevtools: true },
+      {
+        repoPath: '/workspace/repo',
+        includeChromeDevtools: true,
+        chromeDevtoolsBrowserUrl: 'http://127.0.0.1:9222',
+      },
+    ]) {
+      const chrome = buildDefaultMcpServers(opts).find((s) => s.name === 'chrome-devtools');
+      expect(chrome?.args).toContain('--redact-network-headers');
+    }
+  });
+
   it('carries the telemetry opt-out env through to the rendered configs', () => {
     const servers = buildDefaultMcpServers({
       repoPath: '/workspace/repo',

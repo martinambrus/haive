@@ -140,6 +140,28 @@ const CHROME_MCP_NO_GOOGLE_EGRESS_ARGS = ['--no-performance-crux', '--no-usage-s
  *  No equivalent exists for CrUX — there the flag is the only lever. */
 const CHROME_MCP_NO_GOOGLE_EGRESS_ENV = { CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: '1' } as const;
 
+/** Keep credentials out of the MODEL's context. A different leak from the two above:
+ *  those go to Google, this one goes to whichever provider serves the step -- and for
+ *  zai / muse / openrouter / ollama-cloud that is a third party, with the transcript
+ *  also persisted to `cli_invocations`.
+ *
+ *  Live path, not theoretical: `_app-auth.ts` has agents log into the real app, so a
+ *  session cookie exists by the time a browser-verify step calls `get_network_request`,
+ *  which returns raw `requestHeaders`/`responseHeaders` by default.
+ *
+ *  Upstream is an ALLOW-list, not a deny-list (`sanitizeHeaders` -> `allowedHeaders`),
+ *  so it fails closed on header names nobody enumerated here. VERIFIED against the
+ *  1.7.0 set: cookie, set-cookie, authorization, proxy-authorization, x-api-key and
+ *  x-csrf-token all redact to `<redacted>`; www-authenticate stays (a challenge, no
+ *  secret). The header NAME survives, so an agent debugging a login can still see that
+ *  a Set-Cookie came back, just not its value.
+ *
+ *  Deliberately narrow, and NOT a complete credential control: upstream redacts headers
+ *  only. `requestBody` and `responseBody` are returned verbatim (McpResponse ->
+ *  NetworkFormatter.toJSONDetailed), so a login POST body or a token in a JSON response
+ *  still reaches the model. Closing that needs a change upstream, not a flag here. */
+const CHROME_MCP_REDACT_HEADERS_ARGS = ['--redact-network-headers'];
+
 export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): McpServerSpec[] {
   const servers: McpServerSpec[] = [];
   const includeFs = opts.includeFilesystem !== false;
@@ -192,6 +214,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
           `--browser-url=${opts.chromeDevtoolsBrowserUrl}`,
           '--allow-unrestricted-paths',
           ...CHROME_MCP_NO_GOOGLE_EGRESS_ARGS,
+          ...CHROME_MCP_REDACT_HEADERS_ARGS,
         ]
       : [
           '-y',
@@ -202,6 +225,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
           '--viewport=1920x1080',
           '--allow-unrestricted-paths',
           ...CHROME_MCP_NO_GOOGLE_EGRESS_ARGS,
+          ...CHROME_MCP_REDACT_HEADERS_ARGS,
         ];
     // Cap a single browser tool call. Nothing else bounds one: MCP_TOOL_TIMEOUT is unset
     // (~28h default), and the stdio idle timeout only fires on a fully silent server —
