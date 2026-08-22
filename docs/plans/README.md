@@ -35,7 +35,8 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `kind-riding-dream` | Deep project analysis — resellable module | Not started; depends optionally on `purring-marinating-peacock` phase 2b |
 | `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | Not started |
 | `parsed-churning-yeti` | Project plan canvas | Not started |
-| `nimble-browsing-lovelace` | User-selectable browser type + version | Not started; deliberately deferred. Read its blocking constraint first — the agent browser path is CDP-only, so Firefox is two automation stacks rather than a dropdown entry |
+| `patient-pinning-kernighan` | Runtime versions the generator ignores (Go/Rust/Ruby, DDEV node) | Not started; three different failures — Go is frozen, Rust/Ruby drift, DDEV node is detected then dropped — so one blanket fix would trade one for another |
+| `nimble-browsing-lovelace` | User-selectable browser type + version | Not started; deliberately deferred. Read its blocking constraint first — the agent browser path is CDP-only, so Firefox is two automation stacks rather than a dropdown entry. Its second amendment corrects the body: pinning is NOT a separable prerequisite |
 | `purring-marinating-peacock` | Multi-model per step (fan-out + consolidator) | Not started; sequenced behind a cheaper fan-out change — see its amendment |
 | `quiet-reaping-ritchie` | DevTools egress hardening follow-ups | **Shipped** `c094102` (item 1, runner `--init`) and `e066d26` (item 2, MCP body diversion), both verified against real traffic — see amendments. Two browser defects found while verifying, plus a poisoned-npx-cache defect found with them, are fixed in `b7884e6` / `0580c51` / `507cb84` — see its third amendment |
 | `replicated-zooming-beacon` | Agent memory + spec handoff optimisation | Not started; all three defects re-verified as still real |

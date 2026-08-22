@@ -91,3 +91,25 @@ already uses for the npx cache, and the same reasoning as the BuildKit cache-mou
 
 Multi-browser matrices, emulators, device profiles, and anything resembling a QA product.
 Those want their own task type, not a wider dropdown here.
+
+# Amendment — 2026-08-22: the "prerequisite" above is wrong, pinning is not separable
+
+The body calls pinning the browser "a small change [that] does not need this plan". That is
+incorrect and the correction matters, because it moves work INTO this plan rather than ahead
+of it.
+
+MEASURED against the live package indexes: Google's apt repo publishes exactly ONE
+`google-chrome-stable` (151.0.7922.173-1 on the day of writing) with no archive of older
+builds, and Debian carries one `chromium` per suite. So `apt-get install google-chrome-stable=
+<version>` resolves today and starts FAILING the day upstream publishes the next release — a
+build that breaks on someone else's schedule, which is strictly worse than the drift it was
+meant to fix.
+
+Pinning therefore requires the Chrome for Testing overlay this plan already describes, since
+CfT is the only source that archives every version. It is not a prerequisite; it is the same
+work.
+
+What shipped instead, as the honest partial: the browserTesting block now writes the installed
+version to `/etc/haive-browser-version` on the same line that asserts a browser exists. The
+drift is unchanged but is now legible from the image rather than inferred from its build date,
+and that file is the natural thing for a future picker to compare against.
