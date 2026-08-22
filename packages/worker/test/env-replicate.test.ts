@@ -4,6 +4,7 @@ import os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   computeBaseImage,
+  normalizeWebserverType,
   scanRepoForDeps,
   stableStringify,
 } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
@@ -51,6 +52,13 @@ describe('scanRepoForDeps', () => {
     await writeFile(path.join(tmpRoot, 'web', '.htaccess'), 'RewriteEngine On\n');
     const result = await scanRepoForDeps(tmpRoot);
     expect(result.webserver).toBe('apache-fpm');
+  });
+
+  it('leaves webserver at the nginx-fpm default for a markerless repo', async () => {
+    // The value the onboarding/.ddev overrides in detect() are layered on top of.
+    await writeFile(path.join(tmpRoot, 'index.php'), '<?php\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    expect(result.webserver).toBe('nginx-fpm');
   });
 
   it('detects node runtime from package.json engines', async () => {
@@ -529,6 +537,33 @@ describe('stableStringify', () => {
     expect(stableStringify({ runtimes: ['php', 'node'] })).not.toBe(
       stableStringify({ runtimes: ['node', 'php'] }),
     );
+  });
+});
+
+describe('normalizeWebserverType', () => {
+  it('maps the free-text names onboarding accepts onto DDEV webserver types', () => {
+    expect(normalizeWebserverType('apache')).toBe('apache-fpm');
+    expect(normalizeWebserverType('Apache 2.4')).toBe('apache-fpm');
+    expect(normalizeWebserverType('apache2')).toBe('apache-fpm');
+    expect(normalizeWebserverType('httpd')).toBe('apache-fpm');
+    expect(normalizeWebserverType('apache-fpm')).toBe('apache-fpm');
+    expect(normalizeWebserverType('apache_fpm')).toBe('apache-fpm');
+    expect(normalizeWebserverType('nginx')).toBe('nginx-fpm');
+    expect(normalizeWebserverType('NGINX')).toBe('nginx-fpm');
+    expect(normalizeWebserverType('nginx-fpm')).toBe('nginx-fpm');
+  });
+
+  it('resolves a proxy stack to the server that runs the app', () => {
+    expect(normalizeWebserverType('nginx in front of apache')).toBe('apache-fpm');
+  });
+
+  it('returns null for anything DDEV has no fpm type for, so the scan default stands', () => {
+    // "lighttpd" contains "httpd"; a substring test answers Apache for it.
+    expect(normalizeWebserverType('lighttpd')).toBeNull();
+    expect(normalizeWebserverType('caddy')).toBeNull();
+    expect(normalizeWebserverType('')).toBeNull();
+    expect(normalizeWebserverType(null)).toBeNull();
+    expect(normalizeWebserverType(undefined)).toBeNull();
   });
 });
 

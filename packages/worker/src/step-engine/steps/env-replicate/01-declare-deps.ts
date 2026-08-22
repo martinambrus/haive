@@ -117,9 +117,30 @@ function normalizeDbKind(raw: string | null | undefined): DatabaseKind {
   return 'none';
 }
 
+/** Coerce a free-text webserver name into a DDEV `webserver_type`. Onboarding and
+ *  `.ddev/config.yaml` both name it loosely ("apache", "httpd", "apache-fpm"),
+ *  while the selector here is an enum. Apache is matched first so a proxy stack
+ *  ("nginx in front of apache") resolves to the server that actually runs the app.
+ *  Unrecognized names (lighttpd, caddy, generic) return null so the in-repo scan
+ *  default stands rather than a guess. Delimited on letters rather than a word
+ *  boundary or a substring test: a substring test reads "lighttpd" as "httpd" and
+ *  answers Apache for it, and \\b counts "_" as a word char so it misses
+ *  "apache_fpm". */
+const webserverNamed = (name: string, v: string): boolean =>
+  new RegExp(`(^|[^a-z])${name}\\d*([^a-z]|$)`).test(v);
+export function normalizeWebserverType(raw: string | null | undefined): WebserverType | null {
+  const v = (raw ?? '').toLowerCase();
+  if (webserverNamed('apache', v) || webserverNamed('httpd', v)) return 'apache-fpm';
+  if (webserverNamed('nginx', v)) return 'nginx-fpm';
+  return null;
+}
+
 interface OnboardingDetection {
   databaseType: string | null;
   databaseVersion: string | null;
+  /** Raw free-text webserver as typed at onboarding ("apache", "nginx", "httpd"),
+   *  normalized to a DDEV webserver_type at the use site. */
+  webserver: string | null;
   languages: LanguageKey[];
   runtimeVersions: Partial<Record<LanguageKey, string>>;
 }
@@ -189,6 +210,7 @@ export async function loadOnboardingDetection(
   return {
     databaseType: str('databaseType'),
     databaseVersion: str('databaseVersion'),
+    webserver: str('webserver'),
     languages: Array.from(languages),
     runtimeVersions,
   };
@@ -383,9 +405,23 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       }
     }
 
-    // A previously declared webserver wins over the .htaccess-derived default, so
-    // re-running this step never silently reverts an Apache choice to nginx for a
-    // markerless legacy app the scan can't detect (no .htaccess to key on).
+    // Webserver precedence, weakest first — each override below beats the one above
+    // it. The base is the scan's .htaccess inference, which answers nginx-fpm for a
+    // markerless legacy app because it has no marker to key on, NOT because nginx
+    // was detected. Above it:
+    //   1. the stack confirmed at onboarding (02-detection-confirmation), which for
+    //      a markerless app is the only evidence there is — the user answering
+    //      "apache" there was silently ignored here and the form offered nginx;
+    //   2. an existing .ddev/config.yaml, the project's own answer. Display-only:
+    //      01c-ddev-env reads deps.webserver solely to GENERATE a config that is
+    //      missing, so a configured project never consumes this value;
+    //   3. a previously declared webserver, so re-running never reverts a choice.
+    const onboardingWebserver = normalizeWebserverType(onboarding?.webserver);
+    if (onboardingWebserver) result.webserver = onboardingWebserver;
+
+    const ddevWebserver = normalizeWebserverType((await readDdevConfig(ctx.repoPath)).webserver);
+    if (ddevWebserver) result.webserver = ddevWebserver;
+
     const existingTpl = await getTaskEnvTemplate(ctx.db, ctx.taskId);
     const savedWebserver = (existingTpl?.declaredDeps as Record<string, unknown> | null)?.webserver;
     if (savedWebserver === 'apache-fpm' || savedWebserver === 'nginx-fpm') {
@@ -963,6 +999,7 @@ interface DdevInfo {
   present: boolean;
   phpVersion: string | null;
   projectName: string | null;
+  webserver: string | null;
   database: { kind: DatabaseKind; version: string | null };
 }
 
@@ -974,6 +1011,7 @@ async function readDdevConfig(repoPath: string): Promise<DdevInfo> {
       present: false,
       phpVersion: null,
       projectName: null,
+      webserver: null,
       database: { kind: 'none', version: null },
     };
   }
@@ -981,6 +1019,7 @@ async function readDdevConfig(repoPath: string): Promise<DdevInfo> {
     present: true,
     phpVersion: matchYamlField(text, 'php_version'),
     projectName: matchYamlField(text, 'name'),
+    webserver: matchYamlField(text, 'webserver_type'),
     database: parseDdevDatabase(text),
   };
 }
