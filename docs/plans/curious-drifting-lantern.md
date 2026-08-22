@@ -99,11 +99,46 @@ instant the successor's row was being created.
 **Done:** a finalized row returns instead of re-running, re-driving the hand-off only when
 `tasks.current_step_id` still points at this step and round.
 
-**STILL OPEN:** two advance-step jobs for one step at one epoch are still being ENQUEUED.
-The guard makes the second harmless; it does not stop it being created. Prime suspect is
-the pause/resume path — the duplicate landed 0.63s after the first, far too fast for a
-BullMQ stalled re-delivery, and the task had been resumed from a global pause moments
-earlier. Worth confirming before assuming it is benign.
+**SOURCE FOUND:** a parked step re-drives itself with a DELAYED advance for the same
+(step, round, epoch) — `enqueueAdvance(..., { delayMs: PAUSE_POLL_MS })` in the pause park
+and `RUNTIME_PARK_POLL_MS` in the runtime-slot park. Nothing deduplicated those, so a step
+that parked twice (a pause tick plus the hand-off, or two pause ticks) had two live jobs,
+and when the hold lifted both fired. That matches the observed 0.63s gap.
+
+**STILL OPEN — and a fix was ATTEMPTED AND REVERTED (`3ac59bd`, reverted). Do not retry it
+the same way.**
+
+The attempt gave park ticks a deterministic BullMQ `jobId` so a repeat would collapse onto
+the pending one. It failed twice on a live task:
+
+1. `Custom Id cannot contain :` — BullMQ rejects a colon in a custom id (its Redis key
+   separator). The failure surfaced at TASK level with no failed step, because it throws
+   inside handleAdvanceStep's park enqueue, outside any step write. Easy to fix, and not
+   the real problem.
+2. **The approach itself is wrong.** A park tick re-arms itself FROM INSIDE ITS OWN
+   EXECUTION, so its own jobId is still held by the running job and BullMQ silently drops
+   the re-add. The park stops re-arming, and the step keeps its last status copy forever —
+   observed as "waiting: runtime slot, stalled?" with a stale "global pause is on" message
+   while the pause banner said otherwise. Confirmed by `ZCARD bull:task-queue:delayed` = 0:
+   no tick armed anywhere.
+
+`removeOnComplete: true` does NOT save this: removal happens after the handler returns, and
+the re-arm happens during it. A unit test asserting that option passed while the runtime
+behaviour was broken — it encoded the belief, not the sequence.
+
+**A self-re-arming poll cannot deduplicate on its own id.** That rules out the whole
+approach, not just the separator.
+
+**Reassessed priority: LOW.** The `d73bb55` guard already makes a duplicate harmless, so
+the remaining cost is one wasted job. Every attempt to suppress it so far has risked
+stalling the orchestrator, which is far worse than the wart.
+
+**If revisited:** use a PRE-ADD CHECK (query the queue's delayed/waiting jobs for that
+step and skip the add) rather than a `jobId`. It has its own race, but it fails toward an
+extra duplicate — which is already handled — instead of toward a wedge. Verify against a
+REAL park cycle (pause, let a tick fire, unpause), not a synthetic queue probe: the probe
+used for the jobId attempt collapsed two adds correctly and told us nothing about the
+self-re-arm case that actually broke.
 
 **Verify:** one `ledger.entry` per `(task_step_id, fingerprint)` on a clean run, and a
 `advance-step skipped: step already done` warn line where the duplicate used to re-run.
