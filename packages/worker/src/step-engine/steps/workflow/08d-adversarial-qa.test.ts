@@ -8,6 +8,7 @@ import {
   isRuntimeOnlyFinding,
   verifyVerdict,
   verificationForFinding,
+  verificationTiers,
 } from './08d-adversarial-qa.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
@@ -583,10 +584,23 @@ describe('08d verifier wave dispatch and downgrade', () => {
     for (const d of dispatches) expect(d.prompt).toContain('GET /x');
   });
 
-  it('never dispatches a verifier for a non-blocking finding', async () => {
-    // Only blocking findings cost a fix round, so only those are worth the invocations.
+  it('dispatches ONE verifier for a non-blocking finding, not a panel', async () => {
+    // Changed deliberately: verifying blocking findings only meant a round of 26 findings,
+    // none blocking, was verified not at all and triaged entirely by hand. The panel size
+    // still differs, because what a wrong verdict costs still differs.
     enableVerification();
-    const out = await run([adversary('auth-bandit', [MINOR])]);
+    const err = await run([adversary('auth-bandit', [MINOR])]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MiningWaveError);
+    const dispatches = (err as MiningWaveError).dispatches;
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0]!.roleKey).toBe('qa-verify');
+  });
+
+  it('dispatches nothing when no finding has a proof to run', async () => {
+    // A roster that produced only qa-gap entries has nothing executable; the step must not
+    // park on a fan-out with no agents in it.
+    enableVerification();
+    const out = await run([adversary('auth-bandit', [{ severity: 'low', impact: 'no poc here' }])]);
     expect(out.findings).toHaveLength(1);
     expect(out.blocking).toBe(false);
   });
@@ -723,3 +737,163 @@ function err0(e: unknown): unknown {
   expect(e).toBeInstanceOf(MiningWaveError);
   return e;
 }
+
+describe('08d verification tiers', () => {
+  const LENSES = [
+    { id: 'execute', title: 'executes', lines: [] },
+    { id: 'target', title: 'target real', lines: [] },
+    { id: 'linkage', title: 'code linkage', lines: [] },
+  ] as never[];
+  const f = (severity: string, over: Record<string, unknown> = {}) =>
+    ({ severity, location: `x-${Math.random()}`, impact: 'i', poc: 'GET /x', ...over }) as never;
+
+  it('gives blocking findings the full panel and everything else one verifier', () => {
+    // The cost of being wrong differs by an order of magnitude, so the panel does too.
+    const [blocking, advisory] = verificationTiers(
+      [f('critical'), f('high'), f('medium'), f('low')],
+      LENSES,
+    );
+    expect(blocking!.findings).toHaveLength(2);
+    expect(blocking!.lenses).toHaveLength(3);
+    expect(advisory!.findings).toHaveLength(2);
+    expect(advisory!.lenses).toEqual([null]);
+  });
+
+  it('excludes findings with no proof-of-concept from the advisory tier', () => {
+    // Nothing to execute means a verifier could only guess — and guessing would fold the
+    // synthetic qa-gap entries that exist to say an adversary never reported at all.
+    const [, advisory] = verificationTiers(
+      [f('medium', { poc: undefined }), f('low', { poc: '' }), f('low')],
+      LENSES,
+    );
+    expect(advisory!.findings).toHaveLength(1);
+  });
+
+  it('still panels a blocking finding that supplied no proof', () => {
+    // A blocking claim with no proof is exactly what is worth putting a panel on.
+    const [blocking] = verificationTiers([f('critical', { poc: undefined })], LENSES);
+    expect(blocking!.findings).toHaveLength(1);
+  });
+
+  it('orders each tier worst-first so a capped tier spends on what costs most', () => {
+    const [blocking] = verificationTiers([f('high'), f('critical')], LENSES);
+    expect(blocking!.findings.map((x) => x.severity)).toEqual(['critical', 'high']);
+  });
+
+  it('reports overflow per tier rather than truncating silently', () => {
+    const many = Array.from({ length: 30 }, () => f('low'));
+    const [, advisory] = verificationTiers(many, LENSES);
+    expect(advisory!.findings).toHaveLength(20);
+    expect(advisory!.overflow).toBe(10);
+  });
+
+  it('is stable across the dispatch and read-back passes', () => {
+    // Both passes call this with the same findings, so membership and order cannot drift —
+    // which is what keeps the agent ids the two passes compute identical.
+    const input = [f('critical'), f('low'), f('high'), f('medium')];
+    const a = verificationTiers(input, LENSES);
+    const b = verificationTiers(input, LENSES);
+    expect(a.map((t) => t.findings.map((x) => x.location))).toEqual(
+      b.map((t) => t.findings.map((x) => x.location)),
+    );
+  });
+});
+
+describe('08d disproved-finding ledger entry', () => {
+  /** Captures ledger rows separately from review-finding rows: recordLedgerEntry inserts ONE
+   *  task_events object, recordReviewFindings inserts an ARRAY of review_findings. */
+  function captureCtx() {
+    const ledger: Record<string, unknown>[] = [];
+    const ctx = {
+      taskId: 't',
+      taskStepId: 's',
+      round: 2,
+      logger: { info: () => {}, warn: () => {}, debug: () => {} },
+      db: {
+        insert: () => ({
+          values: (v: unknown) => {
+            if (!Array.isArray(v)) ledger.push(v as Record<string, unknown>);
+            return { onConflictDoNothing: () => Promise.resolve() };
+          },
+        }),
+      },
+    } as unknown as StepContext;
+    return { ctx, ledger };
+  }
+
+  const json = (o: unknown) => '```json\n' + JSON.stringify(o) + '\n```';
+  const adversary = (findings: Record<string, unknown>[]): AgentMiningResult => ({
+    agentId: 'auth-bandit',
+    agentTitle: 'auth-bandit',
+    invocationId: 'inv-a',
+    status: 'done',
+    output: null,
+    rawOutput: json({ verdict: 'NEEDS_FIXES', findings }),
+    errorMessage: null,
+  });
+  const FINDING = {
+    severity: 'critical',
+    location: 'admin.php:10',
+    impact: 'rce',
+    poc: 'GET /x',
+    category: 'auth',
+  };
+  const observed = 'Issued GET https://x.ddev.site/x and got 404 with an empty body, no shell';
+
+  async function runTwoPasses(ctx: StepContext, reproduced: boolean) {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    vi.spyOn(configService, 'getNumber').mockResolvedValue(3);
+    const args = (results: AgentMiningResult[]) =>
+      ({
+        detected: {
+          level: 'poc',
+          spec: 's',
+          implementationFiles: [],
+          appUrl: 'https://x.ddev.site',
+        },
+        agentMiningResults: results,
+        isFinalMiningAttempt: true,
+      }) as unknown as Parameters<typeof adversarialQaStep.apply>[1];
+    const first = await adversarialQaStep
+      .apply(ctx, args([adversary([FINDING])]))
+      .catch((e: unknown) => e);
+    const dispatches = (first as MiningWaveError).dispatches;
+    const verifiers: AgentMiningResult[] = dispatches.map((d) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      invocationId: 'inv-v',
+      status: 'done',
+      output: null,
+      rawOutput: json(
+        reproduced ? { reproduced: true } : { reproduced: false, observation: observed },
+      ),
+      errorMessage: null,
+    }));
+    return adversarialQaStep.apply(ctx, args([adversary([FINDING]), ...verifiers]));
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('records what was disproved, worded so a later round can raise it again', async () => {
+    const { ctx, ledger } = captureCtx();
+    await runTwoPasses(ctx, false);
+    expect(ledger).toHaveLength(1);
+    const payload = ledger[0]!.payload as Record<string, unknown>;
+    const text = String(payload.text);
+    expect(text).toContain('did not reproduce');
+    expect(text).toContain('admin.php:10');
+    // Context, never a ban: round 3's fixes created the bugs round 4 found, so a verdict is
+    // about a moment. The wording has to invite the re-raise.
+    expect(text).toContain('raise one again');
+    expect(text).toContain('what changed');
+    expect(payload.round).toBe(2);
+  });
+
+  it('writes nothing when the panel reproduced the finding', async () => {
+    const { ctx, ledger } = captureCtx();
+    await runTwoPasses(ctx, true);
+    expect(ledger).toHaveLength(0);
+  });
+});

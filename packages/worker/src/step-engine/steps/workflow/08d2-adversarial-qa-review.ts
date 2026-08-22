@@ -21,6 +21,8 @@ interface QaFinding {
   label: string;
   /** Full formatted line handed to the implementer when this finding is chosen. */
   line: string;
+  /** Verified as not reproducible AND non-blocking, so gate 1.5 folds it behind a count. */
+  folded: boolean;
 }
 
 interface QaReviewDetect {
@@ -28,6 +30,9 @@ interface QaReviewDetect {
   level: string;
   blocking: boolean;
   counts: { critical: number; high: number; total: number };
+  /** How many findings were folded out of `findings` because a verifier ran their PoC and
+   *  could not reproduce it. Stated at the gate so nothing vanishes silently. */
+  filteredCount: number;
   findings: QaFinding[];
 }
 
@@ -52,6 +57,22 @@ interface Phase8dOutput {
      *  findings that were never blocking (only those are verified). */
     verification?: string;
   }[];
+}
+
+/** Is this finding hidden from gate 1.5's list, behind the filtered count?
+ *
+ *  ONLY when a verifier actually executed its proof-of-concept and could not reproduce it,
+ *  AND it was not blocking. Everything else is shown, and each exclusion is deliberate:
+ *
+ *  - a BLOCKING finding is never folded whatever its verdict — 08d downgrades it to advisory
+ *    and keeps it visible, because the developer keeps that call;
+ *  - `untestable` says the ENVIRONMENT failed, not the finding; folding on it would turn a
+ *    tooling outage into silent data loss;
+ *  - `unverified` means nobody looked, which is not evidence of anything.
+ *
+ *  Presentation only. The finding stays in 08d's output and in review_findings either way. */
+export function foldsAtGate(verification: string | undefined, severity: ReviewSeverity): boolean {
+  return verification === 'not_reproduced' && !isBlockingSeverity(severity);
 }
 
 /** Build the fix request handed to the implementer from the chosen findings +
@@ -126,36 +147,69 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
       return {
         key: String(i),
         severity,
+        folded: foldsAtGate(f.verification, severity),
         label: `${verdict}[${severity}] ${cat}${loc}`,
         line: `- ${verdict}[${severity}] ${cat}${loc}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
       };
     });
+    // Fold the findings a verifier actually RAN and could not reproduce, but only the
+    // non-blocking ones. Filtering here rather than in the form removes them from the
+    // reading list AND from the choose-what-to-fix control below, which is the triage cost
+    // this exists to cut — a round once handed 26 findings, none blocking, to be sorted by
+    // hand.
+    //
+    // Three things are deliberately NOT folded. A blocking finding, whatever its verdict:
+    // that stays advisory-but-visible, which is the contract 08d already ships. `untestable`,
+    // which says the ENVIRONMENT failed rather than the finding — hiding on it would turn a
+    // tooling outage into silent data loss. And `unverified`, which means nobody looked.
+    //
+    // Presentation only: 08d's own output, its counts and every review_findings row keep all
+    // of them, so nothing here is unrecoverable.
+    const shown = findings.filter((f) => !f.folded);
     return {
       ran: out.ran === true,
       level: out.level ?? 'poc',
       blocking: out.blocking === true,
+      filteredCount: findings.length - shown.length,
       counts: {
         critical: out.counts?.critical ?? 0,
         high: out.counts?.high ?? 0,
         total: out.counts?.total ?? findings.length,
       },
-      findings,
+      findings: shown,
     };
   },
 
   form(_ctx, detected): FormSchema {
+    // The folded line is part of the body, not a footnote: a count with no explanation
+    // reads as findings going missing, which is the thing folding must not feel like.
+    const foldedNote =
+      detected.filteredCount > 0
+        ? [
+            '',
+            `_${detected.filteredCount} further finding(s) are hidden: a verifier executed their`,
+            'proof-of-concept against the running app and could not reproduce it. They remain',
+            'recorded and queryable — only this list is filtered._',
+          ].join('\n')
+        : '';
     const infoSections: InfoSection[] = [
       {
         title: 'Adversarial QA findings',
-        preview: `${detected.counts.total} (${detected.counts.critical} critical, ${detected.counts.high} high)`,
-        body: detected.findings.map((f) => f.line).join('\n') || '(no findings)',
+        preview:
+          `${detected.findings.length} shown` +
+          (detected.filteredCount > 0 ? `, ${detected.filteredCount} filtered` : '') +
+          ` (${detected.counts.critical} critical, ${detected.counts.high} high)`,
+        body: (detected.findings.map((f) => f.line).join('\n') || '(no findings)') + foldedNote,
         defaultOpen: detected.blocking,
       },
     ];
     return {
       title: 'Gate 1.5: Adversarial QA review',
       description: [
-        `Adversarial QA (${detected.level}): ${detected.counts.total} findings — ${detected.counts.critical} critical, ${detected.counts.high} high.`,
+        `Adversarial QA (${detected.level}): ${detected.counts.total} findings — ${detected.counts.critical} critical, ${detected.counts.high} high.` +
+          (detected.filteredCount > 0
+            ? ` ${detected.filteredCount} hidden as not reproducible.`
+            : ''),
         '',
         'Decide what to do. "Fix" sends the chosen findings back to implementation (another round);',
         '"Accept as-is" proceeds — the findings still appear at the verification gate.',

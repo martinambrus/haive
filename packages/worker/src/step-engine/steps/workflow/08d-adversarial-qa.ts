@@ -16,6 +16,7 @@ import {
   shouldRetryMiningTerminalFailure,
 } from '../../mining-failure.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { recordLedgerEntry } from '../../task-ledger.js';
 import { resolveSpecView } from './_spec-artifact.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
@@ -128,8 +129,10 @@ interface AdversarialFinding {
   poc?: string;
   impact?: string;
   fix?: string;
-  /** What the verifier panel made of this finding's PoC. Only blocking findings are
-   *  verified, so everything else stays undefined and reads as unverified.
+  /** What the verifier panel made of this finding's PoC. EVERY finding with a PoC is
+   *  verified, at a panel size matched to what a wrong verdict costs: blocking findings get
+   *  the full unanimity panel, the rest get one generic verifier (see verificationTiers).
+   *  A finding with no PoC, or one past its tier's cap, stays undefined and reads unverified.
    *
    *  `not_reproduced` DOWNGRADES: the finding stops blocking but is still shown at gate
    *  1.5, labelled. It is deliberately not a dismissal — the developer keeps the call,
@@ -205,6 +208,12 @@ const QA_VERIFY_PREFIX = 'qaverify-';
 /** Blocking findings verified per round. Same reason 08c caps its refuters: a round that
  *  raises twenty blocking findings must not spend sixty invocations proving them. */
 const MAX_VERIFIED = 8;
+
+/** Non-blocking findings verified per round. Higher than MAX_VERIFIED because each costs ONE
+ *  invocation rather than a panel, and because volume is exactly the problem here: a round
+ *  that raised 26 findings, none of them blocking, verified nothing at all and handed all 26
+ *  to a human to triage by hand. */
+const MAX_VERIFIED_ADVISORY = 20;
 
 /** The angles one PoC is verified from. Each lens changes where a verifier spends its
  *  effort; none of them changes the bar for a downgrade, which is the same for all three.
@@ -380,6 +389,63 @@ export function verificationForFinding(
   if (verdicts.every((v) => v === 'could_not_test')) return 'untestable';
   if (verdicts.every((v) => v === 'not_reproduced')) return 'not_reproduced';
   return 'unverified';
+}
+
+/** One verification tier: the findings in it, and the panel each of them gets.
+ *
+ *  Two tiers because the cost of being WRONG differs by an order of magnitude, not because
+ *  the findings differ. A wrongly dismissed blocking finding loses a defect that was one
+ *  click from shipping, so those get the full unanimity panel. A wrongly dismissed low
+ *  finding costs the reader one line, so those get one generic verifier — spending three
+ *  sandboxed invocations to save a line of reading is the wrong trade.
+ *
+ *  A finding with NO proof-of-concept is excluded from the advisory tier: there is nothing
+ *  to execute, so a verifier could only guess, and guessing would fold the synthetic
+ *  `qa-gap` entries that exist precisely to say an adversary never reported. Blocking
+ *  findings are NOT excluded on that basis — a blocking claim with no proof is exactly the
+ *  thing worth putting a panel on.
+ *
+ *  Returned by ONE function so the dispatch pass and the read-back pass cannot disagree
+ *  about membership, ordering or caps — they call this with the same findings and the same
+ *  lens count, and both are derived from the adversary output, which does not change
+ *  between passes. */
+interface VerificationTier {
+  findings: AdversarialFinding[];
+  lenses: (VerifyLens | null)[];
+  /** How many were dropped by this tier's cap, for the truncation warning. */
+  overflow: number;
+}
+
+export function verificationTiers(
+  findings: AdversarialFinding[],
+  lenses: (VerifyLens | null)[],
+): VerificationTier[] {
+  // Worst first (severityRank ascending in severity), so a capped tier spends its
+  // invocations on the findings that cost most if they are wrong.
+  const bySeverity = (a: AdversarialFinding, b: AdversarialFinding) =>
+    severityRank(a.severity) - severityRank(b.severity);
+  const blocking = findings.filter((f) => isBlockingSeverity(f.severity)).sort(bySeverity);
+  const advisory = findings
+    .filter((f) => !isBlockingSeverity(f.severity) && (f.poc ?? '').trim().length > 0)
+    .sort(bySeverity);
+  return [
+    {
+      findings: blocking.slice(0, MAX_VERIFIED),
+      lenses,
+      overflow: Math.max(0, blocking.length - MAX_VERIFIED),
+    },
+    {
+      findings: advisory.slice(0, MAX_VERIFIED_ADVISORY),
+      lenses: [null],
+      overflow: Math.max(0, advisory.length - MAX_VERIFIED_ADVISORY),
+    },
+  ];
+}
+
+/** Is there anything for the verifier wave to run? Mirrors verificationTiers' membership
+ *  exactly — it is the same predicate, asked before the lens count is known. */
+function hasVerifiable(findings: AdversarialFinding[]): boolean {
+  return verificationTiers(findings, [null]).some((t) => t.findings.length > 0);
 }
 
 /** Human terminal label for a verifier: name the finding it is checking and the lens, so a
@@ -736,14 +802,19 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       const lenses = verifyLensesFor(
         await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length),
       );
-      for (const f of blockingFindings) {
-        const panel = verificationForFinding(allResults, verifyKey(f), lenses);
-        // The panel wins whenever it actually said something. The reach is re-probed on this
-        // pass and can disagree with the one that dispatched — a runner recovering between
-        // the two passes must not discard a verdict that was genuinely recorded, least of all
-        // a reproduction. Only the findings that were skipped come back with nothing at all,
-        // and those are the ones this relabels from `unverified` to the truer `untestable`.
-        f.verification = panel === 'unverified' && provablyUntestable(f) ? 'untestable' : panel;
+      // Read back through the SAME tier split that dispatched, so each finding is scored
+      // against the panel it actually got: the blocking tier against the full lens set, the
+      // advisory tier against its single generic verifier.
+      for (const tier of verificationTiers(findings, lenses)) {
+        for (const f of tier.findings) {
+          const panel = verificationForFinding(allResults, verifyKey(f), tier.lenses);
+          // The panel wins whenever it actually said something. The reach is re-probed on this
+          // pass and can disagree with the one that dispatched — a runner recovering between
+          // the two passes must not discard a verdict that was genuinely recorded, least of all
+          // a reproduction. Only the findings that were skipped come back with nothing at all,
+          // and those are the ones this relabels from `unverified` to the truer `untestable`.
+          f.verification = panel === 'unverified' && provablyUntestable(f) ? 'untestable' : panel;
+        }
       }
       const downgraded = blockingFindings.filter((f) => f.verification === 'not_reproduced');
       if (downgraded.length > 0) {
@@ -761,56 +832,70 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
           'adversarial QA: blocking findings no verifier could test at all (still blocking)',
         );
       }
-    } else if (args.miningWaveExhausted !== true && blockingFindings.length > 0) {
+    } else if (args.miningWaveExhausted !== true && hasVerifiable(findings)) {
+      // hasVerifiable is checked BEFORE the config service: tier membership does not depend
+      // on the lens count, so a round with nothing to verify — every finding non-blocking and
+      // PoC-less, which is what a roster that produced only qa-gap entries looks like — should
+      // not touch config at all. It also keeps the common no-op path free of an await.
       if (await configService.getBoolean(CONFIG_KEYS.QA_VERIFY_ENABLED, true)) {
         const lenses = verifyLensesFor(
           await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length),
         );
+        const tiers = verificationTiers(findings, lenses);
+        for (const tier of tiers) {
+          if (tier.overflow > 0) {
+            ctx.logger.warn(
+              {
+                verifying: tier.findings.length,
+                overflow: tier.overflow,
+                panel: tier.lenses.length,
+              },
+              'more findings than verifiers in this tier; the overflow goes to the gate unverified',
+            );
+          }
+        }
         // A finding located at a URL, with no app running, cannot be verified by anyone: the
-        // panel would spend three invocations to report could_not_test unanimously. Dropped
+        // panel would spend its invocations to report could_not_test unanimously. Dropped
         // from the wave and marked untestable directly, which blocks exactly the same.
-        const verifiable = blockingFindings.filter((f) => !provablyUntestable(f));
-        if (verifiable.length < blockingFindings.length) {
+        const dispatchable = tiers.map((tier) => ({
+          ...tier,
+          findings: tier.findings.filter((f) => !provablyUntestable(f)),
+        }));
+        const skipped =
+          tiers.reduce((n, t) => n + t.findings.length, 0) -
+          dispatchable.reduce((n, t) => n + t.findings.length, 0);
+        if (skipped > 0) {
           ctx.logger.warn(
-            {
-              blocking: blockingFindings.length,
-              untestable: blockingFindings.length - verifiable.length,
-            },
-            'adversarial QA: no running app, so runtime findings go to the gate untested (still blocking)',
+            { untestable: skipped },
+            'adversarial QA: no running app, so runtime findings go to the gate untested',
           );
         }
-        // Worst first (severityRank ascending in severity), so a capped wave spends its
-        // invocations on the findings that cost most if they are wrong.
-        const wave = [...verifiable]
-          .sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
-          .slice(0, MAX_VERIFIED);
-        if (wave.length < verifiable.length) {
-          ctx.logger.warn(
-            { total: verifiable.length, verifying: wave.length },
-            'more blocking findings than verifiers; the overflow goes to the gate unverified',
-          );
-        }
+        const wave = dispatchable.flatMap((tier) =>
+          tier.findings.flatMap((f, i) =>
+            tier.lenses.map((lens) => ({
+              agentId: verifierAgentId(verifyKey(f), lens),
+              agentTitle: verifierTitle(f, i, tier.findings.length, lens),
+              prompt: buildVerifyPrompt(detected, f, lens),
+              // The agent id is per-FINDING and unbounded; the LENS is the stable seat.
+              roleKey: lens ? `qa-verify:${lens.id}` : 'qa-verify',
+            })),
+          ),
+        );
         if (wave.length === 0) {
-          // Nothing left to check: every blocker is a runtime one and nothing is running.
-          // Marked here and NOT dispatched — an empty MiningWaveError would park the step on
-          // a fan-out with no agents in it, waiting for verdicts that can never arrive.
-          for (const f of blockingFindings) f.verification = 'untestable';
+          // Nothing left to check: every candidate is a runtime finding and nothing is
+          // running. Marked here and NOT dispatched — an empty MiningWaveError would park the
+          // step on a fan-out with no agents in it, waiting for verdicts that never arrive.
+          for (const tier of tiers) for (const f of tier.findings) f.verification = 'untestable';
         } else {
           ctx.logger.info(
-            { count: wave.length, lenses: lenses.length },
-            'dispatching PoC verifiers for blocking adversarial findings',
+            {
+              blocking: dispatchable[0]?.findings.length ?? 0,
+              advisory: dispatchable[1]?.findings.length ?? 0,
+              invocations: wave.length,
+            },
+            'dispatching PoC verifiers: full panel for blocking findings, one verifier each for the rest',
           );
-          throw new MiningWaveError(
-            wave.flatMap((f, i) =>
-              lenses.map((lens) => ({
-                agentId: verifierAgentId(verifyKey(f), lens),
-                agentTitle: verifierTitle(f, i, wave.length, lens),
-                prompt: buildVerifyPrompt(detected, f, lens),
-                // The agent id is per-FINDING and unbounded; the LENS is the stable seat.
-                roleKey: lens ? `qa-verify:${lens.id}` : 'qa-verify',
-              })),
-            ),
-          );
+          throw new MiningWaveError(wave);
         }
       }
     }
@@ -819,6 +904,35 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     // it stays in `findings` and reaches gate 1.5 labelled, because the developer keeps the
     // call. Anything unverified still blocks — doubt keeps the finding.
     const blocking = blockingFindings.some((f) => f.verification !== 'not_reproduced');
+
+    // Carry the disproved set forward as CONTEXT for later rounds. augmentPromptWithLedger
+    // already injects the ledger into every mining prompt (step-runner), so this reaches the
+    // next round's adversaries and verifiers with no plumbing of its own.
+    //
+    // Deliberately NOT a suppression list. A verdict is about a MOMENT, not about the defect:
+    // this task's own history is the proof — the round-3 fixes introduced the case-sensitivity
+    // bypass and the Apache parse failure the next round then found. Something disproved in
+    // round 2 can be true in round 5, so the wording invites a re-raise and asks only for what
+    // changed. Suppressing instead would fail silently, in the one direction this whole check
+    // exists to prevent.
+    const disproved = findings.filter((f) => f.verification === 'not_reproduced');
+    if (disproved.length > 0) {
+      await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
+        stepId: '08d-adversarial-qa',
+        round: ctx.round,
+        kind: 'finding',
+        text: [
+          `Adversarial QA round ${ctx.round}: these proofs-of-concept were EXECUTED against the`,
+          'running app and did not reproduce. They are recorded, not deleted. This is a result',
+          'from that round only — later changes can make any of them true, so raise one again if',
+          'you can, and say what changed:',
+          ...disproved.map(
+            (f) =>
+              `- [${f.severity}] ${(f.category ?? 'issue').trim()}${f.location ? ` @ ${f.location}` : ''}: ${(f.impact ?? '').trim().slice(0, 160)}`,
+          ),
+        ].join('\n'),
+      });
+    }
 
     // Recorded PRE-dedupe, one row per adversary that actually reported the finding, so
     // `reviewer_id` names an adversary the way the column's own contract says it should

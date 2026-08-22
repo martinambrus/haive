@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { adversarialQaReviewStep, formatQaFixDiagnosis } from './08d2-adversarial-qa-review.js';
+import {
+  adversarialQaReviewStep,
+  formatQaFixDiagnosis,
+  foldsAtGate,
+} from './08d2-adversarial-qa-review.js';
 import type { StepContext, StepApplyArgs } from '../../step-definition.js';
 
 const detected = {
@@ -104,5 +108,53 @@ describe('08d2 restartLoop', () => {
     expect(hook.evaluate({ decision: 'accept', diagnosis: '', selectedCount: 0 })).toBeNull();
     // fix with nothing selected and no feedback → empty diagnosis → finalize, no loop.
     expect(hook.evaluate({ decision: 'fix', diagnosis: '', selectedCount: 0 })).toBeNull();
+  });
+});
+
+describe('foldsAtGate', () => {
+  it('folds a non-blocking finding a verifier ran and could not reproduce', () => {
+    expect(foldsAtGate('not_reproduced', 'medium')).toBe(true);
+    expect(foldsAtGate('not_reproduced', 'low')).toBe(true);
+  });
+
+  it('never folds a blocking finding, whatever the verdict', () => {
+    // 08d downgrades those to advisory and keeps them visible — the developer keeps the call.
+    expect(foldsAtGate('not_reproduced', 'critical')).toBe(false);
+    expect(foldsAtGate('not_reproduced', 'high')).toBe(false);
+  });
+
+  it('never folds untestable — that is the environment failing, not the finding', () => {
+    // Folding on it would turn a tooling outage into silent data loss.
+    expect(foldsAtGate('untestable', 'low')).toBe(false);
+  });
+
+  it('never folds unverified or an absent verdict — nobody looked', () => {
+    expect(foldsAtGate('unverified', 'low')).toBe(false);
+    expect(foldsAtGate(undefined, 'low')).toBe(false);
+  });
+
+  it('never folds a reproduced finding', () => {
+    expect(foldsAtGate('reproduced', 'medium')).toBe(false);
+  });
+});
+
+describe('08d2 form — filtered count', () => {
+  const withFiltered = (filteredCount: number) => ({ ...detected, filteredCount });
+
+  it('states the filtered count and why, rather than dropping findings silently', () => {
+    const schema = adversarialQaReviewStep.form!(stubCtx, withFiltered(14) as never);
+    const body = JSON.stringify(schema);
+    expect(body).toContain('14 further finding(s) are hidden');
+    expect(body).toContain('could not reproduce');
+    expect(body).toContain('remain');
+    // And the preview reads as shown/filtered, not as a smaller total.
+    expect(body).toContain('14 filtered');
+  });
+
+  it('says nothing about filtering when nothing was filtered', () => {
+    const schema = adversarialQaReviewStep.form!(stubCtx, withFiltered(0) as never);
+    const body = JSON.stringify(schema);
+    expect(body).not.toContain('are hidden');
+    expect(body).not.toContain('filtered');
   });
 });
