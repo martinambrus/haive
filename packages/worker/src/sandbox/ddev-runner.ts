@@ -257,6 +257,15 @@ export async function startDdevRunner(params: {
       args: [
         'run',
         '-d',
+        // Reap orphans. Without this the container's PID 1 is `sleep infinity` (entrypoint.sh
+        // ends in `exec "$@"`), and `sleep` never wait()s, so every process that outlives its
+        // parent reparents to it and stays a zombie for the life of the runner. The nested
+        // dockerd makes that constant: MEASURED on a live runner, 197 zombies out of 265
+        // processes, nearly all containerd-shim with PPID 1, against a pids.max of 8192.
+        // Nothing had failed yet -- the defect is unbounded growth on a long-lived runner.
+        // A/B on this image: orphaning 5 processes leaves 5 zombies without --init and 0 with
+        // it, and the nested dockerd still comes up healthy under tini (verified, 29.7.2).
+        '--init',
         '--privileged',
         '--name',
         name,

@@ -162,6 +162,12 @@ export async function startAppRunner(params: {
     [
       'run',
       '-d',
+      // Same reaping fix as the DDEV runner (see its --init comment): PID 1 here is the
+      // `sleep infinity` below, which never wait()s. This container is not Docker-in-Docker,
+      // so it has no containerd-shim churn, but start-browser-desktop.sh orphans by design
+      // (`nohup chromium ... &`, then the script exits), so Chromium's helpers reparent to
+      // PID 1 and zombie on exit -- observed as defunct chromium entries under PID 1 `sleep`.
+      '--init',
       '--name',
       name,
       '--label',
