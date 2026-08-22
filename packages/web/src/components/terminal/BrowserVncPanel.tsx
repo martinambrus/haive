@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiWebSocketUrl } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
+import { useFloatWindow } from '@/lib/use-float-window';
 import { suppressNovncCloseLog } from '@/lib/suppress-novnc-log';
 
 type VncState = 'idle' | 'connecting' | 'connected' | 'error';
@@ -58,6 +59,11 @@ export function BrowserVncPanel({
     true,
   );
   const [maximized, setMaximized] = useState(false);
+  // Pop-out: the panel root switches to position:fixed at a user-dragged rect and its
+  // header doubles as the window's title bar, so the browser can sit beside the step's
+  // terminal instead of below it. Same mounted element in both modes — see the maximize
+  // note further down for why that is the constraint the whole feature turns on.
+  const float = useFloatWindow(persistId ? `task-ui:${taskId}:vnc:${persistId}:float` : null);
   const [state, setState] = useState<VncState>('idle');
   const [message, setMessage] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -234,9 +240,13 @@ export function BrowserVncPanel({
     if (autoCollapse && !prevAutoCollapse.current) {
       disconnect();
       setExpandedAuto(false);
+      // Dock a popped-out window too, so a finished step never leaves an empty floating
+      // frame over the page. dockAuto (not dock) — this is programmatic, so it must not
+      // overwrite the user's own pop-out choice for the next time this panel opens.
+      float.dockAuto();
     }
     prevAutoCollapse.current = autoCollapse;
-  }, [autoCollapse, disconnect, setExpandedAuto]);
+  }, [autoCollapse, disconnect, setExpandedAuto, float.dockAuto]);
 
   // Maximize = full-page overlay in the SAME window so the user keeps testing
   // without blurring the tab (the user-active timer keeps running). The
@@ -267,107 +277,169 @@ export function BrowserVncPanel({
   }, [maximized]);
 
   return (
-    <div
-      className={
-        maximized
-          ? 'fixed inset-0 z-50 flex flex-col gap-1 border border-neutral-800 bg-neutral-950 p-2'
-          : 'flex flex-col gap-1 rounded-md border border-neutral-800 bg-neutral-950 p-2'
-      }
-    >
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold text-neutral-300">
-          {title ?? 'Browser (interactive validation)'}
-          {state === 'connected' && <span className="ml-2 text-emerald-400">● live</span>}
-          {state === 'connecting' && <span className="ml-2 text-neutral-500">starting…</span>}
+    <>
+      {/* Holds the panel's place in the page flow while it floats. ALWAYS rendered
+          (merely hidden when docked) so the panel root below keeps its slot index —
+          a shifting slot would re-create the noVNC container and kill the session. */}
+      <div
+        className={
+          float.detached
+            ? 'flex items-center justify-between rounded-md border border-dashed border-neutral-700 bg-neutral-950 px-3 py-2'
+            : 'hidden'
+        }
+      >
+        <span className="text-xs text-neutral-400">
+          {title ?? 'Browser (interactive validation)'} — popped out
         </span>
-        <div className="flex items-center gap-2">
-          {pasteNote && <span className="text-xs text-amber-400">{pasteNote}</span>}
-          {expanded && state === 'connected' && canPaste && (
-            <button
-              type="button"
-              onClick={() => void pasteIntoBrowser()}
-              title="Paste your clipboard into the focused field in the remote browser"
-              className="text-xs text-indigo-400 underline"
-            >
-              Paste
-            </button>
-          )}
-          {expanded && (
-            <>
-              <button
-                type="button"
-                onClick={enterFullscreen}
-                className="text-xs text-indigo-400 underline"
-              >
-                Fullscreen
-              </button>
-              <button
-                type="button"
-                onClick={toggleMaximize}
-                className="text-xs text-indigo-400 underline"
-              >
-                {maximized ? 'Restore' : 'Maximize'}
-              </button>
-            </>
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              if (expanded) {
-                disconnect();
-                setMaximized(false);
-              } else {
-                // Re-opening after a hide/auto-collapse → allow a fresh connect even
-                // if a prior live session had dropped.
-                liveDropRef.current = false;
-              }
-              setExpanded((v) => !v);
-            }}
-            className="text-xs text-indigo-400 underline"
-          >
-            {expanded ? 'Hide' : 'Show'} browser
-          </button>
-        </div>
+        <button type="button" onClick={float.dock} className="text-xs text-indigo-400 underline">
+          Dock
+        </button>
       </div>
-      {appUrl && (
-        <p className="px-0.5 text-[11px] text-neutral-500">
-          Testing <span className="font-mono text-neutral-400">{appUrl}</span> in the environment
-          below
-        </p>
-      )}
-      {expanded && (
-        <div className={maximized ? 'relative min-h-0 w-full flex-1' : 'relative h-[480px] w-full'}>
-          {/* noVNC manages its own canvas here; stays mounted across maximize
-              toggles so the RFB session survives. */}
-          <div ref={containerRef} className="h-full w-full overflow-hidden rounded bg-black" />
-          {state !== 'connected' && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded bg-neutral-950/95 px-4 text-center">
-              {state === 'error' ? (
-                <>
-                  <p className="text-sm text-amber-400">
-                    {message ?? 'Could not start the browser environment.'}
-                  </p>
+      <div
+        className={
+          float.detached
+            ? 'fixed z-50 flex flex-col gap-1 overflow-hidden rounded-md border border-neutral-700 bg-neutral-950 p-2 shadow-2xl shadow-black/60'
+            : maximized
+              ? 'fixed inset-0 z-50 flex flex-col gap-1 border border-neutral-800 bg-neutral-950 p-2'
+              : 'flex flex-col gap-1 rounded-md border border-neutral-800 bg-neutral-950 p-2'
+        }
+        style={float.style}
+      >
+        {/* Doubles as the floating window's title bar: the drag handlers no-op while
+            docked, and skip presses that land on the buttons on the right. */}
+        <div
+          className={
+            float.detached
+              ? 'flex cursor-move select-none items-center justify-between'
+              : 'flex items-center justify-between'
+          }
+          {...float.headerHandlers}
+        >
+          <span className="text-xs font-semibold text-neutral-300">
+            {title ?? 'Browser (interactive validation)'}
+            {state === 'connected' && <span className="ml-2 text-emerald-400">● live</span>}
+            {state === 'connecting' && <span className="ml-2 text-neutral-500">starting…</span>}
+          </span>
+          <div className="flex items-center gap-2">
+            {pasteNote && <span className="text-xs text-amber-400">{pasteNote}</span>}
+            {expanded && state === 'connected' && canPaste && (
+              <button
+                type="button"
+                onClick={() => void pasteIntoBrowser()}
+                title="Paste your clipboard into the focused field in the remote browser"
+                className="text-xs text-indigo-400 underline"
+              >
+                Paste
+              </button>
+            )}
+            {expanded && (
+              <>
+                <button
+                  type="button"
+                  onClick={enterFullscreen}
+                  className="text-xs text-indigo-400 underline"
+                >
+                  Fullscreen
+                </button>
+                {!float.detached && (
                   <button
                     type="button"
-                    onClick={retry}
+                    onClick={toggleMaximize}
                     className="text-xs text-indigo-400 underline"
                   >
-                    Retry
+                    {maximized ? 'Restore' : 'Maximize'}
                   </button>
-                </>
-              ) : (
-                <>
-                  <span className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-700 border-t-indigo-400" />
-                  <p className="text-sm text-neutral-300">Starting the browser environment…</p>
-                  <p className="text-xs text-neutral-500">
-                    First boot can take a minute or two while DDEV builds and starts.
-                  </p>
-                </>
-              )}
-            </div>
-          )}
+                )}
+                {!maximized && (
+                  <button
+                    type="button"
+                    onClick={float.detached ? float.dock : float.detach}
+                    title={
+                      float.detached
+                        ? 'Put the browser back inline'
+                        : 'Float the browser over the page so you can watch it beside the terminal'
+                    }
+                    className="text-xs text-indigo-400 underline"
+                  >
+                    {float.detached ? 'Dock' : 'Pop out'}
+                  </button>
+                )}
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                if (expanded) {
+                  disconnect();
+                  setMaximized(false);
+                  // Hiding a popped-out browser docks it: a floating frame with nothing
+                  // in it is not a state worth having.
+                  float.dock();
+                } else {
+                  // Re-opening after a hide/auto-collapse → allow a fresh connect even
+                  // if a prior live session had dropped.
+                  liveDropRef.current = false;
+                }
+                setExpanded((v) => !v);
+              }}
+              className="text-xs text-indigo-400 underline"
+            >
+              {expanded ? 'Hide' : 'Show'} browser
+            </button>
+          </div>
         </div>
-      )}
-    </div>
+        {appUrl && (
+          <p className="px-0.5 text-[11px] text-neutral-500">
+            Testing <span className="font-mono text-neutral-400">{appUrl}</span> in the environment
+            below
+          </p>
+        )}
+        {expanded && (
+          <div
+            className={
+              maximized || float.detached
+                ? 'relative min-h-0 w-full flex-1'
+                : 'relative h-[480px] w-full'
+            }
+          >
+            {/* noVNC manages its own canvas here; stays mounted across maximize and
+                pop-out toggles so the RFB session survives. */}
+            <div ref={containerRef} className="h-full w-full overflow-hidden rounded bg-black" />
+            {state !== 'connected' && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded bg-neutral-950/95 px-4 text-center">
+                {state === 'error' ? (
+                  <>
+                    <p className="text-sm text-amber-400">
+                      {message ?? 'Could not start the browser environment.'}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={retry}
+                      className="text-xs text-indigo-400 underline"
+                    >
+                      Retry
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-700 border-t-indigo-400" />
+                    <p className="text-sm text-neutral-300">Starting the browser environment…</p>
+                    <p className="text-xs text-neutral-500">
+                      First boot can take a minute or two while DDEV builds and starts.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+        {/* Resize border. Trailing siblings, so adding them never disturbs the slots
+            above — least of all the noVNC container's. */}
+        {float.detached &&
+          float.grips.map((grip) => (
+            <div key={grip.edge} className={grip.className} {...grip.handlers} />
+          ))}
+      </div>
+    </>
   );
 }
