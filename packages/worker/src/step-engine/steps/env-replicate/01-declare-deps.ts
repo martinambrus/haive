@@ -13,7 +13,12 @@ import type {
   OnboardingToolingMirror,
 } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
-import { deriveEnvTemplateName, getTaskEnvTemplate, linkTaskToEnvTemplate } from './_shared.js';
+import {
+  deriveEnvTemplateName,
+  getTaskEnvTemplate,
+  linkTaskToEnvTemplate,
+  liveTasksSharingEnvTemplate,
+} from './_shared.js';
 import { loadCliProviderMetadata } from '../onboarding/_helpers.js';
 
 // Both PHP language keys map to the single surviving env key (intelephense-extended):
@@ -415,7 +420,15 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     //   2. an existing .ddev/config.yaml, the project's own answer. Display-only:
     //      01c-ddev-env reads deps.webserver solely to GENERATE a config that is
     //      missing, so a configured project never consumes this value;
-    //   3. a previously declared webserver, so re-running never reverts a choice.
+    //   3. a webserver THIS task previously declared, so re-running never reverts a
+    //      choice. Read only from a template row this task owns: 02-generate-dockerfile
+    //      relinks tasks onto each other's rows, so the linked row can belong to another
+    //      task — another repository, even — and reading its webserver back would
+    //      re-assert a value this task never chose, over everything else here. Ownership
+    //      is the row's name, which `deriveEnvTemplateName` stamps from the task id at
+    //      insert and no later write changes. Observed: a task declared apache-fpm, was
+    //      relinked to a row carrying nginx-fpm, and every re-run of this step read
+    //      nginx-fpm back out of it.
     const onboardingWebserver = normalizeWebserverType(onboarding?.webserver);
     if (onboardingWebserver) result.webserver = onboardingWebserver;
 
@@ -423,7 +436,8 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     if (ddevWebserver) result.webserver = ddevWebserver;
 
     const existingTpl = await getTaskEnvTemplate(ctx.db, ctx.taskId);
-    const savedWebserver = (existingTpl?.declaredDeps as Record<string, unknown> | null)?.webserver;
+    const ownTpl = existingTpl?.name === deriveEnvTemplateName(ctx.taskId) ? existingTpl : null;
+    const savedWebserver = (ownTpl?.declaredDeps as Record<string, unknown> | null)?.webserver;
     if (savedWebserver === 'apache-fpm' || savedWebserver === 'nginx-fpm') {
       result.webserver = savedWebserver;
     }
@@ -659,16 +673,39 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       extraPackages: parseExtraPackages(values.extraPackages ?? ''),
     };
 
-    if (existing) {
-      // A changed base image or declared-deps set makes the previously saved
-      // Dockerfile (and any image built from it) stale — it was rendered from
-      // the OLD inputs. Drop both so step 02 re-renders from the new deps and
-      // step 03 rebuilds, instead of 02's reuse path silently keeping the old
-      // Dockerfile (e.g. a PHP 8.3 -> 5.6 change, which the unbuildable-PHP
-      // self-heal does NOT catch). An unchanged re-run keeps any hand-edits.
-      const staleDockerfile =
-        baseImage !== existing.baseImage ||
-        stableStringify(declaredDeps) !== stableStringify(existing.declaredDeps ?? {});
+    // A changed base image or declared-deps set makes the previously saved
+    // Dockerfile (and any image built from it) stale — it was rendered from
+    // the OLD inputs. Drop both so step 02 re-renders from the new deps and
+    // step 03 rebuilds, instead of 02's reuse path silently keeping the old
+    // Dockerfile (e.g. a PHP 8.3 -> 5.6 change, which the unbuildable-PHP
+    // self-heal does NOT catch). An unchanged re-run keeps any hand-edits.
+    const staleDockerfile =
+      !!existing &&
+      (baseImage !== existing.baseImage ||
+        stableStringify(declaredDeps) !== stableStringify(existing.declaredDeps ?? {}));
+
+    // The linked row can be SHARED: 02-generate-dockerfile relinks tasks onto each
+    // other's templates, so one row can define the environment of many tasks. Writing
+    // a CHANGED definition into it would redefine theirs — everything that reads
+    // declaredDeps (01c-ddev-env, 01a-app-boot, 01d-browser-access, the browserTesting
+    // 09-gate-2 derives) would switch under them with no event, and the status/hash
+    // reset below would force each of them to rebuild. Fork instead: this task takes a
+    // row of its own and the sharers keep theirs. An UNCHANGED re-declaration still
+    // writes in place, because it redefines nothing. 02 then merges the fork straight
+    // back onto a matching row when one exists, so forking cannot multiply rows for one
+    // environment — only separate rows for environments that genuinely differ.
+    const sharedWith =
+      existing && staleDockerfile
+        ? await liveTasksSharingEnvTemplate(ctx.db, existing.id, ctx.taskId)
+        : [];
+    if (existing && sharedWith.length > 0) {
+      ctx.logger.info(
+        { envTemplateId: existing.id, sharedWith, baseImage, templateName },
+        'declared deps changed on a shared env template; forking a row for this task',
+      );
+    }
+
+    if (existing && sharedWith.length === 0) {
       await ctx.db
         .update(schema.envTemplates)
         .set({

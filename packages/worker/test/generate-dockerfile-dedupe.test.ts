@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { FormValues } from '@haive/shared';
-import { generateDockerfileStep } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
+import {
+  envTemplateHash,
+  generateDockerfileStep,
+} from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
 import type { GenerateDockerfileDetect } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
@@ -19,19 +22,16 @@ interface Harness {
   linked: unknown[];
 }
 
-/** `hashMatch` stands in for the rows `findEnvTemplatesByHash` resolves the submitted
- *  Dockerfile to; `sharingTaskIds` for the still-live OTHER tasks the reference query
- *  finds on the superseded row. */
-function makeHarness(
-  hashMatch: { id: string; declaredDeps?: Record<string, unknown> } | null,
-  sharingTaskIds: string[],
-): Harness {
+/** `hashMatch` stands in for the row `findEnvTemplateByHash` resolves the submitted
+ *  Dockerfile + declared deps to; `sharingTaskIds` for the still-live OTHER tasks the
+ *  reference query finds on the superseded row. */
+function makeHarness(hashMatch: { id: string } | null, sharingTaskIds: string[]): Harness {
   const infos: Record<string, unknown>[] = [];
   const deleted: string[] = [];
   const linked: unknown[] = [];
   const db = {
     query: {
-      envTemplates: { findMany: vi.fn(async () => (hashMatch ? [hashMatch] : [])) },
+      envTemplates: { findFirst: vi.fn(async () => hashMatch ?? undefined) },
     },
     select: () => ({
       from: () => ({
@@ -90,16 +90,6 @@ describe('02-generate-dockerfile apply dedupe delete', () => {
     expect(h.deleted).toEqual([]);
   });
 
-  it('does not merge onto a row whose declared deps differ', async () => {
-    // Same Dockerfile bytes, different environment: a DDEV project renders the same
-    // file whatever php/database/webserver it declares, so merging would hand this
-    // task the other row's deps (the nginx-fpm-for-an-apache-project bug).
-    const h = makeHarness({ id: 'tpl-shared', declaredDeps: { webserver: 'nginx-fpm' } }, []);
-    const out = await run(h);
-    expect(out.envTemplateId).toBe('tpl-current');
-    expect(h.deleted).toEqual([]);
-  });
-
   it('rejects an empty Dockerfile before touching any row', async () => {
     const h = makeHarness({ id: 'tpl-shared' }, []);
     await expect(
@@ -109,5 +99,31 @@ describe('02-generate-dockerfile apply dedupe delete', () => {
       } as Parameters<typeof generateDockerfileStep.apply>[1]),
     ).rejects.toThrow('dockerfile cannot be empty');
     expect(h.deleted).toEqual([]);
+  });
+});
+
+describe('envTemplateHash', () => {
+  // A DDEV project renders the same Dockerfile whatever php/database/webserver it
+  // declares (renderDockerfile skips those blocks for ddev and never reads webserver),
+  // so the text alone cannot separate environments — and `env_templates_user_hash_idx`
+  // is UNIQUE on the stored hash, which is what turns a wrong key into a wrong merge.
+  const DEPS = { containerTool: 'ddev', webserver: 'apache-fpm' };
+
+  it('separates environments that render identical Dockerfiles', () => {
+    expect(envTemplateHash(DOCKERFILE, DEPS)).not.toBe(
+      envTemplateHash(DOCKERFILE, { ...DEPS, webserver: 'nginx-fpm' }),
+    );
+  });
+
+  it('is stable for the same Dockerfile and deps regardless of key order', () => {
+    expect(envTemplateHash(DOCKERFILE, DEPS)).toBe(
+      envTemplateHash(DOCKERFILE, { webserver: 'apache-fpm', containerTool: 'ddev' }),
+    );
+  });
+
+  it('still separates different Dockerfiles under identical deps', () => {
+    expect(envTemplateHash(DOCKERFILE, DEPS)).not.toBe(
+      envTemplateHash(`${DOCKERFILE}RUN echo more\n`, DEPS),
+    );
   });
 });

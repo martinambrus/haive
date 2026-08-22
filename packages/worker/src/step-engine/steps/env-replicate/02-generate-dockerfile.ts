@@ -1,15 +1,36 @@
-import { and, eq, ne, notInArray } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { stableStringify } from './01-declare-deps.js';
 import {
-  DISPOSABLE_TASK_STATUSES,
-  findEnvTemplatesByHash,
+  findEnvTemplateByHash,
   getTaskEnvTemplate,
   hashDockerfile,
   linkTaskToEnvTemplate,
+  liveTasksSharingEnvTemplate,
 } from './_shared.js';
+
+/** Identity of an env template: its Dockerfile text AND the deps it was declared
+ *  from. Stored in `dockerfile_hash`, which `env_templates_user_hash_idx` keeps
+ *  UNIQUE per user — so what goes into this hash decides which environments are
+ *  allowed to be the same row.
+ *
+ *  The text alone will not do. renderDockerfile never reads `deps.webserver`, and it
+ *  skips the php and database blocks entirely when containerTool is 'ddev', so php
+ *  5.6 vs 8.3, mariadb vs postgres and apache-fpm vs nginx-fpm all render BYTE
+ *  IDENTICAL Dockerfiles. Hashing the text alone therefore merged environments that
+ *  only looked alike — across repositories — and the survivor's declaredDeps then
+ *  spoke for every task relinked to it: 01c-ddev-env generated
+ *  `webserver_type: nginx-fpm` for a project whose form said apache-fpm.
+ *
+ *  Folding the deps in makes those distinct rows again while leaving the unique
+ *  index (and the single-row lookup it guarantees) intact. Rows written before this
+ *  carry a text-only hash; they simply stop matching, which costs one extra template
+ *  row per environment and no correctness. */
+export function envTemplateHash(dockerfile: string, declaredDeps: unknown): string {
+  return hashDockerfile(`${dockerfile}\n\u0000${stableStringify(declaredDeps ?? {})}`);
+}
 
 export interface GenerateDockerfileDetect {
   envTemplateId: string;
@@ -82,15 +103,16 @@ export const generateDockerfileStep: StepDefinition<
   async reconcileReusedFormValues(ctx, detected, reused) {
     const dockerfile = String(reused.dockerfile ?? '').trim();
     if (!dockerfile) return reused;
-    const depsKey = stableStringify(detected.declaredDeps);
-    // Several templates can carry these bytes (the hash is not identity), so ask
-    // whether ANY of them still speaks for this environment rather than whichever
-    // row the index happens to return first.
-    const sources = await findEnvTemplatesByHash(ctx.db, ctx.userId, hashDockerfile(dockerfile));
-    const sameDeps = sources.some((row) => stableStringify(row.declaredDeps ?? {}) === depsKey);
-    if (sameDeps) return reused;
+    // A row keyed on (these bytes, THIS task's deps) means the reused text still
+    // speaks for this environment, so the difference is a hand-edit worth keeping.
+    const source = await findEnvTemplateByHash(
+      ctx.db,
+      ctx.userId,
+      envTemplateHash(dockerfile, detected.declaredDeps),
+    );
+    if (source) return reused;
     ctx.logger.info(
-      { envTemplateId: detected.envTemplateId, sourceEnvTemplateId: sources[0]?.id ?? null },
+      { envTemplateId: detected.envTemplateId },
       'reused dockerfile predates a declared-deps change; re-rendering from current deps',
     );
     return { ...reused, dockerfile: detected.currentDockerfile };
@@ -117,24 +139,14 @@ export const generateDockerfileStep: StepDefinition<
   async apply(ctx, args) {
     const dockerfile = String(args.formValues.dockerfile ?? '').trim();
     if (!dockerfile) throw new Error('dockerfile cannot be empty');
-    const dockerfileHash = hashDockerfile(dockerfile);
+    // Keyed on the Dockerfile AND the declared deps (see envTemplateHash), so a merge
+    // means the two tasks really do share one environment — not merely one rendering
+    // of it.
+    const dockerfileHash = envTemplateHash(dockerfile, args.detected.declaredDeps);
     const currentId = args.detected.envTemplateId;
 
-    // Merge onto an existing template only when its DECLARED DEPS match too. The
-    // Dockerfile hash alone is not template identity: renderDockerfile skips the php
-    // and database blocks when containerTool is 'ddev', so php 5.6 vs 8.3, mariadb vs
-    // postgres and apache-fpm vs nginx-fpm all render the SAME bytes. Deduping on the
-    // hash alone merged environments that only looked alike, and the survivor's
-    // declaredDeps then spoke for every task relinked to it — 01c-ddev-env generated
-    // `webserver_type: nginx-fpm` for a project declared apache-fpm because the task
-    // had been relinked to another repo's template. A hash collision with different
-    // deps now simply leaves both rows standing.
-    const depsKey = stableStringify(args.detected.declaredDeps);
-    const byHash = await findEnvTemplatesByHash(ctx.db, ctx.userId, dockerfileHash);
-    const existingByHash = byHash.find(
-      (row) => row.id !== currentId && stableStringify(row.declaredDeps ?? {}) === depsKey,
-    );
-    if (existingByHash) {
+    const existingByHash = await findEnvTemplateByHash(ctx.db, ctx.userId, dockerfileHash);
+    if (existingByHash && existingByHash.id !== currentId) {
       await linkTaskToEnvTemplate(ctx.db, ctx.taskId, existingByHash.id);
       const sharedWith = await liveTasksSharingEnvTemplate(ctx.db, currentId, ctx.taskId);
       if (sharedWith.length === 0) {
@@ -179,41 +191,6 @@ export const generateDockerfileStep: StepDefinition<
     };
   },
 };
-
-/** Ids of OTHER still-live tasks whose `env_template_id` points at `templateId`.
- *
- *  The dedupe path in apply() is not free to delete the row it superseded: that row can
- *  be shared. 02 relinks a task onto ANOTHER task's template whenever the hashes match,
- *  and a later re-run of 01-declare-deps then updates that shared row in place rather
- *  than inserting one (its `existing` is just `getTaskEnvTemplate`). `tasks.env_template_id`
- *  is `ON DELETE SET NULL`, so deleting a row a live task still points at silently nulls
- *  that task's link — no error, no event on the victim. The victim only finds out much
- *  later and indirectly: 09-gate-2-verify-approval computes `browserTesting` off the
- *  template row, so a nulled link makes it false and the gate quietly stops offering its
- *  live browser on a task whose runner is up and serving.
- *
- *  Same reference count `cleanupTaskEnvImage` (task-queue.ts) applies before reaping a
- *  template; both share `DISPOSABLE_TASK_STATUSES`, so a `failed` or `completed` task
- *  still counts — it can resume or be reopened. `reapOrphanEnvTemplates` keeps its own
- *  wider dead-set, which is sound because it only ever sweeps rows that never reached
- *  `ready`; a kept row of that kind is still collected at the next worker boot. */
-export async function liveTasksSharingEnvTemplate(
-  db: Database,
-  templateId: string,
-  exceptTaskId: string,
-): Promise<string[]> {
-  const rows = await db
-    .select({ id: schema.tasks.id })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.envTemplateId, templateId),
-        ne(schema.tasks.id, exceptTaskId),
-        notInArray(schema.tasks.status, [...DISPOSABLE_TASK_STATUSES]),
-      ),
-    );
-  return rows.map((r) => r.id);
-}
 
 type PackageManager =
   | 'npm'
