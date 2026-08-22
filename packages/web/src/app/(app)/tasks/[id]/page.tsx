@@ -2786,11 +2786,13 @@ function StepCardImpl({
     'h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50';
   const cliSelectClass = `${cliSelectBase} w-60`;
   const effortSelectClass = `${cliSelectBase} w-24`;
-  // Label column wide enough for the longest seat label in use ("Security Code Reviewer",
-  // 143px at this size); truncate so a longer future one cannot widen the column and
-  // break the alignment. label + cli + effort + the two gaps = 31rem, which is the grid's
-  // column width below.
-  const cliLabelClass = 'w-36 shrink-0 truncate text-xs font-medium text-neutral-400';
+  // Label sits ABOVE its dropdowns, not beside them. Beside, the labels have to share one
+  // fixed-width column or the dropdowns go ragged — and that column is as wide as the
+  // longest label ("Security Code Reviewer", 143px), which strands a short one ("CLI",
+  // 19px) far from its own control however it is aligned inside it. Stacked, every
+  // dropdown starts at its column's left edge with nothing between it and its label, no
+  // label is ever truncated, and the cell narrows to 22rem so more fit per row.
+  const cliLabelClass = 'truncate text-xs font-medium text-neutral-400';
   const cliOptions = (
     <>
       <option value="">(none — deterministic only)</option>
@@ -2992,48 +2994,52 @@ function StepCardImpl({
           {/* One grid cell per picker, each cell laid out label | CLI | effort at fixed
               widths, so the three columns line up across every row instead of each
               picker starting wherever the previous label happened to end. auto-fill
-              drops from three cells per row to two to one as the window narrows; the
-              cell width never changes, so nothing re-flows on a CLI switch. */}
+              drops cells per row as the window narrows; the cell width never changes,
+              so nothing re-flows on a CLI switch. */}
           {showCliPicker && (
-            <div className="grid gap-x-4 gap-y-2 [grid-template-columns:repeat(auto-fill,minmax(31rem,1fr))]">
+            <div className="grid gap-x-4 gap-y-2 [grid-template-columns:repeat(auto-fill,minmax(22rem,1fr))]">
               {step.cliRoles && step.cliRoles.length > 0 ? (
                 // Multi-CLI step (e.g. spec-quality): one dropdown per role.
                 step.cliRoles.map((roleDesc) => (
-                  <div key={roleDesc.id} className="flex items-center gap-2">
+                  <div key={roleDesc.id} className="flex flex-col gap-1">
                     <label htmlFor={`${cliPickerId}-${roleDesc.id}`} className={cliLabelClass}>
                       {roleDesc.label}
                     </label>
+                    <div className="flex items-center gap-2">
+                      <select
+                        id={`${cliPickerId}-${roleDesc.id}`}
+                        disabled={cliLocked || cliBusy}
+                        value={step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? ''}
+                        onChange={(e) => void onChangeCli(e.target.value || null, roleDesc.id)}
+                        className={cliSelectClass}
+                      >
+                        {cliOptions}
+                      </select>
+                      {effortSelectFor(
+                        step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? '',
+                        step.cliRoleEfforts?.[roleDesc.id],
+                        roleDesc.id,
+                      )}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="flex flex-col gap-1">
+                  <label htmlFor={cliPickerId} className={cliLabelClass}>
+                    CLI
+                  </label>
+                  <div className="flex items-center gap-2">
                     <select
-                      id={`${cliPickerId}-${roleDesc.id}`}
+                      id={cliPickerId}
                       disabled={cliLocked || cliBusy}
-                      value={step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? ''}
-                      onChange={(e) => void onChangeCli(e.target.value || null, roleDesc.id)}
+                      value={effectiveCliProviderId}
+                      onChange={(e) => void onChangeCli(e.target.value || null)}
                       className={cliSelectClass}
                     >
                       {cliOptions}
                     </select>
-                    {effortSelectFor(
-                      step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? '',
-                      step.cliRoleEfforts?.[roleDesc.id],
-                      roleDesc.id,
-                    )}
+                    {effortSelectFor(effectiveCliProviderId, step.preferredEffortLevel)}
                   </div>
-                ))
-              ) : (
-                <div className="flex items-center gap-2">
-                  <label htmlFor={cliPickerId} className={cliLabelClass}>
-                    CLI
-                  </label>
-                  <select
-                    id={cliPickerId}
-                    disabled={cliLocked || cliBusy}
-                    value={effectiveCliProviderId}
-                    onChange={(e) => void onChangeCli(e.target.value || null)}
-                    className={cliSelectClass}
-                  >
-                    {cliOptions}
-                  </select>
-                  {effortSelectFor(effectiveCliProviderId, step.preferredEffortLevel)}
                 </div>
               )}
               {/* Fan-out steps (08c, 08d) keep the single CLI dropdown above as the step-wide
@@ -3042,25 +3048,27 @@ function StepCardImpl({
               model. Rendered alongside rather than instead of the default, and separate
               from cliRoles, whose presence drives loop round badges and Resume. */}
               {step.miningSeats?.map((seat) => (
-                <div key={seat.id} className="flex items-center gap-2">
+                <div key={seat.id} className="flex flex-col gap-1">
                   <label htmlFor={`${cliPickerId}-seat-${seat.id}`} className={cliLabelClass}>
                     {seat.label}
                   </label>
-                  <select
-                    id={`${cliPickerId}-seat-${seat.id}`}
-                    disabled={cliLocked || cliBusy}
-                    value={step.miningSeatProviders?.[seat.id] ?? ''}
-                    onChange={(e) => void onChangeCli(e.target.value || null, seat.id)}
-                    className={cliSelectClass}
-                  >
-                    <option value="">(step default)</option>
-                    {cliOptions}
-                  </select>
-                  {effortSelectFor(
-                    step.miningSeatProviders?.[seat.id] ?? '',
-                    step.miningSeatEfforts?.[seat.id],
-                    seat.id,
-                  )}
+                  <div className="flex items-center gap-2">
+                    <select
+                      id={`${cliPickerId}-seat-${seat.id}`}
+                      disabled={cliLocked || cliBusy}
+                      value={step.miningSeatProviders?.[seat.id] ?? ''}
+                      onChange={(e) => void onChangeCli(e.target.value || null, seat.id)}
+                      className={cliSelectClass}
+                    >
+                      <option value="">(step default)</option>
+                      {cliOptions}
+                    </select>
+                    {effortSelectFor(
+                      step.miningSeatProviders?.[seat.id] ?? '',
+                      step.miningSeatEfforts?.[seat.id],
+                      seat.id,
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
