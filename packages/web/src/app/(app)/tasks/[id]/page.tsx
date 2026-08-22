@@ -61,6 +61,7 @@ import {
   type FormValues,
 } from '@/components/form-renderer';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { PersistedDetails } from '@/components/persisted-details';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
 import {
@@ -3258,9 +3259,7 @@ function StepCardImpl({
           <div>
             <h3 className="text-lg font-semibold text-neutral-50">{schema.title}</h3>
             {schema.description && (
-              <p className="mt-1 whitespace-pre-line text-sm text-neutral-400">
-                {schema.description}
-              </p>
+              <InlineMarkdown body={schema.description} className="mt-1 text-sm text-neutral-400" />
             )}
           </div>
           {actionError && (

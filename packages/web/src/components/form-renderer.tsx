@@ -8,6 +8,7 @@ import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { BundleComposer, type BundleComposerEntry } from '@/components/bundle-composer';
 import { GlobalKbStatusPanel } from '@/components/global-kb-status-panel';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { InlineMarkdown, INLINE_MD_CLASS } from '@/components/markdown/inline-markdown';
 import { PersistedDetails } from '@/components/persisted-details';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
@@ -278,7 +279,7 @@ export function FormRenderer({
       <div>
         <h3 className="text-lg font-semibold text-neutral-50">{schema.title}</h3>
         {schema.description && (
-          <p className="mt-1 whitespace-pre-line text-sm text-neutral-400">{schema.description}</p>
+          <InlineMarkdown body={schema.description} className="mt-1 text-sm text-neutral-400" />
         )}
       </div>
       {headerSlot}
@@ -468,7 +469,9 @@ function AccordionField({ field, values, onChange, disabled }: AccordionFieldPro
   return (
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={field.id}>{field.label}</Label>
-      {field.description && <p className="text-xs text-neutral-200">{field.description}</p>}
+      {field.description && (
+        <InlineMarkdown body={field.description} className="text-xs text-neutral-200" />
+      )}
       <div className="flex flex-col overflow-hidden rounded-md border border-neutral-800 bg-neutral-950">
         {field.items.map((item, idx) => (
           <details
@@ -481,7 +484,7 @@ function AccordionField({ field, values, onChange, disabled }: AccordionFieldPro
             </summary>
             <div className="flex flex-col gap-3 border-t border-neutral-800 bg-neutral-950 px-3 py-3">
               {item.description && (
-                <p className="whitespace-pre-line text-xs text-neutral-200">{item.description}</p>
+                <InlineMarkdown body={item.description} className="text-xs text-neutral-200" />
               )}
               {item.fields.map((leaf) =>
                 isFieldVisible(leaf, values) ? (
@@ -502,10 +505,6 @@ function AccordionField({ field, values, onChange, disabled }: AccordionFieldPro
   );
 }
 
-/** Notes are short inline blocks: the surrounding wrapper owns the padding and the
- *  colour, so MarkdownView contributes typography only. */
-const NOTE_MD_CLASS = 'haive-md-inherit max-h-none overflow-visible px-0 py-0';
-
 interface FieldRowProps {
   field: LeafFormField;
   value: unknown;
@@ -519,13 +518,13 @@ function FieldRow({ field, value, onChange, disabled, repositoryId }: FieldRowPr
     if (field.variant === 'warning') {
       return (
         <div className="rounded-md border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
-          <MarkdownView body={field.body} enhanced className={NOTE_MD_CLASS} />
+          <MarkdownView body={field.body} enhanced className={INLINE_MD_CLASS} />
         </div>
       );
     }
     return (
       <div className="text-sm text-neutral-400">
-        <MarkdownView body={field.body} enhanced className={NOTE_MD_CLASS} />
+        <MarkdownView body={field.body} enhanced className={INLINE_MD_CLASS} />
       </div>
     );
   }
@@ -546,7 +545,7 @@ function FieldRow({ field, value, onChange, disabled, repositoryId }: FieldRowPr
           </span>
         </label>
         {field.description && (
-          <p className="whitespace-pre-line pl-6 text-xs text-neutral-200">{field.description}</p>
+          <InlineMarkdown body={field.description} className="pl-6 text-xs text-neutral-200" />
         )}
       </div>
     );
@@ -557,7 +556,9 @@ function FieldRow({ field, value, onChange, disabled, repositoryId }: FieldRowPr
         {field.label}
         {field.required && <span className="ml-1 text-red-400">*</span>}
       </Label>
-      {field.description && <p className="text-xs text-neutral-200">{field.description}</p>}
+      {field.description && (
+        <InlineMarkdown body={field.description} className="text-xs text-neutral-200" />
+      )}
       {field.type !== 'multi-select' && field.details?.kind === 'diff' && (
         <DiffDisclosure details={field.details} />
       )}
@@ -768,7 +769,7 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
                 {opt.info && <InfoTooltip content={opt.info} />}
               </span>
               {opt.description && (
-                <span className="pl-6 text-xs text-neutral-400">{opt.description}</span>
+                <InlineMarkdown body={opt.description} className="pl-6 text-xs text-neutral-400" />
               )}
             </label>
           ))}
