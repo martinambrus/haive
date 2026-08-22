@@ -50,7 +50,8 @@ export async function browserCdpUrlForRunner(name: string): Promise<string | nul
  *  the SCRIPT's directory. Passed in rather than derived here so a wrong path is a
  *  compile-time-visible argument at the call site instead of a silent no-op.
  *
- *  See docker/ddev-runner/browser-close-extra-tabs.js for why the first page is kept and
+ *  See docker/ddev-runner/browser-close-extra-tabs.js for why the tab that survives is
+ *  the one ON SCREEN (neither list order is a contract; both were measured lying) and
  *  why this is a barrier-only operation. */
 export async function closeExtraBrowserTabs(
   name: string,
