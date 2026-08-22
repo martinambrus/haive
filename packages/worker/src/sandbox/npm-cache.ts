@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { logger } from '@haive/shared';
 import type { DockerVolumeMount } from './docker-runner.js';
+import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 
 const exec = promisify(execFile);
 const log = logger.child({ module: 'npm-cache' });
@@ -34,12 +35,59 @@ export function npmCacheMount(): DockerVolumeMount {
 
 let ensured = false;
 
+/** Marker recording that the volume has been chowned to the sandbox identity. Keyed on the
+ *  uid so changing SANDBOX_UID re-runs the alignment instead of trusting a stale marker. */
+const OWNERSHIP_MARKER = `${NPM_CACHE_DIR}/.haive-cache-owner-${SANDBOX_UID}`;
+
+/**
+ * Give the cache to the uid that actually consumes it.
+ *
+ * Docker creates a named volume's root as root:root 755, and this volume was previously
+ * also POPULATED as root, because the warm run below carried no `--user`. The cli-exec
+ * sandbox runs as `node` (SANDBOX_USER, uid 1000, see sandbox-runner), so every `npx` in
+ * a real invocation hit `npm error code EACCES` opening `_cacache/tmp` and exited 1.
+ *
+ * That is not a slow path, it is a dead one: the MCP server never starts, and the CLI
+ * reports it as `"status":"failed"` while the two bind-mounted `node` servers next to it
+ * connect fine. MEASURED in a live 07 invocation: chrome-devtools failed, filesystem
+ * failed (also npx), git pending (uvx), haive-rag and ddev-control connected. The shared
+ * cache was introduced to make the browser MCP load in time; unowned, it stopped it
+ * loading at all, which is why the original symptom looked unchanged.
+ *
+ * Runs as root (no `--user`) because chown is what we are here to do, and is skipped after
+ * the first success via a marker file, so this costs one container per volume rather than
+ * one per worker boot. Best-effort like everything else here: a failure leaves the old
+ * behaviour rather than failing the invocation.
+ */
+async function alignNpmCacheOwnership(image: string): Promise<void> {
+  try {
+    await exec(
+      'docker',
+      [
+        'run',
+        '--rm',
+        '-v',
+        `${NPM_CACHE_VOLUME}:${NPM_CACHE_DIR}`,
+        '--entrypoint',
+        'sh',
+        image,
+        '-c',
+        `test -f ${OWNERSHIP_MARKER} || { chown -R ${SANDBOX_UID}:${SANDBOX_GID} ${NPM_CACHE_DIR} && touch ${OWNERSHIP_MARKER}; }`,
+      ],
+      { timeout: 120_000 },
+    );
+  } catch (err) {
+    log.warn({ err }, 'could not align npm cache ownership; npx may fail as the sandbox user');
+  }
+}
+
 /** Create the volume if it does not exist. `docker volume create` is idempotent, so this
  *  is safe to call repeatedly; the flag just avoids the process spawn after the first. */
-export async function ensureNpmCacheVolume(): Promise<void> {
+export async function ensureNpmCacheVolume(image: string): Promise<void> {
   if (ensured) return;
   try {
     await exec('docker', ['volume', 'create', NPM_CACHE_VOLUME], { timeout: 15_000 });
+    await alignNpmCacheOwnership(image);
     ensured = true;
   } catch (err) {
     // Not fatal: without the volume the mount below fails and npx falls back to an
@@ -63,7 +111,7 @@ export async function warmNpmPackage(
   pkgSpec: string,
   timeoutMs = 240_000,
 ): Promise<boolean> {
-  await ensureNpmCacheVolume();
+  await ensureNpmCacheVolume(image);
   const started = Date.now();
   try {
     await exec(
@@ -71,6 +119,10 @@ export async function warmNpmPackage(
       [
         'run',
         '--rm',
+        // Warm as the identity that will READ this cache. Without it the warm ran as root
+        // and left every entry root-owned, which is what made the sandbox's own npx fail.
+        '--user',
+        `${SANDBOX_UID}:${SANDBOX_GID}`,
         '-v',
         `${NPM_CACHE_VOLUME}:${NPM_CACHE_DIR}`,
         '-e',
