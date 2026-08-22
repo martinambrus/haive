@@ -1,11 +1,14 @@
-import { describe, it, expect } from 'vitest';
-import { logger, STEP_MINING_SEATS } from '@haive/shared';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { configService, logger, STEP_MINING_SEATS } from '@haive/shared';
 import {
   parseAdversaryOutput,
   adversaryIdsForLevel,
   adversarialQaStep,
+  hasObservation,
+  verifyVerdict,
+  verificationForFinding,
 } from './08d-adversarial-qa.js';
-import { MiningRetryError } from '../../step-definition.js';
+import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 
 const fakeCtx = { logger: logger.child({ test: '08d-apply' }) } as unknown as StepContext;
@@ -187,9 +190,11 @@ describe('08d mining seats', () => {
     for (const a of agents) expect(a.roleKey, a.agentId).toBe(a.agentId);
   });
 
-  it('registers exactly the seats the widest roster dispatches', async () => {
+  it('registers the widest roster plus the verifier lenses, and nothing else', async () => {
     // A seat the step emits but the registry omits is unconfigurable in the UI; one the
-    // registry lists but no roster emits is a dead control.
+    // registry lists but nothing ever emits is a dead control. The registry covers TWO
+    // waves: the adversaries selectAgents dispatches, and the PoC verifier lenses the
+    // second wave dispatches per blocking finding (which selectAgents never returns).
     const agents = await adversarialQaStep.agentMining!.selectAgents({
       detected: {
         level: 'enterprise',
@@ -199,7 +204,15 @@ describe('08d mining seats', () => {
       },
     } as never);
     const registered = STEP_MINING_SEATS['08d-adversarial-qa']!.map((s) => s.id);
-    expect(agents.map((a) => a.roleKey!).sort()).toEqual([...registered].sort());
+    const verifierSeats = registered.filter((id) => id.startsWith('qa-verify:'));
+    expect(verifierSeats.sort()).toEqual([
+      'qa-verify:execute',
+      'qa-verify:linkage',
+      'qa-verify:target',
+    ]);
+    expect([...agents.map((a) => a.roleKey!), ...verifierSeats].sort()).toEqual(
+      [...registered].sort(),
+    );
   });
 
   it('keeps a narrower level a strict subset of the registry', async () => {
@@ -215,6 +228,16 @@ describe('08d mining seats', () => {
 });
 
 describe('adversarialQaStep.apply — pre-dedupe finding attribution', () => {
+  // These fixtures are blocking by design (critical/high), which now dispatches the PoC
+  // verifier wave and makes apply() throw instead of returning. This suite is about the
+  // location merge, so pin verification off; its own suite covers the wave.
+  beforeEach(() => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   /** ctx with a capturing db + a logger that records info calls, so both the recorded rows
    *  and the drop-count log can be asserted. `runQa`'s fakeCtx has no db at all. */
   function captureCtx(): {
@@ -329,3 +352,269 @@ describe('adversarialQaStep.apply — pre-dedupe finding attribution', () => {
     expect(infos.some((i) => typeof i.dropped === 'number')).toBe(false);
   });
 });
+
+describe('08d PoC verification', () => {
+  const observed =
+    'Issued GET https://app.ddev.site/UserFiles/File/x.php and got 404 with an empty body';
+
+  const verdictJson = (o: Record<string, unknown>) => '```json\n' + JSON.stringify(o) + '\n```';
+
+  describe('hasObservation', () => {
+    it('rejects a bare assertion with nothing observed', () => {
+      // The sentence this whole bar exists to reject: free to write, and it would silently
+      // downgrade a real defect.
+      expect(hasObservation('Could not reproduce this.')).toBe(false);
+      expect(hasObservation('')).toBe(false);
+      expect(hasObservation(undefined)).toBe(false);
+    });
+
+    it('accepts prose that records a concrete artefact', () => {
+      expect(hasObservation(observed)).toBe(true);
+      expect(
+        hasObservation('Ran `curl -s -o /dev/null -w %{http_code} /admin.php` — it printed 302'),
+      ).toBe(true);
+    });
+
+    it('rejects a long sentence that names nothing concrete', () => {
+      expect(
+        hasObservation(
+          'I looked at this carefully and in my judgement the reported behaviour does not occur here at all',
+        ),
+      ).toBe(false);
+    });
+  });
+
+  describe('verifyVerdict', () => {
+    it('reads a reproduction without needing an observation', () => {
+      // A verifier claiming it DID reproduce is not the direction that loses findings.
+      expect(verifyVerdict(verdictJson({ reproduced: true }))).toBe('reproduced');
+    });
+
+    it('reads a non-reproduction only when something was observed', () => {
+      expect(verifyVerdict(verdictJson({ reproduced: false, observation: observed }))).toBe(
+        'not_reproduced',
+      );
+    });
+
+    it('discards a non-reproduction with no observation', () => {
+      expect(verifyVerdict(verdictJson({ reproduced: false }))).toBeNull();
+      expect(verifyVerdict(verdictJson({ reproduced: false, observation: 'nope' }))).toBeNull();
+    });
+
+    it('is null on unparseable output', () => {
+      expect(verifyVerdict('I ran it and it seemed fine')).toBeNull();
+      expect(verifyVerdict(null)).toBeNull();
+    });
+  });
+
+  describe('verificationForFinding', () => {
+    const LENSES = [
+      { id: 'execute', title: 'executes', lines: [] },
+      { id: 'target', title: 'target real', lines: [] },
+      { id: 'linkage', title: 'code linkage', lines: [] },
+    ] as never[];
+    const fp = 'abcdef0123456789';
+    const voter = (lensId: string, raw: string | null): AgentMiningResult => ({
+      agentId: `qaverify-${fp}-${lensId}`,
+      agentTitle: lensId,
+      invocationId: `inv-${lensId}`,
+      status: raw === null ? 'failed' : 'done',
+      output: null,
+      rawOutput: raw,
+      errorMessage: raw === null ? 'killed' : null,
+    });
+    const allSay = (o: Record<string, unknown>) =>
+      ['execute', 'target', 'linkage'].map((l) => voter(l, verdictJson(o)));
+
+    it('downgrades only when every lens fails to reproduce WITH an observation', () => {
+      expect(
+        verificationForFinding(allSay({ reproduced: false, observation: observed }), fp, LENSES),
+      ).toBe('not_reproduced');
+    });
+
+    it('keeps the finding when any single lens reproduces it', () => {
+      // One successful reproduction is a demonstration; the others failing to repeat it
+      // does not undo it.
+      const mixed = [
+        voter('execute', verdictJson({ reproduced: true })),
+        voter('target', verdictJson({ reproduced: false, observation: observed })),
+        voter('linkage', verdictJson({ reproduced: false, observation: observed })),
+      ];
+      expect(verificationForFinding(mixed, fp, LENSES)).toBe('reproduced');
+    });
+
+    it('keeps the finding when one voter asserts without observing (fail-closed)', () => {
+      const mixed = [
+        voter('execute', verdictJson({ reproduced: false, observation: observed })),
+        voter('target', verdictJson({ reproduced: false })),
+        voter('linkage', verdictJson({ reproduced: false, observation: observed })),
+      ];
+      expect(verificationForFinding(mixed, fp, LENSES)).toBe('unverified');
+    });
+
+    it('keeps the finding when a voter was killed before answering', () => {
+      const mixed = [
+        voter('execute', verdictJson({ reproduced: false, observation: observed })),
+        voter('target', null),
+        voter('linkage', verdictJson({ reproduced: false, observation: observed })),
+      ];
+      expect(verificationForFinding(mixed, fp, LENSES)).toBe('unverified');
+    });
+
+    it('is unverified when the panel never ran at all', () => {
+      expect(verificationForFinding([], fp, LENSES)).toBe('unverified');
+    });
+  });
+});
+
+describe('08d verifier wave dispatch and downgrade', () => {
+  const fakeCtx2 = {
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    db: { insert: () => ({ values: () => ({ onConflictDoNothing: () => Promise.resolve() }) }) },
+    taskId: 't',
+    taskStepId: 's',
+    round: 0,
+  } as unknown as StepContext;
+
+  const adversary = (agentId: string, findings: Record<string, unknown>[]): AgentMiningResult => ({
+    agentId,
+    agentTitle: agentId,
+    invocationId: `inv-${agentId}`,
+    status: 'done',
+    output: null,
+    rawOutput: '```json\n' + JSON.stringify({ verdict: 'NEEDS_FIXES', findings }) + '\n```',
+    errorMessage: null,
+  });
+
+  const BLOCKER = { severity: 'critical', location: 'admin.php:10', impact: 'rce', poc: 'GET /x' };
+  const MINOR = { severity: 'low', location: 'a.php:1', impact: 'info leak', poc: 'GET /a' };
+
+  const run = (results: AgentMiningResult[]) =>
+    adversarialQaStep.apply(fakeCtx2, {
+      detected: { level: 'poc', spec: 's', implementationFiles: [], appUrl: 'https://x.ddev.site' },
+      agentMiningResults: results,
+      isFinalMiningAttempt: true,
+    } as unknown as Parameters<typeof adversarialQaStep.apply>[1]);
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function enableVerification(lenses = 3) {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    vi.spyOn(configService, 'getNumber').mockResolvedValue(lenses);
+  }
+
+  it('dispatches one verifier per lens for a blocking finding', async () => {
+    enableVerification();
+    const err = await run([adversary('auth-bandit', [BLOCKER])]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MiningWaveError);
+    const dispatches = (err as MiningWaveError).dispatches;
+    expect(dispatches).toHaveLength(3);
+    expect(dispatches.map((d) => d.roleKey).sort()).toEqual([
+      'qa-verify:execute',
+      'qa-verify:linkage',
+      'qa-verify:target',
+    ]);
+    // The PoC being checked reaches the verifier — without it there is nothing to run.
+    for (const d of dispatches) expect(d.prompt).toContain('GET /x');
+  });
+
+  it('never dispatches a verifier for a non-blocking finding', async () => {
+    // Only blocking findings cost a fix round, so only those are worth the invocations.
+    enableVerification();
+    const out = await run([adversary('auth-bandit', [MINOR])]);
+    expect(out.findings).toHaveLength(1);
+    expect(out.blocking).toBe(false);
+  });
+
+  it('throws no wave when verification is disabled', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const out = await run([adversary('auth-bandit', [BLOCKER])]);
+    expect(out.blocking).toBe(true);
+    expect(out.findings[0]!.verification).toBeUndefined();
+  });
+
+  it('downgrades a finding no lens could reproduce, but keeps it visible', async () => {
+    enableVerification();
+    const first = await run([adversary('auth-bandit', [BLOCKER])]).catch((e: unknown) => e);
+    const dispatches = (err0(first) as MiningWaveError).dispatches;
+    const observed =
+      'Issued GET https://x.ddev.site/x and got 404 with an empty body; no shell was reached';
+    const verifiers: AgentMiningResult[] = dispatches.map((d) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      invocationId: 'inv-v',
+      status: 'done',
+      output: null,
+      rawOutput:
+        '```json\n' + JSON.stringify({ reproduced: false, observation: observed }) + '\n```',
+      errorMessage: null,
+    }));
+    const out = await run([adversary('auth-bandit', [BLOCKER]), ...verifiers]);
+    expect(out.findings).toHaveLength(1);
+    expect(out.findings[0]!.verification).toBe('not_reproduced');
+    // Downgraded, NOT dismissed: it stops blocking and still reaches gate 1.5.
+    expect(out.blocking).toBe(false);
+    expect(out.counts.total).toBe(1);
+  });
+
+  it('keeps a finding blocking when one lens reproduces it', async () => {
+    enableVerification();
+    const first = await run([adversary('auth-bandit', [BLOCKER])]).catch((e: unknown) => e);
+    const dispatches = (err0(first) as MiningWaveError).dispatches;
+    const verifiers: AgentMiningResult[] = dispatches.map((d, i) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      invocationId: 'inv-v',
+      status: 'done',
+      output: null,
+      rawOutput:
+        '```json\n' +
+        JSON.stringify(
+          i === 0
+            ? {
+                reproduced: true,
+                observation: 'GET https://x.ddev.site/x returned 200 with output',
+              }
+            : {
+                reproduced: false,
+                observation: 'GET https://x.ddev.site/x returned 404 with an empty body here',
+              },
+        ) +
+        '\n```',
+      errorMessage: null,
+    }));
+    const out = await run([adversary('auth-bandit', [BLOCKER]), ...verifiers]);
+    expect(out.findings[0]!.verification).toBe('reproduced');
+    expect(out.blocking).toBe(true);
+  });
+
+  it('does not read verifier output as an adversary that emitted garbage', async () => {
+    // The second pass carries both waves. Parsing verifier JSON as adversary output would
+    // invent a qa-gap finding per verifier — holes in the attack surface conjured from the
+    // wave that was checking it.
+    enableVerification();
+    const first = await run([adversary('auth-bandit', [BLOCKER])]).catch((e: unknown) => e);
+    const dispatches = (err0(first) as MiningWaveError).dispatches;
+    const verifiers: AgentMiningResult[] = dispatches.map((d) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      invocationId: 'inv-v',
+      status: 'done',
+      output: null,
+      rawOutput: '```json\n{"reproduced":true}\n```',
+      errorMessage: null,
+    }));
+    const out = await run([adversary('auth-bandit', [BLOCKER]), ...verifiers]);
+    expect(out.findings.some((f) => f.category === 'qa-gap')).toBe(false);
+    expect(out.qaIncomplete).toBe(false);
+  });
+});
+
+/** Narrow a caught value to the error it must be, so the wave tests read as assertions
+ *  about dispatches rather than about try/catch plumbing. */
+function err0(e: unknown): unknown {
+  expect(e).toBeInstanceOf(MiningWaveError);
+  return e;
+}

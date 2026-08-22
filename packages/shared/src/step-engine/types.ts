@@ -148,6 +148,12 @@ export const STEP_MINING_SEATS: Record<string, readonly CliRoleDescriptor[]> = {
     { id: 'injection-infector', label: 'Injection Infector' },
     { id: 'logic-lunatic', label: 'Logic Lunatic' },
     { id: 'chaos-creator', label: 'Chaos Creator' },
+    // The PoC-verification wave. Same shape as 08c's refuter lenses: the agent id is
+    // per-FINDING and unbounded, so the LENS is the stable seat, namespaced so it can
+    // never collide with an adversary id above.
+    { id: 'qa-verify:execute', label: 'PoC verifier: executes' },
+    { id: 'qa-verify:target', label: 'PoC verifier: target real' },
+    { id: 'qa-verify:linkage', label: 'PoC verifier: code linkage' },
   ],
 };
 

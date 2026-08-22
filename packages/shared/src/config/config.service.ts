@@ -318,6 +318,31 @@ export const CONFIG_KEYS = {
   // the third would have caught. Read per 08c apply (~30s config cache).
   REVIEW_REFUTE_LENSES: 'config:review:refuteLenses',
 
+  // Adversarial QA (08d) reports proof-of-concept findings, and a blocking one sends the
+  // change back to be reimplemented. Unlike 08c's code-review findings, nothing checked
+  // them: 08d's own header says they "are reviewed by the human at gate 1.5", so the only
+  // filter on a PoC that does not run, does not do what it claims, or names code
+  // unconnected to the behaviour was a person reading it. When 'true', each BLOCKING
+  // finding's PoC is EXECUTED against the running app by an independent panel before the
+  // developer sees it, and gate 1.5 states which ones reproduced.
+  //
+  // Deliberately NOT the REVIEW_REFUTE_* keys: sharing them would mean an admin disabling
+  // code-review refutation silently disabled QA verification too. Set 'false' to take the
+  // adversaries' word, which is the behaviour before this existed. Read per 08d apply.
+  QA_VERIFY_ENABLED: 'config:qa:verifyEnabled',
+
+  // How many angles each blocking PoC is verified from (default 3: does it execute and
+  // produce the claimed observable, is the target real in a DEFAULT configuration rather
+  // than an installer/sandbox artefact, does the cited code actually cause it).
+  //
+  // A finding is downgraded ONLY if every lens reports non-reproduction AND states what it
+  // observed; one lens reproducing it, one with no observation, and one that failed to run
+  // all keep it blocking — the same fail-closed direction as REVIEW_REFUTE_LENSES, and for
+  // the same reason. Costs lenses x blocking findings sandboxed invocations, capped per
+  // round. A downgraded finding is NOT dismissed: it stays visible at gate 1.5 as advisory,
+  // so a wrong verdict here costs attention rather than a missed defect.
+  QA_VERIFY_LENSES: 'config:qa:verifyLenses',
+
   // Global kill-switch for the pull-request close-out workflow. When 'true', a
   // workflow task's final worktree-cleanup step offers a "Create a pull request"
   // action (open a PR/MR on the repo's forge instead of a local merge), and the
@@ -524,6 +549,11 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.COST_DISPLAY_CURRENCY]: 'USD',
   [CONFIG_KEYS.REVIEW_REFUTE_ENABLED]: 'true',
   [CONFIG_KEYS.REVIEW_REFUTE_LENSES]: '3',
+  // QA PoC verification ON by default, matching 08c's refutation precedent: an unchecked
+  // blocking PoC costs a fix round and a developer's afternoon, and the kill-switch is here
+  // for the install that would rather pay that than the invocations.
+  [CONFIG_KEYS.QA_VERIFY_ENABLED]: 'true',
+  [CONFIG_KEYS.QA_VERIFY_LENSES]: '3',
   [CONFIG_KEYS.PR_WORKFLOW_ENABLED]: 'false',
   [CONFIG_KEYS.STEP_GUIDANCE_ENABLED]: 'false',
   // Runtime resource governor: ON by default; the numeric caps default to 0 (auto-derive

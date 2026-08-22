@@ -156,6 +156,9 @@ export default function AdminPage() {
   const [stepGuidanceEnabled, setStepGuidanceEnabled] = useState<boolean | null>(null);
   const [savingStepGuidance, setSavingStepGuidance] = useState(false);
   const [reviewRefuteLenses, setReviewRefuteLenses] = useState<number>(3);
+  const [qaVerifyLenses, setQaVerifyLenses] = useState<number>(3);
+  const [qaVerifyEnabled, setQaVerifyEnabled] = useState<boolean | null>(null);
+  const [savingQaVerify, setSavingQaVerify] = useState(false);
   const [reviewRefuteEnabled, setReviewRefuteEnabled] = useState<boolean | null>(null);
   const [savingReviewRefute, setSavingReviewRefute] = useState(false);
   const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
@@ -215,6 +218,7 @@ export default function AdminPage() {
         specViewData,
         stepGuidanceData,
         reviewRefuteData,
+        qaVerifyData,
         usageWindowData,
         usageAlertData,
         prWorkflowData,
@@ -250,6 +254,7 @@ export default function AdminPage() {
         api.get<{ mode: string }>('/admin/config/spec-view'),
         api.get<{ enabled: boolean }>('/admin/config/step-guidance'),
         api.get<{ enabled: boolean; lenses: number }>('/admin/config/review-refute'),
+        api.get<{ enabled: boolean; lenses: number }>('/admin/config/qa-verify'),
         api.get<{ enabled: boolean }>('/admin/config/usage-window'),
         api.get<{ enabled: boolean; thresholdPct: number }>('/admin/config/usage-alert'),
         api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
@@ -285,6 +290,8 @@ export default function AdminPage() {
       setStepGuidanceEnabled(stepGuidanceData.enabled);
       setReviewRefuteEnabled(reviewRefuteData.enabled);
       setReviewRefuteLenses(reviewRefuteData.lenses ?? 3);
+      setQaVerifyEnabled(qaVerifyData.enabled);
+      setQaVerifyLenses(qaVerifyData.lenses ?? 3);
       setUsageWindowEnabled(usageWindowData.enabled);
       setUsageAlertEnabled(usageAlertData.enabled);
       setUsageAlertThresholdInput(String(usageAlertData.thresholdPct));
@@ -718,6 +725,23 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update review refutation');
     } finally {
       setSavingReviewRefute(false);
+    }
+  }
+
+  async function setQaVerify(next: boolean, lenses = qaVerifyLenses) {
+    setSavingQaVerify(true);
+    try {
+      const result = await api.put<{ enabled: boolean; lenses: number }>(
+        '/admin/config/qa-verify',
+        { enabled: next, lenses },
+      );
+      setQaVerifyEnabled(result.enabled);
+      setQaVerifyLenses(result.lenses ?? lenses);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update QA PoC verification');
+    } finally {
+      setSavingQaVerify(false);
     }
   }
 
@@ -1803,6 +1827,56 @@ export default function AdminPage() {
                 3 CLI invocations per blocking finding instead of 1; they queue behind the per-task
                 agent cap rather than crowding other tasks, so the cost is elapsed time. Turn off to
                 run a single general-purpose refuter.
+              </span>
+            </span>
+          </label>
+        </Card>
+      )}
+
+      {qaVerifyEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Verify adversarial QA proofs-of-concept</CardTitle>
+            <CardDescription>
+              Default ON. A blocking adversarial-QA finding sends the change back through
+              implementation, and until this existed nothing ran its proof-of-concept &mdash; a PoC
+              that does not execute, does not do what it claims, or blames code unconnected to the
+              behaviour cost a developer an afternoon to discover by hand. Verifiers now EXECUTE the
+              PoC against the running app. A finding no verifier can reproduce is downgraded to
+              advisory and still shown at gate 1.5, never silently dismissed, so the call stays
+              yours. Takes effect on the next QA round; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={qaVerifyEnabled}
+              disabled={savingQaVerify}
+              onChange={(e) => void setQaVerify(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {qaVerifyEnabled ? 'Enabled' : 'Disabled'}
+            {savingQaVerify && <span className="text-xs text-neutral-500">saving&hellip;</span>}
+          </label>
+          <label className="mt-3 flex items-start gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={qaVerifyLenses >= 3}
+              disabled={savingQaVerify || !qaVerifyEnabled}
+              onChange={(e) => void setQaVerify(qaVerifyEnabled, e.target.checked ? 3 : 1)}
+              className="mt-0.5 h-4 w-4"
+            />
+            <span>
+              Verify each proof from three angles &mdash; it executes, the target is real, the code
+              linkage holds
+              <span className="block text-xs text-neutral-500">
+                Default ON. These are the distinct ways a PoC can look right and be wrong: it never
+                ran, it ran against something only this sandbox has, or it ran and succeeded for a
+                reason unrelated to the code blamed. A finding is downgraded only if ALL of them
+                fail to reproduce it AND each states what it observed &mdash; one silent,
+                unevidenced or killed voter keeps it blocking. Costs 3 CLI invocations per blocking
+                finding instead of 1; they queue behind the per-task agent cap, so the cost is
+                elapsed time. Turn off to run a single general-purpose verifier.
               </span>
             </span>
           </label>

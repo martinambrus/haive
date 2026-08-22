@@ -48,6 +48,9 @@ interface Phase8dOutput {
     location?: string;
     impact?: string;
     fix?: string;
+    /** 08d's PoC-verifier panel verdict; absent on runs from before it existed and on
+     *  findings that were never blocking (only those are verified). */
+    verification?: string;
   }[];
 }
 
@@ -101,14 +104,25 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
     const findings: QaFinding[] = (out.findings ?? []).map((f, i) => {
       const cat = f.category ?? 'issue';
       const loc = f.location ? ` @ ${f.location}` : '';
+      // What a machine made of the PoC, stated before the severity so it is the first
+      // thing read. A developer's scarcest input here is deciding which findings are real,
+      // and NOT REPRO is the one that used to cost an afternoon to discover by hand.
+      // Unverified findings carry no marker at all — most findings are never blocking and
+      // so are never verified, and marking those would drown the two labels that matter.
+      const verdict =
+        f.verification === 'reproduced'
+          ? '[REPRODUCED] '
+          : f.verification === 'not_reproduced'
+            ? '[NOT REPRO] '
+            : '';
       // Coerce rather than read straight through: this reads 08d's persisted jsonb,
       // which for a task started before the ladder change holds the old vocabulary.
       const severity = coerceReviewSeverity(f.severity, 'low');
       return {
         key: String(i),
         severity,
-        label: `[${severity}] ${cat}${loc}`,
-        line: `- [${severity}] ${cat}${loc}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
+        label: `${verdict}[${severity}] ${cat}${loc}`,
+        line: `- ${verdict}[${severity}] ${cat}${loc}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
       };
     });
     return {

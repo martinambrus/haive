@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { MiningRetryError } from '../../step-definition.js';
+import { CONFIG_KEYS, configService } from '@haive/shared';
+import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type {
   StepContext,
   StepDefinition,
@@ -10,6 +11,7 @@ import type {
 } from '../../step-definition.js';
 import {
   didNotCompleteIssue,
+  miningOutcome,
   shouldRerollMiningAgent,
   shouldRetryMiningTerminalFailure,
 } from '../../mining-failure.js';
@@ -18,7 +20,7 @@ import { resolveSpecView } from './_spec-artifact.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { appAuthPromptLines, type AppLoginOutcome } from './_app-auth.js';
-import { parseReviewJson } from './_agent-json.js';
+import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
   changedFilesBlock,
   collectImplementationFiles,
@@ -32,7 +34,7 @@ import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
 import { coerceReviewSeverity, isBlockingSeverity, severityRank } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
-import { recordReviewFindings, splitLocation } from './_review-findings.js';
+import { findingFingerprint, recordReviewFindings, splitLocation } from './_review-findings.js';
 
 // Phase 7 — Adversarial QA (legacy phase7-adversarial-qa.md). Opt-in per task
 // (tasks.adversarial_qa_level: poc|standard|enterprise). After code review and
@@ -125,6 +127,14 @@ interface AdversarialFinding {
   poc?: string;
   impact?: string;
   fix?: string;
+  /** What the verifier panel made of this finding's PoC. Only blocking findings are
+   *  verified, so everything else stays undefined and reads as unverified.
+   *
+   *  `not_reproduced` DOWNGRADES: the finding stops blocking but is still shown at gate
+   *  1.5, labelled. It is deliberately not a dismissal — the developer keeps the call,
+   *  which is why the recorded row's disposition stays `open` rather than becoming
+   *  `dismissed_refuted`. */
+  verification?: 'reproduced' | 'not_reproduced' | 'unverified';
 }
 
 interface AdversarialApply {
@@ -170,6 +180,219 @@ export function parseAdversaryOutput(raw: unknown): AdversarialFinding[] | null 
     if (!parsed.success) return null;
     return parsed.data.findings;
   });
+}
+
+/* --------------------------------------------------------------------------- */
+/* PoC verification. A blocking adversarial finding sends the whole change back   */
+/* to be reimplemented, and until this existed nothing checked one: 08d's header  */
+/* says its findings "are reviewed by the human at gate 1.5", so a PoC that does  */
+/* not run, does not do what it claims, or names code unconnected to the          */
+/* behaviour cost the developer an afternoon to discover. 08c has refuted its     */
+/* blocking findings for a while; this is the same idea on a running app.         */
+/*                                                                               */
+/* REPRODUCER, not 08c's refuter. 08c's claims are static and refutable by        */
+/* reading, which is why its bar is a cited file:line. These are runtime claims,  */
+/* so the verifier EXECUTES the PoC and reports what it saw. Reproduction         */
+/* confirms; non-reproduction refutes.                                            */
+/* --------------------------------------------------------------------------- */
+
+const QA_VERIFY_PREFIX = 'qaverify-';
+
+/** Blocking findings verified per round. Same reason 08c caps its refuters: a round that
+ *  raises twenty blocking findings must not spend sixty invocations proving them. */
+const MAX_VERIFIED = 8;
+
+/** The angles one PoC is verified from. Each lens changes where a verifier spends its
+ *  effort; none of them changes the bar for a downgrade, which is the same for all three.
+ *
+ *  Three rather than one because a single generic verifier finds the first reason a PoC
+ *  looks fine and stops — and the three map the distinct ways a PoC can be wrong while
+ *  still appearing to work: it never ran, it ran against something that only exists in
+ *  this sandbox, or it ran and succeeded for a reason unrelated to the code blamed. */
+const VERIFY_LENSES = [
+  {
+    id: 'execute',
+    title: 'executes',
+    lines: [
+      'YOUR LENS: EXECUTION. Run the PoC exactly as written. Does it run at all, and does it',
+      'produce the observable the finding claims — the status code, the response body, the',
+      'state change, the error? A PoC that 404s, is refused, needs a step the finding never',
+      'mentions, or produces something milder than claimed has not demonstrated the finding.',
+    ],
+  },
+  {
+    id: 'target',
+    title: 'target real',
+    lines: [
+      'YOUR LENS: TARGET. Is the thing being broken real, and would it exist in a DEFAULT',
+      'installation? A file this sandbox happens to have, a half-finished installer state, a',
+      'debug setting this environment turned on, or a fixture another agent created is not a',
+      'property of the project. Check how the target got there before accepting it.',
+    ],
+  },
+  {
+    id: 'linkage',
+    title: 'code linkage',
+    lines: [
+      'YOUR LENS: LINKAGE. The finding blames specific code. Read it, and decide whether it is',
+      'what actually produces the behaviour you observed. A PoC can succeed for an unrelated',
+      'reason — a different handler, a web-server rule, a redirect — while the cited code is',
+      'never reached. If the citation does not explain the observation, say so.',
+    ],
+  },
+] as const;
+
+type VerifyLens = (typeof VERIFY_LENSES)[number];
+
+/** Lenses one PoC is verified through. Below the full panel this runs ONE generic verifier
+ *  rather than a subset, for 08c's reason: a two-lens panel cannot be unanimous about what
+ *  the third would have caught, which is a worse bargain than one honest generalist. */
+function verifyLensesFor(lensCount: number): (VerifyLens | null)[] {
+  return lensCount >= VERIFY_LENSES.length ? [...VERIFY_LENSES] : [null];
+}
+
+/** Deterministic, so the id is the same on the apply() that dispatches the wave and the
+ *  apply() that reads it back. Keyed on the finding, suffixed by lens — the same shape as
+ *  08c's refuters, and the reason the LENS rather than this id is the configurable seat. */
+function verifierAgentId(fingerprint: string, lens: VerifyLens | null): string {
+  return `${QA_VERIFY_PREFIX}${fingerprint.slice(0, 16)}${lens ? `-${lens.id}` : ''}`;
+}
+
+/** The reviewer-agnostic key a finding is verified under. findingFingerprint with an empty
+ *  reviewer id — the same call 08c uses to collapse one bug reported by two reviewers. */
+function verifyKey(f: AdversarialFinding): string {
+  const { path } = splitLocation(f.location);
+  return findingFingerprint('', path, f.impact ?? f.category ?? '');
+}
+
+const verifySchema = z.object({
+  reproduced: z.boolean(),
+  observation: z.string().optional(),
+});
+
+/** Does the verifier's prose actually report something it SAW?
+ *
+ *  The runtime analogue of 08c's `hasFileLineEvidence`, and structural in exactly the same
+ *  way: it proves the verifier wrote down a concrete artefact, not that the artefact is
+ *  true. A bare "I could not reproduce this" is what it exists to reject, because that
+ *  sentence is free to write and would silently downgrade a real defect.
+ *
+ *  A status code, a URL, or a quoted fragment is what a real observation carries; the
+ *  length floor stops a lone stray number passing as one. */
+const OBSERVATION_RE = /https?:\/\/|`[^`]+`|\b\d{3}\b/;
+const MIN_OBSERVATION_CHARS = 40;
+
+export function hasObservation(text: unknown): boolean {
+  return (
+    typeof text === 'string' &&
+    text.trim().length >= MIN_OBSERVATION_CHARS &&
+    OBSERVATION_RE.test(text)
+  );
+}
+
+/** One verifier's verdict, or null when it did not give a usable one. Null covers the
+ *  unparseable, the killed, and — deliberately — the negative with nothing observed. */
+export function verifyVerdict(raw: unknown): 'reproduced' | 'not_reproduced' | null {
+  // parseAgentJson with our OWN key gate, not parseReviewJson: that one admits only
+  // candidates carrying `verdict` or `findings` — a reviewer's report shape — and a
+  // verifier emits neither, so it would reject every valid verdict. Same reason 08c's
+  // isRefuted gates on `refuted` itself.
+  const parsed = parseAgentJson(raw, (candidate) => {
+    if (!hasAnyKey(candidate, ['reproduced'])) return null;
+    const r = verifySchema.safeParse(candidate);
+    return r.success ? r.data : null;
+  });
+  if (!parsed) return null;
+  if (parsed.reproduced) return 'reproduced';
+  return hasObservation(parsed.observation) ? 'not_reproduced' : null;
+}
+
+/** The panel's verdict for one finding.
+ *
+ *  ANY lens reproducing it settles it — one successful reproduction is a demonstration,
+ *  and the other lenses failing to repeat it does not undo that. A downgrade needs EVERY
+ *  lens to report non-reproduction WITH an observation; one silent, unreadable, killed or
+ *  unevidenced voter leaves the finding standing.
+ *
+ *  That is 08c's asymmetry applied here: gate 1.5 defaults to accepting what it is shown,
+ *  so a wrongly-downgraded RCE is worse than a blocking finding the developer waves off. */
+export function verificationForFinding(
+  results: AgentMiningResult[],
+  fingerprint: string,
+  lenses: (VerifyLens | null)[],
+): 'reproduced' | 'not_reproduced' | 'unverified' {
+  const verdicts = lenses.map((lens) => {
+    const outcome = miningOutcome(results, verifierAgentId(fingerprint, lens));
+    return outcome.kind === 'done' ? verifyVerdict(outcome.raw) : null;
+  });
+  if (verdicts.some((v) => v === 'reproduced')) return 'reproduced';
+  if (verdicts.length > 0 && verdicts.every((v) => v === 'not_reproduced')) return 'not_reproduced';
+  return 'unverified';
+}
+
+/** Human terminal label for a verifier: name the finding it is checking and the lens, so a
+ *  fan-out of N verifications does not render as N identical terminals. */
+export function verifierTitle(
+  f: Pick<AdversarialFinding, 'severity' | 'location' | 'impact' | 'category'>,
+  index: number,
+  total: number,
+  lens?: VerifyLens | null,
+): string {
+  const what = (f.impact ?? f.category ?? 'finding').replace(/\s+/g, ' ').trim().slice(0, 60);
+  const where = f.location ? ` @ ${f.location.slice(0, 40)}` : '';
+  const which = lens ? ` [${lens.title}]` : '';
+  return `Verify ${index + 1}/${total}${which}: [${f.severity}] ${what}${where}`;
+}
+
+function buildVerifyPrompt(
+  d: AdversarialDetect,
+  f: AdversarialFinding,
+  lens: VerifyLens | null,
+): string {
+  return [
+    'You are a POC VERIFIER. An adversarial QA agent reported the finding below against a',
+    'change, and acting on it will send the whole change back to be reimplemented. Your job',
+    'is to RUN its proof-of-concept and report what actually happens — not to agree with it,',
+    'not to fix anything, and not to go looking for other problems.',
+    '',
+    'Reproduced means YOU observed the claimed effect yourself, by executing the PoC as',
+    'written. Not that the code looks like it would do that, and not that a similar thing',
+    'happened. If the PoC needs a step the finding never mentions, say so and treat it as',
+    'not reproduced — a proof a developer cannot follow is not a proof.',
+    '',
+    ...(lens ? lens.lines : []),
+    '',
+    ...SAFETY,
+    '',
+    ...REPO_IS_DATA_LINES,
+    '',
+    '=== The finding you are verifying ===',
+    `Severity as filed: ${f.severity}`,
+    `Location: ${f.location ?? '(none given)'}`,
+    `Category: ${f.category ?? '(none given)'}`,
+    `Impact claimed: ${f.impact ?? '(none given)'}`,
+    `Proof of concept: ${f.poc ?? '(none given — that alone is grounds for not reproduced)'}`,
+    '',
+    d.appUrl ? `Running app URL: ${d.appUrl}` : 'No running app URL was recorded for this task.',
+    ...(d.appUrl
+      ? appAuthPromptLines(d.appLogin ?? { attempted: false, ok: false, reason: '' })
+      : []),
+    '',
+    'Do NOT edit code and do NOT run git.',
+    ...SEARCH_LADDER,
+    '',
+    'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this',
+    'shape:',
+    '{ "reproduced": true|false, "observation": "<what you actually saw>" }',
+    '',
+    '`observation` is REQUIRED when you report reproduced:false, and it must record what you',
+    'OBSERVED — the request you issued and the status and body you got back, or the command',
+    'and its output. "Could not reproduce" on its own is rejected and your verdict is',
+    'discarded: it is free to write, and discarding a real defect on it is the one outcome',
+    'this check exists to prevent. Quote the concrete artefact.',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 /** Roster size per level — exported for the unit test. */
@@ -348,7 +571,12 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
   },
 
   async apply(ctx, args): Promise<AdversarialApply> {
-    const results: AgentMiningResult[] = args.agentMiningResults ?? [];
+    const allResults: AgentMiningResult[] = args.agentMiningResults ?? [];
+    // On the SECOND pass this batch carries the verifier wave as well as the adversaries.
+    // The loop below parses every result as adversary output, so an unsplit batch would
+    // read each verifier as an adversary that emitted garbage and raise a qa-gap finding
+    // for it — inventing holes in the attack surface out of the wave that was checking it.
+    const results = allResults.filter((r) => !r.agentId.startsWith(QA_VERIFY_PREFIX));
     const detected = args.detected;
 
     // Aggregate findings across agents; dedupe by location keeping highest severity.
@@ -420,10 +648,70 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     );
     const critical = findings.filter((f) => f.severity === 'critical').length;
     const high = findings.filter((f) => f.severity === 'high').length;
-    const blocking = findings.some((f) => isBlockingSeverity(f.severity));
     // Dispatched, not succeeded — see AdversarialApply.ran.
     const ran = results.length > 0;
     const qaIncomplete = unreadable.length > 0;
+
+    // PoC verification. Blocking findings only: those are the ones that send the change
+    // back to be reimplemented, so those are the ones worth spending invocations proving.
+    const blockingFindings = findings.filter((f) => isBlockingSeverity(f.severity));
+    const waveRan = allResults.some((r) => r.agentId.startsWith(QA_VERIFY_PREFIX));
+
+    if (waveRan) {
+      // Lens count is read on BOTH passes — the one that dispatches and the one that reads
+      // back — so the agent ids cannot disagree. An admin who changes it mid-step leaves the
+      // panel short a voter, which fails closed (a missing verdict keeps the finding).
+      const lenses = verifyLensesFor(
+        await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length),
+      );
+      for (const f of blockingFindings) {
+        f.verification = verificationForFinding(allResults, verifyKey(f), lenses);
+      }
+      const downgraded = blockingFindings.filter((f) => f.verification === 'not_reproduced');
+      if (downgraded.length > 0) {
+        ctx.logger.info(
+          { blocking: blockingFindings.length, downgraded: downgraded.length },
+          'adversarial QA: blocking findings whose PoC no verifier could reproduce (shown as advisory, not dismissed)',
+        );
+      }
+    } else if (args.miningWaveExhausted !== true && blockingFindings.length > 0) {
+      if (await configService.getBoolean(CONFIG_KEYS.QA_VERIFY_ENABLED, true)) {
+        const lenses = verifyLensesFor(
+          await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length),
+        );
+        // Worst first (severityRank ascending in severity), so a capped wave spends its
+        // invocations on the findings that cost most if they are wrong.
+        const wave = [...blockingFindings]
+          .sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
+          .slice(0, MAX_VERIFIED);
+        if (wave.length < blockingFindings.length) {
+          ctx.logger.warn(
+            { total: blockingFindings.length, verifying: wave.length },
+            'more blocking findings than verifiers; the overflow goes to the gate unverified',
+          );
+        }
+        ctx.logger.info(
+          { count: wave.length, lenses: lenses.length },
+          'dispatching PoC verifiers for blocking adversarial findings',
+        );
+        throw new MiningWaveError(
+          wave.flatMap((f, i) =>
+            lenses.map((lens) => ({
+              agentId: verifierAgentId(verifyKey(f), lens),
+              agentTitle: verifierTitle(f, i, wave.length, lens),
+              prompt: buildVerifyPrompt(detected, f, lens),
+              // The agent id is per-FINDING and unbounded; the LENS is the stable seat.
+              roleKey: lens ? `qa-verify:${lens.id}` : 'qa-verify',
+            })),
+          ),
+        );
+      }
+    }
+
+    // A finding whose PoC no verifier could reproduce stops blocking. It is NOT removed:
+    // it stays in `findings` and reaches gate 1.5 labelled, because the developer keeps the
+    // call. Anything unverified still blocks — doubt keeps the finding.
+    const blocking = blockingFindings.some((f) => f.verification !== 'not_reproduced');
 
     // Recorded PRE-dedupe, one row per adversary that actually reported the finding, so
     // `reviewer_id` names an adversary the way the column's own contract says it should
@@ -462,8 +750,15 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
             fix: f.fix,
             // Honest to the column's meaning: "contributed to the step's blocking
             // decision". A finding the merge dropped contributed nothing, however severe
-            // it reads on its own.
-            blocking: survivors.has(f) && isBlockingSeverity(f.severity),
+            // it reads on its own — and neither did one the verifier panel downgraded,
+            // which is why this mirrors the `blocking` computed above rather than
+            // re-deriving from severity.
+            blocking:
+              survivors.has(f) &&
+              isBlockingSeverity(f.severity) &&
+              f.verification !== 'not_reproduced',
+            // `raw` is the finding object, so it carries `verification` for free — the
+            // observation itself lives in the verifier's own invocation output.
             raw: f,
           };
         }),

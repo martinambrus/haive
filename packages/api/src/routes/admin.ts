@@ -886,6 +886,43 @@ adminRoutes.put('/config/review-refute', async (c) => {
   });
 });
 
+const QA_VERIFY_PANEL_LENSES = 3;
+const qaVerifySchema = z.object({
+  enabled: z.boolean(),
+  lenses: z.union([z.literal(1), z.literal(QA_VERIFY_PANEL_LENSES)]).optional(),
+});
+
+// PoC verification over blocking adversarial-QA findings (default ON). A blocking finding
+// sends the change back to be reimplemented, and until this existed nothing ran its
+// proof-of-concept — the developer discovered a fabricated one by trying it. Verifiers
+// EXECUTE the PoC against the running app; a finding no verifier can reproduce is
+// downgraded to advisory and still shown at gate 1.5, never silently dismissed. Kept
+// separate from review-refute so disabling one cannot disable the other. Read per 08d
+// apply, so a flip applies to the next QA round rather than a running one.
+adminRoutes.get('/config/qa-verify', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.QA_VERIFY_ENABLED, true);
+  const lenses = await configService.getNumber(
+    CONFIG_KEYS.QA_VERIFY_LENSES,
+    QA_VERIFY_PANEL_LENSES,
+  );
+  return c.json({ enabled, lenses: lenses >= QA_VERIFY_PANEL_LENSES ? QA_VERIFY_PANEL_LENSES : 1 });
+});
+
+adminRoutes.put('/config/qa-verify', async (c) => {
+  const { enabled, lenses } = qaVerifySchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.QA_VERIFY_ENABLED, enabled ? 'true' : 'false');
+  if (lenses !== undefined) {
+    await configService.set(CONFIG_KEYS.QA_VERIFY_LENSES, String(lenses));
+  }
+  log.info({ enabled, lenses }, 'global qa-verify switch updated');
+  return c.json({
+    enabled,
+    lenses:
+      lenses ??
+      (await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, QA_VERIFY_PANEL_LENSES)),
+  });
+});
+
 const browserAccessSchema = z.object({ enabled: z.boolean() });
 
 // Global direct-browser-access kill-switch. The worker reads this at runner START
