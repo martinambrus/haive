@@ -7,6 +7,7 @@ import rehypeHighlight from 'rehype-highlight';
 import type { Element, ElementContent } from 'hast';
 import { cn } from '@/lib/cn';
 import { segmentMarkdownBody, type Segment } from './markdown-segments';
+import { remarkSoftBreaks } from './remark-soft-breaks';
 import { QuizBlock } from './quiz-block';
 import { MermaidBlock } from './mermaid-block';
 import { BeforeAfterBlock, BeforeAfterPanel } from './before-after-block';
@@ -18,8 +19,15 @@ import { downloadMarkdownHtml } from './export-html';
  *  `[text](url)`. Stays conservative on bare "- " lists and single `*`/`_` emphasis
  *  (which collide with plain text — bullet-looking prose, arithmetic, snake_case
  *  names) to avoid false positives; paired backticks / `**bold**` / a full link with
- *  parens are specific enough to be safe signals. */
-export function looksLikeMarkdown(text: string): boolean {
+ *  parens are specific enough to be safe signals.
+ *
+ *  This decides the LINE-BREAK POLICY, nothing else. It used to gate whether a body
+ *  was rendered as markdown at all, which made an identical block of prose jump
+ *  between monospace-12px and the `.haive-md` sans-14px depending on whether it
+ *  happened to contain a backtick. Every body now renders through this component;
+ *  a false answer only means the soft-break plugin runs, so plain text keeps its
+ *  newlines while hard-wrapped markdown prose still reflows to the column width. */
+function looksLikeMarkdown(text: string): boolean {
   return (
     /^\s*#{1,6}\s+\S/m.test(text) ||
     /^\s*```/m.test(text) ||
@@ -176,6 +184,10 @@ function MarkdownViewImpl({
     () => enhanced && hasCollapsibleContent(segments),
     [segments, enhanced],
   );
+  const remarkPlugins = useMemo(
+    () => (looksLikeMarkdown(body) ? [remarkGfm] : [remarkGfm, remarkSoftBreaks]),
+    [body],
+  );
 
   const setAll = (open: boolean) => {
     rootRef.current?.querySelectorAll('details').forEach((d) => {
@@ -223,7 +235,7 @@ function MarkdownViewImpl({
         return (
           <ReactMarkdown
             key={i}
-            remarkPlugins={[remarkGfm]}
+            remarkPlugins={remarkPlugins}
             rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
             components={MD_COMPONENTS}
           >

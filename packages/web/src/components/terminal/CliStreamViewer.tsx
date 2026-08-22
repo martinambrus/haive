@@ -10,7 +10,7 @@ import { api, apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
 import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
-import { MarkdownView, looksLikeMarkdown } from '@/components/markdown/markdown-view';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 type TerminalTab = 'clean' | 'raw';
@@ -694,18 +694,16 @@ const CleanProse = memo(function CleanProse({ content }: { content: string }) {
   );
 });
 
-// One non-think prose segment. Markdown when it looks like it (react-markdown v10, no
-// rehype-raw — escapes embedded HTML, strips javascript: URLs, safe for untrusted CLI
-// output), otherwise pre-wrap. Raw text is preserved; trim is only the skip test so a
-// no-think run renders identically to before.
+// One non-think prose segment. Always markdown (react-markdown v10, no rehype-raw —
+// escapes embedded HTML, strips javascript: URLs, safe for untrusted CLI output), so a
+// run reads the same whether or not the model happened to emit a backtick; MarkdownView
+// applies hard line breaks to bodies that are not markdown, so plain output keeps its
+// lines. The enclosing CleanProse owns the padding. Raw text is preserved; trim is only
+// the skip test.
 function NormalProse({ text }: { text: string }) {
   if (!text.trim()) return null;
-  return looksLikeMarkdown(text) ? (
-    <MarkdownView body={text} enhanced={false} className="max-h-none overflow-visible" />
-  ) : (
-    <div className="whitespace-pre-wrap break-words font-mono text-[13px] leading-relaxed text-neutral-200">
-      {text}
-    </div>
+  return (
+    <MarkdownView body={text} enhanced={false} className="max-h-none overflow-visible px-0 py-0" />
   );
 }
 

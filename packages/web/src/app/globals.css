@@ -58,6 +58,14 @@ body {
 .haive-md th, .haive-md td { border: 1px solid rgb(38 38 38); padding: 0.25rem 0.5rem; }
 .haive-md th { background: rgb(23 23 23); font-weight: 600; }
 
+/* Colour-neutral variant: body text inherits the wrapper's colour instead of the
+ * default markdown grey. Used by note fields, whose amber/muted tone is the point
+ * of the note. Doubled class so it outranks the plain `.haive-md p` rule above. */
+.haive-md.haive-md-inherit,
+.haive-md.haive-md-inherit p,
+.haive-md.haive-md-inherit li,
+.haive-md.haive-md-inherit strong { color: inherit; }
+
 /* Markdown-view enhancements: animated disclosures, collapsed code blocks,
  * mermaid sizing. Scoped under .haive-md / .haive-mermaid so the form-level
  * <details> (infoSections, accordions) outside markdown bodies are untouched. */

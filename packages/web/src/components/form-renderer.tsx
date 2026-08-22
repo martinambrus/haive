@@ -7,7 +7,7 @@ import { Button, FormError, Input, Label } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { BundleComposer, type BundleComposerEntry } from '@/components/bundle-composer';
 import { GlobalKbStatusPanel } from '@/components/global-kb-status-panel';
-import { MarkdownView, looksLikeMarkdown } from '@/components/markdown/markdown-view';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PersistedDetails } from '@/components/persisted-details';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
@@ -63,36 +63,27 @@ export function InfoSections({
   if (!sections || sections.length === 0) return null;
   return (
     <div className="flex flex-col gap-2">
-      {sections.map((section, i) => {
-        const isMd = looksLikeMarkdown(section.body);
-        return (
-          <PersistedDetails
-            key={`${section.title}-${i}`}
-            persistKey={persistPrefix ? `${persistPrefix}:info:${i}` : null}
-            defaultOpen={section.defaultOpen ?? false}
-            className="rounded-md border border-neutral-800 bg-neutral-950/60"
-            summaryClassName="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900"
-            summary={
-              <>
-                <span className="font-medium">{section.title}</span>
-                {section.preview && (
-                  <span className="ml-2 text-xs text-neutral-400">{section.preview}</span>
-                )}
-              </>
-            }
-          >
-            {isMd ? (
-              <div className="border-t border-neutral-800">
-                <MarkdownView body={section.body} enhanced title={section.title} toolbar />
-              </div>
-            ) : (
-              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800 px-3 py-2 text-xs text-neutral-300">
-                {section.body}
-              </pre>
-            )}
-          </PersistedDetails>
-        );
-      })}
+      {sections.map((section, i) => (
+        <PersistedDetails
+          key={`${section.title}-${i}`}
+          persistKey={persistPrefix ? `${persistPrefix}:info:${i}` : null}
+          defaultOpen={section.defaultOpen ?? false}
+          className="rounded-md border border-neutral-800 bg-neutral-950/60"
+          summaryClassName="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900"
+          summary={
+            <>
+              <span className="font-medium">{section.title}</span>
+              {section.preview && (
+                <span className="ml-2 text-xs text-neutral-400">{section.preview}</span>
+              )}
+            </>
+          }
+        >
+          <div className="border-t border-neutral-800">
+            <MarkdownView body={section.body} enhanced title={section.title} toolbar />
+          </div>
+        </PersistedDetails>
+      ))}
     </div>
   );
 }
@@ -167,7 +158,6 @@ export function StatusSummary({
             </div>
           );
         }
-        const isMd = looksLikeMarkdown(item.body);
         return (
           <PersistedDetails
             key={`${item.label}-${i}`}
@@ -177,15 +167,9 @@ export function StatusSummary({
             summaryClassName="cursor-pointer select-none list-none hover:bg-neutral-900 [&::-webkit-details-marker]:hidden"
             summary={<StatusRowHead item={item} expandable />}
           >
-            {isMd ? (
-              <div className="border-t border-neutral-800">
-                <MarkdownView body={item.body} enhanced title={item.label} toolbar />
-              </div>
-            ) : (
-              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800 px-3 py-2 text-xs text-neutral-300">
-                {item.body}
-              </pre>
-            )}
+            <div className="border-t border-neutral-800">
+              <MarkdownView body={item.body} enhanced title={item.label} toolbar />
+            </div>
           </PersistedDetails>
         );
       })}
@@ -518,6 +502,10 @@ function AccordionField({ field, values, onChange, disabled }: AccordionFieldPro
   );
 }
 
+/** Notes are short inline blocks: the surrounding wrapper owns the padding and the
+ *  colour, so MarkdownView contributes typography only. */
+const NOTE_MD_CLASS = 'haive-md-inherit max-h-none overflow-visible px-0 py-0';
+
 interface FieldRowProps {
   field: LeafFormField;
   value: unknown;
@@ -531,20 +519,14 @@ function FieldRow({ field, value, onChange, disabled, repositoryId }: FieldRowPr
     if (field.variant === 'warning') {
       return (
         <div className="rounded-md border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
-          {looksLikeMarkdown(field.body) ? (
-            <MarkdownView body={field.body} enhanced />
-          ) : (
-            <p className="whitespace-pre-line">{field.body}</p>
-          )}
+          <MarkdownView body={field.body} enhanced className={NOTE_MD_CLASS} />
         </div>
       );
     }
-    return looksLikeMarkdown(field.body) ? (
+    return (
       <div className="text-sm text-neutral-400">
-        <MarkdownView body={field.body} enhanced />
+        <MarkdownView body={field.body} enhanced className={NOTE_MD_CLASS} />
       </div>
-    ) : (
-      <p className="whitespace-pre-line text-sm text-neutral-400">{field.body}</p>
     );
   }
   if (field.type === 'checkbox') {
