@@ -794,55 +794,23 @@ const RUNTIME_PARK_POLL_MS = 15_000;
  *  which is why it is not longer still. */
 const PAUSE_POLL_MS = 30_000;
 
-/** Deterministic job id for a PARK POLL TICK, so re-parking the same step does not stack
- *  a second timer on it.
- *
- *  A park re-drives itself on a delayed advance. Nothing deduplicated those, so a step that
- *  parked twice (a pause tick plus the hand-off, or two pause ticks) ended up with two live
- *  jobs for one (step, round, epoch) — and when the hold lifted BOTH fired. MEASURED on task
- *  153a3437: 08-phase-5-verify ran its apply() twice, 0.63s apart, and ran its verify
- *  commands twice with it.
- *
- *  The epoch is part of the key on purpose: a retry/reset bumps it, so the new tick gets a
- *  fresh id instead of colliding with a stale one that the epoch guard would drop anyway. */
-function parkTickJobId(taskId: string, stepId: string, round: number, epoch?: number): string {
-  // NO COLONS: BullMQ rejects a custom id containing ':' (it is their Redis key
-  // separator) with `Custom Id cannot contain :`. Learned the hard way — a colon-
-  // separated key failed a live task the moment its first park tick fired.
-  return `park__${taskId}__${stepId}__${round}__${epoch ?? 'noepoch'}`;
-}
-
 async function enqueueAdvance(
   taskId: string,
   userId: string,
   stepId: string,
   round = 0,
   epoch?: number,
-  opts?: { delayMs?: number; parkTick?: boolean },
+  opts?: { delayMs?: number },
 ): Promise<void> {
   const queue = getTaskQueue();
-  // A park tick is a POLL — collapsing two of them loses nothing, because whichever survives
-  // re-evaluates the same condition and re-arms. Deliberately NOT applied to ordinary
-  // hand-offs: those must always enqueue, and silently dropping one would strand the chain.
-  //
-  // removeOnComplete/Fail:true is load-bearing here, not tidiness. With the default numeric
-  // retention the id would linger in the completed set and BLOCK the next tick from being
-  // added at all — the park loop would stop re-arming and the task would hang on a hold that
-  // never re-checks.
-  const dedupe = opts?.parkTick
-    ? {
-        jobId: parkTickJobId(taskId, stepId, round, epoch),
-        removeOnComplete: true,
-        removeOnFail: true,
-      }
-    : { removeOnComplete: 100, removeOnFail: 100 };
   await queue.add(
     TASK_JOB_NAMES.ADVANCE_STEP,
     { taskId, userId, stepId, round, epoch },
     {
       attempts: 3,
       backoff: { type: 'exponential', delay: 5000 },
-      ...dedupe,
+      removeOnComplete: 100,
+      removeOnFail: 100,
       ...(opts?.delayMs ? { delay: opts.delayMs } : {}),
     },
   );
@@ -1902,7 +1870,6 @@ async function handleAdvanceStep(
     // BullMQ jobs survive a worker restart, so a hold outlives a redeploy.
     await enqueueAdvance(ctx.taskId, ctx.userId, payload.stepId, round, ctx.orchestrationEpoch, {
       delayMs: PAUSE_POLL_MS,
-      parkTick: true,
     });
     logger.info(
       { taskId: ctx.taskId, stepId: payload.stepId, round, scope: pause },
@@ -2049,7 +2016,6 @@ async function handleAdvanceStep(
       await foldOtherTaskParks(db, ctx.taskId, row.id);
       await enqueueAdvance(ctx.taskId, ctx.userId, payload.stepId, round, ctx.orchestrationEpoch, {
         delayMs: RUNTIME_PARK_POLL_MS,
-        parkTick: true,
       });
       logger.info(
         {
