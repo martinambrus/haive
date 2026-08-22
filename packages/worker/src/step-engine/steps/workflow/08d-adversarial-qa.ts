@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -205,14 +206,15 @@ export function parseAdversaryOutput(raw: unknown): AdversarialFinding[] | null 
 
 const QA_VERIFY_PREFIX = 'qaverify-';
 
-/** Blocking findings verified per round. Same reason 08c caps its refuters: a round that
- *  raises twenty blocking findings must not spend sixty invocations proving them. */
+/** Blocking root-cause GROUPS verified per round — not findings; one panel now answers for
+ *  every finding sharing a cause. Same reason 08c caps its refuters: a round that raises
+ *  twenty blocking findings must not spend sixty invocations proving them. */
 const MAX_VERIFIED = 8;
 
-/** Non-blocking findings verified per round. Higher than MAX_VERIFIED because each costs ONE
- *  invocation rather than a panel, and because volume is exactly the problem here: a round
- *  that raised 26 findings, none of them blocking, verified nothing at all and handed all 26
- *  to a human to triage by hand. */
+/** Non-blocking root-cause GROUPS verified per round. Higher than MAX_VERIFIED because each
+ *  costs ONE invocation rather than a panel, and because volume is exactly the problem here: a
+ *  round that raised 26 findings, none of them blocking, verified nothing at all and handed all
+ *  26 to a human to triage by hand. */
 const MAX_VERIFIED_ADVISORY = 20;
 
 /** The angles one PoC is verified from. Each lens changes where a verifier spends its
@@ -265,10 +267,16 @@ function verifyLensesFor(lensCount: number): (VerifyLens | null)[] {
 }
 
 /** Deterministic, so the id is the same on the apply() that dispatches the wave and the
- *  apply() that reads it back. Keyed on the finding, suffixed by lens — the same shape as
- *  08c's refuters, and the reason the LENS rather than this id is the configurable seat. */
-function verifierAgentId(fingerprint: string, lens: VerifyLens | null): string {
-  return `${QA_VERIFY_PREFIX}${fingerprint.slice(0, 16)}${lens ? `-${lens.id}` : ''}`;
+ *  apply() that reads it back. Keyed on the root-cause GROUP, suffixed by lens — the same
+ *  shape as 08c's refuters, and the reason the LENS rather than this id is the configurable
+ *  seat.
+ *
+ *  Hashed rather than truncated: a group key is a path, and two paths sharing their first 16
+ *  characters (`installer/actions_step_4.php` and `installer/actions_step_7.php` share 22)
+ *  would collide onto one agent id and silently answer for each other's findings. */
+export function verifierAgentId(groupKey: string, lens: VerifyLens | null): string {
+  const hash = createHash('sha256').update(groupKey).digest('hex').slice(0, 16);
+  return `${QA_VERIFY_PREFIX}${hash}${lens ? `-${lens.id}` : ''}`;
 }
 
 /** Is this finding's proof one that can only be run against a live endpoint?
@@ -291,11 +299,51 @@ export function isRuntimeOnlyFinding(f: Pick<AdversarialFinding, 'location'>): b
   }
 }
 
-/** The reviewer-agnostic key a finding is verified under. findingFingerprint with an empty
- *  reviewer id — the same call 08c uses to collapse one bug reported by two reviewers. */
-function verifyKey(f: AdversarialFinding): string {
+/** A file-like token: `functions.php`, `installer/rs2.php`, and — the case a naive pattern
+ *  misses — a DOTFILE such as `.htaccess`, which has no word character before the dot.
+ *  Deliberately not `FILE_LINE_EVIDENCE_RE` from _review-findings.ts: that one requires a
+ *  trailing `:line`, and most of these locations do not carry one.
+ *
+ *  The extension repeats so a double one is taken whole: stopping at the first `\b` would
+ *  read `a.test.ts` as `a.test` and put it in the same group as `a.test.js`. */
+const FILE_TOKEN_RE = /(?:[\w/-]+)?(?:\.[A-Za-z][A-Za-z0-9]{0,11})+\b/g;
+
+/** The ROOT CAUSE a finding is verified under — the unit of one verifier panel.
+ *
+ *  Measured on the first production run: of 10 blocking findings, 6 named
+ *  `installer/contents_step_7.php` and 2 named `installer/actions_step_4.php`, from 5 different
+ *  adversaries, and every disproof came back with the same observation because they share a
+ *  precondition rather than a line. 18 of 24 invocations re-probed one installer flow.
+ *
+ *  `location` is not a path. Adversaries write prose into it and splitLocation keeps whatever it
+ *  cannot parse, so the real values look like `installer/contents_step_7.php:121 and
+ *  installer/actions_step_7.php` or `.htaccess:16 vs installer/contents_step_2.php`. Grouping on
+ *  the raw string groups nothing, which is why this keys on the FIRST file token instead.
+ *
+ *  A URL keys on origin + pathname so query strings do not fragment it, and — the reason the
+ *  token scan is not simply run over everything — so a host like `ddev.site` is never mistaken
+ *  for a file.
+ *
+ *  No recognisable token falls back to the finding's own fingerprint, i.e. a group of one.
+ *  Fragmenting is the safe failure here: it costs invocations. Over-grouping would put two
+ *  unrelated defects in front of one panel, which costs attention inside a prompt. */
+export function rootCauseKey(f: AdversarialFinding): string {
+  const raw = (f.location ?? '').trim();
+  // isRuntimeOnlyFinding, not a local URL test: sharing the predicate is what guarantees a
+  // group is uniformly runtime-only or uniformly not, which the dispatch below relies on to
+  // drop whole groups rather than members.
+  if (isRuntimeOnlyFinding(f)) {
+    try {
+      const u = new URL(raw);
+      return `url:${u.origin}${u.pathname}`.toLowerCase();
+    } catch {
+      /* fall through to the token scan */
+    }
+  }
+  const token = raw.match(FILE_TOKEN_RE)?.[0];
+  if (token) return `file:${token.toLowerCase()}`;
   const { path } = splitLocation(f.location);
-  return findingFingerprint('', path, f.impact ?? f.category ?? '');
+  return `fp:${findingFingerprint('', path, f.impact ?? f.category ?? '')}`;
 }
 
 /** The verifier's report. `reproduced` is deliberately NOT a plain boolean.
@@ -310,9 +358,17 @@ function verifyKey(f: AdversarialFinding): string {
  *  The fix is structural rather than a pattern that rejects unreachability prose: the wording
  *  of a CLI's connection error is an ephemeral value and would break the day it is reworded,
  *  silently and in the unsafe direction. */
-const verifySchema = z.object({
+const verdictSchema = z.object({
+  /** 1-based position in the numbered list the prompt presented. */
+  finding: z.number().int().positive(),
   reproduced: z.union([z.boolean(), z.literal('could_not_test')]),
   observation: z.string().optional(),
+});
+
+/** One panel now answers for EVERY finding sharing a root cause, so the report is a LIST.
+ *  A verdict names the finding by its position in the numbered list the prompt gave it. */
+const verifySchema = z.object({
+  verdicts: z.array(verdictSchema).default([]),
 });
 
 /** Does the verifier's prose actually report something it SAW?
@@ -335,31 +391,43 @@ export function hasObservation(text: unknown): boolean {
   );
 }
 
-/** One verifier's verdict, or null when it did not give a usable one. Null covers the
- *  unparseable, the killed, and — deliberately — the negative with nothing observed.
+/** Every verdict one verifier gave, keyed by the 1-based position the prompt numbered the
+ *  finding at. A finding the verifier never answered for is simply absent from the map, which
+ *  is what makes a short report fail closed rather than shift verdicts onto the wrong finding.
+ *
+ *  A single verdict is null when it is not usable. Null covers the unparseable, the killed,
+ *  and — deliberately — the negative with nothing observed.
  *
  *  `could_not_test` carries no observation requirement: the whole point of it is that there
  *  was nothing to observe. It is not a vote against the finding, so it can never downgrade
  *  one. */
-export function verifyVerdict(
-  raw: unknown,
-): 'reproduced' | 'not_reproduced' | 'could_not_test' | null {
+export type Verdict = 'reproduced' | 'not_reproduced' | 'could_not_test';
+
+export function verifyVerdicts(raw: unknown): Map<number, Verdict> {
   // parseAgentJson with our OWN key gate, not parseReviewJson: that one admits only
   // candidates carrying `verdict` or `findings` — a reviewer's report shape — and a
   // verifier emits neither, so it would reject every valid verdict. Same reason 08c's
   // isRefuted gates on `refuted` itself.
   const parsed = parseAgentJson(raw, (candidate) => {
-    if (!hasAnyKey(candidate, ['reproduced'])) return null;
+    if (!hasAnyKey(candidate, ['verdicts'])) return null;
     const r = verifySchema.safeParse(candidate);
     return r.success ? r.data : null;
   });
-  if (!parsed) return null;
-  if (parsed.reproduced === 'could_not_test') return 'could_not_test';
-  if (parsed.reproduced) return 'reproduced';
-  return hasObservation(parsed.observation) ? 'not_reproduced' : null;
+  const out = new Map<number, Verdict>();
+  if (!parsed) return out;
+  for (const v of parsed.verdicts) {
+    // First verdict for a position wins. A verifier that answers twice for one finding has
+    // contradicted itself, and taking the later answer would let a stray repeat overwrite a
+    // reproduction.
+    if (out.has(v.finding)) continue;
+    if (v.reproduced === 'could_not_test') out.set(v.finding, 'could_not_test');
+    else if (v.reproduced) out.set(v.finding, 'reproduced');
+    else if (hasObservation(v.observation)) out.set(v.finding, 'not_reproduced');
+  }
+  return out;
 }
 
-/** The panel's verdict for one finding.
+/** The panel's verdict for ONE finding inside its root-cause group.
  *
  *  ANY lens reproducing it settles it — one successful reproduction is a demonstration,
  *  and the other lenses failing to repeat it does not undo that. A downgrade needs EVERY
@@ -369,17 +437,27 @@ export function verifyVerdict(
  *  That is 08c's asymmetry applied here: gate 1.5 defaults to accepting what it is shown,
  *  so a wrongly-downgraded RCE is worse than a blocking finding the developer waves off.
  *
+ *  One agent now answers for several findings, so there is a new way to end up with no
+ *  verdict: a verifier that returns a SHORT list, or numbers a verdict at a position that is
+ *  not in the group. Both land on the same fail-closed path as a killed voter — the position
+ *  is absent from the map, the lens votes null, and the finding stays blocking. It is the one
+ *  way grouping could silently lose a finding, so it is asserted in the tests rather than
+ *  assumed from the shape of the code.
+ *
  *  `untestable` is the unanimous could-not-test, reported separately from `unverified` only
  *  so gate 1.5 can distinguish "nobody could run this" from "the panel disagreed". Both keep
  *  the finding blocking; the ONLY verdict that stops one blocking is still `not_reproduced`. */
 export function verificationForFinding(
   results: AgentMiningResult[],
-  fingerprint: string,
+  groupKey: string,
+  /** 0-based position in the group; the prompt numbers it from 1. */
+  index: number,
   lenses: (VerifyLens | null)[],
 ): 'reproduced' | 'not_reproduced' | 'unverified' | 'untestable' {
   const verdicts = lenses.map((lens) => {
-    const outcome = miningOutcome(results, verifierAgentId(fingerprint, lens));
-    return outcome.kind === 'done' ? verifyVerdict(outcome.raw) : null;
+    const outcome = miningOutcome(results, verifierAgentId(groupKey, lens));
+    if (outcome.kind !== 'done') return null;
+    return verifyVerdicts(outcome.raw).get(index + 1) ?? null;
   });
   if (verdicts.some((v) => v === 'reproduced')) return 'reproduced';
   if (verdicts.length === 0) return 'unverified';
@@ -391,13 +469,23 @@ export function verificationForFinding(
   return 'unverified';
 }
 
-/** One verification tier: the findings in it, and the panel each of them gets.
+/** The findings sharing one root cause, verified by one panel. */
+export interface FindingGroup {
+  key: string;
+  findings: AdversarialFinding[];
+}
+
+/** One verification tier: the GROUPS in it, and the panel each group gets.
  *
  *  Two tiers because the cost of being WRONG differs by an order of magnitude, not because
  *  the findings differ. A wrongly dismissed blocking finding loses a defect that was one
  *  click from shipping, so those get the full unanimity panel. A wrongly dismissed low
  *  finding costs the reader one line, so those get one generic verifier — spending three
  *  sandboxed invocations to save a line of reading is the wrong trade.
+ *
+ *  A group inherits the highest tier of its members: one blocking member buys the whole group
+ *  the full panel. Tiering exists to match panel size to what a wrong verdict costs, and the
+ *  cost of the group is the cost of its worst member.
  *
  *  A finding with NO proof-of-concept is excluded from the advisory tier: there is nothing
  *  to execute, so a verifier could only guess, and guessing would fold the synthetic
@@ -410,32 +498,72 @@ export function verificationForFinding(
  *  lens count, and both are derived from the adversary output, which does not change
  *  between passes. */
 interface VerificationTier {
-  findings: AdversarialFinding[];
+  groups: FindingGroup[];
   lenses: (VerifyLens | null)[];
-  /** How many were dropped by this tier's cap, for the truncation warning. */
+  /** How many GROUPS were dropped by this tier's cap, for the truncation warning. */
   overflow: number;
+}
+
+/** Findings one panel is asked about in a single prompt.
+ *
+ *  Grouping trades invocations for prompt length, and past some size that trade goes the wrong
+ *  way: an enterprise roster can raise two dozen findings, and a small change concentrates them
+ *  on one file, so an uncapped group would ask one verifier to run 24 proofs in one pass and
+ *  get 24 shallow verdicts. Set to the size of the round that motivated this — 6 findings on
+ *  one installer file — so that case stays a single panel.
+ *
+ *  An oversized cause SPLITS into further panels rather than dropping its tail: every finding
+ *  is still verified, and the split is deterministic, so both passes number them identically. */
+const MAX_GROUP_FINDINGS = 6;
+
+/** Group findings by root cause, preserving first-seen order both between and within groups. */
+function groupByRootCause(findings: AdversarialFinding[]): FindingGroup[] {
+  const byKey = new Map<string, AdversarialFinding[]>();
+  for (const f of findings) {
+    const key = rootCauseKey(f);
+    const members = byKey.get(key);
+    if (members) members.push(f);
+    else byKey.set(key, [f]);
+  }
+  const groups: FindingGroup[] = [];
+  for (const [key, members] of byKey) {
+    for (let i = 0; i < members.length; i += MAX_GROUP_FINDINGS) {
+      const chunk = members.slice(i, i + MAX_GROUP_FINDINGS);
+      // The first chunk keeps the bare key so the common case — a cause that fits — reads as
+      // itself in the logs and in the agent id.
+      groups.push({ key: i === 0 ? key : `${key}#${i / MAX_GROUP_FINDINGS + 1}`, findings: chunk });
+    }
+  }
+  return groups;
 }
 
 export function verificationTiers(
   findings: AdversarialFinding[],
   lenses: (VerifyLens | null)[],
 ): VerificationTier[] {
+  const eligible = findings.filter(
+    (f) => isBlockingSeverity(f.severity) || (f.poc ?? '').trim().length > 0,
+  );
+  const groups = groupByRootCause(eligible);
   // Worst first (severityRank ascending in severity), so a capped tier spends its
-  // invocations on the findings that cost most if they are wrong.
-  const bySeverity = (a: AdversarialFinding, b: AdversarialFinding) =>
-    severityRank(a.severity) - severityRank(b.severity);
-  const blocking = findings.filter((f) => isBlockingSeverity(f.severity)).sort(bySeverity);
-  const advisory = findings
-    .filter((f) => !isBlockingSeverity(f.severity) && (f.poc ?? '').trim().length > 0)
-    .sort(bySeverity);
+  // invocations on the groups that cost most if they are wrong. A group ranks by its worst
+  // member, the same member that decided its tier.
+  const worst = (g: FindingGroup) => Math.min(...g.findings.map((f) => severityRank(f.severity)));
+  const byWorst = (a: FindingGroup, b: FindingGroup) => worst(a) - worst(b);
+  const blocking = groups
+    .filter((g) => g.findings.some((f) => isBlockingSeverity(f.severity)))
+    .sort(byWorst);
+  const advisory = groups
+    .filter((g) => !g.findings.some((f) => isBlockingSeverity(f.severity)))
+    .sort(byWorst);
   return [
     {
-      findings: blocking.slice(0, MAX_VERIFIED),
+      groups: blocking.slice(0, MAX_VERIFIED),
       lenses,
       overflow: Math.max(0, blocking.length - MAX_VERIFIED),
     },
     {
-      findings: advisory.slice(0, MAX_VERIFIED_ADVISORY),
+      groups: advisory.slice(0, MAX_VERIFIED_ADVISORY),
       lenses: [null],
       overflow: Math.max(0, advisory.length - MAX_VERIFIED_ADVISORY),
     },
@@ -445,34 +573,58 @@ export function verificationTiers(
 /** Is there anything for the verifier wave to run? Mirrors verificationTiers' membership
  *  exactly — it is the same predicate, asked before the lens count is known. */
 function hasVerifiable(findings: AdversarialFinding[]): boolean {
-  return verificationTiers(findings, [null]).some((t) => t.findings.length > 0);
+  return verificationTiers(findings, [null]).some((t) => t.groups.length > 0);
 }
 
-/** Human terminal label for a verifier: name the finding it is checking and the lens, so a
- *  fan-out of N verifications does not render as N identical terminals. */
+/** Human terminal label for a verifier: name what it is checking and the lens, so a fan-out
+ *  of N verifications does not render as N identical terminals.
+ *
+ *  A group of one keeps the single-finding label — the impact reads better than a path. A
+ *  larger group names its cause and its size, because no one member describes it. */
 export function verifierTitle(
-  f: Pick<AdversarialFinding, 'severity' | 'location' | 'impact' | 'category'>,
+  group: FindingGroup,
   index: number,
   total: number,
   lens?: VerifyLens | null,
 ): string {
-  const what = (f.impact ?? f.category ?? 'finding').replace(/\s+/g, ' ').trim().slice(0, 60);
-  const where = f.location ? ` @ ${f.location.slice(0, 40)}` : '';
   const which = lens ? ` [${lens.title}]` : '';
-  return `Verify ${index + 1}/${total}${which}: [${f.severity}] ${what}${where}`;
+  const head = `Verify ${index + 1}/${total}${which}`;
+  const [f] = group.findings;
+  if (!f) return head;
+  if (group.findings.length === 1) {
+    const what = (f.impact ?? f.category ?? 'finding').replace(/\s+/g, ' ').trim().slice(0, 60);
+    const where = f.location ? ` @ ${f.location.slice(0, 40)}` : '';
+    return `${head}: [${f.severity}] ${what}${where}`;
+  }
+  const worst = group.findings.reduce((a, b) =>
+    severityRank(a.severity) <= severityRank(b.severity) ? a : b,
+  );
+  const cause = group.key.replace(/^(file|url|fp):/, '').slice(0, 50);
+  return `${head}: [${worst.severity}] ${group.findings.length} findings @ ${cause}`;
 }
 
 function buildVerifyPrompt(
   d: AdversarialDetect,
-  f: AdversarialFinding,
+  group: FindingGroup,
   lens: VerifyLens | null,
 ): string {
+  const many = group.findings.length > 1;
   return [
-    'You are a POC VERIFIER. An adversarial QA agent reported the finding below against a',
-    'change, and acting on it will send the whole change back to be reimplemented. Your job',
-    'is to RUN its proof-of-concept and report what actually happens — not to agree with it,',
-    'not to fix anything, and not to go looking for other problems.',
+    `You are a POC VERIFIER. ${many ? 'Adversarial QA agents reported the findings' : 'An adversarial QA agent reported the finding'} below against a`,
+    `change, and acting on ${many ? 'them' : 'it'} will send the whole change back to be reimplemented. Your`,
+    `job is to RUN ${many ? 'each proof-of-concept' : 'its proof-of-concept'} and report what actually happens — not to agree`,
+    `with ${many ? 'them' : 'it'}, not to fix anything, and not to go looking for other problems.`,
     '',
+    ...(many
+      ? [
+          `These ${group.findings.length} findings were grouped because they name the same place in the`,
+          'code, so verifying them together saves re-establishing the same setup several times.',
+          'They are SEPARATE claims and each gets its own verdict — do not decide one from',
+          'another, and do not merge them. If a shared precondition is what fails, say so in',
+          'each observation rather than answering once.',
+          '',
+        ]
+      : []),
     'Reproduced means YOU observed the claimed effect yourself, by executing the PoC as',
     'written. Not that the code looks like it would do that, and not that a similar thing',
     'happened. If the PoC needs a step the finding never mentions, say so and treat it as',
@@ -484,13 +636,16 @@ function buildVerifyPrompt(
     '',
     ...REPO_IS_DATA_LINES,
     '',
-    '=== The finding you are verifying ===',
-    `Severity as filed: ${f.severity}`,
-    `Location: ${f.location ?? '(none given)'}`,
-    `Category: ${f.category ?? '(none given)'}`,
-    `Impact claimed: ${f.impact ?? '(none given)'}`,
-    `Proof of concept: ${f.poc ?? '(none given — that alone is grounds for not reproduced)'}`,
-    '',
+    `=== The finding${many ? 's' : ''} you are verifying ===`,
+    ...group.findings.flatMap((f, i) => [
+      `--- Finding ${i + 1} of ${group.findings.length} ---`,
+      `Severity as filed: ${f.severity}`,
+      `Location: ${f.location ?? '(none given)'}`,
+      `Category: ${f.category ?? '(none given)'}`,
+      `Impact claimed: ${f.impact ?? '(none given)'}`,
+      `Proof of concept: ${f.poc ?? '(none given — that alone is grounds for not reproduced)'}`,
+      '',
+    ]),
     // Address and reachability come from the dispatcher's reach block; see buildAdversaryPrompt.
     ...(d.appUrl
       ? appAuthPromptLines(d.appLogin ?? { attempted: false, ok: false, reason: '' })
@@ -500,8 +655,14 @@ function buildVerifyPrompt(
     ...SEARCH_LADDER,
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this',
-    'shape:',
-    '{ "reproduced": true|false|"could_not_test", "observation": "<what you actually saw>" }',
+    'shape, carrying one entry per finding above:',
+    '{ "verdicts": [',
+    '  { "finding": 1, "reproduced": true|false|"could_not_test", "observation": "<what you saw>" }',
+    '] }',
+    '',
+    `\`finding\` is the number above, 1 to ${group.findings.length}. Emit an entry for EVERY one of them, even`,
+    'the ones you could not test. A finding you leave out gets no verdict at all and goes to',
+    'the developer as unverified, which wastes the run you just spent on it.',
     '',
     'Use "could_not_test" — NOT false — when the ENVIRONMENT stopped you running the PoC at',
     'all: you could not reach the running app, the runtime is down, or the run has no access',
@@ -805,15 +966,25 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       // Read back through the SAME tier split that dispatched, so each finding is scored
       // against the panel it actually got: the blocking tier against the full lens set, the
       // advisory tier against its single generic verifier.
+      //
+      // Every group is read, including ones the dispatch dropped as untestable. A group that
+      // never ran has no rows, so every lens votes null and the finding stays blocking. Reading
+      // them unconditionally is what keeps the INDEX stable: group membership is derived from
+      // the findings alone and never from the reach probe, which is re-run on this pass and can
+      // disagree with the one that dispatched. Filtering members by reach here would renumber
+      // the group and hand each finding its neighbour's verdict.
       for (const tier of verificationTiers(findings, lenses)) {
-        for (const f of tier.findings) {
-          const panel = verificationForFinding(allResults, verifyKey(f), tier.lenses);
-          // The panel wins whenever it actually said something. The reach is re-probed on this
-          // pass and can disagree with the one that dispatched — a runner recovering between
-          // the two passes must not discard a verdict that was genuinely recorded, least of all
-          // a reproduction. Only the findings that were skipped come back with nothing at all,
-          // and those are the ones this relabels from `unverified` to the truer `untestable`.
-          f.verification = panel === 'unverified' && provablyUntestable(f) ? 'untestable' : panel;
+        for (const group of tier.groups) {
+          for (const [i, f] of group.findings.entries()) {
+            const panel = verificationForFinding(allResults, group.key, i, tier.lenses);
+            // The panel wins whenever it actually said something. The reach is re-probed on
+            // this pass and can disagree with the one that dispatched — a runner recovering
+            // between the two passes must not discard a verdict that was genuinely recorded,
+            // least of all a reproduction. Only the findings that were skipped come back with
+            // nothing at all, and those are the ones this relabels from `unverified` to the
+            // truer `untestable`.
+            f.verification = panel === 'unverified' && provablyUntestable(f) ? 'untestable' : panel;
+          }
         }
       }
       const downgraded = blockingFindings.filter((f) => f.verification === 'not_reproduced');
@@ -846,24 +1017,28 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
           if (tier.overflow > 0) {
             ctx.logger.warn(
               {
-                verifying: tier.findings.length,
+                verifying: tier.groups.length,
                 overflow: tier.overflow,
                 panel: tier.lenses.length,
               },
-              'more findings than verifiers in this tier; the overflow goes to the gate unverified',
+              'more root causes than verifiers in this tier; the overflow goes to the gate unverified',
             );
           }
         }
         // A finding located at a URL, with no app running, cannot be verified by anyone: the
         // panel would spend its invocations to report could_not_test unanimously. Dropped
         // from the wave and marked untestable directly, which blocks exactly the same.
+        //
+        // Whole GROUPS, never members: a group's key is derived from the same
+        // isRuntimeOnlyFinding predicate, so its members are uniformly runtime-only or
+        // uniformly not, and dropping a member would renumber the group against the read-back.
         const dispatchable = tiers.map((tier) => ({
           ...tier,
-          findings: tier.findings.filter((f) => !provablyUntestable(f)),
+          groups: tier.groups.filter((g) => !g.findings.every(provablyUntestable)),
         }));
         const skipped =
-          tiers.reduce((n, t) => n + t.findings.length, 0) -
-          dispatchable.reduce((n, t) => n + t.findings.length, 0);
+          tiers.reduce((n, t) => n + t.groups.length, 0) -
+          dispatchable.reduce((n, t) => n + t.groups.length, 0);
         if (skipped > 0) {
           ctx.logger.warn(
             { untestable: skipped },
@@ -871,12 +1046,12 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
           );
         }
         const wave = dispatchable.flatMap((tier) =>
-          tier.findings.flatMap((f, i) =>
+          tier.groups.flatMap((group, i) =>
             tier.lenses.map((lens) => ({
-              agentId: verifierAgentId(verifyKey(f), lens),
-              agentTitle: verifierTitle(f, i, tier.findings.length, lens),
-              prompt: buildVerifyPrompt(detected, f, lens),
-              // The agent id is per-FINDING and unbounded; the LENS is the stable seat.
+              agentId: verifierAgentId(group.key, lens),
+              agentTitle: verifierTitle(group, i, tier.groups.length, lens),
+              prompt: buildVerifyPrompt(detected, group, lens),
+              // The agent id is per-GROUP and unbounded; the LENS is the stable seat.
               roleKey: lens ? `qa-verify:${lens.id}` : 'qa-verify',
             })),
           ),
@@ -885,15 +1060,21 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
           // Nothing left to check: every candidate is a runtime finding and nothing is
           // running. Marked here and NOT dispatched — an empty MiningWaveError would park the
           // step on a fan-out with no agents in it, waiting for verdicts that never arrive.
-          for (const tier of tiers) for (const f of tier.findings) f.verification = 'untestable';
+          for (const tier of tiers)
+            for (const group of tier.groups)
+              for (const f of group.findings) f.verification = 'untestable';
         } else {
+          const counted = (t: (typeof dispatchable)[number] | undefined) => ({
+            causes: t?.groups.length ?? 0,
+            findings: t?.groups.reduce((n, g) => n + g.findings.length, 0) ?? 0,
+          });
           ctx.logger.info(
             {
-              blocking: dispatchable[0]?.findings.length ?? 0,
-              advisory: dispatchable[1]?.findings.length ?? 0,
+              blocking: counted(dispatchable[0]),
+              advisory: counted(dispatchable[1]),
               invocations: wave.length,
             },
-            'dispatching PoC verifiers: full panel for blocking findings, one verifier each for the rest',
+            'dispatching PoC verifiers: one panel per root cause, full panel for blocking causes',
           );
           throw new MiningWaveError(wave);
         }

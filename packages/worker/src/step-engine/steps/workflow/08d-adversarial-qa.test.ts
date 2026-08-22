@@ -6,7 +6,9 @@ import {
   adversarialQaStep,
   hasObservation,
   isRuntimeOnlyFinding,
-  verifyVerdict,
+  verifyVerdicts,
+  verifierAgentId,
+  rootCauseKey,
   verificationForFinding,
   verificationTiers,
 } from './08d-adversarial-qa.js';
@@ -360,6 +362,9 @@ describe('08d PoC verification', () => {
     'Issued GET https://app.ddev.site/UserFiles/File/x.php and got 404 with an empty body';
 
   const verdictJson = (o: Record<string, unknown>) => '```json\n' + JSON.stringify(o) + '\n```';
+  /** A one-finding report, the shape every single-finding group produces. */
+  const list = (v: Record<string, unknown>) => ({ verdicts: [{ finding: 1, ...v }] });
+  const one = (raw: string) => verifyVerdicts(raw).get(1);
 
   describe('hasObservation', () => {
     it('rejects a bare assertion with nothing observed', () => {
@@ -386,27 +391,27 @@ describe('08d PoC verification', () => {
     });
   });
 
-  describe('verifyVerdict', () => {
+  describe('verifyVerdicts', () => {
     it('reads a reproduction without needing an observation', () => {
       // A verifier claiming it DID reproduce is not the direction that loses findings.
-      expect(verifyVerdict(verdictJson({ reproduced: true }))).toBe('reproduced');
+      expect(one(verdictJson(list({ reproduced: true })))).toBe('reproduced');
     });
 
     it('reads a non-reproduction only when something was observed', () => {
-      expect(verifyVerdict(verdictJson({ reproduced: false, observation: observed }))).toBe(
+      expect(one(verdictJson(list({ reproduced: false, observation: observed })))).toBe(
         'not_reproduced',
       );
     });
 
     it('discards a non-reproduction with no observation', () => {
-      expect(verifyVerdict(verdictJson({ reproduced: false }))).toBeNull();
-      expect(verifyVerdict(verdictJson({ reproduced: false, observation: 'nope' }))).toBeNull();
+      expect(one(verdictJson(list({ reproduced: false })))).toBeUndefined();
+      expect(one(verdictJson(list({ reproduced: false, observation: 'nope' })))).toBeUndefined();
     });
 
     it('reads could_not_test without needing an observation', () => {
       // There is nothing to quote when nothing was reachable, so the evidence floor that
       // guards a non-reproduction would only push the verifier back onto `false`.
-      expect(verifyVerdict(verdictJson({ reproduced: 'could_not_test' }))).toBe('could_not_test');
+      expect(one(verdictJson(list({ reproduced: 'could_not_test' })))).toBe('could_not_test');
     });
 
     it('keeps could_not_test distinct from a non-reproduction', () => {
@@ -416,13 +421,49 @@ describe('08d PoC verification', () => {
         'No network route from this sandbox — curl https://x.ddev.site/AGENTS.md could not ' +
         'resolve the host, and the published ports were unreachable from the container gateway.';
       expect(
-        verifyVerdict(verdictJson({ reproduced: 'could_not_test', observation: unreachable })),
+        one(verdictJson(list({ reproduced: 'could_not_test', observation: unreachable }))),
       ).toBe('could_not_test');
     });
 
-    it('is null on unparseable output', () => {
-      expect(verifyVerdict('I ran it and it seemed fine')).toBeNull();
-      expect(verifyVerdict(null)).toBeNull();
+    it('is empty on unparseable output', () => {
+      expect(verifyVerdicts('I ran it and it seemed fine').size).toBe(0);
+      expect(verifyVerdicts(null).size).toBe(0);
+    });
+
+    it('keys each verdict by the position the prompt numbered it at', () => {
+      const m = verifyVerdicts(
+        verdictJson({
+          verdicts: [
+            { finding: 1, reproduced: true },
+            { finding: 2, reproduced: false, observation: observed },
+            { finding: 3, reproduced: 'could_not_test' },
+          ],
+        }),
+      );
+      expect(m.get(1)).toBe('reproduced');
+      expect(m.get(2)).toBe('not_reproduced');
+      expect(m.get(3)).toBe('could_not_test');
+    });
+
+    it('leaves a position the verifier never answered for absent', () => {
+      // The fail-closed path grouping introduces: a short report must not shift the
+      // remaining verdicts onto the findings that follow.
+      const m = verifyVerdicts(verdictJson({ verdicts: [{ finding: 1, reproduced: true }] }));
+      expect(m.has(2)).toBe(false);
+    });
+
+    it('keeps the first verdict when one position is answered twice', () => {
+      // A verifier contradicting itself must not have its later answer overwrite a
+      // reproduction.
+      const m = verifyVerdicts(
+        verdictJson({
+          verdicts: [
+            { finding: 1, reproduced: true },
+            { finding: 1, reproduced: false, observation: observed },
+          ],
+        }),
+      );
+      expect(m.get(1)).toBe('reproduced');
     });
   });
 
@@ -432,9 +473,9 @@ describe('08d PoC verification', () => {
       { id: 'target', title: 'target real', lines: [] },
       { id: 'linkage', title: 'code linkage', lines: [] },
     ] as never[];
-    const fp = 'abcdef0123456789';
+    const KEY = 'file:installer/contents_step_7.php';
     const voter = (lensId: string, raw: string | null): AgentMiningResult => ({
-      agentId: `qaverify-${fp}-${lensId}`,
+      agentId: verifierAgentId(KEY, { id: lensId } as never),
       agentTitle: lensId,
       invocationId: `inv-${lensId}`,
       status: raw === null ? 'failed' : 'done',
@@ -443,11 +484,16 @@ describe('08d PoC verification', () => {
       errorMessage: raw === null ? 'killed' : null,
     });
     const allSay = (o: Record<string, unknown>) =>
-      ['execute', 'target', 'linkage'].map((l) => voter(l, verdictJson(o)));
+      ['execute', 'target', 'linkage'].map((l) => voter(l, verdictJson(list(o))));
 
     it('downgrades only when every lens fails to reproduce WITH an observation', () => {
       expect(
-        verificationForFinding(allSay({ reproduced: false, observation: observed }), fp, LENSES),
+        verificationForFinding(
+          allSay({ reproduced: false, observation: observed }),
+          KEY,
+          0,
+          LENSES,
+        ),
       ).toBe('not_reproduced');
     });
 
@@ -455,36 +501,36 @@ describe('08d PoC verification', () => {
       // One successful reproduction is a demonstration; the others failing to repeat it
       // does not undo it.
       const mixed = [
-        voter('execute', verdictJson({ reproduced: true })),
-        voter('target', verdictJson({ reproduced: false, observation: observed })),
-        voter('linkage', verdictJson({ reproduced: false, observation: observed })),
+        voter('execute', verdictJson(list({ reproduced: true }))),
+        voter('target', verdictJson(list({ reproduced: false, observation: observed }))),
+        voter('linkage', verdictJson(list({ reproduced: false, observation: observed }))),
       ];
-      expect(verificationForFinding(mixed, fp, LENSES)).toBe('reproduced');
+      expect(verificationForFinding(mixed, KEY, 0, LENSES)).toBe('reproduced');
     });
 
     it('keeps the finding when one voter asserts without observing (fail-closed)', () => {
       const mixed = [
-        voter('execute', verdictJson({ reproduced: false, observation: observed })),
-        voter('target', verdictJson({ reproduced: false })),
-        voter('linkage', verdictJson({ reproduced: false, observation: observed })),
+        voter('execute', verdictJson(list({ reproduced: false, observation: observed }))),
+        voter('target', verdictJson(list({ reproduced: false }))),
+        voter('linkage', verdictJson(list({ reproduced: false, observation: observed }))),
       ];
-      expect(verificationForFinding(mixed, fp, LENSES)).toBe('unverified');
+      expect(verificationForFinding(mixed, KEY, 0, LENSES)).toBe('unverified');
     });
 
     it('keeps the finding when a voter was killed before answering', () => {
       const mixed = [
-        voter('execute', verdictJson({ reproduced: false, observation: observed })),
+        voter('execute', verdictJson(list({ reproduced: false, observation: observed }))),
         voter('target', null),
-        voter('linkage', verdictJson({ reproduced: false, observation: observed })),
+        voter('linkage', verdictJson(list({ reproduced: false, observation: observed }))),
       ];
-      expect(verificationForFinding(mixed, fp, LENSES)).toBe('unverified');
+      expect(verificationForFinding(mixed, KEY, 0, LENSES)).toBe('unverified');
     });
 
     it('reports untestable when no lens could reach the app', () => {
       // The failure that motivated the third verdict: every lens shares one broken network,
       // so their failures are perfectly correlated and the unanimity rule cannot protect
       // against them. Scored as a downgrade this silently dropped real defects.
-      expect(verificationForFinding(allSay({ reproduced: 'could_not_test' }), fp, LENSES)).toBe(
+      expect(verificationForFinding(allSay({ reproduced: 'could_not_test' }), KEY, 0, LENSES)).toBe(
         'untestable',
       );
     });
@@ -493,24 +539,120 @@ describe('08d PoC verification', () => {
       // One lens that actually ran the PoC and found nothing is a single voter, and a
       // downgrade needs the whole panel.
       const mixed = [
-        voter('execute', verdictJson({ reproduced: 'could_not_test' })),
-        voter('target', verdictJson({ reproduced: false, observation: observed })),
-        voter('linkage', verdictJson({ reproduced: 'could_not_test' })),
+        voter('execute', verdictJson(list({ reproduced: 'could_not_test' }))),
+        voter('target', verdictJson(list({ reproduced: false, observation: observed }))),
+        voter('linkage', verdictJson(list({ reproduced: 'could_not_test' }))),
       ];
-      expect(verificationForFinding(mixed, fp, LENSES)).toBe('unverified');
+      expect(verificationForFinding(mixed, KEY, 0, LENSES)).toBe('unverified');
     });
 
     it('still reproduces when one lens ran the PoC and the rest could not test', () => {
       const mixed = [
-        voter('execute', verdictJson({ reproduced: true })),
-        voter('target', verdictJson({ reproduced: 'could_not_test' })),
-        voter('linkage', verdictJson({ reproduced: 'could_not_test' })),
+        voter('execute', verdictJson(list({ reproduced: true }))),
+        voter('target', verdictJson(list({ reproduced: 'could_not_test' }))),
+        voter('linkage', verdictJson(list({ reproduced: 'could_not_test' }))),
       ];
-      expect(verificationForFinding(mixed, fp, LENSES)).toBe('reproduced');
+      expect(verificationForFinding(mixed, KEY, 0, LENSES)).toBe('reproduced');
     });
 
     it('is unverified when the panel never ran at all', () => {
-      expect(verificationForFinding([], fp, LENSES)).toBe('unverified');
+      expect(verificationForFinding([], KEY, 0, LENSES)).toBe('unverified');
+    });
+
+    it('scores each member of a group against its own verdict', () => {
+      // One panel, several findings: the verdicts must not bleed between them.
+      const panel = ['execute', 'target', 'linkage'].map((l) =>
+        voter(
+          l,
+          verdictJson({
+            verdicts: [
+              { finding: 1, reproduced: false, observation: observed },
+              { finding: 2, reproduced: true },
+            ],
+          }),
+        ),
+      );
+      expect(verificationForFinding(panel, KEY, 0, LENSES)).toBe('not_reproduced');
+      expect(verificationForFinding(panel, KEY, 1, LENSES)).toBe('reproduced');
+    });
+
+    it('leaves a finding the panel never answered for blocking', () => {
+      // THE way grouping could silently lose a finding: a short list. Asserted rather than
+      // assumed from the shape of the code.
+      const panel = ['execute', 'target', 'linkage'].map((l) =>
+        voter(
+          l,
+          verdictJson({ verdicts: [{ finding: 1, reproduced: false, observation: observed }] }),
+        ),
+      );
+      expect(verificationForFinding(panel, KEY, 0, LENSES)).toBe('not_reproduced');
+      expect(verificationForFinding(panel, KEY, 1, LENSES)).toBe('unverified');
+    });
+
+    it('ignores a verdict numbered outside the group rather than misapplying it', () => {
+      const panel = ['execute', 'target', 'linkage'].map((l) =>
+        voter(
+          l,
+          verdictJson({ verdicts: [{ finding: 9, reproduced: false, observation: observed }] }),
+        ),
+      );
+      expect(verificationForFinding(panel, KEY, 0, LENSES)).toBe('unverified');
+    });
+  });
+
+  describe('rootCauseKey', () => {
+    const at = (location: string) => ({ location, severity: 'high', impact: 'i' }) as never;
+
+    it('groups the messy real locations that name one file', () => {
+      // Verbatim from the round that motivated this: adversaries write prose into
+      // `location`, so the raw strings never match each other.
+      const keys = [
+        'installer/contents_step_7.php:121 and installer/actions_step_7.php',
+        'installer/contents_step_7.php:75-76',
+        'installer/contents_step_7.php',
+      ].map((l) => rootCauseKey(at(l)));
+      expect(new Set(keys).size).toBe(1);
+      expect(keys[0]).toBe('file:installer/contents_step_7.php');
+    });
+
+    it('keeps two different files apart', () => {
+      expect(rootCauseKey(at('installer/actions_step_4.php:22'))).not.toBe(
+        rootCauseKey(at('installer/contents_step_7.php:121')),
+      );
+    });
+
+    it('matches a dotfile, which has no word character before the dot', () => {
+      expect(rootCauseKey(at('.htaccess:16 vs installer/contents_step_2.php'))).toBe(
+        'file:.htaccess',
+      );
+    });
+
+    it('keys a URL on origin and path so a query string does not fragment it', () => {
+      expect(rootCauseKey(at('https://app.ddev.site/phpstatus?full'))).toBe(
+        rootCauseKey(at('https://app.ddev.site/phpstatus?x=1')),
+      );
+    });
+
+    it('does not mistake a URL host for a file', () => {
+      // The reason the token scan does not simply run over everything: two unrelated
+      // endpoints would collapse onto `ddev.site`.
+      expect(rootCauseKey(at('https://app.ddev.site/admin.php'))).not.toBe(
+        rootCauseKey(at('https://app.ddev.site/install.php')),
+      );
+    });
+
+    it('takes a double extension whole rather than stopping at the first dot', () => {
+      // Otherwise `a.test.ts` reads as `a.test` and shares a panel with `a.test.js`.
+      expect(rootCauseKey(at('src/a.test.ts:10'))).toBe('file:src/a.test.ts');
+      expect(rootCauseKey(at('src/a.test.ts:10'))).not.toBe(rootCauseKey(at('src/a.test.js:2')));
+    });
+
+    it('falls back to a group of one when nothing is recognisable', () => {
+      // Fragmenting costs invocations; over-grouping costs attention inside one prompt.
+      const a = rootCauseKey(at('somewhere in the upload handling'));
+      const b = rootCauseKey({ location: undefined, severity: 'high', impact: 'j' } as never);
+      expect(a).toMatch(/^fp:/);
+      expect(a).not.toBe(b);
     });
   });
 });
@@ -584,6 +726,46 @@ describe('08d verifier wave dispatch and downgrade', () => {
     for (const d of dispatches) expect(d.prompt).toContain('GET /x');
   });
 
+  it('sends one panel for two findings sharing a root cause, and scores each separately', async () => {
+    // End to end for the grouping: 6 findings on one installer file used to buy 18
+    // invocations that all rediscovered the same closed window. One panel now answers for
+    // both, and the two verdicts must not bleed into each other.
+    enableVerification();
+    const A = { severity: 'critical', location: 'admin.php:10', impact: 'rce', poc: 'GET /x' };
+    const B = { severity: 'high', location: 'admin.php:88', impact: 'sqli', poc: 'GET /y' };
+    const first = await run([adversary('auth-bandit', [A, B])]).catch((e: unknown) => e);
+    const dispatches = (err0(first) as MiningWaveError).dispatches;
+    expect(dispatches).toHaveLength(3);
+    for (const d of dispatches) {
+      expect(d.prompt).toContain('--- Finding 1 of 2 ---');
+      expect(d.prompt).toContain('--- Finding 2 of 2 ---');
+    }
+    const observed =
+      'Issued GET https://x.ddev.site/y and got 404 with an empty body; no query ran';
+    const verifiers: AgentMiningResult[] = dispatches.map((d) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      invocationId: 'inv-v',
+      status: 'done',
+      output: null,
+      rawOutput:
+        '```json\n' +
+        JSON.stringify({
+          verdicts: [
+            { finding: 1, reproduced: true },
+            { finding: 2, reproduced: false, observation: observed },
+          ],
+        }) +
+        '\n```',
+      errorMessage: null,
+    }));
+    const out = await run([adversary('auth-bandit', [A, B]), ...verifiers]);
+    const byImpact = new Map(out.findings.map((f) => [f.impact, f.verification]));
+    expect(byImpact.get('rce')).toBe('reproduced');
+    expect(byImpact.get('sqli')).toBe('not_reproduced');
+    expect(out.blocking).toBe(true);
+  });
+
   it('dispatches ONE verifier for a non-blocking finding, not a panel', async () => {
     // Changed deliberately: verifying blocking findings only meant a round of 26 findings,
     // none blocking, was verified not at all and triaged entirely by hand. The panel size
@@ -625,7 +807,9 @@ describe('08d verifier wave dispatch and downgrade', () => {
       status: 'done',
       output: null,
       rawOutput:
-        '```json\n' + JSON.stringify({ reproduced: false, observation: observed }) + '\n```',
+        '```json\n' +
+        JSON.stringify({ verdicts: [{ finding: 1, reproduced: false, observation: observed }] }) +
+        '\n```',
       errorMessage: null,
     }));
     const out = await run([adversary('auth-bandit', [BLOCKER]), ...verifiers]);
@@ -648,17 +832,21 @@ describe('08d verifier wave dispatch and downgrade', () => {
       output: null,
       rawOutput:
         '```json\n' +
-        JSON.stringify(
-          i === 0
-            ? {
-                reproduced: true,
-                observation: 'GET https://x.ddev.site/x returned 200 with output',
-              }
-            : {
-                reproduced: false,
-                observation: 'GET https://x.ddev.site/x returned 404 with an empty body here',
-              },
-        ) +
+        JSON.stringify({
+          verdicts: [
+            i === 0
+              ? {
+                  finding: 1,
+                  reproduced: true,
+                  observation: 'GET https://x.ddev.site/x returned 200 with output',
+                }
+              : {
+                  finding: 1,
+                  reproduced: false,
+                  observation: 'GET https://x.ddev.site/x returned 404 with an empty body here',
+                },
+          ],
+        }) +
         '\n```',
       errorMessage: null,
     }));
@@ -682,8 +870,14 @@ describe('08d verifier wave dispatch and downgrade', () => {
       rawOutput:
         '```json\n' +
         JSON.stringify({
-          reproduced: 'could_not_test',
-          observation: 'curl https://x.ddev.site/x could not resolve the host from this sandbox',
+          verdicts: [
+            {
+              finding: 1,
+              reproduced: 'could_not_test',
+              observation:
+                'curl https://x.ddev.site/x could not resolve the host from this sandbox',
+            },
+          ],
         }) +
         '\n```',
       errorMessage: null,
@@ -744,19 +938,50 @@ describe('08d verification tiers', () => {
     { id: 'target', title: 'target real', lines: [] },
     { id: 'linkage', title: 'code linkage', lines: [] },
   ] as never[];
+  let n = 0;
+  /** Each finding lands in its own root-cause group unless `location` says otherwise. */
   const f = (severity: string, over: Record<string, unknown> = {}) =>
-    ({ severity, location: `x-${Math.random()}`, impact: 'i', poc: 'GET /x', ...over }) as never;
+    ({ severity, location: `src/f${n++}.php`, impact: 'i', poc: 'GET /x', ...over }) as never;
 
-  it('gives blocking findings the full panel and everything else one verifier', () => {
+  it('gives blocking causes the full panel and everything else one verifier', () => {
     // The cost of being wrong differs by an order of magnitude, so the panel does too.
     const [blocking, advisory] = verificationTiers(
       [f('critical'), f('high'), f('medium'), f('low')],
       LENSES,
     );
-    expect(blocking!.findings).toHaveLength(2);
+    expect(blocking!.groups).toHaveLength(2);
     expect(blocking!.lenses).toHaveLength(3);
-    expect(advisory!.findings).toHaveLength(2);
+    expect(advisory!.groups).toHaveLength(2);
     expect(advisory!.lenses).toEqual([null]);
+  });
+
+  it('collapses findings sharing a root cause into one panel', () => {
+    // The whole point: 6 findings on one installer file used to buy 18 invocations that all
+    // rediscovered the same closed window.
+    const [blocking] = verificationTiers(
+      [
+        f('critical', { location: 'installer/contents_step_7.php:121' }),
+        f('high', { location: 'installer/contents_step_7.php:75-76 → themes/x/index.php' }),
+        f('high', { location: 'installer/contents_step_7.php' }),
+      ],
+      LENSES,
+    );
+    expect(blocking!.groups).toHaveLength(1);
+    expect(blocking!.groups[0]!.findings).toHaveLength(3);
+  });
+
+  it('gives a group the full panel when any one member blocks', () => {
+    // A group's cost is its worst member's cost, which is what tiering matches the panel to.
+    const [blocking, advisory] = verificationTiers(
+      [
+        f('low', { location: 'installer/x.php:1' }),
+        f('critical', { location: 'installer/x.php:99' }),
+      ],
+      LENSES,
+    );
+    expect(blocking!.groups).toHaveLength(1);
+    expect(blocking!.groups[0]!.findings).toHaveLength(2);
+    expect(advisory!.groups).toHaveLength(0);
   });
 
   it('excludes findings with no proof-of-concept from the advisory tier', () => {
@@ -766,35 +991,71 @@ describe('08d verification tiers', () => {
       [f('medium', { poc: undefined }), f('low', { poc: '' }), f('low')],
       LENSES,
     );
-    expect(advisory!.findings).toHaveLength(1);
+    expect(advisory!.groups).toHaveLength(1);
   });
 
   it('still panels a blocking finding that supplied no proof', () => {
     // A blocking claim with no proof is exactly what is worth putting a panel on.
     const [blocking] = verificationTiers([f('critical', { poc: undefined })], LENSES);
-    expect(blocking!.findings).toHaveLength(1);
+    expect(blocking!.groups).toHaveLength(1);
   });
 
   it('orders each tier worst-first so a capped tier spends on what costs most', () => {
     const [blocking] = verificationTiers([f('high'), f('critical')], LENSES);
-    expect(blocking!.findings.map((x) => x.severity)).toEqual(['critical', 'high']);
+    expect(blocking!.groups.map((g) => g.findings[0]!.severity)).toEqual(['critical', 'high']);
+  });
+
+  it('ranks a group by its worst member', () => {
+    const [blocking] = verificationTiers(
+      [
+        f('high', { location: 'a.php:1' }),
+        f('high', { location: 'b.php:1' }),
+        f('critical', { location: 'b.php:2' }),
+      ],
+      LENSES,
+    );
+    expect(blocking!.groups[0]!.key).toBe('file:b.php');
+  });
+
+  it('splits an oversized cause into further panels rather than dropping its tail', () => {
+    // An enterprise roster concentrated on one file would otherwise ask one verifier to run
+    // two dozen proofs in a single pass. Every finding is still verified.
+    const many = Array.from({ length: 14 }, () => f('low', { location: 'one.php' }));
+    const [, advisory] = verificationTiers(many, LENSES);
+    expect(advisory!.groups.map((g) => g.findings.length)).toEqual([6, 6, 2]);
+    expect(advisory!.groups.map((g) => g.key)).toEqual([
+      'file:one.php',
+      'file:one.php#2',
+      'file:one.php#3',
+    ]);
+    expect(advisory!.overflow).toBe(0);
+  });
+
+  it('counts GROUPS against the cap, not findings', () => {
+    // 30 findings on one file are 5 panels, not 30 — well inside the cap that 30 separate
+    // findings would have overflowed.
+    const many = Array.from({ length: 30 }, () => f('low', { location: 'one.php' }));
+    const [, advisory] = verificationTiers(many, LENSES);
+    expect(advisory!.groups).toHaveLength(5);
+    expect(advisory!.overflow).toBe(0);
   });
 
   it('reports overflow per tier rather than truncating silently', () => {
     const many = Array.from({ length: 30 }, () => f('low'));
     const [, advisory] = verificationTiers(many, LENSES);
-    expect(advisory!.findings).toHaveLength(20);
+    expect(advisory!.groups).toHaveLength(20);
     expect(advisory!.overflow).toBe(10);
   });
 
   it('is stable across the dispatch and read-back passes', () => {
-    // Both passes call this with the same findings, so membership and order cannot drift —
-    // which is what keeps the agent ids the two passes compute identical.
+    // Both passes call this with the same findings, so membership, order and the POSITION of
+    // each finding inside its group cannot drift — which is what keeps the agent ids the two
+    // passes compute identical and each verdict on the finding it was written for.
     const input = [f('critical'), f('low'), f('high'), f('medium')];
-    const a = verificationTiers(input, LENSES);
-    const b = verificationTiers(input, LENSES);
-    expect(a.map((t) => t.findings.map((x) => x.location))).toEqual(
-      b.map((t) => t.findings.map((x) => x.location)),
+    const shape = (t: ReturnType<typeof verificationTiers>) =>
+      t.map((x) => x.groups.map((g) => [g.key, g.findings.map((y) => y.location)]));
+    expect(shape(verificationTiers(input, LENSES))).toEqual(
+      shape(verificationTiers(input, LENSES)),
     );
   });
 });
@@ -864,9 +1125,13 @@ describe('08d disproved-finding ledger entry', () => {
       invocationId: 'inv-v',
       status: 'done',
       output: null,
-      rawOutput: json(
-        reproduced ? { reproduced: true } : { reproduced: false, observation: observed },
-      ),
+      rawOutput: json({
+        verdicts: [
+          reproduced
+            ? { finding: 1, reproduced: true }
+            : { finding: 1, reproduced: false, observation: observed },
+        ],
+      }),
       errorMessage: null,
     }));
     return adversarialQaStep.apply(ctx, args([adversary([FINDING]), ...verifiers]));
