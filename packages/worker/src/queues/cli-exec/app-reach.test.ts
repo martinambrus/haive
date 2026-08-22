@@ -13,6 +13,7 @@ const reach = (over: Partial<AppReach>): AppReach => ({
   mounts: [],
   env: {},
   noProxyHosts: [],
+  tlsTrusted: false,
   ...over,
 });
 
@@ -63,6 +64,28 @@ describe('appReachPrompt', () => {
     // Forbidden fetch headers are named so those attacks are reported as out of scope
     // rather than as tested and clean.
     expect(p).toContain('Host');
+  });
+
+  it('promises a clean handshake only when the CA that signed the cert is mounted', () => {
+    const trusted = appReachPrompt(reachable({ mode: 'sandbox_http', tlsTrusted: true }));
+    expect(trusted).toContain('no `-k` is needed');
+
+    // The CA mount is conditional on boot having generated one; without it the runner serves
+    // a throwaway cert and the handshake genuinely fails. Promising otherwise is the same
+    // defect this whole module exists to remove — an asserted capability that is not there —
+    // and an agent believing it reads the failure as a defect in the change under review.
+    const untrusted = appReachPrompt(reachable({ mode: 'sandbox_http', tlsTrusted: false }));
+    expect(untrusted).not.toContain('no `-k` is needed');
+    expect(untrusted).toContain('`-k` is expected here');
+    expect(untrusted).toContain('do not report it as one');
+  });
+
+  it('says nothing about certificates for a plain-http app', () => {
+    const p = appReachPrompt(
+      reachable({ mode: 'sandbox_http', url: 'http://haive-app-abc:3000', tlsTrusted: false }),
+    );
+    expect(p).not.toContain('-k');
+    expect(p).not.toContain('certificate');
   });
 
   it('rules out provider built-in web tools whichever way the app is reached', () => {

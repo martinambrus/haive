@@ -67,6 +67,13 @@ export interface AppReach {
   env: Record<string, string>;
   /** Hostnames the squid egress proxy must not be asked for. */
   noProxyHosts: string[];
+  /** Whether an https `url` will actually VERIFY in the sandbox — i.e. the shared CA that
+   *  signed it is mounted. False when the CA was never generated (boot failed, and the
+   *  runners are then on per-runner throwaway CAs nothing here can verify) and, vacuously,
+   *  for a plain-http URL. Carried rather than derived from `mounts` because it is what the
+   *  PROMPT turns on, and a prompt promising a clean handshake it cannot deliver is the very
+   *  failure this module exists to stop. */
+  tlsTrusted: boolean;
 }
 
 /** Where the CA lands in the sandbox. `/etc/ssl/certs` already exists in the image, and a
@@ -81,6 +88,7 @@ const NO_REACH: AppReach = {
   mounts: [],
   env: {},
   noProxyHosts: [],
+  tlsTrusted: false,
 };
 
 /** How the sandbox reaches this task's running app, or a 'none' reach when nothing serves.
@@ -166,6 +174,7 @@ async function resolveDdevReach(
       : [],
     env: caVolume ? { CURL_CA_BUNDLE: SANDBOX_CA_PATH, NODE_EXTRA_CA_CERTS: SANDBOX_CA_PATH } : {},
     noProxyHosts: [hostname],
+    tlsTrusted: caVolume !== null,
   };
 }
 
@@ -205,7 +214,16 @@ async function resolveAppRunnerReach(
   );
 
   return reachable
-    ? { mode: 'sandbox_http', url, addHosts: [], mounts: [], env: {}, noProxyHosts: [container] }
+    ? {
+        mode: 'sandbox_http',
+        url,
+        addHosts: [],
+        mounts: [],
+        env: {},
+        noProxyHosts: [container],
+        // Plain http — there is no handshake to promise anything about.
+        tlsTrusted: false,
+      }
     : { ...NO_REACH, mode: 'browser_only', url };
 }
 
@@ -266,9 +284,23 @@ export function appReachPrompt(reach: ReachableApp): string {
   if (reach.mode === 'sandbox_http') {
     lines.push(
       `The running app is at ${reach.url} and this sandbox can reach it directly — \`curl\` and`,
-      'any HTTP client work, with full control of method, path, headers and body. Its TLS',
-      'certificate verifies against the trust store, so no `-k` is needed; if you find yourself',
-      'wanting it, something is wrong and worth reporting rather than working around.',
+      'any HTTP client work, with full control of method, path, headers and body.',
+      // Said only when it is true. The CA is mounted only if one was generated at boot; with
+      // a throwaway per-runner CA the handshake genuinely fails, and an agent told otherwise
+      // reads that as a defect in the change it is reviewing.
+      ...(reach.url.startsWith('https:')
+        ? reach.tlsTrusted
+          ? [
+              'Its TLS certificate verifies against the trust store, so no `-k` is needed; if you',
+              'find yourself wanting it, something is wrong and worth reporting rather than',
+              'working around.',
+            ]
+          : [
+              'Its TLS certificate is self-signed by a throwaway development CA this sandbox does',
+              'not trust, so verification WILL fail and `-k` is expected here. That is the local',
+              'environment, not a certificate defect in the change — do not report it as one.',
+            ]
+        : []),
     );
   } else {
     lines.push(
