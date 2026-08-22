@@ -109,12 +109,17 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
       // and NOT REPRO is the one that used to cost an afternoon to discover by hand.
       // Unverified findings carry no marker at all — most findings are never blocking and
       // so are never verified, and marking those would drown the two labels that matter.
+      // NOT TESTED is the third label rather than silence: it still blocks, like an
+      // unverified finding, but the reason is an environment the panel could not reach, and
+      // a developer deciding what to act on needs to know which of the two it was.
       const verdict =
         f.verification === 'reproduced'
           ? '[REPRODUCED] '
           : f.verification === 'not_reproduced'
             ? '[NOT REPRO] '
-            : '';
+            : f.verification === 'untestable'
+              ? '[NOT TESTED] '
+              : '';
       // Coerce rather than read straight through: this reads 08d's persisted jsonb,
       // which for a task started before the ladder change holds the old vocabulary.
       const severity = coerceReviewSeverity(f.severity, 'low');

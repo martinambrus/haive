@@ -401,6 +401,23 @@ describe('08d PoC verification', () => {
       expect(verifyVerdict(verdictJson({ reproduced: false, observation: 'nope' }))).toBeNull();
     });
 
+    it('reads could_not_test without needing an observation', () => {
+      // There is nothing to quote when nothing was reachable, so the evidence floor that
+      // guards a non-reproduction would only push the verifier back onto `false`.
+      expect(verifyVerdict(verdictJson({ reproduced: 'could_not_test' }))).toBe('could_not_test');
+    });
+
+    it('keeps could_not_test distinct from a non-reproduction', () => {
+      // The whole point: an environmental failure must not read as a vote against the
+      // finding. This is the live prose that used to be scored as one.
+      const unreachable =
+        'No network route from this sandbox — curl https://x.ddev.site/AGENTS.md could not ' +
+        'resolve the host, and the published ports were unreachable from the container gateway.';
+      expect(
+        verifyVerdict(verdictJson({ reproduced: 'could_not_test', observation: unreachable })),
+      ).toBe('could_not_test');
+    });
+
     it('is null on unparseable output', () => {
       expect(verifyVerdict('I ran it and it seemed fine')).toBeNull();
       expect(verifyVerdict(null)).toBeNull();
@@ -459,6 +476,35 @@ describe('08d PoC verification', () => {
         voter('linkage', verdictJson({ reproduced: false, observation: observed })),
       ];
       expect(verificationForFinding(mixed, fp, LENSES)).toBe('unverified');
+    });
+
+    it('reports untestable when no lens could reach the app', () => {
+      // The failure that motivated the third verdict: every lens shares one broken network,
+      // so their failures are perfectly correlated and the unanimity rule cannot protect
+      // against them. Scored as a downgrade this silently dropped real defects.
+      expect(verificationForFinding(allSay({ reproduced: 'could_not_test' }), fp, LENSES)).toBe(
+        'untestable',
+      );
+    });
+
+    it('does not downgrade a panel that is split between untested and not-reproduced', () => {
+      // One lens that actually ran the PoC and found nothing is a single voter, and a
+      // downgrade needs the whole panel.
+      const mixed = [
+        voter('execute', verdictJson({ reproduced: 'could_not_test' })),
+        voter('target', verdictJson({ reproduced: false, observation: observed })),
+        voter('linkage', verdictJson({ reproduced: 'could_not_test' })),
+      ];
+      expect(verificationForFinding(mixed, fp, LENSES)).toBe('unverified');
+    });
+
+    it('still reproduces when one lens ran the PoC and the rest could not test', () => {
+      const mixed = [
+        voter('execute', verdictJson({ reproduced: true })),
+        voter('target', verdictJson({ reproduced: 'could_not_test' })),
+        voter('linkage', verdictJson({ reproduced: 'could_not_test' })),
+      ];
+      expect(verificationForFinding(mixed, fp, LENSES)).toBe('reproduced');
     });
 
     it('is unverified when the panel never ran at all', () => {
@@ -587,6 +633,32 @@ describe('08d verifier wave dispatch and downgrade', () => {
     }));
     const out = await run([adversary('auth-bandit', [BLOCKER]), ...verifiers]);
     expect(out.findings[0]!.verification).toBe('reproduced');
+    expect(out.blocking).toBe(true);
+  });
+
+  it('keeps a finding blocking when no lens could test it', async () => {
+    // End to end for the regression: an unreachable app must leave the finding at gate 1.5
+    // as a blocker, not as the advisory a false-scored panel used to produce.
+    enableVerification();
+    const first = await run([adversary('auth-bandit', [BLOCKER])]).catch((e: unknown) => e);
+    const dispatches = (err0(first) as MiningWaveError).dispatches;
+    const verifiers: AgentMiningResult[] = dispatches.map((d) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      invocationId: 'inv-v',
+      status: 'done',
+      output: null,
+      rawOutput:
+        '```json\n' +
+        JSON.stringify({
+          reproduced: 'could_not_test',
+          observation: 'curl https://x.ddev.site/x could not resolve the host from this sandbox',
+        }) +
+        '\n```',
+      errorMessage: null,
+    }));
+    const out = await run([adversary('auth-bandit', [BLOCKER]), ...verifiers]);
+    expect(out.findings[0]!.verification).toBe('untestable');
     expect(out.blocking).toBe(true);
   });
 

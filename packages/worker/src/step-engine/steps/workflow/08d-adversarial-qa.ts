@@ -133,8 +133,11 @@ interface AdversarialFinding {
    *  `not_reproduced` DOWNGRADES: the finding stops blocking but is still shown at gate
    *  1.5, labelled. It is deliberately not a dismissal — the developer keeps the call,
    *  which is why the recorded row's disposition stays `open` rather than becoming
-   *  `dismissed_refuted`. */
-  verification?: 'reproduced' | 'not_reproduced' | 'unverified';
+   *  `dismissed_refuted`.
+   *
+   *  `untestable` is NOT a downgrade: the panel never got to run the PoC at all. Kept
+   *  distinct from `unverified` only so gate 1.5 can say which one it was — both block. */
+  verification?: 'reproduced' | 'not_reproduced' | 'unverified' | 'untestable';
 }
 
 interface AdversarialApply {
@@ -265,8 +268,20 @@ function verifyKey(f: AdversarialFinding): string {
   return findingFingerprint('', path, f.impact ?? f.category ?? '');
 }
 
+/** The verifier's report. `reproduced` is deliberately NOT a plain boolean.
+ *
+ *  A verifier that cannot reach the app has, with only true/false available, no way to say
+ *  so — and its honest write-up ("no network route from this sandbox, curl
+ *  https://x.ddev.site/ failed") clears `hasObservation` on the strength of the URL alone.
+ *  An environmental fault then parses as a legitimate non-reproduction, and because every
+ *  lens shares the same broken network the failures are perfectly correlated, so the
+ *  all-lenses-must-agree rule below buys nothing against it. A real defect gets downgraded.
+ *
+ *  The fix is structural rather than a pattern that rejects unreachability prose: the wording
+ *  of a CLI's connection error is an ephemeral value and would break the day it is reworded,
+ *  silently and in the unsafe direction. */
 const verifySchema = z.object({
-  reproduced: z.boolean(),
+  reproduced: z.union([z.boolean(), z.literal('could_not_test')]),
   observation: z.string().optional(),
 });
 
@@ -291,8 +306,14 @@ export function hasObservation(text: unknown): boolean {
 }
 
 /** One verifier's verdict, or null when it did not give a usable one. Null covers the
- *  unparseable, the killed, and — deliberately — the negative with nothing observed. */
-export function verifyVerdict(raw: unknown): 'reproduced' | 'not_reproduced' | null {
+ *  unparseable, the killed, and — deliberately — the negative with nothing observed.
+ *
+ *  `could_not_test` carries no observation requirement: the whole point of it is that there
+ *  was nothing to observe. It is not a vote against the finding, so it can never downgrade
+ *  one. */
+export function verifyVerdict(
+  raw: unknown,
+): 'reproduced' | 'not_reproduced' | 'could_not_test' | null {
   // parseAgentJson with our OWN key gate, not parseReviewJson: that one admits only
   // candidates carrying `verdict` or `findings` — a reviewer's report shape — and a
   // verifier emits neither, so it would reject every valid verdict. Same reason 08c's
@@ -303,6 +324,7 @@ export function verifyVerdict(raw: unknown): 'reproduced' | 'not_reproduced' | n
     return r.success ? r.data : null;
   });
   if (!parsed) return null;
+  if (parsed.reproduced === 'could_not_test') return 'could_not_test';
   if (parsed.reproduced) return 'reproduced';
   return hasObservation(parsed.observation) ? 'not_reproduced' : null;
 }
@@ -315,18 +337,27 @@ export function verifyVerdict(raw: unknown): 'reproduced' | 'not_reproduced' | n
  *  unevidenced voter leaves the finding standing.
  *
  *  That is 08c's asymmetry applied here: gate 1.5 defaults to accepting what it is shown,
- *  so a wrongly-downgraded RCE is worse than a blocking finding the developer waves off. */
+ *  so a wrongly-downgraded RCE is worse than a blocking finding the developer waves off.
+ *
+ *  `untestable` is the unanimous could-not-test, reported separately from `unverified` only
+ *  so gate 1.5 can distinguish "nobody could run this" from "the panel disagreed". Both keep
+ *  the finding blocking; the ONLY verdict that stops one blocking is still `not_reproduced`. */
 export function verificationForFinding(
   results: AgentMiningResult[],
   fingerprint: string,
   lenses: (VerifyLens | null)[],
-): 'reproduced' | 'not_reproduced' | 'unverified' {
+): 'reproduced' | 'not_reproduced' | 'unverified' | 'untestable' {
   const verdicts = lenses.map((lens) => {
     const outcome = miningOutcome(results, verifierAgentId(fingerprint, lens));
     return outcome.kind === 'done' ? verifyVerdict(outcome.raw) : null;
   });
   if (verdicts.some((v) => v === 'reproduced')) return 'reproduced';
-  if (verdicts.length > 0 && verdicts.every((v) => v === 'not_reproduced')) return 'not_reproduced';
+  if (verdicts.length === 0) return 'unverified';
+  // Checked before the downgrade, and both are unanimity tests, so a mixed panel — one lens
+  // that could not test, one that tested and found nothing — falls through to `unverified`
+  // rather than downgrading on the strength of a single voter.
+  if (verdicts.every((v) => v === 'could_not_test')) return 'untestable';
+  if (verdicts.every((v) => v === 'not_reproduced')) return 'not_reproduced';
   return 'unverified';
 }
 
@@ -383,7 +414,14 @@ function buildVerifyPrompt(
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this',
     'shape:',
-    '{ "reproduced": true|false, "observation": "<what you actually saw>" }',
+    '{ "reproduced": true|false|"could_not_test", "observation": "<what you actually saw>" }',
+    '',
+    'Use "could_not_test" — NOT false — when the ENVIRONMENT stopped you running the PoC at',
+    'all: you could not reach the running app, the runtime is down, or the run has no access',
+    'to the surface the PoC needs. That is different from the under-specified proof above,',
+    'which is a judgement about the finding and stays false. Reporting false here would',
+    'downgrade a finding nobody ever tested, which is the one mistake this step cannot',
+    'afford. Say what you tried in `observation` anyway.',
     '',
     '`observation` is REQUIRED when you report reproduced:false, and it must record what you',
     'OBSERVED — the request you issued and the status and body you got back, or the command',
@@ -672,6 +710,15 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
         ctx.logger.info(
           { blocking: blockingFindings.length, downgraded: downgraded.length },
           'adversarial QA: blocking findings whose PoC no verifier could reproduce (shown as advisory, not dismissed)',
+        );
+      }
+      // Distinct signal, not a variant of the line above: this one says the ENVIRONMENT
+      // failed, not the finding. It is the operator's cue that the panel is running blind.
+      const untestable = blockingFindings.filter((f) => f.verification === 'untestable');
+      if (untestable.length > 0) {
+        ctx.logger.warn(
+          { blocking: blockingFindings.length, untestable: untestable.length },
+          'adversarial QA: blocking findings no verifier could test at all (still blocking)',
         );
       }
     } else if (args.miningWaveExhausted !== true && blockingFindings.length > 0) {
