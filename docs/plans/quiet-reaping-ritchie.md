@@ -260,3 +260,29 @@ of roughly 64 MB per build.
 
 Editing `renderDockerfile` changes `dockerfile_hash`, so every browserTesting env template
 rebuilds once and pays this.
+
+# Amendment — 2026-08-22: the two "unavoidable" bandwidth costs were neither
+
+The previous amendment left two costs standing as inherent. Both were artefacts of how they
+were measured, and both are now MEASURED away.
+
+**`--no-cache` defeating the mounts is not a path this system takes.** It was observed only
+because the benchmark passed the flag. `buildImage` (`sandbox/docker-runner.ts`) builds with
+`['build', '--progress=plain', '-t', tag]` plus an optional `-f`, `--build-arg` and the context
+dir, and `ensureDdevRunnerImage` with `['build', '-t', tag, dir]`. Nothing in the repository
+passes `--no-cache` to `docker build` — the only matches anywhere are `pip --no-cache-dir`,
+which is unrelated. A forced rebuild would indeed pay full price; nothing forces one.
+
+**"Every browserTesting template rebuilds once" does not mean every template pays.** The
+package half of the cache works: with `docker-clean` removed, an install leaves its `.deb`s in
+the `/var/cache/apt` mount (MEASURED: 71 of them after one install). A SECOND image — different
+early layer, so no layer cache at all — installing the same packages then fetched **0 files,
+0.00 MB**, with 0 `Get:` and 4 `Hit:`: both the index and the packages came from the mounts.
+
+So the ~248 MB is paid ONCE PER HOST, not once per template. Every browserTesting template
+installs the same browser and X stack, so that shared portion is nearly the whole of it, and
+later templates pay only for packages no earlier template pulled.
+
+The remaining honest caveat is narrow: the mounts live on the builder, so a pruned builder
+(`docker builder prune`) or a fresh host starts cold again. That is the same class as the
+existing "never blanket prune" rule for images and volumes.
