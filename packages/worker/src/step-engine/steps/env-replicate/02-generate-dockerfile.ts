@@ -565,7 +565,18 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     // an image whose browser only fails hours later inside an MCP tool call. That silence is
     // what hid the Ubuntu gap: the MCP answered "Browser was not found at the configured
     // executablePath (/usr/bin/chromium)" during a verification step, far from the cause.
-    lines.push('RUN /usr/bin/chromium --version');
+    // Records WHICH browser this image got, as well as asserting one exists.
+    //
+    // The version cannot be pinned. MEASURED against the live index: Google's apt repo
+    // publishes exactly ONE google-chrome-stable (no archive), and Debian carries one
+    // chromium per suite, so `=<version>` would resolve today and start FAILING builds the
+    // day upstream publishes the next one -- a build that breaks on someone else's schedule,
+    // which is worse than drift. Real pinning needs the Chrome for Testing overlay described
+    // in docs/plans/nimble-browsing-lovelace.md; CfT is the only source that archives.
+    //
+    // Until then the drift is at least legible: read /etc/haive-browser-version to see what a
+    // given image actually has, instead of inferring it from the build date.
+    lines.push('RUN /usr/bin/chromium --version | tee /etc/haive-browser-version');
     lines.push('');
   }
 

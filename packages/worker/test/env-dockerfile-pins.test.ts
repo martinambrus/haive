@@ -116,9 +116,11 @@ describe('renderDockerfile LSP version pins', () => {
     // The whole class of bug this guards: an image that builds fine and only reveals it has
     // no browser hours later, inside an MCP tool call during a verification step.
     for (const base of ['ubuntu:24.04', 'debian:bookworm-slim']) {
-      expect(renderDockerfile(base, { browserTesting: true })).toContain(
-        'RUN /usr/bin/chromium --version',
-      );
+      const df = renderDockerfile(base, { browserTesting: true });
+      expect(df).toContain('RUN /usr/bin/chromium --version');
+      // Same line records the version: it cannot be pinned (neither apt source archives
+      // old builds), so the least we can do is make the drift readable from the image.
+      expect(df).toContain('/etc/haive-browser-version');
     }
     // Not emitted at all when browser testing is off -- there is no browser to assert on.
     expect(renderDockerfile('ubuntu:24.04', {})).not.toContain('/usr/bin/chromium --version');
