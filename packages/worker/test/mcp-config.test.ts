@@ -165,6 +165,26 @@ describe('buildDefaultMcpServers', () => {
     expect(noProxy?.args[0]).toBe('-y');
   });
 
+  it("opts the headless launch out of Chrome's sandbox, and only that branch", () => {
+    // Chrome's own sandbox cannot nest inside the cli-exec container: without these the
+    // launch dies with "Target closed" before any tool runs. The browser-url branch
+    // launches no browser, so the same flags there would imply a launch that never happens.
+    const headless = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      includeChromeDevtools: true,
+    }).find((s) => s.name === 'chrome-devtools');
+    expect(headless?.args).toContain('--chrome-arg=--no-sandbox');
+    expect(headless?.args).toContain('--chrome-arg=--disable-dev-shm-usage');
+
+    const codriven = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      includeChromeDevtools: true,
+      chromeDevtoolsBrowserUrl: 'http://127.0.0.1:9222',
+    }).find((s) => s.name === 'chrome-devtools');
+    expect(codriven?.args).not.toContain('--chrome-arg=--no-sandbox');
+    expect(codriven?.args).not.toContain('--chrome-arg=--disable-dev-shm-usage');
+  });
+
   it('carries the telemetry opt-out env through to the rendered configs', () => {
     const servers = buildDefaultMcpServers({
       repoPath: '/workspace/repo',

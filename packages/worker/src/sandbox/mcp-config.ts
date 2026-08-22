@@ -169,6 +169,23 @@ const CHROME_MCP_NO_GOOGLE_EGRESS_ENV = { CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTIC
  *  still reaches the model. Closing that needs a change upstream, not a flag here. */
 const CHROME_MCP_REDACT_HEADERS_ARGS = ['--redact-network-headers'];
 
+/** Chrome's own sandbox cannot nest inside the cli-exec container, so the HEADLESS
+ *  self-launch has to opt out of it. MEASURED: with a real Chromium present and these
+ *  absent, the launch dies with `Protocol error (Target.setDiscoverTargets): Target
+ *  closed` before any tool runs — not cargo cult, do not drop them.
+ *
+ *  Puppeteer's defaults do NOT include either flag, and chrome-devtools-mcp forwards
+ *  `--chrome-arg` through untouched, which is the only way to reach the browser argv.
+ *
+ *  Grants nothing new: `browser-check.js` and `start-browser-desktop.sh` already launch
+ *  with both, so the container has always been the boundary here rather than Chrome's
+ *  sandbox. Headless branch ONLY — the `--browser-url` branch launches no browser, so
+ *  these would be inert there and merely imply a launch that never happens. */
+const CHROME_MCP_HEADLESS_LAUNCH_ARGS = [
+  '--chrome-arg=--no-sandbox',
+  '--chrome-arg=--disable-dev-shm-usage',
+];
+
 export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): McpServerSpec[] {
   const servers: McpServerSpec[] = [];
   const includeFs = opts.includeFilesystem !== false;
@@ -233,6 +250,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
           '--allow-unrestricted-paths',
           ...CHROME_MCP_NO_GOOGLE_EGRESS_ARGS,
           ...CHROME_MCP_REDACT_HEADERS_ARGS,
+          ...CHROME_MCP_HEADLESS_LAUNCH_ARGS,
         ];
     // Cap a single browser tool call. Nothing else bounds one: MCP_TOOL_TIMEOUT is unset
     // (~28h default), and the stdio idle timeout only fires on a fully silent server —
