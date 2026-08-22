@@ -142,6 +142,29 @@ describe('buildDefaultMcpServers', () => {
     }
   });
 
+  it('launches chrome-devtools through the body proxy only when one is shipped', () => {
+    const withProxy = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      includeChromeDevtools: true,
+      chromeDevtoolsBodyProxyPath: '/haive/haive-chrome-mcp-proxy.mjs',
+    }).find((s) => s.name === 'chrome-devtools');
+    expect(withProxy?.command).toBe('node');
+    // npx stays the inner command, so the version pin and every flag survive the wrap.
+    expect(withProxy?.args.slice(0, 3)).toEqual(['/haive/haive-chrome-mcp-proxy.mjs', 'npx', '-y']);
+    expect(withProxy?.args).toContain('--redact-network-headers');
+    expect(withProxy?.args).toContain('--no-usage-statistics');
+
+    // No proxy path = launch npx directly. 04-tooling-infrastructure renders the user's
+    // own .claude/mcp_settings.json from this, and that file must not name a path which
+    // exists only inside a Haive sandbox.
+    const noProxy = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      includeChromeDevtools: true,
+    }).find((s) => s.name === 'chrome-devtools');
+    expect(noProxy?.command).toBe('npx');
+    expect(noProxy?.args[0]).toBe('-y');
+  });
+
   it('carries the telemetry opt-out env through to the rendered configs', () => {
     const servers = buildDefaultMcpServers({
       repoPath: '/workspace/repo',

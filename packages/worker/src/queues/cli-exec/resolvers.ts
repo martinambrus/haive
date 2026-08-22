@@ -26,6 +26,7 @@ import {
   serversToJsonObject,
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
+import { CHROME_MCP_PROXY_JS, CHROME_MCP_PROXY_PATH } from '../../sandbox/chrome-mcp-proxy.js';
 import { DDEV_MCP_SERVER_JS, DDEV_MCP_SERVER_PATH } from '../../sandbox/ddev-mcp-server.js';
 import { resolveMcpSurface } from '../../sandbox/mcp-surface.js';
 import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
@@ -208,6 +209,7 @@ export async function resolveMcpExtraFiles(
     includeChromeDevtools: surface.chromeDevtools.enabled,
     chromeDevtoolsBrowserUrl,
     chromeDevtoolsMcpVersion: surface.chromeDevtools.version,
+    chromeDevtoolsBodyProxyPath: CHROME_MCP_PROXY_PATH,
     chromeDevtoolsToolTimeoutMs: await configService.getNumber(
       CONFIG_KEYS.CHROME_MCP_TOOL_TIMEOUT_MS,
       DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
@@ -239,6 +241,16 @@ export async function resolveMcpExtraFiles(
   const ddevFiles: SandboxExtraFile[] = surface.ddevControl.enabled
     ? [{ containerPath: DDEV_MCP_SERVER_PATH, content: DDEV_MCP_SERVER_JS }]
     : [];
+  // Same deal for the chrome-devtools body proxy: the server's command is `node <path>`,
+  // so the file has to exist or the MCP server would not start at all.
+  const chromeFiles: SandboxExtraFile[] = surface.chromeDevtools.enabled
+    ? [{ containerPath: CHROME_MCP_PROXY_PATH, content: CHROME_MCP_PROXY_JS }]
+    : [];
+
+  // ONE list, spread at every return below. Each delivery mode returns its own `files`, so
+  // three separate arrays combined per-site is where a newly added server quietly misses a
+  // branch -- and a missing script file means its MCP server does not start at all.
+  const serverFiles: SandboxExtraFile[] = [...ragFiles, ...ddevFiles, ...chromeFiles];
 
   const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME, userServers);
   if (!config) return empty;
@@ -252,7 +264,7 @@ export async function resolveMcpExtraFiles(
       // Gemini reads MCP servers from the SAME settings.json that holds `selectedAuthType`, so
       // the merge has to preserve the fields it does not own.
       await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers));
-      return { files: [...ragFiles, ...ddevFiles], extraArgs: [] };
+      return { files: serverFiles, extraArgs: [] };
     case 'cli-merge':
       await mergeCliMcpIntoTaskVolume(
         taskId,
@@ -260,13 +272,13 @@ export async function resolveMcpExtraFiles(
         sandboxImage,
         resolveStdioMcpServers(servers, userServers),
       );
-      return { files: [...ragFiles, ...ddevFiles], extraArgs: [] };
+      return { files: serverFiles, extraArgs: [] };
     case 'volume-write':
       await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content);
-      return { files: [...ragFiles, ...ddevFiles], extraArgs: [] };
+      return { files: serverFiles, extraArgs: [] };
     case 'bind':
       return {
-        files: [{ containerPath: config.path, content: config.content }, ...ragFiles, ...ddevFiles],
+        files: [{ containerPath: config.path, content: config.content }, ...serverFiles],
         extraArgs: config.cliArgs ?? [],
       };
   }

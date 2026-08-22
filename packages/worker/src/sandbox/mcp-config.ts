@@ -91,6 +91,13 @@ export interface BuildDefaultMcpServersOptions {
   ddevApiUrl?: string;
   /** Task-scoped bearer token the ddev proxy presents to the API. */
   ddevToken?: string;
+  /** Container path of the bind-mounted chrome-devtools body-diversion proxy. When set,
+   *  the server is launched THROUGH it (`node <proxy> npx <cdm args>`) so network bodies
+   *  are written to disk instead of into the model's context; see chrome-mcp-proxy.ts.
+   *  Absent = launch `npx` directly, which is what the onboarding template must do: that
+   *  template becomes the user's own `.claude/mcp_settings.json` and would otherwise name
+   *  a path that exists only inside a Haive sandbox. */
+  chromeDevtoolsBodyProxyPath?: string;
   /** Hard wall-clock cap in ms on a single chrome-devtools tool call. Defaults to
    *  DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS; 0 emits no cap at all (the CLI's own ~28h
    *  default returns). Only chrome-devtools gets one — filesystem/git/rag/ddev-control
@@ -233,10 +240,13 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
     // ran until the step budget killed it. The per-server `timeout` is explicitly immune to
     // progress notifications, which is why it is the field used here.
     const chromeTimeout = opts.chromeDevtoolsToolTimeoutMs ?? DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS;
+    // Launch through the body-diversion proxy when one was shipped into the sandbox.
+    // `npx` stays the inner command, so the pin, the flags and the env are untouched.
+    const bodyProxy = opts.chromeDevtoolsBodyProxyPath?.trim();
     servers.push({
       name: 'chrome-devtools',
-      command: 'npx',
-      args: chromeArgs,
+      command: bodyProxy ? 'node' : 'npx',
+      args: bodyProxy ? [bodyProxy, 'npx', ...chromeArgs] : chromeArgs,
       env: { ...CHROME_MCP_NO_GOOGLE_EGRESS_ENV },
       ...(chromeTimeout > 0 ? { timeout: chromeTimeout } : {}),
     });
