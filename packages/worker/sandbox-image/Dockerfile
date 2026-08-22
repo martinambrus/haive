@@ -23,6 +23,7 @@ FROM node:24-bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
+      chromium \
       curl \
       git \
       nano \
@@ -30,6 +31,12 @@ RUN apt-get update \
       tini \
       tmux \
  && rm -rf /var/lib/apt/lists/*
+
+# chromium is the HEADLESS fallback for chrome-devtools-mcp: when the task's runner has
+# no live headed browser, mcp-config launches the server with
+# `--executable-path=/usr/bin/chromium --headless=true`. That path was referenced but the
+# binary was never installed here, so the fallback could not have worked. Debian names the
+# binary `chromium` (not `google-chrome`), which is why --channel=stable is not used.
 
 # uv (Astral) — provides `uvx`, used by the git MCP server. Installed to
 # /usr/local/bin so it is on PATH for the node user (the installer otherwise
