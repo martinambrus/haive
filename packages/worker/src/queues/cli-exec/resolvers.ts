@@ -181,6 +181,12 @@ export async function resolveMcpExtraFiles(
    *  and no user MCP servers. Used for knowledge-mining invocations, which are
    *  read-only analysis and should reach nothing but rag_search. */
   ragOnly = false,
+  /** Whether this invocation targets a linked worktree rather than the repo root. Decides
+   *  whether the git MCP server is offered at all — see the `includeGit` note below.
+   *
+   *  Deliberately REQUIRED (no default): the caller already computes it for the gitfile mask,
+   *  and a default would let a new call site silently re-advertise a server that cannot work. */
+  hasWorktree: boolean,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
 
@@ -206,6 +212,28 @@ export async function resolveMcpExtraFiles(
 
   const servers = buildDefaultMcpServers({
     repoPath: sandboxWorkdir,
+    // No git server on a worktree, where git cannot work for two independent reasons.
+    //
+    // worktreeGitfileMask bind-mounts a read-only empty file over the worktree's `.git` as an
+    // integrity control, so git answers `fatal: invalid gitfile format` and does not fall back
+    // to the parent repo. And even unmasked the gitfile names a HOST path
+    // (`gitdir: /var/lib/haive/repos/...`) while the tree is mounted at SANDBOX_WORKDIR, so the
+    // gitdir does not exist in any container.
+    //
+    // MEASURED before this: `"git":"failed"` in the init event of every worktree invocation,
+    // with the server reporting `is not a valid Git repository`. uvx itself is fine. The cost
+    // was a permanently failing entry every agent sees, plus a uvx fetch of 33 packages per
+    // cold sandbox.
+    //
+    // Keyed on the SAME predicate as the mask, which is the point: gitfile-mask.ts already
+    // requires that a prompt cannot claim this boundary for the repo root while a masked
+    // worktree omits it, and the MCP surface is the third thing that has to agree.
+    //
+    // Do NOT "fix" this by pointing the server at the repo root instead. The root is unmasked
+    // only because `.git` is a real directory there; a git MCP aimed at it would hand agents a
+    // working git behind the commit gate that 10-gate-3-commit and completeMergeHostSide rely
+    // on -- exactly what the mask exists to prevent, reached through a different door.
+    includeGit: !hasWorktree,
     includeChromeDevtools: surface.chromeDevtools.enabled,
     chromeDevtoolsBrowserUrl,
     chromeDevtoolsMcpVersion: surface.chromeDevtools.version,

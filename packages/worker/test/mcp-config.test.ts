@@ -185,6 +185,27 @@ describe('buildDefaultMcpServers', () => {
     expect(codriven?.args).not.toContain('--chrome-arg=--disable-dev-shm-usage');
   });
 
+  // cli-exec now passes includeGit: !hasWorktree. On a worktree git cannot work for two
+  // independent reasons -- worktreeGitfileMask bind-mounts an empty read-only file over the
+  // `.git` gitfile as an integrity control, and the gitfile names a HOST path
+  // (/var/lib/haive/repos/...) that does not exist inside any container. Shipping the server
+  // there produced `"git":"failed"` in every init event plus a uvx fetch of 33 packages per
+  // cold sandbox.
+  it('omits the git server when asked, and keeps it otherwise', () => {
+    const withGit = buildDefaultMcpServers({ repoPath: '/workspace/repo' });
+    expect(withGit.map((s) => s.name)).toContain('git');
+
+    const withoutGit = buildDefaultMcpServers({ repoPath: '/workspace/repo', includeGit: false });
+    expect(withoutGit.map((s) => s.name)).not.toContain('git');
+    // Only git goes; the rest of the surface is untouched.
+    expect(withoutGit.map((s) => s.name)).toContain('filesystem');
+
+    // The default must stay ON: the terminal and the onboarding template both render from
+    // this builder, and git works in both (the mask is never applied to terminal containers,
+    // and the template becomes the user's own mcp_settings.json on their machine).
+    expect(buildDefaultMcpServers({ repoPath: '/r' }).map((s) => s.name)).toContain('git');
+  });
+
   it('carries the telemetry opt-out env through to the rendered configs', () => {
     const servers = buildDefaultMcpServers({
       repoPath: '/workspace/repo',

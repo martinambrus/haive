@@ -25,6 +25,10 @@ export async function executeSubAgentNative(
   repoMount: DockerVolumeMount | null,
   sandboxWorkdir: string,
   maskFiles: SandboxExtraFile[],
+  /** Whether this invocation targets a linked worktree. Threaded through from executeByKind,
+   *  which already computes it for the gitfile mask, so the MCP surface and the mask cannot
+   *  disagree about whether git is usable here. */
+  hasWorktree: boolean,
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_native requires cliProviderId');
@@ -63,6 +67,7 @@ export async function executeSubAgentNative(
     // ignore it and always take the full surface, so `toolProfile` meant one thing
     // on the cli path and another on this one.
     payload.toolProfile === 'rag_only',
+    hasWorktree,
   );
   return executeCliSpec(
     spec,
@@ -92,6 +97,10 @@ export async function executeSubAgentSequential(
   repoMount: DockerVolumeMount | null,
   sandboxWorkdir: string,
   maskFiles: SandboxExtraFile[],
+  /** Whether this invocation targets a linked worktree. Threaded through from executeByKind,
+   *  which already computes it for the gitfile mask, so the MCP surface and the mask cannot
+   *  disagree about whether git is usable here. */
+  hasWorktree: boolean,
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_sequential requires cliProviderId');
@@ -124,6 +133,7 @@ export async function executeSubAgentSequential(
     // ignore it and always take the full surface, so `toolProfile` meant one thing
     // on the cli path and another on this one.
     payload.toolProfile === 'rag_only',
+    hasWorktree,
   );
   const spawner = createSandboxSpawner(
     provider.wrapperContent,

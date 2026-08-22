@@ -371,6 +371,7 @@ export async function executeByKind(
             // adversarial-QA agents, and forcing rag-only on all three gave 08d a live
             // app URL it had no browser to reach.
             payload.toolProfile === 'rag_only',
+            hasWorktree,
           )
         : { files: [], extraArgs: [] };
       // Pre-warm the shared npm cache for the MCP servers that are fetched from npm.
@@ -431,7 +432,15 @@ export async function executeByKind(
       );
     }
     case 'subagent_sequential':
-      return executeSubAgentSequential(db, payload, secrets, repoMount, sandboxWorkdir, maskFiles);
+      return executeSubAgentSequential(
+        db,
+        payload,
+        secrets,
+        repoMount,
+        sandboxWorkdir,
+        maskFiles,
+        hasWorktree,
+      );
     case 'subagent_native':
       return executeSubAgentNative(
         db,
@@ -441,6 +450,7 @@ export async function executeByKind(
         repoMount,
         sandboxWorkdir,
         maskFiles,
+        hasWorktree,
       );
     default:
       throw new Error(
