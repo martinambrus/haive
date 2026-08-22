@@ -20,7 +20,7 @@ import {
   type FloatState,
 } from './float-window';
 
-interface PointerHandlers {
+export interface PointerHandlers {
   onPointerDown: (e: ReactPointerEvent<HTMLElement>) => void;
   onPointerMove: (e: ReactPointerEvent<HTMLElement>) => void;
   onPointerUp: (e: ReactPointerEvent<HTMLElement>) => void;

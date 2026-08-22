@@ -118,7 +118,7 @@ function screenshotGallery(
 function liveBrowserPanel(
   step: { id: string; detectOutput: unknown },
   taskId: string,
-  opts: { autoCollapse: boolean; title?: string },
+  opts: { autoCollapse: boolean; title?: string; splitTerminal?: boolean },
 ) {
   const det = step.detectOutput as {
     liveBrowser?: { available?: boolean; appUrl?: string | null };
@@ -141,6 +141,10 @@ function liveBrowserPanel(
       autoCollapse={opts.autoCollapse}
       persistId={step.id}
       appUrl={det.liveBrowser.appUrl}
+      // Split view (browser beside the agent's prose) is offered only where an agent is
+      // driving this browser — the browser-testing step. At gate 2 or in run_app the
+      // browser is the user's to click, so there is no run to watch.
+      terminalStepRowId={opts.splitTerminal ? step.id : undefined}
     />
   ) : null;
   const dbPanel = det?.dbAccess ? (
@@ -3430,7 +3434,10 @@ function StepCardImpl({
                 step.stepId === '08a-browser-verify' &&
                 step.activeRole !== 'fixer' ? (
                   <>
-                    {liveBrowserPanel(step, taskId, { autoCollapse: taskEnded })}
+                    {liveBrowserPanel(step, taskId, {
+                      autoCollapse: taskEnded,
+                      splitTerminal: true,
+                    })}
                     {screenshotGallery(step, taskId, 'output')}
                   </>
                 ) : undefined
@@ -3571,7 +3578,7 @@ function StepCardImpl({
         step.status !== 'done' &&
         step.status !== 'waiting_form' &&
         step.activeRole !== 'fixer' &&
-        liveBrowserPanel(step, taskId, { autoCollapse: taskEnded })}
+        liveBrowserPanel(step, taskId, { autoCollapse: taskEnded, splitTerminal: true })}
 
       {!runtimeTornDown &&
         step.stepId === '08a-browser-verify' &&

@@ -4,7 +4,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiWebSocketUrl } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { useFloatWindow } from '@/lib/use-float-window';
+import { useSplitPane } from '@/lib/use-split-pane';
 import { suppressNovncCloseLog } from '@/lib/suppress-novnc-log';
+import { SplitTerminalPane } from './SplitTerminalPane';
 
 type VncState = 'idle' | 'connecting' | 'connected' | 'error';
 
@@ -35,6 +37,11 @@ interface BrowserVncPanelProps {
    *  port is not published to the host, so this URL only resolves inside the environment
    *  streamed below — direct mode is the one that hands out host-openable URLs. */
   appUrl?: string | null;
+  /** task_steps row id whose CLI output the split view streams beside the browser.
+   *  Passing it is what OFFERS the split view: only the browser-testing step, where an
+   *  agent is actually driving this browser, has prose worth watching live. Panels
+   *  without it (gate 2, run_app) keep Maximize and Pop out only. */
+  terminalStepRowId?: string;
 }
 
 /**
@@ -51,6 +58,7 @@ export function BrowserVncPanel({
   autoCollapse,
   persistId,
   appUrl,
+  terminalStepRowId,
 }: BrowserVncPanelProps) {
   // Persisted per task (when a persistId is given) so a reload restores whether this
   // panel was open. autoCollapse below is edge-guarded so it never clobbers a restore.
@@ -64,6 +72,10 @@ export function BrowserVncPanel({
   // terminal instead of below it. Same mounted element in both modes — see the maximize
   // note further down for why that is the constraint the whole feature turns on.
   const float = useFloatWindow(persistId ? `task-ui:${taskId}:vnc:${persistId}:float` : null);
+  // Split view: browser on one side of the viewport, the agent's prose in a column on
+  // the other. Offered only where a terminal was handed in, and only while the browser
+  // is actually shown — a collapsed panel has nothing to split.
+  const split = useSplitPane(persistId ? `task-ui:${taskId}:vnc:${persistId}:split` : null);
   const [state, setState] = useState<VncState>('idle');
   const [message, setMessage] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -276,6 +288,25 @@ export function BrowserVncPanel({
     return () => window.removeEventListener('keydown', onKey);
   }, [maximized]);
 
+  const splitOn = split.split && !!terminalStepRowId && expanded;
+  // Split and pop-out persist independently, so a reload can restore both. Split takes
+  // the whole viewport, so it wins: without this the root would be the split grid while
+  // the placeholder bar and the float's resize grips still rendered around it.
+  const detached = float.detached && !splitOn;
+  const paneOnRight = split.side === 'right';
+  // Grid areas for split mode. Placing the EXISTING children by area is the whole
+  // trick: wrapping the VNC body in a row to sit it next to the prose column would
+  // re-create the noVNC container and drop the session, so the root becomes a grid
+  // instead and nothing moves in the tree.
+  const rowSpan = (row: number) => (splitOn ? { gridColumn: '1 / -1', gridRow: row } : undefined);
+  const colArea = (col: number) => (splitOn ? { gridColumn: col, gridRow: 3 } : undefined);
+  const enterSplit = () => {
+    float.dockAuto();
+    setMaximized(false);
+    split.enter();
+    nudgeResize();
+  };
+
   return (
     <>
       {/* Holds the panel's place in the page flow while it floats. ALWAYS rendered
@@ -283,7 +314,7 @@ export function BrowserVncPanel({
           a shifting slot would re-create the noVNC container and kill the session. */}
       <div
         className={
-          float.detached
+          detached
             ? 'flex items-center justify-between rounded-md border border-dashed border-neutral-700 bg-neutral-950 px-3 py-2'
             : 'hidden'
         }
@@ -297,22 +328,34 @@ export function BrowserVncPanel({
       </div>
       <div
         className={
-          float.detached
-            ? 'fixed z-50 flex flex-col gap-1 overflow-hidden rounded-md border border-neutral-700 bg-neutral-950 p-2 shadow-2xl shadow-black/60'
-            : maximized
-              ? 'fixed inset-0 z-50 flex flex-col gap-1 border border-neutral-800 bg-neutral-950 p-2'
-              : 'flex flex-col gap-1 rounded-md border border-neutral-800 bg-neutral-950 p-2'
+          splitOn
+            ? 'fixed inset-0 z-50 grid gap-1 border border-neutral-800 bg-neutral-950 p-2'
+            : detached
+              ? 'fixed z-50 flex flex-col gap-1 overflow-hidden rounded-md border border-neutral-700 bg-neutral-950 p-2 shadow-2xl shadow-black/60'
+              : maximized
+                ? 'fixed inset-0 z-50 flex flex-col gap-1 border border-neutral-800 bg-neutral-950 p-2'
+                : 'flex flex-col gap-1 rounded-md border border-neutral-800 bg-neutral-950 p-2'
         }
-        style={float.style}
+        style={
+          splitOn
+            ? {
+                gridTemplateColumns: paneOnRight
+                  ? `1fr 6px ${(split.ratio * 100).toFixed(2)}%`
+                  : `${(split.ratio * 100).toFixed(2)}% 6px 1fr`,
+                gridTemplateRows: 'auto auto minmax(0, 1fr)',
+              }
+            : float.style
+        }
       >
         {/* Doubles as the floating window's title bar: the drag handlers no-op while
             docked, and skip presses that land on the buttons on the right. */}
         <div
           className={
-            float.detached
+            detached
               ? 'flex cursor-move select-none items-center justify-between'
               : 'flex items-center justify-between'
           }
+          style={rowSpan(1)}
           {...float.headerHandlers}
         >
           <span className="text-xs font-semibold text-neutral-300">
@@ -341,7 +384,7 @@ export function BrowserVncPanel({
                 >
                   Fullscreen
                 </button>
-                {!float.detached && (
+                {!detached && !splitOn && (
                   <button
                     type="button"
                     onClick={toggleMaximize}
@@ -350,18 +393,32 @@ export function BrowserVncPanel({
                     {maximized ? 'Restore' : 'Maximize'}
                   </button>
                 )}
-                {!maximized && (
+                {!maximized && !splitOn && (
                   <button
                     type="button"
-                    onClick={float.detached ? float.dock : float.detach}
+                    onClick={detached ? float.dock : float.detach}
                     title={
-                      float.detached
+                      detached
                         ? 'Put the browser back inline'
                         : 'Float the browser over the page so you can watch it beside the terminal'
                     }
                     className="text-xs text-indigo-400 underline"
                   >
-                    {float.detached ? 'Dock' : 'Pop out'}
+                    {detached ? 'Dock' : 'Pop out'}
+                  </button>
+                )}
+                {terminalStepRowId && (
+                  <button
+                    type="button"
+                    onClick={splitOn ? split.exit : enterSplit}
+                    title={
+                      splitOn
+                        ? 'Put the browser back inline'
+                        : "Fill the screen with the browser and stream the agent's text beside it"
+                    }
+                    className="text-xs text-indigo-400 underline"
+                  >
+                    {splitOn ? 'Exit split' : 'Split'}
                   </button>
                 )}
               </>
@@ -389,7 +446,7 @@ export function BrowserVncPanel({
           </div>
         </div>
         {appUrl && (
-          <p className="px-0.5 text-[11px] text-neutral-500">
+          <p className="px-0.5 text-[11px] text-neutral-500" style={rowSpan(2)}>
             Testing <span className="font-mono text-neutral-400">{appUrl}</span> in the environment
             below
           </p>
@@ -397,10 +454,11 @@ export function BrowserVncPanel({
         {expanded && (
           <div
             className={
-              maximized || float.detached
+              maximized || detached || splitOn
                 ? 'relative min-h-0 w-full flex-1'
                 : 'relative h-[480px] w-full'
             }
+            style={colArea(paneOnRight ? 1 : 3)}
           >
             {/* noVNC manages its own canvas here; stays mounted across maximize and
                 pop-out toggles so the RFB session survives. */}
@@ -435,10 +493,29 @@ export function BrowserVncPanel({
         )}
         {/* Resize border. Trailing siblings, so adding them never disturbs the slots
             above — least of all the noVNC container's. */}
-        {float.detached &&
+        {detached &&
           float.grips.map((grip) => (
             <div key={grip.edge} className={grip.className} {...grip.handlers} />
           ))}
+        {/* Split view's divider and prose column — also trailing siblings; the grid
+            areas above put them where they belong regardless of DOM order. */}
+        {splitOn && (
+          <div
+            className="touch-none cursor-col-resize rounded bg-neutral-800 transition-colors hover:bg-indigo-600"
+            style={{ gridColumn: 2, gridRow: 3 }}
+            {...split.dividerHandlers}
+          />
+        )}
+        {splitOn && terminalStepRowId && (
+          <div className="min-h-0 min-w-0" style={colArea(paneOnRight ? 3 : 1)}>
+            <SplitTerminalPane
+              taskId={taskId}
+              stepRowId={terminalStepRowId}
+              side={split.side}
+              onMove={split.moveTo}
+            />
+          </div>
+        )}
       </div>
     </>
   );
