@@ -32,6 +32,53 @@ describe('renderDockerfile LSP version pins', () => {
     expect(df).not.toContain('intelephense@');
   });
 
+  // Ubuntu ships no chromium deb: `chromium` has no candidate and `chromium-browser` is a
+  // snap redirect stub. The generated image previously named the Debian package on both
+  // bases, so /usr/bin/chromium -- which mcp-config, CHROME_PATH, browser-check.js and
+  // 08a-browser-verify all assume -- simply did not exist on Ubuntu.
+  it('takes the browser from Google apt on Ubuntu and from the chromium deb on Debian', () => {
+    const ubuntu = renderDockerfile('ubuntu:24.04', { browserTesting: true });
+    expect(ubuntu).toContain('google-chrome-stable');
+    expect(ubuntu).toContain('ln -sf /usr/bin/google-chrome /usr/bin/chromium');
+    // The Debian package name must NOT be requested on Ubuntu -- that is the original bug.
+    expect(ubuntu).not.toMatch(/--no-install-recommends chromium /);
+
+    const debian = renderDockerfile('debian:bookworm-slim', { browserTesting: true });
+    expect(debian).toMatch(/--no-install-recommends chromium /);
+    expect(debian).not.toContain('google-chrome-stable');
+    expect(debian).not.toContain('dl.google.com');
+  });
+
+  // Each apt block deletes /var/lib/apt/lists, so every additional block re-fetches the
+  // whole package index -- MEASURED 32.3 MB per `apt-get update`. Installing the browser
+  // and the X stack from one block is what keeps that off a slow connection.
+  it('installs the Ubuntu browser and the X stack from a single apt block', () => {
+    const ubuntu = renderDockerfile('ubuntu:24.04', { browserTesting: true });
+    const line = ubuntu
+      .split('\n')
+      .find((l) => l.includes('google-chrome-stable') && l.includes('apt-get install'));
+    expect(line).toBeDefined();
+    // Same install line, therefore the same `apt-get update`.
+    for (const pkg of ['xvfb', 'x11vnc', 'socat', 'procps', 'fonts-dejavu']) {
+      expect(line).toContain(pkg);
+    }
+    // The repo is added inside that block too, not as a separate updating step.
+    const browserSection = ubuntu.slice(ubuntu.indexOf('# Browser testing'));
+    expect(browserSection.match(/apt-get update/g)?.length).toBe(1);
+  });
+
+  it('fails the build when the base cannot produce a working browser', () => {
+    // The whole class of bug this guards: an image that builds fine and only reveals it has
+    // no browser hours later, inside an MCP tool call during a verification step.
+    for (const base of ['ubuntu:24.04', 'debian:bookworm-slim']) {
+      expect(renderDockerfile(base, { browserTesting: true })).toContain(
+        'RUN /usr/bin/chromium --version',
+      );
+    }
+    // Not emitted at all when browser testing is off -- there is no browser to assert on.
+    expect(renderDockerfile('ubuntu:24.04', {})).not.toContain('/usr/bin/chromium --version');
+  });
+
   it('pins the chrome-devtools-mcp env install line when browserTesting is on', () => {
     const pinned = renderDockerfile('ubuntu:24.04', {
       browserTesting: true,

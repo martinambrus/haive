@@ -232,6 +232,13 @@ interface DeclaredDepsShape {
   extraPackages?: string[];
 }
 
+/** Ubuntu bases need different package sources than Debian ones in two places: the PHP
+ *  sury PPA, and the browser (Ubuntu ships no chromium deb at all). One predicate so the
+ *  two cannot drift apart. */
+function isUbuntuBase(baseImage: string): boolean {
+  return /^ubuntu:/i.test(baseImage);
+}
+
 export function renderDockerfile(baseImage: string, rawDeps: Record<string, unknown>): string {
   const deps = rawDeps as DeclaredDepsShape;
   const lines: string[] = [];
@@ -314,8 +321,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     const requestedPhp = normalizePhpVersion(versions.php ?? '8.3');
     const phpVersion = clampPhpToInstallable(requestedPhp);
     const bumped = phpVersion !== requestedPhp;
-    const isUbuntuBase = /^ubuntu:/i.test(baseImage);
-    const needsSuryPpa = isUbuntuBase && phpVersion !== '8.3';
+    const needsSuryPpa = isUbuntuBase(baseImage) && phpVersion !== '8.3';
     if (bumped) {
       // PHP < 5.6 is EOL and carried by no maintained apt repo (ondrej/sury
       // both floor at 5.6, as does DDEV), so the apt install would fail. Floor
@@ -468,18 +474,64 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     // worker injects the desktop launcher + probe scripts into the running
     // container via `docker cp` (they can't be COPYed here — the env-image build
     // context is the repo, not the worker's docker assets).
-    lines.push('# Browser testing: headed Chromium + Xvfb/x11vnc/socat + puppeteer-core');
-    lines.push('RUN apt-get update \\');
-    lines.push(
-      '    && apt-get install -y --no-install-recommends chromium xvfb x11vnc socat procps fonts-dejavu \\',
-    );
-    lines.push('    && rm -rf /var/lib/apt/lists/*');
+    const ubuntu = isUbuntuBase(baseImage);
+    // ONE apt block, repo setup included. Each block ends by deleting
+    // /var/lib/apt/lists, so a second block re-fetches the whole package index: MEASURED
+    // 32.3 MB per `apt-get update`, three times over in a browserTesting build (96.9 MB of
+    // a 344 MB total). Adding the Google repo as its own step would have paid that a fourth
+    // time. The cost of merging is layer granularity -- editing the X-stack list now also
+    // reinstalls the browser -- which is the cheaper side of the trade, since that list
+    // changes far less often than env templates rebuild.
+    lines.push('# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core');
+    if (ubuntu) {
+      // Ubuntu ships NO chromium deb: `chromium` has no candidate at all and
+      // `chromium-browser` is `Transitional package - chromium-browser -> chromium snap`,
+      // a stub that prints "snap install chromium" and exits 1 (MEASURED on ubuntu:24.04).
+      //
+      // Google's apt repo rather than the Chrome for Testing zip because Chrome needs a
+      // long list of system libraries this image does not carry -- MEASURED, libnss3,
+      // libasound2, libatk, libcups, libpango, libxkbcommon and libatspi are all absent,
+      // since it was `apt install chromium` that used to drag them in. apt resolves them
+      // from the deb and keeps doing so across releases; a hand-written list would be
+      // release-specific (24.04 renamed several with a `t64` suffix) and break silently on
+      // the next base.
+      //
+      // Symlinked to /usr/bin/chromium so the path every consumer already assumes becomes
+      // true -- SANDBOX_CHROME_PATH in mcp-config, CHROME_PATH below, browser-check.js and
+      // 08a-browser-verify all name it, and none of them need to know what provided it.
+      lines.push('# Ubuntu has no chromium deb (snap only) — take the browser from Google apt');
+      lines.push('RUN install -m 0755 -d /etc/apt/keyrings \\');
+      lines.push(
+        '    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \\',
+      );
+      lines.push('    && chmod a+r /etc/apt/keyrings/google-chrome.gpg \\');
+      lines.push(
+        '    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \\',
+      );
+      lines.push('    && apt-get update \\');
+      lines.push(
+        '    && apt-get install -y --no-install-recommends google-chrome-stable xvfb x11vnc socat procps fonts-dejavu \\',
+      );
+      lines.push('    && rm -rf /var/lib/apt/lists/* \\');
+      lines.push('    && ln -sf /usr/bin/google-chrome /usr/bin/chromium');
+    } else {
+      lines.push('RUN apt-get update \\');
+      lines.push(
+        '    && apt-get install -y --no-install-recommends chromium xvfb x11vnc socat procps fonts-dejavu \\',
+      );
+      lines.push('    && rm -rf /var/lib/apt/lists/*');
+    }
     const cdmVersion = (deps.chromeDevtoolsMcpVersion ?? '').trim();
     lines.push(`RUN npm install -g chrome-devtools-mcp${cdmVersion ? `@${cdmVersion}` : ''}`);
     lines.push(
       'RUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1',
     );
     lines.push('ENV CHROME_PATH=/usr/bin/chromium');
+    // Fail the BUILD if the base could not produce a working browser, rather than shipping
+    // an image whose browser only fails hours later inside an MCP tool call. That silence is
+    // what hid the Ubuntu gap: the MCP answered "Browser was not found at the configured
+    // executablePath (/usr/bin/chromium)" during a verification step, far from the cause.
+    lines.push('RUN /usr/bin/chromium --version');
     lines.push('');
   }
 
