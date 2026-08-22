@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   didNotCompleteIssue,
+  miningInvocationId,
   miningOutcome,
   shouldRerollMiningAgent,
   shouldRetryMiningTerminalFailure,
@@ -151,5 +152,31 @@ describe('overrideOr', () => {
   it('leaves an undeclared budget undeclared rather than inventing one', () => {
     expect(overrideOr(step(null), undefined)).toBeUndefined();
     expect(overrideOr(step(90 * 60_000), undefined)).toBe(90 * 60_000);
+  });
+});
+
+describe('miningInvocationId', () => {
+  const withInvocation = (agentId: string, invocationId: string | null): AgentMiningResult => ({
+    agentId,
+    agentTitle: agentId,
+    invocationId,
+    status: 'done',
+    output: null,
+    rawOutput: '{}',
+    errorMessage: null,
+  });
+
+  it('returns the invocation the named agent ran as', () => {
+    const results = [withInvocation('peer-reviewer', 'inv-1'), withInvocation('sec', 'inv-2')];
+    expect(miningInvocationId(results, 'sec')).toBe('inv-2');
+  });
+
+  it('is null for an agent absent from the batch', () => {
+    expect(miningInvocationId([withInvocation('peer-reviewer', 'inv-1')], 'nope')).toBeNull();
+  });
+
+  it('is null when the agent never reached dispatch', () => {
+    // Recorder treats null as "cannot name one" rather than guessing.
+    expect(miningInvocationId([withInvocation('peer-reviewer', null)], 'peer-reviewer')).toBeNull();
   });
 });

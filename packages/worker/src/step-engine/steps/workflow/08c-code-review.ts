@@ -10,6 +10,7 @@ import type {
 } from '../../step-definition.js';
 import {
   didNotCompleteIssue,
+  miningInvocationId,
   miningOutcome,
   shouldRerollMiningAgent,
   shouldRetryMiningTerminalFailure,
@@ -1291,6 +1292,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     await recordReviewFindings(ctx, '08c-code-review', [
       ...peerOut.findings.map((f) => ({
         reviewerId: 'peer-reviewer',
+        cliInvocationId: miningInvocationId(results, 'peer-reviewer'),
         severity: f.severity,
         issue: f.issue,
         path: f.path,
@@ -1303,6 +1305,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       })),
       ...securityOut.findings.map((f) => ({
         reviewerId: 'security-code-reviewer',
+        cliInvocationId: miningInvocationId(results, 'security-code-reviewer'),
         severity: f.severity,
         issue: f.issue,
         path: f.path,
@@ -1318,6 +1321,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       ...extraLenses.flatMap((lens) =>
         lens.findings.map((f) => ({
           reviewerId: lens.id,
+          cliInvocationId: miningInvocationId(results, lens.id),
           severity: f.severity,
           issue: f.issue,
           path: f.path,

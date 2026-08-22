@@ -138,6 +138,15 @@ export interface AgentMiningDispatch {
 export interface AgentMiningResult {
   agentId: string;
   agentTitle: string | null;
+  /** The cli_invocation this agent ran as, so apply() can attribute what it produced to
+   *  the model that produced it (review_findings.cli_invocation_id). Copied straight off
+   *  the mining row, which already stores it.
+   *
+   *  Optional rather than required so the six test files that build this shape by hand stay
+   *  valid — package tsconfigs exclude `*.test.ts`, so a required field would break them
+   *  invisibly rather than at typecheck. Production has exactly one producer (the results
+   *  map in step-runner) and it always sets it. */
+  invocationId?: string | null;
   status: 'done' | 'failed';
   output: unknown;
   rawOutput: string | null;
@@ -263,6 +272,11 @@ export interface StepApplyArgs<TDetect = unknown> {
   detected: TDetect;
   formValues: FormValues;
   llmOutput?: unknown;
+  /** The cli_invocation `llmOutput` came from, for steps that record review findings and
+   *  need to attribute them durably. Undefined on the bypass-stub path and on steps whose
+   *  output came from a fan-out instead — those attribute per agent via
+   *  `agentMiningResults[].invocationId`. */
+  llmInvocationId?: string | null;
   agentMiningResults?: AgentMiningResult[];
   /** Zero-based index of the current loop pass. 0 = first pass; equals the
    *  count of entries already in `previousIterations`. Always 0 for steps

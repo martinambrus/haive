@@ -355,6 +355,20 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const byLocation = new Map<string, AdversarialFinding>();
     const unlocated: AdversarialFinding[] = [];
     const unreadable: string[] = [];
+    // Every finding as REPORTED, before the location merge below collapses them, with the
+    // adversary and invocation that raised it. The merge keeps one finding per location and
+    // drops the rest outright — impact, PoC and fix included — so recording post-merge threw
+    // away both the losing finding and any idea of who found what. It also made the loss
+    // unmeasurable: the merge runs before the write, so nothing downstream could tell a run
+    // with no collisions from one that silently dropped half its findings.
+    //
+    // This list is TELEMETRY ONLY. `byLocation` / `unlocated` / `findings` and every gate and
+    // blocking decision below are untouched, so what reaches the developer is unchanged.
+    const reported: {
+      finding: AdversarialFinding;
+      agentId: string;
+      invocationId: string | null;
+    }[] = [];
     for (const r of results) {
       const raw = r.status === 'done' ? (r.output ?? r.rawOutput) : null;
       const parsed = raw == null ? null : parseAdversaryOutput(raw);
@@ -376,6 +390,7 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
         continue;
       }
       for (const f of parsed) {
+        reported.push({ finding: f, agentId: r.agentId, invocationId: r.invocationId ?? null });
         const key = (f.location ?? '').trim().toLowerCase();
         if (!key) {
           unlocated.push(f);
@@ -410,23 +425,45 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const ran = results.length > 0;
     const qaIncomplete = unreadable.length > 0;
 
-    // Recorded post-dedupe, so the reviewer is the step rather than the adversary
-    // that happened to win the keep-highest-severity merge for a location.
+    // Recorded PRE-dedupe, one row per adversary that actually reported the finding, so
+    // `reviewer_id` names an adversary the way the column's own contract says it should
+    // and a finding stays attributable to the model that raised it. The merge above still
+    // decides everything the developer sees; this only stops the losers vanishing.
+    //
+    // Identity-based membership: the survivors are the exact objects the merge kept, so a
+    // finding that lost is not in the set even when a sibling elsewhere reads identically.
+    const survivors = new Set<AdversarialFinding>(findings);
+    // Counted over `reported`, NOT as findings.length - survivors.size: `unlocated` also
+    // collects the synthetic qa-gap entries raised for unreadable agents, which no adversary
+    // reported, so differencing the two totals would under-count and can go negative.
+    const dropped = reported.filter(({ finding }) => !survivors.has(finding)).length;
+    if (dropped > 0) {
+      // The number that decides whether the location-only dedupe key is worth widening.
+      // Nothing recorded it before, which is why the loss could never be quantified.
+      ctx.logger.info(
+        { reported: reported.length, dropped },
+        'adversarial QA: findings merged away by the location dedupe (recorded, not gated)',
+      );
+    }
     await recordReviewFindings(
       ctx,
       '08d-adversarial-qa',
-      findings
-        .filter((f) => (f.impact ?? f.category ?? '').trim().length > 0)
-        .map((f) => {
+      reported
+        .filter(({ finding: f }) => (f.impact ?? f.category ?? '').trim().length > 0)
+        .map(({ finding: f, agentId, invocationId }) => {
           const { path, lines } = splitLocation(f.location);
           return {
-            reviewerId: 'adversarial-qa',
+            reviewerId: agentId,
+            cliInvocationId: invocationId,
             severity: f.severity,
             issue: f.impact || (f.category as string),
             path,
             lines,
             fix: f.fix,
-            blocking: isBlockingSeverity(f.severity),
+            // Honest to the column's meaning: "contributed to the step's blocking
+            // decision". A finding the merge dropped contributed nothing, however severe
+            // it reads on its own.
+            blocking: survivors.has(f) && isBlockingSeverity(f.severity),
             raw: f,
           };
         }),

@@ -162,3 +162,62 @@ describe('recordReviewFindings — credential snippets', () => {
     expect(rows[0]!.raw).toBeNull();
   });
 });
+
+describe('recordReviewFindings — invocation attribution', () => {
+  function captureCtx(): { ctx: StepContext; rows: Record<string, unknown>[] } {
+    const rows: Record<string, unknown>[] = [];
+    const ctx = {
+      taskId: 'task-1',
+      taskStepId: 'step-1',
+      round: 0,
+      logger: { warn: () => {} },
+      db: {
+        insert: () => ({
+          values: (values: Record<string, unknown>[]) => {
+            rows.push(...values);
+            return { onConflictDoNothing: () => Promise.resolve() };
+          },
+        }),
+      },
+    } as unknown as StepContext;
+    return { ctx, rows };
+  }
+
+  const base: RecordableFinding = {
+    reviewerId: 'security-code-reviewer',
+    severity: 'high',
+    issue: 'an issue',
+    path: 'src/a.ts',
+    lines: '12',
+  };
+
+  it('persists the invocation the finding came from', async () => {
+    // The only DURABLE finding -> model link: a retry deletes task_step_agent_minings but
+    // only supersedes cli_invocations and leaves review_findings alone.
+    const { ctx, rows } = captureCtx();
+    await recordReviewFindings(ctx, '08c-code-review', [{ ...base, cliInvocationId: 'inv-abc' }]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.cliInvocationId).toBe('inv-abc');
+  });
+
+  it('writes null rather than undefined when the caller cannot name one', async () => {
+    // A caller that genuinely has no single invocation leaves it unset; the column is
+    // nullable and the row must still be written.
+    const { ctx, rows } = captureCtx();
+    await recordReviewFindings(ctx, '08c-code-review', [base]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.cliInvocationId).toBeNull();
+  });
+
+  it('attributes each reviewer separately in one batch', async () => {
+    const { ctx, rows } = captureCtx();
+    await recordReviewFindings(ctx, '08c-code-review', [
+      { ...base, reviewerId: 'peer-reviewer', cliInvocationId: 'inv-peer' },
+      { ...base, reviewerId: 'security-code-reviewer', cliInvocationId: 'inv-sec' },
+    ]);
+    expect(rows.map((r) => [r.reviewerId, r.cliInvocationId])).toEqual([
+      ['peer-reviewer', 'inv-peer'],
+      ['security-code-reviewer', 'inv-sec'],
+    ]);
+  });
+});

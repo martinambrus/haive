@@ -213,3 +213,119 @@ describe('08d mining seats', () => {
     }
   });
 });
+
+describe('adversarialQaStep.apply — pre-dedupe finding attribution', () => {
+  /** ctx with a capturing db + a logger that records info calls, so both the recorded rows
+   *  and the drop-count log can be asserted. `runQa`'s fakeCtx has no db at all. */
+  function captureCtx(): {
+    ctx: StepContext;
+    rows: Record<string, unknown>[];
+    infos: Record<string, unknown>[];
+  } {
+    const rows: Record<string, unknown>[] = [];
+    const infos: Record<string, unknown>[] = [];
+    const ctx = {
+      taskId: 'task-1',
+      taskStepId: 'step-1',
+      round: 0,
+      logger: {
+        warn: () => {},
+        info: (obj: Record<string, unknown>) => {
+          infos.push(obj);
+        },
+      },
+      db: {
+        insert: () => ({
+          values: (values: Record<string, unknown>[]) => {
+            rows.push(...values);
+            return { onConflictDoNothing: () => Promise.resolve() };
+          },
+        }),
+      },
+    } as unknown as StepContext;
+    return { ctx, rows, infos };
+  }
+
+  const reports = (
+    agentId: string,
+    invocationId: string,
+    findings: Record<string, unknown>[],
+  ): AgentMiningResult => ({
+    agentId,
+    agentTitle: agentId,
+    invocationId,
+    status: 'done',
+    output: null,
+    rawOutput: '```json\n' + JSON.stringify({ verdict: 'NEEDS_FIXES', findings }) + '\n```',
+    errorMessage: null,
+  });
+
+  /** Two adversaries reporting the SAME location — exactly what the merge collapses. */
+  const collidingBatch = () => [
+    reports('auth-bandit', 'inv-auth', [
+      { severity: 'critical', location: 'admin.php', impact: 'auth bypass', fix: 'gate it' },
+    ]),
+    reports('injection-infector', 'inv-inj', [
+      { severity: 'high', location: 'admin.php', impact: 'sql injection', fix: 'parameterise' },
+    ]),
+  ];
+
+  async function run(results: AgentMiningResult[]) {
+    const { ctx, rows, infos } = captureCtx();
+    const out = await adversarialQaStep.apply(ctx, {
+      detected: { level: 'standard' },
+      agentMiningResults: results,
+      isFinalMiningAttempt: true,
+    } as unknown as Parameters<typeof adversarialQaStep.apply>[1]);
+    return { out, rows, infos };
+  }
+
+  it('still merges to one finding for the gate — behaviour is unchanged', async () => {
+    const { out } = await run(collidingBatch());
+    expect(out.findings).toHaveLength(1);
+    // Keep-highest-severity: critical wins.
+    expect(out.findings[0]!.severity).toBe('critical');
+  });
+
+  it('records BOTH reports, each attributed to its own adversary and invocation', async () => {
+    // Before this, the loser vanished entirely — impact, PoC and fix included — and the
+    // survivor was filed under the step id, so nothing could say who found what.
+    const { rows } = await run(collidingBatch());
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => [r.reviewerId, r.cliInvocationId]).sort()).toEqual([
+      ['auth-bandit', 'inv-auth'],
+      ['injection-infector', 'inv-inj'],
+    ]);
+    // The dropped one keeps its own content rather than inheriting the winner's.
+    expect(rows.map((r) => r.issue).sort()).toEqual(['auth bypass', 'sql injection']);
+  });
+
+  it('marks the merged-away report non-blocking and the survivor blocking', async () => {
+    // `blocking` means "contributed to the step's blocking decision". A finding the merge
+    // dropped contributed nothing, however severe it reads alone.
+    const { rows } = await run(collidingBatch());
+    const byReviewer = Object.fromEntries(rows.map((r) => [r.reviewerId, r.blocking]));
+    expect(byReviewer['auth-bandit']).toBe(true);
+    expect(byReviewer['injection-infector']).toBe(false);
+  });
+
+  it('logs how many reports the merge dropped', async () => {
+    // The number that decides whether the location-only dedupe key is worth widening.
+    // Nothing recorded it before, so the loss could never be quantified from a finished run.
+    const { infos } = await run(collidingBatch());
+    expect(infos.some((i) => i.dropped === 1 && i.reported === 2)).toBe(true);
+  });
+
+  it('does not log a drop when nothing collided', async () => {
+    const { rows, infos } = await run([
+      reports('auth-bandit', 'inv-auth', [
+        { severity: 'high', location: 'a.php', impact: 'one', fix: 'x' },
+      ]),
+      reports('injection-infector', 'inv-inj', [
+        { severity: 'high', location: 'b.php', impact: 'two', fix: 'y' },
+      ]),
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(infos.some((i) => typeof i.dropped === 'number')).toBe(false);
+  });
+});

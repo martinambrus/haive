@@ -26,6 +26,14 @@ export function miningOutcome(results: AgentMiningResult[], agentId: string): Mi
   return { kind: 'failed', errorMessage: r.errorMessage };
 }
 
+/** The cli_invocation one agent ran as, for attributing what it produced to the model that
+ *  produced it (`review_findings.cli_invocation_id`). Null when the agent is absent from the
+ *  batch or never reached dispatch — the recorder treats null as "cannot name one" rather
+ *  than guessing. Sibling of miningOutcome so both read the batch the same way. */
+export function miningInvocationId(results: AgentMiningResult[], agentId: string): string | null {
+  return results.find((m) => m.agentId === agentId)?.invocationId ?? null;
+}
+
 /** Copy for the synthetic finding a step reports in place of a review that never happened.
  *
  *  Carries the runtime's own failure text ("CLI process exceeded its time budget (30m).")

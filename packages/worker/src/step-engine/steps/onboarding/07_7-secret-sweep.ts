@@ -230,6 +230,7 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
       '07_7-secret-sweep',
       findings.map((f) => ({
         reviewerId: 'secret-sweeper',
+        cliInvocationId: args.llmInvocationId ?? null,
         severity: f.severity,
         issue: f.issue,
         path: f.path,

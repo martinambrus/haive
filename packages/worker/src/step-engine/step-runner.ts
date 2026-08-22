@@ -270,7 +270,7 @@ type UpdatePatch = Partial<{
 }>;
 
 type LlmResolved =
-  | { resolved: true; llmOutput: unknown; current: TaskStepRow }
+  | { resolved: true; llmOutput: unknown; llmInvocationId: string | null; current: TaskStepRow }
   | { resolved: false; result: AdvanceStepResult };
 
 const IN_STACK_OLLAMA_HOSTS = new Set(['ollama', 'haive-ollama', 'localhost', '127.0.0.1']);
@@ -451,7 +451,7 @@ async function resolveLlmPhase(
       { hasStub: Boolean(stub) },
       'HAIVE_TEST_BYPASS_LLM=1, skipping llm with bypass stub',
     );
-    return { resolved: true, llmOutput, current };
+    return { resolved: true, llmOutput, llmInvocationId: null, current };
   }
 
   const llmSpec = stepDef.llm!;
@@ -490,7 +490,7 @@ async function resolveLlmPhase(
       // on re-entry (no re-dispatch) so downstream phases fall back to defaults.
       if (llmSpec.optional) {
         ctx.logger.warn({ phase: 'llm' }, 'optional llm invocation failed; degrading to null');
-        return { resolved: true, llmOutput: null, current };
+        return { resolved: true, llmOutput: null, llmInvocationId: invocation.id, current };
       }
       const rawTail = invocation.rawOutput?.trim().slice(-1000) ?? '';
       const message =
@@ -608,7 +608,7 @@ async function resolveLlmPhase(
       return { resolved: false, result: { status: 'failed', row: failed, error: message } };
     }
     const llmOutput = invocation.parsedOutput ?? invocation.rawOutput;
-    return { resolved: true, llmOutput, current };
+    return { resolved: true, llmOutput, llmInvocationId: invocation.id, current };
   }
 
   if (invocation && invocation.endedAt === null) {
@@ -619,7 +619,7 @@ async function resolveLlmPhase(
   if (!params.providers || !params.deps) {
     // Best-effort LLM with no providers available: skip rather than fail.
     if (llmSpec.optional) {
-      return { resolved: true, llmOutput: null, current };
+      return { resolved: true, llmOutput: null, llmInvocationId: null, current };
     }
     const failed = await updateRow(db, current.id, {
       status: 'failed',
@@ -1112,6 +1112,7 @@ async function resolveAgentMiningPhase(
     const results: AgentMiningResult[] = existing.map((r) => ({
       agentId: r.agentId,
       agentTitle: r.agentTitle,
+      invocationId: r.cliInvocationId,
       status: r.status === 'done' ? 'done' : 'failed',
       output: r.output,
       rawOutput: r.rawOutput,
@@ -1593,6 +1594,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     // --- Pre-form LLM phase ---
     let llmOutput: unknown = undefined;
+    // The invocation llmOutput came from, so a step that records review findings can
+    // attribute them durably (review_findings.cli_invocation_id). Tracks llmOutput at every
+    // assignment below, including the re-roll paths.
+    let llmInvocationId: string | null = null;
     if (stepDef.llm?.preForm) {
       const skip =
         stepDef.llm.skipIf?.({
@@ -1606,6 +1611,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         const llmResult = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
         if (!llmResult.resolved) return llmResult.result;
         llmOutput = llmResult.llmOutput;
+        llmInvocationId = llmResult.llmInvocationId;
         current = llmResult.current;
 
         // Form-aware retry: re-roll a preForm generator whose output is unusable
@@ -1630,6 +1636,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             const reroll = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
             if (!reroll.resolved) return reroll.result;
             llmOutput = reroll.llmOutput;
+            llmInvocationId = reroll.llmInvocationId;
             current = reroll.current;
           }
         }
@@ -1830,6 +1837,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         );
         if (!llmResult.resolved) return llmResult.result;
         llmOutput = llmResult.llmOutput;
+        llmInvocationId = llmResult.llmInvocationId;
         current = llmResult.current;
       }
     }
@@ -1902,6 +1910,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       detected,
       formValues: formValues ?? {},
       llmOutput,
+      llmInvocationId,
       agentMiningResults,
       iteration,
       previousIterations,

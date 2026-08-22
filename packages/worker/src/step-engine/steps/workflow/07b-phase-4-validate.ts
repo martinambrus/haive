@@ -851,6 +851,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           const { path, lines } = splitLocation(i.file);
           return {
             reviewerId: 'validator',
+            cliInvocationId: args.llmInvocationId ?? null,
             severity: i.severity,
             issue: i.description,
             path,

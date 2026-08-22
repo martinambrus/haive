@@ -181,6 +181,7 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
         .filter((f) => (f.issue ?? '').trim().length > 0)
         .map((f) => ({
           reviewerId: 'code-auditor',
+          cliInvocationId: args.llmInvocationId ?? null,
           severity: f.severity,
           issue: f.issue as string,
           path: f.path,

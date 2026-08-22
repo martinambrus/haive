@@ -86,6 +86,16 @@ export function splitLocation(location: string | undefined | null): {
 export interface RecordableFinding {
   /** Which reviewer raised it: 'peer-reviewer', an adversary id, 'validator', ... */
   reviewerId: string;
+  /** The CLI invocation that produced it, when the caller can name one.
+   *
+   *  This is the only DURABLE link from a finding to the model that raised it. Per-seat
+   *  attribution also exists on `task_step_agent_minings` (agent id + provider +
+   *  invocation), but `resetStepAndDownstream` DELETES those rows on a retry while
+   *  cli_invocations are merely superseded and review_findings is left untouched — so
+   *  after one Retry that table can no longer answer the question and this column is
+   *  what still can. Optional: a caller that genuinely cannot name one invocation (a
+   *  finding merged from several agents) leaves it unset rather than guessing. */
+  cliInvocationId?: string | null;
   severity: ReviewSeverity;
   issue: string;
   path?: string | null;
@@ -145,6 +155,7 @@ export async function recordReviewFindings(
       return {
         taskId: ctx.taskId,
         taskStepId: ctx.taskStepId,
+        cliInvocationId: f.cliInvocationId ?? null,
         stepId,
         round: ctx.round,
         reviewerId: f.reviewerId,
