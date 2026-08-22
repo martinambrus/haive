@@ -99,6 +99,50 @@ describe('buildDefaultMcpServers', () => {
     ]);
   });
 
+  it('opts chrome-devtools out of both Google calls, on both launch paths', () => {
+    // Two distinct channels, both on by default upstream: performance traces POST their
+    // URLs (here: the task's own .ddev.site hosts and app routes) to the CrUX API, and the
+    // telemetry watchdog POSTs to play.googleapis.com. The browser-url path leaks the same
+    // trace URLs as the headless one, so neither branch may be left out.
+    for (const opts of [
+      { repoPath: '/workspace/repo', includeChromeDevtools: true },
+      {
+        repoPath: '/workspace/repo',
+        includeChromeDevtools: true,
+        chromeDevtoolsBrowserUrl: 'http://127.0.0.1:9222',
+      },
+    ]) {
+      const chrome = buildDefaultMcpServers(opts).find((s) => s.name === 'chrome-devtools');
+      expect(chrome?.args).toContain('--no-performance-crux');
+      expect(chrome?.args).toContain('--no-usage-statistics');
+      // Independent second lever: the CLI ignores unknown flags silently (exit 0), so a
+      // rename upstream would turn the flag above into a no-op with no signal.
+      expect(chrome?.env?.CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS).toBe('1');
+      // CI is honored by the same upstream check but is read by npm/test runners across
+      // the whole sandbox — opting out of telemetry must not change unrelated tooling.
+      expect(chrome?.env?.CI).toBeUndefined();
+    }
+  });
+
+  it('carries the telemetry opt-out env through to the rendered configs', () => {
+    const servers = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      includeChromeDevtools: true,
+    });
+    const json = JSON.parse(buildMcpConfigForCli('claude-code', servers)!.content) as {
+      mcpServers: Record<string, { env?: Record<string, string>; args?: string[] }>;
+    };
+    expect(json.mcpServers['chrome-devtools']?.env?.CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS).toBe(
+      '1',
+    );
+    expect(json.mcpServers['chrome-devtools']?.args).toContain('--no-performance-crux');
+    // The TOML CLIs reach the same server through a different renderer.
+    const toml = buildMcpConfigForCli('codex', servers)!.content;
+    expect(toml).toContain('[mcp_servers.chrome-devtools.env]');
+    expect(toml).toContain('CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS = "1"');
+    expect(toml).toContain('--no-usage-statistics');
+  });
+
   it('drops the cap entirely at 0 rather than emitting a zero timeout', () => {
     const chrome = buildDefaultMcpServers({
       repoPath: '/workspace/repo',

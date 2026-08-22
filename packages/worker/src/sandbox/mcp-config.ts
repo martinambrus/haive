@@ -106,6 +106,40 @@ export interface BuildDefaultMcpServersOptions {
  *  with the Dockerfile install path. */
 const SANDBOX_CHROME_PATH = '/usr/bin/chromium';
 
+/** Both of chrome-devtools-mcp's own calls home to Google, switched off.
+ *
+ *  MEASURED against the shipped 1.7.0 bundle, not taken from the startup banners:
+ *  - `--no-performance-crux` gates `populateCruxData` (tools/performance.js), which POSTs
+ *    every URL in a performance trace to `chromeuxreport.googleapis.com`. Under Haive those
+ *    URLs are the task's own `<project>.ddev.site` hostnames and app routes.
+ *  - `--no-usage-statistics` gates the Clearcut logger AND the detached telemetry watchdog
+ *    (telemetry/watchdog/) that POSTs to `play.googleapis.com/log`.
+ *
+ *  Applied to BOTH branches: the CrUX call needs a trace, not a launched browser, so
+ *  co-driving the runner's Chrome over `--browser-url` leaks exactly the same URLs, and the
+ *  telemetry logger is per-MCP-process either way.
+ *
+ *  The third Google host in the bundle (`storage.googleapis.com/chrome-for-testing-public`)
+ *  is puppeteer's browser DOWNLOAD and is already unreachable here: the headless branch
+ *  passes `--executable-path`, and the `--browser-url` branch launches no browser at all.
+ *
+ *  Consistent with the existing posture — `play.googleapis.com` is likewise deliberately
+ *  absent from antigravity's egress allow-set (cli-adapters/antigravity.ts). The allow-set
+ *  only covers `none`/`allowlist` network modes though; these flags also hold under `full`. */
+const CHROME_MCP_NO_GOOGLE_EGRESS_ARGS = ['--no-performance-crux', '--no-usage-statistics'];
+
+/** Second, independent lever for the telemetry half. The CLI is NOT yargs-strict — MEASURED:
+ *  an unknown flag is ignored silently and the process still exits 0 — so if upstream ever
+ *  renames `--no-usage-statistics`, the flag above degrades to a no-op with no signal and
+ *  telemetry silently resumes. This env var is read separately (bin/chrome-devtools-mcp-cli-
+ *  options.js) and both names would have to change at once to re-open the channel.
+ *
+ *  Deliberately NOT `CI=1`, which the same check also honors: that name is read by npm, test
+ *  runners and build tools throughout the sandbox and would change far more than telemetry.
+ *
+ *  No equivalent exists for CrUX — there the flag is the only lever. */
+const CHROME_MCP_NO_GOOGLE_EGRESS_ENV = { CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: '1' } as const;
+
 export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): McpServerSpec[] {
   const servers: McpServerSpec[] = [];
   const includeFs = opts.includeFilesystem !== false;
@@ -157,6 +191,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
           cdmSpec,
           `--browser-url=${opts.chromeDevtoolsBrowserUrl}`,
           '--allow-unrestricted-paths',
+          ...CHROME_MCP_NO_GOOGLE_EGRESS_ARGS,
         ]
       : [
           '-y',
@@ -166,6 +201,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
           '--isolated=true',
           '--viewport=1920x1080',
           '--allow-unrestricted-paths',
+          ...CHROME_MCP_NO_GOOGLE_EGRESS_ARGS,
         ];
     // Cap a single browser tool call. Nothing else bounds one: MCP_TOOL_TIMEOUT is unset
     // (~28h default), and the stdio idle timeout only fires on a fully silent server —
@@ -177,6 +213,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
       name: 'chrome-devtools',
       command: 'npx',
       args: chromeArgs,
+      env: { ...CHROME_MCP_NO_GOOGLE_EGRESS_ENV },
       ...(chromeTimeout > 0 ? { timeout: chromeTimeout } : {}),
     });
   }
