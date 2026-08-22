@@ -29,6 +29,7 @@ import {
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { loadAppBootOutput } from './_task-meta.js';
+import { resolveAppReach } from '../../../queues/cli-exec/app-reach.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
@@ -261,6 +262,26 @@ function verifierAgentId(fingerprint: string, lens: VerifyLens | null): string {
   return `${QA_VERIFY_PREFIX}${fingerprint.slice(0, 16)}${lens ? `-${lens.id}` : ''}`;
 }
 
+/** Is this finding's proof one that can only be run against a live endpoint?
+ *
+ *  Keyed on the LOCATION parsing as an http(s) URL, which the adversary prompt asks for
+ *  explicitly ("file:line or URL") — a structural signal, not a guess at what the PoC prose
+ *  means. Deliberately not a scan of `poc` for words like "curl": that would be reading an
+ *  ephemeral value, and getting it wrong here silently drops a finding from verification.
+ *
+ *  A file:line finding is NOT runtime-only even when its PoC mentions a request: the verifier
+ *  can still read the code path and say what it found. Only the ones with nowhere to point a
+ *  request are skipped. */
+export function isRuntimeOnlyFinding(f: Pick<AdversarialFinding, 'location'>): boolean {
+  const loc = f.location?.trim();
+  if (!loc) return false;
+  try {
+    return ['http:', 'https:'].includes(new URL(loc).protocol);
+  } catch {
+    return false;
+  }
+}
+
 /** The reviewer-agnostic key a finding is verified under. findingFingerprint with an empty
  *  reviewer id — the same call 08c uses to collapse one bug reported by two reviewers. */
 function verifyKey(f: AdversarialFinding): string {
@@ -404,7 +425,7 @@ function buildVerifyPrompt(
     `Impact claimed: ${f.impact ?? '(none given)'}`,
     `Proof of concept: ${f.poc ?? '(none given — that alone is grounds for not reproduced)'}`,
     '',
-    d.appUrl ? `Running app URL: ${d.appUrl}` : 'No running app URL was recorded for this task.',
+    // Address and reachability come from the dispatcher's reach block; see buildAdversaryPrompt.
     ...(d.appUrl
       ? appAuthPromptLines(d.appLogin ?? { attempted: false, ok: false, reason: '' })
       : []),
@@ -470,7 +491,10 @@ function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
       'Changed files (attack surface)',
       'Determine the changed files from the workspace.',
     ),
-    d.appUrl ? `Running app URL (for runtime attacks): ${d.appUrl}` : '',
+    // The app's address and what can actually dial it are stated by the reach block the
+    // dispatcher prepends to every prompt. Repeating the URL here would restate it without
+    // the method, which is the shape that had agents reaching for a curl the sandbox could
+    // not make. The login state is not in that block, so it stays.
     ...(d.appUrl
       ? appAuthPromptLines(d.appLogin ?? { attempted: false, ok: false, reason: '' })
       : []),
@@ -695,6 +719,16 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const blockingFindings = findings.filter((f) => isBlockingSeverity(f.severity));
     const waveRan = allResults.some((r) => r.agentId.startsWith(QA_VERIFY_PREFIX));
 
+    // Whether there is a running app to run a PoC against. Resolved on BOTH passes, for the
+    // same reason the lens count is: the pass that dispatches and the pass that reads back
+    // have to agree about which findings were sent, or a finding excluded from the wave comes
+    // back looking like one whose panel went silent. Only paid for when there is something to
+    // verify.
+    const reach =
+      blockingFindings.length > 0 ? await resolveAppReach(ctx.db, ctx.taskId) : { mode: 'none' };
+    const provablyUntestable = (f: AdversarialFinding): boolean =>
+      reach.mode === 'none' && isRuntimeOnlyFinding(f);
+
     if (waveRan) {
       // Lens count is read on BOTH passes — the one that dispatches and the one that reads
       // back — so the agent ids cannot disagree. An admin who changes it mid-step leaves the
@@ -703,7 +737,13 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
         await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length),
       );
       for (const f of blockingFindings) {
-        f.verification = verificationForFinding(allResults, verifyKey(f), lenses);
+        const panel = verificationForFinding(allResults, verifyKey(f), lenses);
+        // The panel wins whenever it actually said something. The reach is re-probed on this
+        // pass and can disagree with the one that dispatched — a runner recovering between
+        // the two passes must not discard a verdict that was genuinely recorded, least of all
+        // a reproduction. Only the findings that were skipped come back with nothing at all,
+        // and those are the ones this relabels from `unverified` to the truer `untestable`.
+        f.verification = panel === 'unverified' && provablyUntestable(f) ? 'untestable' : panel;
       }
       const downgraded = blockingFindings.filter((f) => f.verification === 'not_reproduced');
       if (downgraded.length > 0) {
@@ -726,32 +766,52 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
         const lenses = verifyLensesFor(
           await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length),
         );
+        // A finding located at a URL, with no app running, cannot be verified by anyone: the
+        // panel would spend three invocations to report could_not_test unanimously. Dropped
+        // from the wave and marked untestable directly, which blocks exactly the same.
+        const verifiable = blockingFindings.filter((f) => !provablyUntestable(f));
+        if (verifiable.length < blockingFindings.length) {
+          ctx.logger.warn(
+            {
+              blocking: blockingFindings.length,
+              untestable: blockingFindings.length - verifiable.length,
+            },
+            'adversarial QA: no running app, so runtime findings go to the gate untested (still blocking)',
+          );
+        }
         // Worst first (severityRank ascending in severity), so a capped wave spends its
         // invocations on the findings that cost most if they are wrong.
-        const wave = [...blockingFindings]
+        const wave = [...verifiable]
           .sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
           .slice(0, MAX_VERIFIED);
-        if (wave.length < blockingFindings.length) {
+        if (wave.length < verifiable.length) {
           ctx.logger.warn(
-            { total: blockingFindings.length, verifying: wave.length },
+            { total: verifiable.length, verifying: wave.length },
             'more blocking findings than verifiers; the overflow goes to the gate unverified',
           );
         }
-        ctx.logger.info(
-          { count: wave.length, lenses: lenses.length },
-          'dispatching PoC verifiers for blocking adversarial findings',
-        );
-        throw new MiningWaveError(
-          wave.flatMap((f, i) =>
-            lenses.map((lens) => ({
-              agentId: verifierAgentId(verifyKey(f), lens),
-              agentTitle: verifierTitle(f, i, wave.length, lens),
-              prompt: buildVerifyPrompt(detected, f, lens),
-              // The agent id is per-FINDING and unbounded; the LENS is the stable seat.
-              roleKey: lens ? `qa-verify:${lens.id}` : 'qa-verify',
-            })),
-          ),
-        );
+        if (wave.length === 0) {
+          // Nothing left to check: every blocker is a runtime one and nothing is running.
+          // Marked here and NOT dispatched — an empty MiningWaveError would park the step on
+          // a fan-out with no agents in it, waiting for verdicts that can never arrive.
+          for (const f of blockingFindings) f.verification = 'untestable';
+        } else {
+          ctx.logger.info(
+            { count: wave.length, lenses: lenses.length },
+            'dispatching PoC verifiers for blocking adversarial findings',
+          );
+          throw new MiningWaveError(
+            wave.flatMap((f, i) =>
+              lenses.map((lens) => ({
+                agentId: verifierAgentId(verifyKey(f), lens),
+                agentTitle: verifierTitle(f, i, wave.length, lens),
+                prompt: buildVerifyPrompt(detected, f, lens),
+                // The agent id is per-FINDING and unbounded; the LENS is the stable seat.
+                roleKey: lens ? `qa-verify:${lens.id}` : 'qa-verify',
+              })),
+            ),
+          );
+        }
       }
     }
 

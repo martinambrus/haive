@@ -5,6 +5,7 @@ import {
   adversaryIdsForLevel,
   adversarialQaStep,
   hasObservation,
+  isRuntimeOnlyFinding,
   verifyVerdict,
   verificationForFinding,
 } from './08d-adversarial-qa.js';
@@ -513,6 +514,22 @@ describe('08d PoC verification', () => {
   });
 });
 
+describe('isRuntimeOnlyFinding', () => {
+  it('is true only for a finding that points at a live URL', () => {
+    expect(isRuntimeOnlyFinding({ location: 'https://x.ddev.site/admin' })).toBe(true);
+    expect(isRuntimeOnlyFinding({ location: 'http://x.ddev.site/admin' })).toBe(true);
+  });
+
+  it('is false for a source location, including one that looks URL-ish', () => {
+    // `new URL('admin.php:10')` parses — protocol `admin.php:` — so the check has to gate on
+    // the scheme being http(s), not on the parse succeeding.
+    expect(isRuntimeOnlyFinding({ location: 'admin.php:10' })).toBe(false);
+    expect(isRuntimeOnlyFinding({ location: 'src/a/b.ts:42' })).toBe(false);
+    expect(isRuntimeOnlyFinding({ location: undefined })).toBe(false);
+    expect(isRuntimeOnlyFinding({ location: '  ' })).toBe(false);
+  });
+});
+
 describe('08d verifier wave dispatch and downgrade', () => {
   const fakeCtx2 = {
     logger: { info: () => {}, warn: () => {}, debug: () => {} },
@@ -658,6 +675,22 @@ describe('08d verifier wave dispatch and downgrade', () => {
       errorMessage: null,
     }));
     const out = await run([adversary('auth-bandit', [BLOCKER]), ...verifiers]);
+    expect(out.findings[0]!.verification).toBe('untestable');
+    expect(out.blocking).toBe(true);
+  });
+
+  it('marks a URL-located blocker untestable, without dispatching a panel, when no app runs', async () => {
+    // The fake ctx has no repository, so app reach resolves to 'none'. Three invocations to
+    // hear could_not_test three times is waste, and an empty wave would park the step on a
+    // fan-out with no agents in it.
+    enableVerification();
+    const RUNTIME_BLOCKER = {
+      severity: 'critical',
+      location: 'https://x.ddev.site/admin',
+      impact: 'auth bypass',
+      poc: 'GET /admin returns 200 logged out',
+    };
+    const out = await run([adversary('auth-bandit', [RUNTIME_BLOCKER])]);
     expect(out.findings[0]!.verification).toBe('untestable');
     expect(out.blocking).toBe(true);
   });
