@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CLI_DISPATCH_STEP_IDS } from '@haive/shared';
+import { CLI_DISPATCH_STEP_IDS, CLI_DISPATCH_STEPS } from '@haive/shared';
 import { StepRegistry } from '../src/step-engine/registry.js';
 import { registerAllSteps } from '../src/step-engine/steps/index.js';
 
@@ -38,5 +38,26 @@ describe('CLI_DISPATCH_STEP_IDS', () => {
         `step "${id}" is listed in CLI_DISPATCH_STEP_IDS but dispatches no CLI`,
       ).toBe(true);
     }
+  });
+
+  /** The catalog's workflowType + title are the ONLY source the api has for naming a step
+   *  with no task_steps row (the CLIs tab's whole content), so a retitled or re-homed step
+   *  must fail here rather than mislabel a dropdown. */
+  it("carries each step's real workflowType and title", () => {
+    const registry = new StepRegistry();
+    registerAllSteps(registry);
+    const byId = new Map(registry.all().map((d) => [d.metadata.id, d]));
+    for (const entry of CLI_DISPATCH_STEPS) {
+      const meta = byId.get(entry.id)?.metadata;
+      expect(meta, `CLI_DISPATCH_STEPS lists unknown step "${entry.id}"`).toBeDefined();
+      expect(
+        { workflowType: meta!.workflowType, title: meta!.title },
+        `CLI_DISPATCH_STEPS entry for "${entry.id}" drifted from its StepDefinition`,
+      ).toEqual({ workflowType: entry.workflowType, title: entry.title });
+    }
+  });
+
+  it('derives CLI_DISPATCH_STEP_IDS from the catalog in the same order', () => {
+    expect([...CLI_DISPATCH_STEP_IDS]).toEqual(CLI_DISPATCH_STEPS.map((s) => s.id));
   });
 });

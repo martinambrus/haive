@@ -1,4 +1,8 @@
-import { CLI_DISPATCH_STEP_IDS, PROVIDER_SENSITIVE_STEP_IDS } from '@haive/shared';
+import {
+  CLI_DISPATCH_STEP_IDS,
+  CLI_DISPATCH_STEPS,
+  PROVIDER_SENSITIVE_STEP_IDS,
+} from '@haive/shared';
 import type { StepRegistry } from '../registry.js';
 import { PATH_STEP_SETS, PATH_REQUIRED_TARGETS } from '../../orchestrator/execution-paths.js';
 import { registerEnvReplicateSteps } from './env-replicate/index.js';
@@ -104,6 +108,26 @@ function assertCliDispatchListInSync(registry: StepRegistry): void {
   if (missing.length > 0 || extra.length > 0) {
     throw new Error(
       `CLI_DISPATCH_STEP_IDS out of sync with StepDefinition CLI dispatch (llm|agentMining|dagExecute) — missing in shared: [${missing.join(', ')}], extra in shared: [${extra.join(', ')}]`,
+    );
+  }
+  // The catalog's workflowType + title are what the api names an upcoming step with —
+  // a step with no task_steps row has no other source for either. Assert them too, so a
+  // retitled or re-homed step fails the boot instead of mislabelling a dropdown.
+  const drift = CLI_DISPATCH_STEPS.flatMap((entry) => {
+    const meta = registry.get(entry.id)?.metadata;
+    if (!meta) return [];
+    const problems: string[] = [];
+    if (meta.workflowType !== entry.workflowType) {
+      problems.push(`workflowType '${entry.workflowType}' != '${meta.workflowType}'`);
+    }
+    if (meta.title !== entry.title) {
+      problems.push(`title '${entry.title}' != '${meta.title}'`);
+    }
+    return problems.length > 0 ? [`${entry.id}: ${problems.join(', ')}`] : [];
+  });
+  if (drift.length > 0) {
+    throw new Error(
+      `CLI_DISPATCH_STEPS out of sync with StepDefinition metadata — ${drift.join('; ')}`,
     );
   }
 }

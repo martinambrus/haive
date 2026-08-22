@@ -35,6 +35,7 @@ import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
+  buildUpcomingCliSteps,
   currentStepParkedSql,
   enrichStepsWithActiveRole,
   enrichStepsWithAgentCounts,
@@ -663,9 +664,22 @@ taskRoutes.get('/:id', async (c) => {
     // badge and the list badge render one identical string.
     currentStepLabel: currentStepLabel(stepRows, task.currentStepId, task.currentRound),
   };
+  // CLI steps the run has not reached yet. They have no task_steps row, so no card and no
+  // CLI picker — and a step that never pauses before dispatching had no window at all in
+  // which to choose one. The CLIs tab renders these; the preference lands on this task
+  // because the worker resolves it at dispatch.
+  const upcomingCliSteps = await buildUpcomingCliSteps(
+    db,
+    userId,
+    id,
+    task.type,
+    stepRows.map((s) => s.stepId),
+    task.ignoreSavedStepClis,
+  );
   return c.json({
     task: taskWithActive,
     steps,
+    upcomingCliSteps,
     providerBreakdown,
     costDisplay,
     parentTask,

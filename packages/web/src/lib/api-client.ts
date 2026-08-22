@@ -735,6 +735,26 @@ export interface SystemPauseResponse {
   globalPause: boolean;
 }
 
+/** A CLI step the run has not reached yet: no `task_steps` row, so no card and no CLI
+ *  picker on it. Served by GET /tasks/:id so the CLIs tab can set its provider before
+ *  dispatch — the only window for a step that never pauses (its form auto-submits, or it
+ *  has none and the task is on auto-continue). Carries the same preference fields a real
+ *  step row does, so one picker component renders both. */
+export interface UpcomingCliStep {
+  stepId: string;
+  /** StepMetadata.title, from the shared CLI dispatch catalog (the step has no row to
+   *  read a title from yet). */
+  title: string;
+  preferredCliProviderId: string | null;
+  preferredEffortLevel: string | null;
+  cliRoles?: { id: string; label: string }[];
+  cliRoleProviders?: Record<string, string | null>;
+  cliRoleEfforts?: Record<string, string | null>;
+  miningSeats?: { id: string; label: string }[];
+  miningSeatProviders?: Record<string, string | null>;
+  miningSeatEfforts?: Record<string, string | null>;
+}
+
 export interface TaskStep {
   id: string;
   taskId: string;

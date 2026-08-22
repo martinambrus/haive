@@ -23,6 +23,7 @@ import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../li
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
+  CLI_DISPATCH_STEP_ID_SET,
   enrichStepsWithActiveRole,
   enrichStepsWithAgentCounts,
   enrichStepsWithCliStats,
@@ -1122,6 +1123,102 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
   return c.json({ invocations });
 });
 
+/** Write (or clear) one (user, step, role) CLI preference. `role: 'default'` targets the
+ *  single-CLI table; any other role the per-role table, which loop roles and fan-out seats
+ *  share. Extracted because three callers must write it IDENTICALLY: a change on a step
+ *  card, and the same change made from the CLIs tab before the step has a row. Two copies
+ *  would let the panel and the card disagree about what "set this step's CLI" means.
+ *
+ *  Validates the provider first and throws the same 404/409 the card path has always
+ *  thrown, so an unknown or disabled provider is rejected before anything is written. */
+async function writeStepCliPreference(
+  db: Database,
+  userId: string,
+  stepId: string,
+  role: string,
+  cliProviderId: string | null,
+  requestedEffort: string | null | undefined,
+): Promise<void> {
+  if (!cliProviderId) {
+    if (role === 'default') {
+      await db
+        .delete(schema.userStepCliPreferences)
+        .where(
+          and(
+            eq(schema.userStepCliPreferences.userId, userId),
+            eq(schema.userStepCliPreferences.stepId, stepId),
+          ),
+        );
+      return;
+    }
+    await db
+      .delete(schema.userStepCliRolePreferences)
+      .where(
+        and(
+          eq(schema.userStepCliRolePreferences.userId, userId),
+          eq(schema.userStepCliRolePreferences.stepId, stepId),
+          eq(schema.userStepCliRolePreferences.role, role),
+        ),
+      );
+    return;
+  }
+  const provider = await db.query.cliProviders.findFirst({
+    where: and(eq(schema.cliProviders.id, cliProviderId), eq(schema.cliProviders.userId, userId)),
+  });
+  if (!provider) throw new HttpError(404, 'CLI provider not found');
+  if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
+  const effortLevel = clampEffort(provider.name, requestedEffort);
+  if (role === 'default') {
+    await db
+      .insert(schema.userStepCliPreferences)
+      .values({ userId, stepId, cliProviderId, effortLevel, explicit: true })
+      .onConflictDoUpdate({
+        target: [schema.userStepCliPreferences.userId, schema.userStepCliPreferences.stepId],
+        set: { cliProviderId, effortLevel, explicit: true, updatedAt: new Date() },
+      });
+    return;
+  }
+  await db
+    .insert(schema.userStepCliRolePreferences)
+    .values({ userId, stepId, role, cliProviderId, effortLevel, explicit: true })
+    .onConflictDoUpdate({
+      target: [
+        schema.userStepCliRolePreferences.userId,
+        schema.userStepCliRolePreferences.stepId,
+        schema.userStepCliRolePreferences.role,
+      ],
+      set: { cliProviderId, effortLevel, explicit: true, updatedAt: new Date() },
+    });
+}
+
+/** Track the touch so a task that opted out of saved prefs still honors this explicit
+ *  mid-task choice (set) or reverts to the task provider (clear). No-op unless the task
+ *  set ignore_saved_step_clis. Same three callers, same reason, as the write above. */
+async function writeCliTouchMarker(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  role: string,
+  set: boolean,
+): Promise<void> {
+  if (set) {
+    await db
+      .insert(schema.taskStepCliTouched)
+      .values({ taskId, stepId, role })
+      .onConflictDoNothing();
+    return;
+  }
+  await db
+    .delete(schema.taskStepCliTouched)
+    .where(
+      and(
+        eq(schema.taskStepCliTouched.taskId, taskId),
+        eq(schema.taskStepCliTouched.stepId, stepId),
+        eq(schema.taskStepCliTouched.role, role),
+      ),
+    );
+}
+
 stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -1169,79 +1266,41 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     },
     orderBy: desc(schema.taskSteps.round),
   });
-  if (!step) throw new HttpError(404, 'Step not found');
-  if (step.status === 'running' || step.status === 'waiting_cli') {
-    throw new HttpError(409, `Cannot change provider while step is ${step.status}`);
-  }
-
   // Named roles (e.g. reviewer/corrector) are stored per (user, step, role) and
   // resolved per loop iteration at dispatch time — no re-detect needed, unlike a
   // default-provider change below.
   const role = body.role ?? 'default';
-  if (role !== 'default') {
-    if (body.cliProviderId) {
-      const provider = await db.query.cliProviders.findFirst({
-        where: and(
-          eq(schema.cliProviders.id, body.cliProviderId),
-          eq(schema.cliProviders.userId, userId),
-        ),
-      });
-      if (!provider) throw new HttpError(404, 'CLI provider not found');
-      if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
-      const effortLevel = clampEffort(provider.name, body.effortLevel);
-      await db
-        .insert(schema.userStepCliRolePreferences)
-        .values({
-          userId,
-          stepId,
-          role,
-          cliProviderId: body.cliProviderId,
-          effortLevel,
-          explicit: true,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.userStepCliRolePreferences.userId,
-            schema.userStepCliRolePreferences.stepId,
-            schema.userStepCliRolePreferences.role,
-          ],
-          set: {
-            cliProviderId: body.cliProviderId,
-            effortLevel,
-            explicit: true,
-            updatedAt: new Date(),
-          },
-        });
-    } else {
-      await db
-        .delete(schema.userStepCliRolePreferences)
-        .where(
-          and(
-            eq(schema.userStepCliRolePreferences.userId, userId),
-            eq(schema.userStepCliRolePreferences.stepId, stepId),
-            eq(schema.userStepCliRolePreferences.role, role),
-          ),
-        );
-    }
-    // Track the touch so a task that opted out of saved prefs still honors this
-    // explicit mid-task choice (set) or reverts to the task provider (clear).
+
+  // No row: a CLI step the run has not reached yet, chosen from the CLIs tab. Preferences
+  // are keyed (user, step, role) with no dependency on a row, and the worker's
+  // resolvePreferredCli reads them at dispatch — so the write alone is the whole change.
+  // Everything the row path does afterwards (detect invalidation, the model-health
+  // propagation, the re-advance enqueue) is about re-running a step that already ran;
+  // there is nothing here to reset and no job to re-drive. Gated on the dispatch catalog
+  // so an unknown step id still 404s rather than accumulating preferences nothing reads.
+  if (!step) {
+    if (!CLI_DISPATCH_STEP_ID_SET.has(stepId)) throw new HttpError(404, 'Step not found');
+    await writeStepCliPreference(db, userId, stepId, role, body.cliProviderId, body.effortLevel);
     if (task.ignoreSavedStepClis) {
-      if (body.cliProviderId) {
-        await db
-          .insert(schema.taskStepCliTouched)
-          .values({ taskId: id, stepId, role })
-          .onConflictDoNothing();
-      } else {
-        await db
-          .delete(schema.taskStepCliTouched)
-          .where(
-            and(
-              eq(schema.taskStepCliTouched.taskId, id),
-              eq(schema.taskStepCliTouched.stepId, stepId),
-              eq(schema.taskStepCliTouched.role, role),
-            ),
-          );
-      }
+      await writeCliTouchMarker(db, id, stepId, role, Boolean(body.cliProviderId));
+    }
+    await appendTaskEvent(db, id, null, 'step.cli_provider_preference_changed', {
+      stepId,
+      role,
+      cliProviderId: body.cliProviderId,
+      upcoming: true,
+      by: userId,
+    });
+    return c.json({ ok: true, stepId, role, cliProviderId: body.cliProviderId });
+  }
+  if (step.status === 'running' || step.status === 'waiting_cli') {
+    throw new HttpError(409, `Cannot change provider while step is ${step.status}`);
+  }
+
+  if (role !== 'default') {
+    await writeStepCliPreference(db, userId, stepId, role, body.cliProviderId, body.effortLevel);
+    if (task.ignoreSavedStepClis) {
+      await writeCliTouchMarker(db, id, stepId, role, Boolean(body.cliProviderId));
     }
     await appendTaskEvent(db, id, step.id, 'step.cli_role_provider_changed', {
       stepId,
@@ -1252,38 +1311,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     return c.json({ ok: true, stepId, role, cliProviderId: body.cliProviderId });
   }
 
-  if (body.cliProviderId) {
-    const provider = await db.query.cliProviders.findFirst({
-      where: and(
-        eq(schema.cliProviders.id, body.cliProviderId),
-        eq(schema.cliProviders.userId, userId),
-      ),
-    });
-    if (!provider) throw new HttpError(404, 'CLI provider not found');
-    if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
-    const effortLevel = clampEffort(provider.name, body.effortLevel);
-    await db
-      .insert(schema.userStepCliPreferences)
-      .values({ userId, stepId, cliProviderId: body.cliProviderId, effortLevel, explicit: true })
-      .onConflictDoUpdate({
-        target: [schema.userStepCliPreferences.userId, schema.userStepCliPreferences.stepId],
-        set: {
-          cliProviderId: body.cliProviderId,
-          effortLevel,
-          explicit: true,
-          updatedAt: new Date(),
-        },
-      });
-  } else {
-    await db
-      .delete(schema.userStepCliPreferences)
-      .where(
-        and(
-          eq(schema.userStepCliPreferences.userId, userId),
-          eq(schema.userStepCliPreferences.stepId, stepId),
-        ),
-      );
-  }
+  await writeStepCliPreference(db, userId, stepId, role, body.cliProviderId, body.effortLevel);
 
   // A CLI swap on the model-health canary rewrites the task default so every later
   // step inherits the new model (see propagateModelHealthCliToTaskDefault). No-op
@@ -1298,22 +1326,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
 
   // Same touch tracking as the role path, for the 'default' single-CLI pref.
   if (task.ignoreSavedStepClis) {
-    if (body.cliProviderId) {
-      await db
-        .insert(schema.taskStepCliTouched)
-        .values({ taskId: id, stepId, role: 'default' })
-        .onConflictDoNothing();
-    } else {
-      await db
-        .delete(schema.taskStepCliTouched)
-        .where(
-          and(
-            eq(schema.taskStepCliTouched.taskId, id),
-            eq(schema.taskStepCliTouched.stepId, stepId),
-            eq(schema.taskStepCliTouched.role, 'default'),
-          ),
-        );
-    }
+    await writeCliTouchMarker(db, id, stepId, 'default', Boolean(body.cliProviderId));
   }
 
   // Invalidate the step's cached detect/form so the next advance re-detects

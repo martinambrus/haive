@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_DISPATCH_STEP_IDS,
+  CLI_DISPATCH_STEPS,
   COST_METERED_PROVIDERS,
   resolveCostBasis,
   MODEL_HEALTH_STEP_IDS,
@@ -833,7 +834,7 @@ export async function enrichStepsWithAgentCounts<T extends { id: string }>(
   });
 }
 
-const CLI_DISPATCH_STEP_ID_SET = new Set<string>(CLI_DISPATCH_STEP_IDS);
+export const CLI_DISPATCH_STEP_ID_SET = new Set<string>(CLI_DISPATCH_STEP_IDS);
 
 /** Annotate each step with whether it ever dispatches a CLI (llm | agentMining |
  *  dagExecute), from the CLI_DISPATCH_STEP_IDS mirror. Drives whether the web
@@ -845,6 +846,44 @@ export function enrichStepsWithCliUsage<T extends { stepId: string }>(
   steps: T[],
 ): (T & { usesCli: boolean })[] {
   return steps.map((s) => ({ ...s, usesCli: CLI_DISPATCH_STEP_ID_SET.has(s.stepId) }));
+}
+
+const MODEL_HEALTH_STEP_ID_SET = new Set<string>(MODEL_HEALTH_STEP_IDS);
+
+/** The task's CLI steps that have NO `task_steps` row yet, with their saved provider /
+ *  effort / role / seat preferences attached — the "CLIs" tab's whole content.
+ *
+ *  Rows are created lazily (when a step runs or parks), so a step the run has not reached
+ *  has no card and therefore no picker. A step that never pauses before dispatching (its
+ *  form sets `autoSubmit`, or it has none and the task is on auto-continue) consequently
+ *  had NO window at all in which to choose its CLI — 08a-browser-verify's Tester/Fixer
+ *  being the reported case. Preferences are keyed (user, step, role) and read by the
+ *  worker's resolvePreferredCli at DISPATCH time, so one written here lands on this task.
+ *
+ *  Deliberately routed through enrichStepsWithCliPreferences rather than re-deriving:
+ *  that function needs only `stepId`, and already resolves roles, fan-out seats and the
+ *  ignore_saved_step_clis gating. Two copies of that resolution would drift.
+ *
+ *  Filtered by workflowType, which OVER-lists rather than under-lists: a workflow task's
+ *  execution_path can drop steps (orchestrator/execution-paths.ts is worker-side and not
+ *  mirrored here), and a stored preference for a step that never runs is inert. The
+ *  model-health canary is excluded — a CLI change there is a task-level decision that
+ *  rewrites tasks.cli_provider_id (propagateModelHealthCliToTaskDefault), not a per-step
+ *  preference, and it runs first in every pipeline anyway. */
+export async function buildUpcomingCliSteps(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  taskId: string,
+  taskType: string,
+  existingStepIds: Iterable<string>,
+  ignoreSaved = false,
+) {
+  const started = new Set<string>(existingStepIds);
+  const upcoming = CLI_DISPATCH_STEPS.filter(
+    (s) => s.workflowType === taskType && !MODEL_HEALTH_STEP_ID_SET.has(s.id) && !started.has(s.id),
+  ).map((s) => ({ stepId: s.id, title: s.title }));
+  if (upcoming.length === 0) return [];
+  return enrichStepsWithCliPreferences(db, userId, upcoming, taskId, ignoreSaved);
 }
 
 export async function resolveWorkspaceRoot(

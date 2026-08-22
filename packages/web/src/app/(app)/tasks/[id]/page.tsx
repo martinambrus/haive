@@ -24,9 +24,11 @@ import {
   type TaskStatus,
   type TaskStep,
   type StepStatus,
+  type UpcomingCliStep,
   type UsageWindowSnapshot,
 } from '@/lib/api-client';
 import { Badge, Button, Card, Input } from '@/components/ui';
+import { CliPickerGrid } from '@/components/cli-picker-grid';
 import { ArrowLeft, CircleDot, Route, FolderGit2 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
@@ -405,7 +407,7 @@ function primaryRecovery(
   return { step: failedStep, action: 'retry', label: 'Retry', title: RETRY_TITLE };
 }
 
-type Tab = 'steps' | 'editor' | 'terminal' | 'activity' | 'attachments';
+type Tab = 'steps' | 'clis' | 'editor' | 'terminal' | 'activity' | 'attachments';
 
 // Mirrors @haive/api TaskProviderUsage (kept local per the barrel-avoidance rule).
 interface TaskProviderUsage {
@@ -439,6 +441,8 @@ interface LinkedTask {
 interface TaskDetailResponse {
   task: Task;
   steps: TaskStep[];
+  /** CLI steps with no row yet — the CLIs tab's content. Absent on an older server. */
+  upcomingCliSteps?: UpcomingCliStep[];
   providerBreakdown: TaskProviderUsage[];
   /** Currency + dated FX rate the server resolved for THIS task, so costs render the
    *  same on every later view. Absent on an older server: fall back to USD. */
@@ -462,12 +466,26 @@ interface TaskDetailResponse {
  * `role` is a cliRole id or a miningSeat id — both live in the same (user, step, role)
  * table server-side, so the cliRoles list decides which map it belongs to here.
  */
-function applyCliPreference(
-  step: TaskStep,
+/** The preference fields applyCliPreference rewrites. Both a real step row and an
+ *  upcoming (row-less) CLI step carry them, and both lists paint the same optimistic
+ *  update, so the helper is generic over the shape rather than tied to TaskStep. */
+type CliPreferenceFields = Pick<
+  TaskStep,
+  | 'preferredCliProviderId'
+  | 'preferredEffortLevel'
+  | 'cliRoles'
+  | 'cliRoleProviders'
+  | 'cliRoleEfforts'
+  | 'miningSeatProviders'
+  | 'miningSeatEfforts'
+>;
+
+function applyCliPreference<T extends CliPreferenceFields>(
+  step: T,
   cliProviderId: string | null,
   role: string | undefined,
   effortLevel: string | undefined,
-): TaskStep {
+): T {
   const effort = effortLevel ?? null;
   if (!role) {
     return { ...step, preferredCliProviderId: cliProviderId, preferredEffortLevel: effort };
@@ -498,6 +516,7 @@ export default function TaskDetailPage() {
   const [promotedDraftCount, setPromotedDraftCount] = useState(0);
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
+  const [upcomingCliSteps, setUpcomingCliSteps] = useState<UpcomingCliStep[]>([]);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
@@ -590,6 +609,7 @@ export default function TaskDetailPage() {
       const data = await api.get<TaskDetailResponse>(`/tasks/${id}`);
       setTask(data.task);
       setSteps(data.steps);
+      setUpcomingCliSteps(data.upcomingCliSteps ?? []);
       setProviderBreakdown(data.providerBreakdown ?? []);
       setCostDisplay(data.costDisplay ?? USD_DISPLAY);
       setParentTask(data.parentTask ?? null);
@@ -1138,6 +1158,12 @@ export default function TaskDetailPage() {
     setSteps((rows) =>
       rows.map((s) => (s.stepId === stepId ? applyCliPreference(s, picked, role, effortLevel) : s)),
     );
+    // Same paint for a step chosen from the CLIs tab: it has no row, so it is absent from
+    // `steps` and the map above is a no-op for it — without this its dropdown snaps back
+    // to the old value until the next poll.
+    setUpcomingCliSteps((rows) =>
+      rows.map((s) => (s.stepId === stepId ? applyCliPreference(s, picked, role, effortLevel) : s)),
+    );
     try {
       // effortLevel omitted (a CLI-only change) clears the stored effort server-side,
       // so the dropdown resets to the new CLI's default on reload; sent (an effort
@@ -1584,6 +1610,9 @@ export default function TaskDetailPage() {
         <TabButton active={tab === 'steps'} onClick={() => setTab('steps')}>
           Steps
         </TabButton>
+        <TabButton active={tab === 'clis'} onClick={() => setTab('clis')}>
+          CLIs
+        </TabButton>
         <TabButton
           active={tab === 'editor'}
           onClick={() => setTab('editor')}
@@ -1711,6 +1740,20 @@ export default function TaskDetailPage() {
         </div>
       )}
 
+      {tab === 'clis' && (
+        <UpcomingCliPanel
+          steps={upcomingCliSteps}
+          providers={providers}
+          taskCliProviderId={task.cliProviderId ?? null}
+          busyStepId={stepProviderBusy}
+          error={stepProviderError}
+          disabled={task.status === 'cancelled' || task.status === 'completed'}
+          onChangeCli={(stepId, cliProviderId, role, effortLevel) =>
+            changeStepProvider(stepId, cliProviderId, role, 0, effortLevel)
+          }
+        />
+      )}
+
       {tab === 'editor' && !editorDisabled && <EditorTab taskId={id} />}
 
       {tab === 'attachments' && <AttachmentsPanel taskId={id} />}
@@ -1769,6 +1812,88 @@ export default function TaskDetailPage() {
           </Card>
         </div>
       )}
+    </div>
+  );
+}
+
+/** The CLIs tab: one picker per CLI step the run has not reached yet.
+ *
+ *  A step's CLI is normally chosen on its own card, but a card only exists once the step
+ *  has a `task_steps` row — created when it runs or parks. A step that never pauses first
+ *  (its form auto-submits, as 08a-browser-verify's does in automated mode, or it has no
+ *  form and the task is on auto-continue) therefore went straight from "not started" to
+ *  "running on the task default", with stopping the step as the only lever. This is that
+ *  missing window: the preference is keyed (user, step, role) and the worker resolves it
+ *  at dispatch, so a pick here lands on this task.
+ *
+ *  Over-lists rather than under-lists: a workflow task's execution path can drop some of
+ *  these steps, and a preference for a step that never runs is inert. */
+function UpcomingCliPanel({
+  steps,
+  providers,
+  taskCliProviderId,
+  busyStepId,
+  error,
+  disabled,
+  onChangeCli,
+}: {
+  steps: UpcomingCliStep[];
+  providers: CliProvider[];
+  taskCliProviderId: string | null;
+  busyStepId: string | null;
+  error: { stepId: string; message: string } | null;
+  disabled: boolean;
+  onChangeCli: (
+    stepId: string,
+    cliProviderId: string | null,
+    role?: string,
+    effortLevel?: string,
+  ) => void;
+}) {
+  if (steps.length === 0) {
+    return (
+      <div className="text-sm text-neutral-500">
+        No upcoming CLI steps — every step that runs an AI CLI has already started. Change a started
+        step&apos;s CLI on its own card in the Steps tab.
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="text-xs text-neutral-500">
+        CLI steps this task has not reached yet. Setting one here applies to this task and is
+        remembered for later tasks. Steps already started keep their picker on their own card. Some
+        of these may not run — the execution path chosen at triage can skip them.
+      </div>
+      {steps.map((s) => (
+        <Card key={s.stepId} className="flex flex-col gap-2 p-3">
+          <div className="flex items-baseline gap-2">
+            <span className="text-sm font-medium text-neutral-200">{s.title}</span>
+            <span className="font-mono text-[11px] text-neutral-600">{s.stepId}</span>
+          </div>
+          <CliPickerGrid
+            providers={providers}
+            idPrefix={`upcoming-cli-${s.stepId}`}
+            roles={s.cliRoles}
+            seats={s.miningSeats}
+            defaultProviderId={s.preferredCliProviderId ?? taskCliProviderId ?? ''}
+            defaultEffortLevel={s.preferredEffortLevel}
+            roleProviders={s.cliRoleProviders}
+            roleEfforts={s.cliRoleEfforts}
+            seatProviders={s.miningSeatProviders}
+            seatEfforts={s.miningSeatEfforts}
+            taskCliProviderId={taskCliProviderId}
+            locked={disabled}
+            busy={busyStepId === s.stepId}
+            onChange={(cliProviderId, role, effortLevel) =>
+              onChangeCli(s.stepId, cliProviderId, role, effortLevel)
+            }
+          />
+          {error?.stepId === s.stepId && (
+            <span className="text-[11px] text-red-400">{error.message}</span>
+          )}
+        </Card>
+      ))}
     </div>
   );
 }
@@ -2861,83 +2986,6 @@ function StepCardImpl({
   // passes (N = role count: review + correct = 2). Show rounds, not raw passes.
   const loopPassesPerRound = step.cliRoles?.length ?? 1;
   const iterBadgeLabel = iterationBadgeLabel(step);
-  // Fixed widths, deliberately not intrinsic or flex-1: a native <select> sizes itself to
-  // its widest option, so self-sizing controls re-laid-out the whole (wrapping) picker row
-  // on every CLI switch. One width for the CLI dropdowns, one for the effort dropdowns,
-  // so the default row and the per-role/per-seat rows line up as columns.
-  const cliSelectBase =
-    'h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50';
-  const cliSelectClass = `${cliSelectBase} w-60`;
-  const effortSelectClass = `${cliSelectBase} w-24`;
-  // Label sits ABOVE its dropdowns, not beside them. Beside, the labels have to share one
-  // fixed-width column or the dropdowns go ragged — and that column is as wide as the
-  // longest label ("Security Code Reviewer", 143px), which strands a short one ("CLI",
-  // 19px) far from its own control however it is aligned inside it. Stacked, every
-  // dropdown starts at its column's left edge with nothing between it and its label, no
-  // label is ever truncated, and the cell narrows to 22rem so more fit per row.
-  const cliLabelClass = 'truncate text-xs font-medium text-neutral-400';
-  const cliOptions = (
-    <>
-      <option value="">(none — deterministic only)</option>
-      {providers.map((p) => (
-        <option key={p.id} value={p.id} disabled={!p.enabled}>
-          {p.label} ({p.name}){!p.enabled ? ' — disabled' : ''}
-        </option>
-      ))}
-    </>
-  );
-
-  // Per-step effort dropdown: given the effective provider for a (step, role) and the
-  // remembered effort, render a select of that CLI's effort scale. A CLI change clears
-  // the stored effort server-side, so this re-derives its options + selected value from
-  // the NEW provider (claude 'max' drops on a switch to codex, which exposes 'ultra').
-  //
-  // A CLI with no effort knob (effortScale === null — gemini, amp, antigravity, grok)
-  // renders a DISABLED placeholder rather than nothing: returning null collapsed the
-  // control, so switching to one of those four shifted every dropdown after it. Reserving
-  // the slot keeps the row geometry identical across every provider.
-  const effortSelectFor = (
-    providerId: string,
-    rememberedEffort: string | null | undefined,
-    roleId?: string,
-  ): React.ReactNode => {
-    const prov = providers.find((p) => p.id === providerId);
-    const scale = prov?.effortScale ?? null;
-    if (!scale)
-      return (
-        <select
-          aria-label="reasoning effort"
-          title={
-            prov
-              ? `${prov.label} has no reasoning/effort setting`
-              : 'No reasoning/effort setting for this CLI'
-          }
-          disabled
-          defaultValue=""
-          className={effortSelectClass}
-        >
-          <option value="">—</option>
-        </select>
-      );
-    const value = rememberedEffort ?? prov?.effortLevel ?? scale.max;
-    return (
-      <select
-        aria-label="reasoning effort"
-        title="Reasoning/effort level for this step's CLI (overrides the CLI's default)"
-        disabled={cliLocked || cliBusy}
-        value={value}
-        onChange={(e) => void onChangeCli(providerId || null, roleId, e.target.value)}
-        className={effortSelectClass}
-      >
-        {scale.values.map((v) => (
-          <option key={v} value={v}>
-            {v}
-          </option>
-        ))}
-      </select>
-    );
-  };
-
   // Detect tooling step fields for inline connection test buttons
   const hasConnectionFields =
     showForm &&
@@ -3080,81 +3128,22 @@ function StepCardImpl({
               drops cells per row as the window narrows; the cell width never changes,
               so nothing re-flows on a CLI switch. */}
           {showCliPicker && (
-            <div className="grid gap-x-4 gap-y-2 [grid-template-columns:repeat(auto-fill,minmax(22rem,1fr))]">
-              {step.cliRoles && step.cliRoles.length > 0 ? (
-                // Multi-CLI step (e.g. spec-quality): one dropdown per role.
-                step.cliRoles.map((roleDesc) => (
-                  <div key={roleDesc.id} className="flex flex-col gap-1">
-                    <label htmlFor={`${cliPickerId}-${roleDesc.id}`} className={cliLabelClass}>
-                      {roleDesc.label}
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <select
-                        id={`${cliPickerId}-${roleDesc.id}`}
-                        disabled={cliLocked || cliBusy}
-                        value={step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? ''}
-                        onChange={(e) => void onChangeCli(e.target.value || null, roleDesc.id)}
-                        className={cliSelectClass}
-                      >
-                        {cliOptions}
-                      </select>
-                      {effortSelectFor(
-                        step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? '',
-                        step.cliRoleEfforts?.[roleDesc.id],
-                        roleDesc.id,
-                      )}
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="flex flex-col gap-1">
-                  <label htmlFor={cliPickerId} className={cliLabelClass}>
-                    CLI
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <select
-                      id={cliPickerId}
-                      disabled={cliLocked || cliBusy}
-                      value={effectiveCliProviderId}
-                      onChange={(e) => void onChangeCli(e.target.value || null)}
-                      className={cliSelectClass}
-                    >
-                      {cliOptions}
-                    </select>
-                    {effortSelectFor(effectiveCliProviderId, step.preferredEffortLevel)}
-                  </div>
-                </div>
-              )}
-              {/* Fan-out steps (08c, 08d) keep the single CLI dropdown above as the step-wide
-              default — an unset seat falls through to it — and add one dropdown per SEAT,
-              so each reviewer, adversary or refutation lens can answer on a different
-              model. Rendered alongside rather than instead of the default, and separate
-              from cliRoles, whose presence drives loop round badges and Resume. */}
-              {step.miningSeats?.map((seat) => (
-                <div key={seat.id} className="flex flex-col gap-1">
-                  <label htmlFor={`${cliPickerId}-seat-${seat.id}`} className={cliLabelClass}>
-                    {seat.label}
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <select
-                      id={`${cliPickerId}-seat-${seat.id}`}
-                      disabled={cliLocked || cliBusy}
-                      value={step.miningSeatProviders?.[seat.id] ?? ''}
-                      onChange={(e) => void onChangeCli(e.target.value || null, seat.id)}
-                      className={cliSelectClass}
-                    >
-                      <option value="">(step default)</option>
-                      {cliOptions}
-                    </select>
-                    {effortSelectFor(
-                      step.miningSeatProviders?.[seat.id] ?? '',
-                      step.miningSeatEfforts?.[seat.id],
-                      seat.id,
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+            <CliPickerGrid
+              providers={providers}
+              idPrefix={cliPickerId}
+              roles={step.cliRoles}
+              seats={step.miningSeats}
+              defaultProviderId={effectiveCliProviderId}
+              defaultEffortLevel={step.preferredEffortLevel}
+              roleProviders={step.cliRoleProviders}
+              roleEfforts={step.cliRoleEfforts}
+              seatProviders={step.miningSeatProviders}
+              seatEfforts={step.miningSeatEfforts}
+              taskCliProviderId={taskCliProviderId}
+              locked={cliLocked}
+              busy={cliBusy}
+              onChange={onChangeCli}
+            />
           )}
           {/* Status line and auto-continue on their own row, below the grid. Both used to
               sit inside the picker row, where the three status messages inserted and

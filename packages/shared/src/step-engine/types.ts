@@ -193,63 +193,121 @@ export const MODEL_HEALTH_STEP_IDS: readonly string[] = [
   '00-model-health-workflow',
 ];
 
-/** Step ids whose StepDefinition dispatches a CLI — i.e. defines `llm`,
+/** Every step whose StepDefinition dispatches a CLI — i.e. defines `llm`,
  *  `agentMining`, or `dagExecute` (the exact predicate the worker step runner
  *  uses to decide an invocation happens). Only these steps ever consume a
  *  per-step CLI provider, so the web renders the per-step CLI picker ONLY for
  *  them; deterministic steps hide it (their per-step preference is never read —
  *  provider-sensitive deterministic steps key off the task-level provider).
  *
+ *  Carries `workflowType` + `title` alongside the id so the api can name and group
+ *  steps that have NO `task_steps` row yet — the upcoming-CLI panel's whole point,
+ *  since a row is created lazily (when the step runs or parks) and until then there
+ *  is nothing to read a title from.
+ *
  *  Duplicated here (like PROVIDER_SENSITIVE_STEP_IDS) because the api/web
  *  packages cannot import the worker step registry. A worker startup assertion
- *  (assertCliDispatchListInSync) verifies this matches the registry, so the
- *  worker refuses to boot on drift. Do NOT key off StepMetadata.requiresCli —
- *  that flag is unreliable (hand-set, unasserted) and read nowhere in prod. */
-export const CLI_DISPATCH_STEP_IDS: readonly string[] = [
+ *  (assertCliDispatchListInSync) verifies EVERY field against the registry, so the
+ *  worker refuses to boot on drift — a retitled step fails boot rather than
+ *  mislabelling a dropdown. Do NOT key off StepMetadata.requiresCli — that flag is
+ *  unreliable (hand-set, unasserted) and read nowhere in prod. */
+export interface CliDispatchStep {
+  id: string;
+  /** StepMetadata.workflowType — the pipeline this step belongs to. */
+  workflowType: string;
+  /** StepMetadata.title, verbatim. */
+  title: string;
+}
+
+export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   // canary model-health steps (one per pipeline)
-  '00-model-health-onboarding',
-  '00-model-health-workflow',
+  { id: '00-model-health-onboarding', workflowType: 'onboarding', title: 'Model health check' },
+  { id: '00-model-health-workflow', workflowType: 'workflow', title: 'Model health check' },
   // onboarding
-  '01-env-detect',
-  '06_5-agent-discovery',
-  '07_7-secret-sweep',
-  '08-knowledge-acquisition',
-  '09-qa',
-  '09_1-qa-suggestions',
-  '09_2-qa-resolve',
-  '09_3-qa-review',
-  '09_5-skill-generation',
-  '09_5b-skill-repair',
-  '09_6_4-global-kb-merge',
-  '11-final-review',
+  { id: '01-env-detect', workflowType: 'onboarding', title: 'Environment detection' },
+  { id: '06_5-agent-discovery', workflowType: 'onboarding', title: 'Agent discovery' },
+  { id: '07_7-secret-sweep', workflowType: 'onboarding', title: 'Committed secret sweep' },
+  {
+    id: '08-knowledge-acquisition',
+    workflowType: 'onboarding',
+    title: 'Knowledge base acquisition',
+  },
+  {
+    id: '09-qa',
+    workflowType: 'onboarding',
+    title: 'Knowledge base Q&A — agent question generation',
+  },
+  {
+    id: '09_1-qa-suggestions',
+    workflowType: 'onboarding',
+    title: 'Knowledge base Q&A — suggested answers',
+  },
+  {
+    id: '09_2-qa-resolve',
+    workflowType: 'onboarding',
+    title: 'Knowledge base Q&A — find answers',
+  },
+  {
+    id: '09_3-qa-review',
+    workflowType: 'onboarding',
+    title: 'Knowledge base Q&A — review answers',
+  },
+  { id: '09_5-skill-generation', workflowType: 'onboarding', title: 'Skill generation' },
+  { id: '09_5b-skill-repair', workflowType: 'onboarding', title: 'Skill repair' },
+  { id: '09_6_4-global-kb-merge', workflowType: 'onboarding', title: 'Global KB merge' },
+  { id: '11-final-review', workflowType: 'onboarding', title: 'Final review' },
   // workflow
-  '00-triage',
-  '00b-estimate',
-  '01a-app-boot',
-  '03-phase-0a-discovery',
-  '03b-business-requirements',
-  '03b2-humanize-requirements',
-  '04-phase-0b-pre-planning',
-  '04a-spec-audit',
-  '05-phase-0b5-spec-quality',
-  '05a-resolve-spec-warnings',
-  '06-run-config',
-  '06b-sprint-planning',
-  '06c-dag-execute',
-  '07-phase-2-implement',
-  '07a-code-simplify',
-  '07b-phase-4-validate',
-  '08a-browser-verify',
-  '08b-test-management',
-  '08c-code-review',
-  '08c2-code-audit',
-  '08d-adversarial-qa',
-  '08e-insights-triage',
-  '11-phase-8-learning',
-  '11d-skill-sync',
+  { id: '00-triage', workflowType: 'workflow', title: 'Choose execution path' },
+  { id: '00b-estimate', workflowType: 'workflow', title: 'Estimate effort' },
+  { id: '01a-app-boot', workflowType: 'workflow', title: 'App boot' },
+  {
+    id: '03-phase-0a-discovery',
+    workflowType: 'workflow',
+    title: 'Phase 0a: Knowledge discovery',
+  },
+  {
+    id: '03b-business-requirements',
+    workflowType: 'workflow',
+    title: 'Phase 1: Business requirements',
+  },
+  {
+    id: '03b2-humanize-requirements',
+    workflowType: 'workflow',
+    title: 'Phase 1: Humanize requirements',
+  },
+  { id: '04-phase-0b-pre-planning', workflowType: 'workflow', title: 'Phase 0b: Pre-planning' },
+  { id: '04a-spec-audit', workflowType: 'workflow', title: 'Spec audit (broad)' },
+  {
+    id: '05-phase-0b5-spec-quality',
+    workflowType: 'workflow',
+    title: 'Phase 0b.5: Spec quality review',
+  },
+  { id: '05a-resolve-spec-warnings', workflowType: 'workflow', title: 'Resolve spec warnings' },
+  { id: '06-run-config', workflowType: 'workflow', title: 'Run configuration' },
+  { id: '06b-sprint-planning', workflowType: 'workflow', title: 'Phase 2c: Sprint planning' },
+  { id: '06c-dag-execute', workflowType: 'workflow', title: 'Phase 3: DAG implementation' },
+  { id: '07-phase-2-implement', workflowType: 'workflow', title: 'Phase 2: Implement' },
+  { id: '07a-code-simplify', workflowType: 'workflow', title: 'Phase 3.5: Code simplification' },
+  {
+    id: '07b-phase-4-validate',
+    workflowType: 'workflow',
+    title: 'Phase 4: Implementation validation',
+  },
+  { id: '08a-browser-verify', workflowType: 'workflow', title: 'Phase 5a: Browser validation' },
+  { id: '08b-test-management', workflowType: 'workflow', title: 'Phase 5b: Test management' },
+  { id: '08c-code-review', workflowType: 'workflow', title: 'Phase 6: Code review' },
+  { id: '08c2-code-audit', workflowType: 'workflow', title: 'Code audit (broad)' },
+  { id: '08d-adversarial-qa', workflowType: 'workflow', title: 'Phase 7: Adversarial QA' },
+  { id: '08e-insights-triage', workflowType: 'workflow', title: 'Insight triage' },
+  { id: '11-phase-8-learning', workflowType: 'workflow', title: 'Phase 8: Learning capture' },
+  { id: '11d-skill-sync', workflowType: 'workflow', title: 'Skill sync' },
   // kb-author
-  '01-kb-enrich',
+  { id: '01-kb-enrich', workflowType: 'kb_author', title: 'Knowledge base enrichment' },
 ];
+
+/** Ids only — the shape every pre-existing consumer reads. Derived so the two can
+ *  never disagree. */
+export const CLI_DISPATCH_STEP_IDS: readonly string[] = CLI_DISPATCH_STEPS.map((s) => s.id);
 
 export interface StepRunRecord {
   id: string;
