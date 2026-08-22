@@ -67,6 +67,51 @@ describe('renderDockerfile LSP version pins', () => {
     expect(browserSection.match(/apt-get update/g)?.length).toBe(1);
   });
 
+  // Each apt block used to end with `rm -rf /var/lib/apt/lists/*`, so the next block
+  // re-fetched the whole index -- MEASURED 32.3 MB per `apt-get update`. Cache mounts share
+  // it across blocks, images and builds instead: a 3-block build went 133 MB -> 68.6 MB, and
+  // an incremental rebuild 36 MB -> 0.18 MB.
+  it('caches apt through BuildKit mounts and never deletes the lists', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      browserTesting: true,
+      runtimes: ['node', 'python', 'java', 'ruby', 'php'],
+      versions: { node: '22', python: '3.12', java: '17', php: '8.2' },
+    } as never);
+    // Deleting the lists would wipe the mount, which is worse than not caching at all.
+    expect(df).not.toContain('rm -rf /var/lib/apt/lists');
+    // Without removing docker-clean the package half of the cache stays empty.
+    expect(df).toContain('rm -f /etc/apt/apt.conf.d/docker-clean');
+
+    // Every RUN that touches apt must carry both mounts.
+    const runs = df.split('\n\n').filter((b) => /apt-get (update|install)/.test(b));
+    expect(runs.length).toBeGreaterThan(3);
+    for (const block of runs) {
+      expect(block).toContain('--mount=type=cache,target=/var/cache/apt,sharing=locked');
+      expect(block).toContain('--mount=type=cache,target=/var/lib/apt/lists,sharing=locked');
+    }
+  });
+
+  // Removing a trailing `&& rm -rf ...` line leaves the line above it ending in a backslash
+  // that continues into nothing. That renders a broken Dockerfile and is invisible in a diff.
+  it('never emits a line continuation into a blank line or a comment', () => {
+    for (const [base, deps] of [
+      [
+        'ubuntu:24.04',
+        { browserTesting: true, runtimes: ['node', 'python', 'java', 'ruby', 'php'] },
+      ],
+      ['debian:bookworm-slim', { browserTesting: true, runtimes: ['go', 'rust'] }],
+      ['ubuntu:24.04', {}],
+    ] as const) {
+      const ls = renderDockerfile(base, deps as never).split('\n');
+      const dangling = ls.filter((l, i) => {
+        if (!/\\\s*$/.test(l)) return false;
+        const next = ls[i + 1];
+        return next === undefined || next.trim() === '' || next.trimStart().startsWith('#');
+      });
+      expect(dangling).toEqual([]);
+    }
+  });
+
   it('fails the build when the base cannot produce a working browser', () => {
     // The whole class of bug this guards: an image that builds fine and only reveals it has
     // no browser hours later, inside an MCP tool call during a verification step.
