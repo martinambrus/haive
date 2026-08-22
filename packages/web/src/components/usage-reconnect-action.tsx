@@ -54,10 +54,10 @@ export function UsagePendingChip({
 
 /** The chip for a meter that has no number to show AND a reason worth stating.
  *
- *  Three situations reach here, all of which used to render nothing at all: a metered CLI that
- *  never produced a reading, a fetch that failed, and a vendor that answered with no window.
- *  The fourth blank — a CLI with no usage endpoint at all — deliberately never reaches this;
- *  see lib/usage-chip-state. Which fault applies is decided there, not here.
+ *  Four situations reach here, all of which used to render nothing at all: a metered CLI that
+ *  never produced a reading, a fetch that failed, a vendor that answered with no window, and a
+ *  CLI that publishes no usage endpoint at all. Which fault applies is decided in
+ *  lib/usage-chip-state, not here.
  *
  *  Only the actionable one is a link, matching the amber-acts / grey-informs split this file
  *  already uses for UsageReconnectAction and UsagePendingChip. It opens in a new tab for the

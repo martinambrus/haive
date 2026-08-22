@@ -8,9 +8,10 @@ import {
 } from './usage-chip-state';
 import type { UsageWindowSnapshot } from '@/lib/api-client';
 
-// Four situations used to render one identical blank. The point of this module is that only
-// ONE of them still does — the CLI that has no usage endpoint to read, where nothing is wrong
-// and there is no number to wait for.
+// Four situations used to render one identical blank. The point of this module is that none of
+// them still do: the chip follows the current step's CLI, so a blank is indistinguishable from
+// the meter breaking when the next step switches CLI. The only blank left is the CLI nobody has
+// identified yet, where there is no claim to make.
 
 const PROVIDER = 'p0000000-0000-0000-0000-00000000000a';
 
@@ -56,11 +57,21 @@ describe('resolveUsageChipState', () => {
     ).toEqual({ kind: 'hidden' });
   });
 
-  // The deliberate blank. A step running on ollama has no allowance anywhere to report, so
-  // saying so on every such step would be noise standing where a number belongs.
-  it('stays blank for a CLI with no usage endpoint', () => {
+  // Was the deliberate blank. Now stated: the chip tracks the CURRENT step's CLI, and a task
+  // that runs one step on Claude and the next on ollama otherwise loses the whole badge
+  // mid-run, which reads as the meter failing rather than as this CLI having none.
+  it('names a CLI with no usage endpoint instead of blanking', () => {
     expect(
       resolveUsageChipState({ providerId: PROVIDER, providerName: 'ollama', snapshots: [] }),
+    ).toEqual({ kind: 'fault', fault: 'no_meter' });
+  });
+
+  // The one blank that survives. `providers` on the task page starts empty and fills after the
+  // task loads, so an unresolved name is "not known yet", not "known to be unmetered" — and
+  // calling it unmetered there would flash a wrong claim that corrects itself a render later.
+  it('stays blank while the CLI itself is still unknown', () => {
+    expect(
+      resolveUsageChipState({ providerId: PROVIDER, providerName: null, snapshots: [] }),
     ).toEqual({ kind: 'hidden' });
   });
 
@@ -138,7 +149,7 @@ describe('resolveUsageChipState', () => {
 
 describe('fault copy', () => {
   it('gives every fault text and a tooltip naming the provider', () => {
-    for (const fault of ['not_connected', 'unavailable', 'no_windows'] as const) {
+    for (const fault of ['not_connected', 'unavailable', 'no_windows', 'no_meter'] as const) {
       expect(usageFaultText(fault).length).toBeGreaterThan(0);
       expect(usageFaultTooltip(fault, 'Codex')).toContain('Codex');
     }
@@ -148,5 +159,6 @@ describe('fault copy', () => {
     expect(usageFaultHref('not_connected')).toBe('/settings/cli-providers');
     expect(usageFaultHref('unavailable')).toBeNull();
     expect(usageFaultHref('no_windows')).toBeNull();
+    expect(usageFaultHref('no_meter')).toBeNull();
   });
 });
