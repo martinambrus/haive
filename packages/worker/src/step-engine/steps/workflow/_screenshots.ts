@@ -1,7 +1,9 @@
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from '@haive/shared';
+import type { StepContext } from '../../step-definition.js';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
+import { resolveTaskWorktreePath } from './_spec-artifact.js';
 
 const log = logger.child({ module: 'screenshots' });
 
@@ -55,6 +57,21 @@ export interface ScreenshotManifestResult {
   /** Absolute path to the written artifact. */
   artifactPath: string;
   count: number;
+}
+
+/** The tree the evidence lives in: the task WORKTREE, never the repo root.
+ *
+ *  A cli-exec invocation mounts the worktree ALONE at the sandbox workdir, so the agent's
+ *  `filePath` captures land under `<worktree>/.haive/screenshots`. The api resolves its
+ *  file root the same way (`resolveWorkspaceRoot` prefers `tasks.worktree_path`), so a
+ *  manifest built against the repo root is wrong twice over: it scans an empty directory
+ *  AND names a path `GET /tasks/:id/files/raw` answers 403 for.
+ *
+ *  Falls back to the repo root for a task with no worktree (root mode, read-only local
+ *  repos) — which is the same fallback the api makes.
+ */
+export async function resolveScreenshotRoot(ctx: StepContext): Promise<string> {
+  return (await resolveTaskWorktreePath(ctx)) ?? ctx.workspacePath;
 }
 
 /** Create the capture directory and hand it to the sandbox uid BEFORE the agent runs.

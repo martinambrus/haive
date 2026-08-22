@@ -23,6 +23,7 @@ import { resolveBrowserRuntime } from './_browser-runtime.js';
 import {
   buildScreenshotManifest,
   ensureScreenshotsDir,
+  resolveScreenshotRoot,
   SCREENSHOTS_DIR_REL,
   type ReportedScreenshot,
 } from './_screenshots.js';
@@ -722,7 +723,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       if ((detected as BrowserVerifyDetect).mode !== 'mcp') return;
       // Hand the capture directory to the sandbox uid before the agent asks
       // chrome-devtools to write its first screenshot into it.
-      await ensureScreenshotsDir(ctx.workspacePath);
+      await ensureScreenshotsDir(await resolveScreenshotRoot(ctx));
       await ctx.emitProgress('Starting the browser desktop for agent testing…');
       // mcp drives the SAME visible browser via chrome-devtools, so the app must
       // be serving and the headed desktop up. ensureAppServing boots DDEV /
@@ -1063,7 +1064,7 @@ async function applyMcp(
   // the evidence gallery must not be able to fail a browser verification.
   const manifest = async (reported: ReportedScreenshot[]): Promise<string | null> => {
     try {
-      const res = await buildScreenshotManifest(ctx.workspacePath, reported);
+      const res = await buildScreenshotManifest(await resolveScreenshotRoot(ctx), reported);
       return res.count > 0 ? res.artifactPath : null;
     } catch (err) {
       ctx.logger.warn({ err }, 'screenshot manifest build failed');

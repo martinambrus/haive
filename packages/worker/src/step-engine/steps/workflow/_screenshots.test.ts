@@ -2,10 +2,12 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
+import type { StepContext } from '../../step-definition.js';
 import {
   buildScreenshotManifest,
   humanizeSlug,
   joinScreenshots,
+  resolveScreenshotRoot,
   SCREENSHOTS_DIR_REL,
   type ScreenshotManifest,
 } from './_screenshots.js';
@@ -119,5 +121,27 @@ describe('buildScreenshotManifest', () => {
     await rm(path.join(ws, SCREENSHOTS_DIR_REL, '01-first.webp'));
     await buildScreenshotManifest(ws, [{ file: '01-first.webp', caption: 'one' }]);
     expect((await readManifest(ws)).shots).toHaveLength(0);
+  });
+});
+
+describe('resolveScreenshotRoot', () => {
+  const ctx = (worktreePath: string | null): StepContext =>
+    ({
+      taskId: 'task-1',
+      workspacePath: '/repos/repo',
+      db: { query: { tasks: { findFirst: async () => ({ worktreePath }) } } },
+    }) as unknown as StepContext;
+
+  it('resolves the task worktree, not the repo root', async () => {
+    // The agent's captures land in the worktree (it is mounted alone at the sandbox
+    // workdir) and the api serves files from the same root, so scanning the repo root
+    // produced an empty manifest at a path `files/raw` answers 403 for.
+    expect(await resolveScreenshotRoot(ctx('/repos/repo/.haive/worktrees/feat'))).toBe(
+      '/repos/repo/.haive/worktrees/feat',
+    );
+  });
+
+  it('falls back to the repo root when the task has no worktree', async () => {
+    expect(await resolveScreenshotRoot(ctx(null))).toBe('/repos/repo');
   });
 });

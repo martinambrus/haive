@@ -23,7 +23,7 @@ import {
 } from '../../../sandbox/app-runner.js';
 import { ensureDdevWithProgress } from './_app-runtime.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
-import { SCREENSHOT_MANIFEST_NAME } from './_screenshots.js';
+import { resolveScreenshotRoot, SCREENSHOT_MANIFEST_NAME } from './_screenshots.js';
 import type { FileCoverage } from './_impl-changes.js';
 
 /** Coverage as a step wrote it into `task_steps.output`. */
@@ -644,7 +644,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // Point at 08a's gallery manifest when it wrote one. Checked on disk rather than read
     // out of 08a's step output, because that column is not durable (_step-reset nulls it)
     // while the artifact lives in the worktree for as long as the shots themselves do.
-    const screenshotsManifest = path.join(ctx.workspacePath, '.haive', SCREENSHOT_MANIFEST_NAME);
+    const screenshotsManifest = path.join(
+      await resolveScreenshotRoot(ctx),
+      '.haive',
+      SCREENSHOT_MANIFEST_NAME,
+    );
     const screenshotsArtifactPath = (await pathExists(screenshotsManifest))
       ? screenshotsManifest
       : null;

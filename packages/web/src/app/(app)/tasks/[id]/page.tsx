@@ -3464,12 +3464,18 @@ function StepCardImpl({
         </div>
       )}
 
+      {/* The live browser belongs to the RUN, not to the record of it. Once 08a is done the
+          agent's session is over and the next interactive surface is Gate 2's own panel, so the
+          card keeps only its evidence gallery — same as Gate 2, whose panel disappears with the
+          form when the user submits. Left mounted it read as a browser you could still open,
+          and expanding it re-bridged (or cold-booted) a desktop nothing was driving. */}
       {!runtimeTornDown &&
         step.stepId === '08a-browser-verify' &&
         step.status !== 'failed' &&
+        step.status !== 'done' &&
         step.status !== 'waiting_form' &&
         step.activeRole !== 'fixer' &&
-        liveBrowserPanel(step, taskId, { autoCollapse: step.status === 'done' || taskEnded })}
+        liveBrowserPanel(step, taskId, { autoCollapse: taskEnded })}
 
       {!runtimeTornDown &&
         step.stepId === '08a-browser-verify' &&
