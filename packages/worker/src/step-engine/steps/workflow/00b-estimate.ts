@@ -12,6 +12,8 @@ import {
   estimateRange,
   heuristicEstimate,
   MAX_ANCHORS,
+  MAX_HOURS,
+  MIN_HOURS,
   round2,
   type EstimateAnchor,
 } from './_estimate.js';
@@ -309,8 +311,12 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
         'Effort = active agent work + your time at review gates (idle / queue time excluded). ' +
         'Defaults to the AI estimate; adjust if you disagree.',
       default: round2(defaultHours),
-      min: 0.05,
-      step: 0.25,
+      min: MIN_HOURS,
+      max: MAX_HOURS,
+      // 'any', not a numeric step: the browser anchors its step ladder at `min`, so
+      // min 0.05 with step 0.25 rejected every whole hour (3h offered 2.8 / 3.05) and
+      // every round2 AI number off that ladder. Hours is a free decimal; min/max bound it.
+      step: 'any',
       required: true,
     });
 

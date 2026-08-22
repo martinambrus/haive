@@ -129,7 +129,11 @@ export const numberFieldSchema = baseField.extend({
   default: z.number().optional(),
   min: z.number().optional(),
   max: z.number().optional(),
-  step: z.number().optional(),
+  /** Passed straight to the DOM input. A numeric step makes the browser enforce a
+   *  ladder anchored at `min` (the HTML step base), so any value off `min + step*k`
+   *  is rejected client-side — including whole numbers when `min` is fractional.
+   *  Use 'any' for a free decimal quantity whose only real bounds are min/max. */
+  step: z.union([z.number(), z.literal('any')]).optional(),
 });
 
 /** Read-only note rendered inline among the fields (no input value). `body` is
