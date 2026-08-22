@@ -1122,10 +1122,15 @@ export default function TaskDetailPage() {
     // the auto-continue flip above. Preferences are keyed by (user, step, role) with no
     // round, so every round's row of this step moves together — matching what the
     // reload would return.
+    //
+    // Paint the id off the loaded provider row rather than the raw dropdown value. This
+    // write is the only place a DOM value reaches component state without passing through
+    // the server first, and the id ends up in the usage chip's reconnect href — an id
+    // that is not in `providers` is not one this page can render anything for anyway.
+    // The PATCH still sends what was picked; the server is the authority on it.
+    const picked = providers.find((p) => p.id === cliProviderId)?.id ?? null;
     setSteps((rows) =>
-      rows.map((s) =>
-        s.stepId === stepId ? applyCliPreference(s, cliProviderId, role, effortLevel) : s,
-      ),
+      rows.map((s) => (s.stepId === stepId ? applyCliPreference(s, picked, role, effortLevel) : s)),
     );
     try {
       // effortLevel omitted (a CLI-only change) clears the stored effort server-side,
