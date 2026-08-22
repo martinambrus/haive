@@ -5,6 +5,37 @@
 # Chrome's CDP beyond localhost (headed Chrome only binds 127.0.0.1; the
 # --remote-debugging-address flag is headless-only), and headed Chromium.
 # Idempotent: pgrep guards make re-runs no-ops. Run as the `ddev` user.
+#
+# The privacy switches below are NOT cosmetic parity with puppeteer: this Chromium
+# is launched RAW, so unlike browser-check.js (puppeteer.launch, which applies
+# --disable-background-networking and friends as defaults) it inherits none of them,
+# and the runner sits on the default bridge with unproxied internet. MEASURED with
+# --log-net-log on Chromium 151 over 30s: an unflagged launch on about:blank issued
+# requests to 7 Google hosts; the switches below remove optimizationguide-pa
+# .googleapis.com (the only one keyed on browsing), the component-update downloads
+# via redirector.gvt1.com, and clients2.google.com/time.
+#
+# Translate is disabled for the biggest payload rather than for anything observed in
+# that window: it posts PAGE TEXT to translate.googleapis.com, and only fires on a
+# foreign-language page, which a 30s about:blank capture cannot trigger. Same for the
+# phishing classifier (page features) and breakpad (crash dumps carry process memory).
+#
+# Net effect MEASURED the same way: 7 Google hosts before, 3 after, with CDP still
+# serving and navigation unaffected.
+#
+# Also MEASURED, and the reason this stops at switches: navigating to a real page added
+# NO further Google traffic, so the visited URL does not leak. The 3 that remain carry
+# no project URL or content -- accounts.google.com/ListAccounts (empty on a signed-out
+# profile), android.clients.google.com checkin/register3 (GCM device registration), and
+# a www.google.com new-tab/search prefetch. None answers to a command-line switch:
+# --allow-browser-signin=false was tried and left ListAccounts untouched. An
+# /etc/chromium/policies/managed file DOES remove the www.google.com pair (verified via
+# DefaultSearchProviderEnabled + NewTabPageLocation) but not the other two, and it is a
+# separate change because this script runs as `ddev` and cannot write /etc, so both the
+# image and the app-runner injection path would need it wired.
+#
+# --disable-background-networking is kept as the documented umbrella even though it
+# removed nothing measurable on its own here.
 set -u
 
 DISPLAY_NUM=":99"
@@ -43,6 +74,17 @@ if ! pgrep -f "chromium.*remote-debugging-port=${CDP_LOCAL}" >/dev/null 2>&1; th
     --password-store=basic \
     --no-sandbox \
     --disable-dev-shm-usage \
+    --disable-background-networking \
+    --disable-component-update \
+    --disable-domain-reliability \
+    --disable-breakpad \
+    --disable-crash-reporter \
+    --disable-client-side-phishing-detection \
+    --disable-sync \
+    --metrics-recording-only \
+    --no-pings \
+    --safebrowsing-disable-auto-update \
+    --disable-features=Translate,OptimizationHints,NetworkTimeServiceQuerying \
     --remote-debugging-port="${CDP_LOCAL}" \
     --user-data-dir="${CHROME_PROFILE_DIR:-$HOME/.chrome-profile}" \
     --window-size=1920,1080 \
