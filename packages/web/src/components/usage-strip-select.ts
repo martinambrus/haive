@@ -37,17 +37,29 @@ function worstRemaining(snap: UsageWindowSnapshot): number {
   return pcts.length === 0 ? Number.POSITIVE_INFINITY : Math.min(...pcts);
 }
 
-export function selectStripMeters(
-  tasks: readonly Task[] | null,
+/** The meters for an EXPLICIT set of provider ids, which is the whole rule; the task-list
+ *  entry point below is one caller of it.
+ *
+ *  Two surfaces need the same grouping over different scopes — the list strip over the rows
+ *  on screen, the task header over the CLIs the current step will spend (a fan-out step runs
+ *  one per seat). Deriving that twice is how the header came to show a single provider while
+ *  the strip showed a subscription; keeping one function means they cannot disagree about
+ *  which rows are the same allowance or which reading speaks for it.
+ *
+ *  Nulls and duplicates in `providerIds` are expected — a seat with no pref contributes
+ *  null, and several seats sharing a CLI contribute the same id — so both are absorbed here
+ *  rather than at each caller. */
+export function selectMetersForProviderIds(
+  providerIds: readonly (string | null)[],
   snapshots: readonly UsageWindowSnapshot[] | null,
   allowanceKeys?: Readonly<Record<string, string>>,
 ): StripMeter[] {
-  if (!tasks || !snapshots) return [];
+  if (!snapshots) return [];
 
-  // Allowances the visible rows actually spend. A task with no CLI set contributes none.
+  // Allowances these providers actually spend. An id-less entry contributes none.
   const visible = new Set<string>();
-  for (const task of tasks) {
-    if (task.cliProviderId) visible.add(allowanceKeyOf(task.cliProviderId, allowanceKeys));
+  for (const providerId of providerIds) {
+    if (providerId) visible.add(allowanceKeyOf(providerId, allowanceKeys));
   }
   if (visible.size === 0) return [];
 
@@ -92,4 +104,18 @@ export function selectStripMeters(
   }
   // Stable order so the strip does not reshuffle on every 3s poll.
   return meters.sort((a, b) => a.allowanceKey.localeCompare(b.allowanceKey));
+}
+
+/** The meters for the task rows on screen — every subscription those rows spend. */
+export function selectStripMeters(
+  tasks: readonly Task[] | null,
+  snapshots: readonly UsageWindowSnapshot[] | null,
+  allowanceKeys?: Readonly<Record<string, string>>,
+): StripMeter[] {
+  if (!tasks) return [];
+  return selectMetersForProviderIds(
+    tasks.map((t) => t.cliProviderId),
+    snapshots,
+    allowanceKeys,
+  );
 }

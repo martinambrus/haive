@@ -48,6 +48,8 @@ import {
   UsageReconnectAction,
 } from '@/components/usage-reconnect-action';
 import { resolveUsageChipState } from '@/lib/usage-chip-state';
+import { stepCliProviderIds } from '@/lib/step-cli-providers';
+import { selectMetersForProviderIds, type StripMeter } from '@/components/usage-strip-select';
 import {
   UsageBars,
   usageRemainingColor,
@@ -1270,12 +1272,18 @@ export default function TaskDetailPage() {
   // rows when an older api omits it.
   const currentStepBadgeText = task.currentStepLabel ?? (currentStep ? currentStep.title : '');
 
-  // The subscription-usage chip follows the CLI of the step the run is parked on (or the
+  // The subscription-usage chip follows the CLIs of the step the run is parked on (or the
   // task default): a Codex step shows Codex's windows, a Claude step shows Claude's.
-  const usageProviderId = currentStep?.preferredCliProviderId ?? task.cliProviderId ?? null;
-  const usageProvider = usageProviderId
-    ? (providers.find((p) => p.id === usageProviderId) ?? null)
-    : null;
+  //
+  // PLURAL, because a fan-out step resolves a provider per SEAT — 08c-code-review can be
+  // spending three subscriptions at once. Reading only `preferredCliProviderId` (the
+  // 'default' row) named a CLI that none of its agents were running on, and its reconnect
+  // prompt covered only that one, so a dead token on a seat CLI failed the step in silence.
+  const usageProviderIds = stepCliProviderIds({
+    step: currentStep ?? null,
+    taskCliProviderId: task.cliProviderId ?? null,
+    enabledProviderIds: new Set(providers.filter((p) => p.enabled).map((p) => p.id)),
+  });
 
   return (
     <div className="flex flex-col gap-6">
@@ -1336,11 +1344,7 @@ export default function TaskDetailPage() {
           {/* Usage chip centers in the gap between the left badges and the right
               pace chip: its ml-auto + the pace chip's own ml-auto split the free
               space evenly on each side. Collapses to the strip's gap-3 at low res. */}
-          <HeaderUsageChip
-            providerId={usageProviderId}
-            providerName={usageProvider?.name ?? null}
-            providerLabel={usageProvider?.label ?? null}
-          />
+          <HeaderUsageChip providerIds={usageProviderIds} providers={providers} />
           <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
         </div>
       )}
@@ -1462,12 +1466,7 @@ export default function TaskDetailPage() {
           {/* Sits with the recovery buttons, not in the title strip: on a task that failed on
               a dead CLI token this is the action, and the strip's copy only appears once the
               user has scrolled the header away. */}
-          <HeaderUsageChip
-            providerId={usageProviderId}
-            providerName={usageProvider?.name ?? null}
-            providerLabel={usageProvider?.label ?? null}
-            reconnectOnly
-          />
+          <HeaderUsageChip providerIds={usageProviderIds} providers={providers} reconnectOnly />
           {canRetry &&
             (() => {
               // Mirror the failed step's own primary button (primaryRecovery) instead of
@@ -2276,29 +2275,43 @@ function HeaderPaceChip({
   );
 }
 
+/** How many meters the fixed title strip draws before collapsing the rest into "+N". The
+ *  strip is ONE line that also carries the back link, the vote score, the title, up to four
+ *  badges and the pace chip, and a full meter is ~250px (name + a 50px bar per window + its
+ *  reset time). Two is what fits on a laptop without the title truncating to nothing; the
+ *  hidden ones keep their numbers in the "+N" tooltip. */
+const HEADER_METER_LIMIT = 2;
+
 /**
- * Subscription usage chip: each window's REMAINING percentage for the provider the
- * current step runs on (used = vendor-reported; remaining = 100 - used, matching the
- * vendor's own "% left" view). Polls /usage-window gently (~60s). Renders nothing when
- * the provider has no readable window, isn't connected, or the snapshot errored; dims
- * when stale. Each window is coloured independently on its own remaining headroom.
+ * Subscription usage chips: each window's REMAINING percentage for the CLIs the current
+ * step runs on (used = vendor-reported; remaining = 100 - used, matching the vendor's own
+ * "% left" view). Polls /usage-window gently (~60s); dims a stale reading. Each window is
+ * coloured independently on its own remaining headroom.
+ *
+ * PLURAL because a fan-out step resolves a provider per SEAT — 08c-code-review can spend
+ * three subscriptions at once. One meter per SUBSCRIPTION, never per provider row: the
+ * grouping is selectMetersForProviderIds, shared with the task-list strip so the two
+ * surfaces cannot disagree about what counts as one allowance or which reading speaks for
+ * it. Renders nothing when none of the step's CLIs has a readable window and none of them
+ * names a fault worth stating.
  */
 function HeaderUsageChip({
-  providerId,
-  providerName,
-  providerLabel,
+  providerIds,
+  providers,
   reconnectOnly,
 }: {
-  providerId: string | null;
-  providerName: CliProviderName | null;
-  providerLabel: string | null;
-  /** Render the dead-token prompt and nothing else. The meter is a summary and can live in
-   *  the title strip the user only sees after scrolling; a repair is an action and has to be
-   *  on screen when the page opens, which is why the always-visible header mounts this
+  /** Every CLI this step will spend, from stepCliProviderIds — the step default plus each
+   *  configured seat/role, already deduped. */
+  providerIds: readonly string[];
+  providers: CliProvider[];
+  /** Render the dead-token prompts and nothing else. The meters are a summary and can live
+   *  in the title strip the user only sees after scrolling; a repair is an action and has to
+   *  be on screen when the page opens, which is why the always-visible header mounts this
    *  variant alongside the strip's full one. */
   reconnectOnly?: boolean;
 }) {
   const [snapshots, setSnapshots] = useState<UsageWindowSnapshot[] | null>(null);
+  const [allowanceKeys, setAllowanceKeys] = useState<Record<string, string> | undefined>(undefined);
   const [now, setNow] = useState(() => Date.now());
   /** Bumped when a repair completes in this tab — see UsageReconnectAction's onRepaired. */
   const [repairNonce, setRepairNonce] = useState(0);
@@ -2307,9 +2320,17 @@ function HeaderUsageChip({
     let cancelled = false;
     const load = () =>
       api
-        .get<{ snapshots: UsageWindowSnapshot[] }>('/usage-window')
+        .get<{
+          snapshots: UsageWindowSnapshot[];
+          alert?: { allowanceKeys?: Record<string, string> };
+        }>('/usage-window')
         .then((d) => {
-          if (!cancelled) setSnapshots(d.snapshots);
+          if (cancelled) return;
+          setSnapshots(d.snapshots);
+          // Rides along on the response the chip already fetches. Without it every provider
+          // row is its own allowance, so one Claude login backing a seat and the step default
+          // would print two identical meters side by side.
+          setAllowanceKeys(d.alert?.allowanceKeys);
         })
         .catch(() => {
           if (!cancelled) setSnapshots([]);
@@ -2336,75 +2357,133 @@ function HeaderUsageChip({
     return () => clearInterval(t);
   }, []);
 
-  // Every reason the bars are absent, decided in one place (lib/usage-chip-state) so the four
-  // situations that used to share a single blank can be told apart. Dead usage token: don't
-  // vanish silently — prompt a reconnect and deep-link to the repair that actually applies to
-  // this provider (usage-OAuth, an interactive CLI login, or an API token). usage-reconnect
-  // owns that fork so this chip, the tasks-list strip and the CLI providers list cannot
-  // disagree about how a given CLI is fixed.
-  // Narrowing guard, not a duplicate of the resolver's own: `reconnect` implies a provider id,
-  // but only this early return proves it to tsc for the props below.
-  if (!providerId) return null;
-  const state = resolveUsageChipState({ providerId, providerName, snapshots });
-  const who = (providerName && CLI_USAGE_LABEL[providerName]) || providerLabel || 'CLI';
-  if (state.kind === 'pending') {
+  // Narrowing guard, not a duplicate of the resolver's own: the fault fallback below indexes
+  // providerIds[0], and only this early return proves it exists to tsc.
+  if (providerIds.length === 0) return null;
+  const meters = selectMetersForProviderIds(providerIds, snapshots, allowanceKeys);
+
+  const rowOf = (providerId: string) => providers.find((p) => p.id === providerId) ?? null;
+  /** Short CLI name for a chip, from the provider row where there is one — the snapshot's own
+   *  name is the fallback for a row the list has not delivered yet. */
+  const nameOf = (snap: UsageWindowSnapshot): string => {
+    const row = rowOf(snap.providerId);
+    const name = (row?.name ?? snap.providerName) as CliProviderName;
+    return CLI_USAGE_LABEL[name] || row?.label || snap.providerName || 'CLI';
+  };
+
+  const chipClass = (tone: string) =>
+    `flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold ${tone}`;
+
+  const renderMeter = (m: StripMeter) => {
+    const who = nameOf(m.snapshot);
+    // Dead token: the numbers are gone and only a user action brings them back, so say so
+    // here rather than leaving the slot blank on the page the user is already looking at.
+    if (m.status === 'pending') {
+      return (
+        <UsagePendingChip
+          key={m.allowanceKey}
+          displayName={who}
+          className={chipClass('text-neutral-400')}
+        />
+      );
+    }
+    if (m.status === 'needs_reconnect') {
+      const row = rowOf(m.snapshot.providerId);
+      return (
+        <UsageReconnectAction
+          key={m.allowanceKey}
+          providerId={m.snapshot.providerId}
+          providerName={(row?.name ?? m.snapshot.providerName) as CliProviderName}
+          providerLabel={row?.label ?? null}
+          displayName={who}
+          className={chipClass('text-amber-400 hover:text-amber-300')}
+          onRepaired={() => setRepairNonce((n) => n + 1)}
+        />
+      );
+    }
+    const windows = usageWindowsOf(m.snapshot);
+    if (windows.length === 0) return null;
     return (
-      <UsagePendingChip
-        displayName={who}
-        className={`flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold text-neutral-400 ${
-          reconnectOnly ? '' : 'ml-auto'
+      <span
+        key={m.allowanceKey}
+        className={`flex shrink-0 items-center gap-1.5 font-mono text-xs font-semibold ${
+          m.snapshot.stale ? 'opacity-50' : ''
         }`}
-      />
-    );
-  }
-  if (state.kind === 'reconnect') {
-    return (
-      <UsageReconnectAction
-        providerId={providerId}
-        providerName={providerName}
-        providerLabel={providerLabel}
-        displayName={who}
-        className={`flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold text-amber-400 hover:text-amber-300 ${
-          reconnectOnly ? '' : 'ml-auto'
+        title={`${who} subscription usage — ${usageTooltip(windows, now)}${
+          m.snapshot.stale ? '   (stale)' : ''
         }`}
-        onRepaired={() => setRepairNonce((n) => n + 1)}
-      />
+      >
+        <UsageBars name={who} windows={windows} now={now} />
+      </span>
     );
+  };
+
+  // Sits with the recovery buttons rather than in the title strip, so a repair is on screen
+  // without scrolling. Every dead subscription the step spends, not just its default one: a
+  // fan-out step whose SEAT token expired fails exactly as hard as one whose default did.
+  if (reconnectOnly) {
+    const repairs = meters.filter((m) => m.status !== 'ok');
+    if (repairs.length === 0) return null;
+    return <>{repairs.map(renderMeter)}</>;
   }
-  // The reconnect-only mount sits beside the recovery buttons and exists purely so a repair is
-  // on screen without scrolling. The fault chips below are statements, not repairs, so they
-  // stay out of it — the full chip in the title strip is where they belong.
-  if (reconnectOnly) return null;
-  if (state.kind === 'fault') {
+
+  if (meters.length === 0) {
+    // Nothing readable for ANY of the step's CLIs. Name WHY for the primary one instead of
+    // going blank: four unrelated situations (unmetered CLI, never polled, failed fetch,
+    // vendor reported no window) used to share one identical blank, which read as the meter
+    // breaking mid-run whenever the previous step's CLI had shown live bars.
+    const primaryId = providerIds[0]!;
+    const row = rowOf(primaryId);
+    const state = resolveUsageChipState({
+      providerId: primaryId,
+      providerName: row?.name ?? null,
+      snapshots,
+    });
+    if (state.kind !== 'fault') return null;
     return (
       <UsageFaultChip
         fault={state.fault}
-        displayName={who}
-        className={`ml-auto flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold ${
+        displayName={(row?.name && CLI_USAGE_LABEL[row.name]) || row?.label || 'CLI'}
+        className={`ml-auto ${chipClass(
           state.fault === 'not_connected'
             ? 'text-amber-400 hover:text-amber-300'
-            : 'text-neutral-500'
-        }`}
+            : 'text-neutral-500',
+        )}`}
       />
     );
   }
-  if (state.kind !== 'meter') return null;
-  const snap = state.snapshot;
 
-  const windows = usageWindowsOf(snap);
-
-  const name =
-    (providerName && CLI_USAGE_LABEL[providerName]) || providerLabel || providerName || 'CLI';
-  const tooltip = usageTooltip(windows, now);
+  const shown = meters.slice(0, HEADER_METER_LIMIT);
+  const hidden = meters.slice(HEADER_METER_LIMIT);
+  // Worst headroom a hidden meter has left, so "+N" carries the colour of the most depleted
+  // thing it covers. The sort above is by allowance key — stable across polls, which is the
+  // point, but arbitrary as an ordering — so without this a CLI at 3% could be invisible
+  // purely because its name sorts late. A meter with no readable window (a dead or repairing
+  // token) counts as 0: that is the most urgent thing the chip can be hiding.
+  const worstOf = (m: StripMeter): number => {
+    const pcts = usageWindowsOf(m.snapshot).map((x) => 100 - x.w.usedPct);
+    return pcts.length === 0 ? 0 : Math.min(...pcts);
+  };
+  const hiddenLine = (m: StripMeter): string =>
+    m.status === 'needs_reconnect'
+      ? `${nameOf(m.snapshot)} — reconnect needed`
+      : m.status === 'pending'
+        ? `${nameOf(m.snapshot)} — reconnecting`
+        : `${nameOf(m.snapshot)} — ${usageTooltip(usageWindowsOf(m.snapshot), now)}`;
 
   return (
-    <span
-      className={`ml-auto flex shrink-0 items-center gap-1.5 px-2 font-mono text-xs font-semibold ${
-        snap.stale ? 'opacity-50' : ''
-      }`}
-      title={`${name} subscription usage — ${tooltip}${snap.stale ? '   (stale)' : ''}`}
-    >
-      <UsageBars name={name} windows={windows} now={now} />
+    <span className="ml-auto flex shrink-0 items-center gap-4">
+      {shown.map(renderMeter)}
+      {hidden.length > 0 && (
+        <span
+          className={`shrink-0 font-mono text-xs font-semibold ${usageRemainingColor(
+            Math.min(...hidden.map(worstOf)),
+          )}`}
+          title={hidden.map(hiddenLine).join('   ·   ')}
+        >
+          +{hidden.length}
+        </span>
+      )}
     </span>
   );
 }

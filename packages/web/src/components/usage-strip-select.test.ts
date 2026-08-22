@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Task, UsageWindowSnapshot } from '@/lib/api-client';
-import { selectStripMeters } from './usage-strip-select';
+import { selectMetersForProviderIds, selectStripMeters } from './usage-strip-select';
 
 const task = (cliProviderId: string | null): Task => ({ id: 'x', cliProviderId }) as Task;
 
@@ -190,5 +190,36 @@ describe('selectStripMeters', () => {
   it('falls back to per-provider keys when the api omits allowanceKeys', () => {
     const meters = selectStripMeters([task('c1'), task('c2')], CLAUDE, undefined);
     expect(meters.map((m) => m.allowanceKey)).toEqual(['provider:c1', 'provider:c2']);
+  });
+});
+
+describe('selectMetersForProviderIds', () => {
+  it('collapses seats sharing a subscription into one meter', () => {
+    // 08c with three seats pointed at three rows of the same Claude login: one meter, not
+    // three copies of the same number sitting beside each other in the header.
+    const meters = selectMetersForProviderIds(['c1', 'c2', 'c3'], CLAUDE, KEYS);
+    expect(meters).toHaveLength(1);
+    expect(meters[0]!.allowanceKey).toBe('shared:claude-code');
+  });
+
+  it('absorbs duplicate and null ids from unset seats', () => {
+    const meters = selectMetersForProviderIds(['c1', null, 'c1', null], CLAUDE, KEYS);
+    expect(meters).toHaveLength(1);
+  });
+
+  it('shows one meter per distinct subscription the step spends', () => {
+    const meters = selectMetersForProviderIds(['c1', 'x1'], [...CLAUDE, CODEX], KEYS);
+    expect(meters.map((m) => m.allowanceKey)).toEqual(['shared:claude-code', 'shared:codex']);
+  });
+
+  it('ignores an id with no snapshot of its own', () => {
+    // An unmetered CLI (ollama, grok) has no row at all; the header names that separately
+    // via resolveUsageChipState rather than here.
+    expect(selectMetersForProviderIds(['nope'], CLAUDE, KEYS)).toEqual([]);
+  });
+
+  it('renders nothing for an empty set or unloaded snapshots', () => {
+    expect(selectMetersForProviderIds([], CLAUDE, KEYS)).toEqual([]);
+    expect(selectMetersForProviderIds(['c1'], null, KEYS)).toEqual([]);
   });
 });
