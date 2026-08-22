@@ -14,7 +14,7 @@ const PLAIN_DEPS = { containerTool: 'none', runtimes: ['php'] };
 const PRIOR_DOCKERFILE = 'FROM ubuntu:24.04\nRUN apt-get install -y php8.3\n';
 const FRESH_DOCKERFILE = 'FROM ubuntu:24.04\nRUN echo ddev\n';
 
-/** Stands in for the env template row `findEnvTemplateByHash` resolves the reused
+/** Stands in for the env template rows `findEnvTemplatesByHash` resolves the reused
  *  Dockerfile bytes to. `null` = no template carries that hash any more. */
 function makeCtx(sourceRow: { id: string; declaredDeps: unknown } | null): {
   ctx: StepContext;
@@ -23,7 +23,7 @@ function makeCtx(sourceRow: { id: string; declaredDeps: unknown } | null): {
   const infos: unknown[] = [];
   const db = {
     query: {
-      envTemplates: { findFirst: vi.fn(async () => sourceRow ?? undefined) },
+      envTemplates: { findMany: vi.fn(async () => (sourceRow ? [sourceRow] : [])) },
     },
   } as unknown as Database;
   const ctx = {

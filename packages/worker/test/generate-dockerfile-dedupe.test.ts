@@ -19,16 +19,19 @@ interface Harness {
   linked: unknown[];
 }
 
-/** `hashMatch` stands in for the row `findEnvTemplateByHash` resolves the submitted
+/** `hashMatch` stands in for the rows `findEnvTemplatesByHash` resolves the submitted
  *  Dockerfile to; `sharingTaskIds` for the still-live OTHER tasks the reference query
  *  finds on the superseded row. */
-function makeHarness(hashMatch: { id: string } | null, sharingTaskIds: string[]): Harness {
+function makeHarness(
+  hashMatch: { id: string; declaredDeps?: Record<string, unknown> } | null,
+  sharingTaskIds: string[],
+): Harness {
   const infos: Record<string, unknown>[] = [];
   const deleted: string[] = [];
   const linked: unknown[] = [];
   const db = {
     query: {
-      envTemplates: { findFirst: vi.fn(async () => hashMatch ?? undefined) },
+      envTemplates: { findMany: vi.fn(async () => (hashMatch ? [hashMatch] : [])) },
     },
     select: () => ({
       from: () => ({
@@ -82,6 +85,16 @@ describe('02-generate-dockerfile apply dedupe delete', () => {
 
   it('never deletes when the hash resolves to the row this task already holds', async () => {
     const h = makeHarness({ id: 'tpl-current' }, ['task-2']);
+    const out = await run(h);
+    expect(out.envTemplateId).toBe('tpl-current');
+    expect(h.deleted).toEqual([]);
+  });
+
+  it('does not merge onto a row whose declared deps differ', async () => {
+    // Same Dockerfile bytes, different environment: a DDEV project renders the same
+    // file whatever php/database/webserver it declares, so merging would hand this
+    // task the other row's deps (the nginx-fpm-for-an-apache-project bug).
+    const h = makeHarness({ id: 'tpl-shared', declaredDeps: { webserver: 'nginx-fpm' } }, []);
     const out = await run(h);
     expect(out.envTemplateId).toBe('tpl-current');
     expect(h.deleted).toEqual([]);

@@ -30,18 +30,22 @@ export async function linkTaskToEnvTemplate(
     .where(eq(schema.tasks.id, taskId));
 }
 
-export async function findEnvTemplateByHash(
+/** Every template of this user whose saved Dockerfile hashes to `dockerfileHash`.
+ *  Plural because the hash is NOT template identity: renderDockerfile skips the php
+ *  and database blocks for a DDEV project, so environments that differ in php
+ *  version, database or webserver still render byte-identical Dockerfiles. Callers
+ *  narrow by declared deps (see 02-generate-dockerfile). */
+export async function findEnvTemplatesByHash(
   db: Database,
   userId: string,
   dockerfileHash: string,
-): Promise<EnvTemplateRow | null> {
-  const row = await db.query.envTemplates.findFirst({
+): Promise<EnvTemplateRow[]> {
+  return db.query.envTemplates.findMany({
     where: and(
       eq(schema.envTemplates.userId, userId),
       eq(schema.envTemplates.dockerfileHash, dockerfileHash),
     ),
   });
-  return row ?? null;
 }
 
 export function deriveEnvTemplateName(taskId: string): string {

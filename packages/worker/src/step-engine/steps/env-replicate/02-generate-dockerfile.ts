@@ -5,7 +5,7 @@ import type { StepDefinition } from '../../step-definition.js';
 import { stableStringify } from './01-declare-deps.js';
 import {
   DISPOSABLE_TASK_STATUSES,
-  findEnvTemplateByHash,
+  findEnvTemplatesByHash,
   getTaskEnvTemplate,
   hashDockerfile,
   linkTaskToEnvTemplate,
@@ -82,13 +82,15 @@ export const generateDockerfileStep: StepDefinition<
   async reconcileReusedFormValues(ctx, detected, reused) {
     const dockerfile = String(reused.dockerfile ?? '').trim();
     if (!dockerfile) return reused;
-    const source = await findEnvTemplateByHash(ctx.db, ctx.userId, hashDockerfile(dockerfile));
-    const sameDeps =
-      !!source &&
-      stableStringify(source.declaredDeps ?? {}) === stableStringify(detected.declaredDeps);
+    const depsKey = stableStringify(detected.declaredDeps);
+    // Several templates can carry these bytes (the hash is not identity), so ask
+    // whether ANY of them still speaks for this environment rather than whichever
+    // row the index happens to return first.
+    const sources = await findEnvTemplatesByHash(ctx.db, ctx.userId, hashDockerfile(dockerfile));
+    const sameDeps = sources.some((row) => stableStringify(row.declaredDeps ?? {}) === depsKey);
     if (sameDeps) return reused;
     ctx.logger.info(
-      { envTemplateId: detected.envTemplateId, sourceEnvTemplateId: source?.id ?? null },
+      { envTemplateId: detected.envTemplateId, sourceEnvTemplateId: sources[0]?.id ?? null },
       'reused dockerfile predates a declared-deps change; re-rendering from current deps',
     );
     return { ...reused, dockerfile: detected.currentDockerfile };
@@ -118,8 +120,21 @@ export const generateDockerfileStep: StepDefinition<
     const dockerfileHash = hashDockerfile(dockerfile);
     const currentId = args.detected.envTemplateId;
 
-    const existingByHash = await findEnvTemplateByHash(ctx.db, ctx.userId, dockerfileHash);
-    if (existingByHash && existingByHash.id !== currentId) {
+    // Merge onto an existing template only when its DECLARED DEPS match too. The
+    // Dockerfile hash alone is not template identity: renderDockerfile skips the php
+    // and database blocks when containerTool is 'ddev', so php 5.6 vs 8.3, mariadb vs
+    // postgres and apache-fpm vs nginx-fpm all render the SAME bytes. Deduping on the
+    // hash alone merged environments that only looked alike, and the survivor's
+    // declaredDeps then spoke for every task relinked to it — 01c-ddev-env generated
+    // `webserver_type: nginx-fpm` for a project declared apache-fpm because the task
+    // had been relinked to another repo's template. A hash collision with different
+    // deps now simply leaves both rows standing.
+    const depsKey = stableStringify(args.detected.declaredDeps);
+    const byHash = await findEnvTemplatesByHash(ctx.db, ctx.userId, dockerfileHash);
+    const existingByHash = byHash.find(
+      (row) => row.id !== currentId && stableStringify(row.declaredDeps ?? {}) === depsKey,
+    );
+    if (existingByHash) {
       await linkTaskToEnvTemplate(ctx.db, ctx.taskId, existingByHash.id);
       const sharedWith = await liveTasksSharingEnvTemplate(ctx.db, currentId, ctx.taskId);
       if (sharedWith.length === 0) {
