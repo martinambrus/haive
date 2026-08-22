@@ -165,3 +165,56 @@ real browser-verify task is the remaining check: confirm `get_network_request` r
 This is a leak reducer, not a containment boundary. The agent can read the file back, and it is
 already authorised to see the app's data on screen. What it stops is a body being swept into a
 third-party model provider's context as a side effect of asking about a request.
+
+# Amendment — 2026-08-22: item 2's end-to-end check closed
+
+The check the first amendment left open is done, but NOT the way it expected. It assumed a
+real browser-verify task would exercise `get_network_request`. Watching task `de98d843`
+through `08a-browser-verify` showed the agent genuinely driving the browser — 7
+`navigate_page`, 8 `take_screenshot`, 6 `list_console_messages`, 5 `list_network_requests`
+— and never calling `get_network_request` once. That confirms the body's own scope note in
+the wild: nothing in Haive steers an agent to the one tool that returns bodies, so waiting
+for the natural path would not have produced the proof.
+
+Forced instead, through the real proxy, a real headless Chromium and a local endpoint
+returning a secret in BOTH a `Set-Cookie` header and a JSON body. `get_network_request` was
+called with only a `reqid` and no file paths, i.e. exactly what an agent sends:
+
+    ### Response Body
+    Saved to /tmp/haive-net-23-2-response.network-response.
+    set-cookie:<redacted>
+
+    HAS_SAVED_TO=true   HAS_HAIVE_NET=true   HAS_REDACTED=true
+    LEAKS_BODY_TOKEN=false   LEAKS_COOKIE=false
+
+So the proxy injected the path, upstream diverted the body to disk rather than rendering
+it, and neither the body token nor the cookie value reached the model-visible text. Both
+`139dc14` (headers) and `e066d26` (bodies) are now verified against real traffic.
+
+Separately confirmed in production during the same run: the proxy is on the real path. A
+live sandbox showed the full chain — `node haive-chrome-mcp-proxy.mjs` -> `npm exec` ->
+`chrome-devtools-mcp` — and the CLI reported `"chrome-devtools":"connected"` on every
+invocation after `cdf7ebe`, where it had reported `"failed"` before.
+
+## Two defects found while verifying, neither recorded elsewhere
+
+1. **The headless fallback cannot launch a browser in a browserTesting env image.**
+   `mcp-config.ts` pins `SANDBOX_CHROME_PATH = /usr/bin/chromium` and the generated env
+   Dockerfile sets `ENV CHROME_PATH=/usr/bin/chromium`, but that env image is Ubuntu 24.04,
+   where `apt-get install chromium` yields only `/usr/bin/chromium-browser` — a snap
+   redirect stub that prints "snap install chromium" and exits 1. There is no
+   `/usr/bin/chromium`. MEASURED: the MCP answers `Browser was not found at the configured
+   executablePath (/usr/bin/chromium)`. `67b297a` fixed this for the CLI sandbox image
+   (Debian bookworm, real binary present); the env-replicate generator still installs the
+   Debian package name on an Ubuntu base. Production masks it because `08a` runs with the
+   desktop up and takes the `--browser-url` branch, so the headless fallback is only
+   reached when there is no runner browser — exactly when it is needed most.
+
+2. **The headless branch passes no `--no-sandbox`.** With a real Chromium present, the
+   launch still dies with `Protocol error (Target.setDiscoverTargets): Target closed` until
+   `--chrome-arg=--no-sandbox` is added. Puppeteer's defaults do not include it, and
+   `start-browser-desktop.sh` passes it explicitly for the headed desktop, so only the
+   headless self-launch lacks it.
+
+Both are unfixed and out of scope for this plan; they belong with F7/F8 in
+`curious-drifting-lantern.md`.
