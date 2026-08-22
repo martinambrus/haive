@@ -218,3 +218,45 @@ invocation after `cdf7ebe`, where it had reported `"failed"` before.
 
 Both are unfixed and out of scope for this plan; they belong with F7/F8 in
 `curious-drifting-lantern.md`.
+
+# Amendment — 2026-08-22: the two defects above are fixed, plus a third found with them
+
+The second amendment recorded two browser defects as unfixed. Both are now fixed, along with
+a third that surfaced while investigating them. Planned in
+`~/.claude/plans/majestic-questing-bumblebee.md`.
+
+- **Headless launch could not start a browser** — `b7884e6`. Chrome's own sandbox cannot nest
+  inside the cli-exec container, so the self-launch died with `Target closed` before any tool
+  ran. `--chrome-arg=--no-sandbox` and `--chrome-arg=--disable-dev-shm-usage` on the headless
+  branch only; `browser-check.js` and `start-browser-desktop.sh` already passed both, so the
+  MCP self-launch was the one path that omitted them.
+
+- **Ubuntu env images had no browser at all** — `0580c51`. Ubuntu ships no chromium deb, so
+  the browser now comes from Google's apt repo and is symlinked to `/usr/bin/chromium`, the
+  path every consumer already assumed. The Chrome for Testing zip was chosen first and then
+  rejected on evidence: it pulls no system libraries, and MEASURED, libnss3, libasound2,
+  libatk, libcups, libpango, libxkbcommon and libatspi are all absent from that image, since
+  `apt install chromium` was what used to drag them in. The block now ends with
+  `RUN /usr/bin/chromium --version`, so a base that cannot produce a browser fails the BUILD
+  rather than shipping an image that fails hours later inside a verification step.
+
+- **A poisoned npx cache tree broke the filesystem MCP forever** — `507cb84`. Found while
+  reading the same init events. The cache is never validated or expired, so one truncated
+  install fails every later invocation. `warmNpmPackage` now purges that package's `_npx`
+  trees and retries once, and `@modelcontextprotocol/server-filesystem` is warmed
+  deliberately rather than cached by accident. The probe args are per-package and are not
+  interchangeable: `--version` is a real flag to chrome-devtools-mcp, but server-filesystem
+  reads its arguments as directories and exits 1 on `--version` even when healthy, so probing
+  it that way would have purged a good tree on every warm.
+
+## Bandwidth, since it is the operative cost here
+
+A browserTesting env build pulls 344 MB, of which 96.9 MB was the same package index fetched
+three times — each apt block ends by deleting `/var/lib/apt/lists`, so the next one re-fetches
+all 32.3 MB of it. The browser and X stack were therefore merged into a single apt block,
+repo setup included, saving one full index fetch. The remaining repetition is in the older
+blocks (base tools, node, PHP) and is untouched; collapsing those is an open, separate saving
+of roughly 64 MB per build.
+
+Editing `renderDockerfile` changes `dockerfile_hash`, so every browserTesting env template
+rebuilds once and pays this.

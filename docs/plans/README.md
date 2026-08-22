@@ -36,7 +36,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | Not started |
 | `parsed-churning-yeti` | Project plan canvas | Not started |
 | `purring-marinating-peacock` | Multi-model per step (fan-out + consolidator) | Not started; sequenced behind a cheaper fan-out change — see its amendment |
-| `quiet-reaping-ritchie` | DevTools egress hardening follow-ups | **Shipped** `c094102` (item 1, runner `--init`) and `e066d26` (item 2, MCP body diversion), both verified against real traffic — see amendments. Two unrelated browser defects found while verifying are recorded in its second amendment, unfixed |
+| `quiet-reaping-ritchie` | DevTools egress hardening follow-ups | **Shipped** `c094102` (item 1, runner `--init`) and `e066d26` (item 2, MCP body diversion), both verified against real traffic — see amendments. Two browser defects found while verifying, plus a poisoned-npx-cache defect found with them, are fixed in `b7884e6` / `0580c51` / `507cb84` — see its third amendment |
 | `replicated-zooming-beacon` | Agent memory + spec handoff optimisation | Not started; all three defects re-verified as still real |
 | `rippling-wibbling-puffin` | Modular (user-definable) task types | Not started |
 | `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; companion to the above, neither supersedes the other |
