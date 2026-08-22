@@ -115,3 +115,53 @@ request, then confirm the tool result reaching the CLI carries neither body, whi
 
 Remove the proxy from the server spec in `sandbox/mcp-config.ts` so the CLI launches
 `chrome-devtools-mcp` directly again. No persisted state, no migration.
+
+# Amendment — 2026-08-22: both items shipped
+
+Both items are done. The body is left byte-identical above; this records what actually happened,
+including where the original recommendation was wrong.
+
+## Item 1 — shipped in `c094102`
+
+`--init` added to the DDEV runner's and the app-runner's `docker run` args. Verified by A/B against
+the real runner image rather than by reasoning about tini: orphaning 5 processes leaves 5 zombies
+without `--init` and 0 with it, PID 1 becomes `docker-init`, and the nested dockerd still comes up
+healthy under it (ServerVersion 29.7.2) with `--privileged` unchanged.
+
+The app-runner was included on evidence rather than symmetry, as the body asked. Its
+`start-browser-desktop.sh` orphans by design (`nohup chromium ... &`, then the script exits), so
+Chromium's helpers reparent to PID 1 and zombie on exit — observed directly as defunct chromium
+entries under PID 1 `sleep`.
+
+## Item 2 — shipped in `e066d26`, and the body's recommendation was too pessimistic
+
+The body recommended weighing option 3 carefully because it assumed the proxy would have to STRIP
+bodies from the response. Reading `converNetworkRequestDetailedToStringDetailed` showed that is not
+necessary: when `requestFilePath` / `responseFilePath` are set, upstream never renders the body at
+all, it renders `Saved to <path>.` instead. So the proxy only ever rewrites the REQUEST, and the
+cost and risk that drove the original hesitation both drop:
+
+- No response parsing, so no dependence on the rendered text (`### Request Body` headings) — which
+  would have been the ephemeral-value trap the body was worried about.
+- The child's stdout is inherited, not piped through a parser, so the response path is byte-exact.
+- Failure is open by design: unparseable lines and every other method are forwarded verbatim.
+
+Bodies are written to `os.tmpdir()`. That is not only repo-hygiene: upstream's own startup warning
+confirms the OS temp directory is the one location it permits when the client negotiates no MCP
+roots, so the choice holds with and without `--allow-unrestricted-paths`.
+
+Option 2 from the body (asking agents to pass the paths themselves) was not used and remains the
+right call to have rejected — the proxy makes it unconditional instead of trusting compliance.
+
+### What is still unverified
+
+The rewrite logic and the `initialize` handshake through the proxy were tested directly. There is no
+end-to-end test against a live page's network request, because that needs a running app. The first
+real browser-verify task is the remaining check: confirm `get_network_request` returns
+`Saved to /tmp/haive-net-...` rather than a body, and that 08a / Gate 2 / the fix loop are unchanged.
+
+### Scope reminder
+
+This is a leak reducer, not a containment boundary. The agent can read the file back, and it is
+already authorised to see the app's data on screen. What it stops is a body being swept into a
+third-party model provider's context as a side effect of asking about a request.

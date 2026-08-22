@@ -36,7 +36,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | Not started |
 | `parsed-churning-yeti` | Project plan canvas | Not started |
 | `purring-marinating-peacock` | Multi-model per step (fan-out + consolidator) | Not started; sequenced behind a cheaper fan-out change — see its amendment |
-| `quiet-reaping-ritchie` | DevTools egress hardening follow-ups | Not started; added 2026-08-22, both items measured. Item 1 (runner PID 1 never reaps) is a live pre-existing defect; item 2 (MCP response bodies) is optional — read its recommendation before building |
+| `quiet-reaping-ritchie` | DevTools egress hardening follow-ups | **Shipped** `c094102` (item 1, runner `--init`) and `e066d26` (item 2, MCP body diversion). Item 2's original recommendation was too pessimistic — see its amendment. One end-to-end check remains open |
 | `replicated-zooming-beacon` | Agent memory + spec handoff optimisation | Not started; all three defects re-verified as still real |
 | `rippling-wibbling-puffin` | Modular (user-definable) task types | Not started |
 | `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; companion to the above, neither supersedes the other |
