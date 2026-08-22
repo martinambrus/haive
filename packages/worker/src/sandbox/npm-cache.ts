@@ -96,6 +96,53 @@ export async function ensureNpmCacheVolume(image: string): Promise<void> {
   }
 }
 
+/** Package name from an npx spec, i.e. the spec minus any version suffix. Scoped names
+ *  keep their leading `@` — only a LATER `@` is a version separator, which is why this
+ *  keys on `lastIndexOf` guarded by `> 0` rather than splitting on the first one. */
+export function packageNameFromSpec(spec: string): string {
+  const at = spec.lastIndexOf('@');
+  return at > 0 ? spec.slice(0, at) : spec;
+}
+
+/**
+ * Drop this package's `_npx` install trees so the next attempt reinstalls from scratch.
+ *
+ * A truncated install otherwise persists forever: the cache is never validated or expired,
+ * so one interrupted fetch poisons every later invocation. MEASURED on the dev cache —
+ * `_npx/a3241bba59c344f5` held `@modelcontextprotocol/server-filesystem` with no `zod`
+ * installed at all, so the server died with `ERR_MODULE_NOT_FOUND ... zod/v3` on every
+ * invocation while a fresh install worked fine.
+ *
+ * Targeted at trees that actually contain this package rather than wiping all of `_npx`:
+ * evicting the chrome-devtools entry as collateral would cost a ~146s cold refetch on the
+ * next browser step. Runs as the sandbox identity, which owns the cache since the
+ * ownership fix, so no root container is needed.
+ */
+async function purgeNpxTrees(image: string, pkgSpec: string): Promise<void> {
+  const name = packageNameFromSpec(pkgSpec);
+  try {
+    await exec(
+      'docker',
+      [
+        'run',
+        '--rm',
+        '--user',
+        `${SANDBOX_UID}:${SANDBOX_GID}`,
+        '-v',
+        `${NPM_CACHE_VOLUME}:${NPM_CACHE_DIR}`,
+        '--entrypoint',
+        'sh',
+        image,
+        '-c',
+        `for d in ${NPM_CACHE_DIR}/_npx/*/; do [ -e "$d/node_modules/${name}" ] && rm -rf "$d"; done; true`,
+      ],
+      { timeout: 60_000 },
+    );
+  } catch (err) {
+    log.warn({ err, pkgSpec }, 'could not purge the npx cache tree');
+  }
+}
+
 /** Populate the shared cache with `pkgSpec` so the sandbox's own `npx` resolves it from
  *  disk instead of the network.
  *
@@ -109,12 +156,13 @@ export async function ensureNpmCacheVolume(image: string): Promise<void> {
 export async function warmNpmPackage(
   image: string,
   pkgSpec: string,
+  probeArgs: string[] = ['--version'],
   timeoutMs = 240_000,
 ): Promise<boolean> {
   await ensureNpmCacheVolume(image);
   const started = Date.now();
-  try {
-    await exec(
+  const attempt = () =>
+    exec(
       'docker',
       [
         'run',
@@ -132,17 +180,31 @@ export async function warmNpmPackage(
         image,
         '-y',
         pkgSpec,
-        '--version',
+        ...probeArgs,
       ],
       { timeout: timeoutMs },
     );
+  try {
+    await attempt();
     log.info({ pkgSpec, ms: Date.now() - started }, 'npm cache warmed');
     return true;
-  } catch (err) {
-    log.warn(
-      { err, pkgSpec, ms: Date.now() - started },
-      'npm cache warm failed; the sandbox will fetch on demand',
-    );
-    return false;
+  } catch (firstErr) {
+    // The probe RUNS the package, so a failure means either the download failed or the
+    // cached tree is unusable — and the second is invisible to any check that only asks
+    // whether files exist. Purge and try once more; a genuinely broken package then fails
+    // twice and falls through to the old behaviour rather than looping.
+    log.warn({ err: firstErr, pkgSpec }, 'npm cache warm failed; purging the tree and retrying');
+    await purgeNpxTrees(image, pkgSpec);
+    try {
+      await attempt();
+      log.info({ pkgSpec, ms: Date.now() - started }, 'npm cache warmed after purge');
+      return true;
+    } catch (err) {
+      log.warn(
+        { err, pkgSpec, ms: Date.now() - started },
+        'npm cache warm failed; the sandbox will fetch on demand',
+      );
+      return false;
+    }
   }
 }

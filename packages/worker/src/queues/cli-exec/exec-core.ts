@@ -373,11 +373,20 @@ export async function executeByKind(
             payload.toolProfile === 'rag_only',
           )
         : { files: [], extraArgs: [] };
-      // Pre-warm the shared npm cache for the ONE MCP server that is fetched from npm.
+      // Pre-warm the shared npm cache for the MCP servers that are fetched from npm.
       // chrome-devtools-mcp's cold fetch (MEASURED 111-146s) outran the agent's ~50s
       // wait for its tools, so 08a silently fell back to static analysis while still
       // reporting a pass. Warm is ~4s. Best-effort and never fatal — a failure just
       // restores the old fetch-on-demand behaviour.
+      //
+      // The probe args are per-package because the warm RUNS the package, which is what
+      // makes it detect an unusable cached tree rather than merely a failed download.
+      // They are not interchangeable: `--version` is a real flag to chrome-devtools-mcp,
+      // but server-filesystem reads its arguments as directories to serve and exits 1 on
+      // `--version` even when perfectly healthy (MEASURED: "Cannot access directory
+      // /haive/workdir/--version"). Probing it that way would purge a good tree on every
+      // warm. `/tmp` is used because it always exists and is readable; the server prints
+      // its banner, reads EOF on the absent stdin and exits 0 in ~1s.
       if (providerRow && sandboxImage) {
         const surface = await resolveMcpSurface(
           db,
@@ -389,6 +398,11 @@ export async function executeByKind(
             sandboxImage,
             `chrome-devtools-mcp@${surface.chromeDevtools.version?.trim() || 'latest'}`,
           );
+        }
+        // filesystem ships on every non-rag invocation but was only ever cached by
+        // accident, which is how its tree ended up truncated and stayed that way.
+        if (payload.toolProfile !== 'rag_only') {
+          await warmNpmPackage(sandboxImage, '@modelcontextprotocol/server-filesystem', ['/tmp']);
         }
       }
       const statusUpdater = payload.taskStepId

@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { NPM_CACHE_DIR, NPM_CACHE_ENV, NPM_CACHE_VOLUME, npmCacheMount } from './npm-cache.js';
+import {
+  NPM_CACHE_DIR,
+  NPM_CACHE_ENV,
+  NPM_CACHE_VOLUME,
+  npmCacheMount,
+  packageNameFromSpec,
+} from './npm-cache.js';
 
 /** F8: chrome-devtools-mcp is launched as `npx -y chrome-devtools-mcp@<version>`, and in a
  *  `--rm` sandbox that means a cold fetch every invocation. MEASURED 111-146s cold against
@@ -17,6 +23,21 @@ describe('shared npm cache', () => {
 
   it('is writable — a read-only cache would silently never populate', () => {
     expect(npmCacheMount().readOnly).toBeUndefined();
+  });
+
+  // The purge that repairs a poisoned tree keys on this name, so getting it wrong either
+  // spares the broken entry or deletes an unrelated one.
+  it('takes the version off a spec without eating a scope', () => {
+    expect(packageNameFromSpec('chrome-devtools-mcp@latest')).toBe('chrome-devtools-mcp');
+    expect(packageNameFromSpec('chrome-devtools-mcp@0.6.1')).toBe('chrome-devtools-mcp');
+    // A scoped name's leading @ is not a version separator.
+    expect(packageNameFromSpec('@modelcontextprotocol/server-filesystem')).toBe(
+      '@modelcontextprotocol/server-filesystem',
+    );
+    expect(packageNameFromSpec('@modelcontextprotocol/server-filesystem@2026.8.1')).toBe(
+      '@modelcontextprotocol/server-filesystem',
+    );
+    expect(packageNameFromSpec('plain-package')).toBe('plain-package');
   });
 
   it('stays clear of the sandbox user home, where the auth volume machinery binds', () => {
