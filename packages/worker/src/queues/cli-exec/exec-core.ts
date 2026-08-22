@@ -15,6 +15,8 @@ import {
   type ModelIdentity,
 } from '@haive/shared';
 import { DEFAULT_RUN_TIMEOUT_MS, type DockerVolumeMount } from '../../sandbox/docker-runner.js';
+import { NPM_CACHE_ENV, npmCacheMount, warmNpmPackage } from '../../sandbox/npm-cache.js';
+import { resolveMcpSurface } from '../../sandbox/mcp-surface.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliCommandSpec } from '../../cli-adapters/types.js';
@@ -371,6 +373,24 @@ export async function executeByKind(
             payload.toolProfile === 'rag_only',
           )
         : { files: [], extraArgs: [] };
+      // Pre-warm the shared npm cache for the ONE MCP server that is fetched from npm.
+      // chrome-devtools-mcp's cold fetch (MEASURED 111-146s) outran the agent's ~50s
+      // wait for its tools, so 08a silently fell back to static analysis while still
+      // reporting a pass. Warm is ~4s. Best-effort and never fatal — a failure just
+      // restores the old fetch-on-demand behaviour.
+      if (providerRow && sandboxImage) {
+        const surface = await resolveMcpSurface(
+          db,
+          payload.taskId,
+          payload.toolProfile === 'rag_only',
+        );
+        if (surface.chromeDevtools.enabled) {
+          await warmNpmPackage(
+            sandboxImage,
+            `chrome-devtools-mcp@${surface.chromeDevtools.version?.trim() || 'latest'}`,
+          );
+        }
+      }
       const statusUpdater = payload.taskStepId
         ? createStepStatusUpdater(db, payload.taskStepId, payload.invocationId)
         : undefined;
@@ -1032,6 +1052,10 @@ export function createSandboxSpawner(
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
     const allMounts: DockerVolumeMount[] = [...authMounts];
     if (repoMount) allMounts.push(repoMount);
+    // Shared npm cache: the sandbox is --rm, so without this every `npx`-launched MCP
+    // server re-downloads on every invocation. See sandbox/npm-cache.ts for what that
+    // silently cost browser verification.
+    allMounts.push(npmCacheMount());
     const runnerOptions: Parameters<typeof runInSandbox>[1] = { workdir: sandboxWorkdir };
     if (sandboxImage) runnerOptions.image = sandboxImage;
     if (allMounts.length > 0) runnerOptions.extraMounts = allMounts;
@@ -1045,7 +1069,7 @@ export function createSandboxSpawner(
       {
         command: spec.command,
         args: finalArgs,
-        env: spec.env,
+        env: { ...NPM_CACHE_ENV, ...spec.env },
         wrapperContent: wrapperContent ?? undefined,
         extraFiles: extraFiles.length > 0 ? extraFiles : undefined,
         timeoutMs: opts.timeoutMs,

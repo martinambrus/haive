@@ -244,6 +244,12 @@ volumes:
     name: haive_bundles
   haive_wrappers:
     name: haive_wrappers
+  # Shared npm cache for per-invocation sandboxes. A sandbox is --rm, so an `npx`-launched
+  # MCP server would re-download on every run; a cold chrome-devtools-mcp fetch (measured
+  # 111-146s) outran the agent's wait for its tools. Cached, not pinned — the version stays
+  # per-repository selectable.
+  haive_npm_cache:
+    name: haive_npm_cache
   haive_squid_configs:
     name: haive_squid_configs
   # Shared mkcert CA for direct browser access: one CA signs every per-task DDEV
