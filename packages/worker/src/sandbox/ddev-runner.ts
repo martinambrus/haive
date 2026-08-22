@@ -355,37 +355,46 @@ export async function startDdevRunner(params: {
     throw new Error('ddev runner nested dockerd did not start');
   }
 
-  // Point DDEV's router at the SAME ports we published, so the cold-boot `ddev
-  // start` brings the router up on them and primary_url / canonical redirects
-  // carry the published port. AND bind the router on all interfaces inside the
-  // runner: by default DDEV's nested router publishes on the runner's loopback
-  // only (127.0.0.1), but our host `-p 127.0.0.1:P:P` forwards to the runner's
-  // bridge IP, so without bind-all the host publish reaches nothing (connection
-  // reset). This config runs BEFORE the first `ddev start`, so the router is
-  // created with the right binding (no recreate needed). Global config =
-  // per-runner here (one project per runner). Best-effort: a failure only
-  // degrades the direct-access ddev.site URL, so warn rather than fail the whole
-  // boot (VNC + in-container access still work).
-  if (directAccess && chosenPorts) {
-    await exec(
-      'docker',
-      [
-        'exec',
-        '-u',
-        'ddev',
-        name,
-        'bash',
-        '-lc',
-        `ddev config global --router-https-port=${chosenPorts.https} --router-http-port=${chosenPorts.http} --router-bind-all-interfaces=true`,
-      ],
-      { timeout: 30_000 },
-    ).catch((err) => {
-      log.warn(
-        { name, err: err instanceof Error ? err.message : String(err) },
-        'ddev router-port config failed; direct-access ddev.site URL may not work',
-      );
-    });
-  }
+  // Router config, applied BEFORE the first `ddev start` so the router is created with the
+  // right binding (no recreate needed). Global config = per-runner here (one project per
+  // runner). Best-effort: a failure degrades reachability, never the boot itself, so warn
+  // rather than fail (VNC + in-container access still work either way).
+  //
+  // TWO independent settings, and only one of them is about direct access:
+  //
+  //  - `--router-bind-all-interfaces` is UNCONDITIONAL. By default the nested router
+  //    publishes on the runner's loopback only (127.0.0.1), which is not an address anything
+  //    outside the runner can dial — verified on a live runner, every ddev-router
+  //    PortBinding read `HostIp: 127.0.0.1` and a curl from a container on the shared sandbox
+  //    network was refused. That blocks the sandboxed CLIs, which sit on that same network
+  //    and are told to verify runtime behavior. Binding all interfaces INSIDE the runner
+  //    exposes 80/443 on the runner's own docker networks only; nothing new reaches the host
+  //    or the LAN, because host exposure is the `-p` publish below and that stays opt-in.
+  //  - The router PORTS are pinned only under direct access, where the host publish needs
+  //    host port == container port so the app's canonical URLs carry the right port instead
+  //    of bouncing to a portless, unpublished :443.
+  const routerPortFlags =
+    directAccess && chosenPorts
+      ? ` --router-https-port=${chosenPorts.https} --router-http-port=${chosenPorts.http}`
+      : '';
+  await exec(
+    'docker',
+    [
+      'exec',
+      '-u',
+      'ddev',
+      name,
+      'bash',
+      '-lc',
+      `ddev config global --router-bind-all-interfaces=true${routerPortFlags}`,
+    ],
+    { timeout: 30_000 },
+  ).catch((err) => {
+    log.warn(
+      { name, err: err instanceof Error ? err.message : String(err) },
+      'ddev router config failed; the app may be unreachable from sandboxed CLIs',
+    );
+  });
   log.info({ taskId: params.taskId, container: name }, 'ddev runner started');
   return { container: name, projectDir: `/repos/${params.repoSubpath}` };
 }
@@ -500,6 +509,18 @@ let ddevCaReady = false;
  *  works, just untrusted until the user clicks through). */
 function ddevCaMountArgs(): string[] {
   return ddevCaReady ? ['-v', `${DDEV_CA_VOLUME}:${DDEV_CA_MOUNT_PATH}`] : [];
+}
+
+/** The shared CA volume, for a consumer that wants to VERIFY a per-task DDEV cert rather
+ *  than serve one — the cli-exec sandbox, which mounts `rootCA.pem` out of it.
+ *
+ *  Null until boot generated it, because before that the runners are on per-runner throwaway
+ *  CAs and this volume's cert signs nothing. Deliberately hands back only the volume name:
+ *  DDEV_CA_MOUNT_PATH is where a RUNNER wants it, and every other consumer picks its own
+ *  path. Callers MUST mount the `rootCA.pem` entry alone — the volume root also holds
+ *  `rootCA-key.pem`, and mounting it whole would hand the CA signing key to an agent. */
+export function ddevCaVolumeName(): string | null {
+  return ddevCaReady ? DDEV_CA_VOLUME : null;
 }
 
 /** Generate the shared mkcert CA into its named volume once (idempotent). Runs on

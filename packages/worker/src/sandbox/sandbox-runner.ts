@@ -170,6 +170,14 @@ export interface SandboxRunnerOptions {
    *  names are `haive-cli-<randomUUID>` and carry no invocation identity, so this label is the
    *  only handle on a single run. */
   invocationId?: string;
+  /** `hostname:ip` entries resolving the task's own runtime, which no DNS the container can
+   *  see knows about. */
+  addHosts?: string[];
+  /** Hostnames the squid egress proxy must NOT be asked for. The task's runtime lives on the
+   *  internal sandbox network and is reached directly; sent through the proxy it would be
+   *  denied, since the allow-set covers the user's external domains. Inert when no gateway
+   *  is in play (policy `full` sets no proxy at all). */
+  noProxyHosts?: string[];
 }
 
 export interface SandboxRunResult extends DockerRunResult {
@@ -291,7 +299,7 @@ export async function runInSandbox(
 
     const modelsHost = inStackModelsHost(spec.env);
     const network = resolveDockerNetwork(policy, gateway);
-    const env = mergeProxyEnv(spec.env, gateway, modelsHost);
+    const env = mergeProxyEnv(spec.env, gateway, modelsHost, options.noProxyHosts ?? []);
 
     // Per-container caps for the CLI-exec sandbox (same governor as the runtime runners;
     // null when disabled). The per-task tasks.memoryLimitMb/cpuLimitMilli override — which
@@ -306,6 +314,7 @@ export async function runInSandbox(
       workdir,
       network,
       connectNetworks: resolveApiConnectNetworks(policy, gateway, modelsHost !== null),
+      addHosts: options.addHosts,
       user: 'node',
       labels:
         options.taskId || options.invocationId
@@ -406,10 +415,13 @@ function resolveApiConnectNetworks(
   return nets;
 }
 
+/** The bypass list is built HERE rather than by the caller because this function overwrites
+ *  any NO_PROXY already in `spec.env` — an upstream value would be silently dropped. */
 function mergeProxyEnv(
   base: Record<string, string> | undefined,
   gateway: EgressGateway | null,
   modelsHost: string | null,
+  extraNoProxyHosts: string[],
 ): Record<string, string> | undefined {
   if (!gateway) return base;
   const proxyUrl = gateway.proxyUrl;
@@ -430,7 +442,11 @@ function mergeProxyEnv(
     OPENROUTER_COMPAT_PROXY_HOST,
   ];
   if (modelsHost) noProxyHosts.push(modelsHost);
-  const noProxy = noProxyHosts.join(',');
+  // The task's own runtime: an internal hostname on the sandbox network, same shape as the
+  // two proxies above. Asked of squid it would be denied — the allow-set covers the user's
+  // external domains, and this host is not one of them.
+  noProxyHosts.push(...extraNoProxyHosts);
+  const noProxy = [...new Set(noProxyHosts)].join(',');
   return {
     ...(base ?? {}),
     HTTP_PROXY: proxyUrl,

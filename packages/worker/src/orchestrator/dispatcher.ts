@@ -23,6 +23,7 @@ import {
 } from '../repo/worktree-git-boundary.js';
 import { withDdevGeneratedBoundary } from '../repo/ddev-generated-boundary.js';
 import { resolveMcpSurface, withMcpSurface, type McpSurface } from '../sandbox/mcp-surface.js';
+import { resolveAppReach, withAppReach, type AppReach } from '../queues/cli-exec/app-reach.js';
 import {
   visionDisallowedTools,
   withModelCapabilityBoundary,
@@ -94,6 +95,10 @@ export interface DispatchRequest {
   /** Computed by resolveTaskDispatch. Exposed on the pure resolver only for
    *  deterministic unit tests; null means "advertise nothing". */
   mcpSurface?: McpSurface | null;
+  /** Whether the sandbox can issue HTTP requests at the task's running app, and at what
+   *  address. Computed by resolveTaskDispatch; exposed on the pure resolver only for
+   *  deterministic unit tests. Null means say nothing about the app. */
+  appReach?: AppReach | null;
   /** Stack-matching global KB titles to advertise. Computed by
    *  resolveTaskDispatch; exposed on the pure resolver only for deterministic
    *  unit tests. Empty means there is nothing to advertise. */
@@ -108,12 +113,14 @@ export async function resolveTaskDispatch(
   taskId: string,
   req: DispatchRequest,
 ): Promise<DispatchPlan> {
-  const [lspConfigured, worktreeGitBoundary, mcpSurface, globalKbDigest] = await Promise.all([
-    hasReadyLspBridge(db, taskId),
-    resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
-    resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
-    resolveGlobalKbDigest(db, taskId),
-  ]);
+  const [lspConfigured, worktreeGitBoundary, mcpSurface, globalKbDigest, appReach] =
+    await Promise.all([
+      hasReadyLspBridge(db, taskId),
+      resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
+      resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
+      resolveGlobalKbDigest(db, taskId),
+      resolveAppReach(db, taskId),
+    ]);
   return resolveDispatch({
     ...req,
     lspConfigured,
@@ -122,6 +129,7 @@ export async function resolveTaskDispatch(
     worktreeGitBoundary,
     mcpSurface,
     globalKbDigest,
+    appReach,
   });
 }
 
@@ -193,6 +201,12 @@ function buildCliSidePlan(
       ddevBounded,
       adapter.supportsMcp ? (req.mcpSurface ?? null) : null,
     );
+    // Whether the app can actually be reached, and how. Same reason as the boundaries above:
+    // handing an agent a URL without saying what can dial it asserts a capability the sandbox
+    // may not have, and a measured run showed agents burning their budget on curl and then
+    // falling back to their provider's own web tool, which can never reach a private host.
+    // Applied at this choke point so it reaches sub-agent and synthesis prompts too.
+    const reachBounded = withAppReach(mcpBounded, req.appReach ?? null);
     // House standards from other projects, as titles. They live behind rag_search and
     // nowhere else — grep cannot reach them — so they are worth prompt tokens exactly
     // when that tool is actually wired for this invocation. Gated on the resolved
@@ -202,8 +216,8 @@ function buildCliSidePlan(
     // never picks the tool on its own.
     const ragWired = adapter.supportsMcp && req.mcpSurface?.rag.enabled === true;
     const digested = ragWired
-      ? withGlobalKbDigest(mcpBounded, req.globalKbDigest ?? [])
-      : mcpBounded;
+      ? withGlobalKbDigest(reachBounded, req.globalKbDigest ?? [])
+      : reachBounded;
     // Learned model limitations. Applied here, after the provider is resolved, so it
     // reaches the prompt, every sub-agent prompt and the synthesis prompt alike — and
     // pairs with the tool deny merged into invokeOpts below.

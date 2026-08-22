@@ -17,6 +17,7 @@ import {
 import { DEFAULT_RUN_TIMEOUT_MS, type DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { NPM_CACHE_ENV, npmCacheMount, warmNpmPackage } from '../../sandbox/npm-cache.js';
 import { resolveMcpSurface } from '../../sandbox/mcp-surface.js';
+import { resolveAppReach, type AppReach } from './app-reach.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliCommandSpec } from '../../cli-adapters/types.js';
@@ -358,6 +359,11 @@ export async function executeByKind(
       // prompt references — the worktree-only mount hides the repo-root .haive/ otherwise.
       const uploadsMount = await resolveTaskUploadsMount(db, payload.taskId, repoMount);
       if (uploadsMount) authMounts.push(uploadsMount);
+      // Re-resolved HERE and not carried on the job: the dispatcher already resolved it at
+      // ENQUEUE to write the prompt, but a runner can be recreated (new IP) between the two,
+      // and an --add-host pointing at a dead address is worse than none. Same split, and the
+      // same reason, as the chrome-devtools browser-url probe.
+      const appReach = payload.taskId ? await resolveAppReach(db, payload.taskId) : null;
       const mcp = providerRow
         ? await resolveMcpExtraFiles(
             db,
@@ -429,6 +435,7 @@ export async function executeByKind(
         mcp.extraArgs,
         makeUsageSnapshotPersister(db, payload.invocationId),
         payload.softTimeout === true,
+        appReach,
       );
     }
     case 'subagent_sequential':
@@ -478,6 +485,10 @@ export async function executeCliSpec(
   mcpExtraArgs: string[] = [],
   onUsageSnapshot?: (usage: CliTokenUsage | null) => void,
   softTimeout = false,
+  /** How this sandbox reaches the task's running app. Trailing with a null default so the
+   *  callers that never had a runtime in view (the `--version` auth probe, the test
+   *  fixtures) keep compiling unchanged. */
+  appReach: AppReach | null = null,
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
@@ -517,6 +528,8 @@ export async function executeCliSpec(
     authMounts,
     taskId,
     invocationId,
+    [],
+    appReach,
   );
 
   // Capture exactly what the live WS viewer sees (header + every stdout/
@@ -1072,10 +1085,14 @@ export function createSandboxSpawner(
   taskId: string | null = null,
   invocationId: string | null = null,
   mcpExtraArgs: string[] = [],
+  /** How this sandbox reaches the task's running app: contributes the DDEV CA mount, the
+   *  `--add-host` entries the app's hostname needs, and the proxy bypass for it. */
+  appReach: AppReach | null = null,
 ): CliSpawner {
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
     const allMounts: DockerVolumeMount[] = [...authMounts];
     if (repoMount) allMounts.push(repoMount);
+    if (appReach) allMounts.push(...appReach.mounts);
     // Shared npm cache: the sandbox is --rm, so without this every `npx`-launched MCP
     // server re-downloads on every invocation. See sandbox/npm-cache.ts for what that
     // silently cost browser verification.
@@ -1088,12 +1105,17 @@ export function createSandboxSpawner(
     if (taskId) runnerOptions.taskId = taskId;
     // Lets the preemption sweeper kill exactly this run instead of the task's whole fan-out.
     if (invocationId) runnerOptions.invocationId = invocationId;
+    if (appReach && appReach.addHosts.length > 0) runnerOptions.addHosts = appReach.addHosts;
+    if (appReach && appReach.noProxyHosts.length > 0) {
+      runnerOptions.noProxyHosts = appReach.noProxyHosts;
+    }
     const finalArgs = mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args;
     const result = await runInSandbox(
       {
         command: spec.command,
         args: finalArgs,
-        env: { ...NPM_CACHE_ENV, ...spec.env },
+        // appReach's CA vars go BEFORE spec.env so a provider that sets its own bundle wins.
+        env: { ...NPM_CACHE_ENV, ...(appReach?.env ?? {}), ...spec.env },
         wrapperContent: wrapperContent ?? undefined,
         extraFiles: extraFiles.length > 0 ? extraFiles : undefined,
         timeoutMs: opts.timeoutMs,

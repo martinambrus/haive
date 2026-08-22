@@ -51,6 +51,11 @@ export interface DockerRunOpts {
    *  Used to give the sandbox an internal api-only NIC regardless of its policy
    *  network. Empty/undefined keeps the plain `docker run` path. */
   connectNetworks?: string[];
+  /** `--add-host` entries, each already formatted `hostname:ip`. Lets a sandbox dial the
+   *  task's runtime by the hostname the app answers to, which is not in any DNS the
+   *  container can see. Rides the shared flag list, so it applies to the plain `docker run`
+   *  path and the create -> connect -> start path alike. */
+  addHosts?: string[];
   /** Run container as this user (e.g. 'node', '1000:1000'). Omit for image default. */
   user?: string;
   /** Docker labels to attach. Used so cancel can find and kill containers by task id. */
@@ -324,6 +329,7 @@ export const defaultDockerRunner: DockerRunner = {
     if (opts.user) flagArgs.push('--user', opts.user);
     if (opts.workdir) flagArgs.push('-w', opts.workdir);
     if (opts.network) flagArgs.push('--network', opts.network);
+    for (const entry of opts.addHosts ?? []) flagArgs.push('--add-host', entry);
     if (opts.entrypoint !== undefined) {
       flagArgs.push('--entrypoint', opts.entrypoint ?? '');
     }

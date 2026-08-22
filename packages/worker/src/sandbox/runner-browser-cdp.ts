@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 
 /** Runner's IPv4 on the shared sandbox network, or null if not attached / not found. */
-async function containerIpOnNetwork(name: string, network: string): Promise<string | null> {
+export async function containerIpOnNetwork(name: string, network: string): Promise<string | null> {
   try {
     const { stdout } = await exec(
       'docker',

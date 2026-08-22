@@ -9,6 +9,7 @@ import { runSequentialSubAgent, type SubAgentRunResult } from '../../cli-executo
 import { assembleNativePrompt } from '../../sub-agent-emulator/native-mode.js';
 import { type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createSandboxSpawner, executeCliSpec } from './exec-core.js';
+import { resolveAppReach } from './app-reach.js';
 import {
   resolveAuthMounts,
   resolveEffectiveEgressDomains,
@@ -69,6 +70,10 @@ export async function executeSubAgentNative(
     payload.toolProfile === 'rag_only',
     hasWorktree,
   );
+  // Resolved here as well: the sub-agent kinds do NOT share exec-core's per-invocation
+  // composition block, so anything added there (this, the uploads mount) reaches them only
+  // if it is added here too.
+  const appReach = payload.taskId ? await resolveAppReach(db, payload.taskId) : null;
   return executeCliSpec(
     spec,
     deps,
@@ -87,6 +92,8 @@ export async function executeSubAgentNative(
     payload.invocationId ?? null,
     mcp.extraArgs,
     makeUsageSnapshotPersister(db, payload.invocationId),
+    false,
+    appReach,
   );
 }
 
@@ -135,6 +142,7 @@ export async function executeSubAgentSequential(
     payload.toolProfile === 'rag_only',
     hasWorktree,
   );
+  const appReach = payload.taskId ? await resolveAppReach(db, payload.taskId) : null;
   const spawner = createSandboxSpawner(
     provider.wrapperContent,
     sandboxImage,
@@ -147,6 +155,7 @@ export async function executeSubAgentSequential(
     payload.taskId ?? null,
     payload.invocationId ?? null,
     mcp.extraArgs,
+    appReach,
   );
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
