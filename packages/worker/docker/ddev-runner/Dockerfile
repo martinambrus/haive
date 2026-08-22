@@ -54,6 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY browser-check.js /opt/browser-check.js
 COPY browser-probe-connect.js /opt/browser-probe-connect.js
 COPY browser-login.js /opt/browser-login.js
+COPY browser-close-extra-tabs.js /opt/browser-close-extra-tabs.js
 # puppeteer-core is pinned EXACT, not to a major. A bare `@22` re-resolved on
 # every image build, so the browser-verify step could change behaviour with no
 # commit of ours -- and there is no lockfile here for Dependabot to watch. The

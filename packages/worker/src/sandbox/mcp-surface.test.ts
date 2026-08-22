@@ -124,6 +124,23 @@ describe('mcpSurfacePrompt', () => {
     expect(prompt).toContain('no `ddev exec`');
   });
 
+  it('tells a browser agent to work in its own tab and release it', () => {
+    const prompt = mcpSurfacePrompt(
+      surfaceOf({ chromeDevtools: { enabled: true, version: null } }),
+    );
+    expect(prompt).toContain('`new_page({url})` your FIRST browser call');
+    expect(prompt).toContain('`close_page` your tab when done');
+    // Named as a prohibition: it is the obvious-looking way to isolate, and it discards
+    // the task's one app login.
+    expect(prompt).toContain('Never pass `isolatedContext`');
+  });
+
+  it('omits the tab discipline when no browser is wired', () => {
+    const prompt = mcpSurfacePrompt(surfaceOf());
+    expect(prompt).not.toContain('new_page');
+    expect(prompt).not.toContain('close_page');
+  });
+
   it('never advertises filesystem or git — the git server points at a masked .git', () => {
     const prompt = mcpSurfacePrompt(
       surfaceOf({

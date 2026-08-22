@@ -37,6 +37,8 @@ import type {
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
+import { closeRunnerExtraTabs } from '../sandbox/ddev-runner.js';
+import { closeAppRunnerExtraTabs } from '../sandbox/app-runner.js';
 import {
   capabilityClassFromMessage,
   cliTimeoutBudgetMinutes,
@@ -976,6 +978,27 @@ async function resolveAiFixPhase(
   return { resolved: false, result: { status: 'waiting_cli', row: updated } };
 }
 
+/** Reclaim the browser tabs a fan-out left behind, once every one of its agents has
+ *  ended. Agents share ONE headed browser per task and each works in a tab of its own
+ *  (BROWSER_TAB_DISCIPLINE, sandbox/mcp-surface.ts); one that finishes normally closes
+ *  its tab, one killed by a soft timeout, preemption or the orphan sweep cannot.
+ *
+ *  Called ONLY at a phase barrier. Never at browser bring-up: that runs while a human
+ *  may have tabs open in the VNC panel, and closing those is worse than leaking one.
+ *
+ *  Both runner kinds are tried, the same way resolveRunnerBrowserCdpUrl does — a task
+ *  has at most one, and the other answers null. Best-effort throughout: a step must not
+ *  fail because a tab did not close. */
+async function reapAgentBrowserTabs(taskId: string, logger: StepContext['logger']): Promise<void> {
+  try {
+    const closed =
+      (await closeRunnerExtraTabs(taskId)) ?? (await closeAppRunnerExtraTabs(taskId)) ?? 0;
+    if (closed > 0) logger.info({ taskId, closed }, 'closed browser tabs left by finished agents');
+  } catch (err) {
+    logger.debug({ err, taskId }, 'browser tab reap best-effort failed');
+  }
+}
+
 type AgentMiningResolved =
   | { resolved: true; results: AgentMiningResult[]; current: TaskStepRow }
   | { resolved: false; result: AdvanceStepResult };
@@ -1858,6 +1881,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       if (!miningResult.resolved) return miningResult.result;
       agentMiningResults = miningResult.results;
       current = miningResult.current;
+      // Barrier: every agent of this fan-out has ended, so any tab still open is one
+      // nobody is coming back for.
+      await reapAgentBrowserTabs(ctx.taskId, ctx.logger);
     }
 
     // --- DAG execution phase (multi-level coder fan-out; parks waiting_cli per
@@ -1866,6 +1892,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       const dagResult = await resolveDagPhase(db, stepDef, current, ctx, params);
       if (!dagResult.resolved) return dagResult.result;
       current = dagResult.current;
+      // Same barrier property as the mining fan-out: reached only once every level has
+      // checkpointed, i.e. no coder/reviewer of this step is still running. Tabs from an
+      // earlier level therefore survive until the whole step ends — accepted; a per-level
+      // reap belongs in dag-executor.ts if it ever matters.
+      await reapAgentBrowserTabs(ctx.taskId, ctx.logger);
     }
 
     // --- Merge-resolution phase (12-worktree-cleanup): merge the feature branch

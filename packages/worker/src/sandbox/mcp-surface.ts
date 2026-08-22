@@ -257,6 +257,39 @@ export function hasAnyMcpServer(surface: McpSurface): boolean {
   );
 }
 
+/** Tab discipline for the browser server. Every invocation of a task attaches to the SAME
+ *  headed Chromium on the runner (resolvers.ts probes the runner once per invocation and
+ *  passes the same `--browser-url` to all of them), and chrome-devtools-mcp selects
+ *  `pages[0]` on first connect — so without this, N concurrent agents all drive ONE tab.
+ *  Live today in two places: `08d-adversarial-qa` (2/4/6 adversaries, the only mining
+ *  fan-out that keeps the full MCP surface) and `06c-dag-execute` (`dag_parallel` coders).
+ *  The symptoms are silent — a navigate landing under another agent's snapshot, a
+ *  `resize_page` applied to someone else's viewport.
+ *
+ *  Tab 0 is not a free tab either: `browser-probe-connect.js` and `browser-login.js` both
+ *  reuse `pages[0]` and bring it to front so the VNC panel shows the app to the human.
+ *
+ *  `isolatedContext` is named as a prohibition rather than left unmentioned because it
+ *  reads like the obvious way to get isolation: it creates a separate browser context,
+ *  i.e. a fresh cookie jar, which discards the one deterministic app login `_app-auth.ts`
+ *  performs for the whole task.
+ *
+ *  Deliberately says nothing about which tab is in FRONT. A background tab is not
+ *  something this codebase has measured for screenshot fidelity, and screenshots are the
+ *  Gate 2 evidence, so the tool default (foreground) stands.
+ *
+ *  Says `close_page` even though `closeExtraBrowserTabs` reaps at the step barrier: the
+ *  reap only runs once every agent of the step has ended, so an agent that tidies up
+ *  releases its renderer minutes earlier — and the reap exists for the agents that are
+ *  KILLED before they can. */
+const BROWSER_TAB_DISCIPLINE = [
+  '  SHARED browser: sibling agents may be driving it right now, and every session starts pointed',
+  "  at tab 0 — the human's view in the VNC panel. Make `new_page({url})` your FIRST browser call",
+  '  and stay in that tab; navigating or resizing before it hits whatever tab someone else is on.',
+  '  Never pass `isolatedContext` — a fresh cookie jar loses the app login this task already did.',
+  '  `close_page` your tab when done; if it refuses as the last open tab, leave it.',
+] as const;
+
 /** Prompt contract paired with the MCP config the sandbox actually receives.
  *
  *  Names ONLY the servers an agent is meant to reach. `filesystem` and `git` are
@@ -280,6 +313,7 @@ export function mcpSurfacePrompt(surface: McpSurface): string {
     lines.push(
       "- `chrome-devtools`: drives the running app's browser — navigate, snapshot, evaluate scripts,",
       '  read console and network. Use it to VERIFY runtime behavior rather than reasoning about it.',
+      ...BROWSER_TAB_DISCIPLINE,
     );
   }
   if (surface.ddevControl.enabled) {

@@ -39,3 +39,32 @@ export async function browserCdpUrlForRunner(name: string): Promise<string | nul
     return null;
   }
 }
+
+/** Close every tab of a runner's headed browser except the first, and report how many
+ *  went. Returns null when there was nothing to do — no runner, no desktop, or the
+ *  script failed — because every caller is a best-effort barrier sweep, not a step that
+ *  may fail on it.
+ *
+ *  `scriptPath` differs per runner kind (`/opt/...` vs `/opt/browser/...`) because that
+ *  is where each image installs puppeteer-core, and node resolves the dependency from
+ *  the SCRIPT's directory. Passed in rather than derived here so a wrong path is a
+ *  compile-time-visible argument at the call site instead of a silent no-op.
+ *
+ *  See docker/ddev-runner/browser-close-extra-tabs.js for why the first page is kept and
+ *  why this is a barrier-only operation. */
+export async function closeExtraBrowserTabs(
+  name: string,
+  scriptPath: string,
+): Promise<number | null> {
+  try {
+    const { stdout } = await exec('docker', ['exec', name, 'node', scriptPath], {
+      timeout: 30_000,
+    });
+    // The script prints one JSON line; anything the runtime wrote before it is noise.
+    const line = stdout.trim().split('\n').pop() ?? '';
+    const parsed = JSON.parse(line) as { closed?: unknown };
+    return typeof parsed.closed === 'number' ? parsed.closed : null;
+  } catch {
+    return null;
+  }
+}

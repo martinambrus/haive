@@ -36,6 +36,16 @@
 #
 # --disable-background-networking is kept as the documented umbrella even though it
 # removed nothing measurable on its own here.
+#
+# The three --disable-*background*/renderer-backgrounding switches are a different
+# concern from the privacy set, and they are here for the same raw-launch reason:
+# puppeteer applies them by default, this launch inherits nothing. Agents now open a
+# tab EACH (see BROWSER_TAB_DISCIPLINE in sandbox/mcp-surface.ts) because they share
+# this one browser, so at any moment all but one agent's tab is in the background.
+# Without these, Chrome throttles those tabs' timers and lowers their renderer
+# priority, and an agent's wait against a timer-driven UI then fails for a reason that
+# has nothing to do with the app under test. Only ONE tab is painted either way --
+# these change scheduling, not visibility.
 set -u
 
 DISPLAY_NUM=":99"
@@ -74,6 +84,9 @@ if ! pgrep -f "chromium.*remote-debugging-port=${CDP_LOCAL}" >/dev/null 2>&1; th
     --password-store=basic \
     --no-sandbox \
     --disable-dev-shm-usage \
+    --disable-background-timer-throttling \
+    --disable-backgrounding-occluded-windows \
+    --disable-renderer-backgrounding \
     --disable-background-networking \
     --disable-component-update \
     --disable-domain-reliability \

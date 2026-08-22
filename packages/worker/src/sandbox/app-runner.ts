@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 import { APP_RUNNER_LABEL, appRunnerName, logger, type TaskAccessEndpoint } from '@haive/shared';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
-import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
+import { browserCdpUrlForRunner, closeExtraBrowserTabs } from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
 import {
   RUNTIME_WEIGHT_LABEL,
@@ -85,7 +85,12 @@ async function isRunning(name: string): Promise<boolean> {
 async function injectBrowserAssets(container: string): Promise<void> {
   const dir = browserAssetsDir();
   await exec('docker', ['exec', container, 'mkdir', '-p', '/opt/browser'], { timeout: 15_000 });
-  for (const f of ['browser-check.js', 'browser-probe-connect.js', 'browser-login.js']) {
+  for (const f of [
+    'browser-check.js',
+    'browser-probe-connect.js',
+    'browser-login.js',
+    'browser-close-extra-tabs.js',
+  ]) {
     await exec('docker', ['cp', path.join(dir, f), `${container}:/opt/browser/${f}`], {
       timeout: 30_000,
     });
@@ -393,6 +398,14 @@ export async function stopBrowserDesktop(taskId: string): Promise<void> {
  *  runnerBrowserCdpUrl (ddev-runner) for the non-DDEV app-runner. */
 export async function appRunnerBrowserCdpUrl(taskId: string): Promise<string | null> {
   return browserCdpUrlForRunner(appRunnerName(taskId));
+}
+
+/** Close the tabs this task's agents left behind in the app-runner's headed browser,
+ *  keeping the first (the human's view). Mirrors closeRunnerExtraTabs (ddev-runner);
+ *  the script path differs because injectBrowserAssets drops it beside the env image's
+ *  puppeteer-core under /opt/browser. */
+export async function closeAppRunnerExtraTabs(taskId: string): Promise<number | null> {
+  return closeExtraBrowserTabs(appRunnerName(taskId), '/opt/browser/browser-close-extra-tabs.js');
 }
 
 /** The user-facing URL(s) for opening this task's app in their OWN browser: the
