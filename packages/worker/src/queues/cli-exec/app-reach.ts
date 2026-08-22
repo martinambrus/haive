@@ -116,9 +116,18 @@ async function resolveDdevReach(
   const ws = await resolveDdevWorkspace(db, taskId, repoPath);
   if (!ws) return null;
 
+  // The IP lookup comes FIRST, and it is the cheap one: a `docker inspect` that fails in
+  // milliseconds when there is no runner. `ddev describe` runs ddev INSIDE the container and
+  // costs seconds, and this resolver sits on the dispatch path of every step in every task —
+  // most of which never boot a runtime at all. Null here also covers a runner that exists but
+  // is off the sandbox network, where the browser cannot attach either, so there is no
+  // narrower mode to report.
+  const ip = await containerIpOnNetwork(ddevRunnerName(taskId), network);
+  if (!ip) return null;
+
   const handle = runnerHandleForTask(taskId, ws.repoSubpath);
   const primaryUrl = await ddevPrimaryUrl(handle);
-  if (!primaryUrl) return null; // Not a DDEV task, or its runner is not up.
+  if (!primaryUrl) return null; // Not a DDEV task, or its project is not up.
 
   let hostname: string;
   let port: string;
@@ -129,9 +138,6 @@ async function resolveDdevReach(
   } catch {
     return null;
   }
-
-  const ip = await containerIpOnNetwork(ddevRunnerName(taskId), network);
-  if (!ip) return { ...NO_REACH, mode: 'browser_only', url: primaryUrl };
 
   const caVolume = ddevCaVolumeName();
   const reachable = await probeFromRunner(() =>
