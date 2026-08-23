@@ -356,6 +356,44 @@ describe('adversarialQaStep.apply — pre-dedupe finding attribution', () => {
     expect(rows).toHaveLength(2);
     expect(infos.some((i) => typeof i.dropped === 'number')).toBe(false);
   });
+
+  it('gives the survivor the fingerprints of BOTH reports that collapsed onto it', async () => {
+    // Gate 1.5 can only mark a finding a developer waived if the survivor can name the rows
+    // it came from — and those rows are keyed by the adversary that raised each one, which
+    // the merge throws away.
+    const { out, rows } = await run(collidingBatch());
+    expect(out.findings).toHaveLength(1);
+    expect(out.findings[0]!.fingerprints).toHaveLength(2);
+    expect(out.findings[0]!.fingerprints!.slice().sort()).toEqual(
+      rows.map((r) => r.fingerprint as string).sort(),
+    );
+  });
+
+  it('gives each uncollided finding only its own fingerprint', async () => {
+    const { out, rows } = await run([
+      reports('auth-bandit', 'inv-auth', [
+        { severity: 'high', location: 'a.php', impact: 'one', fix: 'x' },
+      ]),
+      reports('injection-infector', 'inv-inj', [
+        { severity: 'high', location: 'b.php', impact: 'two', fix: 'y' },
+      ]),
+    ]);
+    const byImpact = new Map(out.findings.map((f) => [f.impact, f.fingerprints]));
+    const byIssue = new Map(rows.map((r) => [r.issue as string, r.fingerprint as string]));
+    expect(byImpact.get('one')).toEqual([byIssue.get('one')]);
+    expect(byImpact.get('two')).toEqual([byIssue.get('two')]);
+  });
+
+  it('claims no fingerprint for a synthetic finding no adversary reported', async () => {
+    // The qa-gap entry raised for an unreadable agent has no row, so it must not borrow one.
+    const { out } = await run([
+      reports('auth-bandit', 'inv-auth', []),
+      mining('flow-fuzzer', null),
+    ]);
+    const gap = out.findings.find((f) => f.category === 'qa-gap');
+    expect(gap).toBeDefined();
+    expect(gap!.fingerprints).toEqual([]);
+  });
 });
 
 describe('08d PoC verification', () => {

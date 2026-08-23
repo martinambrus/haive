@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   adversarialQaReviewStep,
   formatQaFixDiagnosis,
+  formatWaiverLedgerEntry,
   foldsAtGate,
+  partitionFindings,
 } from './08d2-adversarial-qa-review.js';
 import type { StepContext, StepApplyArgs } from '../../step-definition.js';
 
@@ -15,20 +17,60 @@ const detected = {
     {
       key: '0',
       severity: 'critical',
+      fingerprints: ['fp-sqli-bandit', 'fp-sqli-infector'],
       label: '[critical] sqli @ q.php:5',
       line: '- [critical] sqli @ q.php:5: dump — fix: param',
     },
     {
       key: '1',
       severity: 'high',
+      fingerprints: ['fp-xss'],
       label: '[high] xss @ v.tsx:10',
       line: '- [high] xss @ v.tsx:10: steal',
     },
-    { key: '2', severity: 'low', label: '[low] nit @ a.ts:1', line: '- [low] nit @ a.ts:1: style' },
+    {
+      key: '2',
+      severity: 'low',
+      fingerprints: ['fp-nit'],
+      label: '[low] nit @ a.ts:1',
+      line: '- [low] nit @ a.ts:1: style',
+    },
   ],
 };
 
-const stubCtx = { logger: { info: () => {} } } as unknown as StepContext;
+/** ctx with a capturing db, so the waiver's two writes can be asserted: the disposition
+ *  UPDATE on review_findings and the ledger entry on task_events. */
+function captureCtx(): {
+  ctx: StepContext;
+  updates: Record<string, unknown>[];
+  ledger: Record<string, unknown>[];
+} {
+  const updates: Record<string, unknown>[] = [];
+  const ledger: Record<string, unknown>[] = [];
+  const ctx = {
+    taskId: 'task-1',
+    taskStepId: 'step-1',
+    round: 2,
+    logger: { info: () => {}, warn: () => {} },
+    db: {
+      update: () => ({
+        set: (values: Record<string, unknown>) => {
+          updates.push(values);
+          return { where: () => Promise.resolve() };
+        },
+      }),
+      insert: () => ({
+        values: (values: Record<string, unknown>) => {
+          ledger.push(values);
+          return Promise.resolve();
+        },
+      }),
+    },
+  } as unknown as StepContext;
+  return { ctx, updates, ledger };
+}
+
+const stubCtx = captureCtx().ctx;
 
 function applyArgs(formValues: Record<string, unknown>): StepApplyArgs<typeof detected> {
   return { detected, formValues, iteration: 0, previousIterations: [] };
@@ -99,15 +141,127 @@ describe('08d2 apply', () => {
   });
 });
 
+describe('partitionFindings', () => {
+  it('all takes everything and waives nothing', () => {
+    const { chosen, waived } = partitionFindings(detected.findings as never, 'all', []);
+    expect(chosen).toHaveLength(3);
+    expect(waived).toHaveLength(0);
+  });
+
+  it('critical_high waives the non-blocking remainder', () => {
+    const { chosen, waived } = partitionFindings(detected.findings as never, 'critical_high', []);
+    expect(chosen.map((f) => f.key)).toEqual(['0', '1']);
+    expect(waived.map((f) => f.key)).toEqual(['2']);
+  });
+
+  it('selected waives everything the developer did not pick', () => {
+    const { chosen, waived } = partitionFindings(detected.findings as never, 'selected', ['1']);
+    expect(chosen.map((f) => f.key)).toEqual(['1']);
+    expect(waived.map((f) => f.key)).toEqual(['0', '2']);
+  });
+
+  it('treats an unknown scope as all, so a stale form value cannot silently waive', () => {
+    const { waived } = partitionFindings(detected.findings as never, 'something-else', []);
+    expect(waived).toHaveLength(0);
+  });
+});
+
+describe('formatWaiverLedgerEntry', () => {
+  it('invites a re-raise rather than warning the next round off', () => {
+    const text = formatWaiverLedgerEntry(2, detected.findings.slice(2) as never);
+    expect(text).toContain('chose');
+    expect(text).toContain('NOT to fix them in this round');
+    expect(text).toContain('recorded, not deleted');
+    expect(text).toContain('raise one again if you can');
+    expect(text).toContain('[low] nit @ a.ts:1');
+  });
+
+  it('carries the short label, not the full finding line, to stay inside the ledger budget', () => {
+    const text = formatWaiverLedgerEntry(2, detected.findings.slice(2) as never);
+    expect(text).not.toContain('style');
+  });
+});
+
+describe('08d2 waiver writes', () => {
+  it('accept waives nothing — gate 2 still holds the call', async () => {
+    const { ctx, updates, ledger } = captureCtx();
+    const out = await adversarialQaReviewStep.apply(ctx, applyArgs({ decision: 'accept' }));
+    expect(out.waivedCount).toBe(0);
+    expect(updates).toHaveLength(0);
+    expect(ledger).toHaveLength(0);
+  });
+
+  it('fix + all waives nothing, because nothing was left out', async () => {
+    const { ctx, updates, ledger } = captureCtx();
+    const out = await adversarialQaReviewStep.apply(
+      ctx,
+      applyArgs({ decision: 'fix', scope: 'all' }),
+    );
+    expect(out.waivedCount).toBe(0);
+    expect(updates).toHaveLength(0);
+    expect(ledger).toHaveLength(0);
+  });
+
+  it('fix + selected dispositions the leftovers and leaves the ledger a re-raise note', async () => {
+    const { ctx, updates, ledger } = captureCtx();
+    const out = await adversarialQaReviewStep.apply(
+      ctx,
+      applyArgs({ decision: 'fix', scope: 'selected', findingKeys: ['1'] }),
+    );
+    expect(out.waivedCount).toBe(2);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.disposition).toBe('dismissed_human');
+    expect(updates[0]!.dispositionSource).toBe('08d2-adversarial-qa-review');
+    expect(ledger).toHaveLength(1);
+    const payload = ledger[0]!.payload as { text: string; round: number; stepId: string };
+    expect(payload.round).toBe(2);
+    expect(payload.stepId).toBe('08d2-adversarial-qa-review');
+    // The waived pair, and NOT the finding that was sent back to be fixed.
+    expect(payload.text).toContain('sqli');
+    expect(payload.text).toContain('nit');
+    expect(payload.text).not.toContain('xss');
+  });
+
+  it('never fails the gate when the telemetry writes throw', async () => {
+    const brokenCtx = {
+      taskId: 'task-1',
+      taskStepId: 'step-1',
+      round: 1,
+      logger: { info: () => {}, warn: () => {} },
+      db: {
+        update: () => {
+          throw new Error('db down');
+        },
+        insert: () => {
+          throw new Error('db down');
+        },
+      },
+    } as unknown as StepContext;
+    const out = await adversarialQaReviewStep.apply(
+      brokenCtx,
+      applyArgs({ decision: 'fix', scope: 'critical_high' }),
+    );
+    expect(out.decision).toBe('fix');
+    expect(out.selectedCount).toBe(2);
+    expect(out.waivedCount).toBe(1);
+  });
+});
+
 describe('08d2 restartLoop', () => {
   it('routes fix back to implementation and finalizes accept (and empty fix)', () => {
     const hook = adversarialQaReviewStep.restartLoop!;
-    expect(hook.evaluate({ decision: 'fix', diagnosis: 'do it', selectedCount: 1 })).toEqual({
+    expect(
+      hook.evaluate({ decision: 'fix', diagnosis: 'do it', selectedCount: 1, waivedCount: 0 }),
+    ).toEqual({
       diagnosis: 'do it',
     });
-    expect(hook.evaluate({ decision: 'accept', diagnosis: '', selectedCount: 0 })).toBeNull();
+    expect(
+      hook.evaluate({ decision: 'accept', diagnosis: '', selectedCount: 0, waivedCount: 0 }),
+    ).toBeNull();
     // fix with nothing selected and no feedback → empty diagnosis → finalize, no loop.
-    expect(hook.evaluate({ decision: 'fix', diagnosis: '', selectedCount: 0 })).toBeNull();
+    expect(
+      hook.evaluate({ decision: 'fix', diagnosis: '', selectedCount: 0, waivedCount: 3 }),
+    ).toBeNull();
   });
 });
 

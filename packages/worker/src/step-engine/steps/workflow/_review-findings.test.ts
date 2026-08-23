@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  dispositionReviewFindings,
   findingFingerprint,
   parseLineRange,
   recordReviewFindings,
@@ -219,5 +220,70 @@ describe('recordReviewFindings — invocation attribution', () => {
       ['peer-reviewer', 'inv-peer'],
       ['security-code-reviewer', 'inv-sec'],
     ]);
+  });
+});
+
+describe('dispositionReviewFindings', () => {
+  function captureCtx(): { ctx: StepContext; sets: Record<string, unknown>[]; calls: number } {
+    const sets: Record<string, unknown>[] = [];
+    const state = { calls: 0 };
+    const ctx = {
+      taskId: 'task-1',
+      taskStepId: 'step-1',
+      round: 3,
+      logger: { warn: () => {} },
+      db: {
+        update: () => {
+          state.calls += 1;
+          return {
+            set: (values: Record<string, unknown>) => {
+              sets.push(values);
+              return { where: () => Promise.resolve() };
+            },
+          };
+        },
+      },
+    } as unknown as StepContext;
+    return {
+      ctx,
+      sets,
+      get calls() {
+        return state.calls;
+      },
+    };
+  }
+
+  it('writes the verdict and its source', async () => {
+    const cap = captureCtx();
+    await dispositionReviewFindings(cap.ctx, ['fp-a', 'fp-b'], 'dismissed_human', '08d2');
+    expect(cap.sets).toHaveLength(1);
+    expect(cap.sets[0]!.disposition).toBe('dismissed_human');
+    expect(cap.sets[0]!.dispositionSource).toBe('08d2');
+    expect(cap.sets[0]!.dispositionAt).toBeInstanceOf(Date);
+  });
+
+  it('does not touch the table when there is nothing to mark', async () => {
+    // An empty list means the caller waived a finding whose rows predate fingerprint
+    // carrying — an unfiltered UPDATE there would rewrite the whole round.
+    const cap = captureCtx();
+    await dispositionReviewFindings(cap.ctx, [], 'dismissed_human', '08d2');
+    await dispositionReviewFindings(cap.ctx, [''], 'dismissed_human', '08d2');
+    expect(cap.calls).toBe(0);
+  });
+
+  it('never throws — telemetry must not fail the gate that produced it', async () => {
+    const ctx = {
+      taskId: 'task-1',
+      round: 0,
+      logger: { warn: () => {} },
+      db: {
+        update: () => {
+          throw new Error('db down');
+        },
+      },
+    } as unknown as StepContext;
+    await expect(
+      dispositionReviewFindings(ctx, ['fp-a'], 'dismissed_human', '08d2'),
+    ).resolves.toBeUndefined();
   });
 });

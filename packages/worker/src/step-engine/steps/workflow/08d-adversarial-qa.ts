@@ -143,6 +143,16 @@ interface AdversarialFinding {
    *  `untestable` is NOT a downgrade: the panel never got to run the PoC at all. Kept
    *  distinct from `unverified` only so gate 1.5 can say which one it was — both block. */
   verification?: 'reproduced' | 'not_reproduced' | 'unverified' | 'untestable';
+  /** Every reviewer-namespaced `review_findings` fingerprint that collapsed onto this
+   *  finding through the location merge — one per adversary that reported it.
+   *
+   *  Attached to the OUTPUT copy only (see the return below), never to the objects the
+   *  merge and `recordReviewFindings` work on. Exists because rows are written PRE-merge,
+   *  keyed by the adversary that raised each report, while every later step sees only the
+   *  survivor and has no reviewer id to rebuild a key from — gate 1.5 needs it to mark
+   *  the findings a developer chose not to fix. Same shape and reason as 08c's
+   *  `RefutableFinding.fingerprints`. */
+  fingerprints?: string[];
 }
 
 interface AdversarialApply {
@@ -1262,6 +1272,27 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
         }),
     );
 
+    // Which recorded rows belong to each SURVIVING finding. The rows above are written one
+    // per (adversary, report); the merge then keeps one report per location and the gate
+    // downstream sees only that survivor. Without this the survivor cannot name a single row
+    // it came from, because the key is namespaced by the adversary that raised it.
+    //
+    // Resolution mirrors the merge exactly — same key, same map — rather than re-deriving it,
+    // so a report always lands on the finding the developer will actually be shown. The
+    // `impact ?? category` filter is the one the record call uses, so a fingerprint is never
+    // claimed for a row that was never inserted.
+    const fingerprintsByFinding = new Map<AdversarialFinding, string[]>();
+    for (const { finding: f, agentId } of reported) {
+      if ((f.impact ?? f.category ?? '').trim().length === 0) continue;
+      const key = (f.location ?? '').trim().toLowerCase();
+      const survivor = key ? (byLocation.get(key) ?? f) : f;
+      const { path } = splitLocation(f.location);
+      const fp = findingFingerprint(agentId, path, f.impact || (f.category as string));
+      const list = fingerprintsByFinding.get(survivor);
+      if (!list) fingerprintsByFinding.set(survivor, [fp]);
+      else if (!list.includes(fp)) list.push(fp);
+    }
+
     ctx.logger.info(
       {
         level: detected.level,
@@ -1277,7 +1308,10 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     return {
       ran,
       level: ran ? detected.level : null,
-      findings,
+      // Copies, not the merge's own objects: `raw: f` above stores the reported finding
+      // verbatim and `survivors` is an identity Set, so mutating them here would leak the
+      // fingerprints into both.
+      findings: findings.map((f) => ({ ...f, fingerprints: fingerprintsByFinding.get(f) ?? [] })),
       counts: { critical, high, total: findings.length },
       blocking,
       qaIncomplete,

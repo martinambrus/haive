@@ -1,6 +1,8 @@
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { dispositionReviewFindings } from './_review-findings.js';
+import { recordLedgerEntry } from '../../task-ledger.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 
@@ -23,6 +25,10 @@ interface QaFinding {
   line: string;
   /** Verified as not reproducible AND non-blocking, so gate 1.5 folds it behind a count. */
   folded: boolean;
+  /** The `review_findings` rows this finding was recorded as, one per adversary that
+   *  reported it. Empty for a task whose 08d ran before 08d wrote them, which makes the
+   *  waiver below a no-op there rather than a failure. */
+  fingerprints: string[];
 }
 
 interface QaReviewDetect {
@@ -40,6 +46,10 @@ interface QaReviewApply {
   decision: 'fix' | 'accept';
   diagnosis: string;
   selectedCount: number;
+  /** Shown findings a fix round deliberately left out. Stated rather than implied, for the
+   *  same reason `filteredCount` is: a set that shrinks with no number beside it reads as
+   *  findings going missing. */
+  waivedCount: number;
 }
 
 interface Phase8dOutput {
@@ -56,6 +66,9 @@ interface Phase8dOutput {
     /** 08d's PoC-verifier panel verdict; absent on runs from before it existed and on
      *  findings that were never blocking (only those are verified). */
     verification?: string;
+    /** The `review_findings` fingerprints 08d recorded this finding as; absent on runs
+     *  from before 08d carried them. */
+    fingerprints?: string[];
   }[];
 }
 
@@ -91,6 +104,47 @@ export function formatQaFixDiagnosis(lines: string[], feedback: string): string 
     parts.push('', 'Reviewer instructions:', feedback);
   }
   return parts.join('\n');
+}
+
+/** Split the shown findings into the ones a fix round will carry and the ones it leaves.
+ *
+ *  Pure and exported so the split is testable without a db — the write side below is not. */
+export function partitionFindings(
+  findings: QaFinding[],
+  scope: string,
+  keys: string[],
+): { chosen: QaFinding[]; waived: QaFinding[] } {
+  const picked = new Set(keys);
+  // Anything else is 'all' — an unrecognised scope must not silently waive findings.
+  const takes = (f: QaFinding): boolean => {
+    if (scope === 'critical_high') return isBlockingSeverity(f.severity);
+    if (scope === 'selected') return picked.has(f.key);
+    return true;
+  };
+  const chosen: QaFinding[] = [];
+  const waived: QaFinding[] = [];
+  for (const f of findings) (takes(f) ? chosen : waived).push(f);
+  return { chosen, waived };
+}
+
+/** The ledger note a partial fix round leaves behind.
+ *
+ *  Deliberately NOT a suppression list, for the reason 08d states where it carries its
+ *  disproved set forward: a decision is about a MOMENT, not about the defect. A human
+ *  declining to spend a round on something is weaker evidence than a PoC that would not
+ *  run, so the wording invites a re-raise rather than warning the next round off. Nothing
+ *  downstream filters on it; it reaches the next round's agents as prompt context only,
+ *  through augmentPromptWithLedger.
+ *
+ *  Uses each finding's short label rather than its full line — the ledger block has a
+ *  4000-char budget shared with every other step's entries. */
+export function formatWaiverLedgerEntry(round: number, waived: QaFinding[]): string {
+  return [
+    `Adversarial QA round ${round}: the developer reviewed these findings at gate 1.5 and chose`,
+    'NOT to fix them in this round. They are recorded, not deleted, and this says nothing about',
+    'whether they are real — raise one again if you can, and say what changed:',
+    ...waived.map((f) => `- ${f.label}`),
+  ].join('\n');
 }
 
 export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApply> = {
@@ -147,6 +201,7 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
       return {
         key: String(i),
         severity,
+        fingerprints: f.fingerprints ?? [],
         folded: foldsAtGate(f.verification, severity),
         label: `${verdict}[${severity}] ${cat}${loc}`,
         line: `- ${verdict}[${severity}] ${cat}${loc}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
@@ -165,6 +220,13 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
     //
     // Presentation only: 08d's own output, its counts and every review_findings row keep all
     // of them, so nothing here is unrecoverable.
+    //
+    // A finding a developer WAIVED in an earlier round is deliberately not folded here, and
+    // `dismissed_human` is deliberately not read. That verdict is the weakest evidence on
+    // record — a human declining to spend a round on something, not a PoC that would not run
+    // — so suppressing on it would fail silently in exactly the direction 08d refuses to fail
+    // on the far stronger `not_reproduced` (see 08d-adversarial-qa.ts, "Deliberately NOT a
+    // suppression list"). The waiver reaches the next round as prompt context instead.
     const shown = findings.filter((f) => !f.folded);
     return {
       ran: out.ran === true,
@@ -268,25 +330,43 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
     };
     const feedback = (values.feedback ?? '').trim();
     if (values.decision !== 'fix') {
+      // Accept waives nothing. The findings stay `open` and surface advisorily at gate 2,
+      // so the call is deferred rather than made — recording a waiver here would assert a
+      // decision the developer has not taken yet.
       ctx.logger.info('adversarial QA findings accepted as-is');
-      return { decision: 'accept', diagnosis: '', selectedCount: 0 };
+      return { decision: 'accept', diagnosis: '', selectedCount: 0, waivedCount: 0 };
     }
     const scope = values.scope ?? 'all';
-    let chosen = args.detected.findings;
-    if (scope === 'critical_high') {
-      chosen = chosen.filter((f) => isBlockingSeverity(f.severity));
-    } else if (scope === 'selected') {
-      const keys = new Set(values.findingKeys ?? []);
-      chosen = chosen.filter((f) => keys.has(f.key));
-    }
+    const { chosen, waived } = partitionFindings(
+      args.detected.findings,
+      scope,
+      values.findingKeys ?? [],
+    );
     const diagnosis = formatQaFixDiagnosis(
       chosen.map((f) => f.line),
       feedback,
     );
+    if (waived.length > 0) {
+      // Two halves of one record, neither of which hides anything: the row says a human
+      // declined it, and the ledger tells the next round's agents so they do not re-derive
+      // it blind. Both best-effort — a telemetry write must not fail the gate.
+      await dispositionReviewFindings(
+        ctx,
+        waived.flatMap((f) => f.fingerprints),
+        'dismissed_human',
+        '08d2-adversarial-qa-review',
+      );
+      await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
+        stepId: '08d2-adversarial-qa-review',
+        round: ctx.round,
+        kind: 'finding',
+        text: formatWaiverLedgerEntry(ctx.round, waived),
+      });
+    }
     ctx.logger.info(
-      { scope, count: chosen.length },
+      { scope, count: chosen.length, waived: waived.length },
       'adversarial QA findings sent back to implementation',
     );
-    return { decision: 'fix', diagnosis, selectedCount: chosen.length };
+    return { decision: 'fix', diagnosis, selectedCount: chosen.length, waivedCount: waived.length };
   },
 };

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { isCredentialCwe } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
@@ -191,6 +192,47 @@ export async function recordReviewFindings(
     ctx.logger.warn(
       { err, stepId, count: findings.length },
       'failed to record review findings (telemetry only; review unaffected)',
+    );
+  }
+}
+
+/** Mark findings a HUMAN looked at and chose not to act on this round.
+ *
+ *  Same best-effort contract as recordReviewFindings: never throws, because a telemetry
+ *  write must not fail the gate that produced it.
+ *
+ *  Two guards, each load-bearing:
+ *
+ *  - `disposition = 'open'`, so a row a refuter already disproved keeps `dismissed_refuted`.
+ *    A human declining to fix something is a weaker statement than a PoC that would not run,
+ *    and the stronger verdict is the one worth keeping.
+ *  - `round = ctx.round`. The same fingerprint recurs on its OWN row every round, so an
+ *    unscoped update would rewrite the history of rounds the developer never saw.
+ */
+export async function dispositionReviewFindings(
+  ctx: StepContext,
+  fingerprints: string[],
+  disposition: 'dismissed_human',
+  source: string,
+): Promise<void> {
+  const unique = [...new Set(fingerprints.filter((f) => f.length > 0))];
+  if (unique.length === 0) return;
+  try {
+    await ctx.db
+      .update(schema.reviewFindings)
+      .set({ disposition, dispositionAt: new Date(), dispositionSource: source })
+      .where(
+        and(
+          eq(schema.reviewFindings.taskId, ctx.taskId),
+          eq(schema.reviewFindings.round, ctx.round),
+          eq(schema.reviewFindings.disposition, 'open'),
+          inArray(schema.reviewFindings.fingerprint, unique),
+        ),
+      );
+  } catch (err) {
+    ctx.logger.warn(
+      { err, source, count: unique.length },
+      'failed to disposition review findings (telemetry only; the gate decision stands)',
     );
   }
 }
