@@ -504,6 +504,40 @@ function applyCliPreference<T extends CliPreferenceFields>(
   };
 }
 
+/** How much of a task description renders before the reader asks for the rest. Pasted
+ *  issues and specs are common, and the whole body above the step list buries the task's
+ *  actual state under a wall of text. */
+const DESCRIPTION_PREVIEW_CHARS = 280;
+
+function TaskDescription({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  // Null when the whole description already fits — that is also what hides the toggle.
+  // The cut backs up to the last space so the preview never ends mid-word; the 0.6 floor
+  // keeps a spaceless description (one long URL or path) from collapsing to almost nothing.
+  const preview = useMemo(() => {
+    if (text.length <= DESCRIPTION_PREVIEW_CHARS) return null;
+    const cut = text.slice(0, DESCRIPTION_PREVIEW_CHARS);
+    const space = cut.lastIndexOf(' ');
+    return `${(space > DESCRIPTION_PREVIEW_CHARS * 0.6 ? cut.slice(0, space) : cut).trimEnd()}\u2026`;
+  }, [text]);
+
+  return (
+    <p className="text-sm text-neutral-400">
+      {preview && !expanded ? preview : text}
+      {preview && (
+        // ml-1, not a {' '} literal: prettier strips the JSX space expression.
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="ml-1 text-xs text-indigo-400 underline"
+        >
+          {expanded ? 'compact' : 'expand'}
+        </button>
+      )}
+    </p>
+  );
+}
+
 export default function TaskDetailPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
@@ -1456,7 +1490,7 @@ export default function TaskDetailPage() {
             )}
           </div>
           {renameError && <p className="mt-1 text-xs text-red-400">{renameError}</p>}
-          {task.description && <p className="text-sm text-neutral-400">{task.description}</p>}
+          {task.description && <TaskDescription text={task.description} />}
           {task.status === 'failed' && task.errorMessage && (
             <p className="text-sm text-red-400">Error: {task.errorMessage}</p>
           )}

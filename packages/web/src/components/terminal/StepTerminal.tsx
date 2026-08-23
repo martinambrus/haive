@@ -262,8 +262,17 @@ function InvocationPanel({
     >
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
         {label && <span className="font-medium text-neutral-200">{label}</span>}
+        {/* Fan-out titles name the specific finding an agent works ("Refuter 2/4
+            [reachability] — high installer/actions_step_4.php:36 · <issue>"), long enough to
+            push the badges and the runtime onto their own line. Capped and ellipsized; the
+            full string stays readable on hover. */}
         {invocation.agentTitle && (
-          <span className="font-medium text-indigo-300">{invocation.agentTitle}</span>
+          <span
+            className="max-w-[24rem] truncate font-medium text-indigo-300"
+            title={invocation.agentTitle}
+          >
+            {invocation.agentTitle}
+          </span>
         )}
         <span className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 uppercase tracking-wider">
           {invocation.mode === 'agent_mining' ? 'mining' : invocation.mode.replace(/_/g, ' ')}
