@@ -299,7 +299,7 @@ function InvocationPanel({
                   ? "Effort from the CLI provider's own setting"
                   : invocation.effort.source === 'dropped'
                     ? 'The configured effort level is not one this CLI has, so it was not sent and the CLI used its own default'
-                    : "Adapter default (this CLI's highest level)"
+                    : 'Adapter default — nobody set a level for this run'
             }
           >
             {invocation.effort.source === 'dropped'
