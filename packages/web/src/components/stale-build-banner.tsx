@@ -29,6 +29,26 @@ const POLL_MS = 30_000;
  *  the one action that settles it either way. */
 const IS_PROD = process.env.NODE_ENV === 'production';
 
+/** On in production, OFF in dev unless opted into with `NEXT_PUBLIC_STALE_BANNER=1`.
+ *
+ *  The dev default is off because of what the measurements above rule out. In dev the baseline
+ *  can never move — nothing tells this tab that an update was applied — so the banner is
+ *  structurally "the code changed since you loaded", and it cannot be narrowed to "and you
+ *  missed it". It therefore fires on every save, including the overwhelming majority where hot
+ *  reload worked and the reader can SEE their change on the page. A prompt that is wrong nearly
+ *  every time it appears is one people learn to ignore, which costs more than the rare stale tab
+ *  it would catch. (A fourth attempt closed the last door: an applied hot update produces zero
+ *  entries in a `PerformanceObserver` on 'resource' — Turbopack ships the update over its socket,
+ *  so there is no network side effect to observe either.)
+ *
+ *  Production keeps it on because there the same comparison is exact: no page hot-updates, so a
+ *  build id that moved means this page IS the previous build.
+ *
+ *  Turn it on in dev when a tab is SUSPECTED stale — the symptom is UI that contradicts the
+ *  source, e.g. a fixed bug still reproducing — and the banner then answers whether the code
+ *  moved under it. */
+const ENABLED = IS_PROD || process.env.NEXT_PUBLIC_STALE_BANNER === '1';
+
 /**
  * Tells a page that the server's code has moved on without it.
  *
@@ -57,6 +77,7 @@ export function StaleBuildBanner() {
   const barRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    if (!ENABLED) return;
     let cancelled = false;
 
     const poll = async (): Promise<void> => {
@@ -88,7 +109,7 @@ export function StaleBuildBanner() {
     };
   }, []);
 
-  const visible = shouldWarnStaleBuild({ baseline, current, dismissed });
+  const visible = ENABLED && shouldWarnStaleBuild({ baseline, current, dismissed });
 
   useEffect(() => {
     if (!visible) {
