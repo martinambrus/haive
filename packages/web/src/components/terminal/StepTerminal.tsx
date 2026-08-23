@@ -271,6 +271,33 @@ function InvocationPanel({
         {invocation.providerLabel && (
           <span className="font-medium text-neutral-200">{invocation.providerLabel}</span>
         )}
+        {invocation.effort && invocation.effort.source !== 'none' && (
+          // Skipped only for 'none' — a CLI with no effort knob has nothing to report. A
+          // 'dropped' level IS rendered, in amber, because that is the case a user most needs
+          // to see: they set a level this adapter does not have, so the CLI silently used its
+          // own default. The source is shown at all because the level alone cannot tell a
+          // deliberate setting from an adapter default that happens to be the same value.
+          <span
+            className={
+              invocation.effort.source === 'dropped'
+                ? 'rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-amber-300'
+                : 'rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 text-violet-300'
+            }
+            title={
+              invocation.effort.source === 'step'
+                ? 'Effort set for this step'
+                : invocation.effort.source === 'provider'
+                  ? "Effort from the CLI provider's own setting"
+                  : invocation.effort.source === 'dropped'
+                    ? 'The configured effort level is not one this CLI has, so it was not sent and the CLI used its own default'
+                    : "Adapter default (this CLI's highest level)"
+            }
+          >
+            {invocation.effort.source === 'dropped'
+              ? 'effort not applied'
+              : `effort ${invocation.effort.level}`}
+          </span>
+        )}
         {isRunning ? (
           <span className="rounded border border-yellow-500/40 bg-yellow-500/10 px-1.5 py-0.5 uppercase tracking-wider text-yellow-300">
             running

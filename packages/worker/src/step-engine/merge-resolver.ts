@@ -439,6 +439,7 @@ async function dispatchFixAgent(
       taskId: params.taskId,
       taskStepId: current.id,
       cliProviderId: plan.providerId,
+      effort: plan.effort ?? null,
       mode: 'cli',
       prompt: plan.effectivePrompt ?? prompt,
     })

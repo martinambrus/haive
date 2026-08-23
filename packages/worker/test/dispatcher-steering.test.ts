@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { resolveDispatch } from '../src/orchestrator/dispatcher.js';
-import type { CliCommandSpec } from '../src/cli-adapters/types.js';
+import type { CliCommandSpec, EffortDecision } from '../src/cli-adapters/types.js';
 
 function stubAdapter(supportsSteering: boolean) {
   return {
     supportsCliAuth: true,
     supportsSubagents: true,
     supportsSteering,
+    // The dispatcher records the effort that reached the CLI on every plan it builds. This
+    // stub is not a BaseCliAdapter subclass, so it has to answer for itself; these tests are
+    // about steering, so it answers with the no-effort-knob case.
+    effortDecision: (): EffortDecision => ({ level: null, source: 'none' }),
     buildCliInvocation: (
       _p: unknown,
       prompt: string,

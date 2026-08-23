@@ -4,6 +4,28 @@ export type CliProviderRecord = typeof schema.cliProviders.$inferSelect;
 export type CliProviderName = CliProviderRecord['name'];
 export type CliAuthMode = CliProviderRecord['authMode'];
 
+/** The reasoning-effort level that actually reached the CLI, and where it came from.
+ *
+ *  Recorded per invocation because nothing else keeps it: the level is resolved at spawn and
+ *  then discarded, and the per-step preference row holds only its CURRENT value, so its next
+ *  write erases what past runs used.
+ *
+ *  `source` is load-bearing, not descriptive. An adapter whose scale.max is 'high' produces the
+ *  same LEVEL whether a human chose it or nobody did, and a model comparison cannot read a
+ *  deliberate setting off a default. The two are only distinguishable here.
+ *
+ *  Two ways to get a null level, and they are NOT the same fact. 'none' means the CLI has no
+ *  effort knob at all (gemini, amp, antigravity). 'dropped' means a level WAS configured and
+ *  this adapter does not have it, so nothing reached the CLI and it used its own internal
+ *  default — a live hazard here, since the scales genuinely differ (muse rejects `max`,
+ *  ollama's scale is not zai's), and today that failure is silent. Both stay distinguishable
+ *  from a NULL column, which means "not recorded at all".
+ *  Keep in sync with the `effort` jsonb on cli_invocations (@haive/database). */
+export interface EffortDecision {
+  level: string | null;
+  source: 'step' | 'provider' | 'scale_max' | 'dropped' | 'none';
+}
+
 export interface InvokeOpts {
   cwd?: string;
   timeoutMs?: number;

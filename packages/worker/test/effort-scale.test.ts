@@ -372,3 +372,57 @@ describe('ollama effort scale', () => {
     expect(env.CLAUDE_CODE_EFFORT_LEVEL).toBe('low');
   });
 });
+
+describe('effortDecision', () => {
+  const ollama = (effortLevel: string | null): CliProviderRecord =>
+    makeProvider({ id: 'p-ollama', name: 'ollama', effortLevel });
+
+  // The recorded form of the same resolution. It exists because the LEVEL alone cannot say
+  // whether a human chose it: ollama's scale.max is 'high', so a deliberate high and an
+  // adapter default are the same string.
+  it('names the step override as the source', () => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    expect(adapter.effortDecision(ollama('high'), { effortLevel: 'low' })).toEqual({
+      level: 'low',
+      source: 'step',
+    });
+  });
+
+  it("names the provider's own setting when nothing overrides it", () => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    expect(adapter.effortDecision(ollama('medium'), {})).toEqual({
+      level: 'medium',
+      source: 'provider',
+    });
+  });
+
+  it('names the adapter default when nobody set a level', () => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    expect(adapter.effortDecision(ollama(null), {})).toEqual({
+      level: adapter.effortScale!.max,
+      source: 'scale_max',
+    });
+  });
+
+  it('reports a level this adapter does not have as dropped, not as the default', () => {
+    // An out-of-scale level is dropped before it reaches the CLI, so the run used the CLI's
+    // OWN default — not scale.max, and not the level that was asked for. Recording either
+    // would credit the run to something that never ran. A live hazard: muse rejects `max`
+    // and ollama's scale is not zai's, so a preference carried between providers lands here.
+    const adapter = cliAdapterRegistry.get('ollama');
+    expect(adapter.effortDecision(ollama(null), { effortLevel: 'ultra' })).toEqual({
+      level: null,
+      source: 'dropped',
+    });
+  });
+
+  it("says 'none' for a CLI with no effort knob at all", () => {
+    // Must stay distinguishable from a NULL column, which means "not recorded".
+    const adapter = cliAdapterRegistry.get('gemini');
+    expect(adapter.effortScale).toBeNull();
+    expect(adapter.effortDecision(makeProvider({ id: 'p', name: 'gemini' }), {})).toEqual({
+      level: null,
+      source: 'none',
+    });
+  });
+});

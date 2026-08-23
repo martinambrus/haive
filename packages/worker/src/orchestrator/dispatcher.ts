@@ -5,6 +5,7 @@ import { CliAdapterRegistry, cliAdapterRegistry } from '../cli-adapters/registry
 import type {
   CliCommandSpec,
   CliProviderRecord,
+  EffortDecision,
   InvokeOpts,
   SubAgentInvocation,
   SubAgentSpec,
@@ -65,6 +66,11 @@ export interface DispatchPlan {
   /** The prompt after adapting shared capability-sensitive guidance to the
    *  provider that was actually selected. Present for kind:'prompt' plans. */
   effectivePrompt?: string;
+  /** The effort level that will actually reach the CLI, decided HERE — the one place that
+   *  holds the adapter, the provider and the resolved invokeOpts at once. Same doctrine as
+   *  model_identity: decide it where the evidence is, and let every insert site record the
+   *  decision rather than re-derive it. Null on a 'skip' plan, which runs nothing. */
+  effort?: EffortDecision | null;
   reason: string;
 }
 
@@ -257,6 +263,8 @@ function buildCliSidePlan(
       provider,
       invocation: { kind: 'cli', spec },
       effectivePrompt,
+      // Same invokeOpts the spec was built from, so the recorded level is the one the CLI got.
+      effort: adapter.effortDecision(provider, { ...invokeOpts, steeringMode }),
       reason: 'cli',
     };
   }
@@ -277,6 +285,7 @@ function buildCliSidePlan(
     adapter,
     provider,
     invocation: { kind: 'subagent', spec: split.invocation },
+    effort: adapter.effortDecision(provider, invokeOpts),
     reason: split.reason,
   };
 }

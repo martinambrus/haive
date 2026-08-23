@@ -781,6 +781,25 @@ export const cliInvocations = pgTable(
       source: 'stream-json' | 'gemini-stats' | 'antigravity-log' | 'provider-config' | null;
       match: 'exact' | 'differs' | 'unknown';
     }>(),
+    /** The reasoning-effort level that actually reached the CLI, and where it came from.
+     *  Resolved by the adapter (opts.effortLevel -> provider.effortLevel -> scale.max, with an
+     *  out-of-scale value dropped) and otherwise discarded, so nothing recorded what a run was
+     *  actually configured at — a per-step preference row holds only its CURRENT value and its
+     *  next write erases the history.
+     *
+     *  `source` is not decoration: an adapter whose scale.max IS 'high' produces the same level
+     *  whether a human chose it or nobody did, and telling those apart is the whole point.
+     *  A null level is one of two different facts: 'none' means the CLI has no effort knob at
+     *  all (gemini, amp, antigravity); 'dropped' means a level was configured that this adapter
+     *  does not have, so the CLI used its own default and nobody was told. Both stay
+     *  distinguishable from a NULL column, which means "not recorded at all".
+     *  Keep in sync with `EffortDecision` in the worker's cli-adapters/types.ts (this package
+     *  cannot import worker or shared — same note as tokenUsage above).
+     *  NULL on legacy rows. */
+    effort: jsonb('effort').$type<{
+      level: string | null;
+      source: 'step' | 'provider' | 'scale_max' | 'dropped' | 'none';
+    }>(),
     durationMs: integer('duration_ms'),
     containerId: varchar('container_id', { length: 255 }),
     errorMessage: text('error_message'),

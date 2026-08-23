@@ -6,6 +6,7 @@ import type {
   CliProviderName,
   CliProviderRecord,
   CliRulesFileMode,
+  EffortDecision,
   EffortScale,
   EnvInjection,
   InvokeOpts,
@@ -144,6 +145,25 @@ export abstract class BaseCliAdapter {
     const candidate = opts.effortLevel ?? provider.effortLevel ?? scale.max;
     if (!scale.values.includes(candidate)) return null;
     return candidate;
+  }
+
+  /** The effort level that actually reaches the CLI, and its provenance — the recorded form of
+   *  the same decision resolveEffortLevel makes, so there is ONE resolution rule rather than a
+   *  second one at the recording site.
+   *
+   *  Reports what was SENT, not what was asked for: an out-of-scale level is dropped before it
+   *  reaches the CLI, so a stale preference row naming a level this adapter does not have is
+   *  recorded as the fallback that actually ran, never as the level nobody honoured. */
+  effortDecision(provider: CliProviderRecord, opts: InvokeOpts = {}): EffortDecision {
+    if (!this.effortScale) return { level: null, source: 'none' };
+    const level = this.resolveEffortLevel(provider, opts);
+    // A scale exists but nothing resolved: the only way that happens is a configured level this
+    // adapter does not have, which resolveEffortLevel drops rather than forwards. Recorded as
+    // its own source because the run then used the CLI's own default and nobody was told.
+    if (level === null) return { level: null, source: 'dropped' };
+    if (opts.effortLevel === level) return { level, source: 'step' };
+    if (provider.effortLevel === level) return { level, source: 'provider' };
+    return { level, source: 'scale_max' };
   }
 
   protected resolveEffortEnv(

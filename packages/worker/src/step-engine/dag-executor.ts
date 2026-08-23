@@ -541,6 +541,7 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
         taskId: params.taskId,
         taskStepId: current.id,
         cliProviderId: plan.providerId,
+        effort: plan.effort ?? null,
         mode: 'cli',
         prompt: plan.effectivePrompt ?? prompt,
       })
@@ -791,6 +792,7 @@ async function spawnReviewAgent(
       taskId: ra.taskId,
       taskStepId: ra.current.id,
       cliProviderId: plan.providerId,
+      effort: plan.effort ?? null,
       // 'dag_parallel', not 'cli': the reviewer/fix-coder/advisor fan-out runs N
       // concurrent invocations on the ONE 06c step, so it must be exempt from the
       // one-live-per-step index (its concurrency is bounded by dag_agent_runs).
@@ -1307,6 +1309,7 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
         taskId: ea.taskId,
         taskStepId: ea.current.id,
         cliProviderId: plan.providerId,
+        effort: plan.effort ?? null,
         mode: 'cli',
         prompt: plan.effectivePrompt ?? prompt,
       })
@@ -1717,6 +1720,7 @@ export async function resolveDagPhase(
             taskId: ctx.taskId,
             taskStepId: current.id,
             cliProviderId: planDispatch.providerId,
+            effort: planDispatch.effort ?? null,
             // 'dag_parallel', not 'cli': N coders dispatch concurrently on the ONE
             // 06c step, so they must be exempt from the one-live-per-step index (the
             // per-issue barrier is task_dag_issues, not the singleton index).

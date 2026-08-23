@@ -1,0 +1,43 @@
+-- Effort level per invocation: what the CLI was actually asked to think at.
+--
+-- Haive resolves a reasoning-effort level for every invocation
+-- (InvokeOpts.effortLevel -> cli_providers.effort_level -> the adapter's scale.max, with a
+-- value outside the adapter's scale dropped) and then throws it away. The only persisted
+-- copy is user_step_cli_preferences.effort_level / user_step_cli_role_preferences, which
+-- holds one row per (user, step) and is OVERWRITTEN on every change — so it records the
+-- current setting, never what a past run used.
+--
+-- MEASURED cost of that gap: six adversarial-QA rounds comparing claude-opus-4-6, grok-4.6
+-- and glm-5.3 produced the largest single effect of the exercise — the same model on the
+-- same prompt moved from 0 to 3 blocking-severity findings and 12.5k to 26.8k output
+-- tokens when its effort was raised — and three of those six rounds cannot be attributed
+-- to an effort level at all, because the setting was changed afterwards.
+--
+-- Shape (kept in sync with `EffortDecision` in the worker's cli-adapters/types.ts):
+--   { level, source }
+-- `source` is 'step' | 'provider' | 'scale_max' | 'dropped' | 'none'. It is load-bearing rather than
+-- descriptive: glm-5.3's adapter scale.max IS 'high', so level alone cannot distinguish a
+-- deliberate choice from an adapter default, which is exactly the ambiguity that made two
+-- of those rounds hard to compare. A null level is two different facts: 'none' is an adapter
+-- with no effort scale at all (gemini, amp, antigravity), 'dropped' is a level that WAS
+-- configured and this adapter does not have, so the CLI silently used its own default —
+-- a live hazard, since the scales genuinely differ (muse rejects `max`, ollama's is not
+-- zai's). Both must stay distinguishable from "we did not record it".
+--
+-- jsonb rather than two columns, for the same reason as model_identity beside it: the pair
+-- is read whole for display, never filtered or joined on, and a level without its source is
+-- meaningless.
+--
+-- No NOT NULL and no default, and NO BACKFILL. Past rows genuinely have no recorded level;
+-- inferring one from today's preference row would fabricate exactly the evidence this
+-- column exists to provide. NULL means "not recorded", which is the truth about them.
+--
+-- No index: read by primary key with the row.
+--
+-- Additive + idempotent: a second run is a no-op, existing rows stay NULL, and nothing
+-- gates on the column, so leaving it after a code revert is harmless.
+--
+-- Rollback: ALTER TABLE "cli_invocations" DROP COLUMN IF EXISTS "effort";
+--           (No data loss beyond the observations themselves; nothing derives from them.)
+
+ALTER TABLE "cli_invocations" ADD COLUMN IF NOT EXISTS "effort" jsonb;

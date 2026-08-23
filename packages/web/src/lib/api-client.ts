@@ -1005,6 +1005,15 @@ export interface CliInvocationSummary {
     cacheCreationTokens?: number;
     costUsd?: number;
   } | null;
+  /** The reasoning-effort level this run actually got. `source` distinguishes a deliberate
+   *  setting from an adapter default that happens to be the same level — the level alone
+   *  cannot, which is the whole reason it is recorded. A null level is either 'none' (the CLI
+   *  has no effort knob) or 'dropped' (a level was configured that the adapter does not have,
+   *  so the CLI used its own default). Null on rows written before this was recorded. */
+  effort: {
+    level: string | null;
+    source: 'step' | 'provider' | 'scale_max' | 'dropped' | 'none';
+  } | null;
 }
 
 export interface CliInvocationOutput {

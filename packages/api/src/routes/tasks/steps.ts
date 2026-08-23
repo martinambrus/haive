@@ -1089,6 +1089,10 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
       createdAt: schema.cliInvocations.createdAt,
       errorMessage: schema.cliInvocations.errorMessage,
       tokenUsage: schema.cliInvocations.tokenUsage,
+      // The reasoning-effort level this run actually got, and where it came from. Recorded
+      // per invocation because nothing else keeps it: the preference row holds only its
+      // CURRENT value, so comparing two past runs at different levels is otherwise guesswork.
+      effort: schema.cliInvocations.effort,
       // Provider that ran this invocation, so the terminal badge can show which
       // CLI/model it was — important for multi-CLI loop steps (spec-quality).
       providerLabel: schema.cliProviders.label,
