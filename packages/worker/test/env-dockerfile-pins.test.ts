@@ -112,6 +112,47 @@ describe('renderDockerfile LSP version pins', () => {
     }
   });
 
+  // A pinned Chrome cannot come from apt -- Google's repo publishes one version and keeps no
+  // archive -- so the binary comes from Chrome for Testing while apt supplies only the
+  // dependency graph, taken from Chrome's own metadata via `apt-get satisfy`. The browser
+  // package itself must NOT be installed: it would put a second browser on the wire (~164 MB)
+  // only to be overwritten by the zip.
+  it('installs a pinned Chrome from Chrome for Testing, without a second browser', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      browserTesting: true,
+      browser: { type: 'chrome', version: '140.0.7339.207' },
+    } as never);
+    expect(df).toContain('chrome-for-testing-public/140.0.7339.207/linux64/chrome-linux64.zip');
+    expect(df).toContain('apt-get satisfy -y --no-install-recommends "$DEPS"');
+    expect(df).toContain('ln -sf /opt/chrome/chrome-linux64/chrome /usr/bin/chromium');
+    // Fetched once per host, not once per template -- the zip is 168 MB.
+    expect(df).toContain('--mount=type=cache,target=/opt/cft-cache');
+    // The deb is never installed on the pinned path.
+    expect(df).not.toMatch(/--no-install-recommends google-chrome-stable/);
+    // The X stack still comes from the same apt block (one index fetch).
+    for (const pkg of ['xvfb', 'x11vnc', 'socat']) expect(df).toContain(pkg);
+  });
+
+  it('leaves the system-default browser path exactly as it was', () => {
+    // No `browser` key at all is the rollback: it must render what it rendered before the
+    // picker existed -- apt's stable browser, and no Chrome for Testing anywhere.
+    const ubuntu = renderDockerfile('ubuntu:24.04', { browserTesting: true });
+    expect(ubuntu).toContain('google-chrome-stable');
+    expect(ubuntu).not.toContain('chrome-for-testing-public');
+    expect(ubuntu).not.toContain('apt-get satisfy');
+
+    const debian = renderDockerfile('debian:bookworm-slim', { browserTesting: true });
+    expect(debian).toMatch(/--no-install-recommends chromium /);
+    expect(debian).not.toContain('chrome-for-testing-public');
+
+    // An explicit null version is the same thing as absent.
+    const explicitDefault = renderDockerfile('ubuntu:24.04', {
+      browserTesting: true,
+      browser: { type: 'chrome', version: null },
+    } as never);
+    expect(explicitDefault).toBe(ubuntu);
+  });
+
   it('fails the build when the base cannot produce a working browser', () => {
     // The whole class of bug this guards: an image that builds fine and only reveals it has
     // no browser hours later, inside an MCP tool call during a verification step.

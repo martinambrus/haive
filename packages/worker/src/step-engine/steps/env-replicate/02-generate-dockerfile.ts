@@ -225,6 +225,16 @@ interface DeclaredDepsShape {
    *  rust-analyzer and jdtls are not pinnable and ignore any value here. */
   lspServerVersions?: Record<string, string | null>;
   browserTesting?: boolean;
+  /** Which browser the environment is tested in, and at which version.
+   *
+   *  `version` is a FULL Chrome for Testing version (e.g. 140.0.7339.207), not a milestone
+   *  number — the download URL needs all four parts. Null/absent means system default, which
+   *  renders exactly what it rendered before this existed and is therefore the rollback.
+   *
+   *  `type` is Chromium-family only. The agent browser path is chrome-devtools-mcp, which
+   *  speaks CDP, so a non-Chromium browser would leave 08a reporting a pass with no agent
+   *  browser at all. See docs/plans/nimble-browsing-lovelace.md. */
+  browser?: { type?: string; version?: string | null };
   /** chrome-devtools-mcp npm version pin baked into the env image (warm cache).
    *  Absent/empty = latest. The operative runtime pin is applied separately when
    *  the MCP server is launched (resolveMcpExtraFiles → buildDefaultMcpServers). */
@@ -509,30 +519,67 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     // container via `docker cp` (they can't be COPYed here — the env-image build
     // context is the repo, not the worker's docker assets).
     const ubuntu = isUbuntuBase(baseImage);
+    // A FULL Chrome for Testing version (e.g. 140.0.7339.207); empty = system default.
+    const pinnedChrome = (deps.browser?.version ?? '').trim();
+    const xStack = 'xvfb x11vnc socat procps fonts-dejavu';
     // ONE apt block, repo setup included. Each block ends by deleting
     // /var/lib/apt/lists, so a second block re-fetches the whole package index: MEASURED
     // 32.3 MB per `apt-get update`, three times over in a browserTesting build (96.9 MB of
-    // a 344 MB total). Adding the Google repo as its own step would have paid that a fourth
-    // time. The cost of merging is layer granularity -- editing the X-stack list now also
-    // reinstalls the browser -- which is the cheaper side of the trade, since that list
-    // changes far less often than env templates rebuild.
+    // a 344 MB total). Adding a repo as its own step would pay that again.
     lines.push('# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core');
-    if (ubuntu) {
-      // Ubuntu ships NO chromium deb: `chromium` has no candidate at all and
-      // `chromium-browser` is `Transitional package - chromium-browser -> chromium snap`,
-      // a stub that prints "snap install chromium" and exits 1 (MEASURED on ubuntu:24.04).
+    if (pinnedChrome) {
+      // A pinned version cannot come from apt: MEASURED, Google's repo publishes exactly ONE
+      // google-chrome-stable and keeps no archive, so `=<version>` resolves today and fails
+      // the day upstream ships the next release. Chrome for Testing is the only source that
+      // archives every build.
       //
-      // Google's apt repo rather than the Chrome for Testing zip because Chrome needs a
-      // long list of system libraries this image does not carry -- MEASURED, libnss3,
-      // libasound2, libatk, libcups, libpango, libxkbcommon and libatspi are all absent,
-      // since it was `apt install chromium` that used to drag them in. apt resolves them
-      // from the deb and keeps doing so across releases; a hand-written list would be
-      // release-specific (24.04 renamed several with a `t64` suffix) and break silently on
-      // the next base.
+      // But a CfT zip carries NO system libraries and this image has none. So take Chrome's
+      // dependency graph from its own package metadata and hand it to `apt-get satisfy`,
+      // which is constraint-aware. MEASURED: installing the names Chrome declares directly
+      // FAILS on Ubuntu 24.04 ("Package 'libasound2' has no installation candidate" -- two
+      // packages Provide that name, so apt refuses to choose), while satisfy resolves the
+      // same string to libasound2t64 and installs 121 packages WITHOUT google-chrome itself.
+      //
+      // Deps without the browser is the whole point. Installing google-chrome-stable merely
+      // for its dependencies would put a second browser on the wire: MEASURED 80 MB of deps
+      // here against ~164 MB for a deb that is then overwritten anyway.
+      //
+      // The repo is still added, because `apt-cache show` needs it for that metadata.
+      lines.push(`# Chrome pinned to ${pinnedChrome} (Chrome for Testing)`);
+      lines.push(...aptRun());
+      lines.push('    install -m 0755 -d /etc/apt/keyrings \\');
+      lines.push(
+        '    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \\',
+      );
+      lines.push('    && chmod a+r /etc/apt/keyrings/google-chrome.gpg \\');
+      lines.push(
+        '    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \\',
+      );
+      lines.push('    && apt-get update \\');
+      lines.push(`    && apt-get install -y --no-install-recommends unzip ${xStack} \\`);
+      lines.push(
+        '    && DEPS=$(apt-cache show google-chrome-stable | awk \'/^Depends:/{sub(/^Depends: /,""); print; exit}\') \\',
+      );
+      lines.push('    && apt-get satisfy -y --no-install-recommends "$DEPS"');
+      // Its own cache mount so a version is fetched once per HOST, not once per template:
+      // the zip is 168 MB and every browserTesting template would otherwise re-pull it.
+      lines.push('RUN --mount=type=cache,target=/opt/cft-cache,sharing=locked \\');
+      lines.push(`    f=/opt/cft-cache/chrome-linux64-${pinnedChrome}.zip; \\`);
+      lines.push(
+        `    [ -s "$f" ] || curl -fsSL -o "$f" "https://storage.googleapis.com/chrome-for-testing-public/${pinnedChrome}/linux64/chrome-linux64.zip"; \\`,
+      );
+      lines.push('    mkdir -p /opt/chrome && unzip -q -o "$f" -d /opt/chrome \\');
+      lines.push('    && ln -sf /opt/chrome/chrome-linux64/chrome /usr/bin/chromium');
+    } else if (ubuntu) {
+      // Ubuntu ships NO chromium deb: `chromium` has no candidate at all and
+      // `chromium-browser` is a snap redirect stub that exits 1 (MEASURED on ubuntu:24.04).
+      // Google's apt repo instead, which also resolves the ~15 system libraries the image
+      // lacks; a hand-written list would be release-specific (24.04's t64 renames) and break
+      // silently on the next base.
       //
       // Symlinked to /usr/bin/chromium so the path every consumer already assumes becomes
-      // true -- SANDBOX_CHROME_PATH in mcp-config, CHROME_PATH below, browser-check.js and
-      // 08a-browser-verify all name it, and none of them need to know what provided it.
+      // true -- SANDBOX_CHROME_PATH, CHROME_PATH, browser-check.js and 08a-browser-verify all
+      // name it, and none of them need to know what provided it.
       lines.push('# Ubuntu has no chromium deb (snap only) — take the browser from Google apt');
       lines.push(...aptRun());
       lines.push('    install -m 0755 -d /etc/apt/keyrings \\');
@@ -545,15 +592,13 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
       );
       lines.push('    && apt-get update \\');
       lines.push(
-        '    && apt-get install -y --no-install-recommends google-chrome-stable xvfb x11vnc socat procps fonts-dejavu \\',
+        `    && apt-get install -y --no-install-recommends google-chrome-stable ${xStack} \\`,
       );
       lines.push('    && ln -sf /usr/bin/google-chrome /usr/bin/chromium');
     } else {
       lines.push(...aptRun());
       lines.push('    apt-get update \\');
-      lines.push(
-        '    && apt-get install -y --no-install-recommends chromium xvfb x11vnc socat procps fonts-dejavu',
-      );
+      lines.push(`    && apt-get install -y --no-install-recommends chromium ${xStack}`);
     }
     const cdmVersion = (deps.chromeDevtoolsMcpVersion ?? '').trim();
     lines.push(`RUN npm install -g chrome-devtools-mcp${cdmVersion ? `@${cdmVersion}` : ''}`);
