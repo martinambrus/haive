@@ -10,6 +10,7 @@ import { api, apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
 import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
+import { describeRetry, describeStall, isStalled, type CliRetryInfo } from '@/lib/stream-health';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
@@ -48,6 +49,21 @@ interface CliStreamViewerProps {
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
+// Frames that prove the CLI itself is alive, and so re-arm the stall clock. `pong` is
+// excluded on purpose: it is the API answering our own keepalive ping, so a dead CLI on a
+// healthy socket would look busy forever. `error` is excluded too — the stream giving up is
+// not the CLI producing output. `connected` is handled separately: it carries the silence that
+// preceded this socket rather than proving anything about now.
+const STALL_CLOCK_FRAMES = new Set(['output', 'retry', 'retry_resolved', 'steer_consumed', 'exit']);
+// How often the stall verdict is recomputed. Well below the threshold itself, and it only
+// re-renders when the displayed minute count actually changes.
+const STALL_POLL_MS = 15_000;
+
+/** A server-sent elapsed duration, floored at 0. Anything unparseable means "just now". */
+function elapsedMs(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
 // How long the Clean tab may stay empty during a live run before we auto-switch the
 // user to the Raw tab. Ollama-class models stream thinking/assistant frames (which
 // land in Raw) and may not emit the first parsed `text` frame for a long time,
@@ -131,6 +147,15 @@ export function CliStreamViewer({
   // zero size until re-fit).
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+
+  // Stream health. `retry` holds the CLI's own most recent api_retry event and is cleared by
+  // the worker's retry_resolved frame (the next non-retry event it parsed) or by exit.
+  const [retry, setRetry] = useState<CliRetryInfo | null>(null);
+  // When the last CLI-activity frame arrived, and the stall verdict derived from it. A ref
+  // because every frame stamps it and none of them should re-render; the interval below turns
+  // it into state only when the rendered minute count actually changes.
+  const lastFrameAtRef = useRef<number | null>(null);
+  const [stall, setStall] = useState<{ since: number; now: number; minutes: number } | null>(null);
 
   useEffect(() => {
     onExitRef.current = onExit;
@@ -309,11 +334,47 @@ export function CliStreamViewer({
         return;
       }
       if (!parsed) return;
+      // Stall clock: stamped only by frames that prove the CLI is alive. Never by our own
+      // keepalive `pong` — that is the API answering us, so counting it would keep the clock
+      // armed forever and the stall badge could never fire.
+      //
+      // Stamped at the frame's own WRITE time, not its arrival: opening a terminal mid-run
+      // replays the whole buffer at once, and treating hours-old bytes as fresh would hide
+      // exactly the silence worth reporting. The API sends that age already elapsed, so no
+      // clock comparison with the server is involved.
+      if (STALL_CLOCK_FRAMES.has(parsed.type)) {
+        lastFrameAtRef.current = Date.now() - elapsedMs(parsed.ageMs);
+      }
       switch (parsed.type) {
         case 'connected':
           setState('connected');
           setErrorMsg(null);
           setSteerable(parsed.steerable === true);
+          // Continue an existing silence rather than restarting it. The API reports how long
+          // this stream has already been quiet — measured from its last frame, or from the
+          // invocation's start when it never produced one — so a terminal opened on a run that
+          // froze twenty minutes ago answers now instead of after another full threshold.
+          lastFrameAtRef.current = Date.now() - elapsedMs(parsed.idleMs);
+          break;
+        case 'retry': {
+          // The CLI hit a transient API failure and is retrying. Fields come straight from its
+          // own api_retry event; coerce defensively so a reshaped event degrades the wording
+          // rather than rendering NaN.
+          const attempt = Number(parsed.attempt);
+          if (!Number.isFinite(attempt)) break;
+          const maxRetries = Number(parsed.maxRetries);
+          const errorStatus = Number(parsed.errorStatus);
+          setRetry({
+            attempt,
+            maxRetries: Number.isFinite(maxRetries) ? maxRetries : null,
+            errorStatus: Number.isFinite(errorStatus) ? errorStatus : null,
+            error: typeof parsed.error === 'string' ? parsed.error : null,
+          });
+          break;
+        }
+        case 'retry_resolved':
+          // The worker parsed a non-retry event — the CLI is talking again.
+          setRetry(null);
           break;
         case 'output':
           if (typeof parsed.data === 'string') {
@@ -341,6 +402,9 @@ export function CliStreamViewer({
         case 'exit':
           setState('closed');
           setHasOutput(true);
+          // The run is over: whatever it was retrying or waiting for is no longer pending.
+          setRetry(null);
+          setStall(null);
           // The run ended — any steer that never reached a tool-call boundary was
           // never applied. Flip pending rows so they don't hang as "queued".
           setSteers((prev) =>
@@ -437,6 +501,30 @@ export function CliStreamViewer({
     return () => cancelAnimationFrame(id);
   }, [tab, cleanSupported]);
 
+  // Stall watch: a live stream that has produced nothing for STALL_THRESHOLD_MS. Only while the
+  // socket is connected, and never on a replay — a finished run is not stalled, it is finished.
+  // The verdict object is kept identical while the minute count is unchanged, so a quiet run
+  // re-renders once a minute rather than once a tick.
+  useEffect(() => {
+    if (isReplay || state !== 'connected') {
+      setStall(null);
+      return;
+    }
+    const evaluate = () => {
+      const since = lastFrameAtRef.current;
+      const now = Date.now();
+      if (since === null || !isStalled(since, now)) {
+        setStall((prev) => (prev === null ? prev : null));
+        return;
+      }
+      const minutes = Math.max(1, Math.floor((now - since) / 60_000));
+      setStall((prev) => (prev && prev.minutes === minutes ? prev : { since, now, minutes }));
+    };
+    evaluate();
+    const id = setInterval(evaluate, STALL_POLL_MS);
+    return () => clearInterval(id);
+  }, [isReplay, state]);
+
   // CR-only sequences confuse HTML pre-wrap; JSON.parse already turned \n/\t into
   // real characters, so stripping bare \r is all the escaping the prose needs.
   const cleanContent = useMemo(
@@ -512,6 +600,14 @@ export function CliStreamViewer({
   // Compact inline status driven by the most recent steer: shows the error or the
   // "queued" hint, and clears the moment that steer is consumed. The full per-steer
   // history lives behind the list popover.
+  // One badge for both health signals, retry first: an api_retry event is EVIDENCE of what went
+  // wrong, while a stall is only the absence of output — so when the CLI has told us, say that.
+  const health = retry
+    ? { kind: 'retry' as const, ...describeRetry(retry) }
+    : stall
+      ? { kind: 'stall' as const, ...describeStall(stall.since, stall.now) }
+      : null;
+
   const latestSteer = steers.length > 0 ? steers[steers.length - 1]! : null;
   const steerInline =
     latestSteer?.status === 'error'
@@ -617,6 +713,15 @@ export function CliStreamViewer({
           >
             Raw
           </TabButton>
+          {health && <StreamHealthBadge {...health} />}
+        </div>
+      )}
+      {/* Same badge where there is no tab row to hang it on: the cleanOnly split column, and a
+          run that streams a raw trace rather than prose. Both hide the header too, so without
+          this the two views that most need the signal would be the only ones without it. */}
+      {!showTabs && health && (
+        <div className="flex items-center">
+          <StreamHealthBadge {...health} />
         </div>
       )}
 
@@ -793,6 +898,61 @@ function StatusBadge({ state }: { state: ConnectionState }) {
 }
 
 // Small message-bubble glyph for the steer-list toggle (inline SVG, no icon dep).
+/** The stream-health indicator that sits beside the Clean/Raw tabs.
+ *
+ *  Breathing rather than static: a frozen terminal already looks like a still image, so the
+ *  animation is what separates "nothing is happening" from "something is wrong". Amber, not red
+ *  — neither state is a failure yet; both usually resolve on their own. The short word carries
+ *  which signal it is and the tooltip carries the reason. */
+function StreamHealthBadge({
+  kind,
+  label,
+  detail,
+}: {
+  kind: 'retry' | 'stall';
+  label: string;
+  detail: string;
+}) {
+  return (
+    <span
+      role="status"
+      title={detail}
+      aria-label={detail}
+      className="ml-1 flex items-center gap-1 rounded border border-amber-800/60 bg-amber-950/30 px-1.5 py-0.5 text-[11px] text-amber-300"
+    >
+      <DisconnectIcon />
+      <span className="tabular-nums">
+        {kind === 'retry' ? 'retry' : 'quiet'} {label}
+      </span>
+    </span>
+  );
+}
+
+function DisconnectIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="animate-pulse"
+      aria-hidden="true"
+    >
+      <path d="M12 20h.01" />
+      <path d="M8.5 16.429a5 5 0 0 1 7 0" />
+      <path d="M5 12.859a10 10 0 0 1 5.17-2.69" />
+      <path d="M19 12.859a10 10 0 0 0-2.007-1.523" />
+      <path d="M2 8.82a15 15 0 0 1 4.177-2.643" />
+      <path d="M22 8.82a15 15 0 0 0-11.288-3.764" />
+      <path d="m2 2 20 20" />
+    </svg>
+  );
+}
+
 function SteerIcon() {
   return (
     <svg

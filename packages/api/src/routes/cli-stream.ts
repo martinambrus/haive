@@ -47,15 +47,17 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
           return;
         }
         wss.handleUpgrade(req, socket, head, (ws) => {
-          runStreamSession(ws, invocationId, ownership.steerable).catch((err) => {
-            log.error({ err, invocationId }, 'cli-stream session crashed');
-            sendFrame(ws, { type: 'error', message: errorMessage(err) });
-            try {
-              ws.close(1011, 'internal_error');
-            } catch {
-              // ignore
-            }
-          });
+          runStreamSession(ws, invocationId, ownership.steerable, ownership.startedAt).catch(
+            (err) => {
+              log.error({ err, invocationId }, 'cli-stream session crashed');
+              sendFrame(ws, { type: 'error', message: errorMessage(err) });
+              try {
+                ws.close(1011, 'internal_error');
+              } catch {
+                // ignore
+              }
+            },
+          );
         });
       } catch (err) {
         log.error({ err, url: rawUrl }, 'cli-stream upgrade failed');
@@ -68,11 +70,27 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
 }
 
 interface StreamFrameOut {
-  type: 'connected' | 'output' | 'exit' | 'error' | 'pong' | 'steer_consumed';
+  type:
+    | 'connected'
+    | 'output'
+    | 'exit'
+    | 'error'
+    | 'pong'
+    | 'steer_consumed'
+    | 'retry'
+    | 'retry_resolved';
   invocationId?: string;
   /** On the `connected` frame: whether this invocation accepts mid-run steering
    *  (drives the web steer box). */
   steerable?: boolean;
+  /** On the `connected` frame: how long this stream has ALREADY been silent, so the viewer's
+   *  stall clock continues an existing silence instead of restarting it at connect. */
+  idleMs?: number;
+  /** On every forwarded frame: how long ago it was WRITTEN. A viewer connecting mid-run replays
+   *  the whole buffer from id 0, so without this the arrival of hours-old frames would restamp
+   *  the stall clock as if the CLI had just spoken. Server-computed elapsed time, not a
+   *  timestamp, so browser clock skew cannot make it negative. */
+  ageMs?: number;
   stream?: 'stdout' | 'stderr' | 'text';
   data?: string;
   code?: number;
@@ -80,15 +98,28 @@ interface StreamFrameOut {
   /** On the `steer_consumed` frame: the client steer id that was just drained at
    *  a tool-call boundary, so the viewer can tick the matching list row. */
   id?: string;
+  /** On the `retry` frame: the CLI's own api_retry fields, forwarded verbatim so the viewer
+   *  words the reason rather than the wire format doing it. `errorStatus` is absent when no HTTP
+   *  response arrived at all — which is itself the signal that the transport failed. */
+  attempt?: number;
+  maxRetries?: number;
+  errorStatus?: number;
+  error?: string;
 }
 
 async function runStreamSession(
   ws: WebSocket,
   invocationId: string,
   steerable: boolean,
+  startedAt: Date | null,
 ): Promise<void> {
   log.info({ invocationId }, 'cli-stream session opened');
-  sendFrame(ws, { type: 'connected', invocationId, steerable });
+  sendFrame(ws, {
+    type: 'connected',
+    invocationId,
+    steerable,
+    idleMs: await resolveIdleMs(invocationId, startedAt),
+  });
 
   // Dedicated Redis connection — XREAD BLOCK monopolizes the socket.
   const redis = getRedis().duplicate();
@@ -153,10 +184,16 @@ async function runStreamSession(
         lastId = id;
         const frame = fieldsToFrame(fields);
         if (!frame) continue;
+        frame.ageMs = entryAgeMs(id);
         if (frame.type === 'exit') {
           sendFrame(ws, frame);
           sawExit = true;
-        } else if (frame.type === 'output' || frame.type === 'steer_consumed') {
+        } else if (
+          frame.type === 'output' ||
+          frame.type === 'steer_consumed' ||
+          frame.type === 'retry' ||
+          frame.type === 'retry_resolved'
+        ) {
           sendFrame(ws, frame);
         }
       }
@@ -174,6 +211,39 @@ async function runStreamSession(
     clearInterval(keepalive);
     stop();
   }
+}
+
+/** Age of one stream entry. Redis entry ids are `<ms>-<seq>`, i.e. the write time. */
+function entryAgeMs(entryId: string): number {
+  const ms = parseInt(entryId.split('-')[0] ?? '', 10);
+  if (!Number.isFinite(ms)) return 0;
+  return Math.max(0, Date.now() - ms);
+}
+
+/** How long this stream has already been silent when the viewer connects.
+ *
+ *  Without it the viewer's stall clock would start at connect, so opening the terminal on a run
+ *  that froze twenty minutes ago would show nothing for another five — which is precisely the
+ *  moment the user opens it. Measured from the last stream entry (Redis entry ids ARE the write
+ *  time in ms) and, for a run that never wrote a byte at all, from the invocation's own
+ *  started_at. Sent as an ELAPSED duration rather than a timestamp so it is immune to clock skew
+ *  between this host and the browser. */
+async function resolveIdleMs(invocationId: string, startedAt: Date | null): Promise<number> {
+  const key = `${STREAM_PREFIX}${invocationId}`;
+  let sinceMs: number | null = null;
+  try {
+    const last = (await getRedis().xrevrange(key, '+', '-', 'COUNT', 1)) as Array<
+      [string, string[]]
+    >;
+    const id = last?.[0]?.[0];
+    const ms = id ? parseInt(id.split('-')[0] ?? '', 10) : NaN;
+    if (Number.isFinite(ms)) sinceMs = ms;
+  } catch (err) {
+    log.warn({ err, invocationId }, 'idle probe failed; falling back to started_at');
+  }
+  if (sinceMs === null && startedAt) sinceMs = startedAt.getTime();
+  if (sinceMs === null) return 0;
+  return Math.max(0, Date.now() - sinceMs);
 }
 
 function fieldsToFrame(fields: string[]): StreamFrameOut | null {
@@ -197,6 +267,21 @@ function fieldsToFrame(fields: string[]): StreamFrameOut | null {
     const id = map.get('id');
     if (typeof id === 'string') return { type: 'steer_consumed', id };
   }
+  if (stream === 'retry') {
+    // Redis stream fields are strings; a field the CLI's event did not carry is simply absent.
+    const attempt = parseInt(map.get('attempt') ?? '', 10);
+    if (!Number.isFinite(attempt)) return null;
+    const maxRetries = parseInt(map.get('maxRetries') ?? '', 10);
+    const errorStatus = parseInt(map.get('errorStatus') ?? '', 10);
+    return {
+      type: 'retry',
+      attempt,
+      maxRetries: Number.isFinite(maxRetries) ? maxRetries : undefined,
+      errorStatus: Number.isFinite(errorStatus) ? errorStatus : undefined,
+      error: map.get('error'),
+    };
+  }
+  if (stream === 'retry_resolved') return { type: 'retry_resolved' };
   return null;
 }
 
@@ -222,11 +307,11 @@ async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: stri
 async function verifyInvocationOwnership(
   invocationId: string,
   userId: string,
-): Promise<{ taskId: string; steerable: boolean } | null> {
+): Promise<{ taskId: string; steerable: boolean; startedAt: Date | null } | null> {
   const db = getDb();
   const inv = await db.query.cliInvocations.findFirst({
     where: eq(schema.cliInvocations.id, invocationId),
-    columns: { taskId: true, steerable: true },
+    columns: { taskId: true, steerable: true, startedAt: true },
   });
   if (!inv?.taskId) return null;
   const task = await db.query.tasks.findFirst({
@@ -234,7 +319,7 @@ async function verifyInvocationOwnership(
     columns: { userId: true },
   });
   if (!task || task.userId !== userId) return null;
-  return { taskId: inv.taskId, steerable: inv.steerable };
+  return { taskId: inv.taskId, steerable: inv.steerable, startedAt: inv.startedAt ?? null };
 }
 
 function extractInvocationId(rawUrl: string, pathPrefix: string): string | null {

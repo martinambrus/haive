@@ -20,7 +20,8 @@ export const STREAM_TTL_SECONDS = 600;
  *  stream expire mid-run; bump this if that config is raised past ~2h. */
 export const CLI_STREAM_LIVE_TTL_SECONDS = 3 * 60 * 60; // 3h
 
-export type StreamFrameKind = 'stdout' | 'stderr' | 'text' | 'exit' | 'steer_consumed';
+export type StreamFrameKind =
+  'stdout' | 'stderr' | 'text' | 'exit' | 'steer_consumed' | 'retry' | 'retry_resolved';
 
 export function streamKey(invocationId: string): string {
   return `${STREAM_PREFIX}${invocationId}`;
@@ -83,6 +84,65 @@ export async function publishCliSteerConsumed(
       .exec();
   } catch (err) {
     log.warn({ err, invocationId }, 'publishCliSteerConsumed failed');
+  }
+}
+
+/** Publish a `retry` frame: the CLI hit a transient API failure and is backing off. The viewer
+ *  shows a breathing indicator beside its tabs, because the run otherwise looks frozen.
+ *
+ *  Fields are written verbatim from the CLI's own api_retry event and only when it carried them
+ *  — an absent `errorStatus` is itself the signal that no HTTP response arrived. Wording is the
+ *  viewer's job. */
+export async function publishCliRetry(
+  invocationId: string | null | undefined,
+  info: {
+    attempt: number;
+    maxRetries: number | null;
+    errorStatus: number | null;
+    error: string | null;
+  },
+): Promise<void> {
+  if (!invocationId) return;
+  const fields: string[] = ['stream', 'retry', 'attempt', String(info.attempt)];
+  if (info.maxRetries !== null) fields.push('maxRetries', String(info.maxRetries));
+  if (info.errorStatus !== null) fields.push('errorStatus', String(info.errorStatus));
+  if (info.error) fields.push('error', info.error);
+  try {
+    // Same TTL refresh as publishCliChunk: any write keeps the live stream from leaking.
+    await getRedis()
+      .multi()
+      .xadd(streamKey(invocationId), 'MAXLEN', '~', STREAM_MAXLEN, '*', ...fields)
+      .expire(streamKey(invocationId), CLI_STREAM_LIVE_TTL_SECONDS)
+      .exec();
+  } catch (err) {
+    log.warn({ err, invocationId }, 'publishCliRetry failed');
+  }
+}
+
+/** Publish a `retry_resolved` frame: the CLI produced a non-retry event, so it is talking
+ *  again. Clears the viewer's indicator. */
+export async function publishCliRetryResolved(
+  invocationId: string | null | undefined,
+): Promise<void> {
+  if (!invocationId) return;
+  try {
+    await getRedis()
+      .multi()
+      .xadd(
+        streamKey(invocationId),
+        'MAXLEN',
+        '~',
+        STREAM_MAXLEN,
+        '*',
+        'stream',
+        'retry_resolved',
+        'at',
+        String(Date.now()),
+      )
+      .expire(streamKey(invocationId), CLI_STREAM_LIVE_TTL_SECONDS)
+      .exec();
+  } catch (err) {
+    log.warn({ err, invocationId }, 'publishCliRetryResolved failed');
   }
 }
 

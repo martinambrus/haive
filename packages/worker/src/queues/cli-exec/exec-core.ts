@@ -31,11 +31,13 @@ import {
 import { runInSandbox } from '../../sandbox/sandbox-runner.js';
 import {
   publishCliChunk,
+  publishCliRetry,
+  publishCliRetryResolved,
   publishCliSteerConsumed,
   wrapStreamCallback,
 } from '../cli-stream-publisher.js';
 import { log, type CliExecDeps, type ExecutionOutcome } from './_shared.js';
-import { createStreamJsonCollector } from './stream.js';
+import { createStreamJsonCollector, type StreamRetryInfo } from './stream.js';
 import {
   buildModelIdentity,
   requestedFromSpec,
@@ -617,11 +619,27 @@ export async function executeCliSpec(
     );
   }
 
+  // Stream health for the viewer: forward the binary's own api_retry events, and the first
+  // event of any other kind after one, as dedicated frames. Live runs only, like onProseText —
+  // a replay has nothing to be retrying.
+  const onRetry = invocationId
+    ? (info: StreamRetryInfo) => {
+        void publishCliRetry(invocationId, info);
+      }
+    : undefined;
+  const onRetryResolved = invocationId
+    ? () => {
+        void publishCliRetryResolved(invocationId);
+      }
+    : undefined;
+
   const collector = createStreamJsonCollector(
     statusCallback,
     onProseText,
     steer ? steer.onResult : undefined,
     onSteerBoundary,
+    onRetry,
+    onRetryResolved,
   );
   const codexCollector =
     outputFormat === 'codex-jsonl' ? createCodexJsonlCollector(onProseText) : null;

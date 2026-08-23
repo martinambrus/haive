@@ -7,6 +7,15 @@ import { normalizeClaudeUsage } from '../../cli-executor/usage-extract.js';
 import { classifyStreamFailure, OUTPUT_TRUNCATION_HEADLINE } from './failure-class.js';
 import { isPlaceholderModel, type StreamModelReport } from './model-identity.js';
 
+/** One `api_retry` event, carried verbatim. `errorStatus` is null when no HTTP response arrived
+ *  at all, which is what a transport failure looks like from inside the binary. */
+export interface StreamRetryInfo {
+  attempt: number;
+  maxRetries: number | null;
+  errorStatus: number | null;
+  error: string | null;
+}
+
 interface StreamJsonCollector {
   /** Feed raw stdout chunks. Parses NDJSON lines, emits progress, collects result. */
   onChunk: (chunk: string) => void;
@@ -49,8 +58,19 @@ export function createStreamJsonCollector(
    *  observable tool-call boundary at which Claude drains any stdin-queued steer
    *  messages. The steering tracker uses this to mark pending steers consumed. */
   onBoundary?: () => void,
+  /** Fired once per parsed `system`/`api_retry` event — the binary hit a transient API failure
+   *  and is backing off. The only in-band evidence that a frozen-looking terminal is waiting on
+   *  the network (or a rate limit) rather than on the model. */
+  onRetry?: (info: StreamRetryInfo) => void,
+  /** Fired once when a retry was outstanding and ANY other event is parsed. There is no
+   *  "recovered" event to key on — measured, the line after a successful retry is a plain
+   *  assistant event — so the CLI producing anything else at all IS the recovery signal. A
+   *  `system`/`thinking_tokens` line counts: it is the binary talking. */
+  onRetryResolved?: () => void,
 ): StreamJsonCollector {
   let buffer = '';
+  /** True between an api_retry event and the next event of any other kind. */
+  let retryPending = false;
   let resultText: string | null = null;
   let resultFired = false;
   let eventCount = 0;
@@ -112,6 +132,24 @@ export function createStreamJsonCollector(
 
     const type = event.type as string;
     const subtype = event.subtype as string | undefined;
+
+    // Retry state. Consecutive api_retry lines (measured: attempts 1..10 arrive back to back
+    // with nothing between them) keep the flag raised and only update the attempt; anything
+    // else clears it.
+    if (type === 'system' && subtype === 'api_retry') {
+      retryPending = true;
+      onRetry?.({
+        // Defaulting rather than dropping the signal: an event that stopped carrying `attempt`
+        // is still a retry, and "attempt 1" understates rather than invents.
+        attempt: typeof event.attempt === 'number' ? event.attempt : 1,
+        maxRetries: typeof event.max_retries === 'number' ? event.max_retries : null,
+        errorStatus: typeof event.error_status === 'number' ? event.error_status : null,
+        error: typeof event.error === 'string' ? event.error : null,
+      });
+    } else if (retryPending) {
+      retryPending = false;
+      onRetryResolved?.();
+    }
 
     if (type === 'rate_limit_event') {
       const info = event.rate_limit_info as typeof lastRateLimit;
