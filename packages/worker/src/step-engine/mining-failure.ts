@@ -1,4 +1,8 @@
-import { isFatalProviderFailure, isTransientCliFailure } from '../queues/cli-exec/failure-class.js';
+import {
+  fatalClassFromMessage,
+  isTransientCliFailure,
+  isTransientProviderApiError,
+} from '../queues/cli-exec/failure-class.js';
 import type { AgentMiningResult } from './step-definition.js';
 
 /** What a fan-out step actually got back for one named agent.
@@ -56,7 +60,7 @@ const NON_RETRYABLE_MINING_TERMINAL_ERROR_RE =
 // headline vocabulary at all — a provider SDK's own transport wording, which arrives as
 // raw agent output rather than as a Haive-stamped error.
 const TRANSIENT_MINING_TERMINAL_ERROR_RE =
-  /\b(?:connection (?:closed|reset|aborted|dropped)|socket hang up|econn(?:reset|refused)|network (?:error|failure)|fetch failed|stream ended prematurely|unexpected end of (?:stream|response)|timed? out|timeout)\b/i;
+  /\b(?:connection (?:closed|reset|aborted|dropped|lost|interrupted)|socket hang up|econn(?:reset|refused)|network (?:error|failure)|fetch failed|stream ended prematurely|unexpected end of (?:stream|response)|timed? out|timeout)\b/i;
 
 /** True when a failed fan-out agent deserves a fresh terminal, within its attempts budget.
  *
@@ -77,13 +81,19 @@ export function shouldRetryMiningTerminalFailure(result: AgentMiningResult): boo
     .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
     .join('\n');
   if (!diagnostic) return false;
-  if (
-    isFatalProviderFailure(diagnostic) ||
-    NON_RETRYABLE_MINING_TERMINAL_ERROR_RE.test(diagnostic)
-  ) {
-    return false;
-  }
+  // Fatal classes are NOT uniformly non-retryable, which is why this reads the class rather
+  // than isFatalProviderFailure's boolean. `auth` needs a human and `rate_limit` needs a window
+  // that has not moved — retrying either burns a run to learn nothing. A 5xx is the opposite:
+  // it is usually seconds long, and parking the whole TASK on the outage watch because one
+  // agent of twelve caught it is far heavier than trying again. Retry it here first; the watch
+  // still arms once the budget is spent, because exec-core stamps the class on the final failed
+  // row either way.
+  const fatal = fatalClassFromMessage(diagnostic);
+  if (fatal === 'auth' || fatal === 'rate_limit') return false;
+  if (NON_RETRYABLE_MINING_TERMINAL_ERROR_RE.test(diagnostic)) return false;
   return (
+    fatal === 'server_error' ||
+    isTransientProviderApiError(diagnostic) ||
     isTransientCliFailure({ errorMessage: diagnostic }) ||
     TRANSIENT_MINING_TERMINAL_ERROR_RE.test(diagnostic)
   );

@@ -8,6 +8,7 @@ import {
   isRuntimeOnlyFinding,
   verifyVerdicts,
   verifierAgentId,
+  retryableVerifiers,
   rootCauseKey,
   verificationForFinding,
   verificationTiers,
@@ -597,6 +598,75 @@ describe('08d PoC verification', () => {
         ),
       );
       expect(verificationForFinding(panel, KEY, 0, LENSES)).toBe('unverified');
+    });
+  });
+
+  describe('verifier retries', () => {
+    const LENSES = [{ id: 'execute', title: 'executes', lines: [] }] as never[];
+    const GROUP = { key: 'file:a.php', findings: [{ severity: 'high' } as never] };
+    const at = (attempt: number, status: 'done' | 'failed', raw: string | null, err?: string) =>
+      ({
+        agentId: verifierAgentId(GROUP.key, LENSES[0]!, attempt),
+        agentTitle: 'v',
+        invocationId: `inv-${attempt}`,
+        status,
+        output: null,
+        rawOutput: raw,
+        errorMessage: err ?? null,
+      }) as AgentMiningResult;
+    const DROPPED =
+      'LLM run reported a failure (terminal_reason "api_error"): API Error: Connection lost mid-response.';
+
+    it('gives attempt 0 the same id it had before retries existed', () => {
+      // Nothing in flight may change shape when this ships.
+      expect(verifierAgentId(GROUP.key, LENSES[0]!, 0)).toBe(
+        verifierAgentId(GROUP.key, LENSES[0]!),
+      );
+    });
+
+    it('re-runs a verifier the provider dropped', () => {
+      const out = retryableVerifiers([at(0, 'failed', null, DROPPED)], [GROUP], LENSES);
+      expect(out).toHaveLength(1);
+      expect(out[0]!.attempt).toBe(1);
+    });
+
+    it('does not re-run one that died on a rate limit', () => {
+      const fatal = 'Provider rate limit or quota exhausted — usage limit exhausted. (429)';
+      expect(retryableVerifiers([at(0, 'failed', null, fatal)], [GROUP], LENSES)).toHaveLength(0);
+    });
+
+    it('does not re-run a verifier that answered', () => {
+      const ok =
+        '```json\n' + JSON.stringify({ verdicts: [{ finding: 1, reproduced: true }] }) + '\n```';
+      expect(retryableVerifiers([at(0, 'done', ok)], [GROUP], LENSES)).toHaveLength(0);
+    });
+
+    it('does not re-run a group the dispatch skipped entirely', () => {
+      // No row at all is an untestable group, not a failure.
+      expect(retryableVerifiers([], [GROUP], LENSES)).toHaveLength(0);
+    });
+
+    it('stops after the attempt cap rather than retrying forever', () => {
+      const dead = [
+        at(0, 'failed', null, DROPPED),
+        at(1, 'failed', null, DROPPED),
+        at(2, 'failed', null, DROPPED),
+      ];
+      expect(retryableVerifiers(dead, [GROUP], LENSES)).toHaveLength(0);
+      // …and one attempt short of the cap still retries.
+      expect(retryableVerifiers(dead.slice(0, 2), [GROUP], LENSES)).toHaveLength(1);
+    });
+
+    it('reads the verdict a retry produced after the first attempt died', () => {
+      const ok =
+        '```json\n' + JSON.stringify({ verdicts: [{ finding: 1, reproduced: true }] }) + '\n```';
+      const results = [at(0, 'failed', null, DROPPED), at(1, 'done', ok)];
+      expect(verificationForFinding(results, GROUP.key, 0, LENSES)).toBe('reproduced');
+    });
+
+    it('stays unverified when every attempt died', () => {
+      const results = [at(0, 'failed', null, DROPPED), at(1, 'failed', null, DROPPED)];
+      expect(verificationForFinding(results, GROUP.key, 0, LENSES)).toBe('unverified');
     });
   });
 

@@ -399,6 +399,27 @@ export function fatalClassFromMessage(
   return null;
 }
 
+/** The claude-family binary names a provider-side fault on its result event as
+ *  `terminal_reason: "api_error"`, and stream.ts stamps it into the error message as
+ *  ` (terminal_reason "...")`. That stamp is OUR OWN format — written by stream.ts, read only
+ *  here — which is the same "internal contract we own end-to-end" convention CLI_TIMEOUT_HEADLINE
+ *  and OUTPUT_TRUNCATION_HEADLINE use, and the reason this keys on the stamp rather than on the
+ *  binary's prose.
+ *
+ *  MEASURED: the prose is exactly what a pattern cannot hold. "API Error: Connection lost
+ *  mid-response" matched nothing at all — TRANSIENT_MINING_TERMINAL_ERROR_RE lists connection
+ *  closed/reset/aborted/dropped but not LOST — so four of one round's five dead verifiers were
+ *  neither retried nor classified, and their findings reached the gate with no verdict.
+ *
+ *  Matches the VALUE, not the field: other terminal reasons (a refusal, a turn cap) are the
+ *  model's own answer and re-running them is a guess. A caller must still check the fatal
+ *  classes first — an api_error can be a 401 or a 429, and neither is worth a retry. */
+const TRANSIENT_TERMINAL_REASON_RE = /\(terminal_reason "api_error"\)/;
+
+export function isTransientProviderApiError(message: string | null | undefined): boolean {
+  return typeof message === 'string' && TRANSIENT_TERMINAL_REASON_RE.test(message);
+}
+
 /** True when an invocation errorMessage was built for a fatal provider failure
  *  (prefixed with one of PROVIDER_FATAL_HEADLINES by interpretCliFailure). Lets
  *  looping consumers (DAG escalation, merge-fix retry) fail fast instead of

@@ -108,17 +108,63 @@ describe('shouldRerollMiningAgent', () => {
     ).toBe(true);
   });
 
-  it('refuses an agent that died on a fatal provider failure', () => {
+  it('refuses an agent that died on a fatal provider failure a retry cannot clear', () => {
     // The bug this exists for: retryOnInvocationFailure vetoed the re-run at the barrier,
     // then apply() asked for the same agent through MiningRetryError and got it — a second
     // wave of doomed calls into an exhausted quota.
+    //
+    // Only these two. A rate limit needs a window that has not moved and an auth failure needs
+    // a human, so both spend a run to learn nothing; 5xx is the opposite and is covered below.
     for (const msg of [
       'Provider rate limit or quota exhausted — the provider usage limit is exhausted. (429)',
       'CLI authentication failed — re-authenticate your CLI.',
-      'Provider server error (service unavailable) — 503.',
     ]) {
       expect(shouldRerollMiningAgent([failed('a', msg)], 'a')).toBe(false);
     }
+  });
+
+  it('re-rolls a 5xx rather than parking the whole task on it', () => {
+    // A server error is usually seconds long. Parking the task on the outage watch because one
+    // agent of twelve caught it is far heavier than trying again — and the watch still arms
+    // once the per-agent budget is spent, because the final failed row keeps its class.
+    expect(
+      shouldRerollMiningAgent(
+        [failed('a', 'Provider server error (service unavailable) — 503.')],
+        'a',
+      ),
+    ).toBe(true);
+  });
+
+  it('re-rolls a provider fault the prose never named', () => {
+    // MEASURED: four of one round's five dead verifiers carried this verbatim and matched
+    // nothing — the transient list had connection closed/reset/aborted/dropped, not LOST.
+    // Keyed on the terminal_reason stamp stream.ts writes, so the next reword still matches.
+    expect(
+      shouldRerollMiningAgent(
+        [
+          failed(
+            'a',
+            'LLM run reported a failure (terminal_reason "api_error"): API Error: Connection lost mid-response.',
+          ),
+        ],
+        'a',
+      ),
+    ).toBe(true);
+  });
+
+  it('still refuses an api_error that is really a rate limit', () => {
+    // The stamp alone is not enough: a 429 carries it too, and the fatal class must win.
+    expect(
+      shouldRerollMiningAgent(
+        [
+          failed(
+            'a',
+            'Provider rate limit or quota exhausted (terminal_reason "api_error"): 429 too many requests',
+          ),
+        ],
+        'a',
+      ),
+    ).toBe(false);
   });
 
   it('refuses a deliberate stop and an unclassifiable failure', () => {

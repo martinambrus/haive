@@ -274,9 +274,68 @@ function verifyLensesFor(lensCount: number): (VerifyLens | null)[] {
  *  Hashed rather than truncated: a group key is a path, and two paths sharing their first 16
  *  characters (`installer/actions_step_4.php` and `installer/actions_step_7.php` share 22)
  *  would collide onto one agent id and silently answer for each other's findings. */
-export function verifierAgentId(groupKey: string, lens: VerifyLens | null): string {
+export function verifierAgentId(groupKey: string, lens: VerifyLens | null, attempt = 0): string {
   const hash = createHash('sha256').update(groupKey).digest('hex').slice(0, 16);
-  return `${QA_VERIFY_PREFIX}${hash}${lens ? `-${lens.id}` : ''}`;
+  const retry = attempt > 0 ? `-r${attempt}` : '';
+  return `${QA_VERIFY_PREFIX}${hash}${lens ? `-${lens.id}` : ''}${retry}`;
+}
+
+/** Total verifier attempts per group+lens, including the first. Matches
+ *  MAX_MINING_ORPHAN_REDISPATCH and DAG_MAX_INFRA_RETRIES so every infra retry budget in the
+ *  engine is the same number. */
+const MAX_VERIFY_ATTEMPTS = 3;
+
+/** The outcome of the LAST attempt for one group+lens, and which attempt that was.
+ *
+ *  A retried verifier gets a FRESH agent id rather than a second run under the old one, because
+ *  dispatchMiningAgents dispatches nothing for an agent that already has a row — re-throwing the
+ *  same id would silently exhaust the wave instead of retrying it. So the attempts form a chain
+ *  and this walks to its end. */
+function lastVerifyAttempt(
+  results: AgentMiningResult[],
+  groupKey: string,
+  lens: VerifyLens | null,
+): { attempt: number; outcome: ReturnType<typeof miningOutcome> } {
+  let attempt = 0;
+  let outcome = miningOutcome(results, verifierAgentId(groupKey, lens, 0));
+  for (let next = 1; next < MAX_VERIFY_ATTEMPTS; next++) {
+    const o = miningOutcome(results, verifierAgentId(groupKey, lens, next));
+    if (o.kind === 'absent') break;
+    attempt = next;
+    outcome = o;
+  }
+  return { attempt, outcome };
+}
+
+/** Verifier runs worth re-dispatching: the provider dropped the connection, not the model.
+ *
+ *  MEASURED on the round that motivated this: 5 of 12 verifiers died inside one 15-minute
+ *  provider window, and their 14 findings reached the gate with no verdict at all. Fail-closed
+ *  kept those findings blocking, so the cost was the invocations and the information — but a
+ *  wave that loses 42% of its panel to a transient fault is not telling the developer anything
+ *  about the code.
+ *
+ *  Shares shouldRetryMiningTerminalFailure with the adversary re-roll, so an auth failure or a
+ *  rate limit is never retried here either. */
+export function retryableVerifiers(
+  results: AgentMiningResult[],
+  groups: FindingGroup[],
+  lenses: (VerifyLens | null)[],
+): { group: FindingGroup; index: number; lens: VerifyLens | null; attempt: number }[] {
+  const out: { group: FindingGroup; index: number; lens: VerifyLens | null; attempt: number }[] =
+    [];
+  for (const [index, group] of groups.entries()) {
+    for (const lens of lenses) {
+      const { attempt, outcome } = lastVerifyAttempt(results, group.key, lens);
+      // `absent` is a group the dispatch skipped as untestable, not a failure to retry.
+      if (outcome.kind !== 'failed') continue;
+      if (attempt + 1 >= MAX_VERIFY_ATTEMPTS) continue;
+      const r = results.find((m) => m.agentId === verifierAgentId(group.key, lens, attempt));
+      if (!r || !shouldRetryMiningTerminalFailure(r)) continue;
+      out.push({ group, index, lens, attempt: attempt + 1 });
+    }
+  }
+  return out;
 }
 
 /** Is this finding's proof one that can only be run against a live endpoint?
@@ -462,9 +521,17 @@ export function verificationForFinding(
   lenses: (VerifyLens | null)[],
 ): 'reproduced' | 'not_reproduced' | 'unverified' | 'untestable' {
   const verdicts = lenses.map((lens) => {
-    const outcome = miningOutcome(results, verifierAgentId(groupKey, lens));
-    if (outcome.kind !== 'done') return null;
-    return verifyVerdicts(outcome.raw).get(index + 1) ?? null;
+    // Walk the attempt chain and take the first usable verdict. Only a FAILED attempt is ever
+    // retried, so an earlier attempt that answered is the only answer there is; scanning in
+    // order simply skips the ones a dropped connection killed.
+    for (let attempt = 0; attempt < MAX_VERIFY_ATTEMPTS; attempt++) {
+      const outcome = miningOutcome(results, verifierAgentId(groupKey, lens, attempt));
+      if (outcome.kind === 'absent') break;
+      if (outcome.kind !== 'done') continue;
+      const verdict = verifyVerdicts(outcome.raw).get(index + 1);
+      if (verdict) return verdict;
+    }
+    return null;
   });
   if (verdicts.some((v) => v === 'reproduced')) return 'reproduced';
   if (verdicts.length === 0) return 'unverified';
@@ -980,7 +1047,29 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       // the findings alone and never from the reach probe, which is re-run on this pass and can
       // disagree with the one that dispatched. Filtering members by reach here would renumber
       // the group and hand each finding its neighbour's verdict.
-      for (const tier of verificationTiers(findings, lenses)) {
+      const readTiers = verificationTiers(findings, lenses);
+      // Retry before scoring: a verdict lost to a dropped connection is not a verdict, and
+      // scoring first would write `unverified` onto findings a retry is about to answer for.
+      // Guarded on miningWaveExhausted so a retry wave that dispatches nothing cannot loop —
+      // the runner sets that flag and calls apply() again, and this must not ask twice.
+      if (args.miningWaveExhausted !== true) {
+        const retries = readTiers.flatMap((tier) =>
+          retryableVerifiers(allResults, tier.groups, tier.lenses).map((r) => ({
+            agentId: verifierAgentId(r.group.key, r.lens, r.attempt),
+            agentTitle: verifierTitle(r.group, r.index, tier.groups.length, r.lens),
+            prompt: buildVerifyPrompt(detected, r.group, r.lens),
+            roleKey: r.lens ? `qa-verify:${r.lens.id}` : 'qa-verify',
+          })),
+        );
+        if (retries.length > 0) {
+          ctx.logger.warn(
+            { retrying: retries.length, agentIds: retries.map((d) => d.agentId) },
+            'PoC verifiers died on a transient provider fault; re-running them',
+          );
+          throw new MiningWaveError(retries);
+        }
+      }
+      for (const tier of readTiers) {
         for (const group of tier.groups) {
           for (const [i, f] of group.findings.entries()) {
             const panel = verificationForFinding(allResults, group.key, i, tier.lenses);
