@@ -497,7 +497,25 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
         : '# Ruby (whatever the base suite ships)',
     );
     lines.push(...aptRun());
-    lines.push('    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev');
+    // build-essential, because a native gem extension needs a compiler and
+    // --no-install-recommends drops one. MEASURED on ubuntu:24.04 with exactly the apt line
+    // below: `cc`, `gcc` and `make` are all absent while ruby-dev's headers ARE present, so
+    // every native build dies in extconf -- `gem install bigdecimal` exits 1, and so does
+    // `gem install solargraph` (it needs prism), which FAILS THE IMAGE BUILD on the LSP line
+    // this generator emits a few blocks below.
+    //
+    // It did not fail for everyone, and the reason was worse than the bug: build-essential
+    // came from the NODE block, and node is pulled in by browserTesting, which defaults on.
+    // So Ruby worked as a side effect of an unrelated block and broke the moment a Ruby-only
+    // project turned browser testing off. Installing it here makes the block self-sufficient;
+    // a second apt install of an already-present package is a no-op, and both blocks share
+    // the same BuildKit cache mounts.
+    //
+    // libyaml is NOT listed: apt's ruby3.2 already depends on it (VERIFIED -- psych loads and
+    // rubygems works on this path once a compiler exists).
+    lines.push(
+      '    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential',
+    );
     lines.push('');
   }
 

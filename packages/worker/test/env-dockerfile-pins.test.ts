@@ -364,6 +364,24 @@ describe('renderDockerfile runtime version pins', () => {
     expect(node).toContain('https://deb.nodesource.com/setup_24.x');
   });
 
+  // The Ruby block used to borrow build-essential from the NODE block, which arrives only
+  // because browserTesting defaults on and pulls node in. A Ruby-only project with browser
+  // testing off therefore rendered `gem install solargraph` with no compiler -- MEASURED on
+  // ubuntu:24.04, that exits 1 and FAILS THE IMAGE BUILD (solargraph needs the native prism
+  // ext; `gem install bigdecimal` fails the same way).
+  it('gives the Ruby block its own compiler, with no browser or node declared', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['ruby'],
+      lspServers: ['solargraph'],
+      browserTesting: false,
+    } as never);
+    expect(df).not.toContain('nodesource');
+    const rubyBlock = df.slice(df.indexOf('# Ruby'), df.indexOf('# Language servers'));
+    expect(rubyBlock).toContain('build-essential');
+    // The compiler must land BEFORE the gem install that needs it.
+    expect(df.indexOf('build-essential')).toBeLessThan(df.indexOf('gem install solargraph'));
+  });
+
   // declaredDeps is folded into envTemplateHash, so a project declaring none of these must
   // render byte-identically to how it rendered before the fields existed -- otherwise every
   // environment forks a template row and rebuilds its image for no change.
