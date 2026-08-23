@@ -320,6 +320,10 @@ const APP_HEALTH_PROTOCOL = [
   '- The page must not render an application error, stack trace, or fatal — REGARDLESS of the',
   '  HTTP status. A server-side fatal renders happily inside a 200 response, so "the page',
   '  loaded" is not evidence that it worked. If you see one, that is a failure.',
+  '- A page whose CONTENT is an error message is a failure, whatever you believe caused it.',
+  '  "Expected", "known" and "pre-install" are NOT exemptions — a visitor cannot use the app',
+  '  either way. And a rendered sequence of file names and line numbers IS a stack trace, even',
+  '  when the app formats it as prose rather than as a crash dump.',
   '- An install, setup or first-run gate is acceptable ONLY if you can COMPLETE it from the',
   '  browser. Confirm it, do not assume it: a gate that refuses to run leaves a visitor with no',
   '  way forward and is a dead end, not a pre-install state. "Not installed yet" is a pass only',
@@ -364,6 +368,11 @@ const SCREENSHOT_PROTOCOL = [
 
 interface BrowserReport {
   pageTitle: string | null;
+  /** Rendered text of the page, truncated. Absent on reports from a runner built before the
+   *  probe returned it — the DDEV image BAKES the script while the app-runner docker-cp's it at
+   *  startup, so the two runtimes pick this up at different times. Its absence disables the
+   *  stack-trace trigger and nothing else. */
+  bodyText?: string;
   /** HTTP status of the app's main response; null when navigation got NO response
    *  (TLS/connection/DNS error or timeout) → the app was unreachable. Absent on
    *  legacy probe reports written before this field existed. */
@@ -1086,6 +1095,57 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
 const APP_FATAL_RE =
   /\bPHP (?:Fatal error|Parse error)\b|\bAllowed memory size of \d+ bytes exhausted\b/i;
 
+/** A page whose TITLE declares a failure.
+ *
+ *  The app's own statement about itself, which is far stronger evidence than anything inferred
+ *  from body content — MEASURED, the page that motivated this is titled exactly
+ *  "An Error Has Occured" while serving HTTP 200.
+ *
+ *  Vocabulary kept tight on purpose. These three words are what an app uses to DECLARE a
+ *  failure; adding softer ones ("warning", "problem", "sorry") buys little and costs precision,
+ *  and a false positive here spends a fix round. English-only, which is why the trace trigger
+ *  below exists alongside it. */
+const ERROR_TITLE_RE = /\b(error|exception|fatal)\b/i;
+
+/** A source location rendered into the page: `index.php (line 155)` or `index.php(155):`, the
+ *  two shapes PHP and most runtimes produce. */
+const TRACE_LOCATION_RE =
+  /[\w./-]+\.[A-Za-z][A-Za-z0-9]{0,5}\s*(?:\(\s*line\s+\d+\s*\)|\(\d+\)\s*:)/gi;
+
+/** How many source locations make it a stack trace rather than prose. Two, because a single
+ *  incidental "(line 12)" is something a page can legitimately say and a SEQUENCE is not. */
+const MIN_TRACE_LOCATIONS = 2;
+
+/** Is the app serving an error page rather than the application?
+ *
+ *  Neither the HTTP status nor the container log can answer this. MEASURED on the run that
+ *  motivated it: a caught database error renders a full error page — title, prose, and a
+ *  five-entry file/line sequence — at HTTP 200, and the log carries only the app's own
+ *  recursion guard, never the message. So the page itself is the only witness.
+ *
+ *  Two INDEPENDENT triggers rather than a conjunction: the title rule works on every runner
+ *  today, the trace rule needs a probe that reports bodyText and is language-independent.
+ *  Requiring both would have missed the measured case on any runner without bodyText. */
+function errorPageFailure(probe: BrowserReport, url: string): TestFailure | null {
+  const title = (probe.pageTitle ?? '').trim();
+  const body = (probe.bodyText ?? '').trim();
+  const titleSays = title.length > 0 && ERROR_TITLE_RE.test(title);
+  const traceCount = body ? (body.match(TRACE_LOCATION_RE) ?? []).length : 0;
+  const tracey = traceCount >= MIN_TRACE_LOCATIONS;
+  if (!titleSays && !tracey) return null;
+  // ONE failure however many triggers fired — the developer has one problem, not two.
+  const why = titleSays
+    ? `its title is "${title.slice(0, 80)}"`
+    : `it renders ${traceCount} source locations, which is a stack trace`;
+  return {
+    description:
+      `The application root (${url}) is serving an ERROR PAGE, not the application: ${why}. ` +
+      `HTTP status was ${probe.httpStatus ?? 'unknown'} — a server-side error renders inside a ` +
+      `200, so the status does not clear this.`,
+    evidence: (body || title).slice(0, 400),
+  };
+}
+
 /** The health rules themselves, separated from the I/O that feeds them so they can be tested
  *  without a live runner. Additive by construction: it only ever RETURNS failures, so no path
  *  through it can clear one the tester raised. */
@@ -1105,6 +1165,11 @@ export function appHealthFailures(
         `reach the app at all, whatever the spec asked for.`,
       evidence: `HTTP ${probe.httpStatus} at ${url}`,
     });
+  }
+  // An error page at HTTP 200: neither the status above nor the log below can see it.
+  if (probe) {
+    const errorPage = errorPageFailure(probe, url);
+    if (errorPage) failures.push(errorPage);
   }
   const hit = logTail
     .split('\n')

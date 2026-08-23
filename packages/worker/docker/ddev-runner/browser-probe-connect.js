@@ -44,6 +44,13 @@ async function run() {
   }
 
   const title = await page.title().catch(() => null);
+  // Rendered text of the page, truncated. Lets the worker tell an app that WORKS from one whose
+  // page IS an error at HTTP 200 — a caught database error renders a full error page with a
+  // stack trace and a 200 status, and neither the status nor the container log sees it.
+  // innerText, not innerHTML: markup would drown the signal and blow the budget.
+  const bodyText = await page
+    .evaluate(() => (document.body ? document.body.innerText : ''))
+    .catch(() => '');
 
   const errors = consoleMessages.filter((m) => m.level === 'error').map((m) => m.text);
   const warnings = consoleMessages.filter((m) => m.level === 'warning').map((m) => m.text);
@@ -51,6 +58,7 @@ async function run() {
   console.log(
     JSON.stringify({
       pageTitle: title,
+      bodyText: (bodyText || '').slice(0, 4000),
       httpStatus: httpStatus,
       consoleErrors: errors.slice(0, 50),
       consoleWarnings: warnings.slice(0, 50),

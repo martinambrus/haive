@@ -168,3 +168,93 @@ describe('appHealthFailures', () => {
     expect(appHealthFailures(probe(), prose, URL)).toEqual([]);
   });
 });
+
+describe('appHealthFailures: an error page at HTTP 200', () => {
+  const URL = 'https://app.ddev.site/';
+  const probe = (over: Record<string, unknown> = {}) =>
+    ({
+      pageTitle: 'Home',
+      httpStatus: 200,
+      consoleErrors: [],
+      consoleWarnings: [],
+      networkErrors: [],
+      passed: true,
+      ...over,
+    }) as never;
+
+  // Verbatim from the run that motivated this. HTTP 200, 1558 bytes, no PHP fatal in the log.
+  const MEASURED_TITLE = 'An Error Has Occured';
+  const MEASURED_BODY =
+    'An Error Has Occured There has been a problem found while trying to connect to a database. ' +
+    'Error location: File = /var/www/html/database.php Line = 235 Function = Db->Select ' +
+    "Extra Message = Table 'db.rs_modules' doesn't exist File Sequence " +
+    '/var/www/html/index.php (line 155) /var/www/html/init.php (line 582) ' +
+    '/var/www/html/mods.php (line 97) /var/www/html/mods/class_counter.php (line 60)';
+
+  it('fires on the title the app gave itself', () => {
+    const out = appHealthFailures(probe({ pageTitle: MEASURED_TITLE }), '', URL);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.description).toContain('ERROR PAGE');
+    // The status is named so nobody re-derives "but it returned 200".
+    expect(out[0]!.description).toContain('200');
+  });
+
+  it('fires on the rendered trace even when the title says nothing', () => {
+    // Language-independent half: a localised app would not match the title vocabulary.
+    const out = appHealthFailures(
+      probe({ pageTitle: 'Vitajte', bodyText: MEASURED_BODY }),
+      '',
+      URL,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.description).toContain('stack trace');
+  });
+
+  it('reports ONE failure when both triggers fire', () => {
+    // The developer has one problem, not two.
+    const out = appHealthFailures(
+      probe({ pageTitle: MEASURED_TITLE, bodyText: MEASURED_BODY }),
+      '',
+      URL,
+    );
+    expect(out).toHaveLength(1);
+  });
+
+  it('still fires on the title when the runner reports no bodyText', () => {
+    // The DDEV image bakes the probe script, so an existing runner keeps sending the old shape
+    // until it is rebuilt. Absence must disable the trace trigger and nothing else.
+    const out = appHealthFailures(probe({ pageTitle: MEASURED_TITLE }), '', URL);
+    expect(out).toHaveLength(1);
+  });
+
+  it('passes a healthy page', () => {
+    expect(
+      appHealthFailures(probe({ bodyText: 'Welcome to the site. Latest news.' }), '', URL),
+    ).toEqual([]);
+  });
+
+  it('does not fire on a single incidental line reference', () => {
+    // One "(line 12)" is something a page may legitimately say; a SEQUENCE is not.
+    const body = 'See the config example at settings.php (line 12) for details.';
+    expect(appHealthFailures(probe({ bodyText: body }), '', URL)).toEqual([]);
+  });
+
+  it('carries the page text as evidence so the fixer sees what the error said', () => {
+    const out = appHealthFailures(
+      probe({ pageTitle: MEASURED_TITLE, bodyText: MEASURED_BODY }),
+      '',
+      URL,
+    );
+    expect(out[0]!.evidence).toContain("Table 'db.rs_modules' doesn't exist");
+  });
+
+  it('adds to the other health failures rather than replacing them', () => {
+    // Additive by construction: no path through this can clear a failure already raised.
+    const out = appHealthFailures(
+      probe({ httpStatus: 500, pageTitle: MEASURED_TITLE }),
+      'PHP Fatal error: boom in /x.php on line 1',
+      URL,
+    );
+    expect(out.length).toBeGreaterThanOrEqual(3);
+  });
+});
