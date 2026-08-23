@@ -14,6 +14,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { detectOrigin, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
+import { findWorktreePathClaimant } from '../../../repo/worktree-claims.js';
 import {
   ForgeError,
   credentialForgeProvider,
@@ -529,6 +530,29 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
             : 'merge did not run; worktree kept.',
         };
       }
+    }
+
+    // Never remove a directory another live task is working in. Tasks handed the same
+    // branch name before 01-worktree-setup guarded against it share ONE worktree, so this
+    // task finishing would delete the other's tree mid-run. Not an error: the merge (if
+    // any) is already durable, and the sharer removes the worktree when it finishes.
+    const sharer = await findWorktreePathClaimant(ctx.db, {
+      worktreePath: d.worktreePath,
+      taskId: ctx.taskId,
+    });
+    if (sharer) {
+      ctx.logger.warn(
+        { worktreePath: d.worktreePath, sharerTaskId: sharer.id, sharerStatus: sharer.status },
+        'worktree is shared with another live task; left in place',
+      );
+      return {
+        action,
+        removed: false,
+        merged,
+        branchDeleted: false,
+        mode: 'worktree',
+        message: `${merged ? `merged ${d.branchName} into ${mergeTarget}; ` : ''}worktree kept: task "${sharer.title}" (${sharer.id}, ${sharer.status}) is still working in ${d.worktreePath}.`,
+      };
     }
 
     // Remove the worktree (merge_remove after a successful merge, or remove_only).

@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { findWorktreePathClaimant } from './worktree-claims.js';
 
 const exec = promisify(execFile);
 
@@ -80,6 +81,20 @@ export async function removeTaskWorktree(
     }
     worktreePath = output.worktreePath;
     branch = output.branchName ?? null;
+  }
+
+  // Another task may point at this exact directory: tasks that were handed the same
+  // branch name before 01-worktree-setup guarded against it share ONE worktree, because
+  // worktreeDirName maps a branch to exactly one path. Deleting it out from under a task
+  // that is still live destroys its working tree mid-flight, and the delete is not
+  // undoable — so leave it to whichever sharer releases last.
+  const sharer = await findWorktreePathClaimant(db, { worktreePath, taskId });
+  if (sharer) {
+    logger.warn(
+      { taskId, worktreePath, sharerTaskId: sharer.id, sharerStatus: sharer.status },
+      'worktree is shared with another live task; left in place',
+    );
+    return { removed: false, worktreePath, method: null, branch, branchDeleted: false };
   }
 
   // The parent clone that owns the linked worktree (storage_path = repo root).

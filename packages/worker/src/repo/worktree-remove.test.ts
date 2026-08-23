@@ -156,10 +156,20 @@ function mkDb(
   task: { worktreePath: string | null; worktreeBranch: string | null },
   storagePath: string,
   stepOutput: unknown = null,
+  /** Row findWorktreePathClaimant should see: another live task on the same worktree. */
+  sharer: { id: string; title: string; status: string } | null = null,
 ): Database {
+  // removeTaskWorktree reads `tasks` twice: its own row first, then (via
+  // findWorktreePathClaimant) any other live task pointing at the same path.
+  let taskCalls = 0;
   return {
     query: {
-      tasks: { findFirst: async () => ({ repositoryId: 'r1', ...task }) },
+      tasks: {
+        findFirst: async () => {
+          taskCalls += 1;
+          return taskCalls === 1 ? { repositoryId: 'r1', ...task } : (sharer ?? undefined);
+        },
+      },
       repositories: { findFirst: async () => ({ storagePath }) },
     },
     select: () => ({
@@ -226,6 +236,25 @@ describe('removeTaskWorktree', () => {
       const res = await removeTaskWorktree(db, 'task1');
       expect(res.removed).toBe(true);
       expect(res.branchDeleted).toBe(false);
+      expect(await branchExists(root, 'feat')).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Tasks handed the same branch name share ONE worktree directory (worktreeDirName maps
+  // a branch to exactly one path), so cancelling one must not delete the other's tree.
+  it('leaves the worktree alone when another live task is still using it', async () => {
+    const { root, wt } = await setupRepoWithWorktree();
+    try {
+      const db = mkDb({ worktreePath: wt, worktreeBranch: 'feat' }, root, null, {
+        id: 'task2',
+        title: 'Other task',
+        status: 'waiting_user',
+      });
+      const res = await removeTaskWorktree(db, 'task1');
+      expect(res).toMatchObject({ removed: false, worktreePath: wt, branchDeleted: false });
+      expect(await exists(wt)).toBe(true);
       expect(await branchExists(root, 'feat')).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -114,7 +114,11 @@ const logger = { info: () => {}, warn: () => {}, error: () => {} };
 // resolveMergePhase (writes) and apply (reads). resolveGitEnv reads users
 // (undefined -> fallback identity).
 function makeDb(
-  opts: { invocation?: { id: string; endedAt: Date | null; rawOutput?: string } } = {},
+  opts: {
+    invocation?: { id: string; endedAt: Date | null; rawOutput?: string };
+    /** Row findWorktreePathClaimant sees: another live task holding the same worktree. */
+    worktreeSharer?: { id: string; title: string; status: string };
+  } = {},
 ) {
   let mergeState: MergeResolveState | null = null;
   let status = 'running';
@@ -127,6 +131,7 @@ function makeDb(
   const db = {
     query: {
       users: { findFirst: async () => undefined },
+      tasks: { findFirst: async () => opts.worktreeSharer ?? undefined },
       taskSteps: { findFirst: async () => ({ id: 'step1', mergeResolveState: mergeState }) },
       cliInvocations: { findFirst: async () => opts.invocation ?? undefined },
       userStepCliRolePreferences: { findFirst: async () => undefined },
@@ -519,12 +524,19 @@ describe('12 pre-push base sync (origin advanced after 00a)', () => {
 });
 
 describe('12 worktree cleanup apply (non-merge actions)', () => {
-  const stubCtx = (parent: string) =>
+  const stubCtx = (parent: string, sharer?: { id: string; title: string; status: string }) =>
     ({
       repoPath: parent,
       userId: 'u1',
+      taskId: 'task1',
       taskStepId: 'step1',
-      db: { query: { users: { findFirst: async () => undefined } } },
+      db: {
+        query: {
+          users: { findFirst: async () => undefined },
+          // findWorktreePathClaimant: no sharer unless the test supplies one.
+          tasks: { findFirst: async () => sharer },
+        },
+      },
       logger,
     }) as unknown as StepContext;
 
@@ -538,6 +550,23 @@ describe('12 worktree cleanup apply (non-merge actions)', () => {
       expect(out.removed).toBe(true);
       expect(out.merged).toBe(false);
       expect(await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x'])).toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the worktree alone when another live task is still working in it', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      const out = await worktreeCleanupStep.apply(
+        stubCtx(parent, { id: 'task2', title: 'Other task', status: 'waiting_user' }),
+        applyArgs(det(wt), { action: 'remove_only' }),
+      );
+      expect(out.removed).toBe(false);
+      expect(out.message).toContain('task2');
+      // The directory and its branch both survive.
+      expect(await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x'])).toBe(0);
+      expect(await gitCode(wt, ['rev-parse', '--git-dir'])).toBe(0);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

@@ -4,12 +4,13 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import type { FormField, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
 import { ensureGitExcludeEntry, initGitWorkspace } from '../../../repo/git-init.js';
+import { findBranchClaimant } from '../../../repo/worktree-claims.js';
 import {
   WORKTREE_SUBDIR,
   sandboxWorktreePath,
@@ -29,8 +30,12 @@ interface WorktreeDetect {
   hasGit: boolean;
   currentBranch: string | null;
   isClean: boolean;
-  /** Pre-filled feature/fix branch name derived from the task title. */
+  /** Pre-filled feature/fix branch name derived from the task title, bumped past any
+   *  name already taken in this repo (`feature/x` -> `feature/x-2`). */
   proposedBranch: string;
+  /** The un-bumped proposal when `proposedBranch` had to be suffixed, else null. Drives
+   *  the form's collision note — a silently renamed default reads as a bug. */
+  proposalBumpedFrom: string | null;
   /** Base branch chosen + freshened by 00a-sync-base. Null when that step skipped
    *  (no git, no origin) or for an older task created before the step existed; the
    *  apply falls back to the parent's current branch in that case. */
@@ -90,6 +95,23 @@ export function proposeBranchName(title: string, isBug: boolean): string {
   return `${isBug ? 'fix' : 'feature'}/${slug}`;
 }
 
+/** First free name at or after `base`: `x`, `x-2`, `x-3`, … `taken` is asked about the
+ *  branch AND its worktree directory by the caller, because `worktreeDirName` flattens
+ *  slashes — `feature/x` and `feature-x` are distinct refs that land in one directory.
+ *  Bounded so a pathological repo cannot spin; apply's claim guard catches the rest. */
+export function nextFreeBranchName(
+  base: string,
+  taken: (name: string) => boolean,
+  limit = 50,
+): string {
+  if (!taken(base)) return base;
+  for (let n = 2; n <= limit; n += 1) {
+    const candidate = `${base}-${n}`;
+    if (!taken(candidate)) return candidate;
+  }
+  return `${base}-${limit + 1}`;
+}
+
 async function gitRun(
   cwd: string,
   args: string[],
@@ -107,6 +129,20 @@ async function gitRun(
       code: typeof e.code === 'number' ? e.code : 1,
     };
   }
+}
+
+/** Local branch names in the parent clone. An empty set on failure: a missing list must
+ *  only weaken the uniqueness proposal, never block setup — the claim guard in apply is
+ *  the check that has to be right. */
+async function listLocalBranches(repoPath: string): Promise<Set<string>> {
+  const res = await gitRun(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  if (res.code !== 0) return new Set();
+  return new Set(
+    res.stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean),
+  );
 }
 
 async function initGitRepo(
@@ -154,7 +190,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     });
     const title = task?.title ?? '';
     const category = (task?.metadata as { category?: string } | null)?.category ?? null;
-    const proposedBranch = proposeBranchName(
+    const baseProposal = proposeBranchName(
       title,
       isBugBranch(title, task?.description ?? null, category),
     );
@@ -166,15 +202,33 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     const gitDir = path.join(ctx.repoPath, '.git');
     const hasGit = await pathExists(gitDir);
     if (!hasGit) {
-      return { hasGit: false, currentBranch: null, isClean: true, proposedBranch, syncedBase };
+      return {
+        hasGit: false,
+        currentBranch: null,
+        isClean: true,
+        proposedBranch: baseProposal,
+        proposalBumpedFrom: null,
+        syncedBase,
+      };
     }
     const branch = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
     const status = await gitRun(ctx.repoPath, ['status', '--porcelain']);
+    // Never PROPOSE a name that already exists here. `git worktree add <path> <branch>`
+    // adopts an existing branch and its commits instead of forking the base 00a-sync-base
+    // freshened, and when that branch's worktree is still registered the new task silently
+    // shares the other task's directory.
+    const taken = await listLocalBranches(ctx.repoPath);
+    const takenDirs = new Set([...taken].map(worktreeDirName));
+    const proposedBranch = nextFreeBranchName(
+      baseProposal,
+      (name) => taken.has(name) || takenDirs.has(worktreeDirName(name)),
+    );
     return {
       hasGit: true,
       currentBranch: branch.code === 0 ? branch.stdout.trim() : null,
       isClean: status.code === 0 && status.stdout.trim().length === 0,
       proposedBranch,
+      proposalBumpedFrom: proposedBranch === baseProposal ? null : baseProposal,
       syncedBase,
     };
   },
@@ -213,19 +267,29 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     }
     // Base is chosen + freshened earlier by 00a-sync-base; show it read-only here.
     const base = detected.syncedBase ?? detected.currentBranch ?? 'main';
+    const fields: FormField[] = [
+      {
+        type: 'text',
+        id: 'branchName',
+        label: 'Feature branch name',
+        placeholder: 'feature/my-change',
+        default: detected.proposedBranch,
+        required: true,
+      },
+    ];
+    if (detected.proposalBumpedFrom) {
+      fields.push({
+        type: 'note',
+        id: 'branchTakenNote',
+        label: 'Branch name adjusted',
+        body: `**${detected.proposalBumpedFrom}** already exists in this repository, so **${detected.proposedBranch}** is proposed instead. Two tasks cannot share a branch — they would work in the same worktree directory. The original name frees up once the task holding it is completed or cancelled.`,
+        variant: 'info',
+      });
+    }
     return {
       title: 'Worktree setup',
       description: `Base branch: ${base}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. A new worktree will be created inside the repo at .haive/worktrees/<branch>, branched from ${base}.`,
-      fields: [
-        {
-          type: 'text',
-          id: 'branchName',
-          label: 'Feature branch name',
-          placeholder: 'feature/my-change',
-          default: detected.proposedBranch,
-          required: true,
-        },
-      ],
+      fields,
       submitLabel: 'Prepare workspace',
     };
   },
@@ -238,6 +302,31 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       commitMessage?: string;
     };
     const branchName = slugifyBranch(values.branchName ?? 'feature-task');
+
+    // Refuse a branch another live task already holds, BEFORE any git mutation (an init
+    // that then failed would leave a half-set-up repo). The reuse path below is silent on
+    // purpose — a Retry must re-enter this task's own worktree — so without this check a
+    // second task adopts the first one's tree and branch and nothing reports it.
+    const owner = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { repositoryId: true },
+    });
+    if (owner?.repositoryId) {
+      const claimant = await findBranchClaimant(ctx.db, {
+        repositoryId: owner.repositoryId,
+        branchName,
+        taskId: ctx.taskId,
+      });
+      if (claimant) {
+        throw new Error(
+          `Branch "${branchName}" is already held by task "${claimant.title}" ` +
+            `(${claimant.id}, ${claimant.status}). Two tasks cannot share a branch — both ` +
+            `would work in the same worktree directory. Retry this step and pick a different ` +
+            `name, or finish/cancel that task first.`,
+        );
+      }
+    }
+
     const dirName = worktreeDirName(branchName);
     let base: string;
 
