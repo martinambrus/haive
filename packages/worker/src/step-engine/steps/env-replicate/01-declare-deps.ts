@@ -274,6 +274,10 @@ export interface DeclareDepsDetect {
   lspVersionByOption?: Record<string, string>;
   /** "version (latest)" label for the chrome-devtools-mcp browser-testing line. */
   chromeVersionLabel?: string;
+  /** Cached Chrome for Testing milestones for the version picker. Empty when the catalog has
+   *  never been refreshed or its feed is down, which collapses the picker to system default
+   *  rather than blocking the form — the cache is never a gate. */
+  browserVersions?: { version: string; label: string }[];
 }
 
 export interface DeclareDepsApply {
@@ -461,6 +465,20 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       if (v) lspVersionByOption[opt.value] = `${v} (latest)`;
     }
     const chromeNewest = newestByTool.get('chrome-devtools-mcp');
+    // Browser version catalog. A missing row, an empty list or a failed refresh all land the
+    // same way: no options, so the picker offers system default only.
+    // Defensive on BOTH axes, because this must never be able to break environment
+    // declaration: `?.` covers a client whose schema predates the table (a test double, or a
+    // worker running against an older @haive/database dist), and `.catch` covers the read
+    // itself failing. Either way the picker collapses to system default, which is the same
+    // outcome as an empty catalog and renders the pre-picker Dockerfile.
+    const browserRow = await ctx.db.query.browserVersionCache
+      ?.findFirst({
+        where: eq(schema.browserVersionCache.browser, 'chrome'),
+        columns: { versions: true },
+      })
+      .catch(() => undefined);
+    result.browserVersions = browserRow?.versions ?? [];
     result.repositoryId = repositoryId;
     result.cliSupportsLsp = cliSupportsLsp;
     result.lspVersionByOption = lspVersionByOption;
@@ -566,6 +584,30 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         description: `Installs headed Chromium + chrome-devtools-mcp (currently ${detected.chromeVersionLabel ?? 'latest'}) for the browser-verification steps.`,
         default: true,
       },
+      // Version picker for the browser the environment is tested in. Shown only when browser
+      // testing is on, mirroring how the DDEV webserver select keys off containerTool.
+      //
+      // Only offered when the catalog has entries. An empty list means the feed has never
+      // been refreshed or is down, and a select whose only option is the default is noise —
+      // omitting it leaves declaredDeps.browser absent, which renders exactly what it
+      // rendered before this existed.
+      ...(detected.browserVersions && detected.browserVersions.length > 0
+        ? [
+            {
+              type: 'select' as const,
+              id: 'browserVersion',
+              label: 'Chrome version',
+              description:
+                'Which Chrome the browser-verification steps run against. System default takes whatever the package source serves at build time; a pinned version is fetched from Chrome for Testing, which is the only source that archives past releases.',
+              visibleWhen: { field: 'browserTesting', equals: true },
+              options: [
+                { value: '', label: 'System default (latest at build time)' },
+                ...detected.browserVersions.map((v) => ({ value: v.version, label: v.label })),
+              ],
+              default: '',
+            },
+          ]
+        : []),
       {
         type: 'textarea',
         id: 'extraPackages',
@@ -669,6 +711,11 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       lspServers,
       ...(cliSupportsLsp && repoLspVersions ? { lspServerVersions: repoLspVersions } : {}),
       browserTesting: values.browserTesting,
+      // Absent when nothing is pinned, so the generator renders its pre-picker output and the
+      // declared-deps hash is unchanged for every environment that does not use this.
+      ...(values.browserTesting && (values.browserVersion ?? '').trim()
+        ? { browser: { type: 'chrome', version: values.browserVersion!.trim() } }
+        : {}),
       ...(repoChromeMcpVersion ? { chromeDevtoolsMcpVersion: repoChromeMcpVersion } : {}),
       extraPackages: parseExtraPackages(values.extraPackages ?? ''),
     };
@@ -813,6 +860,8 @@ export interface DeclareDepsFormValues extends FormValues {
   lspServers?: LspKey[];
   preinstallDeps: boolean;
   browserTesting: boolean;
+  /** Full Chrome for Testing version, or '' for system default. */
+  browserVersion?: string;
   extraPackages: string;
 }
 

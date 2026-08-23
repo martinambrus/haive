@@ -134,3 +134,36 @@ export const envDepPresetsRelations = relations(envDepPresets, ({ one }) => ({
     references: [repositories.id],
   }),
 }));
+
+/**
+ * Cached browser version catalogs, one row per browser type.
+ *
+ * A cache, never a source of truth. Dropping this table loses nothing the next
+ * REFRESH_VERSIONS rebuilds, and an empty or errored row must degrade the declare-deps
+ * picker to "system default" only rather than blocking environment declaration — the same
+ * rule `openrouter_model_cache` follows for the model picker.
+ *
+ * Populated per browser from whatever source actually archives versions, which differ:
+ * Chrome from the Chrome for Testing milestone feed (42 entries; the 2478-entry
+ * known-good-versions feed is deliberately NOT used, it is unusable as a dropdown), and
+ * Edge from its apt index, which unlike Google's keeps old debs. Opera publishes only its
+ * current release, so it gets no row at all and can only ever be system default.
+ */
+export const browserVersionCache = pgTable('browser_version_cache', {
+  /** Browser type: `chrome`, `edge`. Matches declaredDeps.browser.type. */
+  browser: varchar('browser', { length: 32 }).primaryKey(),
+  versions: jsonb('versions')
+    .$type<
+      {
+        /** FULL version, e.g. 140.0.7339.207 — the download URL needs all four parts. */
+        version: string;
+        /** What the picker shows, e.g. "Chrome 140". */
+        label: string;
+      }[]
+    >()
+    .notNull()
+    .default([]),
+  fetchedAt: timestamp('fetched_at'),
+  fetchError: text('fetch_error'),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
