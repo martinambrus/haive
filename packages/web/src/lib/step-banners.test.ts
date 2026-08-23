@@ -19,7 +19,12 @@ const step = (over: Partial<StepBannerRow> = {}): StepBannerRow => ({
 });
 
 const PARK_COPY = 'Waiting for a free runtime slot — #1 of 2 waiting (8192 MB of 10941 MB in use)';
-const QUEUED_COPY = 'Queued — machine at capacity (2 parallel slots).';
+// The one line a queued invocation can carry: the runtime-holder reserve's, written at defer
+// time by a gate that knows why it is holding the job. Nothing is written at enqueue any more —
+// that mark named capacity it could not know and split one fan-out across two sentences.
+const QUEUED_COPY =
+  'Waiting — 2 tasks with a live environment have priority for the CLI slots. ' +
+  'Your run starts automatically.';
 
 describe('parkBanner', () => {
   it('shows while the step is parked', () => {
@@ -117,9 +122,9 @@ describe('invocationBanner', () => {
   });
 
   it('calls a started invocation running, whatever its copy says', () => {
-    // The bug: the queued mark is written after queue.add, so a job picked up immediately had its
-    // live "Waiting for AI analysis..." clobbered — a running CLI advertising "machine at
-    // capacity" while the task read `running` in the listing.
+    // The bug: a gate's waiting line races the run itself, so a job picked up immediately had
+    // its live "Waiting for AI analysis..." clobbered — a running CLI advertising that it was
+    // still waiting for a slot while the task read `running` in the listing.
     expect(
       invocationBanner(inv({ startedAt: '2026-07-24T15:44:12Z', statusMessage: QUEUED_COPY })),
     ).toEqual({ kind: 'running', text: QUEUED_COPY });
@@ -130,9 +135,10 @@ describe('invocationBanner', () => {
   });
 
   it('speaks for a queued run whose queue line was never written', () => {
-    // The mark is written only when every slot is busy AT ENQUEUE, so a burst fan-out leaves
-    // some jobs queued with no copy. Returning null there let the terminal fall through to its
-    // STEP's live status — a queued verifier rendering another terminal's work in running-blue.
+    // The common case, and since the enqueue mark was dropped it is nearly the only one: a
+    // queued run carries no copy unless a gate deferred it for a reason it could prove.
+    // Returning null there let the terminal fall through to its STEP's live status — a queued
+    // verifier rendering another terminal's work in running-blue.
     expect(invocationBanner(inv())).toEqual({ kind: 'queued', text: QUEUED_WAIT_TEXT });
   });
 

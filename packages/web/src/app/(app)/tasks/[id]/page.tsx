@@ -2936,8 +2936,8 @@ function StepCardImpl({
   // lib/step-banners is the single tested source of that rule.
   //
   // Global pause is one of those structural inputs: a parked step under pause is not waiting for
-  // a machine slot, it is waiting for the switch, and its stored "Queued — machine at capacity"
-  // line would otherwise promise a slot nothing is handing out. Cheap to read per card — the
+  // a machine slot, it is waiting for the switch, and its stored "Waiting for a free runtime
+  // slot" line would otherwise promise a slot nothing is handing out. Cheap to read per card — the
   // hook shares ONE poller across every consumer on the page.
   const globalPaused = useGlobalPause();
   const park = parkBanner(step, { taskEnded, paused: globalPaused });

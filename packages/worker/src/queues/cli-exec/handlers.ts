@@ -126,9 +126,9 @@ export async function handleCliExecJob(
 
   await db
     .update(schema.cliInvocations)
-    // Run truly begins here. Overwrite any "Queued — machine at capacity" text
-    // (set at enqueue) with the live default, so a multi-invocation step's blue
-    // status banner shows "Waiting for AI analysis…" instead of the stale queued
+    // Run truly begins here. Overwrite any waiting copy a gate wrote while this was held
+    // (markWaiting in agent-reserve.ts) with the live default, so a multi-invocation step's
+    // blue status banner shows "Waiting for AI analysis…" instead of the stale queued
     // message; the statusUpdater later refines it to the actual tool/activity.
     .set({ startedAt: new Date(), statusMessage: STATUS_DEFAULT_MESSAGE })
     .where(eq(schema.cliInvocations.id, row.id));

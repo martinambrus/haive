@@ -24,13 +24,16 @@
 export const PAUSED_WAIT_TEXT =
   'Paused — execution is paused, so this will not start until it resumes.';
 
-/** Copy for a queued run that never wrote a status line of its own.
+/** Copy for a queued run that never wrote a status line of its own — which is nearly all of
+ *  them, and by design.
  *
- *  The queued mark is written only when every slot is busy AT ENQUEUE (`queue.add` then a
- *  guarded update in task-queue.ts), so a fan-out enqueued in a burst leaves some of its jobs
- *  queued with no copy at all — nothing is wrong with them, the marker simply never fired.
- *  Deliberately vague about the REASON: a run can also be held by the pause gate, the per-task
- *  agent cap or the runtime-holder reserve, and naming capacity would be a guess.
+ *  Nothing is written at enqueue. A mark there used to fire when every slot happened to be busy
+ *  at `queue.add`, which split ONE fan-out across two sentences (the jobs that lost that race
+ *  got "machine at capacity", the rest got this line) and named a reason it could not know.
+ *  This copy is deliberately vague about the REASON instead: a run can be held by the pause
+ *  gate, the per-task agent cap or the runtime-holder reserve, and only a gate that actually
+ *  deferred the job knows which — so only a gate writes a specific line (markWaiting in
+ *  worker queues/cli-exec/agent-reserve.ts), and its words then replace these.
  *
  *  Supplying words here rather than returning null is what stops a queued run falling through to
  *  whatever a caller shows next — which is how a queued verifier terminal ended up displaying its
@@ -62,8 +65,8 @@ export function parkBanner(
   if (step.status !== 'pending') return null;
   if (step.waitingStartedAt == null) return null;
   // Paused overrides the stored queue line. The park marker is still the thing that proves the
-  // step is waiting — pause only changes WHY it is waiting, and the stored copy ("Queued —
-  // machine at capacity…") would otherwise promise a slot that no one is handing out. The
+  // step is waiting — pause only changes WHY it is waiting, and the stored copy ("Waiting for a
+  // free runtime slot — #1 of 2…") would otherwise promise a slot that no one is handing out. The
   // statusMessage guard is skipped here for the same reason: under pause the step is provably
   // waiting whether or not the park ever wrote its line.
   if (opts.paused) return { text: PAUSED_WAIT_TEXT };

@@ -43,11 +43,7 @@ import {
   type AdvanceStepResult,
   type WorkerDeps,
 } from '../step-engine/index.js';
-import {
-  releaseRuntimeReservation,
-  resolveAgentConcurrency,
-  runtimeAdmission,
-} from '../sandbox/runtime-admission.js';
+import { releaseRuntimeReservation, runtimeAdmission } from '../sandbox/runtime-admission.js';
 import {
   admissionKindFromRuntimeMode,
   classifyRuntime,
@@ -885,39 +881,22 @@ const workerDeps: WorkerDeps = {
       logger.warn({ err, userId: payload.userId }, 'fair-scheduling priority compute failed; FIFO');
     }
     await queue.add(CLI_EXEC_JOB_NAMES.INVOKE, payload, opts);
-    // Queued-status visibility: if every slot is busy at enqueue, the job will
-    // wait — mark the invocation so the UI shows an amber "machine busy" banner.
+    // No queued-status mark is written here, deliberately.
     //
-    // Guarded on started_at IS NULL, because this mark RACES the run itself: it is written after
-    // queue.add, so a job the worker picks up straight away has already stamped its live
-    // "Waiting for AI analysis..." (handlers.ts run-start) and this write would clobber it — a
-    // CLI that was genuinely running then advertised "Queued — machine at capacity", i.e. a task
-    // reading `running` in the listing while its own terminal claimed it was still waiting for a
-    // slot. Only an invocation that has NOT started can be queued, so let the DB decide rather
-    // than assuming the handler wins the race. (Migration 0106 repaired the rows already written.)
-    try {
-      // The effective number, not the raw setting: at 0 (auto) the cli-exec worker sizes
-      // itself from the free host budget, so reading the setting would compare against 0 and
-      // brand every single invocation "machine at capacity".
-      const concurrency = await resolveAgentConcurrency(3);
-      if ((await queue.getActiveCount()) >= concurrency) {
-        await getDb()
-          .update(schema.cliInvocations)
-          .set({
-            statusMessage: `Queued — machine at capacity (${concurrency} parallel slot${
-              concurrency === 1 ? '' : 's'
-            }). Your run starts automatically when a slot frees.`,
-          })
-          .where(
-            and(
-              eq(schema.cliInvocations.id, payload.invocationId),
-              isNull(schema.cliInvocations.startedAt),
-            ),
-          );
-      }
-    } catch (err) {
-      logger.warn({ err, invocationId: payload.invocationId }, 'queued-status mark failed');
-    }
+    // There used to be one: if every slot was busy at `queue.add`, this stamped the invocation
+    // "Queued — machine at capacity (N parallel slots)". It fired on a SNAPSHOT of a race it
+    // does not control, so a single fan-out split its own terminals across two sentences — the
+    // jobs enqueued while the queue happened to be full got that line, the ones a few
+    // milliseconds later got the generic wait copy, and one wave rendered as two states. It also
+    // named a reason it could not know: a queued run may be held by the pause gate, the per-task
+    // agent cap or the runtime-holder reserve, none of which is capacity.
+    //
+    // `started_at IS NULL` already PROVES a run is waiting, so the UI supplies the words
+    // (QUEUED_WAIT_TEXT in packages/web/src/lib/step-banners.ts) without needing a row written
+    // here, and it says only what is certain: this has not started, it starts when a slot frees.
+    // The gates that actually KNOW why they are holding a job still write their own line at
+    // defer time (markWaiting in queues/cli-exec/agent-reserve.ts) — evidence, not a guess, and
+    // that copy replaces the generic wording for exactly the runs it applies to.
   },
 };
 
