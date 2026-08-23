@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  appHealthFailures,
   browserVerifyStep,
   parseBrowserTestOutput,
   parseFixerOutput,
@@ -100,5 +101,70 @@ describe('browserVerifyStep.fixLoopOnError', () => {
 
   it('leaves a reaped runner on the hard-fail path', () => {
     expect(route('ddev restart failed: Error response from daemon: No such container')).toBe(false);
+  });
+});
+
+describe('appHealthFailures', () => {
+  const probe = (over: Record<string, unknown> = {}) =>
+    ({
+      pageTitle: 'Home',
+      httpStatus: 200,
+      consoleErrors: [],
+      consoleWarnings: [],
+      networkErrors: [],
+      passed: true,
+      ...over,
+    }) as never;
+  const URL = 'https://app.ddev.site/';
+  const FATAL =
+    '[23-Aug-2026 18:23:35] WARNING: [pool www] child 1793 said into stderr: "[23-Aug-2026 ' +
+    '18:23:35 Etc/UTC] PHP Fatal error:  Allowed memory size of 1073741824 bytes exhausted ' +
+    '(tried to allocate 77 bytes) in /var/www/html/error.php on line 54"';
+
+  it('fails a 4xx at the app root and names the status', () => {
+    // The measured case: three automated rounds called a 403 root a pre-install state and
+    // passed, and the developer met it at the gate.
+    const out = appHealthFailures(probe({ httpStatus: 403 }), '', URL);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.description).toContain('403');
+    expect(out[0]!.evidence).toContain('403');
+  });
+
+  it('fails a 5xx too', () => {
+    expect(appHealthFailures(probe({ httpStatus: 503 }), '', URL)).toHaveLength(1);
+  });
+
+  it('fails a fatal in the log even when the page returned 200', () => {
+    // The whole reason the log is read rather than the status: a PHP fatal renders inside a 200.
+    const out = appHealthFailures(probe({ httpStatus: 200 }), FATAL, URL);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.evidence).toContain('Allowed memory size');
+  });
+
+  it('reports both when the root is dead AND the log has a fatal', () => {
+    expect(appHealthFailures(probe({ httpStatus: 500 }), FATAL, URL)).toHaveLength(2);
+  });
+
+  it('passes a healthy page with a clean log', () => {
+    expect(appHealthFailures(probe(), 'GET / HTTP/1.1 200\nnothing wrong here', URL)).toEqual([]);
+  });
+
+  it('judges nothing when there is no probe', () => {
+    // "Could not measure" is not "measured clean" — but it must not invent a failure either;
+    // an app the probe cannot reach is already caught by the tester, which cannot test it.
+    expect(appHealthFailures(null, '', URL)).toEqual([]);
+  });
+
+  it('does not fail on an empty log tail', () => {
+    // ddevContainerFailureLogs returns '' on ANY failure, and app-runner mode passes '' by
+    // design. Neither may read as a fatal.
+    expect(appHealthFailures(probe(), '', URL)).toEqual([]);
+  });
+
+  it('does not fire on prose that merely mentions a fatal error', () => {
+    // A CMS page or a changelog can legitimately contain the words; the pattern needs PHP's
+    // own shape. This is why the check reads the error channel and not page text.
+    const prose = 'INFO: docs/errors.md describes what to do about a fatal error in production';
+    expect(appHealthFailures(probe(), prose, URL)).toEqual([]);
   });
 });

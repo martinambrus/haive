@@ -29,7 +29,11 @@ import {
 } from './_screenshots.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
-import { runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
+import {
+  ddevContainerFailureLogs,
+  runnerExec,
+  startBrowserDesktop,
+} from '../../../sandbox/ddev-runner.js';
 import { appAuthPromptLines, loginAppBrowser, type AppLoginOutcome } from './_app-auth.js';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import {
@@ -300,6 +304,31 @@ const VISUAL_PROTOCOL = [
   'A visibility/contrast/consistency failure is a BLOCKING test failure, same as a functional one.',
 ] as const;
 
+/** App health, asked UNCONDITIONALLY.
+ *
+ *  Deliberately NOT part of VISUAL_PROTOCOL. That block opens "mandatory for UI changes: for
+ *  every UI element this change touched", and the output contract tells a backend-only change to
+ *  report visual_verdict SKIPPED — so on a change like "Add DDEV" nobody is asked to look at the
+ *  page at all. A task reached the developer gate with a full-width PHP fatal on screen and an
+ *  installer that refused to run, having passed three automated rounds, because every question
+ *  asked was scoped to the change rather than to the application.
+ *
+ *  These three are about whether a VISITOR can use the app, which is true or false independently
+ *  of what the spec asked for. */
+const APP_HEALTH_PROTOCOL = [
+  'APP HEALTH (check this on EVERY run, including backend-only changes):',
+  '- The page must not render an application error, stack trace, or fatal — REGARDLESS of the',
+  '  HTTP status. A server-side fatal renders happily inside a 200 response, so "the page',
+  '  loaded" is not evidence that it worked. If you see one, that is a failure.',
+  '- An install, setup or first-run gate is acceptable ONLY if you can COMPLETE it from the',
+  '  browser. Confirm it, do not assume it: a gate that refuses to run leaves a visitor with no',
+  '  way forward and is a dead end, not a pre-install state. "Not installed yet" is a pass only',
+  '  when installing is actually possible.',
+  "- Judge from a first-time visitor's position, not only the spec's. If someone opening this",
+  '  URL could not reach a working application, that is a failure even when every acceptance',
+  '  criterion passes.',
+] as const;
+
 /** Where evidence screenshots go INSIDE the sandbox. Absolute on purpose: the MCP server
  *  resolves a relative filePath against its own working directory, which is not something
  *  the prompt should depend on. */
@@ -370,7 +399,7 @@ async function run() {
   await browser.close();
   const errors = consoleMessages.filter(m => m.level === 'error').map(m => m.text);
   const warnings = consoleMessages.filter(m => m.level === 'warning').map(m => m.text);
-  const httpBad = httpStatus !== null && httpStatus >= 500;
+  const httpBad = httpStatus !== null && httpStatus >= 400;
   console.log(JSON.stringify({ pageTitle: title, httpStatus: httpStatus, consoleErrors: errors.slice(0, 50), consoleWarnings: warnings.slice(0, 50), networkErrors: networkErrors.slice(0, 50), passed: errors.length === 0 && networkErrors.length === 0 && !httpBad }));
 }
 run().catch(err => { console.error(err.message); process.exit(1); });
@@ -627,12 +656,14 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     const lb = detected.liveBrowser;
     const probe = lb?.probe ?? null;
     // Pre-set the interactive verdict from the auto-probe: clean → approve; any
-    // console/network error or a 5xx → reject (the user can override after looking).
+    // console/network error or a 4xx/5xx → reject (the user can override after looking).
+    // Same root-is-the-front-door rule as the automated paths — this is the panel that
+    // greeted a developer with "approve" while the app's root was serving 403.
     const probeClean =
       probe != null &&
       probe.consoleErrors.length === 0 &&
       probe.networkErrors.length === 0 &&
-      !(probe.httpStatus != null && probe.httpStatus >= 500);
+      !(probe.httpStatus != null && probe.httpStatus >= 400);
     const infoSections: InfoSection[] = [];
     if (lb && lb.available === false && lb.reason) {
       infoSections.push({
@@ -1002,9 +1033,15 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
 
     const checkConsole = values.checkConsoleErrors !== false;
     const checkNetwork = values.checkNetworkErrors !== false;
-    // A 5xx (server crash — e.g. PHP memory exhaustion) is a hard fail even when no
-    // JS console/network error fired; 4xx (401/403/404) are fine for login-gated apps.
-    const httpBad = 'httpStatus' in report && report.httpStatus != null && report.httpStatus >= 500;
+    // Any 4xx/5xx at the app ROOT is a hard fail, even when no JS console/network error
+    // fired. The probe only ever navigates to appUrl, so this is always the entry point.
+    //
+    // This used to admit 4xx, justified as "fine for login-gated apps" — true of a PROTECTED
+    // path, false of the front door. MEASURED: a task reached the developer gate with its
+    // root serving 403 because the app was wedged mid-install, and every automated round had
+    // called that a pre-install state and passed. _app-auth.ts logs the browser in per task,
+    // so a 4xx here is a dead app rather than an expected gate.
+    const httpBad = 'httpStatus' in report && report.httpStatus != null && report.httpStatus >= 400;
     const passed =
       !httpBad &&
       (!checkConsole || report.consoleErrors.length === 0) &&
@@ -1036,6 +1073,107 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     };
   },
 };
+
+/** Signature of a fatal in the app's own error channel.
+ *
+ *  VOLATILE: this is upstream PHP wording, not a contract we own. Contained by design — the
+ *  check only ever ADDS a failure and can never clear one, so a reword falls through to exactly
+ *  today's behaviour rather than to a false pass. Same containment argument as
+ *  BILLING_EXHAUSTED_RE in failure-class.ts.
+ *
+ *  Read from the error CHANNEL, never from page text: a CMS page can legitimately contain the
+ *  words "Fatal error" (a docs page, a changelog), and the log cannot. */
+const APP_FATAL_RE =
+  /\bPHP (?:Fatal error|Parse error)\b|\bAllowed memory size of \d+ bytes exhausted\b/i;
+
+/** The health rules themselves, separated from the I/O that feeds them so they can be tested
+ *  without a live runner. Additive by construction: it only ever RETURNS failures, so no path
+ *  through it can clear one the tester raised. */
+export function appHealthFailures(
+  probe: BrowserReport | null,
+  logTail: string,
+  url: string,
+): TestFailure[] {
+  const failures: TestFailure[] = [];
+  // The status is NAMED, so the human at the gate can tell a dead front door from a generic
+  // failure and Skip or Retry deliberately. A null probe judges nothing — "could not measure"
+  // is not "measured clean".
+  if (probe?.httpStatus != null && probe.httpStatus >= 400) {
+    failures.push({
+      description:
+        `The application root (${url}) returned HTTP ${probe.httpStatus}. A visitor cannot ` +
+        `reach the app at all, whatever the spec asked for.`,
+      evidence: `HTTP ${probe.httpStatus} at ${url}`,
+    });
+  }
+  const hit = logTail
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => APP_FATAL_RE.test(l));
+  if (hit) {
+    failures.push({
+      description:
+        'The application logged a fatal error while serving the page. The page may still ' +
+        'return HTTP 200 — a server-side fatal renders inside one.',
+      evidence: hit.slice(0, 400),
+    });
+  }
+  return failures;
+}
+
+/** What the app itself says about its health, independent of what the tester reported.
+ *
+ *  Exists because every check in this step was scoped to the CHANGE. A task reached the
+ *  developer gate with its root serving 403, its database empty, its installer refusing to run
+ *  and a full-width PHP fatal on the page — and three consecutive automated rounds passed it,
+ *  correctly, because nothing in the spec ("Add DDEV") was violated and a backend-only change
+ *  sets visual_verdict SKIPPED so nobody was asked to look at the page at all.
+ *
+ *  Follows `verificationIncomplete` below: evidence over self-report. Returns failures rather
+ *  than a boolean so they reach BOTH the gate's rendering and buildFixerPrompt's work list —
+ *  a failure that is not in `failures` is invisible to both. */
+async function checkAppHealth(
+  ctx: StepContext,
+  appUrl: string,
+): Promise<{ ok: boolean; failures: TestFailure[] }> {
+  const failures: TestFailure[] = [];
+  try {
+    const runtime = await ensureAppServing(ctx);
+    const url = appUrl || runtime.url || '';
+    if (!url) return { ok: true, failures };
+
+    // Only the two modes that own a runner can be probed from inside it. 'host' and 'none'
+    // have no container to exec in, so they get no floor — stated here rather than left to a
+    // reader to infer from a crash.
+    const r =
+      runtime.mode === 'ddev'
+        ? await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${url}'`, {
+            timeoutMs: 60_000,
+          })
+        : runtime.mode === 'app-runner'
+          ? await appRunnerExec(
+              runtime.handle,
+              `node /opt/browser/browser-probe-connect.js '${url}'`,
+              { timeoutMs: 60_000 },
+            )
+          : null;
+    if (!r) return { ok: true, failures };
+    const probe = extractReport(r.output);
+
+    // DDEV only: app-runner has no equivalent capture, so it passes '' rather than pretending
+    // to have checked. Silently treating "could not look" as "looks fine" is the shape of bug
+    // this whole function exists to remove — but there is nothing better available yet, so the
+    // honest move is to say so here rather than invent a log-location resolver on one example.
+    const logTail = runtime.mode === 'ddev' ? await ddevContainerFailureLogs(runtime.handle) : '';
+    failures.push(...appHealthFailures(probe, logTail, url));
+  } catch (err) {
+    // Best-effort, exactly like the screenshot manifest below it: a health probe must never be
+    // able to fail a verification by failing itself. An unreachable app is already caught by
+    // the tester, which cannot test what it cannot load.
+    ctx.logger.warn({ err }, 'app health check failed; leaving the tester verdict alone');
+  }
+  return { ok: failures.length === 0, failures };
+}
 
 // --- MCP tester loop apply -------------------------------------------------
 
@@ -1130,7 +1268,21 @@ async function applyMcp(
     };
   }
   const visualFail = verdict.visualVerdict === 'UNSTYLED';
-  const passed = verdict.passed && !visualFail;
+  // The app-health floor. The tester's judgement may only make the verdict STRICTER, never
+  // laxer — which is the whole point: before this, `passed` was the model's boolean and nothing
+  // else, and a wedged app passed three rounds running. Only paid for when the tester says the
+  // run is good; a failure is already a failure.
+  const health =
+    verdict.passed && !visualFail
+      ? await checkAppHealth(ctx, detected.appUrl ?? '')
+      : { ok: true, failures: [] as TestFailure[] };
+  if (!health.ok) {
+    ctx.logger.warn(
+      { failures: health.failures.length },
+      'browser tester reported a pass but the app is not healthy — failing the verification',
+    );
+  }
+  const passed = verdict.passed && !visualFail && health.ok;
   const shots = [...shotsSoFar, ...verdict.screenshots];
   const artifactPath = await manifest(shots);
   // Evidence, not self-report: `manifest` takes existence from DISK and drops entries
@@ -1154,7 +1306,10 @@ async function applyMcp(
   );
   return {
     ...base,
-    failures: verdict.failures,
+    // Health failures join the tester's own: this array is what the gate renders AND what
+    // buildFixerPrompt turns into the fixer's work list, so one that is missing from it is
+    // invisible to both.
+    failures: [...verdict.failures, ...health.failures],
     visualVerdict: verdict.visualVerdict,
     checklistMarkdown: null,
     fixesApplied: fixesSoFar,
@@ -1162,7 +1317,8 @@ async function applyMcp(
     screenshotsArtifactPath: artifactPath,
     passed,
     verificationIncomplete,
-    fixScope: passed ? null : verdict.fixScope,
+    // A health failure is never "trivial" — the app is wedged, not one line wrong.
+    fixScope: passed ? null : !health.ok ? 'implementation' : verdict.fixScope,
     output: verdict.notes,
     source: 'tester',
   };
@@ -1192,6 +1348,8 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
     '',
     ...VISUAL_PROTOCOL,
     '',
+    ...APP_HEALTH_PROTOCOL,
+    '',
     ...SCREENSHOT_PROTOCOL,
     '',
     'Do NOT run git. Do NOT edit application code in this pass (a separate fix pass does that).',
@@ -1202,8 +1360,8 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
     'Put anything you established about this sandbox, its tooling or the running app into',
     '`notes` (including what you ruled out) — later agents are fresh processes and are given',
     'your notes so they need not re-derive it.',
-    'passed=false if ANY functional OR blocking visual check failed. visual_verdict SKIPPED for',
-    'backend-only changes. On a failure, set fix_scope "trivial" ONLY for a tiny self-evident bug',
+    'passed=false if ANY functional, app-health, OR blocking visual check failed. visual_verdict',
+    'SKIPPED for backend-only changes — that skips the VISUAL block only, never APP HEALTH. On a failure, set fix_scope "trivial" ONLY for a tiny self-evident bug',
     '(a JS typo, a one-line logic slip, a wrong CSS value) a focused fixer can patch in place; use',
     '"implementation" for anything needing real design/logic work or spanning multiple files (it',
     'routes back to the implementation agent). When passed=true, fix_scope is ignored.',
