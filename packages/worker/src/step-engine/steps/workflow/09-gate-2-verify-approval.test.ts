@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { recurrenceTag } from './09-gate-2-verify-approval.js';
+import { recurrenceKey } from './_review-findings.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 
 describe('gate-2 restartLoop diagnosis', () => {
@@ -289,5 +291,31 @@ describe('gate-2 status summary', () => {
     });
     expect(decisionDefault(d)).toBe('reject');
     expect(row(d, 'Runtime smoke')?.status).toBe('fail');
+  });
+});
+
+describe('recurrenceTag', () => {
+  const map = new Map<string, number[]>([
+    [recurrenceKey('peer-reviewer', 'src/a.ts'), [0, 2]],
+    [recurrenceKey('peer-reviewer', 'src/once.ts'), [1]],
+  ]);
+
+  it('is empty on a finding with no history — most findings, most rounds', () => {
+    expect(recurrenceTag(map, 'peer-reviewer', 'src/new.ts')).toBe('');
+    expect(recurrenceTag(new Map(), 'peer-reviewer', 'src/a.ts')).toBe('');
+  });
+
+  it('counts rounds including this one', () => {
+    expect(recurrenceTag(map, 'peer-reviewer', 'src/a.ts')).toBe('[repeat x3] ');
+    expect(recurrenceTag(map, 'peer-reviewer', 'src/once.ts')).toBe('[repeat x2] ');
+  });
+
+  it('is scoped to the reviewer — one reviewer repeating is not another repeating', () => {
+    expect(recurrenceTag(map, 'security-code-reviewer', 'src/a.ts')).toBe('');
+  });
+
+  it('survives a finding whose path is missing or not a string', () => {
+    expect(recurrenceTag(map, 'peer-reviewer', undefined)).toBe('');
+    expect(recurrenceTag(map, 'peer-reviewer', 42)).toBe('');
   });
 });

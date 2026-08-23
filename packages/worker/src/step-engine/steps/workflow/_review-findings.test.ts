@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   acceptRemainingReviewFindings,
   dispositionReviewFindings,
+  loadFindingRecurrence,
+  recurrenceKey,
   findingFingerprint,
   parseLineRange,
   recordReviewFindings,
@@ -322,5 +324,122 @@ describe('acceptRemainingReviewFindings', () => {
     await expect(
       acceptRemainingReviewFindings(db, 'task-1', 0, 'fix-loop-gate'),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('recurrenceKey', () => {
+  it('is per reviewer and per file, and normalises the path like findingFingerprint', () => {
+    expect(recurrenceKey('peer-reviewer', ' Src/A.ts ')).toBe(
+      recurrenceKey('peer-reviewer', 'src/a.ts'),
+    );
+    expect(recurrenceKey('peer-reviewer', 'a.ts')).not.toBe(
+      recurrenceKey('security-code-reviewer', 'a.ts'),
+    );
+    expect(recurrenceKey('peer-reviewer', 'a.ts')).not.toBe(recurrenceKey('peer-reviewer', 'b.ts'));
+  });
+
+  it('does not fold two different files onto a missing path', () => {
+    expect(recurrenceKey('peer-reviewer', null)).toBe(recurrenceKey('peer-reviewer', ''));
+  });
+});
+
+describe('loadFindingRecurrence', () => {
+  function ctxWithRows(rows: { reviewerId: string; path: string | null; round: number }[]) {
+    return {
+      taskId: 'task-1',
+      round: 3,
+      logger: { warn: () => {} },
+      db: { select: () => ({ from: () => ({ where: () => Promise.resolve(rows) }) }) },
+    } as unknown as StepContext;
+  }
+
+  it('groups distinct earlier rounds per reviewer and file', async () => {
+    const map = await loadFindingRecurrence(
+      ctxWithRows([
+        { reviewerId: 'peer-reviewer', path: 'a.ts', round: 0 },
+        // Same round twice: one reviewer can raise two findings in a file per round, and that
+        // is one round of history, not two.
+        { reviewerId: 'peer-reviewer', path: 'a.ts', round: 0 },
+        { reviewerId: 'peer-reviewer', path: 'a.ts', round: 2 },
+        { reviewerId: 'security-code-reviewer', path: 'a.ts', round: 1 },
+      ]),
+      3,
+    );
+    expect(map.get(recurrenceKey('peer-reviewer', 'a.ts'))).toEqual([0, 2]);
+    expect(map.get(recurrenceKey('security-code-reviewer', 'a.ts'))).toEqual([1]);
+  });
+
+  it('never queries on round 0 — there is no history to have', async () => {
+    let queried = false;
+    const ctx = {
+      taskId: 'task-1',
+      logger: { warn: () => {} },
+      db: {
+        select: () => {
+          queried = true;
+          return { from: () => ({ where: () => Promise.resolve([]) }) };
+        },
+      },
+    } as unknown as StepContext;
+    expect((await loadFindingRecurrence(ctx, 0)).size).toBe(0);
+    expect(queried).toBe(false);
+  });
+
+  it('degrades to empty rather than failing the gate that reads it', async () => {
+    const ctx = {
+      taskId: 'task-1',
+      logger: { warn: () => {} },
+      db: {
+        select: () => {
+          throw new Error('db down');
+        },
+      },
+    } as unknown as StepContext;
+    await expect(loadFindingRecurrence(ctx, 2)).resolves.toEqual(new Map());
+  });
+});
+
+describe('recordReviewFindings — recurrence count', () => {
+  it('stamps how many earlier rounds already flagged this reviewer+file', async () => {
+    const rows: Record<string, unknown>[] = [];
+    const ctx = {
+      taskId: 'task-1',
+      taskStepId: 'step-1',
+      round: 3,
+      logger: { warn: () => {} },
+      db: {
+        select: () => ({
+          from: () => ({
+            where: () =>
+              Promise.resolve([
+                { reviewerId: 'peer-reviewer', path: 'src/a.ts', round: 0 },
+                { reviewerId: 'peer-reviewer', path: 'src/a.ts', round: 2 },
+              ]),
+          }),
+        }),
+        insert: () => ({
+          values: (v: Record<string, unknown>[]) => {
+            rows.push(...v);
+            return { onConflictDoNothing: () => Promise.resolve() };
+          },
+        }),
+      },
+    } as unknown as StepContext;
+
+    await recordReviewFindings(ctx, '08c-code-review', [
+      {
+        reviewerId: 'peer-reviewer',
+        severity: 'high',
+        issue: 'reworded complaint',
+        path: 'src/a.ts',
+      },
+      { reviewerId: 'peer-reviewer', severity: 'high', issue: 'brand new', path: 'src/b.ts' },
+    ]);
+
+    const byPath = Object.fromEntries(rows.map((r) => [r.path, r.recurrenceCount]));
+    // Two earlier rounds, even though the wording differs each time — which is exactly what
+    // the fingerprint could not see.
+    expect(byPath['src/a.ts']).toBe(2);
+    expect(byPath['src/b.ts']).toBe(0);
   });
 });

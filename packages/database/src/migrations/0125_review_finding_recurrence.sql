@@ -1,0 +1,21 @@
+-- Recurrence counter on review findings.
+--
+-- A reviewer re-raising the same complaint round after round was invisible: nothing read
+-- review_findings at all, and the one key that could have detected it — `fingerprint` —
+-- hashes the ISSUE TEXT, so a reworded repeat hashes as a new finding. MEASURED across 9,750
+-- findings in 68 multi-round tasks: the fingerprint matches across rounds 5 times (0.05%),
+-- while (reviewer_id, path) matches 1,408 of 3,294 (42.7%). Reading the rows confirms those
+-- are one complaint re-raised, one of them across 19 rounds, every row still `open`.
+--
+-- Deliberately a COUNTER and not the `recurred` disposition value. Recurrence is orthogonal to
+-- a verdict (a finding can be refuted AND recurring, and disposition holds one value), and the
+-- two disposition UPDATE paths are guarded on `disposition = 'open'` — writing `recurred` there
+-- would hide the most-repeated findings from a gate-1.5 waiver and from the escalation gate's
+-- acceptance. `fixed` and `recurred` stay declared and unwritten.
+--
+-- Additive and idempotent: a default of 0 means every existing row reads as "not known to
+-- recur", which is exactly what is true of rows written before this counted. Backfilling is
+-- deliberately NOT attempted -- the historic counts are recoverable from the rows themselves at
+-- any time, and a backfill would assert a number for tasks whose reviewers never saw it.
+ALTER TABLE "review_findings"
+  ADD COLUMN IF NOT EXISTS "recurrence_count" integer NOT NULL DEFAULT 0;

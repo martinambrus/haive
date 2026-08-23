@@ -78,6 +78,19 @@ export const reviewFindings = pgTable(
     fingerprint: varchar('fingerprint', { length: 64 }).notNull(),
     /** Whether this finding contributed to the step's blocking decision. */
     blocking: boolean('blocking').notNull().default(false),
+    /** How many EARLIER rounds of this task already saw this reviewer flag this file.
+     *
+     *  A counter beside the verdict, NOT a disposition value, for two reasons. Recurrence is
+     *  orthogonal to a ruling — a finding can be both refuted and recurring — and `disposition`
+     *  holds one value. And the two UPDATE paths (`dispositionReviewFindings`,
+     *  `acceptRemainingReviewFindings`) are guarded on `disposition = 'open'`, so a `recurred`
+     *  written there would make exactly the most-repeated findings invisible to a gate-1.5
+     *  waiver and to the escalation gate's acceptance.
+     *
+     *  Keyed on (reviewer, path), not `fingerprint`: the fingerprint hashes the issue TEXT and
+     *  so identifies a phrasing, matching across rounds 5 times in 9,750 measured findings,
+     *  against 42.7% for (reviewer, path). See `recurrenceKey`. */
+    recurrenceCount: integer('recurrence_count').notNull().default(0),
     disposition: reviewFindingDispositionEnum('disposition').notNull().default('open'),
     dispositionAt: timestamp('disposition_at'),
     /** What set the disposition: a step id, 'fix_loop', or 'refuter'. */

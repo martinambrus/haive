@@ -44,7 +44,9 @@ import type { ReviewSeverity } from '@haive/shared/review';
 import {
   findingFingerprint,
   hasFileLineEvidence,
+  loadFindingRecurrence,
   recordReviewFindings,
+  recurrenceKey,
 } from './_review-findings.js';
 
 // Phase 6 — Code review (legacy phase6-code-review.md). After test management
@@ -137,6 +139,10 @@ interface CodeReviewApply {
   /** Blocking findings a refuter disproved. 0 when the pass is off or nothing blocked. */
   refutedCount: number;
   counts: { peer: number; securityCriticalHigh: number };
+  /** Complaints this task has already heard in earlier rounds, as a prose block for the
+   *  next fix round. Computed in apply() because fixLoop.evaluate is synchronous and has
+   *  no ctx, and empty on round 0 and whenever nothing repeats. */
+  recurringNote: string;
 }
 
 // Severity is coerced, not enum-validated: a repo's checked-in reviewer persona may
@@ -940,6 +946,41 @@ function diagnosisLine(f: {
   return `- [${f.severity}]${cwe} ${loc}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`;
 }
 
+/** The "you have tried this before" block handed to the next fix round.
+ *
+ *  Each fix round is a fresh `claude -p` with no memory of the previous ones.
+ *  loadPriorFixContext does carry earlier diagnoses, but dedupes them by
+ *  fixLoopFingerprint, which hashes prose and so treats a reworded repeat as new — the same
+ *  blind spot that let one complaint run 19 rounds. This states the count outright.
+ *
+ *  Names the reviewer and the FILE, never "the same defect": that is all the key measured.
+ *  Returns '' when nothing repeats, so round 0 and a healthy loop pay nothing. */
+export function buildRecurringNote(
+  entries: { reviewerId: string; path: string | null | undefined }[],
+  recurrence: Map<string, number[]>,
+): string {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const e of entries) {
+    const key = recurrenceKey(e.reviewerId, e.path);
+    if (seen.has(key)) continue;
+    const prior = recurrence.get(key);
+    if (!prior || prior.length === 0) continue;
+    seen.add(key);
+    lines.push(
+      `- ${e.reviewerId} has now flagged \`${(e.path ?? '').trim() || '(no file)'}\` in ${prior.length + 1} rounds of this task`,
+    );
+  }
+  if (lines.length === 0) return '';
+  return [
+    '### Already tried',
+    'These complaints survived earlier fix rounds, so whatever was done before did not resolve',
+    'them. Do not repeat that approach — either fix the underlying cause or state plainly why',
+    'the finding is wrong or cannot be fixed here.',
+    ...lines,
+  ].join('\n');
+}
+
 export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> = {
   metadata: {
     id: '08c-code-review',
@@ -977,6 +1018,8 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         if (!lensFindings.length) continue;
         parts.push(`### ${lens.title}\n` + lensFindings.map(diagnosisLine).join('\n'));
       }
+      // Last, so it reads as a caveat on the findings above rather than displacing them.
+      if (out.recurringNote) parts.push(out.recurringNote);
       return { blocking: true, diagnosis: parts.join('\n\n') || 'Code review requested changes.' };
     },
   },
@@ -1124,6 +1167,8 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         coverage: fileCoverage(args.detected.implementationFiles),
         refutedCount: 0,
         counts: { peer: 0, securityCriticalHigh: 0 },
+        // Nothing was reviewed, so nothing can have recurred.
+        recurringNote: '',
       };
     }
 
@@ -1362,6 +1407,24 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       'code review complete',
     );
 
+    // Built here, not in fixLoop.evaluate: that hook is synchronous and gets only the
+    // output. Scoped to the findings that would actually be sent back — a refuted or
+    // fenced-out finding costs no fix round, so its history is not the fixer's problem.
+    const recurrence = await loadFindingRecurrence(ctx, ctx.round);
+    const recurringNote = buildRecurringNote(
+      [
+        ...live(peerOut.findings).map((f) => ({ reviewerId: 'peer-reviewer', path: f.path })),
+        ...liveInScope(securityOut.findings).map((f) => ({
+          reviewerId: 'security-code-reviewer',
+          path: f.path,
+        })),
+        ...extraLenses.flatMap((lens) =>
+          live(lens.findings).map((f) => ({ reviewerId: lens.id, path: f.path })),
+        ),
+      ],
+      recurrence,
+    );
+
     return {
       reviewed: true,
       peer: peerOut,
@@ -1373,6 +1436,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       coverage: fileCoverage(args.detected.implementationFiles),
       refutedCount,
       counts: { peer: peerOut.findings.length, securityCriticalHigh },
+      recurringNote,
     };
   },
 };

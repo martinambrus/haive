@@ -7,6 +7,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { isOutOfScope } from '../_scope-fence.js';
+import { loadFindingRecurrence, recurrenceKey } from './_review-findings.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import {
@@ -236,6 +237,30 @@ function refutedTag(f: { refuted?: boolean }): string {
 function scopeTag(f: { in_scope?: unknown }): string {
   return isOutOfScope(f) ? '[pre-existing] ' : '';
 }
+
+/** Prefix marking a finding whose reviewer already flagged this FILE in earlier rounds.
+ *
+ *  Says reviewer+file, not "the same defect": the key behind it cannot tell two distinct
+ *  defects in one file apart, and claiming more than was measured is how a useful signal
+ *  turns into a misleading one. See recurrenceKey.
+ *
+ *  The count is total rounds INCLUDING this one, because that is the number a developer is
+ *  actually deciding about — "this is the 4th time" rather than "there were 3 before". */
+export function recurrenceTag(
+  recurrence: Map<string, number[]>,
+  reviewerId: string,
+  filePath: unknown,
+): string {
+  const prior = recurrence.get(
+    recurrenceKey(reviewerId, typeof filePath === 'string' ? filePath : ''),
+  );
+  return prior && prior.length > 0 ? `[repeat x${prior.length + 1}] ` : '';
+}
+
+/** Explains the tag once, beside the findings, instead of padding every line with it. */
+const RECURRENCE_LEGEND =
+  '_`[repeat xN]` = this reviewer has now flagged this file in N rounds of this task. ' +
+  'It marks a complaint that keeps coming back, not necessarily the identical defect._';
 
 interface Phase5aOutput {
   /** Absent on rows written before 08a reported it; treated as false. A pass with no
@@ -480,6 +505,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const phase8c = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08c-code-review');
     const pc = phase8c?.output as Phase8cOutput | null;
     let codeReview: VerifyGateDetect['codeReview'] = null;
+    // Earlier rounds only — this round's own rows must not make every finding look repeated.
+    const recurrence = await loadFindingRecurrence(ctx, ctx.round);
     if (pc?.reviewed) {
       codeReview = {
         peerVerdict: pc.peer?.verdict ?? 'DISCUSS',
@@ -492,14 +519,14 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         // at this gate is the one entitled to disagree with that. It no longer blocks,
         // and the implementer never saw it.
         peerFindings: (pc.peer?.findings ?? []).map((f) =>
-          `${refutedTag(f)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+          `${refutedTag(f)}${recurrenceTag(recurrence, 'peer-reviewer', f.path)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         securityFindings: (pc.security?.findings ?? []).map((f) =>
-          `${refutedTag(f)}${scopeTag(f)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+          `${refutedTag(f)}${scopeTag(f)}${recurrenceTag(recurrence, 'security-code-reviewer', f.path)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         lensFindings: (pc.extraLenses ?? []).flatMap((lens) =>
           (lens.findings ?? []).map((f) =>
-            `${refutedTag(f)}[${lens.title ?? lens.id ?? 'lens'}] [${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+            `${refutedTag(f)}${recurrenceTag(recurrence, lens.id ?? '', f.path)}[${lens.title ?? lens.id ?? 'lens'}] [${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
           ),
         ),
         positives: pc.peer?.positives ?? [],
@@ -875,6 +902,15 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       if (cr.positives.length > 0) {
         lines.push('', '## Positives');
         for (const p of cr.positives) lines.push(`- ${p}`);
+      }
+      // Only when something actually carries the tag — an unconditional legend is noise on
+      // the first round, which is most rounds.
+      if (
+        [...cr.securityFindings, ...cr.peerFindings, ...cr.lensFindings].some((f) =>
+          f.includes('[repeat x'),
+        )
+      ) {
+        lines.push('', RECURRENCE_LEGEND);
       }
       // An unreadable reviewer used to render as pass/OK and collapse its own evidence,
       // so a review that never completed looked like a clean one. A reviewer that asked

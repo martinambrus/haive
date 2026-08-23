@@ -13,6 +13,8 @@ import {
   lensAgentId,
   codeReviewStep,
 } from './08c-code-review.js';
+import { buildRecurringNote } from './08c-code-review.js';
+import { recurrenceKey } from './_review-findings.js';
 import { isOutOfScope } from '../_scope-fence.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
@@ -1383,5 +1385,47 @@ describe('08c mining seats', () => {
     for (const lens of lensesForLevel('enterprise')) {
       expect(registered.has(lens.id), lens.id).toBe(true);
     }
+  });
+});
+
+describe('buildRecurringNote', () => {
+  const map = new Map<string, number[]>([
+    [recurrenceKey('peer-reviewer', 'src/a.ts'), [0, 2]],
+    [recurrenceKey('security-code-reviewer', 'functions.php'), [1]],
+  ]);
+
+  it('is empty when nothing repeats, so a healthy loop pays nothing', () => {
+    expect(buildRecurringNote([{ reviewerId: 'peer-reviewer', path: 'src/new.ts' }], map)).toBe('');
+    expect(buildRecurringNote([], map)).toBe('');
+  });
+
+  it('counts rounds INCLUDING this one — the number being decided about', () => {
+    const note = buildRecurringNote([{ reviewerId: 'peer-reviewer', path: 'src/a.ts' }], map);
+    expect(note).toContain('in 3 rounds of this task');
+  });
+
+  it('claims reviewer+file, never "the same defect"', () => {
+    // The key cannot tell two distinct defects in one file apart, so the copy must not.
+    const note = buildRecurringNote([{ reviewerId: 'peer-reviewer', path: 'src/a.ts' }], map);
+    expect(note).toContain('has now flagged');
+    expect(note).not.toContain('same defect');
+  });
+
+  it('tells the fixer the previous approach did not work', () => {
+    const note = buildRecurringNote([{ reviewerId: 'peer-reviewer', path: 'src/a.ts' }], map);
+    expect(note).toContain('Already tried');
+    expect(note).toContain('Do not repeat that approach');
+  });
+
+  it('lists one line per reviewer+file, not one per finding', () => {
+    const note = buildRecurringNote(
+      [
+        { reviewerId: 'peer-reviewer', path: 'src/a.ts' },
+        { reviewerId: 'peer-reviewer', path: 'src/a.ts' },
+        { reviewerId: 'security-code-reviewer', path: 'functions.php' },
+      ],
+      map,
+    );
+    expect(note.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(2);
   });
 });
