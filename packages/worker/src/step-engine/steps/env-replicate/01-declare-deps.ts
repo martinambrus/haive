@@ -14,6 +14,8 @@ import type {
 } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import {
+  DEFAULT_GO_VERSION,
+  DEFAULT_RUST_VERSION,
   deriveEnvTemplateName,
   getTaskEnvTemplate,
   linkTaskToEnvTemplate,
@@ -331,11 +333,31 @@ const RUNTIME_OPTIONS: { value: LanguageKey; label: string }[] = [
 // Per-language runtime version fields. Each renders only when its language is
 // relevant to the project (detected in-repo or carried over from onboarding), so
 // irrelevant version boxes are hidden entirely.
-const VERSION_FIELDS: { id: string; label: string; language: LanguageKey; fallback: string }[] = [
+const VERSION_FIELDS: {
+  id: string;
+  label: string;
+  language: LanguageKey;
+  fallback: string;
+  description?: string;
+}[] = [
   { id: 'nodeVersion', label: 'Node.js version', language: 'node', fallback: '22' },
   { id: 'phpVersion', label: 'PHP version', language: 'php', fallback: '8.3' },
   { id: 'pythonVersion', label: 'Python version', language: 'python', fallback: '3.12' },
   { id: 'javaVersion', label: 'Java version', language: 'java', fallback: '17' },
+  { id: 'goVersion', label: 'Go version', language: 'go', fallback: DEFAULT_GO_VERSION },
+  { id: 'rustVersion', label: 'Rust version', language: 'rust', fallback: DEFAULT_RUST_VERSION },
+  // Ruby carries no fallback because the image has no pin to offer: apt ships exactly one
+  // interpreter per suite, so a declared version cannot be honoured without a version
+  // manager (out of scope — docs/plans/patient-pinning-kernighan.md). The field still
+  // records what the project asks for; the description says plainly that it is not applied.
+  {
+    id: 'rubyVersion',
+    label: 'Ruby version',
+    language: 'ruby',
+    fallback: '',
+    description:
+      'Recorded for reference only. The sandbox installs Ruby from apt, which ships one interpreter per base image, so this version is not applied.',
+  },
 ];
 
 export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply> = {
@@ -545,6 +567,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
           type: 'text',
           id: vf.id,
           label: vf.label,
+          ...(vf.description ? { description: vf.description } : {}),
           default: findVersion(detected.runtimes, vf.language) ?? vf.fallback,
           placeholder: vf.fallback,
         }),
@@ -716,6 +739,14 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         php: values.phpVersion || null,
         python: values.pythonVersion || null,
         java: values.javaVersion || null,
+        // Written only when declared, unlike the four above. declaredDeps is folded into
+        // `envTemplateHash`, so adding three always-present nulls would change the hash of
+        // EVERY existing environment and force each one to fork a template row and rebuild
+        // its image for no change at all. Absent keys leave the hash byte-identical for a
+        // project that declares none of these — the same reason `browser` is conditional.
+        ...(values.goVersion ? { go: values.goVersion } : {}),
+        ...(values.rustVersion ? { rust: values.rustVersion } : {}),
+        ...(values.rubyVersion ? { ruby: values.rubyVersion } : {}),
       },
       packageManagers,
       preinstallDeps: values.preinstallDeps ?? true,
@@ -890,6 +921,9 @@ export interface DeclareDepsFormValues extends FormValues {
   phpVersion?: string;
   pythonVersion?: string;
   javaVersion?: string;
+  goVersion?: string;
+  rustVersion?: string;
+  rubyVersion?: string;
   containerTool: ContainerTool;
   webserver?: WebserverType;
   databaseKind: DatabaseKind;

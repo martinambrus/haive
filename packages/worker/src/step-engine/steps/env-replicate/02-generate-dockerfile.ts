@@ -4,6 +4,8 @@ import type { FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { stableStringify } from './01-declare-deps.js';
 import {
+  DEFAULT_GO_VERSION,
+  DEFAULT_RUST_VERSION,
   findEnvTemplateByHash,
   getTaskEnvTemplate,
   hashDockerfile,
@@ -214,6 +216,9 @@ interface DeclaredDepsShape {
     php?: string | null;
     python?: string | null;
     java?: string | null;
+    go?: string | null;
+    rust?: string | null;
+    ruby?: string | null;
   };
   packageManagers?: Partial<Record<string, PackageManager | null>>;
   preinstallDeps?: boolean;
@@ -274,6 +279,39 @@ function aptRun(): string[] {
  *  two cannot drift apart. */
 function isUbuntuBase(baseImage: string): boolean {
   return /^ubuntu:/i.test(baseImage);
+}
+
+/** A declared version safe to interpolate into a RUN line or a comment: digits and dots
+ *  only, at most three parts.
+ *
+ *  Not cosmetic. These values default to a REPO-DERIVED capture — `rust-version = "..."`
+ *  from Cargo.toml, `ruby '...'` from a Gemfile — and a JS negated character class matches
+ *  a newline, so a crafted `Gemfile` can close the quote on a later line and carry its own
+ *  `RUN` into the generated Dockerfile. Anything that is not a plain version falls back to
+ *  the recorded default (Rust) or to the undeclared wording (Ruby), so a hostile repo gets
+ *  a working image rather than a shell. normalizeGoVersion filters the same way by
+ *  construction — it rebuilds the string from numeric parts. */
+function isPlainVersion(raw: string): boolean {
+  return /^\d+(\.\d+){0,2}$/.test(raw);
+}
+
+/** A declared Go version as it must appear in a go.dev release filename, or null when the
+ *  input carries no usable version (caller falls back to DEFAULT_GO_VERSION).
+ *
+ *  go.mod states `go 1.26`, and `go1.26.linux-amd64.tar.gz` DOES NOT EXIST — that name would
+ *  404 the build. MEASURED against go.dev 2026-08-23: the bare `X.Y` filename stops at 1.20
+ *  and the `X.Y.0` filename starts at 1.21 (go1.20 200 / go1.20.0 404 / go1.21 404 /
+ *  go1.21.0 200), so the ".0" is appended only from 1.21 up. A version that already names a
+ *  patch is passed through untouched. */
+function normalizeGoVersion(raw: string): string | null {
+  const cleaned = raw.trim().replace(/^go/i, '');
+  const parts = cleaned.split('.').filter((p) => /^\d+$/.test(p));
+  if (parts.length >= 3) return parts.slice(0, 3).join('.');
+  if (parts.length < 2) return null;
+  const major = Number(parts[0]);
+  const minor = Number(parts[1]);
+  const needsPatch = major > 1 || (major === 1 && minor >= 21);
+  return needsPatch ? `${major}.${minor}.0` : `${major}.${minor}`;
 }
 
 export function renderDockerfile(baseImage: string, rawDeps: Record<string, unknown>): string {
@@ -410,25 +448,44 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   }
 
   if (runtimes.has('go')) {
-    lines.push('# Go');
+    const goVersion = normalizeGoVersion(versions.go ?? '') ?? DEFAULT_GO_VERSION;
+    lines.push(`# Go ${goVersion}`);
     lines.push(
-      'RUN curl -fsSL https://go.dev/dl/go1.23.0.linux-amd64.tar.gz | tar -C /usr/local -xz',
+      `RUN curl -fsSL https://go.dev/dl/go${goVersion}.linux-amd64.tar.gz | tar -C /usr/local -xz`,
     );
     lines.push('ENV PATH="/usr/local/go/bin:${PATH}"');
     lines.push('');
   }
 
   if (runtimes.has('rust')) {
-    lines.push('# Rust');
+    // rustup resolves a two- or three-part version as a toolchain name, so a
+    // `rust-version = "1.98"` from Cargo.toml needs no normalizing (VERIFIED:
+    // channel-rust-1.98.toml and channel-rust-1.98.0.toml both resolve).
+    const declaredRust = (versions.rust ?? '').trim();
+    const rustVersion = isPlainVersion(declaredRust) ? declaredRust : DEFAULT_RUST_VERSION;
+    lines.push(`# Rust ${rustVersion}`);
     lines.push(
-      'RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal',
+      `RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain ${rustVersion} --profile minimal`,
     );
     lines.push('ENV PATH="/root/.cargo/bin:${PATH}"');
     lines.push('');
   }
 
   if (runtimes.has('ruby')) {
-    lines.push('# Ruby');
+    // Ruby is the one runtime whose declared version this image CANNOT honour: apt
+    // ships exactly one interpreter per suite (ubuntu:24.04 -> ruby3.2) and naming a
+    // versioned package the suite does not carry fails the build outright. Honouring it
+    // needs a version manager (rbenv/ruby-build or a versioned PPA), which is a change
+    // of its own -- see docs/plans/patient-pinning-kernighan.md. So record the declared
+    // version in the comment and say plainly what is installed, rather than emit a pin
+    // that silently means nothing. Same shape as the python block above.
+    const rawRuby = (versions.ruby ?? '').trim();
+    const declaredRuby = isPlainVersion(rawRuby) ? rawRuby : '';
+    lines.push(
+      declaredRuby
+        ? `# Ruby (declared ${declaredRuby}; apt ships one interpreter per suite, so that version is NOT honoured)`
+        : '# Ruby (whatever the base suite ships)',
+    );
     lines.push(...aptRun());
     lines.push('    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev');
     lines.push('');

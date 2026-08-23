@@ -140,10 +140,21 @@ async function buildProposedConfig(
 ): Promise<string> {
   const versions = (deps.versions as Record<string, string | null> | undefined) ?? {};
   const database = (deps.database as { kind?: string; version?: string | null } | undefined) ?? {};
+  const nodeDeclared =
+    Array.isArray(deps.runtimes) && (deps.runtimes as unknown[]).includes('node');
   const repoName = await loadRepoName(ctx);
   return renderDdevConfig({
     name: repoName ?? 'app',
     phpVersion: versions.php ?? null,
+    // 01-env-detect has always READ nodejs_version out of an existing config; nothing wrote
+    // it, so a generated config left DDEV on its own default and the declared Node version
+    // reached the CLI sandbox image but not the app runtime. Only a config Haive GENERATES
+    // is affected — an existing .ddev/config.yaml is never rewritten by this step.
+    //
+    // Gated on node being a DECLARED runtime, the same test nodeInspect uses: the version
+    // field keeps its detected value even after the user unticks Node, and asking DDEV to
+    // install a Node the project did not declare would rebuild its web image for nothing.
+    nodejsVersion: nodeDeclared ? (versions.node ?? null) : null,
     dbType: database.kind ?? null,
     dbVersion: database.version ?? null,
     webserverType,

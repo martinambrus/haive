@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import { createHash } from 'node:crypto';
 import { classifyDrift, ddevReconcileStep } from './07c-ddev-reconcile.js';
 import { parseDdevProjectListForApproot } from '../../../sandbox/ddev-runner.js';
-import type { DdevConfigFields } from '../_ddev-config.js';
+import { parseDdevConfig, renderDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
 import type { DdevBaseline } from './01c-ddev-env.js';
 
 describe('07c-ddev-reconcile form', () => {
@@ -87,6 +88,28 @@ function target(over: Partial<DdevConfigFields> = {}): DdevConfigFields {
 describe('classifyDrift', () => {
   it('no change (same db, same hash) -> none', () => {
     expect(classifyDrift(baseline(), target(), HASH_A).kind).toBe('none');
+  });
+
+  // 01c now writes `nodejs_version` into a config it generates. It writes the file BEFORE
+  // reading its baseline, so the new line is inside the baseline hash and must not surface
+  // here as a phantom restart of an environment nobody touched.
+  it('a generated config carrying nodejs_version is not drift against its own baseline', () => {
+    const yaml = renderDdevConfig({
+      name: 'proj',
+      phpVersion: '8.1',
+      nodejsVersion: '22',
+      dbType: 'mariadb',
+      dbVersion: '10.4',
+    });
+    const hash = createHash('sha256').update(yaml).digest('hex');
+    const parsed = parseDdevConfig(yaml);
+    const own = baseline({
+      phpVersion: parsed.phpVersion,
+      dbType: parsed.dbType,
+      dbVersion: parsed.dbVersion,
+      configHash: hash,
+    });
+    expect(classifyDrift(own, parsed, hash).kind).toBe('none');
   });
 
   it('php-only bump (db same, hash differs) -> restart', () => {
