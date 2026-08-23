@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto';
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import type { Database } from '@haive/database';
+import { logger } from '@haive/shared';
 import { isCredentialCwe } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 import type { StepContext } from '../../step-definition.js';
+
+/** For the one writer below whose caller runs outside a step and so has no ctx.logger. */
+const log = logger.child({ module: 'review-findings' });
 
 /* ------------------------------------------------------------------ */
 /* Durable review findings. Findings otherwise live only in            */
@@ -233,6 +238,55 @@ export async function dispositionReviewFindings(
     ctx.logger.warn(
       { err, source, count: unique.length },
       'failed to disposition review findings (telemetry only; the gate decision stands)',
+    );
+  }
+}
+
+/** Mark everything still outstanding as knowingly shipped, when the developer accepts the
+ *  remainder at the fix-loop escalation gate.
+ *
+ *  That gate is reached only at the round cap (or a detected oscillation), and accepting
+ *  there stands down EVERY later fix-loop check for the task — so the findings of the round
+ *  it was raised in are not merely unfixed, they are shipped on a decision. `accepted_risk`
+ *  is that decision; `open` would keep claiming they are still being worked.
+ *
+ *  Scoped to `round`, like dispositionReviewFindings and for a second reason on top of its
+ *  one: nothing ever writes `fixed`, so an earlier round's rows are still `open` whether they
+ *  were fixed or recurred. Only the round the gate was raised in describes what is actually
+ *  outstanding at the moment of acceptance — a recurring finding is re-raised into it anyway.
+ *
+ *  Covers the whole round rather than the gate's own step, because acceptance stands the loop
+ *  down for every check, not just the one that tripped. `disposition = 'open'` still guards,
+ *  so a refuter's `dismissed_refuted` and a gate-1.5 `dismissed_human` both keep the more
+ *  specific verdict.
+ *
+ *  Takes a db rather than a StepContext because its caller is the queue's gate resolver,
+ *  which runs outside any step. Best-effort in the same way: never throws. */
+export async function acceptRemainingReviewFindings(
+  db: Database,
+  taskId: string,
+  round: number,
+  source: string,
+): Promise<void> {
+  try {
+    await db
+      .update(schema.reviewFindings)
+      .set({
+        disposition: 'accepted_risk',
+        dispositionAt: new Date(),
+        dispositionSource: source,
+      })
+      .where(
+        and(
+          eq(schema.reviewFindings.taskId, taskId),
+          eq(schema.reviewFindings.round, round),
+          eq(schema.reviewFindings.disposition, 'open'),
+        ),
+      );
+  } catch (err) {
+    log.warn(
+      { err, taskId, round, source },
+      'failed to accept remaining review findings (telemetry only; the gate decision stands)',
     );
   }
 }

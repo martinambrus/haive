@@ -70,6 +70,7 @@ import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
 import { blockedByActiveStepMessage, findLiveSibling } from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
+import { acceptRemainingReviewFindings } from '../step-engine/steps/workflow/_review-findings.js';
 import {
   recordFixLoopRequest,
   recordFixLoopAccepted,
@@ -1394,6 +1395,9 @@ async function resolveFixLoopGate(
     // Stand down every later fix-loop check + advance forward from the source step so the
     // remaining chain runs to gate 2 with the issues recorded but unresolved.
     await recordFixLoopAccepted(db, ctx.taskId, gateRow.id);
+    // "Unresolved" is now a decision, not a pending state: this round's findings ship as they
+    // are. Recorded on the rows so a later read cannot mistake them for work still in flight.
+    await acceptRemainingReviewFindings(db, ctx.taskId, round, 'fix-loop-gate');
     await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
     const steps = await buildRunList(ctx, db);
     const idx = steps.findIndex((s) => s.metadata.id === gateRow.stepId);

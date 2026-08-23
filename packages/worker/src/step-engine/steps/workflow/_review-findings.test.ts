@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  acceptRemainingReviewFindings,
   dispositionReviewFindings,
   findingFingerprint,
   parseLineRange,
@@ -7,6 +8,7 @@ import {
   splitLocation,
   type RecordableFinding,
 } from './_review-findings.js';
+import type { Database } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 
 describe('findingFingerprint', () => {
@@ -284,6 +286,41 @@ describe('dispositionReviewFindings', () => {
     } as unknown as StepContext;
     await expect(
       dispositionReviewFindings(ctx, ['fp-a'], 'dismissed_human', '08d2'),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('acceptRemainingReviewFindings', () => {
+  function captureDb(): { db: Database; sets: Record<string, unknown>[] } {
+    const sets: Record<string, unknown>[] = [];
+    const db = {
+      update: () => ({
+        set: (values: Record<string, unknown>) => {
+          sets.push(values);
+          return { where: () => Promise.resolve() };
+        },
+      }),
+    } as unknown as Database;
+    return { db, sets };
+  }
+
+  it('records the acceptance as a decision, not a pending state', async () => {
+    const { db, sets } = captureDb();
+    await acceptRemainingReviewFindings(db, 'task-1', 3, 'fix-loop-gate');
+    expect(sets).toHaveLength(1);
+    expect(sets[0]!.disposition).toBe('accepted_risk');
+    expect(sets[0]!.dispositionSource).toBe('fix-loop-gate');
+    expect(sets[0]!.dispositionAt).toBeInstanceOf(Date);
+  });
+
+  it('never throws — the gate decision stands even if the write fails', async () => {
+    const db = {
+      update: () => {
+        throw new Error('db down');
+      },
+    } as unknown as Database;
+    await expect(
+      acceptRemainingReviewFindings(db, 'task-1', 0, 'fix-loop-gate'),
     ).resolves.toBeUndefined();
   });
 });
