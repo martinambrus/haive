@@ -777,6 +777,9 @@ describe('08d verifier wave dispatch and downgrade', () => {
   });
 
   const BLOCKER = { severity: 'critical', location: 'admin.php:10', impact: 'rce', poc: 'GET /x' };
+  /** Verbatim from the round that motivated the retry: the binary's own stamp plus its prose. */
+  const DROPPED =
+    'LLM run reported a failure (terminal_reason "api_error"): API Error: Connection lost mid-response.';
   const MINOR = { severity: 'low', location: 'a.php:1', impact: 'info leak', poc: 'GET /a' };
 
   const run = (results: AgentMiningResult[]) =>
@@ -847,6 +850,79 @@ describe('08d verifier wave dispatch and downgrade', () => {
     const byImpact = new Map(out.findings.map((f) => [f.impact, f.verification]));
     expect(byImpact.get('rce')).toBe('reproduced');
     expect(byImpact.get('sqli')).toBe('not_reproduced');
+    expect(out.blocking).toBe(true);
+  });
+
+  it('re-dispatches a verifier the provider dropped, under a fresh attempt id', async () => {
+    // The wiring a unit test on retryableVerifiers cannot reach: apply() must actually throw a
+    // THIRD wave, and the id must be fresh — dispatchMiningAgents dispatches nothing for an
+    // agent that already has a row, so re-throwing the old id would silently exhaust the wave
+    // instead of retrying it.
+    enableVerification();
+    const first = await run([adversary('auth-bandit', [BLOCKER])]).catch((e: unknown) => e);
+    const dispatches = (err0(first) as MiningWaveError).dispatches;
+    const dead: AgentMiningResult[] = dispatches.map((d) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      invocationId: 'inv-v',
+      status: 'failed',
+      output: null,
+      rawOutput: null,
+      errorMessage: DROPPED,
+    }));
+    const second = await run([adversary('auth-bandit', [BLOCKER]), ...dead]).catch(
+      (e: unknown) => e,
+    );
+    const retries = (err0(second) as MiningWaveError).dispatches;
+    expect(retries).toHaveLength(3);
+    for (const d of retries) expect(d.agentId).toMatch(/-r1$/);
+    // Not one of the ids that already has a row.
+    expect(
+      retries.map((d) => d.agentId).some((id) => dispatches.some((o) => o.agentId === id)),
+    ).toBe(false);
+  });
+
+  it('does not retry a verifier that died on a rate limit', async () => {
+    // Same shape, fatal cause: a retry spends a run against a window that has not moved.
+    enableVerification();
+    const first = await run([adversary('auth-bandit', [BLOCKER])]).catch((e: unknown) => e);
+    const dispatches = (err0(first) as MiningWaveError).dispatches;
+    const dead: AgentMiningResult[] = dispatches.map((d) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      invocationId: 'inv-v',
+      status: 'failed',
+      output: null,
+      rawOutput: null,
+      errorMessage: 'Provider rate limit or quota exhausted — usage limit exhausted. (429)',
+    }));
+    const out = await run([adversary('auth-bandit', [BLOCKER]), ...dead]);
+    expect(out.findings[0]!.verification).toBe('unverified');
+    expect(out.blocking).toBe(true);
+  });
+
+  it('stops asking once the runner says the wave is exhausted', async () => {
+    // The loop guard. Without it a retry wave that dispatched nothing would come straight back
+    // here and be re-thrown forever. Doubt still keeps the finding.
+    enableVerification();
+    const first = await run([adversary('auth-bandit', [BLOCKER])]).catch((e: unknown) => e);
+    const dispatches = (err0(first) as MiningWaveError).dispatches;
+    const dead: AgentMiningResult[] = dispatches.map((d) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      invocationId: 'inv-v',
+      status: 'failed',
+      output: null,
+      rawOutput: null,
+      errorMessage: DROPPED,
+    }));
+    const out = await adversarialQaStep.apply(fakeCtx2, {
+      detected: { level: 'poc', spec: 's', implementationFiles: [], appUrl: 'https://x.ddev.site' },
+      agentMiningResults: [adversary('auth-bandit', [BLOCKER]), ...dead],
+      isFinalMiningAttempt: true,
+      miningWaveExhausted: true,
+    } as unknown as Parameters<typeof adversarialQaStep.apply>[1]);
+    expect(out.findings[0]!.verification).toBe('unverified');
     expect(out.blocking).toBe(true);
   });
 
