@@ -59,7 +59,25 @@ export const CLI_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137
  *  exec-core.ts (stop/cancel/timeout), stream.ts (premature stream end). Stable
  *  internal contracts we own end-to-end, never ephemeral upstream wording. */
 export const TRANSIENT_CLI_FAILURE_RE =
-  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget|preempted for a higher-priority task/i;
+  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget|preempted for a higher-priority task|MCP server failed to start/i;
+
+/** Stable headline for a run that started without a capability it was configured with.
+ *
+ *  A declared MCP server that does not connect leaves the agent unable to do the thing the
+ *  step exists to do, while the CLI still exits 0 and reports a confident answer. MEASURED: a
+ *  browser-verification round whose chrome-devtools server lost a race with a cold npm cache
+ *  drove no browser at all, fell back to curl, and reported a clean pass — three rounds in a
+ *  row had done the same.
+ *
+ *  Classed TRANSIENT rather than fatal because the common cause is a package fetch losing a
+ *  race, and the same fetch is warm seconds later: re-dispatching usually just works, and the
+ *  existing orphan cap converges a persistently broken server to a failed step instead of an
+ *  infinite re-drive. Failing the step outright would instead send an npm timeout to a code
+ *  fixer with nothing to fix.
+ *
+ *  Same "internal contract we own end-to-end" convention as CLI_TIMEOUT_HEADLINE — written by
+ *  exec-core, matched only by TRANSIENT_CLI_FAILURE_RE above. */
+export const MCP_SERVER_FAILED_HEADLINE = 'MCP server failed to start';
 
 /** Stable headline for the ONE transient case that must not be re-run identically: the
  *  CLI burned its whole budget and was SIGKILLed. Every other transient failure (worker

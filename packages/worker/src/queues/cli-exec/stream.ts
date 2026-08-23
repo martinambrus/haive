@@ -43,6 +43,10 @@ interface StreamJsonCollector {
    *  channels — see StreamModelReport / model-identity.ts. Null when the stream
    *  named no model anywhere (amp's init reports `agent_mode` instead). */
   getModelIdentity: () => StreamModelReport | null;
+  /** Names of the MCP servers the binary declared and could NOT start. Empty when
+   *  every declared server connected, and ALSO empty for a CLI whose init event does
+   *  not report them at all — absence is not evidence of failure. */
+  getFailedMcpServers: () => string[];
 }
 
 export function createStreamJsonCollector(
@@ -103,6 +107,7 @@ export function createStreamJsonCollector(
   // run whose final turn is a CLI-authored `<synthetic>` error still reports the
   // real model from the turns that did come back.
   let requestedModel: string | null = null;
+  const failedMcpServers = new Set<string>();
   let servedModel: string | null = null;
   const billedModels = new Set<string>();
   let costUsd: number | null = null;
@@ -162,6 +167,21 @@ export function createStreamJsonCollector(
     if (type === 'system' && subtype === 'init' && requestedModel === null) {
       if (typeof event.model === 'string' && event.model.trim()) {
         requestedModel = event.model.trim();
+      }
+      // The same event lists every MCP server the binary was configured with and whether it
+      // started. A server that did not is a run missing a capability the step asked for —
+      // MEASURED: a browser-verification round whose chrome-devtools server lost a race with
+      // a cold npm cache ran with no browser at all and still reported a clean pass.
+      //
+      // Matches the literal 'failed' rather than "anything not connected": those are the two
+      // values observed, and a status we have not seen (a future 'pending', say) must not be
+      // read as a fault and re-run the work. A miss falls through to today's behaviour.
+      if (Array.isArray(event.mcp_servers)) {
+        for (const entry of event.mcp_servers) {
+          const server = entry as { name?: unknown; status?: unknown };
+          if (server?.status === 'failed' && typeof server.name === 'string' && server.name.trim())
+            failedMcpServers.add(server.name.trim());
+        }
       }
     }
 
@@ -359,6 +379,9 @@ export function createStreamJsonCollector(
     },
     getMalformedLineCount(): number {
       return malformedLineCount;
+    },
+    getFailedMcpServers(): string[] {
+      return [...failedMcpServers];
     },
     getModelIdentity(): StreamModelReport | null {
       if (buffer.trim()) {

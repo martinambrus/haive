@@ -69,6 +69,7 @@ import {
   classifyAntigravityDiagnostic,
   classifyModelCapability,
   classifyProviderFatal,
+  MCP_SERVER_FAILED_HEADLINE,
   CLI_PREEMPTED_HEADLINE,
   CLI_TIMEOUT_HEADLINE,
   isCliPreemptionFailure,
@@ -784,16 +785,37 @@ export async function executeCliSpec(
     } else if (malformedLines > 0) {
       log.warn({ command: spec.command, malformedLines }, 'stream-json had malformed lines');
     }
+    // A run that started without a capability it was configured with is not a usable run,
+    // however confident its answer reads. The CLI exits 0 and reports success, so nothing
+    // downstream would notice on its own — see MCP_SERVER_FAILED_HEADLINE. Reported through
+    // errorMessage rather than a synthetic exit code, because the step runner already treats
+    // a non-empty errorMessage on an exit-0 invocation as failed (`contentBad`), and the
+    // headline classifies transient so the existing re-dispatch path re-runs it.
+    //
+    // Never overwrites a real error: only consulted when formatCliErrorMessage found none.
+    const failedMcp = collector.getFailedMcpServers();
+    const cliError = formatCliErrorMessage(
+      result.exitCode,
+      result.stderr,
+      streamResult,
+      result.error,
+    );
+    if (!cliError && failedMcp.length > 0) {
+      log.warn(
+        { command: spec.command, servers: failedMcp },
+        'declared MCP servers did not start; re-dispatching the invocation',
+      );
+    }
     return {
       exitCode: result.exitCode,
       rawOutput: streamResult,
       parsedOutput: tryJsonParse(streamResult),
-      errorMessage: formatCliErrorMessage(
-        result.exitCode,
-        result.stderr,
-        streamResult,
-        result.error,
-      ),
+      errorMessage:
+        cliError ??
+        (failedMcp.length > 0
+          ? `${MCP_SERVER_FAILED_HEADLINE}: ${failedMcp.join(', ')}. The run had no access to ` +
+            `${failedMcp.length === 1 ? 'that server' : 'those servers'}, so its result cannot be trusted.`
+          : null),
       tokenUsage: collector.getTokenUsage(),
       modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
       streamLog,
