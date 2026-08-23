@@ -113,3 +113,61 @@ What shipped instead, as the honest partial: the browserTesting block now writes
 version to `/etc/haive-browser-version` on the same line that asserts a browser exists. The
 drift is unchanged but is now legible from the image rather than inferred from its build date,
 and that file is the natural thing for a future picker to compare against.
+
+# Amendment — 2026-08-23: shipped for Chrome and Edge; Opera rejected on evidence
+
+The picker is live. `01-declare-deps` offers a browser and, per browser, a version, both fed
+by a cached catalog refreshed with the other version feeds. Shipped across `dde9c36` (pinned
+Chrome), `bc1b209` (catalog + picker) and `abb5609` (Edge).
+
+## The version stories were not alike, and the obvious assumption was backwards
+
+MEASURED against the live indexes rather than assumed:
+
+| Browser | Versions offered | Mechanism |
+|---|---|---|
+| Chrome | 42 milestones (113 -> 154) | Chrome for Testing zip; apt supplies only the dependency graph |
+| Edge | 39 majors (95 -> 151), from 184 debs | `apt-get install microsoft-edge-stable=<version>` — apt does everything |
+| Opera | none | rejected, see below |
+
+Edge turned out to be the SIMPLEST to pin and Chrome the hardest, the reverse of what the body
+assumed. Google publishes exactly one `google-chrome-stable` and keeps no archive; Microsoft
+keeps old debs.
+
+The Chrome path's one real problem was solved by `apt-get satisfy`. A CfT zip carries no system
+libraries, and installing `google-chrome-stable` merely to obtain them would put a second
+browser on the wire (~164 MB) only to overwrite it. Taking Chrome's `Depends` from its own
+package metadata and handing that string to `satisfy` installs 121 packages and NOT the
+browser. Installing those dependency NAMES directly does not work — MEASURED, "Package
+'libasound2' has no installation candidate" on Ubuntu 24.04, because two packages Provide that
+name and apt refuses to choose, while satisfy's constraint-aware resolver picks libasound2t64.
+
+## Opera is rejected: it does not expose CDP
+
+The body listed Opera as "likely (Chromium-based), unverified". It is not.
+
+MEASURED on `opera-stable` 135.0.5973.41 installed from deb.opera.com: launched headless with
+`--remote-debugging-port=9222`, the port is still REFUSED after 25 seconds, and the process
+never binds it (listening ports were 8342/9A58/9A60 hex — 9222 is 0x2406 and absent).
+`--dump-dom about:blank` likewise produced no DOM. Release-build Opera disables remote
+debugging, so `chrome-devtools-mcp` times out on the first `tools/call` — which is exactly what
+happened before this was diagnosed.
+
+Opera is therefore not offerable and nothing was built for it. This is why the plan gated each
+type on a verified handshake instead of shipping the dropdown first: Chromium-based was a
+reasonable prior and it was wrong.
+
+## What the gating bought
+
+Each type was proven before being offered, and each proof covered the whole chain rather than
+just "a browser exists": the pinned version installs and reports ITSELF (Chrome 140 not stable
+151; Edge 149 not newest 151), `chrome-devtools-mcp` completes initialize / navigate_page /
+get_network_request against it over CDP, and the credential controls still hold through it --
+body diverted to `/tmp/haive-net-...`, `set-cookie` rendered `<redacted>`, neither secret in
+the model-visible text. The generator-rendered Dockerfile was then built for itself in both
+cases, not just a hand-written equivalent.
+
+## Still open, deliberately
+
+Firefox remains excluded for the reason in the body: the agent path is CDP-only, so it would
+need a second automation stack. Nothing here changes that.
