@@ -54,9 +54,13 @@ export function ScreenshotGallery({ taskId, artifactPath, persistId }: Screensho
   const [shots, setShots] = useState<ScreenshotEntry[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [openIndex, setOpenIndex] = useState<number | null>(null);
+  // Collapsed by default: a task can carry several galleries (one per browser-testing
+  // step) and an open thumbnail grid is tall, so opening them all pushes the rest of the
+  // task page out of reach. Only the fallback changes — usePersistedToggle writes nothing
+  // until the user toggles, so anyone who already opened one keeps it open.
   const [expanded, setExpanded] = usePersistedToggle(
     persistId ? `task-ui:${taskId}:screenshots:${persistId}` : null,
-    true,
+    false,
   );
 
   useEffect(() => {
