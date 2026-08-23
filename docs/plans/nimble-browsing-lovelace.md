@@ -171,3 +171,51 @@ cases, not just a hand-written equivalent.
 
 Firefox remains excluded for the reason in the body: the agent path is CDP-only, so it would
 need a second automation stack. Nothing here changes that.
+
+# Amendment — 2026-08-23: Firefox is feasible after all, via Playwright MCP
+
+The body and the amendment above both exclude Firefox on the grounds that it "would need a
+second automation stack". That is true but was written in a way that implies we would have to
+BUILD one. We would not: a maintained one already exists, and the exclusion should be read as a
+cost decision rather than an impossibility.
+
+MEASURED against the npm registry on 2026-08-23:
+
+- **`@playwright/mcp`** (Microsoft), latest 0.0.79 published 2026-08-06, not deprecated. Its
+  `--browser` flag takes `chrome, firefox, webkit, msedge`. So Firefox is first-class, and
+  **webkit** comes with it — which closes the one gap the body called impossible on Linux.
+  WebKit is not Safari, but it is the engine, and nothing else on Linux gets closer.
+- `@modelcontextprotocol/server-puppeteer` is **deprecated**.
+- No dedicated `firefox-mcp-server` package exists.
+
+Playwright MCP is therefore effectively the only maintained route, and the reason
+`chrome-devtools-mcp` cannot be made to serve is protocol divergence rather than a missing
+feature: it speaks CDP, and Firefox's automation story is WebDriver BiDi. (That divergence is
+background here, not re-measured in this session; what WAS measured is the `--browser` list
+above and Opera's refusal to bind a CDP port.)
+
+## What adopting it would actually cost
+
+Three things, none fatal, all real, and none of them a dropdown entry:
+
+1. **Our prompts name chrome-devtools tools directly** — MEASURED, 11 references in
+   `_agent-templates.ts` and 1 in `08a-browser-verify.ts`. Playwright MCP has its own tool
+   names and a different surface (snapshot/click/type against CDP traces, heap snapshots and
+   `get_network_request`), so the browser-tester template needs a parallel vocabulary and 08a
+   needs to know which one it is driving.
+2. **Neither credential control carries over.** `--redact-network-headers` and the body
+   diversion proxy both target chrome-devtools-mcp specifically. Playwright MCP offers
+   `--secrets`, `--storage-state`, `--isolated` and `--output-dir` — adjacent mechanisms
+   solving related problems, NOT equivalents. Shipping Firefox without re-establishing those
+   would quietly reopen exactly what `139dc14` and `e066d26` closed, and they were expensive to
+   prove.
+3. **Two servers or a swap.** Both running means agents see overlapping browser toolsets and
+   can pick the wrong one; swapping wholesale loses the CDP-only tools the Chrome path has.
+
+## Sequencing if it is ever wanted
+
+Same gate that rejected Opera, in the same order: prove the handshake for the target browser,
+re-establish the credential controls on the Playwright path and verify them the way the Chrome
+and Edge paths were verified (body diverted, `set-cookie` redacted, neither secret in the
+model-visible text), and only then offer the type. Roughly the size of the Chrome and Edge work
+combined, not an addition to it.
