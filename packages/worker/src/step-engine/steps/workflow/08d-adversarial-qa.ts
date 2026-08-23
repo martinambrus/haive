@@ -305,8 +305,15 @@ export function isRuntimeOnlyFinding(f: Pick<AdversarialFinding, 'location'>): b
  *  trailing `:line`, and most of these locations do not carry one.
  *
  *  The extension repeats so a double one is taken whole: stopping at the first `\b` would
- *  read `a.test.ts` as `a.test` and put it in the same group as `a.test.js`. */
-const FILE_TOKEN_RE = /(?:[\w/-]+)?(?:\.[A-Za-z][A-Za-z0-9]{0,11})+\b/g;
+ *  read `a.test.ts` as `a.test` and put it in the same group as `a.test.js`.
+ *
+ *  The leading `\.?` is what separates a dotfile from a dot-DIRECTORY. Without it the first
+ *  match on `.ddev/php/rs.ini` is the bare `.ddev`, which read as a dotfile and put every file
+ *  under that directory in one group — MEASURED on the first live run, where
+ *  `.ddev/apache/rs-hardening.conf`, `.ddev/php/dev-prepend.php` and `.ddev/php/rs.ini` shared
+ *  a panel. `.htaccess` still matches: the optional prefix gives up and the extension branch
+ *  takes the whole token. */
+const FILE_TOKEN_RE = /(?:\.?[\w/-]+)?(?:\.[A-Za-z][A-Za-z0-9]{0,11})+\b/g;
 
 /** The ROOT CAUSE a finding is verified under — the unit of one verifier panel.
  *

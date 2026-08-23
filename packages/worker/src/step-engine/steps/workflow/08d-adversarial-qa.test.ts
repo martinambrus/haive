@@ -627,6 +627,20 @@ describe('08d PoC verification', () => {
       );
     });
 
+    it('keeps a dot-directory apart from a dotfile', () => {
+      // MEASURED on the first live run: the bare `.ddev` read as a dotfile and put three
+      // unrelated files under one panel.
+      expect(rootCauseKey(at('.ddev/apache/rs-hardening.conf'))).toBe(
+        'file:.ddev/apache/rs-hardening.conf',
+      );
+      expect(rootCauseKey(at('.ddev/php/rs.ini:6-8 + .htaccess'))).not.toBe(
+        rootCauseKey(at('.ddev/php/dev-prepend.php')),
+      );
+      // and the real dotfiles still group as themselves
+      expect(rootCauseKey(at('.htaccess:19 and UserFiles/.htaccess'))).toBe('file:.htaccess');
+      expect(rootCauseKey(at('.gitignore (missing entry)'))).toBe('file:.gitignore');
+    });
+
     it('keys a URL on origin and path so a query string does not fragment it', () => {
       expect(rootCauseKey(at('https://app.ddev.site/phpstatus?full'))).toBe(
         rootCauseKey(at('https://app.ddev.site/phpstatus?x=1')),
