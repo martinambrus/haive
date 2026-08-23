@@ -295,6 +295,40 @@ function isPlainVersion(raw: string): boolean {
   return /^\d+(\.\d+){0,2}$/.test(raw);
 }
 
+/** Lowest Ruby that can install solargraph at all.
+ *
+ *  MEASURED, and it is NOT a solargraph version constraint — pinning solargraph does not help.
+ *  Its rubocop chain pulls `parallel`, whose current release requires Ruby >= 3.3, and
+ *  RubyGems can back off to a compatible set from Ruby 3.0 up but not below it:
+ *
+ *    ruby 2.7.8 -> unpinned, 0.47.2 and 0.44.3 ALL fail
+ *                  ("parallel requires Ruby version >= 3.3")
+ *    ruby 3.0.7 -> solargraph 0.58.3  ok      (RubyGems backed off)
+ *    ruby 3.1.7 / 3.2.9 / 3.3.9 -> solargraph 0.60.3  ok
+ *
+ *  This only became reachable once a declared Ruby was actually honoured: before that a
+ *  legacy project silently got apt's 3.2.3 and solargraph installed against an interpreter
+ *  the project does not use. Below the floor the install is SKIPPED rather than allowed to
+ *  fail the build — a legacy app is precisely what the prebuilt interpreters are for — and
+ *  the generated Dockerfile says so where the install would have been. */
+const SOLARGRAPH_MIN_RUBY = [3, 0];
+
+/** True when `version` is at or above SOLARGRAPH_MIN_RUBY. Unknown/absent counts as ABOVE:
+ *  no declared version means apt's interpreter, which is well past the floor. */
+function rubySupportsSolargraph(version: string): boolean {
+  if (!version) return true;
+  const parts = (version.split('-p')[0] ?? '').split('.').map(Number);
+  const [major = 0, minor = 0] = parts;
+  const [minMajor = 0, minMinor = 0] = SOLARGRAPH_MIN_RUBY;
+  return major > minMajor || (major === minMajor && minor >= minMinor);
+}
+
+/** Where a prebuilt Ruby MUST be extracted. Not a choice: `ruby/ruby-builder` tarballs are
+ *  built against this prefix and are not relocatable — anywhere else, ruby fails to start
+ *  with "error while loading shared libraries: libruby.so.X.Y". ruby/setup-ruby extracts to
+ *  the same path for the same reason. */
+const RUBY_TOOLCACHE_ROOT = '/opt/hostedtoolcache/Ruby';
+
 /** A derived MAJOR safe to interpolate: digits only. Node and Java name their install
  *  sources by major alone (`setup_${n}.x`, `openjdk-${n}-jdk-headless`), so what reaches
  *  the line is one part of a split — never a dotted version. Same threat as
@@ -393,6 +427,15 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   if (lspNeedsRust) runtimes.add('rust');
   if (lspNeedsRuby) runtimes.add('ruby');
 
+  // Resolved Ruby, needed in TWO places: the interpreter block below and the solargraph
+  // decision in the LSP block, which must know which Ruby it would be installing against.
+  // 01-declare-deps only ever writes this key after resolveRubyVersion matched it against
+  // the cached catalog, so a value here means a prebuilt interpreter exists for it; an
+  // unresolvable version, a cold catalog and no declaration all arrive as an absent key.
+  const rubyVersion = isPlainVersion((versions.ruby ?? '').trim())
+    ? (versions.ruby ?? '').trim()
+    : '';
+
   if (runtimes.has('node')) {
     const declaredNodeMajor = (versions.node ?? '').split('.')[0] ?? '';
     const nodeMajor = isPlainMajor(declaredNodeMajor) ? declaredNodeMajor : '22';
@@ -482,41 +525,64 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   }
 
   if (runtimes.has('ruby')) {
-    // Ruby is the one runtime whose declared version this image CANNOT honour: apt
-    // ships exactly one interpreter per suite (ubuntu:24.04 -> ruby3.2) and naming a
-    // versioned package the suite does not carry fails the build outright. Honouring it
-    // needs a version manager (rbenv/ruby-build or a versioned PPA), which is a change
-    // of its own -- see docs/plans/patient-pinning-kernighan.md. So record the declared
-    // version in the comment and say plainly what is installed, rather than emit a pin
-    // that silently means nothing. Same shape as the python block above.
-    const rawRuby = (versions.ruby ?? '').trim();
-    const declaredRuby = isPlainVersion(rawRuby) ? rawRuby : '';
-    lines.push(
-      declaredRuby
-        ? `# Ruby (declared ${declaredRuby}; apt ships one interpreter per suite, so that version is NOT honoured)`
-        : '# Ruby (whatever the base suite ships)',
-    );
-    lines.push(...aptRun());
-    // build-essential, because a native gem extension needs a compiler and
-    // --no-install-recommends drops one. MEASURED on ubuntu:24.04 with exactly the apt line
-    // below: `cc`, `gcc` and `make` are all absent while ruby-dev's headers ARE present, so
-    // every native build dies in extconf -- `gem install bigdecimal` exits 1, and so does
-    // `gem install solargraph` (it needs prism), which FAILS THE IMAGE BUILD on the LSP line
-    // this generator emits a few blocks below.
+    // Ruby is the one runtime whose version cannot come from the base image's own package
+    // source: apt ships exactly one interpreter per suite (ubuntu:24.04 -> ruby3.2), so a
+    // declared version has to arrive as a prebuilt `ruby/ruby-builder` tarball instead --
+    // the same artifacts ruby/setup-ruby installs. See docs/plans/smooth-sleeping-flute.md.
     //
-    // It did not fail for everyone, and the reason was worse than the bug: build-essential
-    // came from the NODE block, and node is pulled in by browserTesting, which defaults on.
-    // So Ruby worked as a side effect of an unrelated block and broke the moment a Ruby-only
-    // project turned browser testing off. Installing it here makes the block self-sufficient;
-    // a second apt install of an already-present package is a no-op, and both blocks share
-    // the same BuildKit cache mounts.
-    //
-    // libyaml is NOT listed: apt's ruby3.2 already depends on it (VERIFIED -- psych loads and
-    // rubygems works on this path once a compiler exists).
-    lines.push(
-      '    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential',
-    );
-    lines.push('');
+    // `versions.ruby` is only ever written by 01-declare-deps AFTER resolveRubyVersion
+    // matched it against the cached catalog, so reaching here means a build for it exists.
+    // An unresolvable version, a cold catalog and no declaration at all all arrive as an
+    // absent key and take the apt path below, which is what shipped before this.
+    if (rubyVersion) {
+      lines.push(`# Ruby ${rubyVersion} (prebuilt interpreter; apt ships only one per suite)`);
+      lines.push(...aptRun());
+      // libyaml because the tarball's psych links against it and the base image does not
+      // carry it on its own -- MEASURED: without it `require "psych"` fails, which breaks
+      // `gem install` itself, not merely YAML. build-essential for native gem extensions.
+      lines.push(
+        '    apt-get update && apt-get install -y --no-install-recommends libyaml-0-2 build-essential',
+      );
+      // The prefix is NOT arbitrary. These builds are not relocatable: extracted anywhere
+      // else, ruby dies with "error while loading shared libraries: libruby.so.X.Y"
+      // (MEASURED). /opt/hostedtoolcache/Ruby/<version>/x64 is the path they were built
+      // against, which is why ruby/setup-ruby uses it too. The tarball's own top-level
+      // directory is `x64`, so it extracts into the version directory.
+      lines.push(`RUN mkdir -p ${RUBY_TOOLCACHE_ROOT}/${rubyVersion} \\`);
+      lines.push(
+        `    && curl -fsSL https://github.com/ruby/ruby-builder/releases/download/toolcache/ruby-${rubyVersion}-ubuntu-24.04.tar.gz \\`,
+      );
+      lines.push(`       | tar -xz -C ${RUBY_TOOLCACHE_ROOT}/${rubyVersion}`);
+      // Ahead of the system path so this interpreter wins, and ahead of the LSP block below
+      // so `gem install solargraph` installs into it. No GEM_HOME is needed -- VERIFIED that
+      // gem writes inside the prefix and `gem install` works as-is.
+      lines.push(`ENV PATH="${RUBY_TOOLCACHE_ROOT}/${rubyVersion}/x64/bin:\${PATH}"`);
+      lines.push('');
+    } else {
+      lines.push('# Ruby (whatever the base suite ships)');
+      lines.push(...aptRun());
+      // build-essential, because a native gem extension needs a compiler and
+      // --no-install-recommends drops one. MEASURED on ubuntu:24.04 with exactly the apt line
+      // below: `cc`, `gcc` and `make` are all absent while ruby-dev's headers ARE present, so
+      // every native build dies in extconf -- `gem install bigdecimal` exits 1, and so does
+      // `gem install solargraph` (it needs prism), which FAILS THE IMAGE BUILD on the LSP line
+      // this generator emits a few blocks below.
+      //
+      // It did not fail for everyone, and the reason was worse than the bug: build-essential
+      // came from the NODE block, and node is pulled in by browserTesting, which defaults on.
+      // So Ruby worked as a side effect of an unrelated block and broke the moment a Ruby-only
+      // project turned browser testing off. Installing it here makes the block self-sufficient;
+      // a second apt install of an already-present package is a no-op, and both blocks share
+      // the same BuildKit cache mounts.
+      //
+      // libyaml is NOT listed here: apt's ruby3.2 already depends on it (VERIFIED -- psych
+      // loads and rubygems works on this path once a compiler exists). The tarball path above
+      // does need it.
+      lines.push(
+        '    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential',
+      );
+      lines.push('');
+    }
   }
 
   if (runtimes.has('java')) {
@@ -580,7 +646,16 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
           lines.push('RUN rustup component add rust-analyzer');
           break;
         case 'solargraph':
-          lines.push(`RUN gem install solargraph${v ? ` -v ${v}` : ''}`);
+          if (rubySupportsSolargraph(rubyVersion)) {
+            lines.push(`RUN gem install solargraph${v ? ` -v ${v}` : ''}`);
+          } else {
+            lines.push(
+              `# solargraph SKIPPED: no version of it installs on Ruby ${rubyVersion} (its rubocop`,
+            );
+            lines.push(
+              `#   chain pulls \`parallel\`, which requires Ruby >= 3.3). MEASURED floor: Ruby ${SOLARGRAPH_MIN_RUBY.join('.')}.`,
+            );
+          }
           break;
         case 'jdtls':
           lines.push(

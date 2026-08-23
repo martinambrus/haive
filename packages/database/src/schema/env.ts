@@ -167,3 +167,41 @@ export const browserVersionCache = pgTable('browser_version_cache', {
   fetchError: text('fetch_error'),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
+
+/**
+ * Cached language-runtime version catalogs, one row per runtime.
+ *
+ * A cache, never a source of truth, on the same contract as `browser_version_cache`:
+ * dropping it loses nothing the next REFRESH_VERSIONS rebuilds, and a missing row, an empty
+ * list or a failed refresh must all degrade declare-deps to the un-versioned install path
+ * rather than blocking environment declaration.
+ *
+ * Only `ruby` is populated. It is the one runtime whose declared version the sandbox image
+ * cannot honour from its own package source — apt ships exactly one interpreter per suite
+ * (ubuntu:24.04 -> ruby3.2) — so it installs a prebuilt `ruby/ruby-builder` tarball instead,
+ * and the catalog is what proves a requested version HAS such a build before the Dockerfile
+ * names a URL for it. Go and Rust need no row: their upstreams publish every version at a
+ * predictable URL, so their declared version is used directly.
+ *
+ * Keyed on the runtime rather than named for Ruby for the same reason
+ * `browser_version_cache` is not named for Chrome — it costs no extra code and the key is
+ * what the row is actually about.
+ */
+export const runtimeVersionCache = pgTable('runtime_version_cache', {
+  /** Language runtime: `ruby`. Matches a declaredDeps.versions key. */
+  runtime: varchar('runtime', { length: 32 }).primaryKey(),
+  versions: jsonb('versions')
+    .$type<
+      {
+        /** FULL version as it appears in the upstream artifact name, e.g. 3.4.6, 2.0.0-p648. */
+        version: string;
+        /** What a human sees, e.g. "Ruby 3.4.6". */
+        label: string;
+      }[]
+    >()
+    .notNull()
+    .default([]),
+  fetchedAt: timestamp('fetched_at'),
+  fetchError: text('fetch_error'),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});

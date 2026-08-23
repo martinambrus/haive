@@ -289,21 +289,15 @@ describe('renderDockerfile runtime version pins', () => {
     expect(df).toContain('--default-toolchain 1.90 --profile minimal');
   });
 
-  // Ruby is the one runtime whose declared version this image cannot honour -- apt ships one
-  // interpreter per suite. It must SAY so rather than emit a pin that means nothing.
-  it('records a declared Ruby version without pretending to install it', () => {
+  // The version never reaches an apt package name -- naming `ruby3.4` on a suite that ships
+  // only ruby3.2 fails the build outright, which is why the tarball path exists at all.
+  it('never turns a Ruby version into an apt package name', () => {
     const df = renderDockerfile('ubuntu:24.04', {
       runtimes: ['ruby'],
-      versions: { ruby: '3.4.1' },
+      versions: { ruby: '3.4.6' },
     } as never);
-    expect(df).toContain('declared 3.4.1');
-    expect(df).toContain('NOT honoured');
-    // Still the plain apt install -- no invented package name that no suite carries.
-    expect(df).toContain('apt-get install -y --no-install-recommends ruby ruby-dev');
     expect(df).not.toContain('ruby3.4');
-
-    const undeclared = renderDockerfile('ubuntu:24.04', { runtimes: ['ruby'] } as never);
-    expect(undeclared).toContain('# Ruby (whatever the base suite ships)');
+    expect(df).not.toMatch(/--no-install-recommends ruby3/);
   });
 
   // These versions default to a REPO-DERIVED capture (Cargo.toml `rust-version`, a Gemfile's
@@ -380,6 +374,82 @@ describe('renderDockerfile runtime version pins', () => {
     expect(rubyBlock).toContain('build-essential');
     // The compiler must land BEFORE the gem install that needs it.
     expect(df.indexOf('build-essential')).toBeLessThan(df.indexOf('gem install solargraph'));
+  });
+
+  // apt ships exactly one interpreter per suite, so a declared Ruby arrives as a prebuilt
+  // ruby-builder tarball instead. The prefix is NOT a choice: these builds are not
+  // relocatable and die with "cannot open shared object file: libruby.so" anywhere else.
+  it('installs a resolved Ruby from a prebuilt interpreter at the canonical prefix', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['ruby'],
+      lspServers: ['solargraph'],
+      browserTesting: false,
+      versions: { ruby: '3.4.6' },
+    } as never);
+    expect(df).toContain(
+      'https://github.com/ruby/ruby-builder/releases/download/toolcache/ruby-3.4.6-ubuntu-24.04.tar.gz',
+    );
+    expect(df).toContain('tar -xz -C /opt/hostedtoolcache/Ruby/3.4.6');
+    expect(df).toContain('ENV PATH="/opt/hostedtoolcache/Ruby/3.4.6/x64/bin:${PATH}"');
+    // psych links against libyaml, and without it `gem install` itself fails.
+    expect(df).toContain('libyaml-0-2');
+    // apt's interpreter must NOT also be installed -- it would shadow nothing but costs a
+    // second Ruby in the image.
+    expect(df).not.toMatch(/--no-install-recommends ruby ruby-dev/);
+    // The interpreter has to land before the gem install that uses it.
+    expect(df.indexOf('hostedtoolcache')).toBeLessThan(df.indexOf('gem install solargraph'));
+  });
+
+  // 01-declare-deps writes versions.ruby ONLY after resolveRubyVersion matched the catalog,
+  // so an absent key is how a cold cache, a downed feed and an unbuilt version all arrive.
+  it('falls back to the apt interpreter when no version was resolved', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['ruby'],
+      browserTesting: false,
+    } as never);
+    expect(df).toContain('# Ruby (whatever the base suite ships)');
+    expect(df).toContain('--no-install-recommends ruby ruby-dev build-essential');
+    expect(df).not.toContain('hostedtoolcache');
+    expect(df).not.toContain('ruby-builder');
+  });
+
+  // Honouring a declared Ruby made this reachable: no solargraph version installs on 2.7
+  // (its rubocop chain pulls `parallel`, which needs Ruby >= 3.3), so the unconditional
+  // install would fail the build for exactly the legacy app the prebuilt interpreters exist
+  // to support. MEASURED floor: 3.0 works (solargraph 0.58.3), 2.7 fails at every pin tried.
+  it('skips solargraph below the measured Ruby floor, and says why', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['ruby'],
+      lspServers: ['solargraph'],
+      browserTesting: false,
+      versions: { ruby: '2.7.8' },
+    } as never);
+    expect(df).not.toContain('gem install solargraph');
+    expect(df).toContain('solargraph SKIPPED');
+    expect(df).toContain('2.7.8');
+    // The interpreter itself is still installed -- only the LSP is dropped.
+    expect(df).toContain('ruby-2.7.8-ubuntu-24.04.tar.gz');
+  });
+
+  it('installs solargraph at the floor and above, and when Ruby comes from apt', () => {
+    for (const ruby of ['3.0.7', '3.4.6']) {
+      const df = renderDockerfile('ubuntu:24.04', {
+        runtimes: ['ruby'],
+        lspServers: ['solargraph'],
+        browserTesting: false,
+        versions: { ruby },
+      } as never);
+      expect(df).toContain('gem install solargraph');
+      expect(df).not.toContain('SKIPPED');
+    }
+    // No declared version means apt's interpreter, which is far above the floor.
+    const apt = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['ruby'],
+      lspServers: ['solargraph'],
+      browserTesting: false,
+    } as never);
+    expect(apt).toContain('gem install solargraph');
+    expect(apt).not.toContain('SKIPPED');
   });
 
   // declaredDeps is folded into envTemplateHash, so a project declaring none of these must

@@ -43,6 +43,7 @@ import {
   refreshModelPrices,
   refreshOpenRouterModels,
   refreshBrowserVersions,
+  refreshRubyVersions,
 } from '../../cli-versions/index.js';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js';
@@ -535,13 +536,17 @@ export async function handleRefreshCliVersionsJob(
   // means the provider form's existing "refresh versions" button refreshes it too.
   // Each refresher records its own failure and returns rather than throwing, so one
   // unreachable source cannot fail the job or wipe the other two caches.
-  const [cli, tools, openrouter, browsers] = await Promise.all([
+  const [cli, tools, openrouter, browsers, ruby] = await Promise.all([
     refreshAllCliVersions(db),
     refreshAllToolVersions(db),
     refreshOpenRouterModels(db),
     // Beside the others, not after: unlike refreshModelPrices below it reads none of their
     // caches, so it has nothing to race.
     refreshBrowserVersions(db),
+    // Same reasoning: the Ruby interpreter catalog reads no other cache. It rides this job
+    // rather than getting its own for the same reason the browser catalog does — same kind
+    // of cached remote list, same cadence, same refresh button.
+    refreshRubyVersions(db),
   ]);
   // Model prices and FX ride the same job for the same reasons, but SEQUENTIALLY after
   // the catalog rather than beside it: refreshModelPrices reads openrouter_model_cache
@@ -551,12 +556,13 @@ export async function handleRefreshCliVersionsJob(
   const prices = await refreshModelPrices(db);
   const fx = await refreshFxRates(db);
   return {
-    ok: cli.ok && tools.ok && openrouter.ok && browsers.ok && prices.ok && fx.ok,
+    ok: cli.ok && tools.ok && openrouter.ok && browsers.ok && ruby.ok && prices.ok && fx.ok,
     refreshed: [
       ...cli.refreshed,
       ...tools.refreshed,
       ...openrouter.refreshed,
       ...browsers.refreshed,
+      ...ruby.refreshed,
       ...prices.refreshed,
       ...fx.refreshed,
     ],
@@ -565,6 +571,7 @@ export async function handleRefreshCliVersionsJob(
       ...tools.errors,
       ...openrouter.errors,
       ...browsers.errors,
+      ...ruby.errors,
       ...prices.errors,
       ...fx.errors,
     ],

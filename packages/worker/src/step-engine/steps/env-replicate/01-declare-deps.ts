@@ -280,6 +280,11 @@ export interface DeclareDepsDetect {
    *  never been refreshed or its feed is down, which collapses the picker to system default
    *  rather than blocking the form — the cache is never a gate. */
   browserVersions?: Record<string, { version: string; label: string }[]>;
+  /** The declared Ruby version resolved to one the sandbox image can actually install, or
+   *  null when it cannot be (no catalog yet, its feed is down, or no prebuilt interpreter
+   *  exists for that version). Null renders the apt install path, which is what shipped
+   *  before this existed and is therefore the rollback. */
+  rubyResolvedVersion?: string | null;
 }
 
 export interface DeclareDepsApply {
@@ -346,17 +351,17 @@ const VERSION_FIELDS: {
   { id: 'javaVersion', label: 'Java version', language: 'java', fallback: '17' },
   { id: 'goVersion', label: 'Go version', language: 'go', fallback: DEFAULT_GO_VERSION },
   { id: 'rustVersion', label: 'Rust version', language: 'rust', fallback: DEFAULT_RUST_VERSION },
-  // Ruby carries no fallback because the image has no pin to offer: apt ships exactly one
-  // interpreter per suite, so a declared version cannot be honoured without a version
-  // manager (out of scope — docs/plans/patient-pinning-kernighan.md). The field still
-  // records what the project asks for; the description says plainly that it is not applied.
+  // Ruby carries no fallback because there is no pin to offer: with nothing declared the
+  // image takes apt's interpreter, whatever the base suite ships. A DECLARED version is
+  // honoured when a prebuilt interpreter exists for it, which is what the cached catalog
+  // decides — see resolveRubyVersion.
   {
     id: 'rubyVersion',
     label: 'Ruby version',
     language: 'ruby',
     fallback: '',
     description:
-      'Recorded for reference only. The sandbox installs Ruby from apt, which ships one interpreter per base image, so this version is not applied.',
+      'Installed from a prebuilt interpreter when one exists for this version. Leave empty to take whatever the base image ships. A two-part version (3.1) resolves to the newest patch on that line.',
   },
 ];
 
@@ -499,6 +504,20 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       .catch(() => []);
     result.browserVersions = Object.fromEntries(
       (browserRows ?? []).map((r) => [r.browser, r.versions ?? []]),
+    );
+    // Ruby interpreter catalog, read exactly as defensively and for exactly the same reason
+    // as the browser one above: a missing row, an empty list, a failed refresh, a client
+    // whose schema predates the table, or a failing read must all land as "unresolved" and
+    // render the apt install path, never break environment declaration.
+    const rubyRow = await ctx.db.query.runtimeVersionCache
+      ?.findFirst({
+        where: eq(schema.runtimeVersionCache.runtime, 'ruby'),
+        columns: { versions: true },
+      })
+      .catch(() => null);
+    result.rubyResolvedVersion = resolveRubyVersion(
+      findVersion(result.runtimes, 'ruby'),
+      rubyRow?.versions ?? [],
     );
     result.repositoryId = repositoryId;
     result.cliSupportsLsp = cliSupportsLsp;
@@ -662,6 +681,21 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         rows: 4,
         placeholder: 'vim\ncurl\njq',
       },
+      // Only when the project actually asks for a Ruby the image cannot install. Says so
+      // here as well as in the generated Dockerfile, because a silently ignored version is
+      // the whole defect this resolution exists to close.
+      ...(relevantLanguages.has('ruby') &&
+      findVersion(detected.runtimes, 'ruby') &&
+      !detected.rubyResolvedVersion
+        ? [
+            {
+              type: 'note' as const,
+              id: 'rubyVersionUnavailable',
+              label: 'Ruby version',
+              body: `No prebuilt Ruby ${findVersion(detected.runtimes, 'ruby')} interpreter is available for this base image, so the sandbox will install Ruby from apt instead and this version will not be applied. Edit the generated Dockerfile in the next step if you need this exact version.`,
+            },
+          ]
+        : []),
       ...(detected.repositoryId
         ? [
             {
@@ -732,6 +766,29 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     }
 
     const lspServers = cliSupportsLsp ? (repoLspServers ?? values.lspServers ?? []) : [];
+
+    // Re-resolve from scratch rather than trusting detect(): detect's output is cached across
+    // retries, and the user can edit the version field after it ran, so the SUBMITTED value is
+    // the only authoritative one. Unresolvable (or unresolved because the catalog is cold)
+    // leaves the key off below, which renders the apt install path.
+    const rubyCatalog = await ctx.db.query.runtimeVersionCache
+      ?.findFirst({
+        where: eq(schema.runtimeVersionCache.runtime, 'ruby'),
+        columns: { versions: true },
+      })
+      .catch(() => null);
+    const resolvedRuby = resolveRubyVersion(values.rubyVersion, rubyCatalog?.versions ?? []);
+    // Say so out loud when a declared version is dropped. The form carries a note for the
+    // same case, but form values are REUSED from the last completed task and auto-submitted,
+    // so on that path nobody ever sees the form — and a silently ignored version is the exact
+    // defect this resolution exists to close. A progress line costs no declaredDeps key, and
+    // therefore no envTemplateHash change and no rebuild.
+    if (values.rubyVersion && !resolvedRuby) {
+      await ctx.emitProgress(
+        `No prebuilt Ruby ${values.rubyVersion} interpreter is available for this base image — ` +
+          'installing Ruby from apt instead. Edit the generated Dockerfile if you need that exact version.',
+      );
+    }
     const declaredDeps: Record<string, unknown> = {
       runtimes: values.runtimes,
       versions: {
@@ -746,7 +803,10 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         // project that declares none of these — the same reason `browser` is conditional.
         ...(values.goVersion ? { go: values.goVersion } : {}),
         ...(values.rustVersion ? { rust: values.rustVersion } : {}),
-        ...(values.rubyVersion ? { ruby: values.rubyVersion } : {}),
+        // Only the RESOLVED version, never the raw one: everything downstream reads this key
+        // as "a prebuilt interpreter exists for this", and writing an unbuildable version
+        // would have the generator emit a download URL that 404s the image build.
+        ...(resolvedRuby ? { ruby: resolvedRuby } : {}),
       },
       packageManagers,
       preinstallDeps: values.preinstallDeps ?? true,
@@ -959,6 +1019,33 @@ function findVersion(runtimes: DetectedRuntime[], language: LanguageKey): string
   return runtimes.find((r) => r.language === language)?.version ?? null;
 }
 
+/**
+ * A declared Ruby version resolved to one that has a prebuilt interpreter, or null.
+ *
+ * Ruby is the only runtime needing this. Go and Rust publish every version at a predictable
+ * URL, so their declared value is used directly; Ruby's comes from `ruby/ruby-builder`, which
+ * builds a SUBSET, so a version has to be checked against the catalog before a Dockerfile
+ * names a URL for it. Null is not a failure — it renders the apt install path that shipped
+ * before this, so a cold cache, a downed feed and an unbuilt version all degrade the same way.
+ *
+ * Two-part input resolves to the newest patch on that line, because `.ruby-version` and a
+ * Gemfile disagree about form: a Gemfile commonly says `ruby "3.1"` and no such artifact
+ * exists. `catalog` is assumed newest-first, which is what the refresher writes.
+ */
+export function resolveRubyVersion(
+  declared: string | null | undefined,
+  catalog: { version: string }[],
+): string | null {
+  const want = (declared ?? '').trim().replace(/^ruby-/i, '');
+  if (!want || catalog.length === 0) return null;
+  if (catalog.some((c) => c.version === want)) return want;
+  // Only a bare `major.minor` is widened. A three-part version that is not in the catalog is
+  // a specific request that cannot be met, and quietly serving a different patch would be a
+  // worse answer than falling back visibly to apt.
+  if (!/^\d+\.\d+$/.test(want)) return null;
+  return catalog.find((c) => c.version.startsWith(`${want}.`))?.version ?? null;
+}
+
 function parseExtraPackages(raw: string): string[] {
   return raw
     .split(/\r?\n/)
@@ -1103,11 +1190,22 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
 
   const gemfile = await readTextIfExists(path.join(repoPath, 'Gemfile'));
   if (gemfile) {
+    // `.ruby-version` wins over the Gemfile directive: it is the more specific declaration
+    // and it carries a FULL version, which is what the interpreter catalog is keyed on,
+    // while a Gemfile commonly says `ruby "3.1"`. It also covers the modern
+    // `ruby file: ".ruby-version"` form, which the regex below correctly captures nothing
+    // from (VERIFIED — it does not mis-capture, it simply yields null).
+    const rubyVersionFile = await readTextIfExists(path.join(repoPath, '.ruby-version'));
+    const pinned = rubyVersionFile
+      ?.trim()
+      .split(/\r?\n/)[0]
+      ?.trim()
+      .replace(/^ruby-/i, '');
     const match = gemfile.match(/ruby\s+['"]([^'"]+)['"]/);
     runtimes.push({
       language: 'ruby',
-      version: match?.[1] ?? null,
-      source: 'Gemfile',
+      version: pinned || match?.[1] || null,
+      source: pinned ? '.ruby-version' : 'Gemfile',
       packageManager: 'bundler',
     });
     suggestedLsp.add('solargraph');
