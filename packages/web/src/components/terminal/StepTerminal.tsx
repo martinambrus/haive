@@ -248,6 +248,9 @@ function InvocationPanel({
   // "running" = started and not yet ended. isActive alone is true for a QUEUED
   // run too (endedAt is null), so the auto-scroll target must exclude those.
   const isRunning = invocation.isActive && invocation.startedAt !== null;
+  // Enqueued but not yet picked up. invocationBanner always speaks for one of these, so the
+  // queued branch below never falls through to the step-status fallback.
+  const isQueued = invocation.isActive && invocation.startedAt === null;
   return (
     // scroll-mt-12: the auto-scroll aligns a panel's TOP with the viewport top and a
     // fixed 39px bar spans the content column — without the margin this panel's run
@@ -268,9 +271,16 @@ function InvocationPanel({
         {invocation.providerLabel && (
           <span className="font-medium text-neutral-200">{invocation.providerLabel}</span>
         )}
-        {invocation.isActive ? (
+        {isRunning ? (
           <span className="rounded border border-yellow-500/40 bg-yellow-500/10 px-1.5 py-0.5 uppercase tracking-wider text-yellow-300">
             running
+          </span>
+        ) : invocation.isActive ? (
+          // isActive alone is endedAt === null, which is ALSO true before the run starts, so
+          // this badge used to call a queued invocation running — the same conflation the
+          // status bar below made. Split on startedAt, exactly as invocationBanner does.
+          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 uppercase tracking-wider text-amber-300">
+            queued
           </span>
         ) : invocation.exitCode === 0 ? (
           <span className="rounded border border-green-500/40 bg-green-500/10 px-1.5 py-0.5 uppercase tracking-wider text-green-300">
@@ -337,18 +347,22 @@ function InvocationPanel({
       ) : (
         !replayError && <div className="text-xs text-neutral-500">Loading output…</div>
       )}
-      {invocation.isActive && banner?.kind === 'queued' ? (
-        // Queued: enqueued but no concurrency slot yet. Amber so the user sees the machine is busy
-        // rather than a silent "connected" terminal. invocationBanner (lib/step-banners) splits
-        // queued from running on startedAt, so a started invocation can never present itself as
-        // waiting for a slot even when its copy still says "machine at capacity".
+      {isQueued && banner ? (
+        // Queued: enqueued but no slot yet. Amber so the user sees the run is waiting rather than
+        // a silent "connected" terminal. invocationBanner (lib/step-banners) splits queued from
+        // running on startedAt, so a started invocation can never present itself as waiting for a
+        // slot even when its copy still says "machine at capacity" — and it always returns copy
+        // for a queued one, so this branch is what every queued run renders.
         <div className="flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
           {banner.text}
         </div>
       ) : (
+        // isRunning, not isActive: the STEP's status_message describes whatever is running
+        // right now, so lending it to a run that has not started yet makes that terminal report
+        // another terminal's work as its own. A queued run is handled by the branch above.
         total > 1 &&
-        invocation.isActive &&
+        isRunning &&
         (banner?.kind === 'running' || idx > 0) &&
         (banner?.text ?? (idx > 0 ? statusMessage : null)) && (
           <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">

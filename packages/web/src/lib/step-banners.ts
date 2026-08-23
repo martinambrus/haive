@@ -24,6 +24,21 @@
 export const PAUSED_WAIT_TEXT =
   'Paused — execution is paused, so this will not start until it resumes.';
 
+/** Copy for a queued run that never wrote a status line of its own.
+ *
+ *  The queued mark is written only when every slot is busy AT ENQUEUE (`queue.add` then a
+ *  guarded update in task-queue.ts), so a fan-out enqueued in a burst leaves some of its jobs
+ *  queued with no copy at all — nothing is wrong with them, the marker simply never fired.
+ *  Deliberately vague about the REASON: a run can also be held by the pause gate, the per-task
+ *  agent cap or the runtime-holder reserve, and naming capacity would be a guess.
+ *
+ *  Supplying words here rather than returning null is what stops a queued run falling through to
+ *  whatever a caller shows next — which is how a queued verifier terminal ended up displaying its
+ *  STEP's live "Waiting for AI analysis..." in running-blue, i.e. reporting another terminal's
+ *  work as its own. */
+export const QUEUED_WAIT_TEXT =
+  'Queued — this run has not started yet. It begins automatically when a slot frees.';
+
 /** The step fields the banner rules read. Dates accept a `Date` or an ISO string. */
 export interface StepBannerRow {
   status: string;
@@ -121,6 +136,9 @@ export function invocationBanner(
   // Only the queued half is relabelled — see PAUSED_WAIT_TEXT. A started invocation under pause
   // is still a live sandbox streaming output, so its copy is left exactly as it was.
   if (opts.paused && queued) return { kind: 'queued', text: PAUSED_WAIT_TEXT };
-  if (!inv.statusMessage) return null;
+  // A queued run always has something to say, because `startedAt == null` PROVES it is waiting
+  // whether or not the queue ever wrote a line for it. Only a STARTED run can be silent: there
+  // the message is the whole content, and an absent one means nothing to report.
+  if (!inv.statusMessage) return queued ? { kind: 'queued', text: QUEUED_WAIT_TEXT } : null;
   return { kind: queued ? 'queued' : 'running', text: inv.statusMessage };
 }

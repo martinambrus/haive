@@ -5,6 +5,7 @@ import {
   modelIdentityBanner,
   parkBanner,
   PAUSED_WAIT_TEXT,
+  QUEUED_WAIT_TEXT,
   type StepBannerRow,
   type InvocationBannerRow,
 } from './step-banners';
@@ -124,8 +125,15 @@ describe('invocationBanner', () => {
     ).toEqual({ kind: 'running', text: QUEUED_COPY });
   });
 
-  it('is null with no copy', () => {
+  it('is null with no copy, but only for a STARTED run', () => {
     expect(invocationBanner(inv({ startedAt: '2026-07-24T15:44:12Z' }))).toBeNull();
+  });
+
+  it('speaks for a queued run whose queue line was never written', () => {
+    // The mark is written only when every slot is busy AT ENQUEUE, so a burst fan-out leaves
+    // some jobs queued with no copy. Returning null there let the terminal fall through to its
+    // STEP's live status — a queued verifier rendering another terminal's work in running-blue.
+    expect(invocationBanner(inv())).toEqual({ kind: 'queued', text: QUEUED_WAIT_TEXT });
   });
 
   it('relabels a QUEUED invocation while paused', () => {
