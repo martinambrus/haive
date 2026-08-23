@@ -1,3 +1,8 @@
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const loadPreviousStepOutput = vi.fn();
@@ -158,5 +163,72 @@ describe('isDocsOnlyChange', () => {
   it('does not treat a file merely containing a doc extension as documentation', () => {
     expect(isDocsOnlyChange(set(['src/md.php']))).toBe(false);
     expect(isDocsOnlyChange(set(['app/readme.md.php']))).toBe(false);
+  });
+});
+
+describe('collectImplementationFiles — untracked directories', () => {
+  const exec = promisify(execFile);
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@haive.local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@haive.local',
+  };
+  const git = (dir: string, args: string[]) => exec('git', args, { cwd: dir, env: GIT_ENV });
+
+  /** ctx with no filesTouched and no DAG issues, so the dirty-worktree union is the only
+   *  contributor and the assertion is about `git status` alone. */
+  function ctxAt(): StepContextLike {
+    loadPreviousStepOutput.mockResolvedValue({ output: { filesTouched: [] } });
+    return {
+      taskId: 't1',
+      db: { select: () => ({ from: () => ({ where: () => Promise.resolve([]) }) }) },
+    } as unknown as StepContextLike;
+  }
+
+  /** A repo whose `.ddev/` is wholly untracked and carries its own .gitignore — the exact
+   *  shape DDEV leaves behind, and the one plain `--porcelain` reports as `?? .ddev/`. */
+  async function setupUntrackedDir(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'impl-'));
+    await git(dir, ['init', '-b', 'main']);
+    await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'init']);
+    await mkdir(path.join(dir, '.ddev'), { recursive: true });
+    await writeFile(path.join(dir, '.ddev/.gitignore'), 'generated.yaml\n', 'utf8');
+    await writeFile(path.join(dir, '.ddev/config.yaml'), 'name: x\n', 'utf8');
+    await writeFile(path.join(dir, '.ddev/generated.yaml'), 'machine-specific\n', 'utf8');
+    return dir;
+  }
+
+  it('lists the authored files inside an untracked directory, not the directory', async () => {
+    // The regression this exists for: `git status --porcelain` collapses a wholly-untracked
+    // directory to `?? .ddev/` and never descends, so the nested .gitignore is never applied
+    // and reviewers were handed a DIRECTORY as a changed file. MEASURED: 1,848 finding rows
+    // across 474 recurring (reviewer, file) groups, one re-raised across 19 rounds.
+    const dir = await setupUntrackedDir();
+    try {
+      const out = await collectImplementationFiles(ctxAt(), dir);
+      expect(out.files).toContain('.ddev/config.yaml');
+      expect(out.files).not.toContain('.ddev/');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("honours the untracked directory's own .gitignore", async () => {
+    // Deferring to git's ignore rules is the whole point — a hardcoded path list would rot
+    // the moment DDEV renamed an artifact, and would fix only DDEV.
+    const dir = await setupUntrackedDir();
+    try {
+      const out = await collectImplementationFiles(ctxAt(), dir);
+      // Both halves, or this passes for the wrong reason: without -uall the whole set is
+      // just `.ddev/`, which trivially "does not contain" the generated file.
+      expect(out.files).toContain('.ddev/config.yaml');
+      expect(out.files).not.toContain('.ddev/generated.yaml');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

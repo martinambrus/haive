@@ -71,9 +71,26 @@ export function fileCoverage(value: MaybeFileSet): FileCoverage | null {
   return { listed: set.files.length, total: set.total, truncated: set.truncated === true };
 }
 
+/** Currently-dirty paths in the worktree, as FILES.
+ *
+ *  `-uall` is load-bearing, not a tidy-up. Plain `--porcelain` collapses a wholly-untracked
+ *  DIRECTORY into one entry — on a DDEV worktree, literally `?? .ddev/` — and git never
+ *  descends into it, so the nested `.ddev/.gitignore` that excludes every generated artifact
+ *  is never consulted. That directory then reached six steps as a changed "file", and five
+ *  different reviewers independently opened it and reported the generated compose/build
+ *  output inside. MEASURED before the fix: 474 recurring (reviewer, file) groups and 1,848
+ *  finding rows, one of them re-raised across 19 rounds, none of them fixable — DDEV rewrites
+ *  those files on every start.
+ *
+ *  Deferring to git's own ignore rules is the invariant; a hardcoded `.ddev` exclusion list
+ *  would rot the moment DDEV renames an artifact, and would fix only DDEV. Any untracked
+ *  directory had this bug.
+ *
+ *  Cost: a repo with a large un-gitignored untracked tree now enumerates it and can crowd
+ *  `MAX_LISTED_FILES`. That cap already reports `truncated` rather than hiding the cut. */
 async function dirtyWorktreeFiles(worktreePath: string): Promise<string[]> {
   try {
-    const { stdout } = await exec('git', ['status', '--porcelain'], { cwd: worktreePath });
+    const { stdout } = await exec('git', ['status', '--porcelain', '-uall'], { cwd: worktreePath });
     return stdout
       .toString()
       .split('\n')
