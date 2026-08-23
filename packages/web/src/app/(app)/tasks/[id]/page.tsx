@@ -1314,7 +1314,13 @@ export default function TaskDetailPage() {
   return (
     <div className="flex flex-col gap-6">
       {titleStripVisible && (
-        <div className="fixed left-64 right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-8 py-2 backdrop-blur">
+        // data-fixed-title-strip: StaleBuildBanner parks itself directly under this strip and
+        // MEASURES it rather than carrying a copy of its height — the height is padding plus a
+        // line box, so any type or spacing change here would silently move it out from under.
+        <div
+          data-fixed-title-strip
+          className="fixed left-64 right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-8 py-2 backdrop-blur"
+        >
           {/* Same destination as the header link the strip replaces, so scrolling never
               costs the user the way out. */}
           <Link

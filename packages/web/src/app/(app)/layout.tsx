@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { SidebarNav } from '@/components/sidebar-nav';
 import { GlobalPauseBanner } from '@/components/global-pause-banner';
+import { StaleBuildBanner } from '@/components/stale-build-banner';
 import { CliLoginProvider } from '@/components/cli-login-provider';
 import { NotificationProvider } from '@/components/notifications/notification-provider';
 import { SessionKeepAlive } from '@/components/session-keepalive';
@@ -74,6 +75,11 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           {/* Renders nothing unless the admin global pause switch is on. Role comes from the
               /auth/me call this layout already makes, so the banner costs no extra request
               to decide whether to offer the admin link. */}
+          {/* Renders nothing until the server's code stamp moves past the one this page loaded
+              with, so it is silent on a page that was just opened. FIRST in the column because
+              its bar is fixed and its spacer is what keeps everything below it — the pause
+              banner included — out from under that bar. */}
+          <StaleBuildBanner />
           <GlobalPauseBanner role={data.user.role} />
           {children}
         </main>
