@@ -277,7 +277,7 @@ export interface DeclareDepsDetect {
   /** Cached Chrome for Testing milestones for the version picker. Empty when the catalog has
    *  never been refreshed or its feed is down, which collapses the picker to system default
    *  rather than blocking the form — the cache is never a gate. */
-  browserVersions?: { version: string; label: string }[];
+  browserVersions?: Record<string, { version: string; label: string }[]>;
 }
 
 export interface DeclareDepsApply {
@@ -472,13 +472,12 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     // worker running against an older @haive/database dist), and `.catch` covers the read
     // itself failing. Either way the picker collapses to system default, which is the same
     // outcome as an empty catalog and renders the pre-picker Dockerfile.
-    const browserRow = await ctx.db.query.browserVersionCache
-      ?.findFirst({
-        where: eq(schema.browserVersionCache.browser, 'chrome'),
-        columns: { versions: true },
-      })
-      .catch(() => undefined);
-    result.browserVersions = browserRow?.versions ?? [];
+    const browserRows = await ctx.db.query.browserVersionCache
+      ?.findMany({ columns: { browser: true, versions: true } })
+      .catch(() => []);
+    result.browserVersions = Object.fromEntries(
+      (browserRows ?? []).map((r) => [r.browser, r.versions ?? []]),
+    );
     result.repositoryId = repositoryId;
     result.cliSupportsLsp = cliSupportsLsp;
     result.lspVersionByOption = lspVersionByOption;
@@ -501,6 +500,33 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         ? { ...o, badge: lspVersionByOption[o.value], badgeColor: 'green' as const }
         : o,
     );
+
+    // Only offer a browser whose install path is verified AND whose catalog has entries. A
+    // type with no versions would be a select whose only option is the default, and with no
+    // catalog at all the whole picker disappears -- the cache is never a gate.
+    const catalogs = detected.browserVersions ?? {};
+    const BROWSER_TYPES: { value: string; label: string }[] = [
+      { value: 'chrome', label: 'Google Chrome' },
+      { value: 'edge', label: 'Microsoft Edge' },
+    ];
+    const offerable = BROWSER_TYPES.filter((t) => (catalogs[t.value] ?? []).length > 0);
+    const browserTypeOptions = [
+      { value: '', label: 'System default (whatever the base image provides)' },
+      ...offerable,
+    ];
+    const browserVersionFields = offerable.map((t) => ({
+      type: 'select' as const,
+      id: `browserVersion_${t.value}`,
+      label: `${t.label} version`,
+      description:
+        'Latest at build time takes whatever the package source serves that day. A pinned version is reproducible.',
+      visibleWhen: { field: 'browserType', equals: t.value },
+      options: [
+        { value: '', label: 'Latest at build time' },
+        ...(catalogs[t.value] ?? []).map((v) => ({ value: v.version, label: v.label })),
+      ],
+      default: '',
+    }));
 
     const fields: FormSchema['fields'] = [
       {
@@ -584,30 +610,28 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         description: `Installs headed Chromium + chrome-devtools-mcp (currently ${detected.chromeVersionLabel ?? 'latest'}) for the browser-verification steps.`,
         default: true,
       },
-      // Version picker for the browser the environment is tested in. Shown only when browser
-      // testing is on, mirroring how the DDEV webserver select keys off containerTool.
-      //
-      // Only offered when the catalog has entries. An empty list means the feed has never
-      // been refreshed or is down, and a select whose only option is the default is noise —
-      // omitting it leaves declaredDeps.browser absent, which renders exactly what it
-      // rendered before this existed.
-      ...(detected.browserVersions && detected.browserVersions.length > 0
+      // Browser + version pickers. Both are gated with a SINGLE condition each, because
+      // visibleWhen supports one: the type select keys off browserTesting, and each version
+      // select keys off the type. The type default is '' (system default) precisely so this
+      // composes -- with browser testing off the type stays '', so neither version select
+      // appears, and no second condition is needed.
+      ...(browserTypeOptions.length > 1
         ? [
             {
               type: 'select' as const,
-              id: 'browserVersion',
-              label: 'Chrome version',
+              id: 'browserType',
+              label: 'Browser',
               description:
-                'Which Chrome the browser-verification steps run against. System default takes whatever the package source serves at build time; a pinned version is fetched from Chrome for Testing, which is the only source that archives past releases.',
+                'Which browser the verification steps drive. Chromium-family only: the agent uses chrome-devtools-mcp, which speaks the Chrome DevTools Protocol.',
               visibleWhen: { field: 'browserTesting', equals: true },
-              options: [
-                { value: '', label: 'System default (latest at build time)' },
-                ...detected.browserVersions.map((v) => ({ value: v.version, label: v.label })),
-              ],
+              options: browserTypeOptions,
               default: '',
             },
           ]
         : []),
+      // One version select per type rather than one shared select whose options change:
+      // options are static per field, and this keeps each list honest about its own source.
+      ...browserVersionFields,
       {
         type: 'textarea',
         id: 'extraPackages',
@@ -713,9 +737,22 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       browserTesting: values.browserTesting,
       // Absent when nothing is pinned, so the generator renders its pre-picker output and the
       // declared-deps hash is unchanged for every environment that does not use this.
-      ...(values.browserTesting && (values.browserVersion ?? '').trim()
-        ? { browser: { type: 'chrome', version: values.browserVersion!.trim() } }
-        : {}),
+      // Written only when it changes what gets installed, so the common case leaves
+      // declaredDeps.browser ABSENT and the generator renders its pre-picker output --
+      // which keeps the declared-deps hash stable for every environment not using this.
+      //
+      // Edge always needs the key (it is not the default browser), Chrome only when a
+      // version is actually pinned (Chrome at latest IS the default).
+      ...(() => {
+        if (!values.browserTesting) return {};
+        const type = (values.browserType ?? '').trim();
+        if (type !== 'chrome' && type !== 'edge') return {};
+        const version =
+          (type === 'chrome' ? values.browserVersion_chrome : values.browserVersion_edge) ?? '';
+        const pinned = version.trim();
+        if (type === 'chrome' && !pinned) return {};
+        return { browser: { type, version: pinned || null } };
+      })(),
       ...(repoChromeMcpVersion ? { chromeDevtoolsMcpVersion: repoChromeMcpVersion } : {}),
       extraPackages: parseExtraPackages(values.extraPackages ?? ''),
     };
@@ -860,8 +897,12 @@ export interface DeclareDepsFormValues extends FormValues {
   lspServers?: LspKey[];
   preinstallDeps: boolean;
   browserTesting: boolean;
-  /** Full Chrome for Testing version, or '' for system default. */
-  browserVersion?: string;
+  /** '' = system default, else a verified Chromium-family type. */
+  browserType?: string;
+  /** Per-type pinned version, '' = latest at build time. One field per type because a
+   *  select's options are static, so a shared field could not switch lists. */
+  browserVersion_chrome?: string;
+  browserVersion_edge?: string;
   extraPackages: string;
 }
 

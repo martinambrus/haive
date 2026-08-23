@@ -519,15 +519,50 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     // container via `docker cp` (they can't be COPYed here — the env-image build
     // context is the repo, not the worker's docker assets).
     const ubuntu = isUbuntuBase(baseImage);
+    // Chromium-family only: the agent path is chrome-devtools-mcp, which speaks CDP.
+    const browserType = (deps.browser?.type ?? 'chrome').trim().toLowerCase();
+    const pinnedVersion = (deps.browser?.version ?? '').trim();
     // A FULL Chrome for Testing version (e.g. 140.0.7339.207); empty = system default.
-    const pinnedChrome = (deps.browser?.version ?? '').trim();
+    const pinnedChrome = browserType === 'chrome' ? pinnedVersion : '';
     const xStack = 'xvfb x11vnc socat procps fonts-dejavu';
     // ONE apt block, repo setup included. Each block ends by deleting
     // /var/lib/apt/lists, so a second block re-fetches the whole package index: MEASURED
     // 32.3 MB per `apt-get update`, three times over in a browserTesting build (96.9 MB of
     // a 344 MB total). Adding a repo as its own step would pay that again.
     lines.push('# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core');
-    if (pinnedChrome) {
+    if (browserType === 'edge') {
+      // Edge is the ONLY one of the three that apt can pin directly: MEASURED, its index
+      // carries 184 debs across 39 majors (95 to 151), where Google publishes exactly one
+      // google-chrome-stable and keeps no archive. So no zip overlay and no separate
+      // dependency step -- apt resolves the graph from the deb, on Debian and Ubuntu alike,
+      // which is why this branch needs no base check.
+      //
+      // VERIFIED before being offered, which the plan requires of every type: Edge 149
+      // pinned via `=<version>` installs and reports that version rather than the newest,
+      // chrome-devtools-mcp completes navigate_page against it over CDP, and the credential
+      // controls still hold through it (body diverted to /tmp/haive-net-..., set-cookie
+      // rendered as <redacted>).
+      lines.push(
+        `# Microsoft Edge${pinnedVersion ? ` pinned to ${pinnedVersion}` : ''} (Chromium-based, CDP)`,
+      );
+      lines.push(...aptRun());
+      lines.push('    install -m 0755 -d /etc/apt/keyrings \\');
+      lines.push(
+        '    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft-edge.gpg \\',
+      );
+      lines.push('    && chmod a+r /etc/apt/keyrings/microsoft-edge.gpg \\');
+      lines.push(
+        '    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" > /etc/apt/sources.list.d/microsoft-edge.list \\',
+      );
+      lines.push('    && apt-get update \\');
+      lines.push(
+        `    && apt-get install -y --no-install-recommends microsoft-edge-stable${pinnedVersion ? `=${pinnedVersion}` : ''} ${xStack} \\`,
+      );
+      // Same symlink contract as every other type: SANDBOX_CHROME_PATH, CHROME_PATH,
+      // browser-check.js and 08a-browser-verify all name /usr/bin/chromium and none of them
+      // should learn which browser provided it.
+      lines.push('    && ln -sf /usr/bin/microsoft-edge /usr/bin/chromium');
+    } else if (pinnedChrome) {
       // A pinned version cannot come from apt: MEASURED, Google's repo publishes exactly ONE
       // google-chrome-stable and keeps no archive, so `=<version>` resolves today and fails
       // the day upstream ships the next release. Chrome for Testing is the only source that

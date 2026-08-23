@@ -153,6 +153,42 @@ describe('renderDockerfile LSP version pins', () => {
     expect(explicitDefault).toBe(ubuntu);
   });
 
+  // Edge is the only one of the three apt can pin directly: its index keeps 184 debs across
+  // 39 majors, so no zip overlay and no separate dependency step are needed. Verified before
+  // being offered: Edge 149 pinned installs and reports 149, chrome-devtools-mcp drives it
+  // over CDP, and the credential controls still hold through it.
+  it('installs Edge from the Microsoft repo, pinned when asked', () => {
+    const pinned = renderDockerfile('ubuntu:24.04', {
+      browserTesting: true,
+      browser: { type: 'edge', version: '149.0.4022.98-1' },
+    } as never);
+    expect(pinned).toContain('packages.microsoft.com/repos/edge');
+    expect(pinned).toContain('microsoft-edge-stable=149.0.4022.98-1');
+    expect(pinned).toContain('ln -sf /usr/bin/microsoft-edge /usr/bin/chromium');
+    // apt resolves Edge's dependency graph from the deb, so none of the Chrome machinery.
+    expect(pinned).not.toContain('chrome-for-testing-public');
+    expect(pinned).not.toContain('apt-get satisfy');
+    expect(pinned).not.toContain('google-chrome-stable');
+
+    const latest = renderDockerfile('ubuntu:24.04', {
+      browserTesting: true,
+      browser: { type: 'edge' },
+    } as never);
+    expect(latest).toMatch(/microsoft-edge-stable [a-z]/);
+    expect(latest).not.toContain('microsoft-edge-stable=');
+  });
+
+  it('needs no base branch for Edge — the Microsoft repo serves Debian too', () => {
+    for (const base of ['ubuntu:24.04', 'debian:bookworm-slim']) {
+      const df = renderDockerfile(base, {
+        browserTesting: true,
+        browser: { type: 'edge' },
+      } as never);
+      expect(df).toContain('microsoft-edge-stable');
+      expect(df).toContain('RUN /usr/bin/chromium --version');
+    }
+  });
+
   it('fails the build when the base cannot produce a working browser', () => {
     // The whole class of bug this guards: an image that builds fine and only reveals it has
     // no browser hours later, inside an MCP tool call during a verification step.
