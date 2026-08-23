@@ -295,6 +295,15 @@ function isPlainVersion(raw: string): boolean {
   return /^\d+(\.\d+){0,2}$/.test(raw);
 }
 
+/** A derived MAJOR safe to interpolate: digits only. Node and Java name their install
+ *  sources by major alone (`setup_${n}.x`, `openjdk-${n}-jdk-headless`), so what reaches
+ *  the line is one part of a split — never a dotted version. Same threat as
+ *  isPlainVersion: `engines.node` and pom.xml's `<maven.compiler.source>` are both
+ *  repo-supplied, and pom.xml's `([^<]+)` capture spans a newline. */
+function isPlainMajor(raw: string): boolean {
+  return /^\d+$/.test(raw);
+}
+
 /** A declared Go version as it must appear in a go.dev release filename, or null when the
  *  input carries no usable version (caller falls back to DEFAULT_GO_VERSION).
  *
@@ -385,7 +394,8 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   if (lspNeedsRuby) runtimes.add('ruby');
 
   if (runtimes.has('node')) {
-    const nodeMajor = (versions.node ?? '22').split('.')[0];
+    const declaredNodeMajor = (versions.node ?? '').split('.')[0] ?? '';
+    const nodeMajor = isPlainMajor(declaredNodeMajor) ? declaredNodeMajor : '22';
     lines.push(
       `# Node.js ${nodeMajor} (build-essential + python3 needed by node-gyp for native modules)`,
     );
@@ -492,9 +502,11 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   }
 
   if (runtimes.has('java')) {
-    const javaVersion = versions.java ?? '17';
-    const javaParts = javaVersion.split('.');
-    const javaMajor = javaParts[0] === '1' && javaParts[1] ? javaParts[1] : (javaParts[0] ?? '17');
+    const javaParts = (versions.java ?? '').split('.');
+    // Java 8 and older are named "1.8" in pom.xml/gradle but "openjdk-8-*" in apt.
+    const derivedJavaMajor =
+      javaParts[0] === '1' && javaParts[1] ? javaParts[1] : (javaParts[0] ?? '');
+    const javaMajor = isPlainMajor(derivedJavaMajor) ? derivedJavaMajor : '17';
     lines.push(`# Java ${javaMajor}`);
     lines.push(...aptRun());
     lines.push('    apt-get update \\');

