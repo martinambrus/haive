@@ -33,10 +33,15 @@ export interface ModelPriceRates {
 }
 
 /** Where a stored rate came from. `manual` is admin-entered (a negotiated or
- *  enterprise rate) and is never touched by a sync. */
-export type PriceFeed = 'openrouter' | 'litellm' | 'manual';
+ *  enterprise rate) and is never touched by a sync.
+ *
+ *  `ollama` is a third feed rather than a LiteLLM special case because Ollama
+ *  publishes no price document at all: the only rates it states anywhere are on the
+ *  individual model pages, so they are scraped one page per configured cloud model
+ *  (`cli-versions/ollama-model-prices.ts`). */
+export type PriceFeed = 'openrouter' | 'litellm' | 'manual' | 'ollama';
 
-export const PRICE_FEEDS: PriceFeed[] = ['openrouter', 'litellm', 'manual'];
+export const PRICE_FEEDS: PriceFeed[] = ['openrouter', 'litellm', 'manual', 'ollama'];
 
 /** Public and unauthenticated, like the OpenRouter catalog — no key needed, which
  *  is what lets pricing populate before any provider secret exists. */
@@ -192,13 +197,22 @@ export function parseLitellmPrices(payload: unknown): LitellmPriceEntry[] {
  *  direct-vendor rows).
  *
  *  Coverage as measured: anthropic 26 chat models, openai 90, gemini 50 +
- *  vertex_ai-language-models 29, xai 44, meta 3, zai 13, ollama 21 (all priced 0,
- *  which is the truth for local inference). Two Haive providers get nothing here by
- *  design:
+ *  vertex_ai-language-models 29, xai 44, meta 3, zai 13. Three providers get nothing
+ *  here by design:
  *    - `codex`/`amp` report no model at all, so a rate can only be resolved from the
  *      provider row's configured model.
  *    - `openrouter` is a gateway reselling at its own margin, so it is priced ONLY
- *      from its own catalog (`openrouter_model_cache`), never from a vendor rate. */
+ *      from its own catalog (`openrouter_model_cache`), never from a vendor rate.
+ *    - `ollama` publishes 21 rows and EVERY one is priced 0. That is the truth for a
+ *      local model and a lie for Ollama Cloud, and FOUR of those rows are cloud
+ *      models (`deepseek-v3.1:671b-cloud`, `gpt-oss:20b-cloud`,
+ *      `gpt-oss:120b-cloud`, `qwen3-coder:480b-cloud`). A stored 0 is not
+ *      "unpriced", it is a PRICE: it
+ *      makes an invocation record a real $0.00, the exact outcome the "an unmatched
+ *      id is UNPRICED, never guessed" rule exists to prevent. Ollama is priced from
+ *      its own model pages instead (`source: 'ollama'`); a local model matches
+ *      nothing and resolves `source: 'none'`, which is also the truth for it -- its
+ *      cost is electricity, not tokens. */
 export const PROVIDER_LITELLM_VENDORS: Readonly<Partial<Record<CliProviderName, string[]>>> = {
   'claude-code': ['anthropic'],
   codex: ['openai'],
@@ -209,10 +223,6 @@ export const PROVIDER_LITELLM_VENDORS: Readonly<Partial<Record<CliProviderName, 
   zai: ['zai'],
   muse: ['meta'],
   grok: ['xai'],
-  // Every ollama row is priced 0, which is correct for local inference and harmless
-  // for Ollama Cloud, whose plan is a flat subscription rather than per-token — the
-  // `local` cost basis makes those non-billable regardless.
-  ollama: ['ollama'],
 };
 
 /** The model id inside a LiteLLM key: everything after the last `/`, or the whole
@@ -396,11 +406,15 @@ export interface CostDecision {
 export function resolveCostDecision(input: {
   provider: CliProviderName;
   authMode: AuthMode;
+  /** The model that answered, for the one provider whose basis is per-model rather
+   *  than per-CLI (ollama: cloud vs local). Optional — every other provider ignores
+   *  it, and codex/amp can never supply one. */
+  modelKey?: string | null;
   hasManualRate: boolean;
   hasFeedRate: boolean;
   hasReportedCost: boolean;
 }): CostDecision {
-  const basis = resolveCostBasis(input.provider, input.authMode);
+  const basis = resolveCostBasis(input.provider, input.authMode, input.modelKey);
   // Whether the CLI's own total prices the backend that actually answered. Read from
   // the UNRESOLVED catalog basis, not from `basis`: a flat plan demotes the basis
   // without changing who did the pricing, and the two questions have different

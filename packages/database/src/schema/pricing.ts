@@ -17,8 +17,12 @@ import { sql } from 'drizzle-orm';
 import { cliProviderNameEnum } from './cli-providers.js';
 
 /** Where a stored rate came from. Keep in sync with `PriceFeed` in @haive/shared
- *  (this package cannot import shared — shared imports database, not the reverse). */
-export const priceFeedEnum = pgEnum('price_feed', ['openrouter', 'litellm', 'manual']);
+ *  (this package cannot import shared — shared imports database, not the reverse).
+ *
+ *  `ollama` is its own feed rather than a LiteLLM row because Ollama publishes no
+ *  price document at all: the only rates it states anywhere are on the individual
+ *  model pages, scraped one page per configured cloud model. */
+export const priceFeedEnum = pgEnum('price_feed', ['openrouter', 'litellm', 'manual', 'ollama']);
 
 // --- Effective-dated model prices ---------------------------------------
 

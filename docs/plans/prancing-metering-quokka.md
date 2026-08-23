@@ -1,6 +1,27 @@
 # Ollama Cloud is not free local compute
 
-> Status: DEFERRED. Diagnosed 2026-08-23, not implemented. No code changed.
+> Status: IMPLEMENTED 2026-08-23. Verified live against ollama.com and this install's DB.
+>
+> Three deviations from the plan as written, each measured rather than reasoned:
+>
+> - **Keyed on `isOllamaCloudModel`, not on `:cloud`.** The existing shared helper matches
+>   BOTH `-cloud` and `:cloud`, and it has to: all four zero-rate cloud rows named below
+>   wear the `<size>-cloud` form, so a `:cloud`-only test would have missed every one of
+>   the models this plan calls the latent bug.
+> - **FOUR zero-rate cloud rows, not three.** `gpt-oss:20b-cloud` is a fourth. All 21
+>   ollama LiteLLM rows were live and priced 0; migration 0126 closed them.
+> - **The scraper is scoped to CLOUD models, not to every configured one.** A stored rate
+>   on a `local`-basis invocation would be summed as REAL spend, since only the
+>   `subscription` basis is non-billable. Cloud-only is a guard, not a saved request.
+>
+> Also: no worker egress change was needed. Squid fronts the cli-exec sandbox, not the
+> worker, which already fetches LiteLLM and ECB directly; the ollama ADAPTER already lists
+> `ollama.com` for the sandbox side. Verified by the live scrape succeeding.
+>
+> Live result of the first refresh tick: `pages:10 priced:1 unpublished:9`, zero errors,
+> and `kimi-k3:cloud` stored at input 3e-6 / cached 3e-7 / output 1.5e-5 per token —
+> exactly the measured table below, labels paired the right way round. A second tick wrote
+> nothing (`inserted 0, closed 0, unchanged 645`).
 
 ## Context
 

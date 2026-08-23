@@ -16,6 +16,7 @@ import {
   type ModelPriceRates,
   type RefreshCliVersionsJobResult,
 } from '@haive/shared';
+import { fetchOllamaModelPrices } from './ollama-model-prices.js';
 
 const log = logger.child({ module: 'model-price-refresh' });
 
@@ -28,7 +29,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 interface DesiredRow {
   provider: CliProviderName;
   modelKey: string;
-  source: 'litellm' | 'openrouter';
+  source: 'litellm' | 'openrouter' | 'ollama';
   rates: ModelPriceRates;
 }
 
@@ -51,7 +52,11 @@ interface DesiredRow {
  *  toggle takes effect immediately rather than at the next sync).
  *
  *  Runs AFTER `refreshOpenRouterModels` in the job, not beside it, because it reads
- *  that refresher's cache rather than re-fetching the 4 MB catalog. */
+ *  that refresher's cache rather than re-fetching the 4 MB catalog.
+ *
+ *  Three feeds, not two, because the vendors publish in three incompatible shapes: a
+ *  price document (LiteLLM), a catalog API (OpenRouter), and — for Ollama — nothing at
+ *  all except a figure on each model's own page. */
 export async function refreshModelPrices(db: Database): Promise<RefreshCliVersionsJobResult> {
   // Global kill-switch. OFF means no feed is fetched at all and every stored rate stays
   // exactly as it is, which is the posture an install on negotiated rates wants once it
@@ -135,6 +140,27 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       log.warn({ error }, 'failed to read openrouter catalog for pricing');
       errors.push({ name: 'price:openrouter', error });
       await recordSyncError(db, ['openrouter'], error);
+    }
+  }
+
+  // --- Ollama: rates scraped from the model pages, the only place Ollama states one.
+  // NOT priced from the LiteLLM `ollama` vendor rows: every one of those is 0, which is
+  // the truth for a local model and a LIE for the four CLOUD models the feed also
+  // carries — and a stored 0 is a PRICE, so it would record a real $0.00 cost.
+  if (enabled.has('ollama')) {
+    const { rows, errors: pageErrors } = await fetchOllamaModelPrices(db);
+    for (const row of rows) {
+      desired.push({
+        provider: 'ollama',
+        modelKey: row.modelKey,
+        source: 'ollama',
+        rates: row.rates,
+      });
+    }
+    if (pageErrors.length > 0) {
+      const error = pageErrors.join('; ');
+      errors.push({ name: 'price:ollama', error });
+      await recordSyncError(db, ['ollama'], error);
     }
   }
 

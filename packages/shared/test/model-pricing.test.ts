@@ -159,6 +159,13 @@ describe('litellmRowsForProviders', () => {
       litellm_provider: 'dashscope',
       mode: 'chat',
     },
+    // The feed carries CLOUD models under the ollama vendor, every one priced 0.
+    'ollama/gpt-oss:120b-cloud': {
+      input_cost_per_token: 0,
+      output_cost_per_token: 0,
+      litellm_provider: 'ollama',
+      mode: 'chat',
+    },
   });
 
   it('scopes each vendor row to the Haive provider that calls that vendor', () => {
@@ -185,6 +192,17 @@ describe('litellmRowsForProviders', () => {
     // the admin's manual rate is the intended answer.
     const rows = litellmRowsForProviders(ENTRIES, ['zai']);
     expect(rows.map((r) => r.modelKey)).toEqual(['glm-4.6']);
+  });
+
+  it('gives ollama nothing, because every one of its rows is priced 0', () => {
+    // A stored 0 is not "unpriced", it is a PRICE: it makes an invocation record a real
+    // $0.00 cost. That is the truth for a local model and a LIE for the cloud models the
+    // feed also carries under this vendor. Ollama is priced from its own model pages.
+    expect(litellmRowsForProviders(ENTRIES, ['ollama'])).toEqual([]);
+    // And the zero row must not leak to anyone else either.
+    expect(litellmRowsForProviders(ENTRIES, ['claude-code', 'zai']).map((r) => r.modelKey)).toEqual(
+      ['claude-opus-5', 'glm-4.6'],
+    );
   });
 
   it('gives a gateway provider nothing, since it resells at its own margin', () => {
@@ -408,6 +426,45 @@ describe('resolveCostDecision', () => {
     ).toEqual({ source: 'none', billable: false });
   });
 
+  it('prices an Ollama Cloud model as a counterfactual, never as spend', () => {
+    // The plan is what was paid; the per-token figure is what it would otherwise have
+    // cost. Non-billable however it was priced, and NEVER from the binary's reported
+    // total -- that is Anthropic's table applied to Ollama's tokens.
+    expect(
+      resolveCostDecision({
+        ...base,
+        provider: 'ollama',
+        authMode: 'api_key',
+        modelKey: 'kimi-k3:cloud',
+        hasFeedRate: true,
+        hasReportedCost: true,
+      }),
+    ).toEqual({ source: 'computed', billable: false });
+    expect(
+      resolveCostDecision({
+        ...base,
+        provider: 'ollama',
+        authMode: 'api_key',
+        modelKey: 'gpt-oss:120b-cloud',
+        hasReportedCost: true,
+      }),
+    ).toEqual({ source: 'none', billable: false });
+  });
+
+  it('leaves a LOCAL ollama model unpriced, since its cost is electricity', () => {
+    // The LiteLLM `ollama` rows that used to price these at a real $0.00 are gone, and
+    // the page scraper is scoped to cloud models, so nothing prices a local one.
+    expect(
+      resolveCostDecision({
+        ...base,
+        provider: 'ollama',
+        authMode: 'api_key',
+        modelKey: 'qwen3.5:0.8b',
+        hasReportedCost: true,
+      }),
+    ).toEqual({ source: 'none', billable: false });
+  });
+
   it('reports nothing usable as unpriced rather than as zero spend', () => {
     expect(resolveCostDecision({ ...base, provider: 'codex', authMode: 'api_key' })).toEqual({
       source: 'none',
@@ -425,6 +482,24 @@ describe('resolveCostBasis', () => {
     // Auth-mode independent: local inference stays local, a flat-plan CLI stays flat.
     expect(resolveCostBasis('ollama', 'subscription')).toBe('local');
     expect(resolveCostBasis('amp', 'api_key')).toBe('subscription');
+  });
+
+  it('resolves ollama per MODEL, because one catalog entry covers two products', () => {
+    // Ollama Cloud is plan-included up to a limit and metered beyond it. Neither free
+    // local compute nor per-token billing describes it, and 'subscription' is the basis
+    // that makes its dollars a counterfactual instead of spend.
+    expect(resolveCostBasis('ollama', 'api_key', 'kimi-k3:cloud')).toBe('subscription');
+    // BOTH tag forms. `<size>-cloud` is the common one, and the three cloud models the
+    // LiteLLM feed priced at 0 all wear it -- a `:cloud`-only test would miss every one.
+    expect(resolveCostBasis('ollama', 'api_key', 'qwen3-coder:480b-cloud')).toBe('subscription');
+    expect(resolveCostBasis('ollama', 'api_key', 'gpt-oss:120b-cloud')).toBe('subscription');
+    // A local model stays local: its cost is electricity, not tokens.
+    expect(resolveCostBasis('ollama', 'api_key', 'qwen3.5:0.8b')).toBe('local');
+    // No model in hand (the per-provider rollup groups by provider) keeps the catalog
+    // answer rather than guessing.
+    expect(resolveCostBasis('ollama', 'api_key')).toBe('local');
+    // Nobody else reads the model.
+    expect(resolveCostBasis('zai', 'api_key', 'glm-5.3:cloud')).toBe('estimate');
   });
 });
 

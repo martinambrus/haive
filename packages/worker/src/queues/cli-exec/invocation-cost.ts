@@ -15,6 +15,7 @@ import {
   type InvocationCost,
   type LivePriceRow,
   type ModelIdentity,
+  type PriceFeed,
 } from '@haive/shared';
 import { log } from './_shared.js';
 
@@ -85,6 +86,9 @@ export async function resolveInvocationCost(
   const decision = resolveCostDecision({
     provider: providerName,
     authMode,
+    // Ollama's basis is per-MODEL, not per-CLI: one catalog entry covers the local
+    // daemon and Ollama Cloud, and only the model id says which ran.
+    modelKey,
     hasManualRate: chosen?.source === 'manual',
     hasFeedRate: chosen !== null && chosen.source !== 'manual',
     hasReportedCost: reportedCostUsd !== null,
@@ -187,7 +191,7 @@ async function loadFeedGate(
   providerName: CliProviderName,
 ): Promise<{
   autoUpdateEnabled: boolean;
-  preferredFeed: 'openrouter' | 'litellm' | 'manual' | null;
+  preferredFeed: PriceFeed | null;
 }> {
   const row = await db.query.cliPricingSync.findFirst({
     where: eq(schema.cliPricingSync.name, providerName),

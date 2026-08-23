@@ -1,4 +1,5 @@
 import type { AuthMode, CliProviderName } from '../types/index.js';
+import { isOllamaCloudModel } from './ollama.js';
 
 export interface EffortScaleMetadata {
   /** Allowed level identifiers for this CLI, ordered low-to-high. */
@@ -77,7 +78,9 @@ export interface CliProviderMetadata {
    *    codex, gemini) — sum + display as $.
    *  - 'subscription': flat-plan CLI, no meaningful per-token price (amp, antigravity).
    *  - 'local': free local compute; the claude binary reports Anthropic-price FICTION
-   *    against a local endpoint (ollama).
+   *    against a local endpoint. Ollama's CATALOG basis, but NOT every ollama run's:
+   *    one catalog entry covers the local daemon and Ollama Cloud alike, and a cloud
+   *    model resolves 'subscription' instead -- see resolveCostBasis.
    *  - 'estimate': metered backend, but the claude binary MISPRICES it against
    *    Anthropic's table (zai/GLM overstates ~10x) — reported, but not real $.
    *  Only 'metered' cost is summed as real dollars in the token telemetry; the rest are
@@ -511,12 +514,28 @@ export function isCostMetered(name: CliProviderName): boolean {
  *  NOT the same test as the SQL legacy-cost filters (`name in <metered> and
  *  auth_mode = ...`), and no longer equivalent to them: those read a CLI-REPORTED
  *  total, which is only usable from a metered CLI, while this classifies the
- *  invocation itself however it was priced. */
+ *  invocation itself however it was priced.
+ *
+ *  `modelKey` is optional and only ollama reads it, so a caller with no model in
+ *  hand (the per-provider usage rollup groups by provider, not by model) keeps the
+ *  catalog answer. */
 export function resolveCostBasis(
   name: CliProviderName,
   authMode: AuthMode,
+  modelKey?: string | null,
 ): CliProviderMetadata['costBasis'] {
   const base = CLI_PROVIDER_CATALOG[name].costBasis;
+  // Ollama is the one CLI whose basis is not a property of the CLI. Its catalog entry
+  // says 'local' because that is what `ollama` used to mean, but a `-cloud`/`:cloud`
+  // model runs on ollama.com under a plan that is included up to a limit and metered
+  // beyond it -- neither free nor per-token-billed, and 'subscription' is the basis
+  // that describes it (non-billable, priced only as the counterfactual).
+  //
+  // Keyed on the model TAG, which is Ollama's own structural marker and the same test
+  // the base-URL routing and the boot provisioner already use. NOT on the base URL:
+  // a cloud provider row stores no ANTHROPIC_BASE_URL at all, because the local daemon
+  // proxies cloud models, so a URL check calls every one of them local.
+  if (name === 'ollama' && modelKey && isOllamaCloudModel(modelKey)) return 'subscription';
   if ((base === 'metered' || base === 'estimate') && authMode === 'subscription') {
     return 'subscription';
   }

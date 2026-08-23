@@ -21,7 +21,7 @@ interface PriceRow {
   id: string;
   provider: string | null;
   modelKey: string;
-  source: 'openrouter' | 'litellm' | 'manual';
+  source: 'openrouter' | 'litellm' | 'manual' | 'ollama';
   rates: ModelRates;
   currency: string;
   note: string | null;
