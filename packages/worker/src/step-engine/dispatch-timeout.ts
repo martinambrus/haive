@@ -10,10 +10,15 @@ import type { schema } from '@haive/database';
  *  the run die at 30 is worse than having no control at all, because it looks like the
  *  control worked.
  *
- *  No ladder here on purpose: these sites already own bounded infra-retry budgets
- *  (DAG_MAX_INFRA_RETRIES, the merge fix cap), and stacking a second escalation on top would
- *  make the wall-clock ceiling of a level fan-out hard to reason about. The override is a
- *  deliberate act by a human; escalation is automatic, and only mining needed it.
+ *  No PER-AGENT ladder here, and that part still holds: N coders each escalating independently
+ *  makes the wall-clock ceiling of a level fan-out impossible to reason about, which is why this
+ *  helper stays a flat lookup.
+ *
+ *  `overrideOrLearned` below is the narrow exception, added 2026-08-24 after a coder needing
+ *  ~35 minutes was killed at 30 and then re-dispatched at 30 twice more until
+ *  DAG_MAX_INFRA_RETRIES was spent and its work abandoned. The escalation is written to the
+ *  STEP, not the issue, so every coder in the level shares one budget and the ceiling is still
+ *  computable — N x escalated, bounded to two doublings by DAG_MAX_INFRA_RETRIES.
  *
  *  A non-positive stored value is treated as absent — the API clamps writes to 15..480
  *  minutes, so 0/negative can only mean "cleared".
@@ -59,4 +64,32 @@ export function learnedLadderBaseMs(
   const declared = declaredMs && declaredMs > 0 ? declaredMs : 0;
   const base = Math.max(declared, learned);
   return base > 0 ? base : undefined;
+}
+
+/** Budget for a fan-out site that may escalate: explicit human override > learned > declared.
+ *
+ *  The human pin always wins. Someone who chose 90 minutes on the retry route must not have it
+ *  silently replaced by a value the system inferred, in either direction.
+ *
+ *  `cli_timeout_learned_ms` is the same column the step-runner's mining ladder maintains, reused
+ *  rather than duplicated so a step carries ONE learned budget however it fans out. */
+export function overrideOrLearned(
+  step: Pick<typeof schema.taskSteps.$inferSelect, 'cliTimeoutOverrideMs' | 'cliTimeoutLearnedMs'>,
+  declaredMs: number | undefined,
+): number | undefined {
+  const override = step.cliTimeoutOverrideMs;
+  if (override && override > 0) return override;
+  const learned = step.cliTimeoutLearnedMs;
+  if (learned && learned > 0) return learned;
+  return declaredMs;
+}
+
+/** The next budget for a step whose fan-out agent was SIGKILLed at its own budget.
+ *
+ *  Doubling, not a fixed ladder, so the step converges on the work's real cost from whatever it
+ *  was actually given. Clamped by LEARNED_TIMEOUT_MAX_MS; returns null when there is nothing to
+ *  escalate from, so a caller cannot invent a budget out of an unparseable message. */
+export function escalatedTimeoutMs(failedBudgetMs: number | undefined): number | null {
+  if (!failedBudgetMs || failedBudgetMs <= 0) return null;
+  return Math.min(failedBudgetMs * 2, LEARNED_TIMEOUT_MAX_MS);
 }

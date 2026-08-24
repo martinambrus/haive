@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { copyFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
 import {
   dagIssueResultSchema,
@@ -23,6 +23,8 @@ import { resolveSpecView, SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-a
 import {
   isCliPreemptionFailure,
   isFatalProviderFailure,
+  isCliTimeoutFailure,
+  cliTimeoutBudgetMinutes,
 } from '../queues/cli-exec/failure-class.js';
 import {
   classifyDagIssueFailure,
@@ -30,7 +32,7 @@ import {
   DAG_INFRA_EXHAUSTED_MARKER,
 } from './dag-failure-class.js';
 import { killCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
-import { overrideOr } from './dispatch-timeout.js';
+import { overrideOr, overrideOrLearned, escalatedTimeoutMs } from './dispatch-timeout.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
@@ -1761,7 +1763,7 @@ export async function resolveDagPhase(
           cliProviderId: planDispatch.providerId,
           kind: 'cli',
           spec: planDispatch.invocation.spec,
-          timeoutMs: overrideOr(current, spec.timeoutMs),
+          timeoutMs: overrideOrLearned(current, spec.timeoutMs),
         });
         dispatched += 1;
       }
@@ -1812,6 +1814,33 @@ export async function resolveDagPhase(
           // issue to DAG_INFRA_EXHAUSTED and halt the task with a misleading "raise
           // RUNTIME_MEMORY_MB" diagnosis.
           const preempted = isCliPreemptionFailure({ errorMessage: inv.errorMessage });
+          // A coder SIGKILLed at its own budget needs MORE TIME, not another identical run.
+          // Without this it burns every infra retry at the budget that just killed it and its
+          // work is abandoned (MEASURED: a coder died at 1892s against a 30m budget, three
+          // times). Written to the STEP so the whole level shares one budget and the fan-out's
+          // ceiling stays computable; DAG_MAX_INFRA_RETRIES bounds it to two doublings.
+          if (isCliTimeoutFailure({ errorMessage: inv.errorMessage })) {
+            const failedMs = (cliTimeoutBudgetMinutes(inv.errorMessage) ?? 0) * 60_000;
+            const next = escalatedTimeoutMs(failedMs);
+            if (next) {
+              await db
+                .update(schema.taskSteps)
+                .set({ cliTimeoutLearnedMs: next, updatedAt: new Date() })
+                .where(
+                  and(
+                    eq(schema.taskSteps.id, current.id),
+                    or(
+                      isNull(schema.taskSteps.cliTimeoutLearnedMs),
+                      lt(schema.taskSteps.cliTimeoutLearnedMs, next),
+                    ),
+                  ),
+                );
+              ctx.logger.warn(
+                { issueKey: issue.issueKey, failedMs, nextMs: next },
+                'dag coder hit its time budget — raising the step budget for the retry',
+              );
+            }
+          }
           if (cls === 'transient' && (preempted || issue.infraRetries < DAG_MAX_INFRA_RETRIES)) {
             await db
               .update(schema.taskDagIssues)
