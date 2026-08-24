@@ -12,6 +12,7 @@
 // Invoked by 08a-browser-verify via `node /opt/browser-login.js <config-json>`.
 // Prints one JSON line: { ok, reason, url, title }.
 const puppeteer = require('puppeteer-core');
+const { recordHumanTab } = require('./browser-human-tab.js');
 
 const NAV_TIMEOUT_MS = 30000;
 const SELECTOR_TIMEOUT_MS = 15000;
@@ -58,6 +59,9 @@ async function run() {
     const existing = await browser.pages();
     const page = existing.length > 0 ? existing[0] : await browser.newPage();
     await page.bringToFront().catch(() => {});
+    // Re-record even though probe-connect already did: pages[0] is not a stable choice, so
+    // this may well have fronted a DIFFERENT tab, and the sweep must keep the current one.
+    await recordHumanTab(page);
 
     await page.goto(cfg.loginUrl, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT_MS });
 

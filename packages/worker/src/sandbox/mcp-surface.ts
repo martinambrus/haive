@@ -281,7 +281,15 @@ export function hasAnyMcpServer(surface: McpSurface): boolean {
  *  Says `close_page` even though `closeExtraBrowserTabs` reaps at the step barrier: the
  *  reap only runs once every agent of the step has ended, so an agent that tidies up
  *  releases its renderer minutes earlier — and the reap exists for the agents that are
- *  KILLED before they can. */
+ *  KILLED before they can.
+ *
+ *  Says nothing about undoing a `resize_page`, deliberately, even though an un-restored
+ *  one is what the human sees at Gate 2. An agent CANNOT undo it: `resize_page` takes a
+ *  CONTENT size and there is no window-state tool, so asking for the screen size
+ *  overshoots the display — and every agent's tab lives in the SAME window (measured: two
+ *  tabs, one `windowId`), so restoring at the end of one agent's run resizes a sibling's
+ *  viewport mid-screenshot. It is restored at the barrier and at Gate 2 bring-up instead;
+ *  see docker/ddev-runner/browser-restore-window.js. */
 const BROWSER_TAB_DISCIPLINE = [
   '  SHARED browser: sibling agents may be driving it right now, and every session starts pointed',
   "  at tab 0 — the human's view in the VNC panel. Make `new_page({url})` your FIRST browser call",

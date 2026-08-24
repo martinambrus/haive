@@ -1,5 +1,5 @@
-// Closes every tab of the runner's headed browser except the one currently on screen,
-// and disconnects without touching the browser itself.
+// Closes every tab of the runner's headed browser except the human's, and disconnects
+// without touching the browser itself.
 //
 // WHY. Every sandboxed CLI of a task attaches chrome-devtools to THIS browser over
 // CDP, and each agent is told to work in a tab of its own (BROWSER_TAB_DISCIPLINE in
@@ -11,37 +11,29 @@
 // The caller runs it only at a step barrier, i.e. once every agent of that step has
 // ended -- closing a tab an agent is still driving would be worse than leaking it.
 //
-// WHICH TAB SURVIVES, and why it is not "the first one". Neither list order is a
-// contract, and both were MEASURED lying on a live runner:
+// WHICH TAB SURVIVES: the one browser-probe-connect.js / browser-login.js RECORDED as the
+// human's (browser-human-tab.js), which is a fact rather than an inference -- they pick a
+// tab and bring it to front, so the tab they picked is the tab on screen.
+//
+// It is not derived from the tabs any more, and neither list order nor any page-side
+// signal is usable for it. All were MEASURED lying on live runners:
 //   - puppeteer's browser.pages() is NOT creation order. Two probes minutes apart
 //     disagreed: one run put the newest tab at index 0, the next put the oldest there.
 //     An early version of this script kept pages[0] and closed the app tab the human
 //     was looking at.
 //   - CDP /json/list is a different order again (it looked most-recently-active first),
 //     so swapping one for the other only changes which way it is wrong.
-// document.visibilityState does answer exactly the question that matters: in a headed
-// browser precisely one tab is on screen, and that is the one the VNC panel shows.
-// Measured on three tabs: one 'visible' with document.hasFocus(), two 'hidden'.
+//   - document.visibilityState, which replaced them, then failed the same way: with two
+//     agent tabs in ONE window (identical windowId, identical bounds) BOTH reported
+//     'visible', document.hidden false, document.hasFocus() true, animation frames and
+//     screencast frames. The sweep saw two on-screen tabs, failed safe, and closed
+//     nothing -- on exactly the multi-tab runners that had something to close.
 //
-// FAILS SAFE. If the visible tab cannot be identified -- zero or several report
-// 'visible', every evaluate times out on a wedged renderer -- nothing is closed. A
-// leaked tab costs memory; closing the tab someone is working in costs their work.
+// FAILS SAFE. No record, an unreadable one, or a recorded tab that is no longer open, and
+// nothing is closed: a leaked tab costs memory, closing the tab someone is working in
+// costs their work.
 const puppeteer = require('puppeteer-core');
-
-// A tab whose renderer is wedged never answers. Bound it so one bad tab cannot hold
-// the whole sweep open until the caller's docker-exec timeout kills it.
-const VISIBILITY_TIMEOUT_MS = 3000;
-
-async function visibilityState(page) {
-  try {
-    return await Promise.race([
-      page.evaluate(() => document.visibilityState),
-      new Promise((resolve) => setTimeout(() => resolve(null), VISIBILITY_TIMEOUT_MS)),
-    ]);
-  } catch {
-    return null;
-  }
-}
+const { targetIdOf, readHumanTabId } = require('./browser-human-tab.js');
 
 async function run() {
   const browser = await puppeteer.connect({
@@ -50,29 +42,30 @@ async function run() {
   });
 
   const pages = await browser.pages();
-  const states = await Promise.all(pages.map(visibilityState));
-  const visible = pages.filter((_, i) => states[i] === 'visible');
+  const humanTabId = readHumanTabId();
 
-  if (visible.length !== 1) {
-    await browser.disconnect();
-    console.log(
-      JSON.stringify({
-        kept: pages.length,
-        closed: 0,
-        reason: `expected exactly one visible tab, found ${visible.length}`,
-      }),
-    );
-    return;
+  function bail(reason) {
+    return browser.disconnect().then(() => {
+      console.log(JSON.stringify({ kept: pages.length, closed: 0, reason }));
+    });
   }
 
-  const keep = visible[0];
+  if (pages.length <= 1) return bail('nothing to sweep');
+  if (!humanTabId) return bail('no human tab was recorded for this browser');
+
+  const ids = await Promise.all(pages.map(targetIdOf));
+  const keepIndex = ids.indexOf(humanTabId);
+  if (keepIndex === -1) {
+    return bail(`recorded human tab ${humanTabId} is no longer open`);
+  }
+
   let closed = 0;
-  for (const page of pages) {
-    if (page === keep) continue;
+  for (let i = 0; i < pages.length; i += 1) {
+    if (i === keepIndex) continue;
     // One tab refusing to close (a beforeunload dialog, a target that died mid-list)
     // must not strand the rest.
     try {
-      await page.close();
+      await pages[i].close();
       closed += 1;
     } catch {
       // ignored on purpose -- best effort, per tab

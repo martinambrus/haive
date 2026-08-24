@@ -6,7 +6,11 @@ import { eq } from 'drizzle-orm';
 import { APP_RUNNER_LABEL, appRunnerName, logger, type TaskAccessEndpoint } from '@haive/shared';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
-import { browserCdpUrlForRunner, closeExtraBrowserTabs } from './runner-browser-cdp.js';
+import {
+  browserCdpUrlForRunner,
+  closeExtraBrowserTabs,
+  restoreBrowserWindow,
+} from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
 import {
   RUNTIME_WEIGHT_LABEL,
@@ -90,6 +94,8 @@ async function injectBrowserAssets(container: string): Promise<void> {
     'browser-probe-connect.js',
     'browser-login.js',
     'browser-close-extra-tabs.js',
+    'browser-restore-window.js',
+    'browser-human-tab.js',
   ]) {
     await exec('docker', ['cp', path.join(dir, f), `${container}:/opt/browser/${f}`], {
       timeout: 30_000,
@@ -401,11 +407,18 @@ export async function appRunnerBrowserCdpUrl(taskId: string): Promise<string | n
 }
 
 /** Close the tabs this task's agents left behind in the app-runner's headed browser,
- *  keeping the first (the human's view). Mirrors closeRunnerExtraTabs (ddev-runner);
- *  the script path differs because injectBrowserAssets drops it beside the env image's
- *  puppeteer-core under /opt/browser. */
+ *  keeping the one recorded as the human's view. Mirrors closeRunnerExtraTabs
+ *  (ddev-runner); the script path differs because injectBrowserAssets drops it beside the
+ *  env image's puppeteer-core under /opt/browser. */
 export async function closeAppRunnerExtraTabs(taskId: string): Promise<number | null> {
   return closeExtraBrowserTabs(appRunnerName(taskId), '/opt/browser/browser-close-extra-tabs.js');
+}
+
+/** Put the app-runner's headed browser window back to the full desktop after an agent
+ *  shrank it. Mirrors restoreRunnerBrowserWindow (ddev-runner); the script path differs
+ *  for the same reason closeAppRunnerExtraTabs's does. */
+export async function restoreAppRunnerBrowserWindow(taskId: string): Promise<number | null> {
+  return restoreBrowserWindow(appRunnerName(taskId), '/opt/browser/browser-restore-window.js');
 }
 
 /** The user-facing URL(s) for opening this task's app in their OWN browser: the

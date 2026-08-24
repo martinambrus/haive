@@ -15,12 +15,14 @@ import {
   stopBrowserDesktop as stopDdevBrowserDesktop,
   runnerExec,
   ddevPrimaryUrl,
+  restoreRunnerBrowserWindow,
 } from '../../../sandbox/ddev-runner.js';
 import {
   ensureAppRunnerStarted,
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
   stopBrowserDesktop as stopAppBrowserDesktop,
+  restoreAppRunnerBrowserWindow,
 } from '../../../sandbox/app-runner.js';
 import { ensureDdevWithProgress } from './_app-runtime.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
@@ -610,6 +612,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         if (isDdev && ws) {
           const handle = await ensureDdevWithProgress(ctx, ws.repoSubpath);
           await startBrowserDesktop(handle);
+          // 08a's screenshot protocol shrinks the window to 1280x800 and nothing in the
+          // MCP surface can put it back (browser-restore-window.js). Restore BEFORE the
+          // navigate below so the human's first paint is already the right size.
+          await restoreRunnerBrowserWindow(ctx.taskId);
           const appUrl = pa?.appUrl || (await ddevPrimaryUrl(handle)) || 'http://localhost';
           liveBrowser = { available: true, appUrl };
           const nav = await runnerExec(handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
@@ -629,6 +635,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
               boot.port ?? undefined,
             );
             await startAppBrowserDesktop(handle);
+            // Same restore as the DDEV branch above, for the same reason.
+            await restoreAppRunnerBrowserWindow(ctx.taskId);
             const appUrl = boot.appUrl || `http://localhost:${boot.port ?? 3000}`;
             liveBrowser = { available: true, appUrl };
             const nav = await appRunnerExec(

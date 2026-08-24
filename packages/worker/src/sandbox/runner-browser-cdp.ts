@@ -40,7 +40,7 @@ export async function browserCdpUrlForRunner(name: string): Promise<string | nul
   }
 }
 
-/** Close every tab of a runner's headed browser except the first, and report how many
+/** Close every tab of a runner's headed browser except the human's, and report how many
  *  went. Returns null when there was nothing to do — no runner, no desktop, or the
  *  script failed — because every caller is a best-effort barrier sweep, not a step that
  *  may fail on it.
@@ -51,8 +51,8 @@ export async function browserCdpUrlForRunner(name: string): Promise<string | nul
  *  compile-time-visible argument at the call site instead of a silent no-op.
  *
  *  See docker/ddev-runner/browser-close-extra-tabs.js for why the tab that survives is
- *  the one ON SCREEN (neither list order is a contract; both were measured lying) and
- *  why this is a barrier-only operation. */
+ *  the RECORDED one (neither list order nor any page-side signal is a contract; all
+ *  three were measured lying) and why this is a barrier-only operation. */
 export async function closeExtraBrowserTabs(
   name: string,
   scriptPath: string,
@@ -65,6 +65,32 @@ export async function closeExtraBrowserTabs(
     const line = stdout.trim().split('\n').pop() ?? '';
     const parsed = JSON.parse(line) as { closed?: unknown };
     return typeof parsed.closed === 'number' ? parsed.closed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Put a runner's headed browser window back to the full desktop and report how many
+ *  windows moved. Returns null when there was nothing to do — no runner, no desktop, or
+ *  the script failed — because every caller wants a correctly sized window for the human,
+ *  not a step that fails when a window would not move.
+ *
+ *  `scriptPath` differs per runner kind for the same reason closeExtraBrowserTabs's does:
+ *  node resolves puppeteer-core from the SCRIPT's directory.
+ *
+ *  See docker/ddev-runner/browser-restore-window.js for why the shrink outlives the agent
+ *  that caused it, and why the agents cannot undo it themselves. */
+export async function restoreBrowserWindow(
+  name: string,
+  scriptPath: string,
+): Promise<number | null> {
+  try {
+    const { stdout } = await exec('docker', ['exec', name, 'node', scriptPath], {
+      timeout: 30_000,
+    });
+    const line = stdout.trim().split('\n').pop() ?? '';
+    const parsed = JSON.parse(line) as { restored?: unknown };
+    return typeof parsed.restored === 'number' ? parsed.restored : null;
   } catch {
     return null;
   }

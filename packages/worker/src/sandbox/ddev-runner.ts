@@ -18,7 +18,11 @@ import {
   relaxCappedDdevConstraintForRunner,
   relaxExactDdevVersionConstraint,
 } from './ddev-version-constraint.js';
-import { browserCdpUrlForRunner, closeExtraBrowserTabs } from './runner-browser-cdp.js';
+import {
+  browserCdpUrlForRunner,
+  closeExtraBrowserTabs,
+  restoreBrowserWindow,
+} from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
 import {
   RUNTIME_WEIGHT_LABEL,
@@ -70,16 +74,27 @@ let cachedTag: string | null = null;
 async function resolveImageTag(): Promise<string> {
   if (cachedTag) return cachedTag;
   const dir = runnerContextDir();
-  const [dockerfile, entrypoint, browserCheck, probeConnect, browserLogin, closeTabs, desktopSh] =
-    await Promise.all([
-      readFile(path.join(dir, 'Dockerfile'), 'utf8'),
-      readFile(path.join(dir, 'entrypoint.sh'), 'utf8'),
-      readFile(path.join(dir, 'browser-check.js'), 'utf8'),
-      readFile(path.join(dir, 'browser-probe-connect.js'), 'utf8'),
-      readFile(path.join(dir, 'browser-login.js'), 'utf8'),
-      readFile(path.join(dir, 'browser-close-extra-tabs.js'), 'utf8'),
-      readFile(path.join(dir, 'start-browser-desktop.sh'), 'utf8'),
-    ]);
+  const [
+    dockerfile,
+    entrypoint,
+    browserCheck,
+    probeConnect,
+    browserLogin,
+    closeTabs,
+    restoreWindow,
+    humanTab,
+    desktopSh,
+  ] = await Promise.all([
+    readFile(path.join(dir, 'Dockerfile'), 'utf8'),
+    readFile(path.join(dir, 'entrypoint.sh'), 'utf8'),
+    readFile(path.join(dir, 'browser-check.js'), 'utf8'),
+    readFile(path.join(dir, 'browser-probe-connect.js'), 'utf8'),
+    readFile(path.join(dir, 'browser-login.js'), 'utf8'),
+    readFile(path.join(dir, 'browser-close-extra-tabs.js'), 'utf8'),
+    readFile(path.join(dir, 'browser-restore-window.js'), 'utf8'),
+    readFile(path.join(dir, 'browser-human-tab.js'), 'utf8'),
+    readFile(path.join(dir, 'start-browser-desktop.sh'), 'utf8'),
+  ]);
   const hash = createHash('sha256')
     .update(dockerfile)
     .update('\0')
@@ -92,6 +107,10 @@ async function resolveImageTag(): Promise<string> {
     .update(browserLogin)
     .update('\0')
     .update(closeTabs)
+    .update('\0')
+    .update(restoreWindow)
+    .update('\0')
+    .update(humanTab)
     .update('\0')
     .update(desktopSh)
     .digest('hex')
@@ -1640,10 +1659,18 @@ export async function runnerBrowserCdpUrl(taskId: string): Promise<string | null
 }
 
 /** Close the tabs this task's agents left behind in the runner's headed browser, keeping
- *  the first (the human's view). Best-effort; null when there was nothing to close. The
- *  image bakes the script at /opt, next to the puppeteer-core install it resolves. */
+ *  the one recorded as the human's view. Best-effort; null when there was nothing to
+ *  close. The image bakes the script at /opt, next to the puppeteer-core install it
+ *  resolves. */
 export async function closeRunnerExtraTabs(taskId: string): Promise<number | null> {
   return closeExtraBrowserTabs(ddevRunnerName(taskId), '/opt/browser-close-extra-tabs.js');
+}
+
+/** Put the runner's headed browser window back to the full desktop after an agent shrank
+ *  it for deterministic screenshots. Best-effort; null when there was nothing to do. See
+ *  docker/ddev-runner/browser-restore-window.js for why the agents cannot undo it. */
+export async function restoreRunnerBrowserWindow(taskId: string): Promise<number | null> {
+  return restoreBrowserWindow(ddevRunnerName(taskId), '/opt/browser-restore-window.js');
 }
 
 // --- On-demand step-debugging (Xdebug) ---------------------------------------

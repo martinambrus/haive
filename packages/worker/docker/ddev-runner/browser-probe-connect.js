@@ -6,6 +6,7 @@
 // panel. Invoked by 08a-browser-verify (interactive mode) via
 // `node /opt/browser-probe-connect.js <url>`.
 const puppeteer = require('puppeteer-core');
+const { recordHumanTab } = require('./browser-human-tab.js');
 
 async function run() {
   const url = process.argv[2];
@@ -25,6 +26,9 @@ async function run() {
   const existingPages = await browser.pages();
   const page = existingPages.length > 0 ? existingPages[0] : await browser.newPage();
   await page.bringToFront().catch(() => {});
+  // This call is what MAKES a tab the human's, so record it here: the tab sweep keeps the
+  // recorded one and no page-side signal can tell it apart (see browser-human-tab.js).
+  await recordHumanTab(page);
   const consoleMessages = [];
   const networkErrors = [];
 

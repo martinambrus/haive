@@ -37,8 +37,8 @@ import type {
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
-import { closeRunnerExtraTabs } from '../sandbox/ddev-runner.js';
-import { closeAppRunnerExtraTabs } from '../sandbox/app-runner.js';
+import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
+import { closeAppRunnerExtraTabs, restoreAppRunnerBrowserWindow } from '../sandbox/app-runner.js';
 import {
   capabilityClassFromMessage,
   cliTimeoutBudgetMinutes,
@@ -980,10 +980,16 @@ async function resolveAiFixPhase(
   return { resolved: false, result: { status: 'waiting_cli', row: updated } };
 }
 
-/** Reclaim the browser tabs a fan-out left behind, once every one of its agents has
- *  ended. Agents share ONE headed browser per task and each works in a tab of its own
- *  (BROWSER_TAB_DISCIPLINE, sandbox/mcp-surface.ts); one that finishes normally closes
- *  its tab, one killed by a soft timeout, preemption or the orphan sweep cannot.
+/** Reclaim the browser tabs a fan-out left behind and put its window back to the full
+ *  desktop, once every one of its agents has ended. Agents share ONE headed browser per
+ *  task and each works in a tab of its own (BROWSER_TAB_DISCIPLINE, sandbox/mcp-surface.ts);
+ *  one that finishes normally closes its tab, one killed by a soft timeout, preemption or
+ *  the orphan sweep cannot.
+ *
+ *  The window restore rides the same barrier because it is the same kind of shared state:
+ *  every agent's tab lives in ONE window, so `resize_page` for a screenshot resizes the
+ *  whole fan-out and cannot be undone by any single agent without stomping its siblings.
+ *  See docker/ddev-runner/browser-restore-window.js.
  *
  *  Called ONLY at a phase barrier. Never at browser bring-up: that runs while a human
  *  may have tabs open in the VNC panel, and closing those is worse than leaking one.
@@ -998,6 +1004,15 @@ async function reapAgentBrowserTabs(taskId: string, logger: StepContext['logger'
     if (closed > 0) logger.info({ taskId, closed }, 'closed browser tabs left by finished agents');
   } catch (err) {
     logger.debug({ err, taskId }, 'browser tab reap best-effort failed');
+  }
+  try {
+    const restored =
+      (await restoreRunnerBrowserWindow(taskId)) ??
+      (await restoreAppRunnerBrowserWindow(taskId)) ??
+      0;
+    if (restored > 0) logger.info({ taskId, restored }, 'restored browser window to full screen');
+  } catch (err) {
+    logger.debug({ err, taskId }, 'browser window restore best-effort failed');
   }
 }
 
