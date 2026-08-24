@@ -1073,10 +1073,17 @@ async function awaitQueuedJob<T>(job: Job, abort: AbortHandle, ws: WebSocket): P
     try {
       const state = await job.getState();
       if (state !== 'waiting' && state !== 'delayed' && state !== 'prioritized') return;
-      const [running, waiting] = await Promise.all([
-        queue.getActiveCount(),
+      // Split the active jobs by KIND rather than reporting one total. A bare count reads as
+      // "your tasks are busy" and sends the user to look at their own work: MEASURED
+      // 2026-08-24, four stale `cli-refresh-versions` jobs held every slot while the user's
+      // tasks were paused, and the dialog said "4 jobs are using them all". Only INVOKE spawns
+      // an agent; everything else here is CLI upkeep the user did not start.
+      const [active, waiting] = await Promise.all([
+        queue.getActive(0, -1),
         queue.getWaiting(0, -1),
       ]);
+      const agents = active.filter((j) => j?.name === CLI_EXEC_JOB_NAMES.INVOKE).length;
+      const service = active.length - agents;
       const ahead = waitAheadCount(
         waiting.map((j) => j.id ?? ''),
         job.id ?? '',
@@ -1085,7 +1092,7 @@ async function awaitQueuedJob<T>(job: Job, abort: AbortHandle, ws: WebSocket): P
       // than publish a position that no longer exists.
       if (ahead === null) return;
       announced = true;
-      wsSend(ws, { type: 'queue', running, ahead });
+      wsSend(ws, { type: 'queue', running: active.length, agents, service, ahead });
     } catch (err) {
       log.debug({ err, jobId: job.id }, 'queue position read failed');
     }

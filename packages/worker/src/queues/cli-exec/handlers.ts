@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DelayedError, Worker, type Job } from 'bullmq';
+import { DelayedError, Worker, type Job, type Queue } from 'bullmq';
 import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
@@ -730,11 +730,53 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
       opts: { removeOnComplete: true, removeOnFail: 10 },
     },
   );
+  // Boot kick, so a fresh install populates the caches without waiting up to 12h for the
+  // scheduler. Skipped when a refresh is already in flight.
+  //
+  // MEASURED 2026-08-24: under `tsx watch` a boot happens on every source edit, and this kick
+  // had no dedup, so each one enqueued another `{force:true}` refresh. The Worker's
+  // `lockDuration` is 30 min — right for an INVOKE agent, and applied to every job name in the
+  // queue — so each refresh SIGKILLed by the next reload stayed uncollectable in `active` for
+  // half an hour. Four boots inside one lock window left four refreshes holding every slot on
+  // an otherwise idle machine, and the sign-in dialog reported them as "4 jobs are using them
+  // all", pointing at the user's own paused tasks.
+  if (await versionRefreshInFlight(queue)) {
+    log.info('version refresh already in flight; skipping boot kick');
+    return;
+  }
   await queue.add(
     CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
     { force: true } satisfies RefreshCliVersionsJobPayload,
     { removeOnComplete: true, removeOnFail: 10 },
   );
+}
+
+/** Whether a version refresh is already queued or running.
+ *
+ *  Scans `prioritized` alongside `wait`: this queue prices INVOKE jobs, and BullMQ files a job
+ *  carrying a priority under `prioritized` rather than `wait`, so a name filter over `wait`
+ *  alone can read 0 while jobs exist. A refresh itself is unprioritized, but the check states
+ *  the queue's own invariant rather than this one caller's expectation.
+ *
+ *  `delayed` is deliberately NOT scanned. `upsertJobScheduler` above parks the next 12-hourly
+ *  tick there the moment it runs, so counting it would make this always true and the boot kick
+ *  dead on every install — MEASURED: the first build of this check skipped the kick on a queue
+ *  that was otherwise empty, and the caches kept a `fetched_at` from before the restart. Nothing
+ *  defers a refresh (the gates are INVOKE-only), so a delayed refresh is always future work
+ *  rather than something already trying to run.
+ *
+ *  Deliberately not a fixed `jobId`: with `removeOnFail: 10` a failed refresh would keep that
+ *  id in the failed set, and every later `add` for it would silently return the old job instead
+ *  of running — trading a slot leak for a refresh that never runs again. Fails OPEN, since a
+ *  duplicate refresh is cheap and no refresh at all is not. */
+async function versionRefreshInFlight(queue: Queue<CliExecQueuePayload>): Promise<boolean> {
+  try {
+    const jobs = await queue.getJobs(['active', 'wait', 'prioritized']);
+    return jobs.some((job) => job?.name === CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS);
+  } catch (err) {
+    log.warn({ err }, 'version-refresh in-flight check failed; enqueueing anyway');
+    return false;
+  }
 }
 
 /** Concurrency used when config is unavailable, or when the resource governor is off and there
@@ -805,6 +847,90 @@ const PAUSE_DEFER_MS = 30_000;
  *
  *  Fail-open on every error. The `!token` skip has to stay — moveToDelayed cannot be called
  *  without a worker token, so there is no way to hold the job at all. */
+/** Extra worker slots reserved for the jobs that are not sandboxed agents — version refreshes,
+ *  auth probes, sign-ins, sign-outs, image builds, ollama pulls. The pool they used to share is
+ *  sized in agent RAM (2048 MB apiece), and none of these is an agent, so a full pool must not
+ *  be what stops a user signing a CLI in.
+ *
+ *  "Light" is about WHO SIZED THE POOL, not about cost: a sandbox image build is genuinely
+ *  heavy. It is in the lane anyway because it could already run concurrently with agents before
+ *  this existed, and the alternative — ranking two job kinds against one cap — buys less than it
+ *  complicates. Worst case is agentCap agents plus three builds, which needs three providers set
+ *  up at the same moment; if that is ever observed, give BUILD_SANDBOX_IMAGE its own cap rather
+ *  than shrinking the lane and putting sign-ins back behind agents.
+ *
+ *  MEASURED 2026-08-24: four `cli-refresh-versions` jobs sat in BullMQ `active` holding every
+ *  slot on an otherwise idle machine — zero live invocations existed — while the sign-in dialog
+ *  told the user "4 jobs are using them all" and pointed them at their own paused tasks. See
+ *  `scheduleCliVersionRefresh` for how they accumulated. This lane is the containment: an
+ *  orphaned light job can no longer take a slot an agent is sized for, and one light slot
+ *  survives for the next sign-in.
+ *
+ *  Small on purpose. This is a lane so light work is never blocked BY agents, not a pool.
+ *
+ *  Everything that is not INVOKE rides it — probe, refresh, login, sign-out, image build, ollama
+ *  provision — because INVOKE is the only job name that spawns a sandboxed agent. */
+const LIGHT_JOB_LANE = 3;
+
+/** Hold INVOKE to the agent cap now that the worker runs wider than it.
+ *
+ *  The Worker's concurrency is agentCap + LIGHT_JOB_LANE so a light job always has somewhere to
+ *  run; without this gate that widening would also let agentCap+LIGHT_JOB_LANE agents run,
+ *  quietly over-committing the RAM the pool exists to protect. Same defer mechanism as the pause
+ *  gate and the runtime-holder reserve.
+ *
+ *  Admission is by POSITION in the active set, not by counting the others. Counting livelocks:
+ *  BullMQ moves a job to `active` before calling its processor, so on a thundering start every
+ *  one of N simultaneously-activated jobs sees the other N-1 and, at N > agentCap, they ALL
+ *  defer — zero agents running on a machine with a free pool. Ranking instead means the first
+ *  agentCap of the same set always proceed, whoever reads first.
+ *
+ *  Ranked by (priority, id) — the queue's own order. Priority is read off the job rather than
+ *  its opts, which `changePriority` leaves stale, so the fair-scheduling band and the vote that
+ *  moves it are both honoured; id breaks a tie in enqueue order. Over-admission would need a job
+ *  to be missing from a peer's read while outranking it, and BullMQ activates in queue order, so
+ *  a job that outranks this one is already active by the time this one is. */
+async function enforceAgentLaneCap(
+  job: Job<CliExecQueuePayload>,
+  token: string | undefined,
+  agentCap: number,
+): Promise<void> {
+  if (!token) return;
+  let rank: number;
+  try {
+    const active = await getCliExecQueue().getActive(0, -1);
+    const invokes = active
+      .filter((j) => j?.name === CLI_EXEC_JOB_NAMES.INVOKE && j.id)
+      .sort(
+        (a, b) => (a.priority ?? 0) - (b.priority ?? 0) || compareJobIds(a.id ?? '', b.id ?? ''),
+      );
+    rank = invokes.findIndex((j) => j.id === job.id);
+    // Not in the set we just read — allow rather than guess a position it does not have.
+    if (rank < 0) return;
+  } catch (err) {
+    log.warn({ err }, 'agent-lane rank failed; allowing job');
+    return;
+  }
+  if (rank < agentCap) return;
+  try {
+    await job.moveToDelayed(Date.now() + PAUSE_DEFER_MS, token);
+  } catch (err) {
+    log.warn({ err }, 'agent-lane defer failed; allowing job');
+    return;
+  }
+  log.info({ jobId: job.id, rank, agentCap }, 'agent pool full; deferring invocation');
+  throw new DelayedError();
+}
+
+/** Numeric where both ids are BullMQ's own counter, lexical otherwise: a custom `jobId` is a
+ *  slug, and `'10' < '9'` would order the counter wrong. */
+export function compareJobIds(a: string, b: string): number {
+  const na = Number(a);
+  const nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 async function enforcePauseGate(
   db: Database,
   payload: CliExecJobPayload,
@@ -898,9 +1024,11 @@ export async function startCliExecWorker(
   // Max parallel agent/CLI invocations. A positive MAX_PARALLEL_AGENTS pins it; at 0 it is
   // sized from the host budget the runtime pool is NOT holding. Falls back to the fixed
   // default when config isn't initialized (e.g. focused smoke tests).
-  let concurrency = STATIC_PARALLEL_AGENTS;
+  let agentCap = STATIC_PARALLEL_AGENTS;
+  let concurrency = STATIC_PARALLEL_AGENTS + LIGHT_JOB_LANE;
   try {
-    concurrency = clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
+    agentCap = clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
+    concurrency = agentCap + LIGHT_JOB_LANE;
   } catch {
     /* config not initialized — keep the default */
   }
@@ -922,6 +1050,11 @@ export async function startCliExecWorker(
         // Paused task (or global switch): defer before anything else, so a held task never
         // spends a slot. Throws DelayedError on defer; no-op when the task is live.
         await enforcePauseGate(db, payload, job, token);
+        // Agent-pool cap: the worker runs LIGHT_JOB_LANE wider than the pool so a sign-in is
+        // never stuck behind agents, and this is what still holds AGENTS to the pool size.
+        // After the pause gate on purpose — a held job is briefly `active` before it defers, and
+        // ranking against it would bounce a live agent for work that is not going to run.
+        await enforceAgentLaneCap(job, token, agentCap);
         // Per-task cap: if this task already runs its max parallel agents, defer
         // the job (freeing the slot for others) and let BullMQ redeliver it.
         // Throws DelayedError on defer; no-op when under the cap.
@@ -982,7 +1115,10 @@ export async function startCliExecWorker(
   const applyConcurrency = async (): Promise<void> => {
     let next: number;
     try {
-      next = clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
+      // The retune tracks the AGENT pool; the worker always runs LIGHT_JOB_LANE wider so a
+      // sign-in or version refresh is never queued behind agents.
+      agentCap = clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
+      next = agentCap + LIGHT_JOB_LANE;
     } catch (err) {
       log.warn({ err }, 'cli-exec concurrency resolve failed; keeping the current value');
       return;

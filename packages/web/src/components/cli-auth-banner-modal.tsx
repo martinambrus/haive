@@ -9,6 +9,7 @@ import '@xterm/xterm/css/xterm.css';
 import { Button, FormError } from '@/components/ui';
 import { apiWebSocketUrl, type CliProbeResult, type CliProviderName } from '@/lib/api-client';
 import { osc52ClipboardProvider } from '@/lib/terminal-copy';
+import { describeSlotHolders } from '@/components/cli-slot-wait';
 
 interface CliAuthBannerModalProps {
   open: boolean;
@@ -82,7 +83,12 @@ export function CliAuthBannerModal({
   const termMountRef = useRef<HTMLDivElement | null>(null);
   const [phase, setPhase] = useState<Phase>('connecting');
   /** Non-null while a cli-exec job this dialog started is waiting for a free slot. */
-  const [queueWait, setQueueWait] = useState<{ running: number; ahead: number } | null>(null);
+  const [queueWait, setQueueWait] = useState<{
+    running: number;
+    agents: number;
+    service: number;
+    ahead: number;
+  } | null>(null);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [deviceCode, setDeviceCode] = useState<string | null>(null);
   const [token, setToken] = useState('');
@@ -152,6 +158,10 @@ export function CliAuthBannerModal({
           // phase either of them is on.
           setQueueWait({
             running: typeof msg.running === 'number' ? msg.running : 0,
+            // Absent on a pre-split api; falling back to 0 loses the breakdown but never
+            // invents one, and the message below degrades to the plain count.
+            agents: typeof msg.agents === 'number' ? msg.agents : 0,
+            service: typeof msg.service === 'number' ? msg.service : 0,
             ahead: typeof msg.ahead === 'number' ? msg.ahead : 0,
           });
           break;
@@ -418,9 +428,7 @@ export function CliAuthBannerModal({
                 ? // Queued with nothing running means no worker is taking jobs — paused queue,
                   // or one restarting. Saying "0 jobs are using every slot" would be nonsense.
                   'Queued — waiting for a CLI worker to pick this up.'
-                : `Waiting for a free CLI slot — ${queueWait.running} ${
-                    queueWait.running === 1 ? 'job is' : 'jobs are'
-                  } using them all.`}
+                : `Waiting for a free CLI slot — ${describeSlotHolders(queueWait)}.`}
               {queueWait.ahead > 0
                 ? ` ${queueWait.ahead} other sign-in or test is ahead of you.`
                 : queueWait.running > 0
