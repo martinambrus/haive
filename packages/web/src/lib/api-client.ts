@@ -906,7 +906,9 @@ export type StepErrorHint =
     }
   | {
       type: 'provider_unavailable';
-      reason: 'rate_limit' | 'auth' | 'server_error';
+      /** Mirrors StepErrorHint in @haive/shared. `content_filter` is NOT an outage — the
+       *  provider refused this prompt, so waiting changes nothing. */
+      reason: 'rate_limit' | 'auth' | 'server_error' | 'content_filter';
       providerName?: string;
     }
   | {

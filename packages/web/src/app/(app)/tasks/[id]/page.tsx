@@ -101,6 +101,40 @@ import { usePersistedToggle } from '@/lib/use-persisted-toggle';
  *  08a writes the pointer to its apply output (`step.output`); gate 2 re-derives it in
  *  detect (`step.detectOutput`), because 08a's output column is not durable. Renders
  *  nothing without a pointer — a task whose tester took no shots shows no gallery. */
+/** What to tell the user for each provider-fatal reason, and what to do about it.
+ *
+ *  A table rather than a ternary because the two halves do not correlate: `auth` and
+ *  `content_filter` both used to fall through to "returned a server error (temporarily
+ *  unavailable) ... retry once the provider recovers", which sends the user to WAIT for the one
+ *  thing waiting cannot fix. A filter refused this prompt and a rejected credential needs a
+ *  sign-in; neither heals on its own. Keyed on the reason so a new member is a type error here
+ *  rather than silently inheriting the outage wording. */
+const PROVIDER_UNAVAILABLE_COPY: Record<
+  'rate_limit' | 'auth' | 'server_error' | 'content_filter',
+  { headline: string; remedy: string }
+> = {
+  rate_limit: {
+    headline: 'is rate-limited or out of quota',
+    remedy:
+      'This is a provider outage, not a problem with your code or this task. Retry once the provider recovers.',
+  },
+  server_error: {
+    headline: 'returned a server error (temporarily unavailable)',
+    remedy:
+      'This is a provider outage, not a problem with your code or this task. Retry once the provider recovers.',
+  },
+  auth: {
+    headline: 'rejected the credentials',
+    remedy:
+      'Waiting will not fix this. Sign the provider in again from the CLI settings, then retry the step.',
+  },
+  content_filter: {
+    headline: 'refused this prompt with its own content filter',
+    remedy:
+      'Not an outage — the provider refused this request rather than being unavailable, so waiting changes nothing. Retry the step on a different CLI provider.',
+  },
+};
+
 function screenshotGallery(
   step: { id: string; detectOutput: unknown; output: unknown },
   taskId: string,
@@ -3464,13 +3498,9 @@ function StepCardImpl({
             {step.errorHint.providerName
               ? `Provider ${step.errorHint.providerName} `
               : 'The CLI provider '}
-            {step.errorHint.reason === 'rate_limit'
-              ? 'is rate-limited or out of quota'
-              : 'returned a server error (temporarily unavailable)'}
-            .
+            {PROVIDER_UNAVAILABLE_COPY[step.errorHint.reason].headline}.
           </span>{' '}
-          This is a provider outage, not a problem with your code or this task. Retry once the
-          provider recovers.
+          {PROVIDER_UNAVAILABLE_COPY[step.errorHint.reason].remedy}
         </div>
       )}
 

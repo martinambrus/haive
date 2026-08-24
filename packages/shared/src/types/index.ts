@@ -49,12 +49,16 @@ export type StepErrorHint =
     }
   | {
       /** A CLI provider returned a fatal, non-retryable failure within this run
-       *  (rate-limit/quota exhausted, persistent auth, or a 5xx/server outage), so the
-       *  step was failed fast. The UI shows an "outage — retry when the provider
-       *  recovers" banner instead of implying a code defect. `reason` mirrors the
-       *  worker's ProviderFatalClass. */
+       *  (rate-limit/quota exhausted, persistent auth, a 5xx/server outage, or the
+       *  provider's own content filter refusing the prompt), so the step was failed fast.
+       *  The UI shows an "outage — retry when the provider recovers" banner instead of
+       *  implying a code defect. `reason` mirrors the worker's ProviderFatalClass.
+       *
+       *  `content_filter` is the odd one and the UI should NOT word it as an outage:
+       *  waiting changes nothing, because the provider refused this prompt rather than
+       *  being unavailable. MEASURED on codex refusing an adversarial-QA seat. */
       type: 'provider_unavailable';
-      reason: 'rate_limit' | 'auth' | 'server_error';
+      reason: 'rate_limit' | 'auth' | 'server_error' | 'content_filter';
       providerName?: CliProviderName;
     }
   | {

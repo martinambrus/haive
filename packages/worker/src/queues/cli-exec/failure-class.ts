@@ -185,7 +185,7 @@ export function cliTimeoutBudgetMinutes(errorMessage: string | null | undefined)
  *  - rate_limit: 429 / quota / weekly-or-monthly usage limit exhausted.
  *  - auth:       persistent 401/403 — credentials invalid/expired, re-auth needed.
  *  - server_error: provider 5xx / overloaded / service unavailable. */
-export type ProviderFatalClass = 'rate_limit' | 'auth' | 'server_error';
+export type ProviderFatalClass = 'rate_limit' | 'auth' | 'server_error' | 'content_filter';
 
 /** Stable headline per fatal class. Used to BUILD the invocation errorMessage
  *  (exec-core's interpretCliFailure) and to DETECT it downstream
@@ -198,6 +198,7 @@ export const PROVIDER_FATAL_HEADLINES: Record<ProviderFatalClass, string> = {
   rate_limit: 'Provider rate limit or quota exhausted',
   auth: 'CLI authentication failed',
   server_error: 'Provider server error (service unavailable)',
+  content_filter: 'Provider refused the prompt (content filter)',
 };
 
 // --- Volatile upstream text -------------------------------------------------
@@ -244,6 +245,7 @@ const BILLING_EXHAUSTED_RE =
 // error reported to the user as "check your XAI_API_KEY". `\btoken\b` cannot match
 // `input_tokens` (word char on both sides), and `[^\n]{0,40}?` stops a match bridging a
 // whole JSON line. Do not relax either back.
+//
 // MEASURED FALSE POSITIVE (2026-08-24): an 08d adversary wrote "I'll trace logged-out privileged
 // routes ... and report the unauthenticated login wall as a coverage limit" and the run was
 // classified `auth` — "CLI authentication failed, run codex login" — on the strength of the bare
@@ -262,6 +264,22 @@ const BILLING_EXHAUSTED_RE =
 // alone is not — "an unauthorized user can enumerate" and "deny rules return 403" both stay out.
 export const AUTH_RE =
   /(?:status|http|error|code|\()[\s:/]*40[13]\b|\b(?:unauthor(?:ized|ised)|forbidden)\b[^\n]{0,12}\b40[13]\b|\b40[13]\b[^\n]{0,12}\b(?:unauthor(?:ized|ised)|forbidden)\b|authentication_error|invalid authentication credentials|permission_error|please log.?in|\bnot (?:authenticated|signed in)\b|\btoken\b[^\n]{0,40}?\b(?:expired|invalid|revoked)\b/i;
+// The provider's own moderation refusing the prompt. MEASURED on codex/gpt-5.6-sol running an
+// 08d adversarial-QA seat: "This content was flagged for possible cybersecurity risk. ... To get
+// authorized for security work, join the Trusted Access for Cyber program".
+//
+// A class of its own, not an error, because the correct response differs from every other
+// failure: RETRYING IS GUARANTEED WASTE (the same prompt is refused again), waiting does not
+// help (so it must never arm the outage watch, which only arms for rate_limit/server_error),
+// and the seat must be reported as REFUSED rather than as having found nothing.
+//
+// VOLATILE upstream prose — vendors reword moderation copy freely. Contained the usual way: a
+// miss falls through to today's behaviour (an unclassified exit-1), never to a false pass. Both
+// alternatives are anchored on wording specific to a refusal, not on generic words like
+// "flagged", which an agent could legitimately write about its own findings.
+const CONTENT_FILTER_RE =
+  /flagged for possible [a-z ]*risk|Trusted Access for Cyber|content[_\s-]?(?:policy|filter) (?:violation|refus)/i;
+
 const SERVER_ERROR_RE =
   /\b529\b|(?:status|http|error|code|\()[\s:/]*5\d{2}\b|\b5\d{2}\b\s*(?:error|status|service|unavailable|gateway|bad gateway|overloaded)|service unavailable|bad gateway|gateway time-?out|internal server error|\boverloaded\b/i;
 
@@ -286,6 +304,8 @@ export function classifyProviderFatal(
   // Billing first: an exhausted account answers 403, which AUTH_RE would otherwise claim.
   if (BILLING_EXHAUSTED_RE.test(haystack)) return 'rate_limit';
   if (AUTH_RE.test(haystack)) return 'auth';
+  // Before auth/rate-limit: a refusal is not an outage and must not be waited out.
+  if (CONTENT_FILTER_RE.test(haystack)) return 'content_filter';
   if (RATE_LIMIT_RE.test(haystack)) return 'rate_limit';
   if (SERVER_ERROR_RE.test(haystack)) return 'server_error';
   return null;

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { shouldRerollMiningAgent } from '../../step-engine/mining-failure.js';
 import {
   capabilityClassFromMessage,
   classifyAntigravityDiagnostic,
@@ -539,6 +540,54 @@ describe('a preemption re-dispatches regardless of the transient budget', () => 
 
   it('still re-dispatches a genuine orphan while its budget lasts', () => {
     expect(redispatches([ORPHAN, ORPHAN])).toBe(true);
+  });
+});
+
+describe('content_filter: the provider refusing the prompt', () => {
+  // Verbatim from codex/gpt-5.6-sol on an 08d adversarial-QA seat.
+  const REFUSAL =
+    'This content was flagged for possible cybersecurity risk. If this seems wrong, try ' +
+    'rephrasing your request. To get authorized for security work, join the Trusted Access ' +
+    'for Cyber program: https://chatgpt.com/cyber';
+
+  it('classifies a refusal as content_filter, not an outage', () => {
+    // Must not be rate_limit or server_error: those arm the task-level outage watch, and
+    // waiting does nothing for a refusal.
+    expect(classifyProviderFatal(1, REFUSAL, null)).toBe('content_filter');
+  });
+
+  it('does NOT fire on an adversary describing its own security findings', () => {
+    // The trap this pattern is written around. AUTH_RE already misclassified a run because the
+    // agent wrote "unauthenticated login wall"; a looser moderation pattern would do the same
+    // with "flagged" and "risk".
+    const prose =
+      'I flagged two high-risk installer paths and probed the unauthenticated login wall; ' +
+      'content policy for uploads is unenforced.';
+    expect(classifyProviderFatal(1, prose, null)).not.toBe('content_filter');
+  });
+
+  it('is never returned for a successful or killed run', () => {
+    expect(classifyProviderFatal(0, REFUSAL, null)).toBeNull();
+    expect(classifyProviderFatal(137, REFUSAL, null)).toBeNull();
+  });
+
+  it('is never retried, unlike a 5xx', () => {
+    // Retrying a refusal burns the agent's whole budget to reach the same wall.
+    expect(
+      shouldRerollMiningAgent(
+        [
+          {
+            agentId: 'a',
+            agentTitle: 'a',
+            status: 'failed',
+            output: null,
+            rawOutput: null,
+            errorMessage: `Provider refused the prompt (content filter): ${REFUSAL}`,
+          } as never,
+        ],
+        'a',
+      ),
+    ).toBe(false);
   });
 });
 

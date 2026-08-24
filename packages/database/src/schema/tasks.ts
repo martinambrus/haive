@@ -32,7 +32,7 @@ type TaskStepErrorHint =
   | { type: 'local_model_destructive'; stepId: string; providerName: string }
   | {
       type: 'provider_unavailable';
-      reason: 'rate_limit' | 'auth' | 'server_error';
+      reason: 'rate_limit' | 'auth' | 'server_error' | 'content_filter';
       providerName?: string;
     }
   | { type: 'cli_timeout'; stepId: string; lastBudgetMinutes: number; attempts: number };

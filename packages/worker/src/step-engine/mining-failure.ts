@@ -89,7 +89,10 @@ export function shouldRetryMiningTerminalFailure(result: AgentMiningResult): boo
   // still arms once the budget is spent, because exec-core stamps the class on the final failed
   // row either way.
   const fatal = fatalClassFromMessage(diagnostic);
-  if (fatal === 'auth' || fatal === 'rate_limit') return false;
+  // content_filter joins auth and rate_limit as never-retryable: the provider refused THIS
+  // prompt, so an identical re-run is refused identically. Retrying would burn the agent's
+  // whole budget to reach the same wall.
+  if (fatal === 'auth' || fatal === 'rate_limit' || fatal === 'content_filter') return false;
   if (NON_RETRYABLE_MINING_TERMINAL_ERROR_RE.test(diagnostic)) return false;
   return (
     fatal === 'server_error' ||
