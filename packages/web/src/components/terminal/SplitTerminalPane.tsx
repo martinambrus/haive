@@ -116,6 +116,7 @@ export function SplitTerminalPane({ taskId, stepRowId, side, onMove }: SplitTerm
           fill
           cleanOnly
           cleanSupported={cleanSupported}
+          startedAt={invocation.startedAt}
         />
       ) : replay ? (
         <CliStreamViewer

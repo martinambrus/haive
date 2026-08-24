@@ -380,6 +380,9 @@ function InvocationPanel({
           taskId={taskId}
           height="h-[400px]"
           cleanSupported={invocation.mode !== 'subagent_sequential'}
+          // Null while this run is queued, which is what keeps the stream-health badge quiet
+          // until the CLI is actually launched.
+          startedAt={invocation.startedAt}
         />
       ) : replay ? (
         <CliStreamViewer

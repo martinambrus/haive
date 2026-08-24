@@ -46,6 +46,12 @@ interface CliStreamViewerProps {
    *  both Raw auto-switch effects are skipped: with no tab bar and no raw panel, a
    *  switch to Raw would leave the column silently blank. Defaults to false. */
   cleanOnly?: boolean;
+  /** The invocation's own `started_at`, live from the caller's poll. `null` means the run is
+   *  QUEUED — enqueued, no slot yet — which is the one state where silence proves nothing: the
+   *  CLI has not been launched, so there is nothing to be stalled. Gated on this column and not
+   *  on any message, exactly as invocationBanner (lib/step-banners) splits queued from running.
+   *  Undefined when the caller has no row to read; the health badge then behaves as before. */
+  startedAt?: string | null;
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
@@ -98,6 +104,7 @@ export function CliStreamViewer({
   staticCleanOutput,
   cleanSupported = true,
   cleanOnly = false,
+  startedAt,
 }: CliStreamViewerProps) {
   const isReplay = staticOutput !== undefined;
   // Suppress the "Loading…" overlay once any byte has been written to xterm.
@@ -501,12 +508,35 @@ export function CliStreamViewer({
     return () => cancelAnimationFrame(id);
   }, [tab, cleanSupported]);
 
+  // Arm the stall clock when the run itself STARTS, not when this terminal connected.
+  //
+  // A queued run's socket connects immediately, so the connect-time stamp measures how long the
+  // TERMINAL has been open — and a run that waits twenty minutes for a slot would then be called
+  // stalled the instant it is picked up. Re-stamped at the queued -> started transition, from the
+  // browser's own clock: the caller polls this row every 2s, far inside the five-minute
+  // threshold, and an observed moment cannot be skewed against the API host the way a parsed
+  // `started_at` timestamp could. Only that transition — a viewer opened mid-run must keep the
+  // `connected` frame's idleMs, which is measured from the last frame and so is the sharper
+  // number. Arming it here (rather than leaving the clock null) is what keeps the one signal that
+  // catches a run which starts and then never produces a single byte.
+  const prevStartedAtRef = useRef(startedAt);
+  useEffect(() => {
+    const prev = prevStartedAtRef.current;
+    prevStartedAtRef.current = startedAt;
+    if (prev !== null || startedAt == null) return;
+    lastFrameAtRef.current = Date.now();
+  }, [startedAt]);
+
   // Stall watch: a live stream that has produced nothing for STALL_THRESHOLD_MS. Only while the
   // socket is connected, and never on a replay — a finished run is not stalled, it is finished.
   // The verdict object is kept identical while the minute count is unchanged, so a quiet run
   // re-renders once a minute rather than once a tick.
+  //
+  // Never while the run is QUEUED either: a run with no `started_at` has not been launched, so it
+  // is silent by definition and the badge would be reporting the queue, not a fault — on a busy
+  // machine that is most runs, since waiting five minutes for a slot is the normal path.
   useEffect(() => {
-    if (isReplay || state !== 'connected') {
+    if (isReplay || state !== 'connected' || startedAt === null) {
       setStall(null);
       return;
     }
@@ -523,7 +553,7 @@ export function CliStreamViewer({
     evaluate();
     const id = setInterval(evaluate, STALL_POLL_MS);
     return () => clearInterval(id);
-  }, [isReplay, state]);
+  }, [isReplay, state, startedAt]);
 
   // CR-only sequences confuse HTML pre-wrap; JSON.parse already turned \n/\t into
   // real characters, so stripping bare \r is all the escaping the prose needs.
