@@ -117,9 +117,28 @@ describe('interpretCliFailure', () => {
   });
 
   it('falls back to generic hint when provider name is null', () => {
-    const result = outcome({ rawOutput: 'Unauthorized' });
+    // Was bare 'Unauthorized'. AUTH_RE no longer matches that on its own — see below.
+    const result = outcome({ rawOutput: 'Unauthorized 401' });
     const msg = interpretCliFailure(result, null);
     expect(msg).toMatch(/re-authenticate/);
+  });
+
+  it('deliberately does NOT classify a bare auth adjective with no status code', () => {
+    // A conscious trade, not an oversight. "unauthorized" and "unauthenticated" on their own
+    // are indistinguishable from adversarial-QA prose, which is BUILT from that vocabulary —
+    // MEASURED 2026-08-24, an 08d agent writing "the unauthenticated login wall" had its
+    // healthy run reported as "CLI authentication failed, run codex login".
+    //
+    // Of the two possible errors the false POSITIVE is worse: it misdiagnoses a working system
+    // and sends the operator to re-authenticate something that is fine. The false negative only
+    // costs a less specific hint on a run that fails anyway. Real CLIs pair the adjective with a
+    // status code or a sentence ('Unauthorized 401', 'You are not authenticated'), both of which
+    // still classify.
+    // Unclassified failures come back as an object rather than the auth string, so compare
+    // over the serialised form instead of asserting on a shape this test does not own.
+    expect(
+      JSON.stringify(interpretCliFailure(outcome({ rawOutput: 'Unauthorized' }), null)),
+    ).not.toMatch(/re-authenticate/);
   });
 
   it('headlines a rate-limit / quota failure as a fatal provider error', () => {

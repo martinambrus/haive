@@ -541,3 +541,28 @@ describe('a preemption re-dispatches regardless of the transient budget', () => 
     expect(redispatches([ORPHAN, ORPHAN])).toBe(true);
   });
 });
+
+describe('AUTH_RE must not fire on adversarial-QA prose', () => {
+  // MEASURED 2026-08-24: this exact sentence classified a healthy run as "CLI authentication
+  // failed - run codex login", on the bare word `unauthenticated` in the agent's own answer.
+  const MEASURED =
+    "I'll trace logged-out privileged routes and their access checks, then verify only safe, " +
+    'non-mutating requests. I will report the unauthenticated login wall as a coverage limit.';
+
+  it.each([
+    ['the measured false positive', MEASURED],
+    ['a 403 finding', 'All security deny rules return 403: dotfiles, .ser, .txt, init.php'],
+    ['an unauthorized-access finding', 'An unauthorized user can enumerate upload directories'],
+  ])('does not classify %s as auth', (_label, text) => {
+    expect(classifyProviderFatal(1, text, null)).not.toBe('auth');
+  });
+
+  it.each([
+    ['grok logged out', 'You are not authenticated. Run grok login.'],
+    ['a 401 with http context', 'API error (status 401 Unauthorized): invalid api key'],
+    ['xai 403', 'API error (status 403 Forbidden): permission-denied'],
+    ['anthropic', 'authentication_error: invalid x-api-key'],
+  ])('still classifies %s as auth', (_label, text) => {
+    expect(classifyProviderFatal(1, text, null)).toBe('auth');
+  });
+});

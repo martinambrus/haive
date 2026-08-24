@@ -21,6 +21,8 @@ export interface AuthProbeExecResult {
   timedOut?: boolean;
 }
 
+import { AUTH_RE } from '../queues/cli-exec/failure-class.js';
+
 const AUTH_PROBE_PROMPT = 'respond with the single word pong';
 // `not authenticated` is here for grok: `grok models` exits 0 whether or not it
 // has credentials, printing "You are not authenticated." on stdout when it does
@@ -28,8 +30,25 @@ const AUTH_PROBE_PROMPT = 'respond with the single word pong';
 // completely unauthenticated provider reports as signed in. The PATTERNS list
 // already carried `not[_\s-]?authenticated` (it classifies as auth_expired) — it
 // was simply unreachable for an exit-0 CLI. Same shape as the agy precedent.
+// Bare adjectives and a bare 401 are SAFE here and nowhere else: this haystack is the output of
+// a fixed two-word probe ("respond with the single word pong"), never an agent's answer, so the
+// false-positive risk that forced AUTH_RE to demand HTTP context does not exist.
 const AUTH_FAILURE_GUARD =
   /invalid[_\s-]?token|unauthor(ised|ized)|\b401\b|authentication[_\s-]?required|not[_\s-]?authenticated|not[_\s-]?logged[_\s-]?in|please[_\s-]?sign[_\s-]?in/i;
+
+/** Does the probe output show an auth failure?
+ *
+ *  UNION of this file's bare-word guard and the invocation path's AUTH_RE. It used to be only
+ *  the former, which was a strict SUBSET — it lacked `not signed in`, `please log in`,
+ *  `authentication_error` and `permission_error` — so a provider whose logged-out message used
+ *  any of those probed OK while every real invocation failed. "Test connection" said fine and
+ *  the task then died on the first step.
+ *
+ *  A union, not a replacement: each pattern catches wording the other misses, and over-detecting
+ *  here costs a false "not signed in" on a Test button, while under-detecting costs a whole task. */
+function probeShowsAuthFailure(haystack: string): boolean {
+  return AUTH_FAILURE_GUARD.test(haystack) || AUTH_RE.test(haystack);
+}
 
 // Gemini's folder-trust feature, when enabled, overrides --yolo to "default"
 // and prints a warning whenever the CWD is not in trustedFolders.json. The
@@ -110,7 +129,7 @@ export function classifyAuthProbeOutput(result: AuthProbeExecResult): AuthProbeC
 
   const haystack = `${result.stdout}\n${result.stderr}`;
 
-  if (result.exitCode === 0 && !AUTH_FAILURE_GUARD.test(haystack)) {
+  if (result.exitCode === 0 && !probeShowsAuthFailure(haystack)) {
     return { status: 'ok', message: FRIENDLY_MESSAGES.ok };
   }
 

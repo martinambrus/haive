@@ -244,8 +244,24 @@ const BILLING_EXHAUSTED_RE =
 // error reported to the user as "check your XAI_API_KEY". `\btoken\b` cannot match
 // `input_tokens` (word char on both sides), and `[^\n]{0,40}?` stops a match bridging a
 // whole JSON line. Do not relax either back.
-const AUTH_RE =
-  /\b40[13]\b|authentication_error|invalid authentication credentials|\bunauthorized\b|\bunauthenticated\b|permission_error|please log.?in|not authenticated|not signed in|\btoken\b[^\n]{0,40}?\b(?:expired|invalid|revoked)\b/i;
+// MEASURED FALSE POSITIVE (2026-08-24): an 08d adversary wrote "I'll trace logged-out privileged
+// routes ... and report the unauthenticated login wall as a coverage limit" and the run was
+// classified `auth` — "CLI authentication failed, run codex login" — on the strength of the bare
+// word `unauthenticated` in the AGENT'S OWN ANSWER. The haystack includes providerErrorScan, i.e.
+// stdout, so every adversarial-QA run is exposed: security prose is BUILT from this vocabulary
+// ("unauthorized access", "returns 403", "not authenticated").
+//
+// Fixed by applying the discipline SERVER_ERROR_RE already had and this pattern lacked: a status
+// token must carry HTTP context, and the bare adjectives are gone entirely. What remains is
+// wording a CLI emits and an agent does not: API error codes, credential phrases, and imperative
+// login instructions. `\b403\b` on its own was the worst of them — "all deny rules return 403"
+// is a normal sentence in a security report.
+//
+// The status number and an HTTP reason phrase TOGETHER are specific even without a context word
+// ("Unauthorized 401" is what several CLIs print), so that pairing is admitted while either half
+// alone is not — "an unauthorized user can enumerate" and "deny rules return 403" both stay out.
+export const AUTH_RE =
+  /(?:status|http|error|code|\()[\s:/]*40[13]\b|\b(?:unauthor(?:ized|ised)|forbidden)\b[^\n]{0,12}\b40[13]\b|\b40[13]\b[^\n]{0,12}\b(?:unauthor(?:ized|ised)|forbidden)\b|authentication_error|invalid authentication credentials|permission_error|please log.?in|\bnot (?:authenticated|signed in)\b|\btoken\b[^\n]{0,40}?\b(?:expired|invalid|revoked)\b/i;
 const SERVER_ERROR_RE =
   /\b529\b|(?:status|http|error|code|\()[\s:/]*5\d{2}\b|\b5\d{2}\b\s*(?:error|status|service|unavailable|gateway|bad gateway|overloaded)|service unavailable|bad gateway|gateway time-?out|internal server error|\boverloaded\b/i;
 
