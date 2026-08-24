@@ -29,7 +29,7 @@ const AUTH_PROBE_PROMPT = 'respond with the single word pong';
 // already carried `not[_\s-]?authenticated` (it classifies as auth_expired) — it
 // was simply unreachable for an exit-0 CLI. Same shape as the agy precedent.
 const AUTH_FAILURE_GUARD =
-  /invalid[_\s-]?token|unauthor(ised|ized)|\b401\b|authentication[_\s-]?required|not[_\s-]?authenticated|please[_\s-]?sign[_\s-]?in/i;
+  /invalid[_\s-]?token|unauthor(ised|ized)|\b401\b|authentication[_\s-]?required|not[_\s-]?authenticated|not[_\s-]?logged[_\s-]?in|please[_\s-]?sign[_\s-]?in/i;
 
 // Gemini's folder-trust feature, when enabled, overrides --yolo to "default"
 // and prints a warning whenever the CWD is not in trustedFolders.json. The
@@ -79,7 +79,10 @@ const PATTERNS: Array<{ pattern: RegExp; status: CliAuthStatus }> = [
   // log in" when its OAuth token is missing or expired — and exits 0, so it is
   // also in AUTH_FAILURE_GUARD above to stop an exit-0 probe being misread as ok.
   {
-    pattern: /authentication[_\s-]?required/i,
+    // `not logged in` is codex's logged-out line (`codex login status`, exit 1). Without it the
+    // classifier falls through to unknown_error and the UI shows "auth probe failed" instead of
+    // offering a sign-in.
+    pattern: /authentication[_\s-]?required|not[_\s-]?logged[_\s-]?in/i,
     status: 'auth_expired',
   },
   {
@@ -182,9 +185,28 @@ export function buildAuthProbeCommand(
         env,
       };
     case 'codex':
+      // `codex login status` reads the stored credential and prints one of two lines — the
+      // same shape as `agy models` / `amp usage` / `grok models`, and for the same reason.
+      //
+      // It replaces `codex exec --skip-git-repo-check <prompt>`, which ran a full agentic LLM
+      // round-trip and blew the 25s probe budget: MEASURED 2026-08-24, a provider whose
+      // credentials had just been written reported `timeout`/"auth probe timed out", so a
+      // successful sign-in was shown to the user as needing a login. Exactly the antigravity
+      // failure recorded above.
+      //
+      // MEASURED against codex-cli 0.147.0, both states, as the sandbox user:
+      //   logged in  -> stdout "Logged in using ChatGPT", exit 0, 0.69s
+      //   logged out -> stderr "Not logged in",            exit 1, 0.79s
+      // The exit code is the contract; the wording is backed by the `not logged in` pattern
+      // below so an exit-0 reword cannot read as ok.
+      //
+      // KNOWN LIMIT, same as grok's: this detects MISSING credentials, not REVOKED ones — a
+      // stale token still prints "Logged in using ChatGPT". `codex doctor --json` does reach
+      // the backend and carries a schemaVersion, but it reports a healthy ChatGPT endpoint as
+      // "reachable (HTTP 403)", which this file's own 403 pattern classifies auth_denied.
       return {
         command: executable,
-        args: ['exec', '--skip-git-repo-check', AUTH_PROBE_PROMPT],
+        args: ['login', 'status'],
         env,
       };
     case 'gemini':

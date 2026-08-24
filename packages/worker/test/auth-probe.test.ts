@@ -239,10 +239,35 @@ describe('buildAuthProbeCommand', () => {
     expect(spec.args).toContain('--output-format');
   });
 
-  it('builds codex spec with exec subcommand', () => {
+  // Was `exec --skip-git-repo-check <prompt>` — a full agentic round-trip that blew the 25s
+  // probe budget, so a provider whose credentials had just been written reported `timeout` and
+  // the UI asked the user to sign in again. Same failure the antigravity probe already fixed.
+  it('builds codex spec from login status, not an agentic run', () => {
     const spec = buildAuthProbeCommand(makeProvider({ id: '2', name: 'codex' }), 'codex');
     expect(spec.command).toBe('codex');
-    expect(spec.args[0]).toBe('exec');
+    expect(spec.args).toEqual(['login', 'status']);
+    expect(spec.args).not.toContain('exec');
+  });
+
+  // Both MEASURED against codex-cli 0.147.0 as the sandbox user (uid 1000).
+  it('reads codex logged-in output as ok', () => {
+    expect(
+      classifyAuthProbeOutput({ stdout: 'Logged in using ChatGPT\n', stderr: '', exitCode: 0 })
+        .status,
+    ).toBe('ok');
+  });
+
+  it('reads codex logged-out output as auth_expired, not unknown_error', () => {
+    expect(
+      classifyAuthProbeOutput({ stdout: '', stderr: 'Not logged in\n', exitCode: 1 }).status,
+    ).toBe('auth_expired');
+  });
+
+  // The guard keeps an exit-0 CLI that prints its logged-out line from short-circuiting to ok.
+  it('does not read a logged-out line on exit 0 as ok', () => {
+    expect(
+      classifyAuthProbeOutput({ stdout: 'Not logged in\n', stderr: '', exitCode: 0 }).status,
+    ).toBe('auth_expired');
   });
 
   it('builds gemini spec with -p and --yolo and trusts workspace via env', () => {
