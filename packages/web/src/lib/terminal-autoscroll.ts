@@ -21,25 +21,48 @@ function writePref(value: boolean): void {
   document.cookie = `${COOKIE}=${value ? '1' : '0'}; path=/; max-age=${60 * 60 * 24 * 365}; samesite=lax`;
 }
 
-/** Whether a change in a step's set of RUNNING terminal ids should move the view.
- *  Follows the set in BOTH directions: a run starting, and a run ending while
- *  siblings keep going. The ending case is the one users notice — without it the
- *  view stays parked on the terminal that just exited while the still-running
- *  ones scroll by unseen.
- *
- *  False on the first observation (the page-level effect owns the initial scroll)
- *  and when nothing is left running: the step is wrapping up, and the page-level
- *  effect scrolls to whatever becomes active next — scrolling to this step's list
- *  tail would fight it. */
-export function shouldFollowRunningTerminals(prev: string[] | null, next: string[]): boolean {
-  if (prev === null) return false;
-  if (next.length === 0) return false;
-  const gained = next.some((id) => !prev.includes(id));
-  const lost = prev.some((id) => !next.includes(id));
-  return gained || lost;
+/** The two kinds of ACTIVE run on a step, by invocation id: `running` is started
+ *  and not yet ended, `queued` is enqueued but not yet picked up (no slot free).
+ *  Kept apart because the scroll TARGET prefers a running run and only falls back
+ *  to a queued one — see scrollToNewestActiveTerminal. */
+export interface ActiveTerminalIds {
+  running: string[];
+  queued: string[];
 }
 
-/** Scroll the newest RUNNING terminal inside `root` into view. Returns false when
+/** Set membership either way — the API returns newest-first and a re-sort must not
+ *  read as a change. */
+function membershipChanged(prev: string[], next: string[]): boolean {
+  return next.some((id) => !prev.includes(id)) || prev.some((id) => !next.includes(id));
+}
+
+/** Whether a change in a step's ACTIVE terminal ids should move the view.
+ *  Follows BOTH sets in BOTH directions: a run starting, a run ending while
+ *  siblings keep going, and a fresh run being ENQUEUED. The ending case is the one
+ *  users notice — without it the view stays parked on the terminal that just
+ *  exited while the still-running ones scroll by unseen.
+ *
+ *  Tracking `queued` too is what fixes a step whose next run lands behind the
+ *  concurrency cap: run 1 ends and run 2 is enqueued in the same poll, so the
+ *  RUNNING set empties. Keying on running alone bailed out there (nothing left
+ *  running) and the page never scrolled down to the new, waiting terminal.
+ *
+ *  False on the first observation (the page-level effect owns the initial scroll)
+ *  and when nothing is left active at all: the step is wrapping up, and the
+ *  page-level effect scrolls to whatever becomes active next — scrolling to this
+ *  step's list tail would fight it. */
+export function shouldFollowActiveTerminals(
+  prev: ActiveTerminalIds | null,
+  next: ActiveTerminalIds,
+): boolean {
+  if (prev === null) return false;
+  if (next.running.length === 0 && next.queued.length === 0) return false;
+  return (
+    membershipChanged(prev.running, next.running) || membershipChanged(prev.queued, next.queued)
+  );
+}
+
+/** Scroll the newest ACTIVE terminal inside `root` into view. Returns false when
  *  no target exists yet — run panels mount a tick after their invocation row
  *  appears, so callers retry.
  *
@@ -54,16 +77,22 @@ export function shouldFollowRunningTerminals(prev: string[] | null, next: string
  *  status line describing that run sits above the terminal and panel-top framing is
  *  what scrolls it away. See the call site below.
  *
- *  Prefers the newest RUNNING run: the last panel (and the toggle below it) is
- *  often a queued, empty terminal — a step that fans out more invocations than the
- *  concurrency cap (03-phase-0a-discovery: 8 dispatched, ~5 run at once) leaves the
- *  tail panels waiting their turn. Falls back to the toggle (keeps the checkbox
- *  visible), then the last panel, when nothing is running yet; both are list-tail
- *  targets, so they keep `block: 'end'`. */
-export function scrollToNewestRunningTerminal(root: Element): boolean {
+ *  Target order is RUNNING then QUEUED, both newest-last in document order (panels
+ *  render oldest-first), and the preference holds regardless of DOM position: a step
+ *  that fans out more invocations than the concurrency cap
+ *  (03-phase-0a-discovery: 8 dispatched, ~5 run at once) leaves QUEUED panels at the
+ *  tail while earlier ones stream, and the live output is what the user wants on
+ *  screen. A queued panel is only the target when NOTHING is running — which is the
+ *  case the running-only version could not express, and the reason it left a
+ *  waiting terminal off-screen. Last resort is the toggle (keeps the checkbox
+ *  visible), then the last panel; both are list-tail targets, so they keep
+ *  `block: 'end'`. */
+export function scrollToNewestActiveTerminal(root: Element): boolean {
   const panels = root.querySelectorAll('[data-cli-terminal]');
   const running = root.querySelectorAll('[data-cli-terminal][data-cli-running]');
-  const newest = running[running.length - 1];
+  const queued = root.querySelectorAll('[data-cli-terminal][data-cli-queued]');
+  const newest: Element | undefined =
+    running[running.length - 1] ?? queued[queued.length - 1] ?? undefined;
   if (newest) {
     // One-panel step: that run's only status line is the STEP's own, which renders
     // ABOVE the terminal — the in-panel copy is gated on 2+ runs (InvocationPanel's

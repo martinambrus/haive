@@ -89,7 +89,7 @@ import { DatabaseAccessPanel } from '@/components/terminal/DatabaseAccessPanel';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
 import {
   autoScrollTerminalsEnabled,
-  scrollToNewestRunningTerminal,
+  scrollToNewestActiveTerminal,
 } from '@/lib/terminal-autoscroll';
 import { usePageTitle } from '@/lib/use-page-title';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
@@ -827,7 +827,7 @@ export default function TaskDetailPage() {
       const scrollToLastTerminal = (): boolean => {
         const stepEl = container.querySelector(`[data-step-id="${activeId}"]`);
         if (!stepEl) return false;
-        return scrollToNewestRunningTerminal(stepEl);
+        return scrollToNewestActiveTerminal(stepEl);
       };
 
       // Follow the active step into view only when the user is already looking

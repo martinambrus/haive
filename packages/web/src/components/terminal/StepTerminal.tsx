@@ -5,8 +5,9 @@ import { api, type CliInvocationOutput, type CliInvocationSummary } from '@/lib/
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { CliStreamViewer } from './CliStreamViewer';
 import {
-  scrollToNewestRunningTerminal,
-  shouldFollowRunningTerminals,
+  type ActiveTerminalIds,
+  scrollToNewestActiveTerminal,
+  shouldFollowActiveTerminals,
   useAutoScrollTerminals,
 } from '@/lib/terminal-autoscroll';
 import { formatDuration } from '@/lib/format-duration';
@@ -40,7 +41,7 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
   const [loadError, setLoadError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useAutoScrollTerminals();
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const prevRunningRef = useRef<string[] | null>(null);
+  const prevActiveRef = useRef<ActiveTerminalIds | null>(null);
 
   // Sync expanded state to autoExpand transitions only — not on every render.
   // This way: a step starts running → terminal pops open; the step finishes →
@@ -94,30 +95,38 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     return () => clearInterval(t);
   }, [expanded, invocations, autoExpand, reload]);
 
-  // Follow the newest RUNNING run whenever the set of running runs CHANGES — a
-  // fresh run starts, a queued one finally gets a slot, or a run ends while its
-  // siblings keep going. Tracking the running SET, not just the count, is what
-  // makes the scroll follow the last ACTIVE terminal as the queue drains, instead
-  // of stalling on whichever ran first (e.g. landing on terminal 7 when 7 AND 8 go
+  // Follow the newest ACTIVE run whenever the set of running OR queued runs
+  // CHANGES — a fresh run starts, a queued one finally gets a slot, a run ends
+  // while its siblings keep going, or a new run is ENQUEUED behind the
+  // concurrency cap. Tracking the SETS, not just the count, is what makes the
+  // scroll follow the last active terminal as the queue drains, instead of
+  // stalling on whichever ran first (e.g. landing on terminal 7 when 7 AND 8 go
   // active) — and reacting to a LOSS is what stops the view from staying parked on
   // the terminal that just exited when no replacement starts in the same tick.
+  // Watching the QUEUED set too covers the case where the replacement cannot
+  // start: run 1 ends and run 2 is enqueued with no slot free, which empties the
+  // running set, so a running-only trigger read it as "step wrapping up" and never
+  // moved. Target choice stays in scrollToNewestActiveTerminal — a running run
+  // always outranks a queued one.
   // Not on the initial load (the page-level effect scrolls to the first terminal
   // when the step becomes active). Gated on the user's preference.
   useEffect(() => {
     if (invocations === null || !autoScroll) return;
-    // "running" = started and not yet ended (mirrors the data-cli-running marker).
-    // isActive alone is true for a QUEUED run too (endedAt is null).
-    const runningIds = invocations
-      .filter((i) => i.isActive && i.startedAt !== null)
-      .map((i) => i.id);
-    const prev = prevRunningRef.current;
-    prevRunningRef.current = runningIds;
-    if (!shouldFollowRunningTerminals(prev, runningIds)) return;
+    // "running" = started and not yet ended (mirrors data-cli-running); "queued" =
+    // active with no startedAt (mirrors data-cli-queued). isActive alone conflates
+    // the two, because endedAt is null for both.
+    const active: ActiveTerminalIds = {
+      running: invocations.filter((i) => i.isActive && i.startedAt !== null).map((i) => i.id),
+      queued: invocations.filter((i) => i.isActive && i.startedAt === null).map((i) => i.id),
+    };
+    const prev = prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (!shouldFollowActiveTerminals(prev, active)) return;
     // The new panel and its xterm mount a tick later; retry briefly.
     const timers = [80, 300, 700].map((delay) =>
       setTimeout(() => {
         const root = containerRef.current;
-        if (root) scrollToNewestRunningTerminal(root);
+        if (root) scrollToNewestActiveTerminal(root);
       }, delay),
     );
     return () => timers.forEach(clearTimeout);
@@ -249,7 +258,8 @@ function InvocationPanel({
   // run too (endedAt is null), so the auto-scroll target must exclude those.
   const isRunning = invocation.isActive && invocation.startedAt !== null;
   // Enqueued but not yet picked up. invocationBanner always speaks for one of these, so the
-  // queued branch below never falls through to the step-status fallback.
+  // queued branch below never falls through to the step-status fallback. Also the
+  // auto-scroll fallback target (data-cli-queued) when nothing on the step is running.
   const isQueued = invocation.isActive && invocation.startedAt === null;
   return (
     // scroll-mt-12: the auto-scroll aligns a panel's TOP with the viewport top and a
@@ -258,6 +268,7 @@ function InvocationPanel({
     <div
       data-cli-terminal
       data-cli-running={isRunning ? '' : undefined}
+      data-cli-queued={isQueued ? '' : undefined}
       className="flex scroll-mt-12 flex-col gap-1.5 rounded border border-neutral-800 p-2"
     >
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
