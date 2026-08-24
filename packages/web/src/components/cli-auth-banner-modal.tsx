@@ -10,6 +10,7 @@ import { Button, FormError } from '@/components/ui';
 import { apiWebSocketUrl, type CliProbeResult, type CliProviderName } from '@/lib/api-client';
 import { osc52ClipboardProvider } from '@/lib/terminal-copy';
 import { describeSlotHolders } from '@/components/cli-slot-wait';
+import { runCliProbe } from '@/lib/cli-jobs';
 
 interface CliAuthBannerModalProps {
   open: boolean;
@@ -45,7 +46,7 @@ const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderN
 const MAX_URL_WAIT_ATTEMPTS = 3;
 const URL_WAIT_TIMEOUT_MS = 30_000;
 
-// Upper bound on phase 'success' ("saving credentials..."). The server runs the
+// Upper bound on phase 'success' ("testing and saving credentials..."). The server runs the
 // post-login probe (<=30s) then sends 'saved'. If that frame is lost (WS closed
 // mid-probe -> dropped wsSend), the modal would otherwise hang here forever.
 const SUCCESS_SAVE_TIMEOUT_MS = 40_000;
@@ -95,6 +96,11 @@ export function CliAuthBannerModal({
   const [error, setError] = useState<string | null>(null);
   const [savedResult, setSavedResult] = useState<CliProbeResult | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
+  /** The SIGN-IN succeeded and only its verification did not come back. Kept as its own flag
+   *  rather than read off `error`, because the error copy is display text: keying the button on
+   *  wording would silently restart a full OAuth login the day someone rewords it. */
+  const [verifyOnly, setVerifyOnly] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const [urlAttempt, setUrlAttempt] = useState(1);
 
   useEffect(() => {
@@ -106,6 +112,8 @@ export function CliAuthBannerModal({
     setError(null);
     setSavedResult(null);
     setQueueWait(null);
+    setVerifyOnly(false);
+    setVerifying(false);
 
     const ws = new WebSocket(apiWebSocketUrl(`/cli-login-banner/${providerId}`));
     wsRef.current = ws;
@@ -239,7 +247,7 @@ export function CliAuthBannerModal({
     return () => clearTimeout(timer);
   }, [open, phase, authUrl, urlAttempt, providerName]);
 
-  // Safety net: phase 'success' ("saving credentials...") waits on the server's
+  // Safety net: phase 'success' ("testing and saving credentials...") waits on the server's
   // post-login probe + 'saved' frame. If that frame never arrives (e.g. the WS
   // closed mid-probe, so the server's wsSend was dropped), the modal would hang
   // here forever. Bound it: after SUCCESS_SAVE_TIMEOUT_MS, surface an escape. The
@@ -254,9 +262,10 @@ export function CliAuthBannerModal({
     if (phase !== 'success' || queueWait !== null) return;
     const timer = setTimeout(() => {
       setPhase('error');
+      setVerifyOnly(true);
       setError(
-        'Sign-in finished but verification did not come back in time. Your credentials may ' +
-          'already be saved — close this dialog and click "Test connection" to confirm.',
+        'Sign-in finished and your credentials were saved, but the connection test did not ' +
+          'come back in time. Test the connection to confirm — there is no need to sign in again.',
       );
     }, SUCCESS_SAVE_TIMEOUT_MS);
     return () => clearTimeout(timer);
@@ -363,6 +372,28 @@ export function CliAuthBannerModal({
   const handleClose = useCallback(() => {
     onClose();
   }, [onClose]);
+
+  /** Re-run ONLY the connection test, for a sign-in that saved its credentials and then lost
+   *  its verification. Same probe the provider page's "Test connection" runs, so the result the
+   *  user sees here is the one stored against the provider. */
+  const retestConnection = useCallback(async () => {
+    setVerifying(true);
+    setError(null);
+    try {
+      const probeResult = await runCliProbe(providerId);
+      setSavedResult(probeResult);
+      setVerifyOnly(false);
+      setPhase('saved');
+      if (onLoginComplete) onLoginComplete(probeResult);
+    } catch (err) {
+      // Stay in the verify-only branch: the credentials are still saved, so the way out is
+      // another test, never another login.
+      setPhase('error');
+      setError(err instanceof Error ? err.message : 'Connection test failed');
+    } finally {
+      setVerifying(false);
+    }
+  }, [providerId, onLoginComplete]);
 
   if (!open) return null;
 
@@ -553,7 +584,7 @@ export function CliAuthBannerModal({
         {phase === 'success' && (
           <BannerRow tone="success">
             <Checkmark />
-            <span>Authentication successful — saving credentials...</span>
+            <span>Authentication successful — testing and saving credentials...</span>
           </BannerRow>
         )}
 
@@ -621,7 +652,17 @@ export function CliAuthBannerModal({
             <Button variant="ghost" onClick={handleClose}>
               Close
             </Button>
-            <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
+            {/* Bumping retryNonce re-opens the login WebSocket, i.e. it runs the whole OAuth
+                flow again. That is right when the sign-in itself failed and wrong when it
+                succeeded and only the test timed out — there the credentials are already
+                saved, so re-running the login throws away a good sign-in. */}
+            {verifyOnly ? (
+              <Button disabled={verifying} onClick={() => void retestConnection()}>
+                {verifying ? 'Testing...' : 'Test connection'}
+              </Button>
+            ) : (
+              <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
+            )}
           </div>
         )}
       </div>
