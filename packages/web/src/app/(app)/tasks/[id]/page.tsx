@@ -602,6 +602,10 @@ export default function TaskDetailPage() {
   // One-shot guard so the scroll-to-bottom-on-completion fires once per
   // completion (reset if the task leaves 'completed', e.g. a retry).
   const completedScrolledRef = useRef(false);
+  // The tab shown on the previous render. The steps container is conditionally
+  // rendered, so leaving the tab UNMOUNTS it and returning remounts it scrolled
+  // to the top — a fresh view, not a continuation of the one the user left.
+  const prevTabRef = useRef<Tab>('steps');
   const titleRowRef = useRef<HTMLDivElement>(null);
   const [titleStripVisible, setTitleStripVisible] = useState(false);
 
@@ -782,6 +786,20 @@ export default function TaskDetailPage() {
   // form / status stays visible.
   useEffect(() => {
     const container = stepsContainerRef.current;
+    // Returning to the steps tab is a fresh view: the container remounts at the
+    // top of the page. Clear the last-scrolled key (the 2s poll keeps writing it
+    // while another tab is shown, so it would match and skip) and the
+    // initial-scroll guard (the remounted active step is below the fold, so the
+    // don't-yank-the-user check would skip too), and re-arm the
+    // scroll-to-bottom-on-completion guard so a finished task lands on its
+    // trailing CTAs the same way a page load does.
+    const returnedToSteps = tab === 'steps' && prevTabRef.current !== 'steps';
+    prevTabRef.current = tab;
+    if (returnedToSteps) {
+      prevScrollKeyRef.current = null;
+      didInitialScrollRef.current = false;
+      completedScrolledRef.current = false;
+    }
     const activeStep =
       steps.find(
         (s) => s.status === 'waiting_form' || s.status === 'running' || s.status === 'waiting_cli',
@@ -888,7 +906,7 @@ export default function TaskDetailPage() {
       }
     }
     prevScrollKeyRef.current = scrollKey;
-  }, [steps]);
+  }, [steps, tab]);
 
   // Clear any pending scroll retries on unmount.
   useEffect(() => () => scrollTimersRef.current.forEach(clearTimeout), []);
