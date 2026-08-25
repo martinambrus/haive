@@ -10,6 +10,7 @@ import type { FormSchema } from '@haive/shared';
 import { computeStepContribution, computeTaskTiming } from '@haive/shared/timing';
 import {
   api,
+  getPlanOverview,
   postUserActive,
   type CliProvider,
   type CliProviderName,
@@ -582,6 +583,7 @@ export default function TaskDetailPage() {
   const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
   const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
   const [promotedDraftCount, setPromotedDraftCount] = useState(0);
+  const [planNodeCount, setPlanNodeCount] = useState(0);
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
   const [upcomingCliSteps, setUpcomingCliSteps] = useState<UpcomingCliStep[]>([]);
@@ -723,6 +725,35 @@ export default function TaskDetailPage() {
       window.removeEventListener('focus', onFocus);
     };
   }, [task?.status, id]);
+
+  // Same shape as the promoted-draft CTA above: a plan task's closing act is on
+  // the plan page, so a completed plan task offers a direct link there. Gated on
+  // the repo actually HAVING nodes so a deleted/empty plan shows no dead link,
+  // and refetched on focus so the banner appears as soon as the plan exists.
+  const isPlanTask =
+    task?.type === 'plan_build' || task?.type === 'plan_chat' || task?.type === 'advisory';
+  useEffect(() => {
+    if (task?.status !== 'completed' || !isPlanTask || !task.repositoryId) {
+      setPlanNodeCount(0);
+      return;
+    }
+    let cancelled = false;
+    const fetchCount = async () => {
+      try {
+        const res = await getPlanOverview(task.repositoryId!);
+        if (!cancelled) setPlanNodeCount(res.nodeCount ?? 0);
+      } catch {
+        if (!cancelled) setPlanNodeCount(0);
+      }
+    };
+    void fetchCount();
+    const onFocus = () => void fetchCount();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [task?.status, task?.repositoryId, isPlanTask]);
 
   const reloadEvents = useCallback(async () => {
     try {
@@ -1819,6 +1850,13 @@ export default function TaskDetailPage() {
                   Review {promotedDraftCount} global KB draft{promotedDraftCount === 1 ? '' : 's'}{' '}
                   you promoted →
                 </Button>
+              </Link>
+            </div>
+          )}
+          {isPlanTask && task.status === 'completed' && task.repositoryId && planNodeCount > 0 && (
+            <div className="flex justify-center pt-2">
+              <Link href={`/repos/${task.repositoryId}/plan`}>
+                <Button>Continue to the plan →</Button>
               </Link>
             </div>
           )}
