@@ -16,7 +16,7 @@ import {
 import { CredentialModal } from './credential-modal';
 import { FilesystemBrowser } from './filesystem-browser';
 
-type Source = 'local_path' | 'git_https' | 'github_oauth' | 'upload';
+type Source = 'local_path' | 'git_https' | 'github_oauth' | 'upload' | 'blank';
 
 interface CredentialRow {
   id: string;
@@ -123,6 +123,7 @@ const SOURCE_OPTIONS: { value: Source; label: string }[] = [
   { value: 'git_https', label: 'Git (HTTPS)' },
   { value: 'github_oauth', label: 'GitHub (OAuth device flow)' },
   { value: 'upload', label: 'Upload archive (zip/tar)' },
+  { value: 'blank', label: 'Blank project (new, empty repository)' },
 ];
 
 export function NewRepoForm() {
@@ -298,7 +299,11 @@ export function NewRepoForm() {
       } else {
         const body: Record<string, unknown> = { source };
         if (name.trim()) body.name = name.trim();
-        if (source === 'local_path') {
+        if (source === 'blank') {
+          // No URL and no path to derive from, so the name is the only identifying
+          // input — the API rejects a blank repo without one.
+          if (!name.trim()) throw new Error('Give the new project a name');
+        } else if (source === 'local_path') {
           if (!localPath) throw new Error('Pick a local directory containing a .git folder');
           body.localPath = localPath;
           body.writable = writable;
@@ -334,7 +339,9 @@ export function NewRepoForm() {
       </CardHeader>
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="repo-name">Display name (optional)</Label>
+          <Label htmlFor="repo-name">
+            {source === 'blank' ? 'Project name' : 'Display name (optional)'}
+          </Label>
           <Input
             id="repo-name"
             value={name}
@@ -343,7 +350,9 @@ export function NewRepoForm() {
             placeholder="my-project"
           />
           <p className="text-xs text-neutral-500">
-            Leave blank to derive from the repository URL or folder name.
+            {source === 'blank'
+              ? 'Required for a blank project — there is no URL or folder to derive it from.'
+              : 'Leave blank to derive from the repository URL or folder name.'}
           </p>
         </div>
 

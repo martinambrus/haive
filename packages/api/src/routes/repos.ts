@@ -220,11 +220,13 @@ repoRoutes.post('/', async (c) => {
     ...(body.credentialsId ? { credentialsId: body.credentialsId } : {}),
   };
   const jobName =
-    body.source === 'local_path'
-      ? body.writable
-        ? REPO_JOB_NAMES.COPY
-        : REPO_JOB_NAMES.SCAN
-      : REPO_JOB_NAMES.CLONE;
+    body.source === 'blank'
+      ? REPO_JOB_NAMES.INIT
+      : body.source === 'local_path'
+        ? body.writable
+          ? REPO_JOB_NAMES.COPY
+          : REPO_JOB_NAMES.SCAN
+        : REPO_JOB_NAMES.CLONE;
   await queue.add(jobName, payload, {
     attempts: 3,
     backoff: { type: 'exponential', delay: 5000 },

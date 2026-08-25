@@ -37,6 +37,11 @@ export const REPO_JOB_NAMES = {
   /** Copy a writable-local repo's working tree from the host bind (/host-fs)
    *  into the haive_repos volume so the workflow can write against a snapshot. */
   COPY: 'copy-repo',
+  /** Greenfield `blank` source: create the storage dir, `git init`, land one
+   *  commit. Produces a normal git repo so every repo-anchored feature
+   *  (worktrees, attachments, the .haive-data mirror) works on a project that
+   *  does not exist yet. */
+  INIT: 'init-repo',
 } as const;
 
 export const BUNDLE_JOB_NAMES = {

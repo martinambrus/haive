@@ -145,7 +145,13 @@ export interface ModelIdentity {
 }
 
 export type RepoSource =
-  'local_path' | 'git_https' | 'github_https' | 'github_oauth' | 'gitlab_https' | 'upload';
+  | 'local_path'
+  | 'git_https'
+  | 'github_https'
+  | 'github_oauth'
+  | 'gitlab_https'
+  | 'upload'
+  | 'blank';
 
 export type ArchiveFormat = 'zip' | 'tar' | 'tar.gz';
 
@@ -219,7 +225,43 @@ export const HAIVE_DATA_FILES = {
   environment: `${HAIVE_DATA_DIR}/environment.json`,
   tooling: `${HAIVE_DATA_DIR}/tooling.json`,
   exclusions: `${HAIVE_DATA_DIR}/exclusions.json`,
+  /** Plan canvas mirror. `plan.json` is the machine-readable projection that
+   *  restores the plan on a fresh clone; `plan.md` is the SAME render the plan
+   *  agents are prompted with, committed so a human reading the repo sees exactly
+   *  what the agents see. Two files rather than one because a JSON blob is
+   *  unreadable in a diff and a markdown doc cannot be re-imported losslessly. */
+  plan: `${HAIVE_DATA_DIR}/plan.json`,
+  planMarkdown: `${HAIVE_DATA_DIR}/plan.md`,
 } as const;
+
+export const PLAN_MIRROR_SCHEMA_VERSION = 1;
+
+/** Committed mirror of a repo's plan canvas (`.haive-data/plan.json`), restored
+ *  on clone by persistDetection. schemaVersion-gated like the onboarding mirrors:
+ *  a future format bump is ignored rather than mis-parsed. Node ids are carried
+ *  VERBATIM — plan node ids are what the technical-spec writer names in its
+ *  "Affected components" section, so a re-import that renumbered them would
+ *  silently break every stored reference. */
+export interface PlanMirror {
+  schemaVersion: number;
+  nodes: {
+    id: string;
+    parentId: string | null;
+    ordinal: number;
+    title: string;
+    kind: string;
+    body: string | null;
+    status: string;
+    taskable: boolean;
+    createdBy: string;
+  }[];
+  edges: {
+    fromNodeId: string;
+    toNodeId: string;
+    kind: string;
+    note: string | null;
+  }[];
+}
 
 export type CustomBundleSourceType = 'zip' | 'git';
 export type CustomBundleStatus = 'active' | 'syncing' | 'failed';

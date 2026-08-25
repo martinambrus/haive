@@ -7,6 +7,11 @@ export const repoSourceSchema = z.enum([
   'github_oauth',
   'gitlab_https',
   'upload',
+  /** Greenfield: no remote, no local tree. The repo queue's INIT job creates the
+   *  storage dir, `git init`s it and lands one commit, so the plan canvas (and
+   *  everything else repo-anchored: worktrees, task attachments, the
+   *  `.haive-data/` mirror) works on a project that does not exist yet. */
+  'blank',
 ]);
 
 /** Which forge (git host) a credential authenticates against, selecting the PR/MR
@@ -46,6 +51,15 @@ export const createRepoRequestSchema = z
     writable: z.boolean().optional(),
   })
   .superRefine((val, ctx) => {
+    // A blank repo has neither a URL nor a path to derive a name from, so the
+    // name is the only identifying input and must be supplied.
+    if (val.source === 'blank' && !val.name?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['name'],
+        message: 'name is required when source is blank',
+      });
+    }
     if (val.source === 'local_path' && !val.localPath) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

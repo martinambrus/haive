@@ -18,3 +18,4 @@ export * from './user-settings.js';
 export * from './usage-window.js';
 export * from './pricing.js';
 export * from './step-guidance.js';
+export * from './plan.js';

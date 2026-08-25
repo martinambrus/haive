@@ -90,6 +90,13 @@ export const CONFIG_KEYS = {
   HOST_REPO_ROOT: 'config:filesystem:hostRepoRoot',
   REPO_STORAGE_PATH: 'config:filesystem:repoStoragePath',
 
+  // Global kill-switch for the plan canvas (schema/plan.ts). Default ON. When
+  // 'false' the onboarding plan-build step self-skips and the plan task types
+  // refuse to spawn, so a repo can be onboarded without one — the step registry
+  // itself is untouched, since removing a registered step would break the
+  // forward walk for tasks already mid-flight.
+  PLAN_CANVAS_ENABLED: 'config:plan:canvasEnabled',
+
   CLAWKER_BIN: 'config:sandbox:clawkerBin',
   SANDBOX_NETWORK: 'config:sandbox:network',
   // Global kill-switch for secret-file masking (hides deny-listed files from AI
@@ -511,6 +518,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',
   [CONFIG_KEYS.SANDBOX_NETWORK]: 'haive-network',
+  [CONFIG_KEYS.PLAN_CANVAS_ENABLED]: 'true',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
   [CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED]: 'true',

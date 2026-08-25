@@ -59,6 +59,18 @@ export const workflowTypeEnum = pgEnum('workflow_type', [
   // (DDEV or app-runner) so the user can browse/test/edit the live app, then a
   // Finish button tears it all down. No implementation pipeline / triage.
   'run_app',
+  // Plan canvas (schema/plan.ts). Three types, all spawned from the plan UI with
+  // context the generic create-task form cannot supply, so — like kb_author —
+  // they are deliberately absent from `workflowTypeSchema` in @haive/shared.
+  //   plan_build: decompose a repo (from its KB) or an uploaded markdown doc into
+  //     plan nodes, level by level.
+  //   plan_chat:  a per-node conversation that returns node patches. Self-targeting
+  //     reviseLoop, so it re-parks on one card until the user submits blank.
+  //   advisory:   research a `research`/`external` node (hosting, trademark, domain)
+  //     and park on a decision form the USER resolves.
+  'plan_build',
+  'plan_chat',
+  'advisory',
 ]);
 export const taskStatusEnum = pgEnum('task_status', [
   'created',

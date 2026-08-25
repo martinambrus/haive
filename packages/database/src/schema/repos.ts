@@ -24,6 +24,10 @@ export const repoSourceEnum = pgEnum('repo_source', [
   'github_oauth',
   'gitlab_https',
   'upload',
+  // Greenfield: no remote and no local tree. The repo-queue INIT job creates the
+  // storage dir, `git init`s it and lands one commit, so every downstream
+  // resolver (worktrees, mounts, the .haive-data mirror) sees a normal repo.
+  'blank',
 ]);
 export const repoStatusEnum = pgEnum('repo_status', ['cloning', 'ready', 'error']);
 

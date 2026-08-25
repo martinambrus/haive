@@ -32,6 +32,7 @@ import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, getOriginUrl, gitRun } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
+import { writePlanMirror } from '../../../plan/mirror.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
 import {
@@ -367,6 +368,17 @@ async function writeHaiveDataMirror(
       scopeExcludeGlobs: globs,
     };
     await writeJson(HAIVE_DATA_FILES.exclusions, mirror);
+  }
+
+  // The plan canvas mirrors into the same dir. Best-effort and independent of the
+  // onboarding columns above: a repo with no plan simply writes nothing, and a
+  // plan-mirror failure must not cost the user their onboarding commit.
+  try {
+    filesWritten.push(...(await writePlanMirror(ctx.db, repositoryId, ctx.repoPath)));
+  } catch (err) {
+    warnings.push(
+      `haive-data mirror: plan mirror failed (${err instanceof Error ? err.message : String(err)})`,
+    );
   }
 
   if (filesWritten.length > 0) {

@@ -47,6 +47,10 @@
       "types": "./dist/global-kb/index.d.ts",
       "import": "./dist/global-kb/index.js"
     },
+    "./plan": {
+      "types": "./dist/plan/index.d.ts",
+      "import": "./dist/plan/index.js"
+    },
     "./timing": {
       "types": "./dist/step-engine/timing.d.ts",
       "import": "./dist/step-engine/timing.js"

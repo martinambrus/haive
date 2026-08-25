@@ -10,3 +10,4 @@ export * from './cli-providers.js';
 export * from './user-settings.js';
 export * from './upgrades.js';
 export * from './env-dep-presets.js';
+export * from './plan.js';

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -16,6 +16,7 @@ import {
   type RepoJobPayload,
 } from '@haive/shared';
 import { detectFromDirectory } from './framework-detect.js';
+import { importPlanMirror } from '../plan/mirror.js';
 import { buildCredentialHelper } from './git-push.js';
 
 export function buildAuthenticatedUrl(url: string, username: string, secret: string): string {
@@ -184,6 +185,18 @@ async function persistDetection(
   } catch (err) {
     logger.warn({ err, repositoryId }, 'haive-data mirror import failed (non-fatal)');
   }
+
+  // The plan canvas restores from the same dir but is its own call, not another
+  // branch inside importHaiveDataMirror: that function early-returns once it has
+  // no repository COLUMNS to fill, and the plan lives in its own tables.
+  try {
+    const res = await importPlanMirror(db, repositoryId, storagePath);
+    if (!res.imported && res.reason && res.reason !== 'no plan mirror') {
+      logger.info({ repositoryId, reason: res.reason }, 'plan mirror not imported');
+    }
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'plan mirror import failed (non-fatal)');
+  }
 }
 
 export async function handleScan(payload: RepoJobPayload, db: Database): Promise<void> {
@@ -316,6 +329,76 @@ export async function handleExtract(
   // arrived on disk instead of silently masking the error.
   await rm(payload.archivePath, { force: true }).catch(() => {});
   logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
+}
+
+/** Run a git command in `cwd`, rejecting on a non-zero exit. Local-only (no
+ *  network, no credentials), so unlike gitClone there is nothing to redact. */
+function gitRun(cwd: string, args: string[], env?: Record<string, string>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('git', ['-C', cwd, ...args], { env: { ...process.env, ...(env ?? {}) } });
+    let stderr = '';
+    proc.stderr.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
+    proc.on('error', reject);
+    proc.on('exit', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`git ${args[0]} failed (exit ${code}): ${stderr.trim()}`));
+    });
+  });
+}
+
+/** Identity for the seed commit. `git init` inherits no user config inside the
+ *  worker container, and `git commit` hard-fails without one. Matches the
+ *  fallback the step-engine commit paths use. */
+const INIT_GIT_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Haive',
+  GIT_AUTHOR_EMAIL: 'worker@haive.local',
+  GIT_COMMITTER_NAME: 'Haive',
+  GIT_COMMITTER_EMAIL: 'worker@haive.local',
+};
+
+/** Greenfield `blank` source: create the repo's storage dir, `git init` it and
+ *  land one commit so it has a HEAD. Everything repo-anchored downstream —
+ *  `01-worktree-setup` (which needs a commit to branch from), task attachments
+ *  (which need `storagePath`), the `.haive-data/` mirror — then works on a
+ *  project that does not exist yet. Ends by calling persistDetection so the row
+ *  lands `ready` through the same path as clone/scan/copy; detection over a
+ *  one-file tree simply finds no framework. */
+export async function handleInit(
+  payload: RepoJobPayload,
+  db: Database,
+  repoStorageRoot: string,
+): Promise<void> {
+  const [row] = await db
+    .select({ name: schema.repositories.name })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, payload.repositoryId))
+    .limit(1);
+  const repoName = row?.name ?? 'project';
+
+  const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
+  await mkdir(path.dirname(dest), { recursive: true });
+  // Clean first so a retry starts from scratch rather than re-initialising over
+  // a half-written tree.
+  await rm(dest, { recursive: true, force: true });
+  await mkdir(dest, { recursive: true });
+
+  const branch = payload.branch?.trim() || 'main';
+  await gitRun(dest, ['init', '--initial-branch', branch]);
+  await writeFile(
+    path.join(dest, 'README.md'),
+    `# ${repoName}\n\nCreated by Haive as a blank project.\n`,
+    'utf8',
+  );
+  await gitRun(dest, ['add', '--', 'README.md']);
+  await gitRun(dest, ['commit', '-m', 'chore: initialise blank repository'], INIT_GIT_IDENTITY);
+
+  await persistDetection(db, payload.repositoryId, dest);
+  logger.info({ repositoryId: payload.repositoryId, dest, branch }, 'Blank repo init complete');
 }
 
 export async function handleClone(
