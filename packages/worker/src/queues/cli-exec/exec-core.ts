@@ -247,7 +247,17 @@ function buildProviderFatalMessage(
   const hint =
     fatalClass === 'rate_limit'
       ? "the provider's usage limit or quota is exhausted; retry this task once it resets"
-      : 'the provider returned a server error (service unavailable); retry this task when it recovers';
+      : fatalClass === 'content_filter'
+        ? // A moderation refusal is NOT an outage: the provider declined THIS prompt, so waiting
+          // changes nothing and an identical retry is refused identically. Point at the two things
+          // that actually move it — a different provider, or the access grant the vendor gates
+          // this content behind (e.g. OpenAI's Cyber program). Without this branch content_filter
+          // fell through to the server_error hint below and told the user to "retry when it
+          // recovers", which is exactly backwards. MEASURED live on codex/gpt-5.6-sol 08d seats.
+          'the provider refused this request through its content filter; retrying will not help — ' +
+          'run this step on a different CLI provider, or wait until the provider grants access for ' +
+          'this kind of content'
+        : 'the provider returned a server error (service unavailable); retry this task when it recovers';
   return `${PROVIDER_FATAL_HEADLINES[fatalClass]} — ${hint}.${detail}`;
 }
 

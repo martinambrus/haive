@@ -38,6 +38,23 @@ describe('interpretCliFailure', () => {
     expect(msg).toMatch(/codex login/);
   });
 
+  // The real moderation refusal, MEASURED on codex/gpt-5.6-sol running an 08d adversarial-QA
+  // seat. The headline classifies it content_filter; the HINT must not tell the user to wait for
+  // recovery (it fell through to the server_error hint before this fix — exactly backwards).
+  it('gives a content_filter refusal its own hint, not the server-error one', () => {
+    const CONTENT_FILTER_OUT =
+      '{"type":"error","message":"This content was flagged for possible cybersecurity risk. ' +
+      'To get authorized for security work, join the Trusted Access for Cyber program."}';
+    const msg = interpretCliFailure(
+      outcome({ exitCode: 1, rawOutput: CONTENT_FILTER_OUT }),
+      'codex',
+    );
+    expect(msg).toMatch(/refused the prompt \(content filter\)/);
+    expect(msg).toMatch(/retrying will not help/);
+    expect(msg).not.toMatch(/server error/);
+    expect(msg).not.toMatch(/retry this task when it recovers/);
+  });
+
   // VERBATIM tail of a real failing grok run. Its own init line reported
   // apiKeySource:"user" — the XAI_API_KEY reached the CLI and was used — and the account
   // was simply out of credits, yet grok emits the string it uses for "never logged in".
