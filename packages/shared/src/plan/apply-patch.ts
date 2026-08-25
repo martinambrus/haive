@@ -23,6 +23,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export interface ApplyPlanPatchOptions {
   repositoryId: string;
+  /** The commit the patch's code links were derived at. Stored beside each link
+   *  so a stale one can be DATED rather than merely doubted. */
+  derivedAtCommit?: string | null;
   /** Who is writing. Stamped on CREATED nodes only — an LLM editing a
    *  human-authored node does not make the node the LLM's. */
   origin: PlanNodeOrigin;
@@ -36,6 +39,7 @@ export interface ApplyPlanPatchResult {
   deleted: string[];
   linked: number;
   unlinked: number;
+  codeLinked: number;
   /** patch-local ref -> real uuid, so a caller can report what an LLM's
    *  placeholder became and a chat transcript stays interpretable after the fact. */
   refs: Record<string, string>;
@@ -82,13 +86,14 @@ async function applyOps(
   patch: PlanPatch,
   opts: ApplyPlanPatchOptions,
 ): Promise<ApplyPlanPatchResult> {
-  const { repositoryId, origin, sourceTaskId = null } = opts;
+  const { repositoryId, origin, sourceTaskId = null, derivedAtCommit = null } = opts;
   const result: ApplyPlanPatchResult = {
     created: [],
     updated: [],
     deleted: [],
     linked: 0,
     unlinked: 0,
+    codeLinked: 0,
     refs: {},
   };
   /** patch-local ref (temp id or uuid) -> real uuid. */
@@ -160,6 +165,51 @@ async function applyOps(
     return (row?.max ?? -1) + 1;
   }
 
+  /** Upsert a node's code links. Re-asserting a link CLEARS its stale flag: the
+   *  agent has just looked at the current tree and said the file still belongs,
+   *  which is precisely the evidence the flag was waiting for. */
+  async function writeCodeLinks(nodeId: string, op: UpsertOp): Promise<void> {
+    if (!op.codeLinks?.length) return;
+    for (const link of op.codeLinks) {
+      const symbol = link.symbol ?? null;
+      // Read-then-write rather than ON CONFLICT: the unique index is on
+      // `coalesce(symbol,'')` and drizzle's conflict target takes columns, not
+      // expressions. Inside this transaction the read cannot race the write.
+      const [existing] = await tx
+        .select({ id: schema.planNodeCodeLinks.id })
+        .from(schema.planNodeCodeLinks)
+        .where(
+          and(
+            eq(schema.planNodeCodeLinks.nodeId, nodeId),
+            eq(schema.planNodeCodeLinks.repoPath, link.repoPath),
+            symbol === null
+              ? isNull(schema.planNodeCodeLinks.symbol)
+              : eq(schema.planNodeCodeLinks.symbol, symbol),
+          ),
+        )
+        .limit(1);
+
+      const fields = {
+        evidence: link.evidence ?? null,
+        confidence: link.confidence ?? null,
+        derivedAtCommit,
+        stale: false,
+        updatedAt: new Date(),
+      };
+      if (existing) {
+        await tx
+          .update(schema.planNodeCodeLinks)
+          .set(fields)
+          .where(eq(schema.planNodeCodeLinks.id, existing.id));
+      } else {
+        await tx
+          .insert(schema.planNodeCodeLinks)
+          .values({ repositoryId, nodeId, repoPath: link.repoPath, symbol, ...fields });
+      }
+      result.codeLinked++;
+    }
+  }
+
   async function createNode(op: UpsertOp, opIndex: number): Promise<void> {
     if (!op.title) {
       throw new PlanPatchError('invalid', `new plan node '${op.nodeRef}' needs a title`, opIndex);
@@ -218,6 +268,7 @@ async function applyOps(
 
     refs.set(op.nodeRef, id);
     result.created.push(id);
+    await writeCodeLinks(id, op);
   }
 
   async function updateNode(op: UpsertOp, row: NodeRow, opIndex: number): Promise<void> {
@@ -290,6 +341,7 @@ async function applyOps(
     await tx.update(schema.planNodes).set(set).where(eq(schema.planNodes.id, row.id));
     refs.set(op.nodeRef, row.id);
     if (!result.updated.includes(row.id)) result.updated.push(row.id);
+    await writeCodeLinks(row.id, op);
   }
 
   async function applyUpsert(op: UpsertOp, opIndex: number): Promise<void> {

@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import { INVESTIGATIONS_DIR, KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -12,6 +14,15 @@ import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { loadBusinessRequirements } from './_business-requirements.js';
 import { isBugBranch } from './01-worktree-setup.js';
 import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
+import {
+  computeImpact,
+  findPlanRoot,
+  loadPlanEdges,
+  loadPlanSkeletons,
+  parsePlanNodeRefs,
+  renderImpactMermaid,
+  renderPlanMarkdown,
+} from '@haive/shared/plan';
 
 interface KbReference {
   id: string;
@@ -33,6 +44,43 @@ interface PrePlanningDetect {
    *  scope field and auto-submitted so a re-draft addresses it. Empty on the first run /
    *  after approval. */
   priorRejectionFeedback: string;
+  /** The repository's plan canvas as a compact component index (ids + titles, no
+   *  bodies), when it has one. Empty string when it does not — a repo with no plan
+   *  is the normal case and must change nothing about this step. */
+  planIndex: string;
+  planRepositoryId: string | null;
+}
+
+/** The plan canvas as a compact index for the spec prompt: titles, ids, kinds and
+ *  statuses down to three levels, with no bodies. The whole plan would swamp the
+ *  prompt and most of it is irrelevant to any one task; what the spec writer needs
+ *  is the VOCABULARY — which components exist and what they are called — so its
+ *  "Affected components" section names real ones. Silent when the repo has no plan. */
+async function loadPlanIndex(
+  ctx: StepContext,
+): Promise<{ planIndex: string; planRepositoryId: string | null }> {
+  try {
+    const [task] = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    const repositoryId = task?.repositoryId ?? null;
+    if (!repositoryId) return { planIndex: '', planRepositoryId: null };
+    if (!(await findPlanRoot(ctx.db, repositoryId))) {
+      return { planIndex: '', planRepositoryId: repositoryId };
+    }
+    const planIndex = await renderPlanMarkdown(ctx.db, repositoryId, {
+      titlesOnly: true,
+      maxDepth: 3,
+    });
+    return { planIndex, planRepositoryId: repositoryId };
+  } catch (err) {
+    // The plan is context, never a dependency: a lookup failure must not stop the
+    // spec being written.
+    ctx.logger.warn({ err }, 'plan index unavailable for the spec prompt');
+    return { planIndex: '', planRepositoryId: null };
+  }
 }
 
 function kbHeading(text: string): string | null {
@@ -63,6 +111,85 @@ interface PrePlanningApply {
   summary: string;
   spec: string;
   source: 'llm' | 'stub';
+  /** Plan nodes the spec named, plus everything the edge graph says they reach.
+   *  Absent when the repo has no plan. Rendered at gate 1 so the approver sees
+   *  the blast radius alongside the spec. */
+  affectedComponents?: {
+    named: { id: string; title: string }[];
+    reached: { id: string; title: string; depth: number; via: string }[];
+    truncated: null | { reason: 'depth' | 'nodes'; limit: number };
+    mermaid: string;
+  };
+}
+
+/**
+ * Resolve the plan nodes a spec named, and what they reach.
+ *
+ * The parse is by NODE ID — a stable identifier the agent copied from the index
+ * it was given — and never by matching its prose. A component index is a list of
+ * names, and matching names would silently pick the wrong node the first time
+ * two of them read alike.
+ *
+ * Purely additive: a repo with no plan, a spec that named nothing, or a lookup
+ * that fails all leave the step's existing output untouched.
+ */
+async function resolveAffectedComponents(
+  ctx: StepContext,
+  repositoryId: string | null,
+  spec: string,
+): Promise<PrePlanningApply['affectedComponents']> {
+  if (!repositoryId) return undefined;
+  try {
+    const ids = parsePlanNodeRefs(spec);
+    if (ids.length === 0) return undefined;
+
+    const [skeletons, edges] = await Promise.all([
+      loadPlanSkeletons(ctx.db, repositoryId),
+      loadPlanEdges(ctx.db, repositoryId),
+    ]);
+    const byId = new Map(skeletons.map((n) => [n.id, n]));
+    // An id the agent invented, or one from another repo, is DROPPED rather than
+    // rendered as an unresolvable uuid.
+    const named = ids.flatMap((id) => {
+      const n = byId.get(id);
+      return n ? [{ id: n.id, title: n.title }] : [];
+    });
+    if (named.length === 0) return undefined;
+
+    const titleById = new Map(skeletons.map((n) => [n.id, n.title]));
+    const seen = new Set(named.map((n) => n.id));
+    const reached: NonNullable<PrePlanningApply['affectedComponents']>['reached'] = [];
+    let truncated: NonNullable<PrePlanningApply['affectedComponents']>['truncated'] = null;
+
+    // One walk per named node, deduped across them. The traversal is cycle-guarded
+    // and capped, and the cap is CARRIED through to the render rather than dropped
+    // — a short list read as "nothing else is affected" is the whole failure mode.
+    for (const start of named) {
+      const impact = computeImpact(start.id, edges, { maxDepth: 3 });
+      truncated ??= impact.truncated;
+      for (const hop of impact.hops) {
+        if (seen.has(hop.nodeId)) continue;
+        seen.add(hop.nodeId);
+        reached.push({
+          id: hop.nodeId,
+          title: titleById.get(hop.nodeId) ?? hop.nodeId,
+          depth: hop.depth,
+          via: hop.viaKind,
+        });
+      }
+    }
+
+    const combined = computeImpact(named[0]!.id, edges, { maxDepth: 3 });
+    return {
+      named,
+      reached,
+      truncated,
+      mermaid: renderImpactMermaid(combined, titleById),
+    };
+  } catch (err) {
+    ctx.logger.warn({ err }, 'affected-components resolution failed (non-fatal)');
+    return undefined;
+  }
 }
 
 interface DiscoveryOutput {
@@ -206,6 +333,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
       kbReferences,
       isBugFix: isBugBranch(meta.title, meta.description, meta.category),
       priorRejectionFeedback: await loadOutstandingSpecFeedback(ctx),
+      ...(await loadPlanIndex(ctx)),
     };
   },
 
@@ -281,6 +409,21 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         'Produce a concise draft specification for the task below.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         '{ "summary": "<short rationale>", "spec": "<markdown spec body>" }',
+        detected.planIndex
+          ? [
+              'This project has a PLAN — a durable tree of what it is meant to be. Here is its',
+              'component index (ids and titles only):',
+              '',
+              detected.planIndex,
+              '',
+              'The spec body MUST therefore also include a section `## Affected components` listing',
+              'the plan nodes this change touches, one per line, each as `node:<uuid>` followed by a',
+              'short reason. Copy the ids VERBATIM from the index above — do not invent one, and do',
+              'not name a component that is not in it. If the change touches nothing in the plan,',
+              'write "none" under that heading and say why.',
+              '',
+            ].join('\n')
+          : '',
         'The spec body must include sections: Goal, Approach, Risks, Acceptance criteria.',
         'Where the change touches them, the spec must also address the operational and lifecycle',
         'dimensions a reviewer will check: observability (logging/metrics for the new behavior),',
@@ -343,7 +486,17 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
     const parsed = parsePrePlanningOutput(args.llmOutput ?? null);
     if (parsed) {
       ctx.logger.info({ source: 'llm' }, 'pre-planning spec parsed');
-      return { summary: parsed.summary, spec: parsed.spec, source: 'llm' };
+      const affected = await resolveAffectedComponents(
+        ctx,
+        args.detected.planRepositoryId,
+        parsed.spec,
+      );
+      return {
+        summary: parsed.summary,
+        spec: parsed.spec,
+        source: 'llm',
+        ...(affected ? { affectedComponents: affected } : {}),
+      };
     }
     if (!args.isFinalLlmAttempt) {
       throw new RetryableParseError('pre-planning spec output unparseable — retrying');

@@ -45,6 +45,17 @@ export const planNodeRefSchema = z.string().trim().min(1).max(128);
  *                  the applier rejects it (a new node must say where it goes).
  *    - null     -> this is the plan ROOT.
  *    - a ref    -> parent it here (a move, when the node already exists). */
+/** A file (optionally a symbol within it) that implements a node. `evidence` is
+ *  required in spirit if not in type: an impact list without it is an
+ *  unfalsifiable claim, and a human cannot tell a real link from a guess. */
+export const planCodeLinkSchema = z.object({
+  repoPath: z.string().trim().min(1).max(1024),
+  symbol: z.string().trim().max(512).optional(),
+  evidence: z.string().max(2_000).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+});
+export type PlanCodeLinkInput = z.infer<typeof planCodeLinkSchema>;
+
 export const planUpsertOpSchema = z.object({
   op: z.literal('upsert'),
   nodeRef: planNodeRefSchema,
@@ -55,6 +66,10 @@ export const planUpsertOpSchema = z.object({
   status: planNodeStatusSchema.optional(),
   taskable: z.boolean().optional(),
   ordinal: z.number().int().min(0).max(100_000).optional(),
+  /** Files this node is implemented by. ADDITIVE — an agent that names three
+   *  files does not thereby claim the other two the node already had are wrong.
+   *  Removing a link is a separate, deliberate act. */
+  codeLinks: z.array(planCodeLinkSchema).max(50).optional(),
   /** Optimistic-concurrency guard for an EXISTING node. A mismatch is a conflict
    *  the caller must surface, never a silent overwrite — two plan chats patching
    *  one node is the expected case, not an edge one. Omitted for a new node

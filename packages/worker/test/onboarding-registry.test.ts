@@ -38,13 +38,14 @@ describe('onboarding registry', () => {
       '09_6_5-global-kb-review',
       '09_7-rag-source-selection',
       '10-rag-populate',
+      '10_8-plan-build',
       '11-final-review',
       '12-post-onboarding',
       '13-onboarding-push',
     ]);
     expect(steps.map((s) => s.metadata.index)).toEqual([
       0, 1, 2, 3, 4, 4.5, 5.5, 6, 6.5, 7, 8, 8.5, 9, 10, 10.25, 10.5, 10.75, 11, 11.5, 12, 12.4,
-      12.5, 13, 14, 15, 16, 17,
+      12.5, 13, 14, 14.5, 15, 16, 17,
     ]);
   });
 

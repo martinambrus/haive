@@ -255,6 +255,7 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   { id: '09_5-skill-generation', workflowType: 'onboarding', title: 'Skill generation' },
   { id: '09_5b-skill-repair', workflowType: 'onboarding', title: 'Skill repair' },
   { id: '09_6_4-global-kb-merge', workflowType: 'onboarding', title: 'Global KB merge' },
+  { id: '10_8-plan-build', workflowType: 'onboarding', title: 'Project plan' },
   { id: '11-final-review', workflowType: 'onboarding', title: 'Final review' },
   // workflow
   { id: '00-triage', workflowType: 'workflow', title: 'Choose execution path' },
@@ -303,6 +304,11 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   { id: '11d-skill-sync', workflowType: 'workflow', title: 'Skill sync' },
   // kb-author
   { id: '01-kb-enrich', workflowType: 'kb_author', title: 'Knowledge base enrichment' },
+  // plan canvas — 02-advisory-decision is deliberately absent: it runs no CLI,
+  // because closing a non-code blocker is the user's call, not an agent's.
+  { id: '01-plan-build', workflowType: 'plan_build', title: 'Build the plan' },
+  { id: '01-plan-chat', workflowType: 'plan_chat', title: 'Plan conversation' },
+  { id: '01-advisory-research', workflowType: 'advisory', title: 'Research' },
 ];
 
 /** Ids only — the shape every pre-existing consumer reads. Derived so the two can

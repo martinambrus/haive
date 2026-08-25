@@ -18,6 +18,17 @@ interface SpecGateDetect {
   qualityFindings: string[];
   iterationHistory: string[];
   exhaustedBudget: boolean;
+  /** The plan components the spec named and what they reach, resolved by 04 from
+   *  node IDS rather than from the agent's prose. Null when the repo has no plan
+   *  or the spec named nothing — the section is then simply absent. */
+  affectedComponents: AffectedComponents | null;
+}
+
+interface AffectedComponents {
+  named: { id: string; title: string }[];
+  reached: { id: string; title: string; depth: number; via: string }[];
+  truncated: null | { reason: 'depth' | 'nodes'; limit: number };
+  mermaid: string;
 }
 
 interface SpecGateApply {
@@ -28,6 +39,45 @@ interface SpecGateApply {
 interface PrePlanningOutput {
   summary?: string;
   spec?: string;
+  affectedComponents?: AffectedComponents;
+}
+
+/** Render the affected-component set as a collapsible section with a fenced
+ *  mermaid diagram, which `markdown-view` already turns into a rendered graph.
+ *
+ *  The cap is stated when the traversal hit one. An approver reading a short list
+ *  as "nothing else is affected" is exactly the failure the impact view exists to
+ *  prevent, and it is worse here than anywhere else — this is the moment they
+ *  commit to the change. */
+function affectedComponentsSection(a: AffectedComponents | null): InfoSection[] {
+  if (!a || a.named.length === 0) return [];
+  const lines = ['**Named by the spec**', '', ...a.named.map((n) => `- ${n.title}`)];
+  if (a.reached.length > 0) {
+    lines.push(
+      '',
+      '**Also reached through the plan links**',
+      '',
+      ...a.reached.map(
+        (r) =>
+          `- ${r.title} — ${r.via.replace(/_/g, ' ')} (${r.depth} hop${r.depth === 1 ? '' : 's'})`,
+      ),
+    );
+  }
+  if (a.truncated) {
+    lines.push(
+      '',
+      `> The traversal stopped at the ${a.truncated.reason} limit of ${a.truncated.limit}. More components may be affected than are listed here.`,
+    );
+  }
+  lines.push('', '```mermaid', a.mermaid, '```');
+  return [
+    {
+      title: 'Affected components',
+      preview: `${a.named.length} named${a.reached.length > 0 ? ` • ${a.reached.length} reached` : ''}`,
+      body: lines.join('\n'),
+      defaultOpen: true,
+    },
+  ];
 }
 
 interface QualityFinding {
@@ -246,6 +296,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
         : [],
       iterationHistory: iterations.map(summariseIteration),
       exhaustedBudget,
+      affectedComponents: planOutput.affectedComponents ?? null,
     };
   },
 
@@ -278,6 +329,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
         preview: fullPreview,
         body: fullSpecBody,
       },
+      ...affectedComponentsSection(detected.affectedComponents),
     ];
     return {
       title: 'Gate 1: Spec approval',

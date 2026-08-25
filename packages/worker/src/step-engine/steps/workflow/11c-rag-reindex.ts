@@ -1,6 +1,7 @@
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { markPlanCodeLinksStale } from '../../../plan/code-link-staleness.js';
 import { probeOllama } from '../onboarding/_rag-embed.js';
 import type { RagMode, RagToolingPrefs } from '../onboarding/_rag-connection.js';
 import {
@@ -144,12 +145,18 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
       };
     }
 
-    return runRagIndexSync(ctx, {
+    const result = await runRagIndexSync(ctx, {
       repoPath: detected.worktreePath,
       prefs: detected.ragToolingPrefs,
       projectName: detected.projectName,
       ollamaReachable: detected.ollamaReachable,
       codeCollect: detected.codeCollect,
     });
+
+    // The same trigger, for the same reason: the code just moved, so anything
+    // derived FROM the code is now of uncertain age. Plan code links cannot be
+    // re-derived automatically, so they are flagged rather than re-computed.
+    await markPlanCodeLinksStale(ctx.db, ctx.taskId);
+    return result;
   },
 };

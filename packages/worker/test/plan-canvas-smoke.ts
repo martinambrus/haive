@@ -19,6 +19,7 @@ import { logger } from '@haive/shared';
 // Subpath, not the root barrel: the plan applier reaches the database, and the
 // barrel is what pulls ioredis/dns into anything that imports it.
 import { PlanPatchError, applyPlanPatch, findPlanRoot } from '@haive/shared/plan';
+import { markPlanCodeLinksStale } from '../src/plan/code-link-staleness.js';
 import { HAIVE_DATA_FILES, PLAN_MIRROR_SCHEMA_VERSION, type PlanMirror } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { importPlanMirror, writePlanMirror } from '../src/plan/mirror.js';
@@ -59,6 +60,7 @@ interface State {
   userId?: string;
   repoId?: string;
   mirrorRepoId?: string;
+  taskId?: string;
   tmpDir?: string;
 }
 const state: State = {};
@@ -94,6 +96,19 @@ async function main(): Promise<void> {
   if (!repo) throw new Error('repo insert failed');
   state.repoId = repo.id;
   const repositoryId = repo.id;
+
+  const [linkTask] = await db
+    .insert(schema.tasks)
+    .values({
+      userId,
+      type: 'workflow',
+      title: 'plan-smoke staleness fixture',
+      repositoryId,
+      status: 'completed',
+    })
+    .returning();
+  const linkTaskId = linkTask!.id;
+  state.taskId = linkTaskId;
 
   const nodes = async () =>
     db
@@ -300,7 +315,105 @@ async function main(): Promise<void> {
     siblings,
   );
 
-  /* --- 11. the .haive-data mirror round-trips onto a fresh clone ----------- */
+  /* --- 11. code links, and what makes one stale ---------------------------- */
+
+  const linkTarget = await byTitle('Web');
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        {
+          op: 'upsert',
+          nodeRef: linkTarget!.id,
+          codeLinks: [
+            { repoPath: 'src/mobile/App.tsx', evidence: 'the app shell', confidence: 0.9 },
+            { repoPath: 'src/mobile/App.tsx', symbol: 'useSession', evidence: 'reads the token' },
+          ],
+        },
+      ],
+    },
+    { repositoryId, origin: 'llm', derivedAtCommit: 'abc123' },
+  );
+  const readLinks = async () =>
+    db
+      .select({
+        id: schema.planNodeCodeLinks.id,
+        repoPath: schema.planNodeCodeLinks.repoPath,
+        symbol: schema.planNodeCodeLinks.symbol,
+        stale: schema.planNodeCodeLinks.stale,
+        commit: schema.planNodeCodeLinks.derivedAtCommit,
+      })
+      .from(schema.planNodeCodeLinks)
+      .where(eq(schema.planNodeCodeLinks.nodeId, linkTarget!.id));
+
+  let links = await readLinks();
+  check('code links are written with their commit', links.length === 2, links);
+  check(
+    'a file-level link and a symbol-level one on the same file coexist',
+    links.filter((l) => l.repoPath === 'src/mobile/App.tsx').length === 2,
+    links,
+  );
+
+  // The bug the coalesce(symbol,'') index exists for: a NULL symbol is DISTINCT
+  // in a plain unique index, so re-asserting a file-level link would duplicate it.
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        {
+          op: 'upsert',
+          nodeRef: linkTarget!.id,
+          codeLinks: [{ repoPath: 'src/mobile/App.tsx', evidence: 'still the app shell' }],
+        },
+      ],
+    },
+    { repositoryId, origin: 'llm', derivedAtCommit: 'def456' },
+  );
+  links = await readLinks();
+  check('re-asserting a file-level link updates rather than duplicates', links.length === 2, links);
+
+  const beforeStale = await db
+    .update(schema.tasks)
+    .set({ changedPaths: ['src/mobile/App.tsx'] })
+    .where(eq(schema.tasks.id, linkTaskId))
+    .returning({ id: schema.tasks.id });
+  check('staleness fixture task exists', beforeStale.length === 1);
+
+  const staleResult = await markPlanCodeLinksStale(db, linkTaskId);
+  links = await readLinks();
+  check(
+    'a task that changed the file marks its links stale',
+    staleResult.marked === 2 && links.every((l) => l.stale),
+    { staleResult, links },
+  );
+  check(
+    'marking is idempotent — an already-stale link is not rewritten',
+    (await markPlanCodeLinksStale(db, linkTaskId)).marked === 0,
+  );
+
+  // Re-assertion is the ONLY thing that clears the flag: an agent has just opened
+  // the file and said it still belongs, which is the fresh evidence the flag was
+  // waiting for.
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        {
+          op: 'upsert',
+          nodeRef: linkTarget!.id,
+          codeLinks: [{ repoPath: 'src/mobile/App.tsx', evidence: 're-checked' }],
+        },
+      ],
+    },
+    { repositoryId, origin: 'llm', derivedAtCommit: 'ghi789' },
+  );
+  links = await readLinks();
+  const reasserted = links.find((l) => l.symbol === null);
+  const untouched = links.find((l) => l.symbol === 'useSession');
+  check('re-asserting a link clears its stale flag', reasserted?.stale === false, reasserted);
+  check('a link nobody re-asserted stays stale', untouched?.stale === true, untouched);
+
+  /* --- 12. the .haive-data mirror round-trips onto a fresh clone ----------- */
 
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'plan-mirror-'));
   state.tmpDir = tmpDir;
@@ -422,6 +535,7 @@ main()
       if (state.repoId) {
         await db.delete(schema.repositories).where(eq(schema.repositories.id, state.repoId));
       }
+      if (state.taskId) await db.delete(schema.tasks).where(eq(schema.tasks.id, state.taskId));
       if (state.mirrorRepoId) {
         await db.delete(schema.repositories).where(eq(schema.repositories.id, state.mirrorRepoId));
       }
