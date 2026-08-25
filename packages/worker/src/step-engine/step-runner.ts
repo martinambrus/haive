@@ -1017,7 +1017,12 @@ async function reapAgentBrowserTabs(taskId: string, logger: StepContext['logger'
 }
 
 type AgentMiningResolved =
-  | { resolved: true; results: AgentMiningResult[]; current: TaskStepRow }
+  | {
+      resolved: true;
+      results: AgentMiningResult[];
+      newResults: AgentMiningResult[];
+      current: TaskStepRow;
+    }
   | { resolved: false; result: AdvanceStepResult };
 
 async function resolveAgentMiningPhase(
@@ -1149,7 +1154,7 @@ async function resolveAgentMiningPhase(
       };
     }
 
-    const results: AgentMiningResult[] = existing.map((r) => ({
+    const toResult = (r: (typeof existing)[number]): AgentMiningResult => ({
       agentId: r.agentId,
       agentTitle: r.agentTitle,
       invocationId: r.cliInvocationId,
@@ -1157,7 +1162,15 @@ async function resolveAgentMiningPhase(
       output: r.output,
       rawOutput: r.rawOutput,
       errorMessage: r.errorMessage,
-    }));
+    });
+    const results: AgentMiningResult[] = existing.map(toResult);
+    // Rows a previous apply() pass has NOT folded (consumed_at is stamped right
+    // before a MiningWaveError dispatches the next wave, and cleared on a
+    // re-roll). Wave-aware steps fold only these; everything else ignores them
+    // and folds the cumulative `results` exactly as before.
+    const newResults: AgentMiningResult[] = existing
+      .filter((r) => r.consumedAt === null)
+      .map(toResult);
 
     // A mining terminal can fail independently of its siblings (for example, a
     // provider connection dropping mid-response). Let an opt-in step re-roll only
@@ -1209,7 +1222,7 @@ async function resolveAgentMiningPhase(
         }
       }
     }
-    return { resolved: true, results, current };
+    return { resolved: true, results, newResults, current };
   }
 
   if (!params.providers || !params.deps) {
@@ -1233,7 +1246,7 @@ async function resolveAgentMiningPhase(
 
   if (dispatches.length === 0) {
     ctx.logger.warn('agent mining selectAgents returned empty list, skipping mining');
-    return { resolved: true, results: [], current };
+    return { resolved: true, results: [], newResults: [], current };
   }
 
   const dispatched = await dispatchMiningAgents(
@@ -1436,6 +1449,9 @@ async function dispatchMiningAgents(
           errorMessage: null,
           startedAt: null,
           endedAt: null,
+          // A re-roll replaces the output a wave-aware step may already have folded;
+          // clearing the marker puts the fresh output back into its unconsumed set.
+          consumedAt: null,
           // A preemption re-dispatch is free: see MiningRetryTargets.chargeAttempt.
           attempts: prior.attempts + (prior.chargeAttempt === false ? 0 : 1),
           timeoutAttempts: prior.timeoutAttempts,
@@ -1885,6 +1901,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     // --- Agent mining phase (fan-out N CLI jobs, wait for all) ---
     let agentMiningResults: AgentMiningResult[] | undefined;
+    let newAgentMiningResults: AgentMiningResult[] | undefined;
     if (stepDef.agentMining) {
       const miningResult = await resolveAgentMiningPhase(
         db,
@@ -1898,6 +1915,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       );
       if (!miningResult.resolved) return miningResult.result;
       agentMiningResults = miningResult.results;
+      newAgentMiningResults = miningResult.newResults;
       current = miningResult.current;
       // Barrier: every agent of this fan-out has ended, so any tab still open is one
       // nobody is coming back for.
@@ -1961,6 +1979,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       llmOutput,
       llmInvocationId,
       agentMiningResults,
+      // Only the rows no previous apply() pass folded. Undefined for non-mining
+      // steps; identical to agentMiningResults until a MiningWaveError stamps
+      // consumed_at, so steps that ignore it are unaffected.
+      newAgentMiningResults,
       iteration,
       previousIterations,
       isFinalLlmAttempt,
@@ -1984,6 +2006,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           params.deps &&
           applyArgs.miningWaveExhausted !== true
         ) {
+          // Mark every row apply() has just folded, BEFORE the wave's fresh rows
+          // exist: the next apply() pass asks for the unconsumed set via
+          // newAgentMiningResults, so a step whose fold is not idempotent (temp-ref
+          // creation, e.g. the plan builder) folds each wave exactly once. Steps
+          // that fold idempotently (08c, by fingerprint) never read it back.
+          await db
+            .update(schema.taskStepAgentMinings)
+            .set({ consumedAt: new Date(), updatedAt: new Date() })
+            .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
           const dispatched = await dispatchMiningAgents(
             db,
             stepDef,

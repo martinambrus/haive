@@ -723,7 +723,17 @@ describe('advanceStep agentMining second wave', () => {
     const miningInserts = state.inserts.filter((i) => i.table === 'task_step_agent_minings');
     expect(miningInserts.map((i) => i.row.agentId)).toEqual(['refute-abc', 'refute-def']);
     expect(miningInserts.every((i) => i.row.status === 'pending')).toBe(true);
-    expect(state.updates.filter((u) => u.table === 'task_step_agent_minings')).toHaveLength(0);
+    // The first wave's rows are never re-rolled or reset by a wave dispatch. The
+    // one update allowed is the consumed_at stamp (a marker only — no status,
+    // output or budget touched) so a wave-aware apply() cannot re-fold them.
+    const miningUpdates = state.updates.filter((u) => u.table === 'task_step_agent_minings');
+    // The recorder spreads the set values onto the entry, so "marker-only" means
+    // no key beyond table/consumedAt/updatedAt.
+    expect(
+      miningUpdates.filter((u) =>
+        Object.keys(u).some((k) => k !== 'table' && k !== 'consumedAt' && k !== 'updatedAt'),
+      ),
+    ).toHaveLength(0);
   });
 
   it('settles without asking again once the wave’s results are present', async () => {
@@ -797,7 +807,13 @@ describe('advanceStep agentMining second wave', () => {
     expect(miningInserts.map((i) => i.row.agentId)).toEqual(['refute-abc', 'refute-def']);
     expect(miningInserts.every((i) => i.row.status === 'pending')).toBe(true);
     expect(enqueued).toHaveLength(2);
-    expect(state.updates.filter((u) => u.table === 'task_step_agent_minings')).toHaveLength(0);
+    // No re-roll, no reset — at most the consumed_at stamp (see above).
+    const miningUpdates2 = state.updates.filter((u) => u.table === 'task_step_agent_minings');
+    expect(
+      miningUpdates2.filter((u) =>
+        Object.keys(u).some((k) => k !== 'table' && k !== 'consumedAt' && k !== 'updatedAt'),
+      ),
+    ).toHaveLength(0);
   });
 
   it('fails rather than looping when the wave-exhausted pass asks again', async () => {

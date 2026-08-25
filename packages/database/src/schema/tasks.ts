@@ -640,6 +640,14 @@ export const taskStepAgentMinings = pgTable(
      *  prose fixes nothing. Reset to 0 by any non-timeout failure, so a preemption or a
      *  worker-restart orphan between two timeouts cannot climb the ladder either. */
     timeoutAttempts: integer('timeout_attempts').notNull().default(0),
+    /** Set by the runner on every row apply() has already folded, right before a
+     *  MiningWaveError fan-out dispatches the next wave. Wave-aware steps ask for
+     *  only the unconsumed rows (`StepApplyArgs.newAgentMiningResults`) so a re-run
+     *  of apply does not re-fold a wave — temp-ref creation is not idempotent.
+     *  Cleared by a re-roll so the fresh output re-applies. NULL on every row of a
+     *  step that never throws MiningWaveError; such steps (08c) fold the cumulative
+     *  set and ignore the column. */
+    consumedAt: timestamp('consumed_at'),
     /** Set when a HUMAN asked for this one agent to be re-run, keeping its siblings' output.
      *  The fan-out barrier re-dispatches marked rows through retryMiningAgents and clears the
      *  mark, so it fires exactly once.

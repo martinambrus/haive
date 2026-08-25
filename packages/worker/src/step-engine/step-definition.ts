@@ -278,6 +278,15 @@ export interface StepApplyArgs<TDetect = unknown> {
    *  `agentMiningResults[].invocationId`. */
   llmInvocationId?: string | null;
   agentMiningResults?: AgentMiningResult[];
+  /** The subset of `agentMiningResults` no previous apply() pass has folded —
+   *  rows whose mining row is still unconsumed (consumed_at is stamped right
+   *  before a MiningWaveError dispatches the next wave, and cleared on a
+   *  re-roll). A step whose fold is NOT idempotent across re-entry (temp-ref
+   *  creation — the plan builder) folds THESE and uses `agentMiningResults`
+   *  only for read-only history. Identical to `agentMiningResults` on the
+   *  first pass and for every step that never throws MiningWaveError, so
+   *  existing steps can ignore it. */
+  newAgentMiningResults?: AgentMiningResult[];
   /** Zero-based index of the current loop pass. 0 = first pass; equals the
    *  count of entries already in `previousIterations`. Always 0 for steps
    *  that don't declare a loop hook. */
