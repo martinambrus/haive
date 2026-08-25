@@ -371,6 +371,12 @@ export function createPlanBuildStep(
       retry: { maxAttempts: 2 },
 
       async selectAgents({ ctx, detected, formValues }) {
+        // Smokes run the whole registered list under HAIVE_TEST_BYPASS_LLM; a
+        // mining dispatch there enqueues a real CLI nobody will serve and the
+        // step wedges waiting_cli. Same guard every mining onboarding step
+        // (09_5 et al.) carries: no agents under bypass, apply() then settles
+        // immediately with an empty fold.
+        if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
         if (!detected || !(detected as PlanBuildDetect).repositoryId) return [];
         const d = detected as PlanBuildDetect;
         const repositoryId = d.repositoryId!;
