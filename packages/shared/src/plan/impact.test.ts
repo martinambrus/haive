@@ -116,4 +116,16 @@ describe('renderImpactMermaid', () => {
     const out = renderImpactMermaid(computeImpact(B, [edge(A, B)]), titles);
     expect(out).toContain('-.->');
   });
+
+  it('encodes node ids as a recoverable pnode token', () => {
+    // The browser recovers the uuid from THIS token, not from mermaid's
+    // surrounding decoration (`<renderId>-flowchart-<id>-<index>`), which is an
+    // internal convention. A version that keyed on mermaid's prefix bound zero
+    // click handlers and failed silently.
+    const out = renderImpactMermaid(computeImpact(A, [edge(A, B)]), titles);
+    expect(out).toContain(`pnode${A.replace(/-/g, '')}`);
+    expect(out).toContain(`pnode${B.replace(/-/g, '')}`);
+    const recovered = /pnode([0-9a-f]{32})/i.exec(out)?.[1];
+    expect(recovered).toBe(A.replace(/-/g, ''));
+  });
 });

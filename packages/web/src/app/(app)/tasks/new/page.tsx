@@ -93,12 +93,17 @@ export default function NewTaskPage() {
   // Preset from the repo card's "Run app" button (?mode=run_app); also selectable
   // here via the task-type toggle below.
   const [isRunApp, setIsRunApp] = useState(searchParams.get('mode') === 'run_app');
+  /** Set by the plan canvas's "Create a task from this" button. Recorded on the
+   *  task so its completion greens the plan node; carried in the query rather
+   *  than picked here, because the node is chosen ON the canvas where its
+   *  context is visible. */
+  const planNodeId = searchParams.get('planNodeId');
   const presetAppliedRef = useRef(false);
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [title, setTitle] = useState('');
+  const [title, setTitle] = useState(searchParams.get('title') ?? '');
   const [description, setDescription] = useState('');
   const [estimatedTime, setEstimatedTime] = useState('');
   const [repositoryId, setRepositoryId] = useState<string>('');
@@ -325,6 +330,7 @@ export default function NewTaskPage() {
       }
       if (cliProviderId) body.cliProviderId = cliProviderId;
       if (ignoreSavedStepClis) body.ignoreSavedStepClis = true;
+      if (planNodeId) body.planNodeId = planNodeId;
       if (type === 'workflow') {
         body.isBugFix = isBugFix;
         if (feature.trim()) body.feature = feature.trim();
@@ -517,6 +523,12 @@ export default function NewTaskPage() {
               : 'Run the autonomous workflow — onboarding for a fresh repo, the implementation workflow once onboarded.'}
           </p>
         </div>
+
+        {planNodeId && (
+          <p className="rounded border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
+            This task is linked to a plan node. When it completes, that node goes green.
+          </p>
+        )}
 
         {!isRunApp && (
           <>

@@ -399,6 +399,13 @@ function RepoCard(props: RepoCardProps) {
             </Link>
           )}
           {repo.status === 'ready' && (
+            <Link href={`/repos/${repo.id}/plan`}>
+              <Button variant="secondary" size="sm">
+                Plan
+              </Button>
+            </Link>
+          )}
+          {repo.status === 'ready' && (
             <Link href={`/repos/${repo.id}/estimates`}>
               <Button variant="secondary" size="sm">
                 Estimates

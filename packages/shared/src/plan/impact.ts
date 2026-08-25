@@ -150,7 +150,14 @@ export function renderImpactMermaid(result: ImpactResult, titleById: Map<string,
     const raw = titleById.get(id) ?? id;
     return raw.replace(/["\n\r]/g, ' ').slice(0, 80);
   };
-  const nodeId = (id: string): string => `n${id.replace(/-/g, '')}`;
+  // `pnode` + the hyphen-stripped uuid. The prefix is deliberately distinctive
+  // because the browser has to recover the uuid from the RENDERED DOM id, and
+  // mermaid decorates what it is given: the element ends up as
+  // `<renderId>-flowchart-<thisId>-<index>`. Keying the client on `pnode<32 hex>`
+  // means it keys on OUR token — the part we control — instead of on mermaid's
+  // surrounding decoration, which is an internal convention that can be reworded
+  // in any release.
+  const nodeId = (id: string): string => `pnode${id.replace(/-/g, '')}`;
 
   const lines = ['flowchart TD'];
   lines.push(`  ${nodeId(result.originNodeId)}["${label(result.originNodeId)}"]:::origin`);

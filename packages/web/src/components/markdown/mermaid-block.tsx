@@ -2,18 +2,7 @@
 
 import { useEffect, useId, useState } from 'react';
 import { repairFlowchartLabelParens, repairSequenceSemicolons } from './mermaid-repair';
-
-/** Module-level singleton so mermaid (a ~1.5MB chunk) loads once, lazily, and
- *  only on pages that actually render a diagram. The dynamic import keeps it
- *  out of the server bundle and the initial client chunk. */
-let mermaidPromise: Promise<typeof import('mermaid').default> | null = null;
-function loadMermaid() {
-  mermaidPromise ??= import('mermaid').then((m) => {
-    m.default.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
-    return m.default;
-  });
-  return mermaidPromise;
-}
+import { loadMermaid } from './mermaid-loader';
 
 type RenderState = { kind: 'pending' } | { kind: 'error' } | { kind: 'done'; svg: string };
 
