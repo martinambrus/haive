@@ -67,6 +67,7 @@ import {
 } from './_shared.js';
 import { enforceRuntimeHolderReserve } from './agent-reserve.js';
 import { executeByKind, interpretCliFailure } from './exec-core.js';
+import { fatalClassFromMessage } from './failure-class.js';
 import {
   resolveProviderNameForPayload,
   resumeStepIfLinked,
@@ -197,6 +198,13 @@ export async function handleCliExecJob(
         cost,
         durationMs,
         errorMessage: finalErrorMessage,
+        // The structural verdict behind that message, so the UI can gate a persistent
+        // "refused by the provider, not a CLI failure" banner on the class rather than the
+        // copy (the step-banners.ts rule). fatalClassFromMessage reverses the stable internal
+        // headline interpretCliFailure wrote — the same round-trip mining-failure already
+        // relies on — so it costs no extra classification. NULL for a success or a genuine
+        // code error, which is the truth about them.
+        providerFatalClass: fatalClassFromMessage(finalErrorMessage),
         endedAt: new Date(),
       })
       .where(eq(schema.cliInvocations.id, row.id));

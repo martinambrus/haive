@@ -800,6 +800,14 @@ export const cliInvocations = pgTable(
       level: string | null;
       source: 'step' | 'provider' | 'scale_max' | 'dropped' | 'none';
     }>(),
+    /** Why a FAILED run failed, as a structural verdict rather than the prose in errorMessage.
+     *  exec-core classifies a failed invocation (auth | rate_limit | server_error |
+     *  content_filter) and builds a headline from it; this persists the class itself so the UI
+     *  can key on the state instead of the copy (the step-banners.ts rule). NULL for a success,
+     *  a still-running row, or a failure that was not one of those classes (a genuine code
+     *  error). text, not a pg enum, because the union changes in code and nothing joins on it.
+     *  Migration 0129; NULL on legacy rows. */
+    providerFatalClass: text('provider_fatal_class'),
     durationMs: integer('duration_ms'),
     containerId: varchar('container_id', { length: 255 }),
     errorMessage: text('error_message'),

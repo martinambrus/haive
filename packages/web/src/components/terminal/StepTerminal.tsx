@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type CliInvocationOutput, type CliInvocationSummary } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { CliStreamViewer } from './CliStreamViewer';
+import { describeInvocationStatus } from './cli-stream-status';
 import {
   type ActiveTerminalIds,
   scrollToNewestActiveTerminal,
@@ -230,6 +231,9 @@ function InvocationPanel({
   // already started is left alone, because pause never interrupts work in flight.
   const globalPaused = useGlobalPause();
   const banner = invocationBanner(invocation, { paused: globalPaused });
+  // Persistent provider verdict (refusal / model swap), read from the row so it outlives the
+  // stream. Null for a clean run, which is nearly all of them.
+  const statusVerdict = describeInvocationStatus(invocation);
 
   // Active invocation → live WebSocket via CliStreamViewer (no fetch needed).
   // Ended invocation → fetch persisted rawOutput once and render statically.
@@ -396,6 +400,18 @@ function InvocationPanel({
         />
       ) : (
         !replayError && <div className="text-xs text-neutral-500">Loading output…</div>
+      )}
+      {/* Persistent provider-verdict banner, BELOW the terminal and read from the invocation row
+          (not the stream), so it survives the CLI ending and the 600s stream expiry: a provider
+          refusing the prompt, or silently swapping the served model. See cli-stream-status.ts. */}
+      {statusVerdict && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+          <span className="mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full bg-amber-400" />
+          <span>
+            <span className="font-semibold">{statusVerdict.headline}</span>
+            {statusVerdict.detail ? <> {statusVerdict.detail}</> : null}
+          </span>
+        </div>
       )}
       {isQueued && banner ? (
         // Queued: enqueued but no slot yet. Amber so the user sees the run is waiting rather than

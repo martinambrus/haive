@@ -1,0 +1,33 @@
+-- Provider-fatal class per invocation: WHY a run failed, as a structural verdict rather than
+-- prose.
+--
+-- exec-core.ts classifies a failed invocation into a ProviderFatalClass
+-- (auth | rate_limit | server_error | content_filter) and turns it into a human headline in
+-- error_message. The class itself is thrown away. That leaves the UI with only the prose to
+-- go on, and the codebase's own rule (step-banners.ts, "a message column is display copy,
+-- never state") forbids gating UI on that copy — so a persistent "refused by the provider,
+-- not a CLI failure" banner has nothing structural to key on.
+--
+-- MEASURED need: codex/gpt-5.6-sol running an 08d adversarial-QA seat returns
+-- {"type":"error","message":"This content was flagged for possible cybersecurity risk..."},
+-- exit 1, no other signal. To the user that is indistinguishable from a broken CLI; the
+-- verdict (content_filter) is the one thing that says otherwise, and it was not persisted.
+--
+-- text, not an enum type: the ProviderFatalClass union changes in code more readily than a
+-- pg enum can follow, and nothing joins or filters on it — it is read by primary key with the
+-- row for display. An unknown future value renders as itself rather than breaking a CHECK.
+--
+-- NULL means "no provider-fatal verdict" — a success, a still-running row, or a failure that
+-- was not one of the fatal classes (a genuine code error). No NOT NULL, no default, NO
+-- BACKFILL: a past failure's class cannot be recovered without re-running it, and inferring
+-- one from today's error_message prose is exactly the copy-keying this column exists to avoid.
+--
+-- No index: read with the row by primary key.
+--
+-- Additive + idempotent: a second run is a no-op, existing rows stay NULL, nothing gates on
+-- the column, so leaving it after a code revert is harmless.
+--
+-- Rollback: ALTER TABLE "cli_invocations" DROP COLUMN IF EXISTS "provider_fatal_class";
+--           (No data loss beyond the verdicts themselves; nothing derives from them.)
+
+ALTER TABLE "cli_invocations" ADD COLUMN IF NOT EXISTS "provider_fatal_class" text;

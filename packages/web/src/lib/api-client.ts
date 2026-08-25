@@ -1016,6 +1016,21 @@ export interface CliInvocationSummary {
     level: string | null;
     source: 'step' | 'provider' | 'scale_max' | 'dropped' | 'none';
   } | null;
+  /** Why a FAILED run failed, as a structural verdict (cli_invocations.provider_fatal_class):
+   *  'auth' | 'rate_limit' | 'server_error' | 'content_filter'. Drives the persistent
+   *  provider-verdict banner below the terminal (only 'content_filter' surfaces there; the
+   *  others are shown at the step level). Null for a success, a running row, or a genuine code
+   *  error. Optional so an older api renders absent. */
+  providerFatalClass?: string | null;
+  /** This invocation's own model identity (cli_invocations.model_identity) — requested vs
+   *  served. `match: 'differs'` means the provider swapped the served model (measured: a Claude
+   *  Code fable request served claude-opus-4-8 on a security prompt). Optional so an older api
+   *  renders absent; distinct from the TASK-level modelIdentity, which is the canary's copy. */
+  modelIdentity?: {
+    requested: string | null;
+    served: string | null;
+    match: 'exact' | 'differs' | 'unknown';
+  } | null;
 }
 
 export interface CliInvocationOutput {

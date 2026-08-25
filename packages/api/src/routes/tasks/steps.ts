@@ -1106,6 +1106,14 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
       // This terminal's own latest activity line (per-invocation, not the shared
       // step status), so each terminal shows what it is actually doing.
       statusMessage: schema.cliInvocations.statusMessage,
+      // Why a failed run failed, as a structural verdict — drives the persistent
+      // provider-verdict banner below the terminal (a content_filter refusal), read from the
+      // row so it outlives the 600s stream. NULL for a success or a genuine code error.
+      providerFatalClass: schema.cliInvocations.providerFatalClass,
+      // This invocation's own requested-vs-served model. match:'differs' means the provider
+      // swapped the served model (e.g. a Fable request served claude-opus-4-8 on a security
+      // prompt) — the other half of the same banner.
+      modelIdentity: schema.cliInvocations.modelIdentity,
     })
     .from(schema.cliInvocations)
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
