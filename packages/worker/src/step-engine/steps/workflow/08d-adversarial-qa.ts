@@ -12,6 +12,7 @@ import type {
 } from '../../step-definition.js';
 import {
   didNotCompleteIssue,
+  miningInvocationId,
   miningOutcome,
   shouldRerollMiningAgent,
   shouldRetryMiningTerminalFailure,
@@ -143,6 +144,14 @@ interface AdversarialFinding {
    *  `untestable` is NOT a downgrade: the panel never got to run the PoC at all. Kept
    *  distinct from `unverified` only so gate 1.5 can say which one it was — both block. */
   verification?: 'reproduced' | 'not_reproduced' | 'unverified' | 'untestable';
+  /** Per-lens verifier panel for this finding: which verify seat (lens) reached which verdict
+   *  on which CLI. The collapsed `verification` above is the consensus; this is the raw panel,
+   *  recorded so the VALIDATION side of the reviewer-CLI benchmark becomes measurable (which CLI
+   *  is best at each qa-verify seat) — the consensus string alone attributes nothing. Rides the
+   *  finding's `raw` jsonb like `verification`; no new table (recordReviewFindings bulk-inserts
+   *  without returning ids, so a FK sibling would need id-threading a jsonb array avoids).
+   *  See docs/plans/calibrating-adversarial-mongoose.md. */
+  verifications?: VerifierLensVerdict[];
   /** Every reviewer-namespaced `review_findings` fingerprint that collapsed onto this
    *  finding through the location merge — one per adversary that reported it.
    *
@@ -551,6 +560,48 @@ export function verificationForFinding(
   if (verdicts.every((v) => v === 'could_not_test')) return 'untestable';
   if (verdicts.every((v) => v === 'not_reproduced')) return 'not_reproduced';
   return 'unverified';
+}
+
+/** One verify seat's contribution to a finding: which lens, which CLI ran it, what it decided.
+ *  `verdict` null means the seat ran but produced nothing usable (killed, silent, or numbered a
+ *  verdict at a position that is not this finding); `cliInvocationId` null means the seat was
+ *  never dispatched. The lens id IS the configurable seat, so it is the key the validation
+ *  matrix groups on. */
+export interface VerifierLensVerdict {
+  lensId: string;
+  cliInvocationId: string | null;
+  verdict: Verdict | null;
+}
+
+/** The raw panel behind verificationForFinding's consensus: per lens, the seat's CLI and verdict.
+ *  Walks the same attempt chain, but RECORDS rather than collapses, so the validation half of the
+ *  reviewer-CLI benchmark (which CLI is best at each qa-verify seat) can be measured from the
+ *  stored finding. Deliberately captures the seat's cliInvocationId even when the verdict is null,
+ *  so a seat that ran and stayed silent is still attributed to its CLI. */
+export function verifierPanelDetail(
+  results: AgentMiningResult[],
+  groupKey: string,
+  index: number,
+  lenses: (VerifyLens | null)[],
+): VerifierLensVerdict[] {
+  return lenses.map((lens) => {
+    let cliInvocationId: string | null = null;
+    let verdict: Verdict | null = null;
+    for (let attempt = 0; attempt < MAX_VERIFY_ATTEMPTS; attempt++) {
+      const agentId = verifierAgentId(groupKey, lens, attempt);
+      const outcome = miningOutcome(results, agentId);
+      if (outcome.kind === 'absent') break;
+      const inv = miningInvocationId(results, agentId);
+      if (inv) cliInvocationId = inv;
+      if (outcome.kind !== 'done') continue;
+      const v = verifyVerdicts(outcome.raw).get(index + 1);
+      if (v) {
+        verdict = v;
+        break;
+      }
+    }
+    return { lensId: lens?.id ?? 'default', cliInvocationId, verdict };
+  });
 }
 
 /** The findings sharing one root cause, verified by one panel. */
@@ -1090,6 +1141,9 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
             // nothing at all, and those are the ones this relabels from `unverified` to the
             // truer `untestable`.
             f.verification = panel === 'unverified' && provablyUntestable(f) ? 'untestable' : panel;
+            // Record the raw per-lens panel alongside the collapsed verdict so the validation
+            // side of the reviewer-CLI benchmark is measurable (see calibrating-adversarial-mongoose).
+            f.verifications = verifierPanelDetail(allResults, group.key, i, tier.lenses);
           }
         }
       }

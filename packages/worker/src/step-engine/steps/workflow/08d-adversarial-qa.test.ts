@@ -11,6 +11,7 @@ import {
   retryableVerifiers,
   rootCauseKey,
   verificationForFinding,
+  verifierPanelDetail,
   verificationTiers,
 } from './08d-adversarial-qa.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
@@ -636,6 +637,34 @@ describe('08d PoC verification', () => {
         ),
       );
       expect(verificationForFinding(panel, KEY, 0, LENSES)).toBe('unverified');
+    });
+
+    it('records the per-lens panel (lens, CLI, verdict) for the validation matrix', () => {
+      const panel = [
+        voter('execute', verdictJson(list({ reproduced: true }))),
+        voter('target', verdictJson(list({ reproduced: false, observation: observed }))),
+        voter('linkage', verdictJson(list({ reproduced: 'could_not_test' }))),
+      ];
+      expect(verifierPanelDetail(panel, KEY, 0, LENSES)).toEqual([
+        { lensId: 'execute', cliInvocationId: 'inv-execute', verdict: 'reproduced' },
+        { lensId: 'target', cliInvocationId: 'inv-target', verdict: 'not_reproduced' },
+        { lensId: 'linkage', cliInvocationId: 'inv-linkage', verdict: 'could_not_test' },
+      ]);
+    });
+
+    it('attributes a killed lens seat to its CLI with a null verdict', () => {
+      // The seat ran but produced nothing usable — still record which CLI it was, so a silent
+      // verifier is not invisible in the validation matrix.
+      const panel = [
+        voter('execute', verdictJson(list({ reproduced: true }))),
+        voter('target', null),
+        voter('linkage', verdictJson(list({ reproduced: true }))),
+      ];
+      expect(verifierPanelDetail(panel, KEY, 0, LENSES)[1]).toEqual({
+        lensId: 'target',
+        cliInvocationId: 'inv-target',
+        verdict: null,
+      });
     });
   });
 
