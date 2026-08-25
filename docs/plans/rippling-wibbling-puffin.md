@@ -237,3 +237,60 @@ Anchor drift shared by both: `buildRunList` is now `task-queue.ts:152` (half A s
 `buildRunAppRunList` is `:186` (says 146-178). Both `execution-paths.ts:98`
 (`PATH_REQUIRED_TARGETS`) and `:133` (`orderWorkflowRunList`) still resolve exactly as cited, in
 `packages/worker/src/orchestrator/execution-paths.ts`.
+
+---
+
+# Amendment — 2026-08-25: creator-mode authoring + a note that spatial composability is already here
+
+*Prompted by the DeepSeek/Cordis harness (harness.pdf). Two of its ideas touch this plan: one is
+already built into it, and one is a natural extension of Phase 3's admin authoring.*
+
+## I. Spatial composability is this plan's capability tokens — already done
+
+Cordis's "spatial composability" means a plugin declares what it needs from the environment and the
+runtime resolves it reactively: a dependency that disappears makes the plugin "just deactivate and
+wait, without erroring," rather than crash. This plan independently arrived at exactly that:
+
+- The `requires`/`provides` capability tokens (`'worktree'`, `'runtime'`, `'spec'`) ARE the
+  dependency declaration — a step needs `worktree`, and any step that provides it satisfies the
+  need, so alternatives compose without special-casing (the payoff already noted in amendment F).
+- Amendment G is the "deactivate and wait" behaviour verbatim: a definition referencing a step that
+  no longer resolves (its module was removed) becomes not-selectable WITH A NAMED REASON, never a
+  crash and never a silently truncated pipeline.
+
+So no change is needed here — this is recorded only so a future reader does not "add spatial
+composability" as if it were missing. It is the design already locked. What Haive deliberately does
+NOT take is the reactive RUNTIME rebind (swap a provider under a live task and reload it): a running
+task's run list is materialised and forward-walked precisely so a mid-flight definition edit cannot
+mutate it, which is the correct choice and the opposite of Cordis's live rebind.
+
+## J. Creator mode: describe a step in chat, generate the DATA-DRIVEN definition
+
+Cordis's "creator mode" scaffolds and hot-loads a new plugin from a chat description after an
+approval click. The dangerous half of that (hot-loading executable code into a live process) is
+exactly what Phase 3 refused. But the SAFE half maps perfectly onto this plan, because a
+prompt-template step is DATA, not code:
+
+- An admin describes the step they want in natural language ("review the changed SQL migrations for
+  destructive operations and report each with severity"). An LLM turn produces a candidate
+  `{ kind:'prompt-template', stepSlug, title, promptTemplate, requiredCapabilities, timeoutMs,
+  uiPanels? }` entry — the exact shape Phase 3.1 already synthesizes into a StepDefinition.
+- Nothing executes on generation. The output is a definition row the admin previews, edits in the
+  composer, and saves. It flows through the SAME prereq/loop-closure validator and the SAME
+  `synthesizeStepDefinition` factory — there is no new execution path, no runtime code injection,
+  and no rebuild (prompt-template steps are data and need none, per Phase 3.1).
+- This is strictly an authoring convenience over Phase 3's manual composer, so it trails Phase 3 and
+  cannot precede it. It reuses one existing LLM dispatch and adds no new trust surface: the
+  generated artifact is a prompt template that runs in the sandbox like any other, gated by the
+  same `CUSTOM_TASK_TYPES_ENABLED` switch.
+- Explicitly NOT in scope even here: generating a custom MCP TOOL's callback from a description.
+  Tool callbacks are the vetted allow-list (Phase 3.2); a described-into-existence handler would be
+  arbitrary code and is the exact thing that plan section keeps behind the allow-list. Creator mode
+  generates prompt-template steps only.
+
+## What Haive is already ahead on (recorded, not actioned)
+
+The harness author is envious of an append-only session log with a trajectory view — "what did the
+model actually see is a click." Haive already has it: `task_events`, `cli_invocations` with
+`stream_log`, the `CliStreamViewer` trajectory, and per-invocation `model_identity` (requested vs
+served). No gap; noted so it is not "discovered" later as a missing feature.

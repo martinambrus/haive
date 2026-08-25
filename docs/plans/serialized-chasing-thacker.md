@@ -306,3 +306,221 @@ namespaced. Those are hygiene, not isolation.
    (companion amendment G).
 6. `pnpm build` + `pnpm typecheck` clean with zero modules present — the union discovery must be a
    no-op when neither `modules/*` nor any `@haive-module/*` dependency exists.
+
+---
+
+# Amendment — 2026-08-25: reversible teardown + loader introspection (from the DeepSeek/Cordis harness)
+
+*Prompted by the DeepSeek `dsh` harness and its Cordis composition kernel (harness.pdf). Read
+critically: most of what makes Cordis novel does NOT apply here, and saying why is the point.*
+
+## What does NOT transfer, and why that is the right call
+
+Cordis's headline is hot module replacement for a live agent — edit a plugin's source and the
+runtime disposes the old version's effects and installs the new one WITHOUT restarting, rolling
+back transactionally if the reload fails mid-way. That directly contradicts this plan's locked
+decision (`Attach model = REBUILD ON INSTALL, no runtime hot-load`), which exists to sidestep the
+Next.js `output: 'standalone'` build wall and to keep closed-source code assembled at each
+customer's build rather than injected at runtime.
+
+It is worth stating that the article's own skeptics land where this plan already stood: the HN
+thread called plugin-everything "a pile of footguns," and nobody yet knows whether a harness needs
+OSGi-grade dynamic composition "or whether a monolith with good hooks gets you 95% of the way."
+This plan chose the monolith-with-good-hooks path deliberately. The harness is the seductive other
+road; we are not taking it, and the reasons have not changed.
+
+## A. The one real gap it exposes: removal has no inverse
+
+Cordis's genuinely useful principle is temporal composability — every setup effect carries the
+function that undoes it, so "uninstall stops being a prayer and becomes a proof obligation."
+Applied to THIS plan (not to hot-reload, but to the removal lifecycle), it names a real hole:
+
+- Install is covered. `ensure-schema` sets up a module's own database idempotently; the loader
+  registers routes/steps/nav; config keys are seeded via SETNX.
+- Removal is NOT. The plan says "removing the module + rebuild cleanly drops its nav/routes" — but
+  that is only true of the in-memory registry. The module's DATABASE persists, its seeded
+  `config:module:<id>:*` keys persist, its `onboarding_artifacts`-style rows (if any) persist, and
+  its `modules`-table intent row persists. A removed module leaves state behind, and the next
+  admin has no record of what to clean.
+
+Fix, in the plan's own grain (data + boot-upsert, no runtime effect system):
+
+- A module MAY declare `./teardown` — an idempotent inverse of `./ensure-schema` (drop its own
+  database/schema, delete its namespaced config keys). Explicitly NOT auto-run on rebuild (a
+  rebuild without the module is not a request to destroy its data); run only by an explicit
+  `pnpm module remove <id>` operator action, the symmetric sibling of `pnpm module add`, which the
+  admin UI surfaces as a distinct, confirm-gated "remove and purge data" step separate from
+  "disable."
+- What has no clean inverse must be declared, not pretended. A module that ingested into a SHARED
+  table (the first-party Statistics reference reads core tables read-only, so it has nothing to
+  undo; a hypothetical writer would) states so in its manifest, and `pnpm module remove` refuses
+  to claim a clean purge it cannot deliver — the same fail-loud-rather-than-half-do discipline the
+  rest of this plan uses.
+
+This is temporal composability without the effect runtime: the inverse is a declared, idempotent
+teardown script, matched to Haive's rebuild-on-install model.
+
+## B. Loader introspection: make the boot report a real endpoint
+
+The plan already says a module flips to `active` "on the loader's boot report of the module ids it
+actually registered" — the only evidence the rebuilt process loaded it. Cordis's `--dump-config`
+(print the exact composed plugin tree the running process is made of) is the same idea and worth
+building concretely, because a half-install is this plan's stated recurring failure:
+
+- Add `GET /admin/modules/loaded` (requireAdmin): the api and worker each report what they
+  ACTUALLY registered at boot — module ids, their routes' base paths, contributed step ids,
+  composable-catalog entries, seeded config namespaces, and `ensure-schema` result. Not the
+  `modules` intent table (that records what SHOULD load); the live registry (what DID).
+- The admin install page diffs intent against this: a row that is `active` in intent but absent
+  from the loaded report is a half-install, surfaced with the exact reason (build succeeded,
+  process did not register it) rather than a green checkmark that lies.
+
+## Out of scope, stated so nobody assumes it
+
+Runtime hot-swap, transactional mid-session reload, and a general `ctx.effect(do -> undo)` runtime
+are NOT adopted — they are the parts of Cordis that presuppose the runtime-load model this plan
+rejected. If Haive ever moves off rebuild-on-install (it should not, for the standalone-build
+reason), revisit; until then, the declared-teardown script in A is the whole of the idea that fits.
+
+---
+
+# Amendment — 2026-08-25: concrete module lifecycle management (install/uninstall/activate/deactivate, dead tasks, live-task removal)
+
+*Task 1 and the prior amendments cover the module CONTRACT, distribution, and the loader boot
+report. They do NOT cover how a human actually manages a module day to day. This fills that in.
+Grounded: task actions `cancel`/`pause`/`resume` exist (`routes/tasks/index.ts:881,897,959,979`)
+plus STOP (kill-CLI-keep-env) and the GLOBAL_PAUSE+drain flow; `registry.require` THROWS on an
+unknown step (`registry.ts:39`), so a removed module currently CRASHES dependent tasks rather than
+degrading — the exact hazard sections K-L below close.*
+
+## H. How a user installs a module — UI first, folder-drop for power users
+
+Two entry paths feed the SAME discovery + rebuild; the plan's rebuild-on-install constraint is
+unchanged (code cannot appear in a running process without a rebuild), so the UI records intent and
+surfaces the rebuild rather than pretending to hot-load.
+
+- **UI install (preferred).** A Modules admin page (own tab, sibling of `admin/pricing`) where the
+  user adds a module by SOURCE, and the system fetches it to where it belongs:
+  - `git`: a repository URL plus an OPTIONAL access token / deploy key for a private repo. The
+    system clones the pinned ref into `modules/<id>/` (or a managed clone dir). The token is stored
+    envelope-encrypted (the existing secrets machinery), never in plaintext, never in an image.
+  - `registry`: a `@haive-module/*` package name plus a scoped read token (amendment B). This stays
+    the path for PAID, resellable, closed-source modules — amendment B's reasoning (git hands over
+    full source+history, a revoked deploy key claws nothing back) applies to RESALE specifically and
+    is not contradicted here: a user installing a public or their-own module from GitHub has no
+    source to protect, so a git URL is legitimate for that case. The UI makes the source type an
+    explicit choice so the two models coexist without either pretending to be the other.
+  - After fetch, the module is in state `installed (pending rebuild)`. The UI shows the exact next
+    step (the `pnpm module add`/rebuild operator action, or triggers a build job if one exists), and
+    the row flips to `active` only on the loader's boot report (amendment B/the introspection
+    endpoint), never on a successful fetch.
+- **Folder-drop (power users, must work, not preferred as the ONLY way).** A developer places
+  `modules/<id>/` in the tree and it is picked up by the build-time codegen discovery (Slice 0). The
+  Modules page LISTS folder-discovered modules alongside UI-installed ones, marked `source: local`,
+  so a power user building their own module or task type sees it in the same management surface and
+  can activate/deactivate it. Requiring folder-drop as the only install path is rejected.
+
+## I. Four states, not two — the WordPress model, explicitly
+
+DECIDED: install/uninstall AND activate/deactivate, all four. Drupal's install-destroys-everything
+with no deactivate is rejected. The `modules` intent row carries two orthogonal axes:
+
+- **Install axis** — `installed` vs `uninstalled`. Governs CODE PRESENCE, so it is rebuild-gated
+  (adding/removing the workspace package or dependency + rebuild). Uninstall has the two data
+  choices from the teardown amendment: KEEP data (default, reversible) or PURGE (explicit, runs
+  `./teardown`).
+- **Active axis** — `active` vs `deactivated`. Governs whether an installed module is USED, and is a
+  LIVE DB FLAG the loader/api honor WITHOUT a rebuild: a deactivated module's routes return 404, its
+  steps are not offered to the composer, its task types are not selectable, its nav is hidden — but
+  its code and data stay in place. This is the WordPress "deactivate" — reversible instantly, no
+  data loss, no rebuild. (Deactivation can be live precisely because it only STOPS using code that
+  is already loaded; install/uninstall change what code EXISTS, which the standalone-build model
+  requires a rebuild for.)
+
+So the four reachable states: installed+active (normal), installed+deactivated (parked, data kept),
+uninstalled+data-kept (gone but revivable), uninstalled+purged (gone, `./teardown` ran). The
+Modules page exposes all four transitions.
+
+## J. A module removed out from under the system (missing at boot)
+
+The dangerous case: a folder-dropped module is deleted, or a dependency is dropped, and the system
+restarts with the module GONE while its rows and tasks remain. `registry.require` throws today, so
+this must be made graceful.
+
+- The loader detects the mismatch: a `modules` row is `installed+active` but the code did not
+  register at boot (the introspection endpoint's diff). The row is flagged `missing` (distinct from
+  `deactivated` — the operator did not choose this).
+- Its task types go not-selectable with a named reason (companion plan amendment G — the
+  new-task-creation side).
+- EXISTING tasks of that module become DEAD rather than crashing (section K).
+
+## K. Dead-task handling — read-only, cancel-only, loudly flagged
+
+A task whose module is missing must not crash the orchestrator or the task page. `buildRunList` must
+detect an unresolvable step (its module is `missing`) and mark the task DEAD instead of calling
+`registry.require` and throwing.
+
+- The task page STILL RENDERS. Forms and step state live in Postgres (`task_steps`, the tasks row's
+  `preAnswers` etc.) and are NOT purged on uninstall by default (section I), so the stored forms
+  display. This is why keep-data is the uninstall default: purging would erase a task's own history.
+- Everything that would ADVANCE the task is disabled: no retry, no stop, no abort, no CLI retry, no
+  auto-continuation, no gate resolution. CANCEL stays enabled — the one action a dead task needs, so
+  the user can clean it up. (Cancel tears down; it does not need the module's steps.)
+- A RED, unmissable task-level banner renders at BOTH the TOP and the BOTTOM of the task page (a
+  long task scrolls, so one placement is not enough), plus on the task in any list view: "This task
+  uses the module `<name>`, which has been removed from this system. It cannot continue. You may
+  cancel it." This is a task-level banner, distinct from the per-step banners in
+  `lib/step-banners.ts`; add it as a `deadModuleBanner` predicate keyed on the task's dead-module
+  flag, so the rule lives in one tested place like the others.
+- Reinstalling the module (same id) revives the task: its data was kept, the steps resolve again,
+  the dead flag clears at the next boot report. This is the payoff of keep-data-by-default.
+
+## L. Lifecycle actions while dependent tasks are RUNNING
+
+Uninstalling OR deactivating a module that live tasks depend on would break those tasks mid-flight
+(their steps/routes vanish). The Modules page must never do this silently: before any uninstall or
+deactivate, it computes and SHOWS the running/queued tasks that depend on the module, and forces the
+operator to choose one of two paths.
+
+- **Urgent (a security flaw — remove now):** STOP the dependent tasks immediately (kill their CLIs
+  via the existing STOP), then apply the deactivate/uninstall. This is the "I do not care about
+  in-flight work, I need this gone" path — the RAM/exposure risk outranks the lost work.
+- **Graceful (wait it out):** PAUSE the dependent tasks, wait for their in-flight CLIs to DRAIN
+  (the same started-not-ended drain the operator flow already uses — never a BullMQ queue pause),
+  then apply the action. New work for those tasks stays held; running work finishes.
+
+Both paths reuse existing mechanisms (STOP / pause / drain / cancel) — this section adds the
+module-scoped ORCHESTRATION and the mandatory operator choice, not new primitives. Deactivate is
+included because although it is a live flag, flipping it under a running task is as breaking as an
+uninstall for that task; only a module with zero live/queued dependent tasks may be deactivated
+without the choice.
+
+## Net-new for this amendment
+
+- Modules admin page (tab) with source-typed install (git URL+token / registry package+token /
+  local), the four-state controls, the dependent-tasks preflight + urgent/graceful choice.
+- `modules` row gains the two-axis state (install + active) and a `missing` flag; source type +
+  encrypted credential ref.
+- `buildRunList` degrades on an unresolvable (missing-module) step to a DEAD task rather than
+  throwing; a task-level `dead-module` flag.
+- `deadModuleBanner` predicate (top+bottom+list) in the step-banners module family.
+- Module-scoped stop/pause-drain orchestration behind the uninstall/deactivate preflight.
+
+## Verification additions
+
+1. UI install of a public git module: state goes `installed (pending rebuild)` -> `active` only on
+   the boot report; a private git module with a token clones; the token is never in plaintext or an
+   image (`docker history` clean, DB value encrypted).
+2. A folder-dropped module appears in the Modules list as `source: local` and can be
+   activated/deactivated.
+3. Deactivate (installed+active -> installed+deactivated) with no dependent tasks: routes 404, steps
+   unlisted, task types not selectable, nav hidden, NO data lost, NO rebuild; reactivate restores
+   all of it instantly.
+4. Uninstall keep-data then reinstall same id: dependent tasks that went dead revive with their
+   forms intact. Uninstall purge runs `./teardown` and does not.
+5. Remove a module's code and reboot: dependent tasks render DEAD (top+bottom red banner, cancel-only
+   — retry/stop/abort/auto-continue all disabled), the orchestrator does not crash, and the task
+   type is not-selectable with a named reason.
+6. Uninstall/deactivate with a RUNNING dependent task: the preflight lists it and blocks until the
+   operator picks urgent (tasks stopped, then action) or graceful (tasks paused, drained, then
+   action); neither path silently kills or silently waits.
