@@ -403,6 +403,22 @@ taskRoutes.post('/', async (c) => {
     parentTaskId = parent.parentTaskId ?? parent.id;
   }
 
+  // A plan node can only seed a task in ITS OWN repository — the link is what
+  // later flips the node green, and a cross-repo link would green the wrong plan.
+  if (body.planNodeId) {
+    if (!body.repositoryId) {
+      throw new HttpError(400, 'planNodeId requires a repositoryId');
+    }
+    const node = await db.query.planNodes.findFirst({
+      where: and(
+        eq(schema.planNodes.id, body.planNodeId),
+        eq(schema.planNodes.repositoryId, body.repositoryId),
+      ),
+      columns: { id: true },
+    });
+    if (!node) throw new HttpError(404, 'Plan node not found in this repository');
+  }
+
   const metadata: Record<string, unknown> = {};
   if (body.isBugFix) metadata.category = 'bugfix';
   if (body.feature) metadata.feature = body.feature;
@@ -438,6 +454,13 @@ taskRoutes.post('/', async (c) => {
 
   const task = inserted[0];
   if (!task) throw new HttpError(500, 'Failed to create task');
+
+  if (body.planNodeId) {
+    await db
+      .insert(schema.planNodeTasks)
+      .values({ nodeId: body.planNodeId, taskId: task.id })
+      .onConflictDoNothing();
+  }
 
   await appendTaskEvent(db, task.id, null, 'task.created', { userId });
 

@@ -30,6 +30,7 @@ import { resolveGlobalKbSettings } from '@haive/shared/global-kb';
 import { fairPriority } from '@haive/shared/fair-priority';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
+import { completePlanNodesForTask } from '../plan/task-link.js';
 import { getBullRedis, getRedis } from '../redis.js';
 import { reapAllSessionsForTask } from '../sandbox/terminal-session-reaper.js';
 import {
@@ -395,6 +396,9 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
   await cleanupTaskContainers(db, taskId, 'completed');
   await maybeUnloadTaskEmbedModel(db, taskId);
   await unloadTaskOllamaCliModels(db, taskId);
+  // Hooked to COMPLETION specifically: cancel and fail write through their own
+  // functions, so an abandoned task can never green a plan node.
+  await completePlanNodesForTask(db, taskId);
 }
 
 async function markTaskFailed(db: Database, taskId: string, message: string): Promise<void> {

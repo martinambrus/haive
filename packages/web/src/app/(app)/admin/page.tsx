@@ -123,6 +123,8 @@ export default function AdminPage() {
   const [savingUsageAlert, setSavingUsageAlert] = useState(false);
   const [ideEnabled, setIdeEnabled] = useState<boolean | null>(null);
   const [savingIde, setSavingIde] = useState(false);
+  const [planCanvasEnabled, setPlanCanvasEnabled] = useState<boolean | null>(null);
+  const [savingPlanCanvas, setSavingPlanCanvas] = useState(false);
   const [debugModeEnabled, setDebugModeEnabled] = useState<boolean | null>(null);
   const [savingDebugMode, setSavingDebugMode] = useState(false);
   const [browserAccessEnabled, setBrowserAccessEnabled] = useState<boolean | null>(null);
@@ -202,6 +204,7 @@ export default function AdminPage() {
         softTimeoutData,
         timeoutLadderData,
         ideData,
+        planCanvasData,
         debugModeData,
         browserAccessData,
         dbAccessData,
@@ -236,6 +239,7 @@ export default function AdminPage() {
           '/admin/config/cli-timeout-ladder',
         ),
         api.get<{ enabled: boolean }>('/admin/config/ide'),
+        api.get<{ enabled: boolean }>('/admin/config/plan-canvas'),
         api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/db-access'),
@@ -275,6 +279,7 @@ export default function AdminPage() {
       setTimeoutLadderInput(timeoutLadderData.ladder);
       setTimeoutRungs(timeoutLadderData.rungs);
       setIdeEnabled(ideData.enabled);
+      setPlanCanvasEnabled(planCanvasData.enabled);
       setDebugModeEnabled(debugModeData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
       setDbAccessEnabled(dbAccessData.enabled);
@@ -757,6 +762,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update editor switch');
     } finally {
       setSavingIde(false);
+    }
+  }
+
+  async function setPlanCanvas(next: boolean) {
+    setSavingPlanCanvas(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/plan-canvas', {
+        enabled: next,
+      });
+      setPlanCanvasEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update plan canvas switch');
+    } finally {
+      setSavingPlanCanvas(false);
     }
   }
 
@@ -1903,6 +1923,32 @@ export default function AdminPage() {
             />
             {ideEnabled ? 'Enabled' : 'Disabled'}
             {savingIde && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {planCanvasEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Plan canvas</CardTitle>
+            <CardDescription>
+              A durable, per-repo tree of what each project is meant to be, drilling down to
+              taskable leaves. Global kill-switch: OFF makes the onboarding plan-build step skip
+              itself and refuses new plan build/chat/advisory tasks. Existing plans stay readable
+              and editable — hiding a plan someone already made would look like data loss. Takes
+              effect within ~30s; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={planCanvasEnabled}
+              disabled={savingPlanCanvas}
+              onChange={(e) => void setPlanCanvas(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {planCanvasEnabled ? 'Enabled' : 'Disabled'}
+            {savingPlanCanvas && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

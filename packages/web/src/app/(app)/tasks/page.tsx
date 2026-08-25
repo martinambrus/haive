@@ -35,6 +35,11 @@ const TYPE_LABELS: Record<string, string> = {
   onboarding: 'Onboarding',
   workflow: 'Workflow',
   onboarding_upgrade: 'Onboarding upgrade',
+  run_app: 'Run app',
+  kb_author: 'KB enrichment',
+  plan_build: 'Plan build',
+  plan_chat: 'Plan chat',
+  advisory: 'Advisory research',
   env_replicate: 'Env replicate', // legacy tasks only
 };
 

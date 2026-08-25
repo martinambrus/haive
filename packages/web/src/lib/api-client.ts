@@ -527,7 +527,19 @@ export interface Container {
   destroyedAt: string | null;
 }
 
-export type WorkflowType = 'onboarding' | 'workflow' | 'onboarding_upgrade' | 'run_app';
+/** Task types the browser can encounter. A superset of the ones the create-task
+ *  form offers: kb_author and the three plan types are spawned by their own
+ *  endpoints (they need context the generic form has no field for) but still
+ *  appear in the task list and detail views. */
+export type WorkflowType =
+  | 'onboarding'
+  | 'workflow'
+  | 'onboarding_upgrade'
+  | 'run_app'
+  | 'kb_author'
+  | 'plan_build'
+  | 'plan_chat'
+  | 'advisory';
 
 /** Execution path chosen at the 00-triage step (workflow tasks). Mirrors
  *  ExecutionPath in @haive/shared; redefined here so the browser bundle never
@@ -1178,4 +1190,251 @@ export interface TerminalSessionSummary {
 
 export interface TerminalSessionDetail extends TerminalSessionSummary {
   fullLog: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Plan canvas                                                         */
+/* ------------------------------------------------------------------ */
+
+/** Mirrors the plan enums in @haive/shared; redefined here so the browser bundle
+ *  never imports the server-only package barrel. */
+export type PlanNodeKind = 'component' | 'decision' | 'research' | 'external';
+export type PlanNodeStatus = 'todo' | 'in_progress' | 'blocked_human' | 'done' | 'not_applicable';
+export type PlanEdgeKind = 'depends_on' | 'affects' | 'implements';
+export type PlanNodeOrigin = 'user' | 'llm' | 'import';
+
+export interface PlanNode {
+  id: string;
+  parentId: string | null;
+  path: string;
+  ordinal: number;
+  title: string;
+  kind: PlanNodeKind;
+  body: string | null;
+  status: PlanNodeStatus;
+  taskable: boolean;
+  version: number;
+  createdBy: PlanNodeOrigin;
+  sourceTaskId: string | null;
+  directChildren: number;
+  totalDescendants: number;
+  /** Status after roll-up against descendants — what the card actually renders.
+   *  Server-derived; the client never has the subtree to compute it from. */
+  rolledStatus: PlanNodeStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlanCrumb {
+  id: string;
+  title: string;
+}
+
+export interface PlanEdge {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string;
+  kind: PlanEdgeKind;
+  note: string | null;
+  fromTitle?: string | null;
+  toTitle?: string | null;
+}
+
+export interface PlanCodeLink {
+  id: string;
+  nodeId: string;
+  repoPath: string;
+  symbol: string | null;
+  evidence: string | null;
+  derivedAtCommit: string | null;
+  confidence: number | null;
+  stale: boolean;
+}
+
+export interface PlanNodeTask {
+  taskId: string;
+  title: string;
+  status: TaskStatus;
+  type: WorkflowType;
+  createdAt: string;
+}
+
+export interface PlanOverview {
+  repositoryName: string;
+  root: PlanNode | null;
+  children: PlanNode[];
+  nodeCount: number;
+}
+
+export interface PlanTreeNode {
+  id: string;
+  parentId: string | null;
+  title: string;
+  kind: PlanNodeKind;
+  status: PlanNodeStatus;
+  rolledStatus: PlanNodeStatus;
+  taskable: boolean;
+  directChildren: number;
+  totalDescendants: number;
+}
+
+export interface PlanNodeDetail {
+  node: PlanNode;
+  ancestry: PlanCrumb[];
+  children: PlanNode[];
+  edges: PlanEdge[];
+  codeLinks: PlanCodeLink[];
+  tasks: PlanNodeTask[];
+}
+
+export interface PlanSearchMatch extends PlanNode {
+  ancestry: PlanCrumb[];
+}
+
+export interface PlanMessage {
+  id: string;
+  nodeId: string;
+  taskId: string | null;
+  role: 'user' | 'assistant';
+  body: string;
+  patch: unknown;
+  createdAt: string;
+}
+
+export interface PlanImpactHop {
+  nodeId: string;
+  depth: number;
+  viaNodeId: string;
+  viaKind: PlanEdgeKind;
+  reversed: boolean;
+  title: string | null;
+  status: PlanNodeStatus | null;
+}
+
+export interface PlanImpact {
+  origin: { id: string; title: string | null };
+  hops: PlanImpactHop[];
+  /** Non-null when a cap stopped the walk. Must be SHOWN — a truncated impact
+   *  list read as "nothing else is affected" is the failure this view exists to
+   *  prevent. */
+  truncated: null | { reason: 'depth' | 'nodes'; limit: number };
+  mermaid: string;
+  codeLinks: PlanCodeLink[];
+}
+
+const planBase = (repositoryId: string) => `/repositories/${encodeURIComponent(repositoryId)}/plan`;
+
+export function getPlanOverview(repositoryId: string): Promise<PlanOverview> {
+  return api.get<PlanOverview>(planBase(repositoryId));
+}
+
+export function getPlanTree(repositoryId: string): Promise<{ nodes: PlanTreeNode[] }> {
+  return api.get<{ nodes: PlanTreeNode[] }>(`${planBase(repositoryId)}/tree`);
+}
+
+export function getPlanNode(repositoryId: string, nodeId: string): Promise<PlanNodeDetail> {
+  return api.get<PlanNodeDetail>(`${planBase(repositoryId)}/nodes/${nodeId}`);
+}
+
+export function searchPlan(
+  repositoryId: string,
+  q: string,
+): Promise<{ matches: PlanSearchMatch[] }> {
+  return api.get<{ matches: PlanSearchMatch[] }>(
+    `${planBase(repositoryId)}/search?q=${encodeURIComponent(q)}`,
+  );
+}
+
+export function createPlanNode(
+  repositoryId: string,
+  body: {
+    parentId?: string | null;
+    title: string;
+    kind?: PlanNodeKind;
+    body?: string;
+    taskable?: boolean;
+  },
+): Promise<{ node: PlanNode }> {
+  return api.post<{ node: PlanNode }>(`${planBase(repositoryId)}/nodes`, body);
+}
+
+/** `expectedVersion` is REQUIRED: a plan chat can patch any node at any time, so
+ *  every UI write states which version it read. A 409 comes back when it lost. */
+export function updatePlanNode(
+  repositoryId: string,
+  nodeId: string,
+  body: {
+    expectedVersion: number;
+    title?: string;
+    body?: string | null;
+    kind?: PlanNodeKind;
+    status?: PlanNodeStatus;
+    taskable?: boolean;
+    parentId?: string | null;
+    ordinal?: number;
+  },
+): Promise<{ node: PlanNode }> {
+  return api.patch<{ node: PlanNode }>(`${planBase(repositoryId)}/nodes/${nodeId}`, body);
+}
+
+export function deletePlanNode(
+  repositoryId: string,
+  nodeId: string,
+): Promise<{ deleted: string[] }> {
+  return api.delete<{ deleted: string[] }>(`${planBase(repositoryId)}/nodes/${nodeId}`);
+}
+
+export function createPlanEdge(
+  repositoryId: string,
+  body: { fromNodeId: string; toNodeId: string; kind: PlanEdgeKind; note?: string },
+): Promise<{ edge: PlanEdge | null }> {
+  return api.post<{ edge: PlanEdge | null }>(`${planBase(repositoryId)}/edges`, body);
+}
+
+export function deletePlanEdge(repositoryId: string, edgeId: string): Promise<{ deleted: string }> {
+  return api.delete<{ deleted: string }>(`${planBase(repositoryId)}/edges/${edgeId}`);
+}
+
+export function getPlanImpact(
+  repositoryId: string,
+  nodeId: string,
+  maxDepth?: number,
+): Promise<PlanImpact> {
+  const qs = maxDepth ? `?maxDepth=${maxDepth}` : '';
+  return api.get<PlanImpact>(`${planBase(repositoryId)}/impact/${nodeId}${qs}`);
+}
+
+export function getPlanMessages(
+  repositoryId: string,
+  nodeId: string,
+): Promise<{ messages: PlanMessage[] }> {
+  return api.get<{ messages: PlanMessage[] }>(`${planBase(repositoryId)}/nodes/${nodeId}/messages`);
+}
+
+export function buildPlan(
+  repositoryId: string,
+  body: {
+    mode: 'from_repo' | 'from_md';
+    cliProviderId?: string;
+    title?: string;
+    description?: string;
+  },
+): Promise<{ taskId: string }> {
+  return api.post<{ taskId: string }>(`${planBase(repositoryId)}/build`, body);
+}
+
+export function startPlanChat(
+  repositoryId: string,
+  nodeId: string,
+  body: { message: string; cliProviderId?: string },
+): Promise<{ taskId: string }> {
+  return api.post<{ taskId: string }>(`${planBase(repositoryId)}/nodes/${nodeId}/chat`, body);
+}
+
+export function startPlanAdvisory(
+  repositoryId: string,
+  nodeId: string,
+  body: { question?: string; cliProviderId?: string },
+): Promise<{ taskId: string }> {
+  return api.post<{ taskId: string }>(`${planBase(repositoryId)}/nodes/${nodeId}/advisory`, body);
 }

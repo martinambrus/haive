@@ -111,6 +111,11 @@ export const createTaskRequestSchema = z
      *  every step to this task's cliProviderId. Manual mid-task step changes
      *  still save globally as usual (see tasks.ignore_saved_step_clis). */
     ignoreSavedStepClis: z.boolean().optional(),
+    /** Plan-canvas node this task implements. Recorded in `plan_node_tasks`, so a
+     *  node can seed several attempts and each one is traceable; when the task
+     *  completes the node goes green. Set by the plan UI's "create a task from
+     *  this leaf" button. */
+    planNodeId: z.string().uuid().optional(),
     resourceLimits: resourceLimitsSchema,
     stepLoopLimits: stepLoopLimitsSchema,
   })

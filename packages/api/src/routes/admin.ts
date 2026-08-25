@@ -940,6 +940,26 @@ adminRoutes.put('/config/browser-access', async (c) => {
   return c.json({ enabled });
 });
 
+const planCanvasSchema = z.object({ enabled: z.boolean() });
+
+// Global plan-canvas kill-switch. OFF makes the onboarding plan-build step
+// self-skip and the plan API refuse to spawn plan tasks; existing plans stay
+// readable and editable, since hiding a plan someone already made would look
+// like data loss rather than a disabled feature. The step registry is untouched
+// either way — de-registering a step would break the forward walk for tasks
+// already mid-flight.
+adminRoutes.get('/config/plan-canvas', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.PLAN_CANVAS_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/plan-canvas', async (c) => {
+  const { enabled } = planCanvasSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.PLAN_CANVAS_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global plan-canvas switch updated');
+  return c.json({ enabled });
+});
+
 const ideEnabledSchema = z.object({ enabled: z.boolean() });
 
 // Global in-task IDE (Editor tab) kill-switch. The api/worker read this within the

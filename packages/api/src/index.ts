@@ -28,6 +28,7 @@ import { taskRoutes } from './routes/tasks.js';
 import { usageWindowRoutes } from './routes/usage-window.js';
 import { upgradeRoutes } from './routes/upgrades.js';
 import { toolingUpgradeRoutes } from './routes/tooling-upgrades.js';
+import { planRoutes } from './routes/plan.js';
 import { userSettingsRoutes } from './routes/user-settings.js';
 import { installBrowserVncWebSocket } from './routes/browser-vnc.js';
 import { ideRoutes, installIdeWebSocket } from './routes/ide.js';
@@ -80,6 +81,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/tooling', toolingRoutes);
   app.route('/repositories', upgradeRoutes);
   app.route('/repositories', toolingUpgradeRoutes);
+  app.route('/repositories', planRoutes);
   app.route('/ide', ideRoutes);
 
   return app;
