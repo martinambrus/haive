@@ -69,7 +69,11 @@ export function kindHint(kind: PlanNodeKind): string {
   return KIND[kind].hint;
 }
 
-export const PLAN_KINDS: PlanNodeKind[] = ['component', 'decision', 'research', 'external'];
+/** Kinds the UI OFFERS. `decision` is deliberately absent: it is a label a
+ *  build agent may write into plan.md, never something a human needs to pick —
+ *  existing decision nodes still resolve through `kindLabel`, they just render
+ *  without a kind badge. */
+export const PLAN_KINDS: PlanNodeKind[] = ['component', 'research', 'external'];
 
 /** `(direct / total)` as it appears on a card. Both numbers are server-computed;
  *  showing only the total would hide that a node with 3 children has 400

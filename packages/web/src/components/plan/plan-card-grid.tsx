@@ -77,7 +77,9 @@ export function PlanCardGrid({
               <Badge variant={statusBadge(node.rolledStatus)}>
                 {statusLabel(node.rolledStatus)}
               </Badge>
-              {node.kind !== 'component' && <Badge>{kindLabel(node.kind)}</Badge>}
+              {node.kind !== 'component' && node.kind !== 'decision' && (
+                <Badge>{kindLabel(node.kind)}</Badge>
+              )}
             </div>
 
             <div className="flex items-center justify-between text-[11px] text-neutral-600">
