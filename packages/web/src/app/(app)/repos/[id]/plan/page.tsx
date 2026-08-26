@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { LayoutGrid, ListTree } from 'lucide-react';
@@ -206,7 +206,6 @@ export default function PlanPage() {
       try {
         setFocus(await getPlanNode(repositoryId, nodeId));
         setSelectedId(nodeId);
-        setMatches(null);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to open node');
       }
@@ -257,6 +256,10 @@ export default function PlanPage() {
   }
 
   selectedIdRef.current = selectedId;
+
+  // The tree filters on match IDS, not the match payloads — the tree rows
+  // already carry their own titles, and only visibility is in question.
+  const matchIds = useMemo(() => (matches ? new Set(matches.map((m) => m.id)) : null), [matches]);
 
   if (loading) return <p className="p-6 text-sm text-neutral-500">Loading plan…</p>;
 
@@ -396,11 +399,18 @@ export default function PlanPage() {
               </div>
             </div>
 
+            {matches && (
+              <p className="text-xs text-neutral-500">
+                {matches.length} match{matches.length === 1 ? '' : 'es'} anywhere in the plan
+              </p>
+            )}
+
             {view === 'tree' ? (
               <div className="max-h-[calc(100vh-12rem)] overflow-y-auto rounded-md border border-neutral-800 bg-neutral-950 py-2">
                 <PlanTree
                   nodes={tree}
                   selectedId={selectedId}
+                  matchIds={matchIds}
                   onSelect={(id) => {
                     // Clicking the ALREADY-selected row closes the panel — same
                     // contract as clicking a selected tile. Otherwise the click
@@ -417,19 +427,16 @@ export default function PlanPage() {
               </div>
             ) : (
               <>
-                {matches && (
-                  <p className="text-xs text-neutral-500">
-                    {matches.length} match{matches.length === 1 ? '' : 'es'} anywhere in the plan
-                  </p>
-                )}
-
                 <nav className="flex flex-wrap items-center gap-1 text-xs text-neutral-400">
                   {crumbs.map((crumb, i) => (
                     <span key={crumb.id} className="flex items-center gap-1">
                       {i > 0 && <span className="text-neutral-700">/</span>}
                       <button
                         type="button"
-                        onClick={() => void descend(crumb.id)}
+                        onClick={() => {
+                          setMatches(null);
+                          void descend(crumb.id);
+                        }}
                         className={
                           i === crumbs.length - 1 ? 'text-neutral-100' : 'hover:text-neutral-100'
                         }
@@ -444,7 +451,12 @@ export default function PlanPage() {
                   nodes={cards}
                   selectedId={selectedId}
                   onSelect={(n) => setSelectedId((prev) => (prev === n.id ? null : n.id))}
-                  onDescend={(n) => void descend(n.id)}
+                  onDescend={(n) => {
+                    // Descending replaces the card list with one node's
+                    // children, so an active filter must not survive it.
+                    setMatches(null);
+                    void descend(n.id);
+                  }}
                   emptyMessage={
                     matches
                       ? 'Nothing matched.'

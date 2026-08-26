@@ -16,10 +16,14 @@ export function PlanTree({
   nodes,
   selectedId,
   onSelect,
+  matchIds,
 }: {
   nodes: PlanTreeNode[];
   selectedId: string | null;
   onSelect: (nodeId: string) => void;
+  /** Server-search matches. While set, the tree shows only these nodes plus
+   *  the ancestors needed to keep the hierarchy readable. */
+  matchIds?: ReadonlySet<string> | null;
 }) {
   const byParent = useMemo(() => {
     const m = new Map<string | null, PlanTreeNode[]>();
@@ -53,13 +57,38 @@ export function PlanTree({
       return next;
     });
 
+  // The filtered visibility set: every match plus each match's ancestors. An
+  // ancestor carries no hit of its own, but without it a match would render as
+  // a detached root and the outline would stop answering "where is this".
+  // `has(cur)` doubles as the walk's cycle guard — every match walks its own
+  // full chain, so stopping on an already-kept node loses nothing.
+  const keep = useMemo(() => {
+    // An EMPTY set stays a filter: zero hits must render "Nothing matched."
+    // here exactly as the tiles view does, not silently unfilter the tree.
+    if (!matchIds) return null;
+    const parentOf = new Map<string, string | null>();
+    for (const n of nodes) parentOf.set(n.id, n.parentId);
+    const set = new Set<string>(matchIds);
+    for (const id of matchIds) {
+      let cur = parentOf.get(id) ?? null;
+      while (cur && !set.has(cur)) {
+        set.add(cur);
+        cur = parentOf.get(cur) ?? null;
+      }
+    }
+    return set;
+  }, [matchIds, nodes]);
+
   const render = (node: PlanTreeNode, depth: number): React.ReactNode => {
-    const children = byParent.get(node.id) ?? [];
-    const isCollapsed = collapsed.has(node.id);
+    const children = (byParent.get(node.id) ?? []).filter((c) => !keep || keep.has(c.id));
+    // Filtering forces every kept branch open — a collapsed ancestor would
+    // hide the very matches the filter exists to show.
+    const isCollapsed = keep ? false : collapsed.has(node.id);
+    const isMatch = matchIds?.has(node.id) ?? false;
     return (
       <div key={node.id}>
         <div
-          className={`flex items-center gap-1.5 rounded px-1.5 py-1 text-sm ${
+          className={`flex items-center gap-1.5 rounded py-1 pl-1.5 pr-5 text-sm ${
             node.id === selectedId ? 'bg-indigo-500/15 text-neutral-100' : 'text-neutral-300'
           }`}
           style={{ paddingLeft: `${depth * 14 + 6}px` }}
@@ -83,7 +112,9 @@ export function PlanTree({
           <button
             type="button"
             onClick={() => onSelect(node.id)}
-            className="flex-1 truncate text-left hover:text-neutral-100"
+            className={`flex-1 truncate text-left hover:text-neutral-100 ${
+              isMatch ? 'font-medium text-neutral-100' : ''
+            }`}
           >
             {node.title}
           </button>
@@ -96,9 +127,13 @@ export function PlanTree({
     );
   };
 
-  const roots = byParent.get(null) ?? [];
+  const roots = (byParent.get(null) ?? []).filter((r) => !keep || keep.has(r.id));
   if (roots.length === 0) {
-    return <p className="px-2 py-3 text-sm text-neutral-500">No plan yet.</p>;
+    return (
+      <p className="px-2 py-3 text-sm text-neutral-500">
+        {keep ? 'Nothing matched.' : 'No plan yet.'}
+      </p>
+    );
   }
   return <div className="flex flex-col">{roots.map((r) => render(r, 0))}</div>;
 }
