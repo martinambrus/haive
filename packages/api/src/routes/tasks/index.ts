@@ -24,6 +24,7 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { clampVoteScore } from '@haive/shared/fair-priority';
+import { applyPlanPatch } from '@haive/shared/plan';
 import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
@@ -405,6 +406,10 @@ taskRoutes.post('/', async (c) => {
 
   // A plan node can only seed a task in ITS OWN repository — the link is what
   // later flips the node green, and a cross-repo link would green the wrong plan.
+  // taskable/version ride the same read: creating a task from a node is the
+  // definitional "this is a unit of work" signal, and the flag write below
+  // needs the version for the optimistic-concurrency check.
+  let planNode: { id: string; taskable: boolean; version: number } | null = null;
   if (body.planNodeId) {
     if (!body.repositoryId) {
       throw new HttpError(400, 'planNodeId requires a repositoryId');
@@ -414,9 +419,10 @@ taskRoutes.post('/', async (c) => {
         eq(schema.planNodes.id, body.planNodeId),
         eq(schema.planNodes.repositoryId, body.repositoryId),
       ),
-      columns: { id: true },
+      columns: { id: true, taskable: true, version: true },
     });
     if (!node) throw new HttpError(404, 'Plan node not found in this repository');
+    planNode = node;
   }
 
   const metadata: Record<string, unknown> = {};
@@ -455,11 +461,35 @@ taskRoutes.post('/', async (c) => {
   const task = inserted[0];
   if (!task) throw new HttpError(500, 'Failed to create task');
 
-  if (body.planNodeId) {
+  if (body.planNodeId && planNode) {
     await db
       .insert(schema.planNodeTasks)
       .values({ nodeId: body.planNodeId, taskId: task.id })
       .onConflictDoNothing();
+
+    // Creating a task from a node marks it taskable — a human picking a node to
+    // run is better evidence than any LLM guess. Best-effort: the flag is
+    // metadata, and a lost race for the version must not fail the task creation.
+    if (!planNode.taskable) {
+      try {
+        await applyPlanPatch(
+          db,
+          {
+            ops: [
+              {
+                op: 'upsert',
+                nodeRef: planNode.id,
+                expectedVersion: planNode.version,
+                taskable: true,
+              },
+            ],
+          },
+          { repositoryId: body.repositoryId!, origin: 'user' },
+        );
+      } catch (err) {
+        logger.warn({ err, nodeId: planNode.id }, 'taskable auto-mark on task create failed');
+      }
+    }
   }
 
   await appendTaskEvent(db, task.id, null, 'task.created', { userId });
