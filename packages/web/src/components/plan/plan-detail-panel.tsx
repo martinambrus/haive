@@ -393,11 +393,12 @@ export function PlanDetailPanel({
           )}
 
           <div className="flex flex-wrap gap-2 border-t border-neutral-800 pt-3">
-            {/* No actions for an `external` node: the work lives outside the
-                system, so no predefined step can run on it. If it needs
+            {/* No `Create a task` for research/external nodes: a research node's
+                whole flow IS the advisory task the Research button spawns, and
+                external work lives outside the system — if it needs
                 investigating first, that is what the `research` kind (or the
                 chat tab) is for. */}
-            {node.kind !== 'external' && (
+            {node.kind !== 'external' && node.kind !== 'research' && (
               <Link
                 href={`/tasks/new?repositoryId=${repositoryId}&planNodeId=${nodeId}&title=${encodeURIComponent(node.title)}`}
               >
@@ -407,7 +408,6 @@ export function PlanDetailPanel({
             {node.kind === 'research' && (
               <Button
                 size="sm"
-                variant="secondary"
                 disabled={saving}
                 onClick={() => {
                   // Spawn, then go watch it — the advisory task's decision gate
