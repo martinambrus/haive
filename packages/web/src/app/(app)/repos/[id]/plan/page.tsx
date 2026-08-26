@@ -50,6 +50,8 @@ export default function PlanPage() {
   const [rootId, setRootId] = useState<string | null>(null);
   const [tree, setTree] = useState<PlanTreeNode[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Mirror for the once-registered ESC listener.
+  const selectedIdRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -92,6 +94,28 @@ export default function PlanPage() {
     apply();
     mq.addEventListener('change', apply);
     return () => mq.removeEventListener('change', apply);
+  }, []);
+
+  // ESC closes the detail panel. Ignored while the user is typing in a field —
+  // an ESC meant to clear/leave an input must not also throw away an unsaved
+  // body draft in the panel.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || !selectedIdRef.current) return;
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      setSelectedId(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   const persistPrefs = useCallback((next: UiPrefs) => {
@@ -232,6 +256,8 @@ export default function PlanPage() {
     }
   }
 
+  selectedIdRef.current = selectedId;
+
   if (loading) return <p className="p-6 text-sm text-neutral-500">Loading plan…</p>;
 
   const currentParentId = focus?.node.id ?? rootId;
@@ -309,8 +335,8 @@ export default function PlanPage() {
               alternate views of the same left column, not two side-by-side
               surfaces. */}
           <section
-            className="flex min-w-0 flex-col gap-3 lg:shrink-0"
-            style={isWide ? { width: `${splitPct}%` } : undefined}
+            className={`flex min-w-0 flex-col gap-3 ${selectedId ? 'lg:shrink-0' : 'flex-1'}`}
+            style={isWide && selectedId ? { width: `${splitPct}%` } : undefined}
           >
             {/* View switcher. `title` carries the tooltip; aria-pressed says
                 which is active to something reading the page. */}
@@ -376,9 +402,14 @@ export default function PlanPage() {
                   nodes={tree}
                   selectedId={selectedId}
                   onSelect={(id) => {
-                    // Tree click both selects (right panel follows) and focuses
-                    // (children load, so a later switch to tiles is where you
-                    // left off).
+                    // Clicking the ALREADY-selected row closes the panel — same
+                    // contract as clicking a selected tile. Otherwise the click
+                    // both selects (right panel follows) and focuses (children
+                    // load, so a later switch to tiles is where you left off).
+                    if (id === selectedId) {
+                      setSelectedId(null);
+                      return;
+                    }
                     setSelectedId(id);
                     void descend(id);
                   }}
@@ -412,7 +443,7 @@ export default function PlanPage() {
                 <PlanCardGrid
                   nodes={cards}
                   selectedId={selectedId}
-                  onSelect={(n) => setSelectedId(n.id)}
+                  onSelect={(n) => setSelectedId((prev) => (prev === n.id ? null : n.id))}
                   onDescend={(n) => void descend(n.id)}
                   emptyMessage={
                     matches
@@ -443,28 +474,35 @@ export default function PlanPage() {
             )}
           </section>
 
-          {/* Splitter — wide screens only; stacked panes have nothing to resize. */}
-          <div
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize plan panes"
-            onPointerDown={onSplitterDown}
-            onPointerMove={onSplitterMove}
-            onPointerUp={onSplitterUp}
-            className={`hidden w-1.5 shrink-0 cursor-col-resize bg-neutral-800 transition-colors hover:bg-indigo-500/60 lg:block ${
-              splitDragging.current ? 'bg-indigo-500/60' : ''
-            }`}
-          />
+          {/* Splitter — only while the detail panel is open; with no right pane
+              it would dangle beside empty space. Wide screens only; stacked
+              panes have nothing to resize. */}
+          {selectedId && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize plan panes"
+              onPointerDown={onSplitterDown}
+              onPointerMove={onSplitterMove}
+              onPointerUp={onSplitterUp}
+              className={`hidden w-1.5 shrink-0 cursor-col-resize bg-neutral-800 transition-colors hover:bg-indigo-500/60 lg:block ${
+                splitDragging.current ? 'bg-indigo-500/60' : ''
+              }`}
+            />
+          )}
 
-          {/* Right pane: the selected node's details. Collapsible by design —
-              closing the panel (✕) gives the view the full width. */}
-          <section
-            className="min-w-0 flex-1"
-            style={
-              isWide ? ({ width: `${100 - splitPct}%`, flex: 'none' } as CSSProperties) : undefined
-            }
-          >
-            {selectedId && (
+          {/* Right pane: the selected node's details — rendered only while a
+              node is selected; closed, the view takes the full width and the
+              splitter goes with it. */}
+          {selectedId && (
+            <section
+              className="min-w-0 flex-1"
+              style={
+                isWide
+                  ? ({ width: `${100 - splitPct}%`, flex: 'none' } as CSSProperties)
+                  : undefined
+              }
+            >
               <PlanDetailPanel
                 repositoryId={repositoryId}
                 nodeId={selectedId}
@@ -473,8 +511,8 @@ export default function PlanPage() {
                 onNavigate={(id) => void descend(id)}
                 onClose={() => setSelectedId(null)}
               />
-            )}
-          </section>
+            </section>
+          )}
         </div>
       )}
     </div>
