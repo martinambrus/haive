@@ -66,6 +66,9 @@ export function PlanDetailPanel({
   const [saving, setSaving] = useState(false);
   const [editingBody, setEditingBody] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
+  const [editingMeta, setEditingMeta] = useState(false);
+  const [statusDraft, setStatusDraft] = useState<PlanNodeStatus>('todo');
+  const [kindDraft, setKindDraft] = useState<PlanNodeDetail['node']['kind']>('component');
   const [bodyDraft, setBodyDraft] = useState('');
   const [titleDraft, setTitleDraft] = useState('');
   const [linkTarget, setLinkTarget] = useState('');
@@ -86,6 +89,7 @@ export function PlanDetailPanel({
     setConflict(false);
     setEditingBody(false);
     setEditingTitle(false);
+    setEditingMeta(false);
     setTab('details');
     void getPlanNode(repositoryId, nodeId)
       .then((d) => {
@@ -165,6 +169,23 @@ export function PlanDetailPanel({
     if (ok) setEditingTitle(false);
   }
 
+  // The badge row's OK button: both fields go in ONE patch (one version bump),
+  // and a failed write keeps the editor open with the drafts intact.
+  async function applyMeta(): Promise<void> {
+    if (statusDraft === node.status && kindDraft === node.kind) {
+      setEditingMeta(false);
+      return;
+    }
+    const ok = await write(() =>
+      updatePlanNode(repositoryId, nodeId, {
+        expectedVersion: node.version,
+        status: statusDraft,
+        kind: kindDraft,
+      }),
+    );
+    if (ok) setEditingMeta(false);
+  }
+
   return (
     <aside className="flex flex-col gap-3 rounded-md border border-neutral-800 bg-neutral-950 p-4">
       <div className="flex items-start gap-2.5">
@@ -211,10 +232,72 @@ export function PlanDetailPanel({
         </button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Badge variant={statusBadge(node.rolledStatus)}>{statusLabel(node.rolledStatus)}</Badge>
-        <Badge>{kindLabel(node.kind)}</Badge>
-      </div>
+      {editingMeta ? (
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-neutral-400">Status</span>
+              <select
+                value={statusDraft}
+                disabled={saving}
+                onChange={(e) => setStatusDraft(e.target.value as PlanNodeStatus)}
+                className="h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100"
+              >
+                {PLAN_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {statusLabel(s)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-neutral-400">Kind</span>
+              <select
+                value={kindDraft}
+                disabled={saving}
+                onChange={(e) => setKindDraft(e.target.value as PlanNodeDetail['node']['kind'])}
+                className="h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100"
+              >
+                {PLAN_KINDS.map((k) => (
+                  <option key={k} value={k}>
+                    {kindLabel(k)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="flex gap-2">
+              <Button size="sm" disabled={saving} onClick={() => void applyMeta()}>
+                OK
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={saving}
+                onClick={() => setEditingMeta(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant={statusBadge(node.rolledStatus)}>{statusLabel(node.rolledStatus)}</Badge>
+          <Badge>{kindLabel(node.kind)}</Badge>
+          <button
+            type="button"
+            title="Change status or kind"
+            onClick={() => {
+              setStatusDraft(node.status);
+              setKindDraft(node.kind);
+              setEditingMeta(true);
+            }}
+            className="text-neutral-500 hover:text-neutral-200"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {rolled && (
         // A user who set this node to "done" and sees amber deserves to be told
@@ -251,47 +334,6 @@ export function PlanDetailPanel({
 
       {tab === 'details' && (
         <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap gap-2">
-            <select
-              value={node.status}
-              disabled={saving}
-              onChange={(e) =>
-                void write(() =>
-                  updatePlanNode(repositoryId, nodeId, {
-                    expectedVersion: node.version,
-                    status: e.target.value as PlanNodeStatus,
-                  }),
-                )
-              }
-              className="h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100"
-            >
-              {PLAN_STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {statusLabel(s)}
-                </option>
-              ))}
-            </select>
-            <select
-              value={node.kind}
-              disabled={saving}
-              onChange={(e) =>
-                void write(() =>
-                  updatePlanNode(repositoryId, nodeId, {
-                    expectedVersion: node.version,
-                    kind: e.target.value as PlanNodeDetail['node']['kind'],
-                  }),
-                )
-              }
-              className="h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100"
-            >
-              {PLAN_KINDS.map((k) => (
-                <option key={k} value={k}>
-                  {kindLabel(k)}
-                </option>
-              ))}
-            </select>
-          </div>
-
           {editingBody ? (
             <div className="flex flex-col gap-2">
               <textarea
