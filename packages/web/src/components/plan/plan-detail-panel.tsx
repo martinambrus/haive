@@ -393,12 +393,18 @@ export function PlanDetailPanel({
           )}
 
           <div className="flex flex-wrap gap-2 border-t border-neutral-800 pt-3">
-            <Link
-              href={`/tasks/new?repositoryId=${repositoryId}&planNodeId=${nodeId}&title=${encodeURIComponent(node.title)}`}
-            >
-              <Button size="sm">Create a task from this</Button>
-            </Link>
-            {(node.kind === 'research' || node.kind === 'external') && (
+            {/* No actions for an `external` node: the work lives outside the
+                system, so no predefined step can run on it. If it needs
+                investigating first, that is what the `research` kind (or the
+                chat tab) is for. */}
+            {node.kind !== 'external' && (
+              <Link
+                href={`/tasks/new?repositoryId=${repositoryId}&planNodeId=${nodeId}&title=${encodeURIComponent(node.title)}`}
+              >
+                <Button size="sm">Create a task from this</Button>
+              </Link>
+            )}
+            {node.kind === 'research' && (
               <Button
                 size="sm"
                 variant="secondary"
