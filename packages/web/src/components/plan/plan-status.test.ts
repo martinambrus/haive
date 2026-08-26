@@ -23,6 +23,15 @@ describe('plan-status', () => {
     for (const k of PLAN_KINDS) expect(kindLabel(k)).toBeTruthy();
   });
 
+  it('offers every kind except decision, but still names legacy decision nodes', () => {
+    // `decision` is agent-written metadata a human never needs to pick; it is
+    // absent from the picker so legacy nodes can still be re-labelled away
+    // from it, and kindLabel must keep resolving it for anything that renders.
+    expect(PLAN_KINDS).toEqual(['component', 'research', 'external']);
+    expect(PLAN_KINDS).not.toContain('decision');
+    expect(kindLabel('decision')).toBe('Decision');
+  });
+
   it('keeps done the only green', () => {
     const green = PLAN_STATUSES.filter((s) => statusBadge(s) === 'success');
     expect(green).toEqual(['done']);

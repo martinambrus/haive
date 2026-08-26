@@ -24,7 +24,7 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { clampVoteScore } from '@haive/shared/fair-priority';
-import { applyPlanPatch } from '@haive/shared/plan';
+import { markPlanNodeTaskable } from '../../lib/mark-plan-node-taskable.js';
 import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
@@ -467,29 +467,7 @@ taskRoutes.post('/', async (c) => {
       .values({ nodeId: body.planNodeId, taskId: task.id })
       .onConflictDoNothing();
 
-    // Creating a task from a node marks it taskable — a human picking a node to
-    // run is better evidence than any LLM guess. Best-effort: the flag is
-    // metadata, and a lost race for the version must not fail the task creation.
-    if (!planNode.taskable) {
-      try {
-        await applyPlanPatch(
-          db,
-          {
-            ops: [
-              {
-                op: 'upsert',
-                nodeRef: planNode.id,
-                expectedVersion: planNode.version,
-                taskable: true,
-              },
-            ],
-          },
-          { repositoryId: body.repositoryId!, origin: 'user' },
-        );
-      } catch (err) {
-        logger.warn({ err, nodeId: planNode.id }, 'taskable auto-mark on task create failed');
-      }
-    }
+    await markPlanNodeTaskable(db, planNode, body.repositoryId!);
   }
 
   await appendTaskEvent(db, task.id, null, 'task.created', { userId });
