@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { Pencil } from 'lucide-react';
 import {
   createPlanEdge,
@@ -58,6 +59,7 @@ export function PlanDetailPanel({
   onNavigate: (nodeId: string) => void;
   onClose: () => void;
 }) {
+  const router = useRouter();
   const [detail, setDetail] = useState<PlanNodeDetail | null>(null);
   const [tab, setTab] = useState<Tab>('details');
   const [impact, setImpact] = useState<PlanImpact | null>(null);
@@ -258,7 +260,10 @@ export function PlanDetailPanel({
                 onChange={(e) => setKindDraft(e.target.value as PlanNodeDetail['node']['kind'])}
                 className="h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100"
               >
-                {PLAN_KINDS.map((k) => (
+                {(node.kind === 'decision'
+                  ? (['decision', ...PLAN_KINDS] as const)
+                  : PLAN_KINDS
+                ).map((k) => (
                   <option key={k} value={k}>
                     {kindLabel(k)}
                   </option>
@@ -283,7 +288,7 @@ export function PlanDetailPanel({
       ) : (
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant={statusBadge(node.rolledStatus)}>{statusLabel(node.rolledStatus)}</Badge>
-          <Badge>{kindLabel(node.kind)}</Badge>
+          {node.kind !== 'decision' && <Badge>{kindLabel(node.kind)}</Badge>}
           <button
             type="button"
             title="Change status or kind"
@@ -398,7 +403,18 @@ export function PlanDetailPanel({
                 size="sm"
                 variant="secondary"
                 disabled={saving}
-                onClick={() => void write(() => startPlanAdvisory(repositoryId, nodeId, {}))}
+                onClick={() => {
+                  // Spawn, then go watch it — the advisory task's decision gate
+                  // is where the user's input is needed, and staying on the
+                  // panel made the click look like a no-op.
+                  void (async () => {
+                    let taskId: string | null = null;
+                    const ok = await write(async () => {
+                      ({ taskId } = await startPlanAdvisory(repositoryId, nodeId, {}));
+                    });
+                    if (ok && taskId) router.push(`/tasks/${taskId}`);
+                  })();
+                }}
               >
                 Research it
               </Button>
