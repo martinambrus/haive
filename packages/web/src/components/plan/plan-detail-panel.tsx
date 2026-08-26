@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { Pencil } from 'lucide-react';
 import {
   createPlanEdge,
   deletePlanEdge,
@@ -16,7 +17,7 @@ import {
   type PlanNodeStatus,
   type PlanTreeNode,
 } from '@/lib/api-client';
-import { Badge, Button, FormError, Input } from '@/components/ui';
+import { Badge, Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PlanChat } from './plan-chat';
 import { PlanGraph } from './plan-graph';
@@ -64,6 +65,7 @@ export function PlanDetailPanel({
   const [conflict, setConflict] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editingBody, setEditingBody] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
   const [bodyDraft, setBodyDraft] = useState('');
   const [titleDraft, setTitleDraft] = useState('');
   const [linkTarget, setLinkTarget] = useState('');
@@ -83,6 +85,7 @@ export function PlanDetailPanel({
     setError(null);
     setConflict(false);
     setEditingBody(false);
+    setEditingTitle(false);
     setTab('details');
     void getPlanNode(repositoryId, nodeId)
       .then((d) => {
@@ -104,7 +107,9 @@ export function PlanDetailPanel({
       .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load impact'));
   }, [tab, impact, repositoryId, nodeId]);
 
-  async function write(fn: () => Promise<unknown>): Promise<void> {
+  // Returns whether the write landed, so a caller holding an in-place editor
+  // can keep the user's draft on failure instead of silently dropping it.
+  async function write(fn: () => Promise<unknown>): Promise<boolean> {
     setSaving(true);
     setError(null);
     setConflict(false);
@@ -112,12 +117,14 @@ export function PlanDetailPanel({
       await fn();
       await reload();
       onChanged();
+      return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save';
       // A 409 is not a generic failure — someone else wrote this node while the
       // panel was open, and the user has to see that before deciding what to do.
       if (/modified by someone else/i.test(message)) setConflict(true);
       setError(message);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -138,14 +145,66 @@ export function PlanDetailPanel({
   const node = detail.node;
   const rolled = isRolledUp(node.status, node.rolledStatus);
 
+  // The inline title editor's commit path: Enter blurs the input, and the blur
+  // itself is what applies — one path, no double-apply guard needed. A no-op
+  // edit (empty or unchanged) just restores the title. On failure the editor
+  // STAYS open so the draft survives the error/conflict banner.
+  async function applyTitleRename(): Promise<void> {
+    const next = titleDraft.trim();
+    if (!next || next === node.title) {
+      setTitleDraft(node.title);
+      setEditingTitle(false);
+      return;
+    }
+    const ok = await write(() =>
+      updatePlanNode(repositoryId, nodeId, {
+        expectedVersion: node.version,
+        title: next,
+      }),
+    );
+    if (ok) setEditingTitle(false);
+  }
+
   return (
     <aside className="flex flex-col gap-3 rounded-md border border-neutral-800 bg-neutral-950 p-4">
-      <div className="flex items-start gap-2">
+      <div className="flex items-start gap-2.5">
+        {editingTitle ? null : (
+          <button
+            type="button"
+            title="Rename this node"
+            onClick={() => {
+              setTitleDraft(node.title);
+              setEditingTitle(true);
+            }}
+            className="mt-1 text-neutral-500 hover:text-neutral-200"
+          >
+            <Pencil className="h-4 w-4" />
+          </button>
+        )}
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[11px] text-neutral-600">
-            {detail.ancestry.map((a) => a.title).join(' / ')}
-          </p>
-          <h2 className="truncate text-base font-semibold text-neutral-100">{node.title}</h2>
+          {editingTitle ? (
+            <input
+              autoFocus
+              value={titleDraft}
+              disabled={saving}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+                if (e.key === 'Escape') {
+                  // Cancel, not apply: restore the loaded title and close the
+                  // editor. No blur() call — unmounting the input moves focus
+                  // off it, and even a late blur would no-op on the restored
+                  // draft.
+                  setTitleDraft(node.title);
+                  setEditingTitle(false);
+                }
+              }}
+              onBlur={() => void applyTitleRename()}
+              className="w-full rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-base font-semibold text-neutral-100 outline-none focus:border-indigo-500"
+            />
+          ) : (
+            <h2 className="truncate text-base font-semibold text-neutral-100">{node.title}</h2>
+          )}
         </div>
         <button type="button" onClick={onClose} className="text-sm text-neutral-500">
           ✕
@@ -193,29 +252,6 @@ export function PlanDetailPanel({
 
       {tab === 'details' && (
         <div className="flex flex-col gap-3">
-          <div className="flex gap-2">
-            <Input
-              value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
-              className="flex-1"
-            />
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={saving || titleDraft.trim() === node.title || !titleDraft.trim()}
-              onClick={() =>
-                void write(() =>
-                  updatePlanNode(repositoryId, nodeId, {
-                    expectedVersion: node.version,
-                    title: titleDraft.trim(),
-                  }),
-                )
-              }
-            >
-              Rename
-            </Button>
-          </div>
-
           <div className="flex flex-wrap gap-2">
             <select
               value={node.status}
