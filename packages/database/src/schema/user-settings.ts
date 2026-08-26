@@ -32,3 +32,15 @@ export const userIdeSettings = pgTable('user_ide_settings', {
   settingsJson: text('settings_json').notNull().default('{}'),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
+
+/** Per-user UI preferences as one JSON blob — view choice and pane split for the
+ *  plan canvas today. Per USER (not per repo, not per browser): a layout choice
+ *  is about how a person reads plans. Schemaless on the server; the web owns the
+ *  keys, so a new pref is a web-only change. Same shape as user_ide_settings. */
+export const userUiPrefs = pgTable('user_ui_prefs', {
+  userId: uuid('user_id')
+    .primaryKey()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  settingsJson: text('settings_json').notNull().default('{}'),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});

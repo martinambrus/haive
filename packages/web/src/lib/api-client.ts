@@ -1438,3 +1438,29 @@ export function startPlanAdvisory(
 ): Promise<{ taskId: string }> {
   return api.post<{ taskId: string }>(`${planBase(repositoryId)}/nodes/${nodeId}/advisory`, body);
 }
+
+/* ------------------------------------------------------------------ */
+/* Per-user UI preferences                                             */
+/* ------------------------------------------------------------------ */
+
+/** Server-persisted UI prefs (plan-canvas view + pane split). Web-owned keys —
+ *  the server stores the blob verbatim. Follows the account across browsers. */
+export interface UiPrefs {
+  /** 'tree' | 'tiles' — which plan-canvas view the user chose. */
+  planView?: 'tree' | 'tiles';
+  /** Left-pane width as a percentage (25-75) for the plan canvas. */
+  planSplitPct?: number;
+}
+
+export function getUiPrefs(): Promise<UiPrefs> {
+  return api
+    .get<{ settingsJson: string }>('/user-settings/ui-prefs')
+    .then((res) => JSON.parse(res.settingsJson) as UiPrefs)
+    .catch(() => ({}));
+}
+
+export function putUiPrefs(prefs: UiPrefs): Promise<void> {
+  return api
+    .put('/user-settings/ui-prefs', { settingsJson: JSON.stringify(prefs) })
+    .then(() => undefined);
+}

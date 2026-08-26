@@ -220,6 +220,42 @@ userSettingsRoutes.put('/ide', async (c) => {
   return c.json({ ok: true });
 });
 
+// Per-user UI preferences (plan-canvas view + split today). Same contract as
+// /ide: one JSON blob, web-owned keys, 64 KiB cap, absent row = '{}'.
+userSettingsRoutes.get('/ui-prefs', async (c) => {
+  const userId = c.get('userId');
+  const db = getDb();
+  const row = await db.query.userUiPrefs.findFirst({
+    where: eq(schema.userUiPrefs.userId, userId),
+    columns: { settingsJson: true },
+  });
+  return c.json({ settingsJson: row?.settingsJson ?? '{}' });
+});
+
+userSettingsRoutes.put('/ui-prefs', async (c) => {
+  const userId = c.get('userId');
+  const body = (await c.req.json()) as { settingsJson?: unknown };
+  const settingsJson = body.settingsJson;
+  if (typeof settingsJson !== 'string') throw new HttpError(400, 'settingsJson must be a string');
+  if (Buffer.byteLength(settingsJson, 'utf8') > MAX_IDE_SETTINGS_BYTES) {
+    throw new HttpError(413, 'settings exceed the 64 KiB limit');
+  }
+  try {
+    JSON.parse(settingsJson);
+  } catch {
+    throw new HttpError(400, 'settingsJson must be valid JSON');
+  }
+  const db = getDb();
+  await db
+    .insert(schema.userUiPrefs)
+    .values({ userId, settingsJson })
+    .onConflictDoUpdate({
+      target: schema.userUiPrefs.userId,
+      set: { settingsJson, updatedAt: new Date() },
+    });
+  return c.json({ ok: true });
+});
+
 userSettingsRoutes.get('/notifications', async (c) => {
   const userId = c.get('userId');
   const db = getDb();
