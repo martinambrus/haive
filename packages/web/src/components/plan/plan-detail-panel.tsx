@@ -214,7 +214,6 @@ export function PlanDetailPanel({
       <div className="flex flex-wrap items-center gap-1.5">
         <Badge variant={statusBadge(node.rolledStatus)}>{statusLabel(node.rolledStatus)}</Badge>
         <Badge>{kindLabel(node.kind)}</Badge>
-        {node.taskable && <Badge variant="info">Taskable</Badge>}
       </div>
 
       {rolled && (
@@ -291,22 +290,6 @@ export function PlanDetailPanel({
                 </option>
               ))}
             </select>
-            <label className="flex items-center gap-1.5 text-xs text-neutral-300">
-              <input
-                type="checkbox"
-                checked={node.taskable}
-                disabled={saving}
-                onChange={(e) =>
-                  void write(() =>
-                    updatePlanNode(repositoryId, nodeId, {
-                      expectedVersion: node.version,
-                      taskable: e.target.checked,
-                    }),
-                  )
-                }
-              />
-              Taskable
-            </label>
           </div>
 
           {editingBody ? (

@@ -78,7 +78,6 @@ export function PlanCardGrid({
                 {statusLabel(node.rolledStatus)}
               </Badge>
               {node.kind !== 'component' && <Badge>{kindLabel(node.kind)}</Badge>}
-              {node.taskable && <Badge variant="info">Taskable</Badge>}
             </div>
 
             <div className="flex items-center justify-between text-[11px] text-neutral-600">
