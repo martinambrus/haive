@@ -73,6 +73,19 @@ body {
 /* ...but not twice: the rule above also matches the <code> inside a <pre>. */
 .haive-md.haive-md-inherit pre code { font-size: inherit; }
 
+/* WYSIWYG markdown editor (tiptap). The contenteditable carries .haive-md so
+ * in-editor typography IS the render typography; these rules add only editor
+ * affordances on top. */
+.haive-md.ProseMirror { white-space: pre-wrap; outline: none; caret-color: rgb(129 140 248); }
+.haive-md.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder); color: rgb(113 113 122);
+  float: left; height: 0; pointer-events: none; }
+.haive-md.ProseMirror table { display: table; width: 100%; table-layout: fixed; }
+.haive-md.ProseMirror th, .haive-md.ProseMirror td { position: relative; }
+.haive-md.ProseMirror .selectedCell::after {
+  content: ''; position: absolute; inset: 0;
+  background: rgb(99 102 241 / 0.2); pointer-events: none; }
+
 /* Markdown-view enhancements: animated disclosures, collapsed code blocks,
  * mermaid sizing. Scoped under .haive-md / .haive-mermaid so the form-level
  * <details> (infoSections, accordions) outside markdown bodies are untouched. */

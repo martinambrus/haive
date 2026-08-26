@@ -14,6 +14,13 @@
   "dependencies": {
     "@haive/shared": "workspace:*",
     "@novnc/novnc": "^1.5.0",
+    "@tiptap/core": "^3.30.5",
+    "@tiptap/extension-list": "^3.30.5",
+    "@tiptap/extension-table": "^3.30.5",
+    "@tiptap/extensions": "^3.30.5",
+    "@tiptap/pm": "^3.30.5",
+    "@tiptap/react": "^3.30.5",
+    "@tiptap/starter-kit": "^3.30.5",
     "@xterm/addon-clipboard": "^0.2.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
@@ -28,7 +35,8 @@
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^3.6.0"
+    "tailwind-merge": "^3.6.0",
+    "tiptap-markdown": "^0.9.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",

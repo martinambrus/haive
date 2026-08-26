@@ -19,7 +19,9 @@ import {
   type PlanTreeNode,
 } from '@/lib/api-client';
 import { Badge, Button, FormError } from '@/components/ui';
+import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { looksLikeMarkdown } from '@/components/markdown/looks-like-markdown';
 import { PlanChat } from './plan-chat';
 import { PlanGraph } from './plan-graph';
 import {
@@ -341,11 +343,16 @@ export function PlanDetailPanel({
         <div className="flex flex-col gap-3">
           {editingBody ? (
             <div className="flex flex-col gap-2">
-              <textarea
+              {/* key={nodeId}: a hard reset when a different node is opened —
+                  the editor reads `value` at creation only. `breaks` mirrors
+                  MarkdownView's line-break policy so plain-text bodies keep
+                  their newlines. */}
+              <MarkdownEditor
+                key={nodeId}
                 value={bodyDraft}
-                onChange={(e) => setBodyDraft(e.target.value)}
-                rows={10}
-                className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-xs text-neutral-100"
+                onChange={setBodyDraft}
+                placeholder="Describe this node…"
+                breaks={!looksLikeMarkdown(node.body ?? '')}
               />
               <div className="flex gap-2">
                 <Button
