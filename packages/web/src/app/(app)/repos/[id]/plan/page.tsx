@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { LayoutGrid, ListTree, Plus, Trash2 } from 'lucide-react';
 import {
@@ -51,6 +51,7 @@ const UNREAD_POLL_MS = 15_000;
 export default function PlanPage() {
   usePageTitle('Plan');
   const params = useParams();
+  const router = useRouter();
   const repositoryId = String(params.id);
   // The selected node lives in the URL, not in preferences: it is per-repo by
   // construction, it survives a reload, and Back from the new-task form returns
@@ -92,7 +93,6 @@ export default function PlanPage() {
   const [addingChild, setAddingChild] = useState(false);
   const [query, setQuery] = useState('');
   const [matches, setMatches] = useState<PlanSearchMatch[] | null>(null);
-  const [buildTaskId, setBuildTaskId] = useState<string | null>(null);
 
   // Which of the two views the user reads the plan in, and how wide the left
   // pane is. Both are PER-USER preferences, persisted server-side (not per
@@ -369,10 +369,15 @@ export default function PlanPage() {
     setError(null);
     try {
       const { taskId } = await buildPlan(repositoryId, { mode });
-      setBuildTaskId(taskId);
+      // Straight to the task the click just created, the same as the research
+      // action on a node. Building is the only thing happening now and it
+      // happens over there; leaving the user on an empty plan behind a notice
+      // asking them to click again is a step that carries no decision.
+      router.push(`/tasks/${taskId}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to start the build');
-    } finally {
+      // Only on failure: on success the page is leaving, and re-enabling the
+      // button mid-navigation invites a second build.
       setBusy(false);
     }
   }
@@ -436,16 +441,6 @@ export default function PlanPage() {
       </div>
 
       <FormError message={error} />
-
-      {buildTaskId && (
-        <p className="rounded border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
-          Building the plan —{' '}
-          <Link href={`/tasks/${buildTaskId}`} className="underline">
-            watch the task
-          </Link>
-          . Reload this page when it finishes.
-        </p>
-      )}
 
       {nodeCount === 0 ? (
         <Card>
