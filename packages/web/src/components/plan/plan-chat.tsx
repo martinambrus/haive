@@ -526,12 +526,15 @@ function ConversationGroup({
                   <span className="h-px flex-1 bg-indigo-500/40" />
                 </div>
               )}
-              <p className="text-[11px] uppercase tracking-wide text-neutral-600">
+              {/* Indigo for the speaker so a turn is findable while scanning a
+                  long transcript; the neutral-600/700 pair it used before was
+                  barely legible on this background. */}
+              <p className="text-[11px] uppercase tracking-wide text-indigo-300">
                 {m.role === 'user' ? 'You' : 'Agent'}
                 {stamp(m.createdAt) && (
                   // Not uppercased with the speaker: a date in caps is harder
                   // to read than the word beside it.
-                  <span className="ml-1 normal-case text-neutral-700">({stamp(m.createdAt)})</span>
+                  <span className="ml-1 normal-case text-neutral-400">({stamp(m.createdAt)})</span>
                 )}
               </p>
               {/* No cap and no scroller of its own: the transcript above is
