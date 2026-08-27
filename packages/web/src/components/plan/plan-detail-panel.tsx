@@ -910,7 +910,10 @@ export function PlanDetailPanel({
                             <ChevronRight className="h-3 w-3" />
                           )}
                           {g.label}
-                          <span className="text-neutral-600">({g.hops.length})</span>
+                          {/* Same weight as the relation counts below it, so
+                              the two rows do not disagree about how loud a
+                              count is. */}
+                          <span className="text-neutral-400">({g.hops.length})</span>
                         </button>
                         {open && (
                           <div className="flex flex-col gap-2 border-t border-neutral-800 px-2 py-1.5">
@@ -921,9 +924,15 @@ export function PlanDetailPanel({
                                 are emitted, so none of these is ever empty. */}
                             {g.relations.map((r) => (
                               <div key={r.id} className="flex flex-col">
-                                <p className="text-[10px] uppercase tracking-wide text-neutral-600">
+                                {/* Indigo, matching the chat transcript's
+                                    speaker label: the neutral-600/700 pair
+                                    this used is the same one that was already
+                                    found barely legible on this background,
+                                    and these headings are what the reader
+                                    scans the list by. */}
+                                <p className="text-[10px] uppercase tracking-wide text-indigo-300">
                                   {r.label}{' '}
-                                  <span className="text-neutral-700">({r.hops.length})</span>
+                                  <span className="text-neutral-400">({r.hops.length})</span>
                                 </p>
                                 {r.hops.map((h) => (
                                   <button
