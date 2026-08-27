@@ -223,7 +223,11 @@ export function PlanTree({
             aria-level={row.depth + 1}
             aria-selected={isSelected}
             aria-expanded={row.hasChildren ? !isCollapsed : undefined}
-            className={`flex items-center gap-1.5 rounded py-1 pl-1.5 pr-5 text-sm ${
+            // `group` + no vertical padding of its own: the padding moves onto
+            // the title button so its hit area IS the row. It used to leave a
+            // 4px band at the top and bottom of every row that highlighted
+            // nothing and clicked nothing, while looking like part of the node.
+            className={`group flex items-center gap-1.5 rounded pl-1.5 pr-5 text-sm ${
               isSelected ? 'bg-indigo-500/15 text-neutral-100' : 'text-neutral-300'
             }`}
             style={{ paddingLeft: `${row.depth * 14 + 6}px` }}
@@ -233,13 +237,13 @@ export function PlanTree({
                 type="button"
                 tabIndex={-1}
                 onClick={() => toggle(row.id)}
-                className="w-4 shrink-0 text-neutral-500"
+                className="w-4 shrink-0 py-1 text-neutral-500"
                 aria-label={isCollapsed ? 'Expand' : 'Collapse'}
               >
                 {isCollapsed ? '▸' : '▾'}
               </button>
             ) : (
-              <span className="w-4 shrink-0" />
+              <span className="w-4 shrink-0 py-1" />
             )}
             <span
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDot(node.rolledStatus)}`}
@@ -253,7 +257,7 @@ export function PlanTree({
               tabIndex={row.id === cursor ? 0 : -1}
               onFocus={() => setCursorId(row.id)}
               onClick={() => onSelect(row.id)}
-              className={`flex-1 truncate text-left hover:text-neutral-100 ${
+              className={`flex-1 truncate py-1 text-left group-hover:text-neutral-100 ${
                 isMatch ? 'font-medium text-neutral-100' : ''
               }`}
             >
