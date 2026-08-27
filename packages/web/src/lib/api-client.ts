@@ -1423,11 +1423,48 @@ export function getPlanImpact(
   return api.get<PlanImpact>(`${planBase(repositoryId)}/impact/${nodeId}${qs}`);
 }
 
+/** One plan_chat task's state, sent with the transcript so the chat panel can
+ *  tell a live conversation from a finished or cancelled one without a request
+ *  per group. */
+export interface PlanConversation {
+  taskId: string;
+  status: TaskStatus;
+  completedAt: string | null;
+}
+
 export function getPlanMessages(
   repositoryId: string,
   nodeId: string,
-): Promise<{ messages: PlanMessage[] }> {
-  return api.get<{ messages: PlanMessage[] }>(`${planBase(repositoryId)}/nodes/${nodeId}/messages`);
+): Promise<{ messages: PlanMessage[]; conversations: PlanConversation[] }> {
+  return api.get<{ messages: PlanMessage[]; conversations: PlanConversation[] }>(
+    `${planBase(repositoryId)}/nodes/${nodeId}/messages`,
+  );
+}
+
+/** The step id every plan_chat task cycles on. Its revise loop re-targets
+ *  itself, so a conversation is ONE row at round 0 — submitting by step id is
+ *  unambiguous. */
+export const PLAN_CHAT_STEP_ID = '01-plan-chat';
+
+/** Continue a conversation by submitting the turn the step is parked on. The
+ *  STEP records the message, so this must not also post to the chat endpoint —
+ *  that would insert the turn twice and spawn a second task. */
+export function submitPlanChatTurn(taskId: string, message: string): Promise<unknown> {
+  return api.post(`/tasks/${taskId}/steps/${PLAN_CHAT_STEP_ID}/submit`, {
+    values: { message },
+  });
+}
+
+/** End a conversation: the same form, submitted blank, which is what the step
+ *  reads as "no further turn". */
+export function endPlanChat(taskId: string): Promise<unknown> {
+  return submitPlanChatTurn(taskId, '');
+}
+
+/** Point a live conversation at a different CLI. Refused by the API while the
+ *  step is running or waiting on a CLI. */
+export function setPlanChatProvider(taskId: string, cliProviderId: string): Promise<unknown> {
+  return api.patch(`/tasks/${taskId}/steps/${PLAN_CHAT_STEP_ID}/cli-provider`, { cliProviderId });
 }
 
 export function buildPlan(
