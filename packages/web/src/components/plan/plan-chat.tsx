@@ -56,13 +56,20 @@ const OUTCOME_NOTE: Record<string, string> = {
   failed: 'failed',
 };
 
+/** A timestamp in the viewer's own locale and zone. Undefined or unparseable
+ *  reads as null so a caller can leave the label off entirely rather than print
+ *  "Invalid Date" beside a real message. */
+function stamp(iso: string | undefined): string | null {
+  if (!iso) return null;
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return null;
+  return at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 /** When a conversation started, from its first turn — the API records the
  *  opening message as the task is created, so this IS the task's start. */
 function startedLabel(iso: string | undefined): string {
-  if (!iso) return 'Conversation';
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return 'Conversation';
-  return at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return stamp(iso) ?? 'Conversation';
 }
 
 export function PlanChat({
@@ -521,6 +528,11 @@ function ConversationGroup({
               )}
               <p className="text-[11px] uppercase tracking-wide text-neutral-600">
                 {m.role === 'user' ? 'You' : 'Agent'}
+                {stamp(m.createdAt) && (
+                  // Not uppercased with the speaker: a date in caps is harder
+                  // to read than the word beside it.
+                  <span className="ml-1 normal-case text-neutral-700">({stamp(m.createdAt)})</span>
+                )}
               </p>
               {/* No cap and no scroller of its own: the transcript above is
                   already scrolling, and a scrollbar inside a scrollbar makes a
