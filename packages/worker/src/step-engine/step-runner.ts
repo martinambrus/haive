@@ -2802,10 +2802,61 @@ async function retryMiningAgents(
     })
   ).filter((d) => targets.has(d.agentId));
 
+  // Agents `selectAgents` cannot re-offer, recovered from the prompt their last
+  // run actually used.
+  //
+  // A WAVE-DISPATCHING step throws its later waves from apply() as a
+  // MiningWaveError, so `selectAgents` never authored those agents and cannot
+  // reconstruct them: plan-build's returns [] outright once a root exists.
+  // Without this, every retry route for a wave-2+ agent silently did nothing —
+  // a user's Resume, the allowance auto-resume after a rate limit reset, and the
+  // worker-restart orphan reconcile alike. MEASURED on a real plan_build: eight
+  // agents failed on a five-hour limit, and both the automatic resume at the
+  // reset and two manual ones re-failed 0.6s later with the ORIGINAL rate-limit
+  // text, because nothing was ever dispatched. The task looked permanently
+  // quota-blocked long after the quota came back.
+  //
+  // Safe because it only fills gaps: an agent `selectAgents` DID offer keeps
+  // that fresh prompt, so this can never shadow a newer one. `cli_invocations.prompt`
+  // is not null, so a row with a prior invocation always has one.
+  const offered = new Set(dispatches.map((d) => d.agentId));
+  const unofferedWithPrior = [...targets.entries()].filter(
+    ([agentId, t]) => !offered.has(agentId) && t.cliInvocationId,
+  );
+  if (unofferedWithPrior.length > 0) {
+    const priorPrompts = await db
+      .select({ id: schema.cliInvocations.id, prompt: schema.cliInvocations.prompt })
+      .from(schema.cliInvocations)
+      .where(
+        inArray(
+          schema.cliInvocations.id,
+          unofferedWithPrior.map(([, t]) => t.cliInvocationId!),
+        ),
+      );
+    const promptById = new Map(priorPrompts.map((r) => [r.id, r.prompt]));
+    const titleByAgentId = new Map(wantedRows.map((r) => [r.agentId, r.agentTitle]));
+    for (const [agentId, t] of unofferedWithPrior) {
+      const prompt = promptById.get(t.cliInvocationId!);
+      if (!prompt) continue;
+      // No roleKey: the seat a wave agent occupied is not recorded anywhere, and
+      // inventing one would silently route the retry to a different CLI than the
+      // run it is repeating. Unset resolves as the step's own preference then the
+      // task provider — the same path the fan-out took before per-seat selection.
+      dispatches.push({ agentId, agentTitle: titleByAgentId.get(agentId) ?? null, prompt });
+    }
+    ctx.logger.info(
+      {
+        stepId: stepDef.metadata.id,
+        recovered: dispatches.filter((d) => !offered.has(d.agentId)).map((d) => d.agentId),
+      },
+      'mining retry recovered agents from their prior prompt',
+    );
+  }
+
   if (dispatches.length === 0) {
     ctx.logger.warn(
       { stepId: stepDef.metadata.id, agentIds },
-      'mining retry requested but selectAgents no longer offers those agents',
+      'mining retry requested but selectAgents no longer offers those agents, and none has a prior run to repeat',
     );
     return 0;
   }

@@ -28,6 +28,10 @@ interface MockState {
   /** Simulate the (task_step_id, agent_id) unique index rejecting a mining insert, so
    *  onConflictDoNothing().returning() yields no row and nothing is enqueued. */
   miningInsertConflicts?: boolean;
+  /** Prior CLI runs, keyed by the id a mining row points at. Needed for the
+   *  wave-dispatch recovery path, which repeats an agent by the prompt its last
+   *  run actually used. */
+  invocationRows?: { id: string; prompt: string; errorMessage?: string | null }[];
 }
 
 function tableNameOf(table: unknown): string {
@@ -47,6 +51,7 @@ function makeMockDb(state: MockState): Database {
   const rowsFor = (table: string): unknown[] => {
     if (table === 'task_steps') return state.taskStepRow.id ? [state.taskStepRow] : [];
     if (table === 'task_step_agent_minings') return state.miningRows;
+    if (table === 'cli_invocations') return state.invocationRows ?? [];
     return [];
   };
   const db = {
@@ -834,5 +839,89 @@ describe('advanceStep agentMining second wave', () => {
     expect(applyCalls).toHaveLength(2);
     expect(applyCalls[1]!.miningWaveExhausted).toBe(true);
     expect(enqueued).toHaveLength(0);
+  });
+});
+
+describe('advanceStep agentMining retry for a wave-dispatched step', () => {
+  /** A step whose later waves are thrown from apply(), so `selectAgents` never
+   *  authored them and returns nothing once the first wave exists — plan-build's
+   *  shape exactly. */
+  function waveStep(): StepDefinition {
+    return {
+      metadata: { id: 'test-wave-step', title: 'wave', description: '', index: 0 },
+      async detect() {
+        return { foo: 'bar' };
+      },
+      form() {
+        return null;
+      },
+      agentMining: {
+        requiredCapabilities: [],
+        async selectAgents() {
+          return [];
+        },
+      },
+      async apply() {
+        return { settled: true };
+      },
+    } as unknown as StepDefinition;
+  }
+
+  it('repeats the agent using the prompt its last run used', async () => {
+    // The measured failure: eight wave-3 agents died on a five-hour rate limit,
+    // and every retry route — the user's Resume, the allowance auto-resume at the
+    // reset, the worker-restart reconcile — did nothing at all, because
+    // selectAgents cannot re-offer an agent it never authored. The task read as
+    // permanently quota-blocked long after the quota returned.
+    const state = freshState([
+      miningRow('plan-expand-abc-p3', 1, {
+        status: 'failed',
+        errorMessage: 'Provider rate limit or quota exhausted',
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    state.invocationRows = [{ id: 'inv-plan-expand-abc-p3', prompt: 'expand node abc' }];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), waveStep(), enqueued);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+    // The prompt rides on the invocation row the dispatch writes, not the job.
+    const invocation = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(invocation?.row.prompt).toBe('expand node abc');
+  });
+
+  it('does nothing for an agent with no prior run to repeat', async () => {
+    // Nothing to reconstruct from, so the old behaviour stands rather than a
+    // guessed prompt being sent to a CLI.
+    const state = freshState([
+      miningRow('plan-expand-abc-p3', 1, {
+        status: 'failed',
+        errorMessage: 'Provider rate limit or quota exhausted',
+        userRetryRequestedAt: new Date(),
+        cliInvocationId: null,
+      }),
+    ]);
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), waveStep(), enqueued);
+    expect(enqueued).toHaveLength(0);
+  });
+
+  it('never shadows a prompt selectAgents did offer', async () => {
+    // The recovery fills gaps only. An agent still on offer keeps the FRESH
+    // prompt; repeating a stale one there would undo whatever the new wave knows.
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    state.invocationRows = [{ id: 'inv-peer-reviewer', prompt: 'STALE prompt' }];
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), noRetryMiningStep([]), enqueued);
+    expect(enqueued).toHaveLength(1);
+    const invocation = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(invocation?.row.prompt).toBe('review');
   });
 });
