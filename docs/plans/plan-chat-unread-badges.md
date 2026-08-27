@@ -1,7 +1,14 @@
 # Plan chat: unread replies, badges, and notification routing
 
-Deferred scope, raised while building the self-contained Chat tab. Kept separate
-because it touches notifications, the tree, the tiles and the panel at once.
+STATUS: SHIPPED. Every item below is implemented; this file is kept as the
+rationale record, not as outstanding work.
+
+Raised while building the self-contained Chat tab and kept separate because it
+touches notifications, the tree, the tiles and the panel at once. Implemented
+across `2e421548` (read table), `e5e36165` (feed exclusion + unread endpoint)
+and `6355ae84` (badges, divider, filter), covered by
+`packages/api/test/plan-chat-surfaces-smoke.ts` and
+`packages/web/src/components/plan/plan-chat-turn.test.ts`.
 
 ## Problem
 
@@ -13,10 +20,12 @@ navigates away from it takes the user out of the surface they were working in.
 There is also no way to tell that a reply arrived while you were elsewhere in
 the plan: the transcript just grows.
 
-## Wanted
+## Wanted, and where each landed
 
-1. **Suppress task toasts for `plan_chat` while the plan canvas is open.** The
-   user is already looking at the conversation; a toast about it is noise.
+1. **Suppress task toasts for `plan_chat`** — the user is already looking at
+   the conversation, so a toast about it is noise. Landed without any
+   notification-specific code: the notifier polls the task list, which now
+   hides chats by default (`notification-provider.tsx:49`).
 2. **Never raise a BROWSER notification for `plan_chat`.** Those open a new tab
    on the task page. Chat is handled in plan mode, by hand, on purpose.
 3. **Unread divider** in the transcript — the chat-app convention: everything
@@ -28,20 +37,23 @@ the plan: the transcript just grows.
    one, so the node badge has a visible destination.
 6. **Clearing**: reading the messages clears every badge for that node.
 
-## Open questions to settle when this is planned properly
+## Questions that were open, and how they were settled
 
-- Where "last read" lives. Per user per node, so it follows the account like the
-  other plan prefs — `user_ui_prefs` is per-user but schemaless and unbounded
-  growth per node is a poor fit; a small table keyed `(user_id, node_id)` with a
-  `last_read_at` is probably right.
-- What counts as read: opening the Chat tab on that node, or the transcript
-  actually being scrolled to the bottom.
-- How the tree/tiles learn about unread counts without a request per node — the
-  plan tree endpoint would need to carry a count, computed from
-  `plan_node_messages.created_at > last_read_at`.
-- Whether suppression should key on the plan page being OPEN (a live signal) or
-  on the task type alone (simpler, and arguably right: a plan chat should never
-  toast, since its home is the panel).
+- Where "last read" lives: `user_plan_node_reads`, keyed `(user_id, node_id)`
+  with a `last_read_at` (migration `0134`). `user_ui_prefs` was rejected —
+  per-user but schemaless, and unbounded growth per node is a poor fit.
+- What counts as read: opening the Chat tab on that node. Scroll position was
+  rejected — a short conversation never scrolls, so it would never clear.
+- How the tree/tiles learn the counts: one endpoint, `GET /:id/plan/unread`,
+  returning a nodeId→count map. Not folded into the tree endpoint — tree,
+  node-detail and overview are three calls that all bottom out in `toNodeViews`,
+  so it would have cost three aggregates per refresh and changed a type the
+  worker shares.
+- Suppression keys on the TASK TYPE alone, not on the plan page being open: a
+  plan chat's home is the panel, so it should never toast from anywhere. The
+  task list gained `?includeChats=1` to bring them back on demand, and the
+  repository badge counts were excluded to match — a badge counting tasks the
+  list refuses to show is the failure this change existed to prevent.
 
 ## Related code
 
