@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Pencil } from 'lucide-react';
+import { ChevronDown, ChevronRight, Pencil } from 'lucide-react';
 import {
   createPlanEdge,
   createPlanNode,
@@ -23,6 +23,7 @@ import { Badge, Button, FormError } from '@/components/ui';
 import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { looksLikeMarkdown } from '@/components/markdown/looks-like-markdown';
+import { groupPlanEdges } from './plan-edge-groups';
 import { PlanChat } from './plan-chat';
 import { PlanGraph } from './plan-graph';
 import {
@@ -76,6 +77,9 @@ export function PlanDetailPanel({
   // breadcrumb can only add under the node it ends on, so a node reached by
   // clicking a tile or a tree row has no other way to gain a child.
   const [addingChild, setAddingChild] = useState(false);
+  // Link groups the user has folded away. Ids, not indices: a group
+  // disappears when its last link is removed.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [childTitle, setChildTitle] = useState('');
   const [statusDraft, setStatusDraft] = useState<PlanNodeStatus>('todo');
   const [kindDraft, setKindDraft] = useState<PlanNodeDetail['node']['kind']>('component');
@@ -559,22 +563,68 @@ export function PlanDetailPanel({
           {detail.edges.length === 0 ? (
             <p className="text-xs text-neutral-600">No links yet.</p>
           ) : (
-            detail.edges.map((e) => (
-              <div key={e.id} className="flex items-center gap-2 text-xs text-neutral-300">
-                <span className="flex-1 truncate">
-                  {e.fromTitle}{' '}
-                  <span className="text-neutral-600">{e.kind.replace(/_/g, ' ')}</span> {e.toTitle}
-                </span>
-                <button
-                  type="button"
-                  className="text-neutral-500 underline"
-                  disabled={saving}
-                  onClick={() => void write(() => deletePlanEdge(repositoryId, e.id))}
-                >
-                  remove
-                </button>
-              </div>
-            ))
+            groupPlanEdges(detail.edges, nodeId).map((group) => {
+              const folded = collapsedGroups.has(group.id);
+              return (
+                <div key={group.id} className="rounded-md border border-neutral-800">
+                  <button
+                    type="button"
+                    aria-expanded={!folded}
+                    onClick={() =>
+                      setCollapsedGroups((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(group.id)) next.delete(group.id);
+                        else next.add(group.id);
+                        return next;
+                      })
+                    }
+                    className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left"
+                  >
+                    {folded ? (
+                      <ChevronRight className="h-3.5 w-3.5 text-neutral-500" />
+                    ) : (
+                      <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
+                    )}
+                    {/* White and bold rather than amber: amber already means
+                        "blocked, needs a person" everywhere else in this UI. */}
+                    <span className="text-xs font-semibold text-neutral-100">{group.label}</span>
+                    <span className="text-[11px] text-neutral-500">{group.items.length}</span>
+                  </button>
+                  {!folded && (
+                    <div className="flex flex-col gap-1 border-t border-neutral-800 px-2 py-1.5">
+                      {group.items.map((item) => (
+                        <div
+                          key={item.edgeId}
+                          className="flex items-center gap-2 text-xs text-neutral-300"
+                        >
+                          {/* Goes to the node on the other end — the same move
+                              an impact hop makes, and the reason the group
+                              carries that node's id rather than only its name. */}
+                          <button
+                            type="button"
+                            onClick={() => onNavigate(item.nodeId)}
+                            className="flex-1 truncate text-left hover:text-neutral-100 hover:underline"
+                          >
+                            {item.title}
+                            {item.note && <span className="text-neutral-500"> — {item.note}</span>}
+                          </button>
+                          <button
+                            type="button"
+                            className="shrink-0 text-neutral-500 underline hover:text-neutral-300"
+                            disabled={saving}
+                            onClick={() =>
+                              void write(() => deletePlanEdge(repositoryId, item.edgeId))
+                            }
+                          >
+                            remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })
           )}
 
           <div className="flex flex-col gap-2 border-t border-neutral-800 pt-3">
