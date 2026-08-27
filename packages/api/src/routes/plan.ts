@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, isNotNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -197,13 +197,38 @@ planRoutes.get('/:id/plan/nodes/:nodeId', async (c) => {
 
 planRoutes.get('/:id/plan/nodes/:nodeId/messages', async (c) => {
   const { repositoryId } = await requireOwnedRepo(c);
+  await requirePlanCanvasEnabled();
   const nodeId = c.req.param('nodeId');
   await requireNode(repositoryId, nodeId);
-  const rows = await getDb()
+  const db = getDb();
+  const rows = await db
     .select()
     .from(schema.planNodeMessages)
     .where(eq(schema.planNodeMessages.nodeId, nodeId))
     .orderBy(asc(schema.planNodeMessages.createdAt));
+
+  // The state of each conversation these messages belong to. Sent with the
+  // transcript rather than fetched per task by the client: the chat panel needs
+  // it for EVERY group it renders, and one join beats a request per group.
+  const taskIds = [...new Set(rows.map((m) => m.taskId).filter((id): id is string => id !== null))];
+  const conversations =
+    taskIds.length === 0
+      ? []
+      : (
+          await db
+            .select({
+              taskId: schema.tasks.id,
+              status: schema.tasks.status,
+              completedAt: schema.tasks.completedAt,
+            })
+            .from(schema.tasks)
+            .where(inArray(schema.tasks.id, taskIds))
+        ).map((t) => ({
+          taskId: t.taskId,
+          status: t.status,
+          completedAt: t.completedAt ? t.completedAt.toISOString() : null,
+        }));
+
   return c.json({
     messages: rows.map((m) => ({
       id: m.id,
@@ -214,6 +239,7 @@ planRoutes.get('/:id/plan/nodes/:nodeId/messages', async (c) => {
       patch: (m.patchJson ?? null) as PlanPatch | null,
       createdAt: m.createdAt.toISOString(),
     })),
+    conversations,
   });
 });
 
@@ -467,6 +493,10 @@ async function spawnPlanTask(args: {
   description?: string;
   metadata: Record<string, unknown>;
   cliProviderId: string | null;
+  /** Runs after the task row exists and BEFORE the job is enqueued. Anything a
+   *  step's detect() must already see belongs here: once the job is on the
+   *  queue the worker can pick it up immediately, and it does. */
+  seed?: (taskId: string) => Promise<void>;
 }): Promise<string> {
   const db = getDb();
   const [task] = await db
@@ -484,6 +514,8 @@ async function spawnPlanTask(args: {
     })
     .returning();
   if (!task) throw new HttpError(500, 'failed to create plan task');
+
+  if (args.seed) await args.seed(task.id);
 
   await getTaskQueue().add(
     TASK_JOB_NAMES.START,
@@ -540,12 +572,19 @@ planRoutes.post('/:id/plan/nodes/:nodeId/chat', async (c) => {
     description: body.message,
     metadata: { planNodeId: nodeId },
     cliProviderId,
-  });
-  await db.insert(schema.planNodeMessages).values({
-    nodeId,
-    taskId,
-    role: 'user',
-    body: body.message,
+    // The opening turn must be readable before the worker starts: detect()
+    // derives the pending question from the transcript, and the step's skipIf
+    // treats "no pending question" as nothing to answer. Inserting it after the
+    // enqueue lost that race and parked the conversation on an empty form
+    // without ever calling a CLI.
+    seed: async (id) => {
+      await db.insert(schema.planNodeMessages).values({
+        nodeId,
+        taskId: id,
+        role: 'user',
+        body: body.message,
+      });
+    },
   });
   return c.json({ taskId }, 201);
 });
