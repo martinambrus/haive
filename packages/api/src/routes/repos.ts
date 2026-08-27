@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, desc, notInArray, sql } from 'drizzle-orm';
+import { eq, and, desc, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
 import {
@@ -122,6 +122,9 @@ repoRoutes.get('/', async (c) => {
       and(
         eq(schema.tasks.userId, userId),
         notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+        // Plan chats are excluded from the task listing, so counting them here
+        // would badge a repository with work the list then refuses to show.
+        ne(schema.tasks.type, 'plan_chat'),
       ),
     )
     .groupBy(schema.tasks.repositoryId, schema.tasks.status);

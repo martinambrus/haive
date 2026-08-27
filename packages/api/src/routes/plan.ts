@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -122,6 +122,70 @@ planRoutes.get('/:id/plan/tree', async (c) => {
       totalDescendants: n.totalDescendants,
     })),
   });
+});
+
+/**
+ * Unread assistant turns per node, for the badges on the tree, the tiles and
+ * the Chat tab.
+ *
+ * Its own endpoint rather than a field on the tree: the tree, the node detail
+ * and the overview are three separate calls that all build from the same node
+ * views, so threading a count through them would cost three aggregates per
+ * refresh and change a type the worker shares. One map serves all three
+ * surfaces.
+ *
+ * Counts are NOT rolled up to ancestors. A badge on a parent tells the user
+ * something is unread somewhere beneath it and leaves them to search a subtree
+ * for it; a badge only where the reply actually landed is a destination.
+ */
+planRoutes.get('/:id/plan/unread', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  const rows = await getDb()
+    .select({
+      nodeId: schema.planNodeMessages.nodeId,
+      n: sql<number>`count(*)::int`,
+    })
+    .from(schema.planNodeMessages)
+    .innerJoin(schema.planNodes, eq(schema.planNodes.id, schema.planNodeMessages.nodeId))
+    .leftJoin(
+      schema.userPlanNodeReads,
+      and(
+        eq(schema.userPlanNodeReads.nodeId, schema.planNodeMessages.nodeId),
+        eq(schema.userPlanNodeReads.userId, userId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.planNodes.repositoryId, repositoryId),
+        // The user's own turns are not news to them.
+        eq(schema.planNodeMessages.role, 'assistant'),
+        // No read row means nothing has been read, so every turn counts — the
+        // honest reading for a chat that has never been opened.
+        sql`(${schema.userPlanNodeReads.lastReadAt} is null or ${schema.planNodeMessages.createdAt} > ${schema.userPlanNodeReads.lastReadAt})`,
+      ),
+    )
+    .groupBy(schema.planNodeMessages.nodeId);
+
+  const counts: Record<string, number> = {};
+  for (const row of rows) counts[row.nodeId] = row.n;
+  return c.json({ counts });
+});
+
+/** Mark one node's chat read up to now. Idempotent; re-reading just moves the
+ *  stamp forward. */
+planRoutes.put('/:id/plan/nodes/:nodeId/read', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  const nodeId = c.req.param('nodeId');
+  await requireNode(repositoryId, nodeId);
+  const lastReadAt = new Date();
+  await getDb()
+    .insert(schema.userPlanNodeReads)
+    .values({ userId, nodeId, lastReadAt })
+    .onConflictDoUpdate({
+      target: [schema.userPlanNodeReads.userId, schema.userPlanNodeReads.nodeId],
+      set: { lastReadAt },
+    });
+  return c.json({ ok: true, lastReadAt: lastReadAt.toISOString() });
 });
 
 planRoutes.get('/:id/plan/search', async (c) => {

@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, inArray, isNotNull, isNull, not, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, not, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   buildEstimationAccuracy,
@@ -83,6 +83,13 @@ taskRoutes.get('/', async (c) => {
   // wants those lists minus the ones they deliberately parked. Ignored under ?status=paused,
   // where the explicit filter wins over the generic exclusion.
   const hidePaused = ['1', 'true'].includes(c.req.query('hidePaused')?.trim() ?? '');
+  // Plan chats are conversations, not work items. They live in the plan canvas
+  // and are answered there, so listing them here buries real tasks among a
+  // conversation's turns — and because the notifier polls THIS endpoint, it also
+  // stops them raising toasts and OS notifications that would open the task page
+  // instead of the plan. An exclusion layered on the status token, like
+  // hidePaused above, rather than a status of its own.
+  const includeChats = ['1', 'true'].includes(c.req.query('includeChats')?.trim() ?? '');
   const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
   const pageSize = Math.min(
     100,
@@ -145,6 +152,7 @@ taskRoutes.get('/', async (c) => {
       );
     }
   }
+  if (!includeChats) conds.push(ne(schema.tasks.type, 'plan_chat'));
   if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);
   const where = and(...conds);
 
