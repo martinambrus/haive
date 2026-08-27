@@ -6,18 +6,22 @@ import rehypeHighlight from 'rehype-highlight';
 import { getRepoFile } from '@/lib/api-client';
 import { Dialog, DialogContent } from '@/components/dialog';
 import { FormError } from '@/components/ui';
-import { findSymbolLine, languageForPath } from './code-preview-source';
+import { languageForPath, resolvePreviewLine } from './code-preview-source';
 
 export function CodePreviewDialog({
   repositoryId,
   repoPath,
   symbol,
+  evidence,
   open,
   onOpenChange,
 }: {
   repositoryId: string;
   repoPath: string;
   symbol: string | null;
+  /** What the agent said when it made the link. Sometimes it names the line
+   *  outright, which beats anything derivable from the symbol. */
+  evidence?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -39,7 +43,7 @@ export function CodePreviewDialog({
     };
   }, [open, repositoryId, repoPath]);
 
-  const line = file?.content ? findSymbolLine(file.content, symbol) : null;
+  const line = file?.content ? resolvePreviewLine(file.content, symbol, evidence) : null;
 
   // Where the located line sits inside the scroll container, in px, measured
   // ONCE so the scroll position and the marker are the same number.

@@ -97,7 +97,11 @@ export function PlanDetailPanel({
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   // The code link being previewed, or null. Held here rather than per row so
   // only one file is ever fetched and mounted.
-  const [preview, setPreview] = useState<{ repoPath: string; symbol: string | null } | null>(null);
+  const [preview, setPreview] = useState<{
+    repoPath: string;
+    symbol: string | null;
+    evidence: string | null;
+  } | null>(null);
   const [childTitle, setChildTitle] = useState('');
   const [statusDraft, setStatusDraft] = useState<PlanNodeStatus>('todo');
   const [kindDraft, setKindDraft] = useState<PlanNodeDetail['node']['kind']>('component');
@@ -745,7 +749,13 @@ export function PlanDetailPanel({
                   key={l.id}
                   type="button"
                   title="Open this file"
-                  onClick={() => setPreview({ repoPath: l.repoPath, symbol: l.symbol })}
+                  onClick={() =>
+                    setPreview({
+                      repoPath: l.repoPath,
+                      symbol: l.symbol,
+                      evidence: l.evidence ?? null,
+                    })
+                  }
                   className="block w-full truncate text-left font-mono text-[11px] text-neutral-400 hover:text-neutral-200 hover:underline"
                 >
                   {l.repoPath}
@@ -763,6 +773,7 @@ export function PlanDetailPanel({
           repositoryId={repositoryId}
           repoPath={preview.repoPath}
           symbol={preview.symbol}
+          evidence={preview.evidence}
           open
           onOpenChange={(o) => !o && setPreview(null)}
         />
