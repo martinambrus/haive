@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { Info } from 'lucide-react';
 import { getPlanMessages, startPlanChat, type PlanMessage } from '@/lib/api-client';
 import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -78,24 +79,31 @@ export function PlanChat({
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="max-h-72 overflow-y-auto rounded-md border border-neutral-800 bg-neutral-950 p-2">
-        {messages.length === 0 ? (
-          <p className="px-1 py-2 text-xs text-neutral-500">
+      {/* Guidance, not an empty transcript. Inside the bordered box it wore the
+          same frame as the composer below it and read as a message someone had
+          already sent; the app's indigo note styling says "this is the UI
+          talking" the way the build banner does. */}
+      {messages.length === 0 ? (
+        <div className="flex gap-2 rounded-md border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <p>
             Ask for a change to this part of the plan. The agent is given the WHOLE plan, so it can
             also patch nodes elsewhere when your request touches them.
           </p>
-        ) : (
-          messages.map((m) => (
+        </div>
+      ) : (
+        <div className="max-h-72 overflow-y-auto rounded-md border border-neutral-800 bg-neutral-950 p-2">
+          {messages.map((m) => (
             <div key={m.id} className="mb-2">
               <p className="text-[11px] uppercase tracking-wide text-neutral-600">
                 {m.role === 'user' ? 'You' : 'Agent'}
               </p>
               <MarkdownView body={m.body} />
             </div>
-          ))
-        )}
-        <div ref={endRef} />
-      </div>
+          ))}
+          <div ref={endRef} />
+        </div>
+      )}
 
       {activeTaskId && (
         <p className="text-[11px] text-neutral-500">
