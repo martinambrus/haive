@@ -10,10 +10,12 @@ import {
   timestamp,
   index,
   uniqueIndex,
+  primaryKey,
   pgEnum,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
+import { users } from './auth.js';
 import { repositories } from './repos.js';
 import { tasks } from './tasks.js';
 
@@ -235,6 +237,30 @@ export const planNodeMessages = pgTable(
     createdAt: timestamp('created_at').notNull().defaultNow(),
   },
   (table) => [index('plan_node_messages_node_created_idx').on(table.nodeId, table.createdAt)],
+);
+
+/**
+ * How far a user has read one node's chat.
+ *
+ * Per user AND per node, not a watermark per repository: the badge has to say
+ * WHICH node has a reply waiting, and a single timestamp would clear every
+ * node's badge the moment any one conversation was read.
+ *
+ * A missing row means nothing has been read, so every assistant turn counts as
+ * unread — the honest reading for a node whose chat you have never opened.
+ */
+export const userPlanNodeReads = pgTable(
+  'user_plan_node_reads',
+  {
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    nodeId: uuid('node_id')
+      .notNull()
+      .references(() => planNodes.id, { onDelete: 'cascade' }),
+    lastReadAt: timestamp('last_read_at').notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.nodeId] })],
 );
 
 export const planNodeTasks = pgTable(
