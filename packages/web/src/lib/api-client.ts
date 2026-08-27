@@ -552,6 +552,10 @@ export interface OnboardingStatus {
   missing: string[];
 }
 
+export function getRepoOnboardingStatus(repositoryId: string): Promise<OnboardingStatus> {
+  return api.get<OnboardingStatus>(`/repos/${encodeURIComponent(repositoryId)}/onboarding-status`);
+}
+
 export type TaskStatus =
   | 'created'
   | 'queued'

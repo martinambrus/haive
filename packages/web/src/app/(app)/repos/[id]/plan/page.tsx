@@ -7,6 +7,7 @@ import { LayoutGrid, ListTree } from 'lucide-react';
 import {
   buildPlan,
   createPlanNode,
+  getRepoOnboardingStatus,
   getUiPrefs,
   putUiPrefs,
   getPlanOverview,
@@ -46,6 +47,11 @@ export default function PlanPage() {
 
   const [repoName, setRepoName] = useState('');
   const [nodeCount, setNodeCount] = useState(0);
+  // Fetched only while the plan is empty: it decides whether the "build from
+  // the knowledge base" offer can exist at all. Null = unknown, treated as
+  // onboarded so nothing hides on a failed check (same stance as the repos
+  // page's `onboarded` handling).
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
   const [focus, setFocus] = useState<PlanNodeDetail | null>(null);
   const [rootId, setRootId] = useState<string | null>(null);
   const [tree, setTree] = useState<PlanTreeNode[]>([]);
@@ -200,6 +206,19 @@ export default function PlanPage() {
     };
   }, [loadRoot, repositoryId]);
 
+  // Only asked once the repo is known to have no plan — the answer changes
+  // nothing while a plan exists.
+  useEffect(() => {
+    if (nodeCount !== 0) return;
+    let cancelled = false;
+    void getRepoOnboardingStatus(repositoryId)
+      .then((s) => !cancelled && setOnboarded(s.onboarded))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [nodeCount, repositoryId]);
+
   const descend = useCallback(
     async (nodeId: string) => {
       setError(null);
@@ -310,15 +329,23 @@ export default function PlanPage() {
             </CardDescription>
           </CardHeader>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" disabled={busy} onClick={() => void build('from_repo')}>
-              Build from the knowledge base
-            </Button>
+            {/* A repo that was never onboarded has no knowledge base to build
+                from — only the by-hand starter exists for it. */}
+            {onboarded !== false && (
+              <Button size="sm" disabled={busy} onClick={() => void build('from_repo')}>
+                Build from the knowledge base
+              </Button>
+            )}
             <div className="flex gap-2">
               <Input
                 value={newTitle}
                 onChange={(e) => setNewTitle(e.target.value)}
-                placeholder="Or name the project to start by hand"
-                className="w-72"
+                placeholder={
+                  onboarded === false
+                    ? 'Name the project to start creating its plan/map'
+                    : 'Or name the project to start by hand'
+                }
+                className={onboarded === false ? 'w-96' : 'w-72'}
               />
               <Button
                 size="sm"
