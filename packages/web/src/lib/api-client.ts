@@ -1317,6 +1317,10 @@ export interface PlanMessage {
   role: 'user' | 'assistant';
   body: string;
   patch: unknown;
+  /** The CLI that produced this turn, when it was recorded. Null on user turns
+   *  and on turns written before the provider was stored — unknown, not
+   *  guessed from whatever the conversation uses now. */
+  cliLabel: string | null;
   createdAt: string;
 }
 

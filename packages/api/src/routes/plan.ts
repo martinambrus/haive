@@ -265,9 +265,25 @@ planRoutes.get('/:id/plan/nodes/:nodeId/messages', async (c) => {
   const nodeId = c.req.param('nodeId');
   await requireNode(repositoryId, nodeId);
   const db = getDb();
+  // Left join: a turn from before the provider was recorded, or one whose
+  // provider has since been deleted, still belongs in the transcript — it just
+  // cannot say which CLI wrote it.
   const rows = await db
-    .select()
+    .select({
+      id: schema.planNodeMessages.id,
+      nodeId: schema.planNodeMessages.nodeId,
+      taskId: schema.planNodeMessages.taskId,
+      role: schema.planNodeMessages.role,
+      body: schema.planNodeMessages.body,
+      patchJson: schema.planNodeMessages.patchJson,
+      createdAt: schema.planNodeMessages.createdAt,
+      cliLabel: schema.cliProviders.label,
+    })
     .from(schema.planNodeMessages)
+    .leftJoin(
+      schema.cliProviders,
+      eq(schema.cliProviders.id, schema.planNodeMessages.cliProviderId),
+    )
     .where(eq(schema.planNodeMessages.nodeId, nodeId))
     .orderBy(asc(schema.planNodeMessages.createdAt));
 
@@ -301,6 +317,7 @@ planRoutes.get('/:id/plan/nodes/:nodeId/messages', async (c) => {
       role: m.role,
       body: m.body,
       patch: (m.patchJson ?? null) as PlanPatch | null,
+      cliLabel: m.cliLabel ?? null,
       createdAt: m.createdAt.toISOString(),
     })),
     conversations,

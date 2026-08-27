@@ -16,6 +16,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 import { users } from './auth.js';
+import { cliProviders } from './cli-providers.js';
 import { repositories } from './repos.js';
 import { tasks } from './tasks.js';
 
@@ -229,6 +230,13 @@ export const planNodeMessages = pgTable(
      *  here precisely SO it survives — a self-targeting reviseLoop resets the step
      *  row every cycle, so the step's own output cannot hold chat history. */
     taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    /** The CLI that produced this turn. Per MESSAGE rather than read off the
+     *  task, because a conversation's provider can be changed mid-flight and
+     *  the current one is not evidence of what answered earlier. Null on user
+     *  turns and on rows written before this was recorded. */
+    cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
+      onDelete: 'set null',
+    }),
     role: varchar('role', { length: 16 }).notNull(),
     body: text('body').notNull(),
     /** The structured patch the assistant turn emitted, verbatim. The audit trail
