@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeVisibleSet } from './plan-tree-filter';
+import { ancestorsOf, computeVisibleSet } from './plan-tree-filter';
 
 /** id -> parentId, the only two fields the filter reads. */
 const nodes = [
@@ -54,5 +54,27 @@ describe('computeVisibleSet', () => {
     // visibility, so an id matching no node can never draw a row.
     const orphan = [{ id: 'lost', parentId: 'missing' }];
     expect(computeVisibleSet(orphan, new Set(['lost']))).toEqual(new Set(['lost', 'missing']));
+  });
+});
+
+describe('ancestorsOf', () => {
+  it('walks from the node up to the root, nearest first', () => {
+    expect(ancestorsOf(nodes, 'a1')).toEqual(['a', 'root']);
+  });
+
+  it('returns nothing for a root', () => {
+    expect(ancestorsOf(nodes, 'root')).toEqual([]);
+  });
+
+  it('returns nothing for a node it does not know', () => {
+    expect(ancestorsOf(nodes, 'ghost')).toEqual([]);
+  });
+
+  it('stops on a parent cycle instead of spinning', () => {
+    const cyclic = [
+      { id: 'x', parentId: 'y' },
+      { id: 'y', parentId: 'x' },
+    ];
+    expect(ancestorsOf(cyclic, 'x')).toEqual(['y']);
   });
 });

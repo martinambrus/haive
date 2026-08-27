@@ -1,9 +1,9 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PlanTreeNode } from '@/lib/api-client';
 import { statusDot, statusLabel } from './plan-status';
-import { computeVisibleSet } from './plan-tree-filter';
+import { ancestorsOf, computeVisibleSet } from './plan-tree-filter';
 
 /**
  * Hierarchy only — no edges.
@@ -62,6 +62,32 @@ export function PlanTree({
   // empty-set-is-still-a-filter) is unit-testable without a DOM.
   const keep = useMemo(() => computeVisibleSet(nodes, matchIds), [matchIds, nodes]);
 
+  // Reveal whatever is selected, however it got selected — a link row, an
+  // impact hop, a breadcrumb. A selected row inside a folded branch is
+  // selected invisibly, which reads as the click having done nothing.
+  useEffect(() => {
+    if (!selectedId) return;
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const id of ancestorsOf(nodes, selectedId)) {
+        if (next.delete(id)) changed = true;
+      }
+      // Same set back when nothing was folded: a new Set every time would
+      // re-render the whole tree on every selection.
+      return changed ? next : prev;
+    });
+  }, [selectedId, nodes]);
+
+  const selectedRef = useRef<HTMLDivElement | null>(null);
+  // After the expansion above has rendered — hence `collapsed` in the deps.
+  // `nearest` scrolls the tree's own overflow container and leaves the page
+  // where it is.
+  useEffect(() => {
+    if (!selectedId) return;
+    selectedRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [selectedId, collapsed, keep]);
+
   const render = (node: PlanTreeNode, depth: number): React.ReactNode => {
     const children = (byParent.get(node.id) ?? []).filter((c) => !keep || keep.has(c.id));
     // Filtering forces every kept branch open — a collapsed ancestor would
@@ -71,6 +97,7 @@ export function PlanTree({
     return (
       <div key={node.id}>
         <div
+          ref={node.id === selectedId ? selectedRef : undefined}
           className={`flex items-center gap-1.5 rounded py-1 pl-1.5 pr-5 text-sm ${
             node.id === selectedId ? 'bg-indigo-500/15 text-neutral-100' : 'text-neutral-300'
           }`}

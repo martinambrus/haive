@@ -32,3 +32,30 @@ export function computeVisibleSet(
   }
   return set;
 }
+
+/**
+ * The chain of parents above a node, nearest first.
+ *
+ * Used to reveal a node the user reached from somewhere else — a link row, an
+ * impact hop, a breadcrumb — since a selected row inside a folded branch is
+ * selected invisibly, which reads as the click having done nothing.
+ *
+ * Carries its own visited guard: the parent chain is data, and a corrupt one
+ * must not spin the browser.
+ */
+export function ancestorsOf(
+  nodes: Pick<PlanTreeNode, 'id' | 'parentId'>[],
+  nodeId: string,
+): string[] {
+  const parentOf = new Map<string, string | null>();
+  for (const n of nodes) parentOf.set(n.id, n.parentId);
+  const chain: string[] = [];
+  const seen = new Set<string>([nodeId]);
+  let cur = parentOf.get(nodeId) ?? null;
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    chain.push(cur);
+    cur = parentOf.get(cur) ?? null;
+  }
+  return chain;
+}
