@@ -15,8 +15,12 @@ const edge = (over: Partial<PlanEdge>): PlanEdge => ({
 });
 
 describe('groupPlanEdges', () => {
-  it('returns nothing when there are no links', () => {
-    expect(groupPlanEdges([], ME)).toEqual([]);
+  it('offers every outgoing kind even with no links at all', () => {
+    // Each is a link the user can create from here, and a group that appears
+    // only once it has content cannot offer the control that fills it.
+    const groups = groupPlanEdges([], ME);
+    expect(groups.map((g) => g.id)).toEqual(['depends_on:out', 'affects:out', 'implements:out']);
+    expect(groups.every((g) => g.items.length === 0)).toBe(true);
   });
 
   it('separates the two directions of one kind', () => {
@@ -27,7 +31,8 @@ describe('groupPlanEdges', () => {
       ],
       ME,
     );
-    expect(groups.map((g) => g.label)).toEqual(['Depends on', 'Depended on by']);
+    expect(groups.map((g) => g.label)).toContain('Depended on by');
+    expect(groups.find((g) => g.id === 'depends_on:out')?.items).toHaveLength(1);
     expect(groups[0]?.items).toEqual([{ edgeId: 'out', nodeId: 'x', title: 'X', note: null }]);
     expect(groups[1]?.items).toEqual([{ edgeId: 'in', nodeId: 'y', title: 'Y', note: null }]);
   });
@@ -43,6 +48,7 @@ describe('groupPlanEdges', () => {
       ME,
     );
     expect(groups.map((g) => g.label)).toEqual([
+      'Depends on',
       'Affects',
       'Affected by',
       'Implements',
@@ -59,19 +65,23 @@ describe('groupPlanEdges', () => {
       ],
       ME,
     );
-    expect(groups.map((g) => g.id)).toEqual(['depends_on:out', 'depends_on:in', 'implements:out']);
+    expect(groups.map((g) => g.id)).toEqual([
+      'depends_on:out',
+      'depends_on:in',
+      'affects:out',
+      'implements:out',
+    ]);
   });
 
-  it('omits a group with no links rather than rendering it empty', () => {
+  it('omits an INCOMING group with no links — nobody can create one from here', () => {
     const groups = groupPlanEdges([edge({ toNodeId: 'x', toTitle: 'X' })], ME);
-    expect(groups).toHaveLength(1);
-    expect(groups[0]?.label).toBe('Depends on');
+    expect(groups.map((g) => g.id)).toEqual(['depends_on:out', 'affects:out', 'implements:out']);
   });
 
   it('names a link whose title the server did not send', () => {
     // Dropping the row would under-report what this node is connected to.
     const groups = groupPlanEdges([edge({ toNodeId: 'x', toTitle: null })], ME);
-    expect(groups[0]?.items[0]?.title).toBe('Untitled node');
+    expect(groups.find((g) => g.id === 'depends_on:out')?.items[0]?.title).toBe('Untitled node');
   });
 
   it('sorts each group by name, not by insertion order', () => {
@@ -100,11 +110,11 @@ describe('groupPlanEdges', () => {
 
   it('carries the note through', () => {
     const groups = groupPlanEdges([edge({ toNodeId: 'x', toTitle: 'X', note: 'why' })], ME);
-    expect(groups[0]?.items[0]?.note).toBe('why');
+    expect(groups.find((g) => g.id === 'depends_on:out')?.items[0]?.note).toBe('why');
   });
 
   it('ignores an edge that touches neither side of this node', () => {
     const groups = groupPlanEdges([edge({ fromNodeId: 'a', toNodeId: 'b' })], ME);
-    expect(groups).toEqual([]);
+    expect(groups.every((g) => g.items.length === 0)).toBe(true);
   });
 });

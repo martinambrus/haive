@@ -30,6 +30,14 @@ const LABELS: Record<PlanEdgeKind, { out: string; in: string }> = {
  *  reads first, what others assert about it second. */
 const ORDER: PlanEdgeKind[] = ['depends_on', 'affects', 'implements'];
 
+/**
+ * Every outgoing group is ALWAYS returned, empty or not: each one is a link the
+ * user can create from this node, and a group that renders only once it has
+ * content cannot offer the affordance that creates its first item. Incoming
+ * groups are facts about this node written elsewhere, so they appear only when
+ * something is there to state.
+ */
+
 export function groupPlanEdges(edges: PlanEdge[], nodeId: string): PlanEdgeGroup[] {
   const groups: PlanEdgeGroup[] = [];
   for (const kind of ORDER) {
@@ -51,7 +59,9 @@ export function groupPlanEdges(edges: PlanEdge[], nodeId: string): PlanEdgeGroup
         // dev plan), and insertion order is the order edges happened to be
         // written, which tells the reader nothing.
         .sort((a, b) => a.title.localeCompare(b.title));
-      if (items.length > 0) groups.push({ id: `${kind}:${dir}`, label: LABELS[kind][dir], items });
+      if (dir === 'out' || items.length > 0) {
+        groups.push({ id: `${kind}:${dir}`, label: LABELS[kind][dir], items });
+      }
     }
   }
   return groups;

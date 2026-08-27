@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ChevronDown, ChevronRight, Pencil } from 'lucide-react';
+import { ChevronDown, ChevronRight, Pencil, Plus } from 'lucide-react';
 import {
   createPlanEdge,
   createPlanNode,
@@ -77,16 +77,18 @@ export function PlanDetailPanel({
   // breadcrumb can only add under the node it ends on, so a node reached by
   // clicking a tile or a tree row has no other way to gain a child.
   const [addingChild, setAddingChild] = useState(false);
-  // Link groups the user has folded away. Ids, not indices: a group
-  // disappears when its last link is removed.
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  // EXPLICIT fold choices only, keyed by group id (true = open). Absent means
+  // "as it comes": a group with links opens, an empty one stays folded, since
+  // an empty group is a control to add one rather than something to read.
+  const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [childTitle, setChildTitle] = useState('');
   const [statusDraft, setStatusDraft] = useState<PlanNodeStatus>('todo');
   const [kindDraft, setKindDraft] = useState<PlanNodeDetail['node']['kind']>('component');
   const [bodyDraft, setBodyDraft] = useState('');
   const [titleDraft, setTitleDraft] = useState('');
   const [linkTarget, setLinkTarget] = useState('');
-  const [linkKind, setLinkKind] = useState<PlanEdgeKind>('depends_on');
+  // Which group's add-a-link row is open, as `<kind>:<dir>`. One at a time.
+  const [addingLinkTo, setAddingLinkTo] = useState<string | null>(null);
 
   const reload = async (): Promise<void> => {
     const d = await getPlanNode(repositoryId, nodeId);
@@ -105,6 +107,9 @@ export function PlanDetailPanel({
     setEditingTitle(false);
     setEditingMeta(false);
     setAddingChild(false);
+    setAddingLinkTo(null);
+    setGroupOpen({});
+    setLinkTarget('');
     setTab('details');
     void getPlanNode(repositoryId, nodeId)
       .then((d) => {
@@ -560,115 +565,152 @@ export function PlanDetailPanel({
 
       {tab === 'links' && (
         <div className="flex flex-col gap-3">
-          {detail.edges.length === 0 ? (
-            <p className="text-xs text-neutral-600">No links yet.</p>
-          ) : (
-            groupPlanEdges(detail.edges, nodeId).map((group) => {
-              const folded = collapsedGroups.has(group.id);
-              return (
-                <div key={group.id} className="rounded-md border border-neutral-800">
-                  <button
-                    type="button"
-                    aria-expanded={!folded}
-                    onClick={() =>
-                      setCollapsedGroups((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(group.id)) next.delete(group.id);
-                        else next.add(group.id);
-                        return next;
-                      })
-                    }
-                    className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left"
-                  >
-                    {folded ? (
-                      <ChevronRight className="h-3.5 w-3.5 text-neutral-500" />
-                    ) : (
-                      <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
-                    )}
-                    {/* White and bold rather than amber: amber already means
+          {groupPlanEdges(detail.edges, nodeId).map((group) => {
+            const folded = !(groupOpen[group.id] ?? group.items.length > 0);
+            return (
+              <div key={group.id} className="rounded-md border border-neutral-800">
+                <button
+                  type="button"
+                  aria-expanded={!folded}
+                  onClick={() => setGroupOpen((prev) => ({ ...prev, [group.id]: folded }))}
+                  className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left"
+                >
+                  {folded ? (
+                    <ChevronRight className="h-3.5 w-3.5 text-neutral-500" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
+                  )}
+                  {/* White and bold rather than amber: amber already means
                         "blocked, needs a person" everywhere else in this UI. */}
-                    <span className="text-xs font-semibold text-neutral-100">{group.label}</span>
-                    <span className="text-[11px] text-neutral-500">{group.items.length}</span>
-                  </button>
-                  {!folded && (
-                    <div className="flex flex-col gap-1 border-t border-neutral-800 px-2 py-1.5">
-                      {group.items.map((item) => (
-                        <div
-                          key={item.edgeId}
-                          className="flex items-center gap-2 text-xs text-neutral-300"
+                  <span className="text-xs font-semibold text-neutral-100">{group.label}</span>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    title={`Add to ${group.label.toLowerCase()}`}
+                    aria-label={`Add to ${group.label.toLowerCase()}`}
+                    onClick={(e) => {
+                      // Nested in the header button, so the fold must not
+                      // also toggle when the + is what was hit.
+                      e.stopPropagation();
+                      setLinkTarget('');
+                      setAddingLinkTo((cur) => (cur === group.id ? null : group.id));
+                      // The row it opens lives in the body, so a folded group
+                      // would swallow it.
+                      setGroupOpen((prev) => ({ ...prev, [group.id]: true }));
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter' && e.key !== ' ') return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setLinkTarget('');
+                      setAddingLinkTo((cur) => (cur === group.id ? null : group.id));
+                    }}
+                    className="text-neutral-500 hover:text-neutral-200"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </span>
+                  <span className="ml-auto text-[11px] text-neutral-500">{group.items.length}</span>
+                </button>
+                {!folded && (
+                  <div className="flex flex-col gap-1 border-t border-neutral-800 px-2 py-1.5">
+                    {addingLinkTo === group.id && (
+                      // First row, inside the group it adds to: the kind and
+                      // the direction are the group's, so only the node is
+                      // still a question — no kind dropdown needed.
+                      <div className="flex items-center gap-2 pb-1">
+                        <select
+                          autoFocus
+                          value={linkTarget}
+                          disabled={saving}
+                          onChange={(e) => setLinkTarget(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                              setLinkTarget('');
+                              setAddingLinkTo(null);
+                            }
+                          }}
+                          className="h-8 min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100"
                         >
-                          {/* Goes to the node on the other end — the same move
+                          <option value="">Pick a node…</option>
+                          {tree
+                            .filter(
+                              (n) => n.id !== nodeId && !group.items.some((i) => i.nodeId === n.id),
+                            )
+                            .map((n) => (
+                              <option key={n.id} value={n.id}>
+                                {n.title}
+                              </option>
+                            ))}
+                        </select>
+                        <Button
+                          size="sm"
+                          disabled={saving || !linkTarget}
+                          onClick={() =>
+                            void write(async () => {
+                              const [kind, dir] = group.id.split(':');
+                              await createPlanEdge(repositoryId, {
+                                // An inbound group means the OTHER node points
+                                // here, so the edge is written that way round.
+                                fromNodeId: dir === 'out' ? nodeId : linkTarget,
+                                toNodeId: dir === 'out' ? linkTarget : nodeId,
+                                kind: kind as PlanEdgeKind,
+                              });
+                              setLinkTarget('');
+                              setAddingLinkTo(null);
+                            })
+                          }
+                        >
+                          OK
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={saving}
+                          onClick={() => {
+                            setLinkTarget('');
+                            setAddingLinkTo(null);
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    )}
+                    {group.items.length === 0 && addingLinkTo !== group.id && (
+                      <p className="text-xs italic text-neutral-400">No links of this kind yet.</p>
+                    )}
+                    {group.items.map((item) => (
+                      <div
+                        key={item.edgeId}
+                        className="flex items-center gap-2 text-xs text-neutral-300"
+                      >
+                        {/* Goes to the node on the other end — the same move
                               an impact hop makes, and the reason the group
                               carries that node's id rather than only its name. */}
-                          <button
-                            type="button"
-                            onClick={() => onNavigate(item.nodeId)}
-                            className="flex-1 truncate text-left hover:text-neutral-100 hover:underline"
-                          >
-                            {item.title}
-                            {item.note && <span className="text-neutral-500"> — {item.note}</span>}
-                          </button>
-                          <button
-                            type="button"
-                            className="shrink-0 text-neutral-500 underline hover:text-neutral-300"
-                            disabled={saving}
-                            onClick={() =>
-                              void write(() => deletePlanEdge(repositoryId, item.edgeId))
-                            }
-                          >
-                            remove
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })
-          )}
-
-          <div className="flex flex-col gap-2 border-t border-neutral-800 pt-3">
-            <select
-              value={linkKind}
-              onChange={(e) => setLinkKind(e.target.value as PlanEdgeKind)}
-              className="h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100"
-            >
-              <option value="depends_on">this depends on…</option>
-              <option value="affects">this affects…</option>
-              <option value="implements">this implements…</option>
-            </select>
-            <select
-              value={linkTarget}
-              onChange={(e) => setLinkTarget(e.target.value)}
-              className="h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100"
-            >
-              <option value="">Pick a node…</option>
-              {tree
-                .filter((n) => n.id !== nodeId)
-                .map((n) => (
-                  <option key={n.id} value={n.id}>
-                    {n.title}
-                  </option>
-                ))}
-            </select>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={saving || !linkTarget}
-              onClick={() =>
-                void write(async () => {
-                  await createPlanEdge(repositoryId, {
-                    fromNodeId: nodeId,
-                    toNodeId: linkTarget,
-                    kind: linkKind,
-                  });
-                  setLinkTarget('');
-                })
-              }
-            >
-              Add link
-            </Button>
-          </div>
+                        <button
+                          type="button"
+                          onClick={() => onNavigate(item.nodeId)}
+                          className="flex-1 truncate text-left hover:text-neutral-100 hover:underline"
+                        >
+                          {item.title}
+                          {item.note && <span className="text-neutral-500"> — {item.note}</span>}
+                        </button>
+                        <button
+                          type="button"
+                          className="shrink-0 text-neutral-500 underline hover:text-neutral-300"
+                          disabled={saving}
+                          onClick={() =>
+                            void write(() => deletePlanEdge(repositoryId, item.edgeId))
+                          }
+                        >
+                          remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
 
           {detail.codeLinks.length > 0 && (
             <div className="border-t border-neutral-800 pt-3">
