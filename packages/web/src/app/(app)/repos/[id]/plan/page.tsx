@@ -123,6 +123,9 @@ export default function PlanPage() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || !selectedIdRef.current) return;
+      // A dialog on top owns Escape — closing it and the panel underneath on
+      // one press loses work the user never asked to discard.
+      if (document.querySelector('[data-haive-dialog]')) return;
       const t = e.target as HTMLElement | null;
       if (
         t &&

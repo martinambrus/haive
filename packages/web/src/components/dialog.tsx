@@ -25,7 +25,10 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
 
   if (!open) return null;
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    // Marked so page-level Escape handlers can tell a dialog is on top and
+    // leave the key to it: without that, one Escape closes the dialog AND
+    // whatever was behind it.
+    <div data-haive-dialog="" className="fixed inset-0 z-50 flex items-center justify-center">
       <div
         className="fixed inset-0 bg-black/60 backdrop-blur-sm"
         onClick={() => onOpenChange(false)}

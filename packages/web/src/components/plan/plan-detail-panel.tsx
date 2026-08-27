@@ -20,6 +20,7 @@ import {
   type PlanTreeNode,
 } from '@/lib/api-client';
 import { Badge, Button, FormError } from '@/components/ui';
+import { CodePreviewDialog } from '@/components/code-preview-dialog';
 import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { looksLikeMarkdown } from '@/components/markdown/looks-like-markdown';
@@ -81,6 +82,9 @@ export function PlanDetailPanel({
   // "as it comes": a group with links opens, an empty one stays folded, since
   // an empty group is a control to add one rather than something to read.
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
+  // The code link being previewed, or null. Held here rather than per row so
+  // only one file is ever fetched and mounted.
+  const [preview, setPreview] = useState<{ repoPath: string; symbol: string | null } | null>(null);
   const [childTitle, setChildTitle] = useState('');
   const [statusDraft, setStatusDraft] = useState<PlanNodeStatus>('todo');
   const [kindDraft, setKindDraft] = useState<PlanNodeDetail['node']['kind']>('component');
@@ -112,6 +116,7 @@ export function PlanDetailPanel({
     setAddingChild(false);
     setAddingLinkTo(null);
     setGroupOpen({});
+    setPreview(null);
     setLinkTarget('');
     void getPlanNode(repositoryId, nodeId)
       .then((d) => {
@@ -718,15 +723,31 @@ export function PlanDetailPanel({
             <div className="border-t border-neutral-800 pt-3">
               <p className="mb-1 text-xs font-medium text-neutral-400">Code</p>
               {detail.codeLinks.map((l) => (
-                <p key={l.id} className="truncate font-mono text-[11px] text-neutral-400">
+                <button
+                  key={l.id}
+                  type="button"
+                  title="Open this file"
+                  onClick={() => setPreview({ repoPath: l.repoPath, symbol: l.symbol })}
+                  className="block w-full truncate text-left font-mono text-[11px] text-neutral-400 hover:text-neutral-200 hover:underline"
+                >
                   {l.repoPath}
                   {l.symbol ? `::${l.symbol}` : ''}
                   {l.stale && <span className="ml-1 text-amber-400">(stale)</span>}
-                </p>
+                </button>
               ))}
             </div>
           )}
         </div>
+      )}
+
+      {preview && (
+        <CodePreviewDialog
+          repositoryId={repositoryId}
+          repoPath={preview.repoPath}
+          symbol={preview.symbol}
+          open
+          onOpenChange={(o) => !o && setPreview(null)}
+        />
       )}
 
       {tab === 'chat' && (

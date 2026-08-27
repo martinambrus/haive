@@ -552,6 +552,21 @@ export interface OnboardingStatus {
   missing: string[];
 }
 
+export interface RepoFile {
+  path: string;
+  size: number;
+  binary: boolean;
+  /** True when the file was longer than the read cap; `content` holds the head. */
+  truncated: boolean;
+  content: string | null;
+}
+
+export function getRepoFile(repositoryId: string, path: string): Promise<RepoFile> {
+  return api.get<RepoFile>(
+    `/repos/${encodeURIComponent(repositoryId)}/file?path=${encodeURIComponent(path)}`,
+  );
+}
+
 export function getRepoOnboardingStatus(repositoryId: string): Promise<OnboardingStatus> {
   return api.get<OnboardingStatus>(`/repos/${encodeURIComponent(repositoryId)}/onboarding-status`);
 }

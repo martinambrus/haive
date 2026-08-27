@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq, and, desc, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
 import {
   createRepoRequestSchema,
   initRepoUploadRequestSchema,
@@ -614,6 +615,62 @@ repoRoutes.get('/:id/scope-tree', async (c) => {
   if (!root) throw new HttpError(409, 'Repository has no on-disk path yet');
   const tree = tagManagedKnowledgeNodes(await buildScopeTree(root));
   return c.json({ tree, scopeExcludeGlobs: repo.scopeExcludeGlobs ?? [] });
+});
+
+/** One text file from the repository, for the plan canvas's code-link preview.
+ *  Repo-scoped rather than task-scoped (`/tasks/:id/files`): a plan code link
+ *  names a path in the repository and exists whether or not any task is open on
+ *  it. Read-only, capped, and refuses anything outside the repo root. */
+repoRoutes.get('/:id/file', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const requested = c.req.query('path');
+  if (!requested) throw new HttpError(400, 'Missing path query parameter');
+
+  const db = getDb();
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { id: true, storagePath: true, localPath: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  const root = repo.storagePath ?? repo.localPath;
+  if (!root) throw new HttpError(409, 'Repository has no on-disk path yet');
+
+  // Resolve THEN contain: `path.resolve` collapses `..`, so the containment
+  // check sees where the read would actually land rather than what was typed.
+  const target = path.resolve(root, requested);
+  const rel = path.relative(root, target);
+  if (rel.startsWith('..') || path.isAbsolute(rel) || rel.includes('\0')) {
+    throw new HttpError(403, 'Path is outside the repository');
+  }
+
+  let st;
+  try {
+    st = await stat(target);
+  } catch {
+    throw new HttpError(404, 'File not found');
+  }
+  if (st.isDirectory()) throw new HttpError(400, 'Path is a directory, not a file');
+
+  const handle = await open(target, 'r');
+  try {
+    const buf = Buffer.alloc(Math.min(st.size, MAX_FILE_CONTENT_BYTES));
+    await handle.read(buf, 0, buf.length, 0);
+    // A NUL in the first block is the usual "this is not text" tell; returning
+    // it as a string would render as mojibake in the preview.
+    if (buf.includes(0)) {
+      return c.json({ path: rel, size: st.size, binary: true, truncated: false, content: null });
+    }
+    return c.json({
+      path: rel,
+      size: st.size,
+      binary: false,
+      truncated: st.size > buf.length,
+      content: buf.toString('utf8'),
+    });
+  } finally {
+    await handle.close();
+  }
 });
 
 repoRoutes.patch('/:id/exclusions', async (c) => {
