@@ -44,6 +44,10 @@ import { groupPlanConversations, liveConversation, type PlanChatGroup } from './
  *  ends, so a settled conversation costs nothing. */
 const POLL_MS = 2000;
 
+/** How many past conversations the history section shows before asking. A node
+ *  chatted about for weeks would otherwise open as a wall of folded boxes. */
+const HISTORY_PREVIEW = 3;
+
 /** How a conversation that can no longer take a turn ENDED. A plain completion
  *  needs no word — the date says everything — but a cancelled or failed one is
  *  a different fact about the same transcript and has to say so. */
@@ -89,6 +93,8 @@ export function PlanChat({
   const [providerId, setProviderId] = useState('');
   const [liveStep, setLiveStep] = useState<TaskStep | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  // Whether history shows everything or just the most recent few.
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   // How many replies were unread when this node was opened, captured ONCE:
   // opening the tab marks them read, so a live count would move the divider
   // past the very replies it is meant to sit above. Counted rather than
@@ -116,6 +122,7 @@ export function PlanChat({
     setConversations([]);
     setLiveStep(null);
     setShowHistory(false);
+    setHistoryExpanded(false);
     markedRef.current = null;
     setUnreadAtOpen(unreadCount);
     setError(null);
@@ -128,14 +135,31 @@ export function PlanChat({
     };
   }, [reloadMessages]);
 
+  // Show the CLI that WILL run, not a placeholder: there is no stored per-repo
+  // default to name. The server takes this repository's most recent task's
+  // provider and falls back to the oldest enabled one, so the picker resolves
+  // the same thing and preselects it.
   useEffect(() => {
     let cancelled = false;
-    void api
-      .get<{ providers: CliProvider[] }>('/cli-providers')
-      .then((res) => {
+    void Promise.all([
+      api.get<{ providers: CliProvider[] }>('/cli-providers'),
+      api
+        .get<{ cliProviderId: string | null }>(
+          `/tasks/last-cli?repositoryId=${encodeURIComponent(repositoryId)}`,
+        )
+        .catch(() => ({ cliProviderId: null })),
+    ])
+      .then(([res, last]) => {
         if (cancelled) return;
         const enabled = res.providers.filter((p) => p.enabled);
         setProviders(enabled);
+        setProviderId((current) => {
+          // A conversation already under way owns the choice; see the poll.
+          if (current) return current;
+          const lastId = last.cliProviderId;
+          if (lastId && enabled.some((p) => p.id === lastId)) return lastId;
+          return enabled[0]?.id ?? '';
+        });
       })
       .catch(() => {
         /* the picker is optional — without it the server picks the provider */
@@ -143,7 +167,7 @@ export function PlanChat({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [repositoryId]);
 
   // The first reply the user has not seen: walk back over assistant turns until
   // as many have been passed as were unread when the tab opened.
@@ -183,6 +207,9 @@ export function PlanChat({
         if (cancelled) return;
         const step = res.steps.find((s) => s.stepId === PLAN_CHAT_STEP_ID) ?? null;
         setLiveStep(step);
+        // A conversation already running has a provider of its own; the picker
+        // must show THAT rather than what a new conversation would start with.
+        if (res.task.cliProviderId) setProviderId(res.task.cliProviderId);
         const settled =
           step?.status === 'waiting_form' ||
           ['completed', 'cancelled', 'failed'].includes(res.task.status);
@@ -294,9 +321,16 @@ export function PlanChat({
     }
   }
 
-  const history = groups.filter((g) => g !== live);
-  const current = live ?? (groups.length > 0 ? groups[groups.length - 1]! : null);
-  const older = current ? history.filter((g) => g !== current) : history;
+  // Exactly one thing sits outside the history section: the conversation that
+  // can still take a turn. Everything else IS history, including the newest
+  // finished one — leaving that outside made the section look like it had
+  // missed a conversation.
+  //
+  // Newest first inside history, so "show more" reveals older ones rather than
+  // burying the recent ones under a fold.
+  const history = groups.filter((g) => g !== live).reverse();
+  const shown = historyExpanded ? history : history.slice(0, HISTORY_PREVIEW);
+  const hiddenCount = history.length - shown.length;
 
   return (
     <div className="flex flex-col gap-2">
@@ -313,32 +347,80 @@ export function PlanChat({
         </div>
       )}
 
-      {showHistory &&
-        older.map((g, i) => (
-          <ConversationGroup key={g.taskId ?? `orphan-${i}`} group={g} defaultOpen={false} />
-        ))}
-
-      {/* Only a LIVE conversation opens by itself. A finished one is history:
-          it opens when asked for, like every other group. */}
-      {current && (
-        <ConversationGroup
-          group={current}
-          defaultOpen={Boolean(live)}
-          firstUnreadId={firstUnreadId}
-        />
+      {/* Everything finished folded behind ONE heading. Loose conversation
+          boxes stacked down the tab read as clutter the moment a node has been
+          chatted about more than twice. */}
+      {history.length > 0 && (
+        <>
+          <div className="rounded-md border border-neutral-800">
+            <button
+              type="button"
+              aria-expanded={showHistory}
+              onClick={() => setShowHistory((v) => !v)}
+              className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left"
+            >
+              {showHistory ? (
+                <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5 text-neutral-500" />
+              )}
+              <span className="text-xs font-semibold text-neutral-100">Chat history</span>
+              <span className="ml-auto text-[11px] text-neutral-500">{history.length}</span>
+            </button>
+            {showHistory && (
+              <div className="flex flex-col gap-2 border-t border-neutral-800 p-2">
+                {shown.map((g, i) => (
+                  <ConversationGroup
+                    key={g.taskId ?? `orphan-${i}`}
+                    group={g}
+                    defaultOpen={false}
+                    firstUnreadId={firstUnreadId}
+                  />
+                ))}
+                {(hiddenCount > 0 || historyExpanded) && (
+                  <button
+                    type="button"
+                    onClick={() => setHistoryExpanded((v) => !v)}
+                    className="self-start text-xs text-indigo-300 underline"
+                  >
+                    {historyExpanded ? 'Show fewer' : `Show more history (${hiddenCount})`}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          {/* Generous space, not just a line: with several folded boxes in a
+              column a hairline rule alone does not say where history ends and
+              the live conversation begins. */}
+          <hr className="my-3 border-neutral-800" />
+        </>
       )}
 
-      {/* Under the groups, where it reads as "there is more below this" rather
-          than as a heading for what follows. */}
-      {older.length > 0 && (
-        <button
-          type="button"
-          onClick={() => setShowHistory((v) => !v)}
-          className="self-start text-xs text-indigo-300 underline"
+      {providers.length > 0 && (
+        // No visible label: the options name CLIs, so the word "CLI" beside
+        // them only added a column of text to a tab that already has several.
+        // The name moves to aria-label/title so it is still announced and
+        // still explains itself on hover.
+        <select
+          aria-label="CLI that answers this conversation"
+          title="CLI that answers this conversation"
+          value={providerId}
+          disabled={working}
+          onChange={(e) => void changeProvider(e.target.value)}
+          className="h-7 w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 disabled:opacity-50"
         >
-          {showHistory ? 'Collapse history' : `Show more history (${older.length})`}
-        </button>
+          {providers.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+        </select>
       )}
+
+      {/* Directly above the composer, under the CLI that answers it: a live
+          conversation belongs with the box you reply in, not stacked above the
+          history section where it read as part of the history. */}
+      {live && <ConversationGroup group={live} defaultOpen firstUnreadId={firstUnreadId} />}
 
       {working && (
         <p className="flex items-center gap-2 text-[11px] text-neutral-400">
@@ -355,25 +437,6 @@ export function PlanChat({
           </Link>{' '}
           to watch what the agent is doing.
         </p>
-      )}
-
-      {providers.length > 0 && (
-        <label className="flex items-center gap-2 text-[11px] text-neutral-400">
-          CLI
-          <select
-            value={providerId}
-            disabled={working}
-            onChange={(e) => void changeProvider(e.target.value)}
-            className="h-7 min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 disabled:opacity-50"
-          >
-            <option value="">Default for this repository</option>
-            {providers.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </label>
       )}
 
       <textarea
