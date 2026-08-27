@@ -44,11 +44,22 @@ import { groupPlanConversations, liveConversation, type PlanChatGroup } from './
  *  ends, so a settled conversation costs nothing. */
 const POLL_MS = 2000;
 
-const STATUS_LABEL: Record<string, string> = {
-  completed: 'Ended',
-  cancelled: 'Cancelled',
-  failed: 'Failed',
+/** How a conversation that can no longer take a turn ENDED. A plain completion
+ *  needs no word — the date says everything — but a cancelled or failed one is
+ *  a different fact about the same transcript and has to say so. */
+const OUTCOME_NOTE: Record<string, string> = {
+  cancelled: 'cancelled',
+  failed: 'failed',
 };
+
+/** When a conversation started, from its first turn — the API records the
+ *  opening message as the task is created, so this IS the task's start. */
+function startedLabel(iso: string | undefined): string {
+  if (!iso) return 'Conversation';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return 'Conversation';
+  return at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
 
 export function PlanChat({
   repositoryId,
@@ -302,6 +313,50 @@ export function PlanChat({
         </div>
       )}
 
+      {showHistory &&
+        older.map((g, i) => (
+          <ConversationGroup key={g.taskId ?? `orphan-${i}`} group={g} defaultOpen={false} />
+        ))}
+
+      {/* Only a LIVE conversation opens by itself. A finished one is history:
+          it opens when asked for, like every other group. */}
+      {current && (
+        <ConversationGroup
+          group={current}
+          defaultOpen={Boolean(live)}
+          firstUnreadId={firstUnreadId}
+        />
+      )}
+
+      {/* Under the groups, where it reads as "there is more below this" rather
+          than as a heading for what follows. */}
+      {older.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowHistory((v) => !v)}
+          className="self-start text-xs text-indigo-300 underline"
+        >
+          {showHistory ? 'Collapse history' : `Show more history (${older.length})`}
+        </button>
+      )}
+
+      {working && (
+        <p className="flex items-center gap-2 text-[11px] text-neutral-400">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+          {liveStep?.statusMessage ?? 'Thinking…'}
+        </p>
+      )}
+
+      {liveTaskId && (
+        <p className="text-[11px] text-neutral-500">
+          The conversation runs as a task —{' '}
+          <Link href={`/tasks/${liveTaskId}`} className="text-indigo-300 underline">
+            open it
+          </Link>{' '}
+          to watch what the agent is doing.
+        </p>
+      )}
+
       {providers.length > 0 && (
         <label className="flex items-center gap-2 text-[11px] text-neutral-400">
           CLI
@@ -319,40 +374,6 @@ export function PlanChat({
             ))}
           </select>
         </label>
-      )}
-
-      {older.length > 0 && (
-        <button
-          type="button"
-          onClick={() => setShowHistory((v) => !v)}
-          className="self-start text-xs text-indigo-300 underline"
-        >
-          {showHistory ? 'Collapse history' : `Show more history (${older.length})`}
-        </button>
-      )}
-
-      {showHistory &&
-        older.map((g, i) => (
-          <ConversationGroup key={g.taskId ?? `orphan-${i}`} group={g} defaultOpen={false} />
-        ))}
-
-      {current && <ConversationGroup group={current} defaultOpen firstUnreadId={firstUnreadId} />}
-
-      {working && (
-        <p className="flex items-center gap-2 text-[11px] text-neutral-400">
-          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-          {liveStep?.statusMessage ?? 'Thinking…'}
-        </p>
-      )}
-
-      {liveTaskId && (
-        <p className="text-[11px] text-neutral-500">
-          The conversation runs as a task —{' '}
-          <Link href={`/tasks/${liveTaskId}`} className="text-indigo-300 underline">
-            open it
-          </Link>{' '}
-          to watch what the agent is doing.
-        </p>
       )}
 
       <textarea
@@ -395,8 +416,11 @@ function ConversationGroup({
   firstUnreadId?: string | null;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  // A live conversation is named by what it is; a finished one by WHEN it
+  // happened, since that is what tells two of them apart in a list.
+  const note = OUTCOME_NOTE[group.status ?? ''];
   const label = group.ended
-    ? (STATUS_LABEL[group.status ?? ''] ?? 'Ended')
+    ? `${startedLabel(group.messages[0]?.createdAt)}${note ? ` (${note})` : ''}`
     : 'Current conversation';
   return (
     <div className="rounded-md border border-neutral-800">
