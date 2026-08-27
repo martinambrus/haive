@@ -119,6 +119,10 @@ interface PrePlanningApply {
     reached: { id: string; title: string; depth: number; via: string }[];
     truncated: null | { reason: 'depth' | 'nodes'; limit: number };
     mermaid: string;
+    /** Nodes the DIAGRAM left out, which the list above still carries. Optional
+     *  because this output is persisted: a gate parked before the diagram was
+     *  bounded has no such field, and must keep rendering. */
+    mermaidOmitted?: number;
   };
 }
 
@@ -179,12 +183,16 @@ async function resolveAffectedComponents(
       }
     }
 
+    // The WALK stays at depth 3 — the prose list below the diagram wants the
+    // wider set. Only the picture is bounded, and it says by how much.
     const combined = computeImpact(named[0]!.id, edges, { maxDepth: 3 });
+    const diagram = renderImpactMermaid(combined, titleById);
     return {
       named,
       reached,
       truncated,
-      mermaid: renderImpactMermaid(combined, titleById),
+      mermaid: diagram.source,
+      mermaidOmitted: diagram.omitted,
     };
   } catch (err) {
     ctx.logger.warn({ err }, 'affected-components resolution failed (non-fatal)');

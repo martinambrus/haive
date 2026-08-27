@@ -1342,6 +1342,10 @@ export interface PlanImpact {
    *  prevent. */
   truncated: null | { reason: 'depth' | 'nodes'; limit: number };
   mermaid: string;
+  /** Nodes in `hops` the DIAGRAM does not draw. The diagram is bounded so it
+   *  stays readable; this is what lets the panel say so instead of letting a
+   *  partial picture read as the whole radius. */
+  mermaidOmitted: number;
   codeLinks: PlanCodeLink[];
 }
 

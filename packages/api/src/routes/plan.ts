@@ -16,6 +16,7 @@ import {
   PlanPatchError,
   ancestryOf,
   applyPlanPatch,
+  IMPACT_DEFAULT_VIEW_DEPTH,
   computeImpact,
   findPlanRoot,
   loadPlanEdges,
@@ -336,12 +337,19 @@ planRoutes.get('/:id/plan/impact/:nodeId', async (c) => {
     loadPlanSkeletons(db, repositoryId),
     loadPlanEdges(db, repositoryId),
   ]);
+  // Absent means the VIEW's default radius, not the walk's safety cap. One hop
+  // reaches a median of 3 nodes on a real plan and two reach 130 — a transitive
+  // answer is "essentially the whole plan", which answers nothing. Deeper is
+  // available, but asked for.
   const depthParam = Number(c.req.query('maxDepth'));
   const impact = computeImpact(nodeId, edges, {
-    ...(Number.isFinite(depthParam) && depthParam > 0 ? { maxDepth: depthParam } : {}),
+    maxDepth:
+      Number.isFinite(depthParam) && depthParam > 0 ? depthParam : IMPACT_DEFAULT_VIEW_DEPTH,
   });
   const titleById = new Map(skeletons.map((n) => [n.id, n.title]));
   const byId = new Map(skeletons.map((n) => [n.id, n]));
+
+  const diagram = renderImpactMermaid(impact, titleById);
 
   const affectedIds = impact.hops.map((h) => h.nodeId);
   const codeLinks = affectedIds.length
@@ -359,7 +367,10 @@ planRoutes.get('/:id/plan/impact/:nodeId', async (c) => {
       status: byId.get(h.nodeId)?.status ?? null,
     })),
     truncated: impact.truncated,
-    mermaid: renderImpactMermaid(impact, titleById),
+    mermaid: diagram.source,
+    // What the picture had to leave out, so the panel can say so rather than
+    // letting a bounded diagram read as the whole answer.
+    mermaidOmitted: diagram.omitted,
     codeLinks: codeLinks.filter((l) => l.nodeId === nodeId || affectedIds.includes(l.nodeId)),
   });
 });

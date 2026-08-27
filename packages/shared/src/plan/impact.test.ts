@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeImpact, renderImpactMermaid } from './impact.js';
+import { IMPACT_DIAGRAM_MAX_NODES, computeImpact, renderImpactMermaid } from './impact.js';
 import type { PlanEdgeRecord } from './read.js';
 
 let seq = 0;
@@ -92,11 +92,14 @@ describe('renderImpactMermaid', () => {
   const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
   it('emits a flowchart with the origin marked', () => {
-    const out = renderImpactMermaid(computeImpact(A, [edge(A, B)]), titles);
-    expect(out.startsWith('flowchart TD')).toBe(true);
-    expect(out).toContain(':::origin');
-    expect(out).toContain('"Origin"');
-    expect(out).toContain('"Target"');
+    const { source, omitted } = renderImpactMermaid(computeImpact(A, [edge(A, B)]), titles);
+    // LR, not TD: top-down lays one BFS level out as a ROW, which is how a
+    // 122-node level became a 45,871px-wide diagram.
+    expect(source.startsWith('flowchart LR')).toBe(true);
+    expect(source).toContain(':::origin');
+    expect(source).toContain('"Origin"');
+    expect(source).toContain('"Target"');
+    expect(omitted).toBe(0);
   });
 
   it('strips quotes and newlines from titles', () => {
@@ -107,14 +110,14 @@ describe('renderImpactMermaid', () => {
       [A, 'Say "hi"\nflowchart LR'],
       [B, 'ok'],
     ]);
-    const out = renderImpactMermaid(computeImpact(A, [edge(A, B)]), hostile);
-    expect(out).not.toContain('Say "hi"');
-    expect(out.split('\n').filter((l) => l.trim().startsWith('flowchart'))).toHaveLength(1);
+    const { source } = renderImpactMermaid(computeImpact(A, [edge(A, B)]), hostile);
+    expect(source).not.toContain('Say "hi"');
+    expect(source.split('\n').filter((l) => l.trim().startsWith('flowchart'))).toHaveLength(1);
   });
 
   it('renders a reversed hop with a dotted arrow', () => {
-    const out = renderImpactMermaid(computeImpact(B, [edge(A, B)]), titles);
-    expect(out).toContain('-.->');
+    const { source } = renderImpactMermaid(computeImpact(B, [edge(A, B)]), titles);
+    expect(source).toContain('-.->');
   });
 
   it('encodes node ids as a recoverable pnode token', () => {
@@ -122,10 +125,79 @@ describe('renderImpactMermaid', () => {
     // surrounding decoration (`<renderId>-flowchart-<id>-<index>`), which is an
     // internal convention. A version that keyed on mermaid's prefix bound zero
     // click handlers and failed silently.
-    const out = renderImpactMermaid(computeImpact(A, [edge(A, B)]), titles);
-    expect(out).toContain(`pnode${A.replace(/-/g, '')}`);
-    expect(out).toContain(`pnode${B.replace(/-/g, '')}`);
-    const recovered = /pnode([0-9a-f]{32})/i.exec(out)?.[1];
+    const { source } = renderImpactMermaid(computeImpact(A, [edge(A, B)]), titles);
+    expect(source).toContain(`pnode${A.replace(/-/g, '')}`);
+    expect(source).toContain(`pnode${B.replace(/-/g, '')}`);
+    const recovered = /pnode([0-9a-f]{32})/i.exec(source)?.[1];
     expect(recovered).toBe(A.replace(/-/g, ''));
+  });
+});
+
+describe('the diagram cap', () => {
+  // A hub with many spokes: exactly the shape that made a real diagram
+  // 45,871px wide. Every spoke is one hop from the origin.
+  const HUB = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const spoke = (i: number) => `bbbbbbbb-bbbb-4bbb-8bbb-${String(i).padStart(12, '0')}`;
+  const spokes = Array.from({ length: 60 }, (_, i) => spoke(i));
+  const edges = spokes.map((s) => edge(HUB, s));
+  const titles = new Map([[HUB, 'Hub'], ...spokes.map((s, i) => [s, `Spoke ${i}`] as const)]);
+
+  it('draws only the nearest nodes and says how many it left', () => {
+    const result = computeImpact(HUB, edges);
+    const { source, omitted } = renderImpactMermaid(result, titles);
+    const drawn = source.split('\n').filter((l) => /^\s+pnode\w+\[/.test(l));
+    // origin + the cap
+    expect(drawn).toHaveLength(IMPACT_DIAGRAM_MAX_NODES + 1);
+    expect(omitted).toBe(60 - IMPACT_DIAGRAM_MAX_NODES);
+  });
+
+  it('caps the DIAGRAM only, never the walk', () => {
+    // The list beside the diagram shows everything; the picture is the only
+    // thing bounded. A cap that ate hops would be the silent truncation this
+    // whole view exists to prevent.
+    const result = computeImpact(HUB, edges);
+    renderImpactMermaid(result, titles);
+    expect(result.hops).toHaveLength(60);
+  });
+
+  it('honours an explicit cap', () => {
+    const { source, omitted } = renderImpactMermaid(computeImpact(HUB, edges), titles, {
+      maxNodes: 5,
+    });
+    expect(source.split('\n').filter((l) => /^\s+pnode\w+\[/.test(l))).toHaveLength(6);
+    expect(omitted).toBe(55);
+  });
+
+  it('never draws an edge to a node it did not draw', () => {
+    // Nearest-first is what guarantees this: a hop's via-node is always at a
+    // shallower depth, so it is always at a lower index than the hop itself.
+    const chain = ['a', 'b', 'c', 'd', 'e'].map(
+      (c) => `${c.repeat(8)}-${c.repeat(4)}-4${c.repeat(3)}-8${c.repeat(3)}-${c.repeat(12)}`,
+    );
+    const chainEdges = chain.slice(0, -1).map((from, i) => edge(from, chain[i + 1]!));
+    const chainTitles = new Map(chain.map((id, i) => [id, `N${i}`]));
+    const { source } = renderImpactMermaid(computeImpact(chain[0]!, chainEdges), chainTitles, {
+      maxNodes: 2,
+    });
+    const declared = new Set([...source.matchAll(/^\s+(pnode\w+)\[/gm)].map((m) => m[1]!));
+    for (const [, a, b] of source.matchAll(/^\s+(pnode\w+) -[.-]?->\|[^|]*\| (pnode\w+)$/gm)) {
+      expect(declared.has(a!)).toBe(true);
+      expect(declared.has(b!)).toBe(true);
+    }
+  });
+
+  it('shortens a label so the box does not set the diagram width', () => {
+    const long = 'rs_dynamic_modules dialog: module picker & dynamic-module placeholder insertion';
+    const { source } = renderImpactMermaid(
+      computeImpact(HUB, [edge(HUB, spoke(0))]),
+      new Map([
+        [HUB, long],
+        [spoke(0), 'short'],
+      ]),
+    );
+    expect(source).not.toContain(long);
+    expect(source).toContain('…');
+    const widest = Math.max(...[...source.matchAll(/\["([^"]*)"\]/g)].map((m) => m[1]!.length));
+    expect(widest).toBeLessThanOrEqual(40);
   });
 });

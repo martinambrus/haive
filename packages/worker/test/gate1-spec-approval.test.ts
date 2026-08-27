@@ -270,3 +270,64 @@ describe('gate-1 summary carries the spec diagrams', () => {
     expect(summaryBody({ specBody: '# Spec\n\nprose only.' })).not.toContain('## Diagram');
   });
 });
+
+describe('the affected-components section', () => {
+  const affected = (over: Record<string, unknown> = {}) => ({
+    ...detectedStub(),
+    affectedComponents: {
+      named: [{ id: 'n1', title: 'Mailer' }],
+      reached: [
+        { id: 'n2', title: 'SMTP transport', depth: 1, via: 'depends_on' },
+        { id: 'n3', title: 'Theme contract', depth: 2, via: 'affects' },
+      ],
+      truncated: null,
+      mermaid: 'flowchart LR\n  a --> b',
+      ...over,
+    },
+  });
+
+  const sectionBody = (detected: ReturnType<typeof affected>): string => {
+    const schema = gate1SpecApprovalStep.form!(makeApplyCtx().ctx, detected) as FormSchema;
+    const section = schema.infoSections?.find((s) => s.title === 'Affected components');
+    expect(section).toBeDefined();
+    return section!.body;
+  };
+
+  it('lists what the spec named and what it reaches, and fences the diagram', () => {
+    const body = sectionBody(affected());
+    expect(body).toContain('Mailer');
+    expect(body).toContain('SMTP transport — depends on (1 hop)');
+    expect(body).toContain('Theme contract — affects (2 hops)');
+    expect(body).toContain('```mermaid');
+  });
+
+  it('says how much the diagram left out', () => {
+    // The picture is bounded so it stays readable; silence here would let a
+    // partial diagram read as the whole blast radius.
+    const body = sectionBody(affected({ mermaidOmitted: 7 }));
+    expect(body).toMatch(/7 further components .* listed above rather than drawn/);
+  });
+
+  it('says nothing when the diagram drew everything', () => {
+    expect(sectionBody(affected({ mermaidOmitted: 0 }))).not.toContain('rather than drawn');
+  });
+
+  it('still renders output written before the diagram was bounded', () => {
+    // This shape is PERSISTED in task_steps.output. A gate parked under the old
+    // shape has no mermaidOmitted at all, and must not render a broken line.
+    const body = sectionBody(affected());
+    expect(body).toContain('```mermaid');
+    expect(body).not.toContain('undefined');
+    expect(body).not.toContain('rather than drawn');
+  });
+
+  it('still states a traversal cap, which is a different fact', () => {
+    // The walk stopping and the picture being bounded are two separate limits;
+    // one must not hide the other.
+    const body = sectionBody(
+      affected({ truncated: { reason: 'depth', limit: 3 }, mermaidOmitted: 4 }),
+    );
+    expect(body).toContain('stopped at the depth limit of 3');
+    expect(body).toContain('rather than drawn');
+  });
+});

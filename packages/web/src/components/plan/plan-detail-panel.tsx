@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ChevronDown, ChevronRight, Pencil, Plus } from 'lucide-react';
@@ -25,6 +25,12 @@ import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { looksLikeMarkdown } from '@/components/markdown/looks-like-markdown';
 import { groupPlanEdges } from './plan-edge-groups';
+import {
+  DEFAULT_IMPACT_DEPTH,
+  IMPACT_DEPTH_CHOICES,
+  defaultOpenImpactDepths,
+  groupImpactHops,
+} from './plan-impact-groups';
 import { PlanChat } from './plan-chat';
 import { PlanGraph } from './plan-graph';
 import {
@@ -81,6 +87,10 @@ export function PlanDetailPanel({
   const router = useRouter();
   const [detail, setDetail] = useState<PlanNodeDetail | null>(null);
   const [impact, setImpact] = useState<PlanImpact | null>(null);
+  // The radius the Impact tab opens at. One hop, because on a real plan two
+  // reach a median of 130 nodes — a transitive answer is "the whole plan".
+  const [impactDepth, setImpactDepth] = useState<number>(DEFAULT_IMPACT_DEPTH);
+  const [openImpactDepths, setOpenImpactDepths] = useState<Set<number> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -148,12 +158,23 @@ export function PlanDetailPanel({
     };
   }, [repositoryId, nodeId]);
 
+  // `impact` doubles as the cache flag, so the fetched depth has to be part of
+  // what "already loaded" means — otherwise the control renders and does
+  // nothing, which is worse than not offering it.
+  const impactDepthRef = useRef<number | null>(null);
   useEffect(() => {
-    if (tab !== 'impact' || impact) return;
-    void getPlanImpact(repositoryId, nodeId)
-      .then(setImpact)
+    if (tab !== 'impact') return;
+    if (impact && impactDepthRef.current === impactDepth) return;
+    impactDepthRef.current = impactDepth;
+    void getPlanImpact(repositoryId, nodeId, impactDepth)
+      .then((next) => {
+        setImpact(next);
+        setOpenImpactDepths(null);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load impact'));
-  }, [tab, impact, repositoryId, nodeId]);
+  }, [tab, impact, impactDepth, repositoryId, nodeId]);
+
+  const impactGroups = groupImpactHops(impact?.hops ?? []);
 
   // Returns whether the write landed, so a caller holding an in-place editor
   // can keep the user's draft on failure instead of silently dropping it.
@@ -791,37 +812,127 @@ export function PlanDetailPanel({
 
       {tab === 'impact' && (
         <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-neutral-500">Reach</span>
+            {IMPACT_DEPTH_CHOICES.map((d) => (
+              <button
+                key={d}
+                type="button"
+                onClick={() => setImpactDepth(d)}
+                title={`Nodes within ${d} hop${d === 1 ? '' : 's'} of this one`}
+                className={`h-5 w-6 rounded border text-[11px] ${
+                  d === impactDepth
+                    ? 'border-indigo-500 bg-indigo-500/20 text-indigo-200'
+                    : 'border-neutral-700 text-neutral-400 hover:text-neutral-200'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+            <span className="text-[11px] text-neutral-600">hop{impactDepth === 1 ? '' : 's'}</span>
+          </div>
+
           {!impact ? (
             <p className="text-xs text-neutral-500">Loading…</p>
           ) : (
             <>
-              {impact.truncated && (
-                // Shown, never swallowed: a short list read as "nothing else is
-                // affected" is the failure this view exists to prevent.
+              {/* Two different facts, deliberately not one banner.
+               *
+               * Hitting the DEPTH limit is the radius doing its job: the user
+               * asked for N hops and there is more further out. At the default
+               * of 1 that is true of nearly every linked node, so raising it as
+               * an alarm would mark almost every result incomplete — which is
+               * precisely what trains a reader to ignore the alarm. It gets a
+               * quiet line and a way to go further.
+               *
+               * Hitting the NODE limit is a cap nobody asked for, and the only
+               * one that can hide something the chosen radius should have
+               * shown. That stays amber. Either way more is never silent: a
+               * short list read as "nothing else is affected" is the failure
+               * this view exists to prevent. */}
+              {impact.truncated?.reason === 'nodes' && (
                 <p className="rounded border border-amber-900 bg-amber-950/30 px-2 py-1 text-[11px] text-amber-200">
-                  Stopped at the {impact.truncated.reason} limit of {impact.truncated.limit}. There
-                  are more affected nodes than are shown here.
+                  Showing {impact.hops.length} nodes — the walk stopped at its limit of{' '}
+                  {impact.truncated.limit}, so more lie beyond even within {impactDepth} hop
+                  {impactDepth === 1 ? '' : 's'}.
+                </p>
+              )}
+              {impact.truncated?.reason === 'depth' && (
+                <p className="text-[11px] text-neutral-500">
+                  More lies beyond {impactDepth} hop{impactDepth === 1 ? '' : 's'}.
+                  {impactDepth < IMPACT_DEPTH_CHOICES[IMPACT_DEPTH_CHOICES.length - 1]! && (
+                    <button
+                      type="button"
+                      onClick={() => setImpactDepth(impactDepth + 1)}
+                      className="ml-1 text-indigo-300 underline"
+                    >
+                      Reach {impactDepth + 1} hop{impactDepth + 1 === 1 ? '' : 's'}
+                    </button>
+                  )}
                 </p>
               )}
               {impact.hops.length === 0 ? (
                 <p className="text-xs text-neutral-600">
-                  Nothing else is linked to this node yet. Add links on the Links tab.
+                  Nothing else is linked to this node
+                  {impactDepth > 1 ? ` within ${impactDepth} hops` : ''} yet. Add links on the Links
+                  tab.
                 </p>
               ) : (
                 <>
                   <PlanGraph source={impact.mermaid} onNodeClick={onNavigate} />
-                  {impact.hops.map((h) => (
-                    <button
-                      key={h.nodeId}
-                      type="button"
-                      onClick={() => onNavigate(h.nodeId)}
-                      className="truncate text-left text-xs text-neutral-300 hover:text-neutral-100"
-                    >
-                      <span className="text-neutral-600">{'· '.repeat(h.depth)}</span>
-                      {h.title}{' '}
-                      <span className="text-neutral-600">({h.viaKind.replace(/_/g, ' ')})</span>
-                    </button>
-                  ))}
+                  {impact.mermaidOmitted > 0 && (
+                    <p className="text-[11px] text-neutral-500">
+                      Diagram shows the {impact.hops.length - impact.mermaidOmitted} nearest;{' '}
+                      {impact.mermaidOmitted} more are in the list below.
+                    </p>
+                  )}
+                  {impactGroups.map((g) => {
+                    const open = (openImpactDepths ?? defaultOpenImpactDepths(impactGroups)).has(
+                      g.depth,
+                    );
+                    return (
+                      <div key={g.depth} className="rounded border border-neutral-800">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setOpenImpactDepths((prev) => {
+                              const next = new Set(prev ?? defaultOpenImpactDepths(impactGroups));
+                              if (next.has(g.depth)) next.delete(g.depth);
+                              else next.add(g.depth);
+                              return next;
+                            })
+                          }
+                          className="flex w-full items-center gap-1 px-2 py-1 text-left text-[11px] text-neutral-400 hover:text-neutral-200"
+                        >
+                          {open ? (
+                            <ChevronDown className="h-3 w-3" />
+                          ) : (
+                            <ChevronRight className="h-3 w-3" />
+                          )}
+                          {g.label}
+                          <span className="text-neutral-600">({g.hops.length})</span>
+                        </button>
+                        {open && (
+                          <div className="flex flex-col border-t border-neutral-800 px-2 py-1">
+                            {g.hops.map((h) => (
+                              <button
+                                key={h.nodeId}
+                                type="button"
+                                onClick={() => onNavigate(h.nodeId)}
+                                title={h.title ?? undefined}
+                                className="truncate text-left text-xs text-neutral-300 hover:text-neutral-100"
+                              >
+                                {h.title}{' '}
+                                <span className="text-neutral-600">
+                                  ({h.viaKind.replace(/_/g, ' ')})
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </>
               )}
             </>

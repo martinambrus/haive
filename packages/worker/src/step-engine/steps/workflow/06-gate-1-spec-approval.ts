@@ -29,6 +29,10 @@ interface AffectedComponents {
   reached: { id: string; title: string; depth: number; via: string }[];
   truncated: null | { reason: 'depth' | 'nodes'; limit: number };
   mermaid: string;
+  /** Nodes the DIAGRAM left out, which `reached` above still carries. Optional
+   *  because this arrives from persisted step output: a gate parked before the
+   *  diagram was bounded has no such field, and must keep rendering. */
+  mermaidOmitted?: number;
 }
 
 interface SpecGateApply {
@@ -70,6 +74,18 @@ function affectedComponentsSection(a: AffectedComponents | null): InfoSection[] 
     );
   }
   lines.push('', '```mermaid', a.mermaid, '```');
+  if (a.mermaidOmitted && a.mermaidOmitted > 0) {
+    // Said UNDER the diagram, where someone who has just looked at it is:
+    // silence would let a partial picture read as the whole radius.
+    //
+    // The omitted count is stated ALONE, never subtracted from `reached`:
+    // `reached` is the union over every named node while the diagram walks only
+    // the first, so no arithmetic between the two is true.
+    lines.push(
+      '',
+      `> The diagram is bounded so it stays readable: ${a.mermaidOmitted} further component${a.mermaidOmitted === 1 ? '' : 's'} it reaches are listed above rather than drawn.`,
+    );
+  }
   return [
     {
       title: 'Affected components',

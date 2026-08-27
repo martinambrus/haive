@@ -52,6 +52,32 @@ export interface ImpactResult {
 export const IMPACT_DEFAULT_MAX_DEPTH = 4;
 export const IMPACT_DEFAULT_MAX_NODES = 200;
 
+/** The radius a VIEW opens at, which is not the same question as the walk's
+ *  safety cap above.
+ *
+ *  MEASURED on a 226-node, 530-edge plan: one hop reaches a median of 3 nodes
+ *  (p90 7), two hops reach a median of 130. The jump is hub structure — almost
+ *  any node's neighbour is connected to almost everything — so a transitive
+ *  answer is "essentially the whole plan", which answers nothing. One hop is
+ *  what "if I change this, what else must change?" actually means; further is
+ *  available, but asked for.
+ *
+ *  Deliberately NOT applied by lowering `IMPACT_DEFAULT_MAX_DEPTH`, which would
+ *  silently narrow every caller of `computeImpact` rather than one view. */
+export const IMPACT_DEFAULT_VIEW_DEPTH = 1;
+
+/** How many nodes a DIAGRAM may draw. Past this the picture stops being one:
+ *  192 nodes rendered as a 45,871 x 950 px SVG in a 702px panel, which fits at
+ *  zoom 0.0153 and draws a 16px label at a quarter of a pixel. The hops are in
+ *  BFS order, so the cap keeps the NEAREST nodes — the ones the question is
+ *  about — and the caller is told how many it left for the list. */
+export const IMPACT_DIAGRAM_MAX_NODES = 40;
+
+/** Longest label a diagram box may carry. A mermaid box is as wide as its
+ *  label, and plan titles run past 70 characters; the full title is one click
+ *  away in the node itself and is listed verbatim beside the diagram. */
+const DIAGRAM_LABEL_CHARS = 40;
+
 export function computeImpact(
   originNodeId: string,
   edges: PlanEdgeRecord[],
@@ -136,19 +162,43 @@ export function computeImpact(
   }
 }
 
+/** A bounded diagram plus what it had to leave out. An object rather than a
+ *  bare string so a caller cannot draw the wall by ignoring the cap — the two
+ *  facts travel together or the omission goes unsaid. */
+export interface ImpactDiagram {
+  /** mermaid source. */
+  source: string;
+  /** Nodes in the result that the diagram does NOT show, origin excluded. */
+  omitted: number;
+}
+
 /**
  * A mermaid `flowchart` of an impact result.
+ *
+ * `LR`, not `TD`: a flowchart lays each BFS level out along the cross-axis, so
+ * top-down turns one level into a ROW — measured at 45,871 px wide for a level
+ * holding 122 nodes. Left-to-right makes DEPTH the x-axis, which the depth cap
+ * already bounds to a handful of columns, and stacks siblings vertically, which
+ * a narrow panel can scroll.
  *
  * Rendered with `securityLevel: 'strict'` by the existing mermaid block, so
  * labels are the one injection surface — a plan node title is LLM- or
  * user-authored text. Titles are quoted and the quote character stripped, which
  * is what keeps a title containing `"` or a mermaid keyword from ending the
- * label early and turning the rest into syntax.
+ * label early and turning the rest into syntax. The display truncation below is
+ * ON TOP of that guard, never instead of it.
  */
-export function renderImpactMermaid(result: ImpactResult, titleById: Map<string, string>): string {
+export function renderImpactMermaid(
+  result: ImpactResult,
+  titleById: Map<string, string>,
+  opts: { maxNodes?: number } = {},
+): ImpactDiagram {
+  const maxNodes = opts.maxNodes ?? IMPACT_DIAGRAM_MAX_NODES;
   const label = (id: string): string => {
-    const raw = titleById.get(id) ?? id;
-    return raw.replace(/["\n\r]/g, ' ').slice(0, 80);
+    const safe = (titleById.get(id) ?? id).replace(/["\n\r]/g, ' ').slice(0, 80);
+    return safe.length > DIAGRAM_LABEL_CHARS
+      ? `${safe.slice(0, DIAGRAM_LABEL_CHARS - 1).trimEnd()}…`
+      : safe;
   };
   // `pnode` + the hyphen-stripped uuid. The prefix is deliberately distinctive
   // because the browser has to recover the uuid from the RENDERED DOM id, and
@@ -159,12 +209,17 @@ export function renderImpactMermaid(result: ImpactResult, titleById: Map<string,
   // in any release.
   const nodeId = (id: string): string => `pnode${id.replace(/-/g, '')}`;
 
-  const lines = ['flowchart TD'];
+  // Nearest-first, because `hops` is in BFS order. A hop is drawable only if the
+  // node it was reached FROM is drawn too, which nearest-first guarantees: the
+  // via-node is always at a shallower depth and so at a lower index.
+  const drawn = result.hops.slice(0, Math.max(0, maxNodes));
+
+  const lines = ['flowchart LR'];
   lines.push(`  ${nodeId(result.originNodeId)}["${label(result.originNodeId)}"]:::origin`);
-  for (const hop of result.hops) {
+  for (const hop of drawn) {
     lines.push(`  ${nodeId(hop.nodeId)}["${label(hop.nodeId)}"]`);
   }
-  for (const hop of result.hops) {
+  for (const hop of drawn) {
     const arrow = hop.reversed ? '-.->' : '-->';
     const [a, b] = hop.reversed
       ? [nodeId(hop.nodeId), nodeId(hop.viaNodeId)]
@@ -172,5 +227,5 @@ export function renderImpactMermaid(result: ImpactResult, titleById: Map<string,
     lines.push(`  ${a} ${arrow}|${hop.viaKind.replace(/_/g, ' ')}| ${b}`);
   }
   lines.push('  classDef origin stroke-width:3px;');
-  return lines.join('\n');
+  return { source: lines.join('\n'), omitted: result.hops.length - drawn.length };
 }
