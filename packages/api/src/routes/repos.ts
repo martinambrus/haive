@@ -763,7 +763,12 @@ async function stripHaiveContent(full: string): Promise<{ changed: boolean; dele
   return { changed: true, deleted: false };
 }
 
-async function resolveRepoRoot(
+/** The repo's on-disk root, or a 404/409 explaining why there isn't one.
+ *  Exported because the plan routes remove the committed `.haive-data/` mirror
+ *  on delete and must resolve the root exactly as every other file route does —
+ *  a second copy of this would be a second place for the storage/local
+ *  fallback to drift. */
+export async function resolveRepoRoot(
   db: ReturnType<typeof getDb>,
   userId: string,
   id: string,

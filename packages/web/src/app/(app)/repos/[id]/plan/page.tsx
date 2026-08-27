@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { LayoutGrid, ListTree, Plus } from 'lucide-react';
+import { LayoutGrid, ListTree, Plus, Trash2 } from 'lucide-react';
 import {
   buildPlan,
   createPlanNode,
@@ -34,6 +34,7 @@ import { usePageTitle } from '@/lib/use-page-title';
 import { PlanCardGrid } from '@/components/plan/plan-card-grid';
 import { PlanDetailPanel, type PlanPanelTab } from '@/components/plan/plan-detail-panel';
 import { PlanTree } from '@/components/plan/plan-tree';
+import { PlanDeleteDialog } from '@/components/plan/plan-delete-dialog';
 
 /**
  * The plan canvas.
@@ -100,6 +101,7 @@ export default function PlanPage() {
   // and vice versa; `tiles` / 55 are the optimistic defaults shown before the
   // fetch resolves.
   const [view, setView] = useState<'tree' | 'tiles'>('tiles');
+  const [deleting, setDeleting] = useState(false);
   const [splitPct, setSplitPct] = useState(55);
   const [isWide, setIsWide] = useState(false);
   const prefsRef = useRef<UiPrefs>({});
@@ -402,8 +404,23 @@ export default function PlanPage() {
     <div className="flex flex-col gap-4 p-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h1 className="text-lg font-semibold text-neutral-100">
+          <h1 className="flex items-center gap-2 text-lg font-semibold text-neutral-100">
             Plan{repoName && <span className="text-neutral-500"> — {repoName}</span>}
+            {/* An icon, not a red button: the weight of this belongs in the
+                confirmation, not in a control someone brushes past. Hidden
+                entirely when there is no plan — an affordance that deletes
+                nothing is just a question mark. */}
+            {nodeCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setDeleting(true)}
+                title="Delete this plan"
+                aria-label="Delete this plan"
+                className="text-neutral-500 hover:text-red-400"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            )}
           </h1>
           <p className="text-xs text-neutral-500">
             {nodeCount} node{nodeCount === 1 ? '' : 's'}
@@ -729,6 +746,21 @@ export default function PlanPage() {
           )}
         </div>
       )}
+
+      <PlanDeleteDialog
+        open={deleting}
+        onOpenChange={setDeleting}
+        repositoryId={repositoryId}
+        repoName={repoName}
+        nodeCount={nodeCount}
+        onDeleted={() => {
+          // Clear the selection before refreshing: the panel is showing a node
+          // that no longer exists, and reloading it would 404 before the grid
+          // ever got the chance to redraw as empty.
+          setSelectedId(null);
+          void refresh();
+        }}
+      />
     </div>
   );
 }

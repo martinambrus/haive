@@ -12,6 +12,11 @@ export interface ApiError extends Error {
   status: number;
   code?: string;
   issues?: { path: string; message: string }[];
+  /** The parsed error body, verbatim. Kept so an endpoint can hand the UI
+   *  structured detail its message cannot carry — the plan delete's 409 names
+   *  the tasks blocking it, and a list of links beats a sentence telling the
+   *  user to go find them. Callers that do not need it ignore it. */
+  body?: unknown;
 }
 
 let refreshing: Promise<boolean> | null = null;
@@ -80,6 +85,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     error.status = res.status;
     if (body.code) error.code = body.code;
     if (body.issues) error.issues = body.issues;
+    error.body = body;
     throw error;
   }
   if (res.status === 204) return undefined as T;
@@ -103,7 +109,15 @@ export const api = {
       method: 'PATCH',
       body: body !== undefined ? JSON.stringify(body) : undefined,
     }),
-  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  /** `body` is optional and rarely wanted — a DELETE says everything by its
+   *  URL. It exists for the plan delete, which carries a typed confirmation the
+   *  server re-checks; that belongs in a body rather than a query string, where
+   *  it would land in every access log along the way. */
+  delete: <T>(path: string, body?: unknown) =>
+    request<T>(path, {
+      method: 'DELETE',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    }),
 };
 
 /** Post an increment of a step's user-active time. Uses `keepalive` so the
@@ -1402,6 +1416,29 @@ export function updatePlanNode(
   },
 ): Promise<{ node: PlanNode }> {
   return api.patch<{ node: PlanNode }>(`${planBase(repositoryId)}/nodes/${nodeId}`, body);
+}
+
+/** Open plan task blocking a delete, as named by the 409. */
+export interface OpenPlanTask {
+  id: string;
+  title: string;
+  type: string;
+}
+
+/**
+ * Delete a repository's whole plan.
+ *
+ * `confirm` must equal the repository name; the server re-checks it, so this is
+ * not a client-side-only guard. Throws with `code: 'plan_tasks_open'` and a
+ * `tasks` list when a plan task is still running.
+ */
+export function deletePlan(
+  repositoryId: string,
+  confirm: string,
+): Promise<{ deletedNodes: number; mirrorRemoved: boolean }> {
+  return api.delete<{ deletedNodes: number; mirrorRemoved: boolean }>(planBase(repositoryId), {
+    confirm,
+  });
 }
 
 export function deletePlanNode(

@@ -1,22 +1,26 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { rm } from 'node:fs/promises';
+import path from 'node:path';
+import { and, asc, desc, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
+  HAIVE_DATA_FILES,
   configService,
   createPlanEdgeRequestSchema,
   createPlanNodeRequestSchema,
   planAdvisoryRequestSchema,
   planBuildRequestSchema,
   planChatRequestSchema,
+  logger,
   updatePlanNodeRequestSchema,
   type PlanPatch,
 } from '@haive/shared';
 import {
+  IMPACT_DEFAULT_VIEW_DEPTH,
   PlanPatchError,
   ancestryOf,
   applyPlanPatch,
-  IMPACT_DEFAULT_VIEW_DEPTH,
   computeImpact,
   findPlanRoot,
   loadPlanEdges,
@@ -28,6 +32,8 @@ import {
   toNodeViews,
 } from '@haive/shared/plan';
 import { getDb } from '../db.js';
+import { resolveRepoRoot } from './repos.js';
+import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { spawnPlanTask } from '../lib/spawn-plan-task.js';
@@ -453,6 +459,83 @@ planRoutes.patch('/:id/plan/nodes/:nodeId', async (c) => {
   } catch (err) {
     planError(err);
   }
+});
+
+/**
+ * Delete the whole plan for a repository.
+ *
+ * Destructive and effectively irreversible: every node, edge, code link, chat
+ * transcript and read marker goes with it. The one recovery path is the
+ * COMMITTED `.haive-data/plan.json` — `importPlanMirror` recreates nodes with
+ * their original ids on a fresh clone — which is why the mirror is removed here
+ * too, and why a failure to remove it is reported rather than swallowed.
+ *
+ * PLAN_CANVAS_ENABLED is deliberately NOT consulted. That switch refuses NEW
+ * plan work while leaving existing plans readable and editable; removing one a
+ * user no longer wants is the most editable thing there is, and refusing here
+ * would strand a plan the user cannot get rid of.
+ */
+planRoutes.delete('/:id/plan', async (c) => {
+  const { userId, repositoryId, repo } = await requireOwnedRepo(c);
+  const db = getDb();
+
+  const openTasks = await db
+    .select({ id: schema.tasks.id, title: schema.tasks.title, type: schema.tasks.type })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        inArray(schema.tasks.type, ['plan_build', 'plan_chat', 'advisory']),
+        notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+      ),
+    );
+
+  const body = (await c.req.json().catch(() => ({}))) as { confirm?: unknown };
+  const refusal = planDeleteRefusal({
+    confirm: body.confirm,
+    repoName: repo.name,
+    openTasks,
+  });
+  if (refusal) {
+    return c.json(
+      {
+        error: refusal.message,
+        code: refusal.code,
+        ...(refusal.tasks ? { tasks: refusal.tasks } : {}),
+      },
+      refusal.status,
+    );
+  }
+
+  const root = await findPlanRoot(db, repositoryId);
+  if (!root) return c.json({ deletedNodes: 0, mirrorRemoved: true });
+
+  // Through applyPlanPatch like every other write; the subtree goes by the
+  // parent_id cascade. No expectedVersion: the user is deleting the whole
+  // plan, so a concurrent edit to one node does not change their intent, and a
+  // 409 here would be noise on the one action nobody wants to retry.
+  const result = await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: root.id }] },
+    { repositoryId, origin: 'user' },
+  );
+
+  // Mirror second: the database is the source of truth and these files are
+  // derived from it. A file that is already gone is success. A file that
+  // cannot be removed is REPORTED — it is the path by which a deleted plan
+  // comes back on the next clone.
+  let mirrorRemoved = true;
+  try {
+    const repoRoot = await resolveRepoRoot(db, userId, repositoryId);
+    for (const rel of [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown]) {
+      await rm(path.join(repoRoot, rel), { force: true });
+    }
+  } catch (err) {
+    mirrorRemoved = false;
+    logger.warn({ err, repositoryId }, 'plan mirror removal failed after plan delete');
+  }
+
+  return c.json({ deletedNodes: result.deleted.length, mirrorRemoved });
 });
 
 planRoutes.delete('/:id/plan/nodes/:nodeId', async (c) => {

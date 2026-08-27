@@ -513,6 +513,86 @@ async function main(): Promise<void> {
     restored: restoredEdges.length,
     mirror: mirror.edges.length,
   });
+
+  /* --- 13. deleting the ROOT clears every attached table ------------------- */
+
+  // What the "delete this plan" action does, run last and on the restored
+  // plan because it destroys whatever it touches. The blast radius is entirely
+  // FK cascade, so it cannot be asserted anywhere but against a real database,
+  // and being wrong in either direction is serious: too little leaves rows that
+  // resurrect the plan, too much would take the user's TASKS with it.
+  const doomedRepoId = freshRepoB!.id;
+  const restoredRoot = await findPlanRoot(db, doomedRepoId);
+  const victim = restoredNodes.find((n) => n.id !== restoredRoot!.id)!;
+
+  await db.insert(schema.planNodeCodeLinks).values({
+    repositoryId: doomedRepoId,
+    nodeId: victim.id,
+    repoPath: 'src/index.ts',
+    symbol: 'main',
+    evidence: 'line 1',
+    commitSha: 'deadbeef',
+  });
+  await db.insert(schema.planNodeMessages).values({
+    nodeId: victim.id,
+    taskId: linkTaskId,
+    role: 'user',
+    body: 'does this survive a plan delete?',
+  });
+  await db.insert(schema.planNodeTasks).values({ nodeId: victim.id, taskId: linkTaskId });
+  await db
+    .insert(schema.userPlanNodeReads)
+    .values({ userId, nodeId: victim.id, lastReadAt: new Date() });
+
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: restoredRoot!.id }] },
+    { repositoryId: doomedRepoId, origin: 'user' },
+  );
+
+  const leftNodes = await db
+    .select({ id: schema.planNodes.id })
+    .from(schema.planNodes)
+    .where(eq(schema.planNodes.repositoryId, doomedRepoId));
+  check('deleting the root leaves no nodes', leftNodes.length === 0, leftNodes.length);
+
+  const leftLinks = await db
+    .select({ id: schema.planNodeCodeLinks.id })
+    .from(schema.planNodeCodeLinks)
+    .where(eq(schema.planNodeCodeLinks.repositoryId, doomedRepoId));
+  check('code links go with the plan', leftLinks.length === 0, leftLinks.length);
+
+  const leftEdges = await db
+    .select({ id: schema.planNodeEdges.id })
+    .from(schema.planNodeEdges)
+    .where(eq(schema.planNodeEdges.repositoryId, doomedRepoId));
+  check('edges go with the plan', leftEdges.length === 0, leftEdges.length);
+
+  const leftMsgs = await db
+    .select({ id: schema.planNodeMessages.id })
+    .from(schema.planNodeMessages)
+    .where(eq(schema.planNodeMessages.nodeId, victim.id));
+  check('chat transcripts go with the plan', leftMsgs.length === 0, leftMsgs.length);
+
+  const leftReads = await db
+    .select({ userId: schema.userPlanNodeReads.userId })
+    .from(schema.userPlanNodeReads)
+    .where(eq(schema.userPlanNodeReads.nodeId, victim.id));
+  check('read markers go with the plan', leftReads.length === 0, leftReads.length);
+
+  const leftTaskLinks = await db
+    .select({ taskId: schema.planNodeTasks.taskId })
+    .from(schema.planNodeTasks)
+    .where(eq(schema.planNodeTasks.nodeId, victim.id));
+  check('the task LINK goes with the plan', leftTaskLinks.length === 0, leftTaskLinks.length);
+
+  // The one thing that must NOT go. Deleting a plan must never delete the
+  // user's work; only the link between them belongs to the plan.
+  const survivingTask = await db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, linkTaskId));
+  check('the TASK itself survives the plan', survivingTask.length === 1, survivingTask.length);
 }
 
 main()
