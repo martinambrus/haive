@@ -18,6 +18,19 @@ import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-pr
  * The transcript lives in `plan_node_messages`, NOT in this step's output,
  * because the revise loop below resets the step row on every cycle and would
  * take the history with it.
+ *
+ * ONE turn is TWO passes, because the engine runs form() before the LLM and a
+ * step that parks first cannot answer first:
+ *
+ *   answer pass  — a question is pending, so no form is offered. The LLM runs,
+ *                  the reply is recorded, and the step re-enters itself.
+ *   collect pass — nothing is pending, so the form is offered and the step
+ *                  parks. A message re-enters the answer pass; blank ends the
+ *                  conversation.
+ *
+ * Parking first was the original shape and it put every reply one turn behind:
+ * the answer to a message only appeared once the NEXT one was submitted, which
+ * reads as a chat that ignores you.
  */
 
 interface PlanChatDetect {
@@ -39,8 +52,12 @@ interface PlanChatApply {
   deleted: number;
   linked: number;
   summary: string;
-  /** True when the user submitted another message, which re-enters this step. */
+  /** True when this step must run again — either because a reply has just been
+   *  recorded and the next message has to be collected, or because the user
+   *  submitted one that now needs answering. */
   continueRequested: boolean;
+  /** Which pass this was, for the step summary and for anyone reading the row. */
+  pass: 'answer' | 'collect';
   error: string | null;
 }
 
@@ -148,6 +165,9 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
 
   form(_ctx, detected): FormSchema | null {
     if (!detected.nodeId) return null;
+    // A pending question is answered in THIS pass, so offering a form here
+    // would park before the reply and delay it by a turn.
+    if (detected.pendingQuestion !== null) return null;
     return {
       title: `Plan chat: ${detected.nodeTitle}`,
       description:
@@ -165,10 +185,11 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
   },
 
   reviseLoop: {
-    // Self-target: a non-blank message re-enters THIS step so the conversation
-    // continues on ONE card instead of accumulating a step per turn. Uncapped and
-    // human-gated — the form re-parks every cycle, so the user ends it by
-    // submitting nothing.
+    // Self-target: the conversation continues on ONE card instead of
+    // accumulating a step per turn. Uncapped and human-gated — an answer pass
+    // always hands over to a collect pass, which parks, so the loop can only
+    // advance when a person submits something, and ends when they submit
+    // nothing.
     evaluate: (out) => (out.continueRequested ? { targetStepId: '01-plan-chat' } : null),
   },
 
@@ -182,6 +203,7 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       linked: 0,
       summary: '',
       continueRequested: false,
+      pass: d.pendingQuestion !== null ? 'answer' : 'collect',
       error: null,
     };
     if (!d.repositoryId || !d.nodeId) return result;
@@ -233,6 +255,11 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       } catch (err) {
         ctx.logger.warn({ err }, 'plan mirror write failed (non-fatal)');
       }
+
+      // The reply is recorded; go round again to collect the next message. That
+      // pass offers the form and parks, so this never spins.
+      result.continueRequested = true;
+      return result;
     }
 
     const next = String((args.formValues as { message?: unknown }).message ?? '').trim();
