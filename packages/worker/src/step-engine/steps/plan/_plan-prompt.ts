@@ -18,6 +18,7 @@ Reply with ONE \`\`\`json fenced block and nothing else that matters. Its shape:
 \`\`\`json
 {
   "summary": "one line describing what you changed",
+  "reply": "OPTIONAL. Prose a person reads. Only conversational steps ask for it; when they do, this is your answer to them, not a note about what you did.",
   "ops": [
     { "op": "upsert", "nodeRef": "tmp-api", "parentRef": "<parent uuid or another nodeRef>", "title": "Backend API", "kind": "component", "body": "markdown describing this part", "taskable": false },
     { "op": "upsert", "nodeRef": "<an existing node uuid>", "body": "revised text", "expectedVersion": 4 },
@@ -69,14 +70,26 @@ Rules:
 /** Extract a patch object from an agent's raw reply. Returns null when nothing
  *  patch-shaped is there, so the caller decides whether that is a retry or a
  *  legitimate "no change". */
-export function parsePlanPatch(raw: unknown): { ops: unknown[]; summary?: string } | null {
+export function parsePlanPatch(
+  raw: unknown,
+): { ops: unknown[]; summary?: string; reply?: string } | null {
   const parsed =
     typeof raw === 'string' ? parseJsonLoose(raw) : (raw as Record<string, unknown> | null);
   if (!parsed || typeof parsed !== 'object') return null;
   const ops = (parsed as { ops?: unknown }).ops;
   if (!Array.isArray(ops)) return null;
   const summary = (parsed as { summary?: unknown }).summary;
-  return { ops, ...(typeof summary === 'string' ? { summary } : {}) };
+  // `reply` is what a person reads; `summary` is a changelog line. Steps that
+  // show the agent's words to a human need a field that MEANS that, because a
+  // field documented as "what you changed" gets a description of the change
+  // even when the step asks for an answer — measured twice on live chats, which
+  // both came back as "Answered the question; no plan changes."
+  const reply = (parsed as { reply?: unknown }).reply;
+  return {
+    ops,
+    ...(typeof summary === 'string' ? { summary } : {}),
+    ...(typeof reply === 'string' ? { reply } : {}),
+  };
 }
 
 /**

@@ -83,8 +83,18 @@ function buildChatPrompt(d: PlanChatDetect): string {
     'the user is looking at — if what they asked for belongs somewhere else in the tree, put it',
     'there and say so in your summary.',
     '',
-    'If the message is a question rather than a change request, reply with an empty `ops` array',
-    'and put the answer in `summary`. Do not change the plan to answer a question.',
+    'If the message is a question rather than a change request, reply with an empty `ops` array.',
+    'Do not change the plan to answer a question.',
+    '',
+    '## `reply` is what the user reads',
+    'Write your answer to them in `reply`. It is shown verbatim as your turn in the',
+    'conversation, so write it to a person: answer the question, or say what you changed and',
+    'why. `summary` stays a one-line changelog and nobody reads it here.',
+    '',
+    'A reply that describes your own behaviour instead of answering is not an answer:',
+    '  BAD   "reply": "Answered the question; no plan changes."',
+    '  GOOD  "reply": "It is the front controller — index.php plus the generated init.php, which',
+    '         together boot config, sessions and the module chain."',
     '',
     'Send `expectedVersion` with every change to an existing node, using the version shown',
     'beside it above.',
@@ -160,7 +170,11 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
     // blank finalizes without spending an invocation.
     skipIf: ({ detected }) => (detected as PlanChatDetect).pendingQuestion === null,
     buildPrompt: ({ detected }) => buildChatPrompt(detected as PlanChatDetect),
-    bypassStub: () => ({ summary: 'test bypass — no change', ops: [] }),
+    bypassStub: () => ({
+      summary: 'test bypass — no change',
+      reply: 'test bypass — no change',
+      ops: [],
+    }),
   },
 
   form(_ctx, detected): FormSchema | null {
@@ -237,14 +251,19 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       // The assistant turn is recorded whatever happened, including the failure —
       // a transcript that silently omits a turn is worse than one that shows it
       // went wrong.
+      //
+      // `reply` is the prose written FOR the user; `summary` is a changelog line
+      // and reads like one ("Answered the question; no plan changes."). Fall
+      // back to it only when the agent sent nothing else.
+      const spoken = patch?.reply?.trim() || result.summary;
       await ctx.db.insert(schema.planNodeMessages).values({
         nodeId: d.nodeId,
         taskId: ctx.taskId,
         role: 'assistant',
         body:
           result.error !== null
-            ? `${result.summary || 'Could not apply that.'}\n\n_${result.error}_`
-            : result.summary || 'Done.',
+            ? `${spoken || 'Could not apply that.'}\n\n_${result.error}_`
+            : spoken || 'Done.',
         patchJson: patch
           ? { ops: patch.ops, ...(patch.summary ? { summary: patch.summary } : {}) }
           : null,
