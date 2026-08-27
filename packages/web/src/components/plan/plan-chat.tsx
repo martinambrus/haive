@@ -21,6 +21,7 @@ import {
 import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { groupPlanConversations, liveConversation, type PlanChatGroup } from './plan-chat-groups';
+import { firstUnreadMessageId, opCount, startedLabel, stamp } from './plan-chat-turn';
 
 /**
  * The per-node conversation, driven entirely from this panel.
@@ -55,34 +56,6 @@ const OUTCOME_NOTE: Record<string, string> = {
   cancelled: 'cancelled',
   failed: 'failed',
 };
-
-/** How many operations an assistant turn actually sent, from the patch stored
- *  beside it. Null when the turn carried no patch at all (a prose reply).
- *
- *  Shown because prose is not evidence: an agent has reported "Done — three
- *  children now hang off this node" while sending `ops: []`, and the only thing
- *  that touched the plan was the ops. The count is the record. */
-function opCount(patch: unknown): number | null {
-  if (!patch || typeof patch !== 'object') return null;
-  const ops = (patch as { ops?: unknown }).ops;
-  return Array.isArray(ops) ? ops.length : null;
-}
-
-/** A timestamp in the viewer's own locale and zone. Undefined or unparseable
- *  reads as null so a caller can leave the label off entirely rather than print
- *  "Invalid Date" beside a real message. */
-function stamp(iso: string | undefined): string | null {
-  if (!iso) return null;
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return null;
-  return at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-}
-
-/** When a conversation started, from its first turn — the API records the
- *  opening message as the task is created, so this IS the task's start. */
-function startedLabel(iso: string | undefined): string {
-  return stamp(iso) ?? 'Conversation';
-}
 
 export function PlanChat({
   repositoryId,
@@ -189,19 +162,7 @@ export function PlanChat({
     };
   }, [repositoryId]);
 
-  // The first reply the user has not seen: walk back over assistant turns until
-  // as many have been passed as were unread when the tab opened.
-  let firstUnreadId: string | null = null;
-  if (unreadAtOpen > 0) {
-    let seen = 0;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]!;
-      if (m.role !== 'assistant') continue;
-      seen += 1;
-      firstUnreadId = m.id;
-      if (seen === unreadAtOpen) break;
-    }
-  }
+  const firstUnreadId = firstUnreadMessageId(messages, unreadAtOpen);
 
   const groups = groupPlanConversations(messages, conversations);
   const live = liveConversation(groups);
