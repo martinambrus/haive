@@ -24,10 +24,14 @@ export function PlanTree({
   selectedId,
   onSelect,
   matchIds,
+  unread,
 }: {
   nodes: PlanTreeNode[];
   selectedId: string | null;
   onSelect: (nodeId: string) => void;
+  /** Unread chat replies per node id. Never rolled up: a badge on a parent
+   *  makes the user search a subtree for the node that actually has one. */
+  unread?: Record<string, number>;
   /** Server-search matches. While set, the tree shows only these nodes plus
    *  the ancestors needed to keep the hierarchy readable. */
   matchIds?: ReadonlySet<string> | null;
@@ -263,6 +267,14 @@ export function PlanTree({
             >
               {node.title}
             </button>
+            {(unread?.[row.id] ?? 0) > 0 && (
+              <span
+                title={`${unread?.[row.id]} unread chat repl${unread?.[row.id] === 1 ? 'y' : 'ies'}`}
+                className="shrink-0 rounded-full bg-indigo-500 px-1.5 text-[10px] font-medium text-white"
+              >
+                {unread?.[row.id]}
+              </span>
+            )}
             {node.totalDescendants > 0 && (
               <span className="shrink-0 text-[11px] text-neutral-600">{node.totalDescendants}</span>
             )}

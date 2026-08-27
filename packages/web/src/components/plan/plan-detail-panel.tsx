@@ -55,6 +55,8 @@ export function PlanDetailPanel({
   tree,
   tab,
   onTabChange,
+  unreadCount,
+  onRead,
   onChanged,
   onNavigate,
   onClose,
@@ -62,6 +64,11 @@ export function PlanDetailPanel({
   repositoryId: string;
   nodeId: string;
   tree: PlanTreeNode[];
+  /** Unread chat replies on THIS node, badged on the Chat tab so the badge in
+   *  the tree has a visible destination. */
+  unreadCount: number;
+  /** The chat marked itself read; the page re-reads the counts. */
+  onRead: () => void;
   /** Owned by the page, not by this component: the panel unmounts whenever the
    *  selection clears (Escape, or clicking the selected node again), and a tab
    *  kept here would be forgotten every time that happened. */
@@ -386,11 +393,16 @@ export function PlanDetailPanel({
             key={t}
             type="button"
             onClick={() => onTabChange(t)}
-            className={`px-2 py-1 capitalize ${
+            className={`flex items-center gap-1 px-2 py-1 capitalize ${
               tab === t ? 'border-b-2 border-indigo-400 text-neutral-100' : 'text-neutral-500'
             }`}
           >
             {t}
+            {t === 'chat' && tab !== 'chat' && unreadCount > 0 && (
+              <span className="rounded-full bg-indigo-500 px-1.5 text-[10px] font-medium text-white">
+                {unreadCount}
+              </span>
+            )}
           </button>
         ))}
       </nav>
@@ -757,7 +769,13 @@ export function PlanDetailPanel({
       )}
 
       {tab === 'chat' && (
-        <PlanChat repositoryId={repositoryId} nodeId={nodeId} onPatched={onChanged} />
+        <PlanChat
+          repositoryId={repositoryId}
+          nodeId={nodeId}
+          onPatched={onChanged}
+          onRead={onRead}
+          unreadCount={unreadCount}
+        />
       )}
 
       {tab === 'impact' && (

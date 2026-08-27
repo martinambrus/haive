@@ -7,6 +7,7 @@ import { LayoutGrid, ListTree, Plus } from 'lucide-react';
 import {
   buildPlan,
   createPlanNode,
+  getPlanUnread,
   getRepoOnboardingStatus,
   getUiPrefs,
   putUiPrefs,
@@ -67,6 +68,9 @@ export default function PlanPage() {
   const [focus, setFocus] = useState<PlanNodeDetail | null>(null);
   const [rootId, setRootId] = useState<string | null>(null);
   const [tree, setTree] = useState<PlanTreeNode[]>([]);
+  // Unread assistant turns per node. Its own fetch rather than a field on the
+  // tree: the same map badges the tree, the tiles and the panel's Chat tab.
+  const [unread, setUnread] = useState<Record<string, number>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Which panel tab is open, held HERE because the panel unmounts every time
   // the selection clears — inside it, the choice died with each Escape.
@@ -208,6 +212,11 @@ export default function PlanPage() {
     const [overview, treeRes] = await Promise.all([
       getPlanOverview(repositoryId),
       getPlanTree(repositoryId),
+      // Best-effort: a badge that fails to load must not stop the plan
+      // rendering.
+      getPlanUnread(repositoryId)
+        .then((u) => setUnread(u.counts))
+        .catch(() => {}),
     ]);
     setRepoName(overview.repositoryName);
     setNodeCount(overview.nodeCount);
@@ -513,6 +522,7 @@ export default function PlanPage() {
                   nodes={tree}
                   selectedId={selectedId}
                   matchIds={matchIds}
+                  unread={unread}
                   onSelect={(id) => {
                     // Clicking the ALREADY-selected row closes the panel — same
                     // contract as clicking a selected tile. Otherwise the click
@@ -608,6 +618,7 @@ export default function PlanPage() {
                 <PlanCardGrid
                   nodes={cards}
                   selectedId={selectedId}
+                  unread={unread}
                   onSelect={(n) => setSelectedId((prev) => (prev === n.id ? null : n.id))}
                   onDescend={(n) => {
                     // Descending replaces the card list with one node's
@@ -663,6 +674,20 @@ export default function PlanPage() {
                 repositoryId={repositoryId}
                 nodeId={selectedId}
                 tree={tree}
+                unreadCount={unread[selectedId] ?? 0}
+                onRead={() => {
+                  // Clear this node's badge as soon as the panel says it was
+                  // read, then re-read the map so the tree and tiles agree.
+                  setUnread((prev) => {
+                    if (!prev[selectedId]) return prev;
+                    const next = { ...prev };
+                    delete next[selectedId];
+                    return next;
+                  });
+                  void getPlanUnread(repositoryId)
+                    .then((u) => setUnread(u.counts))
+                    .catch(() => {});
+                }}
                 tab={panelTab}
                 onTabChange={(t) => {
                   setPanelTab(t);

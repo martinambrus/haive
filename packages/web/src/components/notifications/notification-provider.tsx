@@ -46,6 +46,11 @@ const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
  *  fired, and the persistent seen-store keeps it from re-firing if it drifts back in.
  *  detectTransitions handles the arrival: a task first seen mid-session in a notifiable
  *  status has no prior identity, which differs from any identity, so it fires. */
+// No `includeChats` here, deliberately: the endpoint hides plan_chat by default,
+// and that is what keeps a conversation from raising a toast or an OS
+// notification that would open the task page instead of the plan panel where
+// the chat is answered. A plan chat's attention signal is the unread badge on
+// its node. Do not "fix" this by adding the flag.
 const NOTIFY_FEED_URL = '/tasks?sort=updated&pageSize=50';
 
 const SEEN_PREFIX = 'haive:notif-seen:';

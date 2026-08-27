@@ -23,9 +23,12 @@ export function PlanCardGrid({
   onSelect,
   onDescend,
   emptyMessage,
+  unread,
 }: {
   nodes: PlanNode[];
   selectedId: string | null;
+  /** Unread chat replies per node id — the same map the tree badges from. */
+  unread?: Record<string, number>;
   onSelect: (node: PlanNode) => void;
   onDescend: (node: PlanNode) => void;
   emptyMessage: string;
@@ -79,6 +82,14 @@ export function PlanCardGrid({
               </Badge>
               {node.kind !== 'component' && node.kind !== 'decision' && (
                 <Badge>{kindLabel(node.kind)}</Badge>
+              )}
+              {(unread?.[node.id] ?? 0) > 0 && (
+                <span
+                  title={`${unread?.[node.id]} unread chat repl${unread?.[node.id] === 1 ? 'y' : 'ies'}`}
+                  className="rounded-full bg-indigo-500 px-1.5 text-[10px] font-medium text-white"
+                >
+                  {unread?.[node.id]}
+                </span>
               )}
             </div>
 

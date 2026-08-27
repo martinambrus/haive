@@ -161,7 +161,7 @@ const POLL_MAX = 100;
 // not restored on a later visit.
 const FILTER_STORAGE_KEY = 'haive:tasks-filter';
 
-type SavedFilter = { repositoryId: string; status: string; hidePaused: string };
+type SavedFilter = { repositoryId: string; status: string; hidePaused: string; showChats: string };
 
 function readSavedFilter(): SavedFilter | null {
   if (typeof window === 'undefined') return null;
@@ -175,6 +175,9 @@ function readSavedFilter(): SavedFilter | null {
       // Absent in filters saved before this flag existed — read as "off" rather than
       // undefined so the restore below never writes `hidePaused=undefined` into the URL.
       hidePaused: parsed.hidePaused ?? '',
+      // Same reasoning as hidePaused: absent in filters saved before the flag
+      // existed, read as "off".
+      showChats: parsed.showChats ?? '',
     };
   } catch {
     return null;
@@ -202,8 +205,12 @@ export default function TasksPage() {
   // server ignores it there, and the checkbox renders disabled to say so.
   const hidePaused = searchParams.get('hidePaused') === '1';
   const hidePausedInert = statusFilter === 'paused';
-  const filterKey = `${repoFilter}|${statusFilter}|${q}|${hidePaused ? '1' : ''}`;
-  const filtersActive = Boolean(repoFilter || statusFilter || q || hidePaused);
+  // Plan chats are hidden by the SERVER unless asked for: they are conversations
+  // held in the plan canvas, not work items, and listing them buries real tasks
+  // among a conversation's turns. This asks for them back.
+  const showChats = searchParams.get('showChats') === '1';
+  const filterKey = `${repoFilter}|${statusFilter}|${q}|${hidePaused ? '1' : ''}|${showChats ? '1' : ''}`;
+  const filtersActive = Boolean(repoFilter || statusFilter || q || hidePaused || showChats);
 
   // On a bare, unfiltered visit that has a saved filter to restore, the mount
   // effect below router.replace()s to it. Detect that at render time so the
@@ -213,7 +220,9 @@ export default function TasksPage() {
   const willRestoreFilter = useMemo(() => {
     if (searchParams.has('repositoryId') || searchParams.has('status')) return false;
     const saved = readSavedFilter();
-    return Boolean(saved && (saved.repositoryId || saved.status || saved.hidePaused));
+    return Boolean(
+      saved && (saved.repositoryId || saved.status || saved.hidePaused || saved.showChats),
+    );
   }, [searchParams]);
 
   const [tasks, setTasks] = useState<Task[] | null>(null);
@@ -241,6 +250,7 @@ export default function TasksPage() {
     if (statusFilter) params.set('status', statusFilter);
     if (q) params.set('q', q);
     if (hidePaused) params.set('hidePaused', '1');
+    if (showChats) params.set('includeChats', '1');
     return params.toString();
   }
 
@@ -333,11 +343,15 @@ export default function TasksPage() {
     if (saved.repositoryId) params.set('repositoryId', saved.repositoryId);
     if (saved.status) params.set('status', saved.status);
     if (saved.hidePaused) params.set('hidePaused', saved.hidePaused);
+    if (saved.showChats) params.set('showChats', saved.showChats);
     router.replace(`/tasks?${params.toString()}`, { scroll: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function setFilter(key: 'repositoryId' | 'status' | 'q' | 'hidePaused', value: string) {
+  function setFilter(
+    key: 'repositoryId' | 'status' | 'q' | 'hidePaused' | 'showChats',
+    value: string,
+  ) {
     const params = new URLSearchParams(searchParams.toString());
     if (value) params.set(key, value);
     else params.delete(key);
@@ -345,13 +359,14 @@ export default function TasksPage() {
       repositoryId: params.get('repositoryId') ?? '',
       status: params.get('status') ?? '',
       hidePaused: params.get('hidePaused') ?? '',
+      showChats: params.get('showChats') ?? '',
     });
     const qs = params.toString();
     router.replace(qs ? `/tasks?${qs}` : '/tasks', { scroll: false });
   }
 
   function clearFilters() {
-    writeSavedFilter({ repositoryId: '', status: '', hidePaused: '' });
+    writeSavedFilter({ repositoryId: '', status: '', hidePaused: '', showChats: '' });
     setSearch('');
     router.replace('/tasks', { scroll: false });
   }
@@ -422,6 +437,18 @@ export default function TasksPage() {
               onChange={(e) => setFilter('hidePaused', e.target.checked ? '1' : '')}
             />
             Hide paused
+          </label>
+          <label
+            className="flex items-center gap-2 text-sm text-neutral-300"
+            title="Plan chats are conversations held in the plan canvas, not work items, so they are left out of this list unless you ask for them."
+          >
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500 focus:ring-indigo-500"
+              checked={showChats}
+              onChange={(e) => setFilter('showChats', e.target.checked ? '1' : '')}
+            />
+            Show plan chats
           </label>
           <Link href="/tasks/new">
             <Button>New task</Button>

@@ -7,6 +7,7 @@ import {
   api,
   endPlanChat,
   getPlanMessages,
+  markPlanNodeRead,
   setPlanChatProvider,
   startPlanChat,
   submitPlanChatTurn,
@@ -53,12 +54,20 @@ export function PlanChat({
   repositoryId,
   nodeId,
   onPatched,
+  onRead,
+  unreadCount = 0,
 }: {
   repositoryId: string;
   nodeId: string;
   /** Called after a turn lands so the canvas can refetch — a chat rooted here
    *  is allowed to patch anywhere in the plan. */
   onPatched: () => void;
+  /** Called once this node's transcript has been marked read, so the badges
+   *  elsewhere can clear. */
+  onRead?: () => void;
+  /** Unread replies on this node at the moment it was opened — where the
+   *  "new" divider goes. */
+  unreadCount?: number;
 }) {
   const [messages, setMessages] = useState<PlanMessage[]>([]);
   const [conversations, setConversations] = useState<PlanConversation[]>([]);
@@ -69,7 +78,20 @@ export function PlanChat({
   const [providerId, setProviderId] = useState('');
   const [liveStep, setLiveStep] = useState<TaskStep | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  // How many replies were unread when this node was opened, captured ONCE:
+  // opening the tab marks them read, so a live count would move the divider
+  // past the very replies it is meant to sit above. Counted rather than
+  // timestamped because the count is already on screen as the badge.
+  const [unreadAtOpen, setUnreadAtOpen] = useState(0);
   const endRef = useRef<HTMLDivElement | null>(null);
+  // Held in a ref, not a dependency: the page recreates this callback on every
+  // render, and depending on its identity made the mark-read effect re-run on
+  // its own result — a PUT/refetch loop that hammered the API.
+  const onReadRef = useRef(onRead);
+  onReadRef.current = onRead;
+  // The (node, turn-count) pair this transcript was last marked read at, so a
+  // re-render cannot re-send the same read.
+  const markedRef = useRef<string | null>(null);
 
   const reloadMessages = useCallback(async (): Promise<void> => {
     const res = await getPlanMessages(repositoryId, nodeId);
@@ -83,6 +105,8 @@ export function PlanChat({
     setConversations([]);
     setLiveStep(null);
     setShowHistory(false);
+    markedRef.current = null;
+    setUnreadAtOpen(unreadCount);
     setError(null);
     void reloadMessages().catch(() => {
       /* an empty transcript is the normal case, not an error worth showing */
@@ -109,6 +133,20 @@ export function PlanChat({
       cancelled = true;
     };
   }, []);
+
+  // The first reply the user has not seen: walk back over assistant turns until
+  // as many have been passed as were unread when the tab opened.
+  let firstUnreadId: string | null = null;
+  if (unreadAtOpen > 0) {
+    let seen = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.role !== 'assistant') continue;
+      seen += 1;
+      firstUnreadId = m.id;
+      if (seen === unreadAtOpen) break;
+    }
+  }
 
   const groups = groupPlanConversations(messages, conversations);
   const live = liveConversation(groups);
@@ -160,6 +198,30 @@ export function PlanChat({
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.length]);
+
+  // Opening the tab is what counts as reading. Not scroll position: a short
+  // conversation never scrolls, so waiting for that would leave the badge on
+  // forever. The stamp taken BEFORE the write is what the divider uses.
+  useEffect(() => {
+    if (messages.length === 0) return;
+    const key = `${nodeId}:${messages.length}`;
+    if (markedRef.current === key) return;
+    markedRef.current = key;
+    let cancelled = false;
+    void markPlanNodeRead(repositoryId, nodeId)
+      .then(() => {
+        if (cancelled) return;
+        onReadRef.current?.();
+      })
+      .catch(() => {
+        /* a read marker that fails to save is not worth interrupting a chat */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Keyed on the node and on how many turns exist, so a reply arriving while
+    // the tab is open is marked read too — but only once per turn count.
+  }, [repositoryId, nodeId, messages.length]);
 
   async function send(): Promise<void> {
     const message = draft.trim();
@@ -274,7 +336,7 @@ export function PlanChat({
           <ConversationGroup key={g.taskId ?? `orphan-${i}`} group={g} defaultOpen={false} />
         ))}
 
-      {current && <ConversationGroup group={current} defaultOpen />}
+      {current && <ConversationGroup group={current} defaultOpen firstUnreadId={firstUnreadId} />}
 
       {working && (
         <p className="flex items-center gap-2 text-[11px] text-neutral-400">
@@ -323,7 +385,15 @@ export function PlanChat({
 
 /** One conversation, foldable. Ended ones say so in the header — a dead
  *  conversation that looks live invites a reply nothing will read. */
-function ConversationGroup({ group, defaultOpen }: { group: PlanChatGroup; defaultOpen: boolean }) {
+function ConversationGroup({
+  group,
+  defaultOpen,
+  firstUnreadId,
+}: {
+  group: PlanChatGroup;
+  defaultOpen: boolean;
+  firstUnreadId?: string | null;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   const label = group.ended
     ? (STATUS_LABEL[group.status ?? ''] ?? 'Ended')
@@ -348,6 +418,13 @@ function ConversationGroup({ group, defaultOpen }: { group: PlanChatGroup; defau
         <div className="max-h-72 overflow-y-auto border-t border-neutral-800 p-2">
           {group.messages.map((m) => (
             <div key={m.id} className="mb-2">
+              {m.id === firstUnreadId && (
+                <div className="mb-2 flex items-center gap-2">
+                  <span className="h-px flex-1 bg-indigo-500/40" />
+                  <span className="text-[10px] uppercase tracking-wide text-indigo-300">New</span>
+                  <span className="h-px flex-1 bg-indigo-500/40" />
+                </div>
+              )}
               <p className="text-[11px] uppercase tracking-wide text-neutral-600">
                 {m.role === 'user' ? 'You' : 'Agent'}
               </p>

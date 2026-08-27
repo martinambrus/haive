@@ -1446,6 +1446,23 @@ export function getPlanMessages(
  *  unambiguous. */
 export const PLAN_CHAT_STEP_ID = '01-plan-chat';
 
+/** Unread assistant turns per node, keyed by node id. Nodes with nothing unread
+ *  are absent rather than zero, so the map is small on a plan nobody chats on. */
+export function getPlanUnread(repositoryId: string): Promise<{ counts: Record<string, number> }> {
+  return api.get<{ counts: Record<string, number> }>(`${planBase(repositoryId)}/unread`);
+}
+
+/** Mark one node's chat read up to now. */
+export function markPlanNodeRead(
+  repositoryId: string,
+  nodeId: string,
+): Promise<{ ok: boolean; lastReadAt: string }> {
+  return api.put<{ ok: boolean; lastReadAt: string }>(
+    `${planBase(repositoryId)}/nodes/${nodeId}/read`,
+    {},
+  );
+}
+
 /** Continue a conversation by submitting the turn the step is parked on. The
  *  STEP records the message, so this must not also post to the chat endpoint —
  *  that would insert the turn twice and spawn a second task. */
