@@ -28,6 +28,7 @@ export function PlanGraph({
   const rawId = useId();
   const renderId = `planmermaid-${rawId.replace(/[^A-Za-z0-9_-]/g, '')}`;
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -81,6 +82,30 @@ export function PlanGraph({
     return () => cleanups.forEach((fn) => fn());
   }, [svg, onNodeClick]);
 
+  // Wheel-to-zoom as a NATIVE listener with `passive: false`, not React's
+  // `onWheel`.
+  //
+  // React registers wheel at the root as passive, so `preventDefault()` inside
+  // a synthetic handler does nothing — which is why the wheel used to zoom the
+  // diagram AND scroll the panel behind it at the same time, moving two things
+  // at once for one gesture. A non-passive native listener can actually claim
+  // the gesture.
+  //
+  // Ctrl+wheel is deliberately NOT claimed: that is the browser's own page-zoom
+  // (and a trackpad pinch), and taking it would override an accessibility
+  // affordance the user expects everywhere.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el || !svg) return;
+    const onWheel = (e: WheelEvent): void => {
+      if (e.ctrlKey) return;
+      e.preventDefault();
+      setZoom((z) => Math.min(3, Math.max(0.3, z - e.deltaY * 0.001)));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [svg]);
+
   if (failed) {
     return (
       <pre className="overflow-auto rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400">
@@ -117,12 +142,8 @@ export function PlanGraph({
         ))}
       </div>
       <div
-        className="h-[360px] cursor-grab active:cursor-grabbing"
-        onWheel={(e) => {
-          // Ctrl+wheel is the browser's own page zoom gesture; leave it alone.
-          if (e.ctrlKey) return;
-          setZoom((z) => Math.min(3, Math.max(0.3, z - e.deltaY * 0.001)));
-        }}
+        ref={viewportRef}
+        className="h-[360px] cursor-grab overscroll-contain active:cursor-grabbing"
         onPointerDown={(e) => {
           drag.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
           e.currentTarget.setPointerCapture(e.pointerId);

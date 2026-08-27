@@ -913,20 +913,30 @@ export function PlanDetailPanel({
                           <span className="text-neutral-600">({g.hops.length})</span>
                         </button>
                         {open && (
-                          <div className="flex flex-col border-t border-neutral-800 px-2 py-1">
-                            {g.hops.map((h) => (
-                              <button
-                                key={h.nodeId}
-                                type="button"
-                                onClick={() => onNavigate(h.nodeId)}
-                                title={h.title ?? undefined}
-                                className="truncate text-left text-xs text-neutral-300 hover:text-neutral-100"
-                              >
-                                {h.title}{' '}
-                                <span className="text-neutral-600">
-                                  ({h.viaKind.replace(/_/g, ' ')})
-                                </span>
-                              </button>
+                          <div className="flex flex-col gap-2 border-t border-neutral-800 px-2 py-1.5">
+                            {/* Relation sub-groups, all open: the depth group
+                                above is the thing that collapses, and a second
+                                closed layer would hide every row behind two
+                                clicks. Only relations that are actually present
+                                are emitted, so none of these is ever empty. */}
+                            {g.relations.map((r) => (
+                              <div key={r.id} className="flex flex-col">
+                                <p className="text-[10px] uppercase tracking-wide text-neutral-600">
+                                  {r.label}{' '}
+                                  <span className="text-neutral-700">({r.hops.length})</span>
+                                </p>
+                                {r.hops.map((h) => (
+                                  <button
+                                    key={h.nodeId}
+                                    type="button"
+                                    onClick={() => onNavigate(h.nodeId)}
+                                    title={h.title ?? undefined}
+                                    className="truncate pl-2 text-left text-xs text-neutral-300 hover:text-neutral-100"
+                                  >
+                                    {h.title}
+                                  </button>
+                                ))}
+                              </div>
                             ))}
                           </div>
                         )}
