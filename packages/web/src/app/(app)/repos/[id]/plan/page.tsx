@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { LayoutGrid, ListTree } from 'lucide-react';
+import { LayoutGrid, ListTree, Plus } from 'lucide-react';
 import {
   buildPlan,
   createPlanNode,
@@ -63,6 +63,9 @@ export default function PlanPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [newTitle, setNewTitle] = useState('');
+  // The breadcrumb's add-a-child input. Closed by default: it is an action,
+  // not a permanent field, and it lives under the crumb whose child it makes.
+  const [addingChild, setAddingChild] = useState(false);
   const [query, setQuery] = useState('');
   const [matches, setMatches] = useState<PlanSearchMatch[] | null>(null);
   const [buildTaskId, setBuildTaskId] = useState<string | null>(null);
@@ -271,6 +274,7 @@ export default function PlanPage() {
     try {
       await createPlanNode(repositoryId, { parentId, title });
       setNewTitle('');
+      setAddingChild(false);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to add');
@@ -490,7 +494,63 @@ export default function PlanPage() {
                       </button>
                     </span>
                   ))}
+                  {/* Adds a child of the node the breadcrumb ENDS on — the one
+                      whose children the grid is showing. Hidden while a search
+                      filters the grid, since the crumb is then not what is
+                      listed below it. */}
+                  {!matches && currentParentId && (
+                    <button
+                      type="button"
+                      title="Add a new child"
+                      aria-label="Add a new child"
+                      onClick={() => {
+                        setNewTitle('');
+                        setAddingChild((v) => !v);
+                      }}
+                      className="ml-2.5 text-neutral-500 hover:text-neutral-200"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </nav>
+
+                {addingChild && !matches && (
+                  <div className="flex gap-2">
+                    <Input
+                      autoFocus
+                      value={newTitle}
+                      onChange={(e) => setNewTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && newTitle.trim()) void addNode(currentParentId);
+                        // Escape closes the adder. The page-level ESC handler
+                        // ignores INPUT targets, so the panel stays open.
+                        if (e.key === 'Escape') {
+                          setNewTitle('');
+                          setAddingChild(false);
+                        }
+                      }}
+                      placeholder="Name the new child"
+                      className="h-8 flex-1 text-xs"
+                    />
+                    <Button
+                      size="sm"
+                      disabled={busy || !newTitle.trim()}
+                      onClick={() => void addNode(currentParentId)}
+                    >
+                      OK
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        setNewTitle('');
+                        setAddingChild(false);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                )}
 
                 <PlanCardGrid
                   nodes={cards}
@@ -505,28 +565,9 @@ export default function PlanPage() {
                   emptyMessage={
                     matches
                       ? 'Nothing matched.'
-                      : 'Nothing under this node yet — add a child below, or ask a plan chat to break it down.'
+                      : 'Nothing under this node yet — add a child with the + beside the breadcrumb, or ask a plan chat to break it down.'
                   }
                 />
-
-                {!matches && (
-                  <div className="flex gap-2">
-                    <Input
-                      value={newTitle}
-                      onChange={(e) => setNewTitle(e.target.value)}
-                      placeholder="Add a child here"
-                      className="h-8 flex-1 text-xs"
-                    />
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={busy || !newTitle.trim()}
-                      onClick={() => void addNode(currentParentId)}
-                    >
-                      Add
-                    </Button>
-                  </div>
-                )}
               </>
             )}
           </section>

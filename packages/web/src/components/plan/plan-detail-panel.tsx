@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { Pencil } from 'lucide-react';
 import {
   createPlanEdge,
+  createPlanNode,
   deletePlanEdge,
   deletePlanNode,
   getPlanImpact,
@@ -71,6 +72,11 @@ export function PlanDetailPanel({
   const [editingBody, setEditingBody] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [editingMeta, setEditingMeta] = useState(false);
+  // Add-a-child, available from the panel in BOTH views — the tiles
+  // breadcrumb can only add under the node it ends on, so a node reached by
+  // clicking a tile or a tree row has no other way to gain a child.
+  const [addingChild, setAddingChild] = useState(false);
+  const [childTitle, setChildTitle] = useState('');
   const [statusDraft, setStatusDraft] = useState<PlanNodeStatus>('todo');
   const [kindDraft, setKindDraft] = useState<PlanNodeDetail['node']['kind']>('component');
   const [bodyDraft, setBodyDraft] = useState('');
@@ -94,6 +100,7 @@ export function PlanDetailPanel({
     setEditingBody(false);
     setEditingTitle(false);
     setEditingMeta(false);
+    setAddingChild(false);
     setTab('details');
     void getPlanNode(repositoryId, nodeId)
       .then((d) => {
@@ -188,6 +195,16 @@ export function PlanDetailPanel({
       }),
     );
     if (ok) setEditingMeta(false);
+  }
+
+  async function applyAddChild(): Promise<void> {
+    const title = childTitle.trim();
+    if (!title) return;
+    const ok = await write(() => createPlanNode(repositoryId, { parentId: nodeId, title }));
+    if (ok) {
+      setChildTitle('');
+      setAddingChild(false);
+    }
   }
 
   return (
@@ -400,6 +417,17 @@ export function PlanDetailPanel({
           )}
 
           <div className="flex flex-wrap gap-2 border-t border-neutral-800 pt-3">
+            <Button
+              size="sm"
+              className="bg-emerald-600 text-white hover:bg-emerald-500"
+              disabled={saving}
+              onClick={() => {
+                setChildTitle('');
+                setAddingChild((v) => !v);
+              }}
+            >
+              Add a child
+            </Button>
             {/* No `Create a task` for research/external nodes: a research node's
                 whole flow IS the advisory task the Research button spawns, and
                 external work lives outside the system — if it needs
@@ -452,6 +480,46 @@ export function PlanDetailPanel({
               Delete
             </Button>
           </div>
+
+          {addingChild && (
+            <div className="flex gap-2">
+              <input
+                autoFocus
+                value={childTitle}
+                disabled={saving}
+                onChange={(e) => setChildTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && childTitle.trim()) void applyAddChild();
+                  // Escape cancels. The page-level ESC handler ignores INPUT
+                  // targets, so this never also closes the panel.
+                  if (e.key === 'Escape') {
+                    setChildTitle('');
+                    setAddingChild(false);
+                  }
+                }}
+                placeholder="Name the new child"
+                className="h-8 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 outline-none focus:border-indigo-500"
+              />
+              <Button
+                size="sm"
+                disabled={saving || !childTitle.trim()}
+                onClick={() => void applyAddChild()}
+              >
+                OK
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={saving}
+                onClick={() => {
+                  setChildTitle('');
+                  setAddingChild(false);
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          )}
 
           {detail.tasks.length > 0 && (
             <div className="border-t border-neutral-800 pt-3">
