@@ -502,7 +502,14 @@ function ConversationGroup({
         <span className="ml-auto text-[11px] text-neutral-500">{group.messages.length}</span>
       </button>
       {open && (
-        <div className="max-h-72 overflow-y-auto border-t border-neutral-800 p-2">
+        <div
+          // Resizable like a textarea, and capped by nothing: people with tall
+          // screens want more conversation on screen, and a fixed box cannot
+          // give it to them. A default height rather than max-height, because
+          // max-height would clamp whatever the user dragged it to.
+          style={{ height: '18rem' }}
+          className="min-h-24 resize-y overflow-y-auto border-t border-neutral-800 p-2"
+        >
           {group.messages.map((m) => (
             <div key={m.id} className="mb-2">
               {m.id === firstUnreadId && (
@@ -515,7 +522,10 @@ function ConversationGroup({
               <p className="text-[11px] uppercase tracking-wide text-neutral-600">
                 {m.role === 'user' ? 'You' : 'Agent'}
               </p>
-              <MarkdownView body={m.body} />
+              {/* No cap and no scroller of its own: the transcript above is
+                  already scrolling, and a scrollbar inside a scrollbar makes a
+                  long reply almost unreadable. */}
+              <MarkdownView body={m.body} className="max-h-none overflow-visible px-0 py-1" />
             </div>
           ))}
         </div>
