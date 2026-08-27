@@ -17,7 +17,14 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onOpenChange(false);
+      if (e.key !== 'Escape') return;
+      // Stop here rather than let it reach window-level handlers. The
+      // data-haive-dialog marker below is not enough on its own: React flushes
+      // this close synchronously on a discrete event, so the portal is already
+      // gone by the time a window listener looks for it, and one Escape closed
+      // both the dialog and whatever was behind it.
+      e.stopPropagation();
+      onOpenChange(false);
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);

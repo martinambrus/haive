@@ -1470,6 +1470,11 @@ export interface UiPrefs {
   /** Left-pane width as a percentage for the plan canvas. Clamped 20-80 on
    *  both read and write by the page that owns it. */
   planSplitPct?: number;
+  /** Which detail-panel tab the plan canvas opens on. Persisted like the other
+   *  two: a person reading links across nodes is still doing that after a
+   *  reload. Costs nothing on load — the panel only mounts once a node is
+   *  selected, so no tab fetches anything until it is asked for. */
+  planTab?: 'details' | 'links' | 'chat' | 'impact';
 }
 
 export function getUiPrefs(): Promise<UiPrefs> {

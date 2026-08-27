@@ -36,7 +36,7 @@ import {
   statusLabel,
 } from './plan-status';
 
-type Tab = 'details' | 'links' | 'chat' | 'impact';
+export type PlanPanelTab = 'details' | 'links' | 'chat' | 'impact';
 
 /**
  * Everything about one node, in a panel beside the grid.
@@ -53,6 +53,8 @@ export function PlanDetailPanel({
   repositoryId,
   nodeId,
   tree,
+  tab,
+  onTabChange,
   onChanged,
   onNavigate,
   onClose,
@@ -60,13 +62,17 @@ export function PlanDetailPanel({
   repositoryId: string;
   nodeId: string;
   tree: PlanTreeNode[];
+  /** Owned by the page, not by this component: the panel unmounts whenever the
+   *  selection clears (Escape, or clicking the selected node again), and a tab
+   *  kept here would be forgotten every time that happened. */
+  tab: PlanPanelTab;
+  onTabChange: (tab: PlanPanelTab) => void;
   onChanged: () => void;
   onNavigate: (nodeId: string) => void;
   onClose: () => void;
 }) {
   const router = useRouter();
   const [detail, setDetail] = useState<PlanNodeDetail | null>(null);
-  const [tab, setTab] = useState<Tab>('details');
   const [impact, setImpact] = useState<PlanImpact | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
@@ -375,11 +381,11 @@ export function PlanDetailPanel({
       )}
 
       <nav className="flex gap-1 border-b border-neutral-800 text-xs">
-        {(['details', 'links', 'chat', 'impact'] as Tab[]).map((t) => (
+        {(['details', 'links', 'chat', 'impact'] as PlanPanelTab[]).map((t) => (
           <button
             key={t}
             type="button"
-            onClick={() => setTab(t)}
+            onClick={() => onTabChange(t)}
             className={`px-2 py-1 capitalize ${
               tab === t ? 'border-b-2 border-indigo-400 text-neutral-100' : 'text-neutral-500'
             }`}

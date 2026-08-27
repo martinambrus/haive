@@ -31,7 +31,7 @@ import {
 import { cn } from '@/lib/cn';
 import { usePageTitle } from '@/lib/use-page-title';
 import { PlanCardGrid } from '@/components/plan/plan-card-grid';
-import { PlanDetailPanel } from '@/components/plan/plan-detail-panel';
+import { PlanDetailPanel, type PlanPanelTab } from '@/components/plan/plan-detail-panel';
 import { PlanTree } from '@/components/plan/plan-tree';
 
 /**
@@ -57,6 +57,9 @@ export default function PlanPage() {
   const [rootId, setRootId] = useState<string | null>(null);
   const [tree, setTree] = useState<PlanTreeNode[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Which panel tab is open, held HERE because the panel unmounts every time
+  // the selection clears — inside it, the choice died with each Escape.
+  const [panelTab, setPanelTab] = useState<PlanPanelTab>('details');
   // Mirror for the once-registered ESC listener.
   const selectedIdRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -98,6 +101,14 @@ export default function PlanPage() {
       const merged: UiPrefs = { ...p, ...prefsRef.current };
       prefsRef.current = merged;
       if (merged.planView === 'tree' || merged.planView === 'tiles') setView(merged.planView);
+      if (
+        merged.planTab === 'details' ||
+        merged.planTab === 'links' ||
+        merged.planTab === 'chat' ||
+        merged.planTab === 'impact'
+      ) {
+        setPanelTab(merged.planTab);
+      }
       if (typeof merged.planSplitPct === 'number') {
         const clamped = Math.min(80, Math.max(20, merged.planSplitPct));
         splitPctRef.current = clamped;
@@ -616,6 +627,11 @@ export default function PlanPage() {
                 repositoryId={repositoryId}
                 nodeId={selectedId}
                 tree={tree}
+                tab={panelTab}
+                onTabChange={(t) => {
+                  setPanelTab(t);
+                  persistPrefs({ ...prefsRef.current, planTab: t });
+                }}
                 onChanged={() => void refresh()}
                 onNavigate={(id) => void descend(id)}
                 onClose={() => setSelectedId(null)}
