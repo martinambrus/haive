@@ -1452,7 +1452,8 @@ export function startPlanAdvisory(
 export interface UiPrefs {
   /** 'tree' | 'tiles' — which plan-canvas view the user chose. */
   planView?: 'tree' | 'tiles';
-  /** Left-pane width as a percentage (25-75) for the plan canvas. */
+  /** Left-pane width as a percentage for the plan canvas. Clamped 20-80 on
+   *  both read and write by the page that owns it. */
   planSplitPct?: number;
 }
 

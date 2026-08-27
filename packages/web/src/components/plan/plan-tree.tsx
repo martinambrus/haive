@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import type { PlanTreeNode } from '@/lib/api-client';
 import { statusDot, statusLabel } from './plan-status';
+import { computeVisibleSet } from './plan-tree-filter';
 
 /**
  * Hierarchy only — no edges.
@@ -57,27 +58,9 @@ export function PlanTree({
       return next;
     });
 
-  // The filtered visibility set: every match plus each match's ancestors. An
-  // ancestor carries no hit of its own, but without it a match would render as
-  // a detached root and the outline would stop answering "where is this".
-  // `has(cur)` doubles as the walk's cycle guard — every match walks its own
-  // full chain, so stopping on an already-kept node loses nothing.
-  const keep = useMemo(() => {
-    // An EMPTY set stays a filter: zero hits must render "Nothing matched."
-    // here exactly as the tiles view does, not silently unfilter the tree.
-    if (!matchIds) return null;
-    const parentOf = new Map<string, string | null>();
-    for (const n of nodes) parentOf.set(n.id, n.parentId);
-    const set = new Set<string>(matchIds);
-    for (const id of matchIds) {
-      let cur = parentOf.get(id) ?? null;
-      while (cur && !set.has(cur)) {
-        set.add(cur);
-        cur = parentOf.get(cur) ?? null;
-      }
-    }
-    return set;
-  }, [matchIds, nodes]);
+  // Every match plus its ancestors. Extracted so the walk (cycle guard,
+  // empty-set-is-still-a-filter) is unit-testable without a DOM.
+  const keep = useMemo(() => computeVisibleSet(nodes, matchIds), [matchIds, nodes]);
 
   const render = (node: PlanTreeNode, depth: number): React.ReactNode => {
     const children = (byParent.get(node.id) ?? []).filter((c) => !keep || keep.has(c.id));

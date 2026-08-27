@@ -28,6 +28,7 @@ import {
   FormError,
   Input,
 } from '@/components/ui';
+import { cn } from '@/lib/cn';
 import { usePageTitle } from '@/lib/use-page-title';
 import { PlanCardGrid } from '@/components/plan/plan-card-grid';
 import { PlanDetailPanel } from '@/components/plan/plan-detail-panel';
@@ -78,15 +79,26 @@ export default function PlanPage() {
   const prefsRef = useRef<UiPrefs>({});
   const splitHostRef = useRef<HTMLDivElement | null>(null);
   const splitDragging = useRef(false);
+  // Live mirror of splitPct. The release handler reads THIS rather than a
+  // setState updater: an updater must be pure, and StrictMode runs it twice,
+  // which would fire the PUT twice per drag.
+  const splitPctRef = useRef(55);
+  const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     void getUiPrefs().then((p) => {
       if (cancelled) return;
-      prefsRef.current = p;
-      if (p.planView === 'tree' || p.planView === 'tiles') setView(p.planView);
-      if (typeof p.planSplitPct === 'number') {
-        setSplitPct(Math.min(80, Math.max(20, p.planSplitPct)));
+      // MERGE with local precedence, never replace: a pref the user changed
+      // while this GET was in flight already sits in the ref, and overwriting
+      // it here would drop it from the next PUT (which merges from the ref).
+      const merged: UiPrefs = { ...p, ...prefsRef.current };
+      prefsRef.current = merged;
+      if (merged.planView === 'tree' || merged.planView === 'tiles') setView(merged.planView);
+      if (typeof merged.planSplitPct === 'number') {
+        const clamped = Math.min(80, Math.max(20, merged.planSplitPct));
+        splitPctRef.current = clamped;
+        setSplitPct(clamped);
       }
     });
     return () => {
@@ -141,22 +153,28 @@ export default function PlanPage() {
   // only — a drag fires dozens of moves and each would be a PUT.
   const onSplitterDown = (e: React.PointerEvent<HTMLDivElement>): void => {
     splitDragging.current = true;
+    setDragging(true);
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const onSplitterMove = (e: React.PointerEvent<HTMLDivElement>): void => {
     if (!splitDragging.current || !splitHostRef.current) return;
     const rect = splitHostRef.current.getBoundingClientRect();
-    const pct = ((e.clientX - rect.left) / rect.width) * 100;
-    setSplitPct(Math.min(80, Math.max(20, pct)));
+    const pct = Math.min(80, Math.max(20, ((e.clientX - rect.left) / rect.width) * 100));
+    splitPctRef.current = pct;
+    setSplitPct(pct);
   };
-  const onSplitterUp = (): void => {
+  const endSplitterDrag = (persist: boolean): void => {
     if (!splitDragging.current) return;
     splitDragging.current = false;
-    setSplitPct((pct) => {
-      persistPrefs({ ...prefsRef.current, planSplitPct: Math.round(pct) });
-      return pct;
-    });
+    setDragging(false);
+    if (persist) {
+      persistPrefs({ ...prefsRef.current, planSplitPct: Math.round(splitPctRef.current) });
+    }
   };
+  const onSplitterUp = (): void => endSplitterDrag(true);
+  // A cancelled pointer (interrupted touch, stolen focus) never fires pointerup.
+  // Without this the drag flag sticks and later moves resize with no button held.
+  const onSplitterCancel = (): void => endSplitterDrag(false);
 
   const loadRoot = useCallback(async (): Promise<string | null> => {
     const [overview, treeRes] = await Promise.all([
@@ -524,9 +542,14 @@ export default function PlanPage() {
               onPointerDown={onSplitterDown}
               onPointerMove={onSplitterMove}
               onPointerUp={onSplitterUp}
-              className={`hidden w-1.5 shrink-0 cursor-col-resize bg-neutral-800 transition-colors hover:bg-indigo-500/60 lg:block ${
-                splitDragging.current ? 'bg-indigo-500/60' : ''
-              }`}
+              onPointerCancel={onSplitterCancel}
+              className={cn(
+                'hidden w-1.5 shrink-0 cursor-col-resize transition-colors lg:block',
+                // Mutually exclusive branches: a ref cannot re-render, and a
+                // second bg-* in one string is resolved by stylesheet order,
+                // not by where it sits in the string.
+                dragging ? 'bg-indigo-500/60' : 'bg-neutral-800 hover:bg-indigo-500/60',
+              )}
             />
           )}
 
