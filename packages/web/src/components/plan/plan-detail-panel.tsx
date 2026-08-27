@@ -99,6 +99,9 @@ export function PlanDetailPanel({
 
   useEffect(() => {
     let cancelled = false;
+    // The TAB deliberately survives a node change: someone comparing links (or
+    // chats, or impact) across nodes is doing one job, and being thrown back to
+    // Details on every click would make them re-open the same tab every time.
     setDetail(null);
     setImpact(null);
     setError(null);
@@ -110,7 +113,6 @@ export function PlanDetailPanel({
     setAddingLinkTo(null);
     setGroupOpen({});
     setLinkTarget('');
-    setTab('details');
     void getPlanNode(repositoryId, nodeId)
       .then((d) => {
         if (cancelled) return;
