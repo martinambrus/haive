@@ -4,7 +4,12 @@ import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
 import { loadPlanNode, renderPlanMarkdown } from '@haive/shared/plan';
 import type { StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
-import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
+import {
+  PLAN_PATCH_CONTRACT,
+  applyAgentPatch,
+  conversationalReply,
+  parsePlanPatch,
+} from './_plan-prompt.js';
 
 /**
  * A conversation about ONE node that may patch ANY node.
@@ -224,8 +229,13 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
 
     if (d.pendingQuestion !== null) {
       const patch = parsePlanPatch(args.llmOutput ?? null);
+      // A turn with no patch is not automatically a failure. The agent may have
+      // answered in prose — often to propose something and ask before writing
+      // it — and that is a reply the user asked for. Only a turn with no words
+      // AND no patch is an error.
+      const spokenOnly = patch ? null : conversationalReply(args.llmOutput);
       if (!patch) {
-        result.error = 'The agent did not reply with a usable patch.';
+        if (!spokenOnly) result.error = 'The agent did not reply with a usable patch.';
       } else {
         result.summary = patch.summary ?? '';
         try {
@@ -255,7 +265,7 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       // `reply` is the prose written FOR the user; `summary` is a changelog line
       // and reads like one ("Answered the question; no plan changes."). Fall
       // back to it only when the agent sent nothing else.
-      const spoken = patch?.reply?.trim() || result.summary;
+      const spoken = patch?.reply?.trim() || spokenOnly || result.summary;
       await ctx.db.insert(schema.planNodeMessages).values({
         nodeId: d.nodeId,
         taskId: ctx.taskId,

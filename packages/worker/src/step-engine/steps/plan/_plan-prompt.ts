@@ -76,20 +76,61 @@ export function parsePlanPatch(
   const parsed =
     typeof raw === 'string' ? parseJsonLoose(raw) : (raw as Record<string, unknown> | null);
   if (!parsed || typeof parsed !== 'object') return null;
-  const ops = (parsed as { ops?: unknown }).ops;
-  if (!Array.isArray(ops)) return null;
-  const summary = (parsed as { summary?: unknown }).summary;
+  const summaryField = (parsed as { summary?: unknown }).summary;
+  const replyField = (parsed as { reply?: unknown }).reply;
+  const spoke = typeof summaryField === 'string' || typeof replyField === 'string';
+  const rawOps = (parsed as { ops?: unknown }).ops;
+  // A reply that CHANGES nothing often omits `ops` rather than sending `[]` —
+  // measured on a live chat, where an answer carrying a full `reply` was thrown
+  // away as unusable and the user saw an error instead of it. Absent ops on an
+  // object that plainly spoke means "no operations".
+  //
+  // Only when it spoke, though: an object with neither field is not a patch
+  // that changed nothing, it is something else entirely, and the build steps
+  // rely on null there to re-roll rather than record an empty pass.
+  if (!Array.isArray(rawOps) && !(rawOps === undefined && spoke)) return null;
+  const ops = Array.isArray(rawOps) ? rawOps : [];
+  const summary = summaryField;
   // `reply` is what a person reads; `summary` is a changelog line. Steps that
   // show the agent's words to a human need a field that MEANS that, because a
   // field documented as "what you changed" gets a description of the change
   // even when the step asks for an answer — measured twice on live chats, which
   // both came back as "Answered the question; no plan changes."
-  const reply = (parsed as { reply?: unknown }).reply;
+  const reply = replyField;
   return {
     ops,
     ...(typeof summary === 'string' ? { summary } : {}),
     ...(typeof reply === 'string' ? { reply } : {}),
   };
+}
+
+/** How much of a prose reply is kept in a transcript. A conversational turn is
+ *  a paragraph or two; anything past this is a stream that lost its way. */
+const CONVERSATIONAL_MAX = 8000;
+
+/**
+ * The part of a reply a person can read, for a turn that carried no patch.
+ *
+ * An agent asked to answer by patching sometimes answers in prose instead —
+ * most usefully when it wants confirmation before writing anything. Recording
+ * "the agent did not reply with a usable patch" throws that answer away and
+ * leaves the user staring at an error where a reply should be, so the words are
+ * kept even though the machine-readable part is missing.
+ *
+ * Fenced blocks are stripped: a block that reached here failed to parse, and
+ * pasting a broken payload into a conversation helps nobody. Null when nothing
+ * but those blocks was there.
+ */
+export function conversationalReply(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const prose = raw
+    .replace(/```[\s\S]*?```/g, '')
+    // Removing a block leaves the blank lines that surrounded it; three or more
+    // in a row render as a hole in the transcript.
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!prose) return null;
+  return prose.length > CONVERSATIONAL_MAX ? `${prose.slice(0, CONVERSATIONAL_MAX)}…` : prose;
 }
 
 /**
