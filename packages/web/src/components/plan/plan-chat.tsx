@@ -430,10 +430,13 @@ export function PlanChat({
       {live && <ConversationGroup group={live} defaultOpen firstUnreadId={firstUnreadId} />}
 
       {working && (
-        <p className="flex items-center gap-2 text-[11px] text-neutral-400">
+        // The same status panel a running step wears on the task page, rather
+        // than a line of grey text: this IS that step's status, and it should
+        // not be quieter here than it is there.
+        <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
           {liveStep?.statusMessage ?? 'Thinking…'}
-        </p>
+        </div>
       )}
 
       {liveTaskId && (
