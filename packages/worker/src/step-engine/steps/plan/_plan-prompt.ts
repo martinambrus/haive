@@ -48,6 +48,12 @@ Rules:
   actually looked at, and say in \`evidence\` what made you link it. A guessed path is
   worse than no path — it makes the impact view lie with a straight face. Links are
   additive; naming three files does not retract the ones already recorded.
+  Put them on the node each file implements — usually a node you are CREATING, not
+  the one you were asked to expand. Links banked on the parent leave every child
+  answering "nothing" when the impact view asks what implements it.
+  Naming a file in a title is a claim, not a link: a node called
+  \`SMTP transport (smtp.php)\` still needs \`smtp.php\` in its \`codeLinks\`, or the
+  plan only knows the filename as prose.
 
   \`\`\`json
   { "op": "upsert", "nodeRef": "<uuid>", "codeLinks": [

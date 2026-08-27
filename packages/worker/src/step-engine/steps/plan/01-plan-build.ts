@@ -233,7 +233,14 @@ function buildExpandPrompt(
     'plan. Those links are what later answers "if I change this, what else must change".',
     '',
     d.mode === 'from_repo'
-      ? 'Where a node you name is ALREADY implemented, add `codeLinks` for the files you actually opened. Skip it for anything not built yet — a guessed path makes the impact view lie.'
+      ? [
+          'Where a node you name is ALREADY implemented, add `codeLinks` for the files you actually',
+          'opened. Skip it for anything not built yet — a guessed path makes the impact view lie.',
+          'Attach each link to the CHILD that file implements, not to the node you are expanding:',
+          'links banked on the parent leave every child answering "nothing" when the impact view',
+          "asks what implements it. If you put a filename in a child's title, that child needs the",
+          'same file in its `codeLinks` — a title is prose, only a link is a link.',
+        ].join(' ')
       : '',
     '',
     PLAN_PATCH_CONTRACT,
