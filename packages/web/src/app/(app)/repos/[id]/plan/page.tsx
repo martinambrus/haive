@@ -42,6 +42,11 @@ import { PlanTree } from '@/components/plan/plan-tree';
  * fetches that level alone, so a 400-node plan never arrives in the browser at
  * once — only the hierarchy-only tree does, and that carries no bodies.
  */
+/** How often unread badges are re-read while the plan is open. Slow on purpose:
+ *  it answers "did a reply land somewhere else", which is a matter of seconds
+ *  mattering to nobody, and the query runs for every node of the repo. */
+const UNREAD_POLL_MS = 15_000;
+
 export default function PlanPage() {
   usePageTitle('Plan');
   const params = useParams();
@@ -207,6 +212,29 @@ export default function PlanPage() {
   // A cancelled pointer (interrupted touch, stolen focus) never fires pointerup.
   // Without this the drag flag sticks and later moves resize with no button held.
   const onSplitterCancel = (): void => endSplitterDrag(false);
+
+  // Unread badges are a NOTIFICATION surface: a reply that arrives while the
+  // user is reading a different node has to show up on its own, and a plan chat
+  // deliberately raises no toast to announce it. The chat panel only polls the
+  // node it is open on, so without this a badge for any other node waited for a
+  // manual refresh. One aggregate query, and only while the tab is visible.
+  useEffect(() => {
+    let cancelled = false;
+    const load = (): void => {
+      if (document.hidden) return;
+      void getPlanUnread(repositoryId)
+        .then((u) => !cancelled && setUnread(u.counts))
+        .catch(() => {});
+    };
+    const timer = setInterval(load, UNREAD_POLL_MS);
+    // Coming back to the tab should not wait out the interval.
+    document.addEventListener('visibilitychange', load);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', load);
+    };
+  }, [repositoryId]);
 
   const loadRoot = useCallback(async (): Promise<string | null> => {
     const [overview, treeRes] = await Promise.all([
