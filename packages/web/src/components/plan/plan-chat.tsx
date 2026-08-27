@@ -56,6 +56,18 @@ const OUTCOME_NOTE: Record<string, string> = {
   failed: 'failed',
 };
 
+/** How many operations an assistant turn actually sent, from the patch stored
+ *  beside it. Null when the turn carried no patch at all (a prose reply).
+ *
+ *  Shown because prose is not evidence: an agent has reported "Done — three
+ *  children now hang off this node" while sending `ops: []`, and the only thing
+ *  that touched the plan was the ops. The count is the record. */
+function opCount(patch: unknown): number | null {
+  if (!patch || typeof patch !== 'object') return null;
+  const ops = (patch as { ops?: unknown }).ops;
+  return Array.isArray(ops) ? ops.length : null;
+}
+
 /** A timestamp in the viewer's own locale and zone. Undefined or unparseable
  *  reads as null so a caller can leave the label off entirely rather than print
  *  "Invalid Date" beside a real message. */
@@ -533,12 +545,26 @@ function ConversationGroup({
                   long transcript; the neutral-600/700 pair it used before was
                   barely legible on this background. */}
               <p className="text-[11px] uppercase tracking-wide text-indigo-300">
-                {m.role === 'user' ? 'You' : 'Agent'}
+                {/* The CLI that answered rides on the label as a tooltip: it is
+                    worth being able to ask, and not worth a line of its own in
+                    every turn. */}
+                <span title={m.cliLabel ? `Answered by ${m.cliLabel}` : undefined}>
+                  {m.role === 'user' ? 'You' : 'Agent'}
+                </span>
                 {stamp(m.createdAt) && (
                   // Not uppercased with the speaker: a date in caps is harder
                   // to read than the word beside it.
                   <span className="ml-1 normal-case text-neutral-400">({stamp(m.createdAt)})</span>
                 )}
+                {m.role === 'assistant' &&
+                  opCount(m.patch) !== null &&
+                  (opCount(m.patch) === 0 ? (
+                    <span className="ml-1.5 normal-case text-neutral-500">· plan unchanged</span>
+                  ) : (
+                    <span className="ml-1.5 normal-case text-emerald-400">
+                      · {opCount(m.patch)} plan change{opCount(m.patch) === 1 ? '' : 's'}
+                    </span>
+                  ))}
               </p>
               {/* No cap and no scroller of its own: the transcript above is
                   already scrolling, and a scrollbar inside a scrollbar makes a

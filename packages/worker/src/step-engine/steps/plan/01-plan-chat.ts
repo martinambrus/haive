@@ -96,6 +96,13 @@ function buildChatPrompt(d: PlanChatDetect): string {
     'conversation, so write it to a person: answer the question, or say what you changed and',
     'why. `summary` stays a one-line changelog and nobody reads it here.',
     '',
+    'NEVER describe a change you did not send as an op. `ops` is the only thing that touches',
+    'the plan — an empty `ops` array leaves it exactly as it was, whatever your reply says. A',
+    'reply reading "Done, I split it into three" with no ops is a false report: the user is',
+    'looking at the plan and will see nothing changed. If you intend to make the change, send',
+    'the ops in the SAME reply; if you want confirmation first, say so and describe it as a',
+    'proposal, not as something already done.',
+    '',
     'A reply that describes your own behaviour instead of answering is not an answer:',
     '  BAD   "reply": "Answered the question; no plan changes."',
     '  GOOD  "reply": "It is the front controller — index.php plus the generated init.php, which',
@@ -269,6 +276,9 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       await ctx.db.insert(schema.planNodeMessages).values({
         nodeId: d.nodeId,
         taskId: ctx.taskId,
+        // The provider that answered THIS turn. Read here rather than from the
+        // task later: the conversation's CLI can be changed between turns.
+        cliProviderId: ctx.cliProviderId,
         role: 'assistant',
         body:
           result.error !== null

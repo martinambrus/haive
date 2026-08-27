@@ -61,6 +61,9 @@ Rules:
       { "repoPath": "src/auth/session.ts", "symbol": "createSession",
         "evidence": "the only place a session cookie is minted", "confidence": 0.9 } ] }
   \`\`\`
+- \`ops\` is the ONLY thing that changes the plan. An empty array changes nothing,
+  no matter what your prose says, so never report a change you did not send as an
+  op — the reader is looking at the plan and will see that it did not happen.
 - \`kind\` for links: \`depends_on\` (this cannot proceed until the target does),
   \`affects\` (changing the target forces a change here), \`implements\` (this
   realises the target).
