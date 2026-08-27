@@ -119,8 +119,17 @@ export function PlanDeleteDialog({
             <ul className="flex flex-col gap-1">
               {blockedBy.map((t) => (
                 <li key={t.id}>
-                  <Link href={`/tasks/${t.id}`} className="text-xs text-indigo-300 underline">
-                    {t.title}
+                  {/* New tab, deliberately: navigating here would tear down the
+                      dialog and the typed confirmation with it, so cancelling
+                      the blocker would cost the user the whole delete. `rel`
+                      because a target'd link hands the opener over otherwise. */}
+                  <Link
+                    href={`/tasks/${t.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-indigo-300 underline"
+                  >
+                    {t.title} ↗
                   </Link>
                 </li>
               ))}

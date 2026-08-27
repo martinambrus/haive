@@ -15,12 +15,19 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: ButtonSize;
 }
 
+// Every variant carries a disabled treatment, not just `primary`. The base
+// class sets `disabled:cursor-not-allowed`, which only reveals itself on hover
+// — so a disabled `destructive` button rendered in full bg-red-600 and read as
+// live. An inert control that looks active is worse than one that does nothing:
+// the user clicks, nothing happens, and the button is what lied.
 const buttonVariants: Record<ButtonVariant, string> = {
   primary:
     'bg-indigo-500 text-white hover:bg-indigo-400 disabled:bg-indigo-700 disabled:opacity-70',
-  secondary: 'bg-neutral-800 text-neutral-100 hover:bg-neutral-700 border border-neutral-700',
-  ghost: 'bg-transparent text-neutral-100 hover:bg-neutral-800',
-  destructive: 'bg-red-600 text-white hover:bg-red-500',
+  secondary:
+    'bg-neutral-800 text-neutral-100 hover:bg-neutral-700 border border-neutral-700 disabled:bg-neutral-900 disabled:text-neutral-500 disabled:opacity-70',
+  ghost: 'bg-transparent text-neutral-100 hover:bg-neutral-800 disabled:text-neutral-500',
+  destructive:
+    'bg-red-600 text-white hover:bg-red-500 disabled:bg-red-900 disabled:text-red-200/60 disabled:opacity-70',
 };
 
 const buttonSizes: Record<ButtonSize, string> = {
