@@ -245,6 +245,9 @@ export default function PlanPage() {
       setError(null);
       try {
         setFocus(await getPlanNode(repositoryId, nodeId));
+        // Every way of moving to a node — a tree row, a breadcrumb, an impact
+        // hop, a card's Open — leaves the panel open on the node moved to. One
+        // rule: the panel describes wherever you just went.
         setSelectedId(nodeId);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to open node');

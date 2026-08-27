@@ -197,6 +197,25 @@ export function PlanDetailPanel({
     if (ok) setEditingMeta(false);
   }
 
+  // Delete cannot ride write(): write() reloads THIS node after the mutation,
+  // and the node no longer exists, so the 404 threw before onChanged() could
+  // run and the grid kept rendering the deleted card until the user navigated.
+  // Refresh the page first, then unmount.
+  async function applyDelete(): Promise<void> {
+    setSaving(true);
+    setError(null);
+    setConflict(false);
+    try {
+      await deletePlanNode(repositoryId, nodeId);
+      onChanged();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function applyAddChild(): Promise<void> {
     const title = childTitle.trim();
     if (!title) return;
@@ -471,10 +490,7 @@ export function PlanDetailPanel({
                     ? `Delete "${node.title}" and everything under it (${n} node${n === 1 ? '' : 's'})?`
                     : `Delete "${node.title}"?`;
                 if (!window.confirm(warning)) return;
-                void write(async () => {
-                  await deletePlanNode(repositoryId, nodeId);
-                  onClose();
-                });
+                void applyDelete();
               }}
             >
               Delete
