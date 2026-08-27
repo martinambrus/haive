@@ -120,6 +120,7 @@ export function PlanChat({
   // timestamped because the count is already on screen as the badge.
   const [unreadAtOpen, setUnreadAtOpen] = useState(0);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // Held in a ref, not a dependency: the page recreates this callback on every
   // render, and depending on its identity made the mark-read effect re-run on
   // its own result — a PUT/refetch loop that hammered the API.
@@ -255,6 +256,19 @@ export function PlanChat({
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.length]);
+
+  // The composer disables itself while the agent works, which takes the cursor
+  // with it. Hand it back when the turn returns, so a reply can be typed
+  // straight away instead of clicking into the box after every exchange.
+  //
+  // Only on the transition into "your turn": focusing on every render would
+  // steal the caret from whatever the user was doing — reading history, editing
+  // the CLI — the whole time a conversation is parked.
+  const wasWorking = useRef(false);
+  useEffect(() => {
+    if (wasWorking.current && !working) composerRef.current?.focus();
+    wasWorking.current = working;
+  }, [working]);
 
   // Opening the tab is what counts as reading. Not scroll position: a short
   // conversation never scrolls, so waiting for that would leave the badge on
@@ -462,6 +476,7 @@ export function PlanChat({
       )}
 
       <textarea
+        ref={composerRef}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         rows={3}
