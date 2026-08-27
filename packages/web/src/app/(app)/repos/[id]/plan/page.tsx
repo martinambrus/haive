@@ -45,6 +45,17 @@ export default function PlanPage() {
   usePageTitle('Plan');
   const params = useParams();
   const repositoryId = String(params.id);
+  // The selected node lives in the URL, not in preferences: it is per-repo by
+  // construction, it survives a reload, and Back from the new-task form returns
+  // to the node the task was created from. Read once, at mount — after that the
+  // page owns the selection and writes it back.
+  //
+  // Read through the browser rather than useSearchParams(): that hook opts the
+  // route out of static rendering unless it sits under a Suspense boundary, and
+  // this needs neither router state nor a re-render to answer.
+  const initialNodeRef = useRef<string | null>(
+    typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('node'),
+  );
 
   const [repoName, setRepoName] = useState('');
   const [nodeCount, setNodeCount] = useState(0);
@@ -229,6 +240,20 @@ export default function PlanPage() {
     let cancelled = false;
     void loadRoot()
       .then(async (root) => {
+        if (cancelled) return;
+        // A node named in the URL wins over the root. A stale one — deleted, or
+        // belonging to a plan that has since been rebuilt — falls back to the
+        // root rather than leaving the page empty on a bad link.
+        const wanted = initialNodeRef.current;
+        if (wanted) {
+          try {
+            setFocus(await getPlanNode(repositoryId, wanted));
+            if (!cancelled) setSelectedId(wanted);
+            return;
+          } catch {
+            initialNodeRef.current = null;
+          }
+        }
         // The root is focused immediately rather than treated as a special
         // "no focus" state. Without it the root is the one node that can never
         // be selected, so its own description, status and chat are unreachable.
@@ -314,6 +339,17 @@ export default function PlanPage() {
   }
 
   selectedIdRef.current = selectedId;
+
+  // Mirror the selection into the URL. replaceState, not a push: browsing the
+  // plan is not a history trail, and a push per click would make Back mean
+  // "undo one selection" instead of "leave the plan".
+  useEffect(() => {
+    if (loading) return;
+    const url = new URL(window.location.href);
+    if (selectedId) url.searchParams.set('node', selectedId);
+    else url.searchParams.delete('node');
+    if (url.href !== window.location.href) window.history.replaceState(null, '', url);
+  }, [selectedId, loading]);
 
   // The tree filters on match IDS, not the match payloads — the tree rows
   // already carry their own titles, and only visibility is in question.
