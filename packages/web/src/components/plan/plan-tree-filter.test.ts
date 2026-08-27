@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ancestorsOf, computeVisibleSet } from './plan-tree-filter';
+import { ancestorsOf, computeVisibleSet, flattenVisible } from './plan-tree-filter';
 
 /** id -> parentId, the only two fields the filter reads. */
 const nodes = [
@@ -76,5 +76,48 @@ describe('ancestorsOf', () => {
       { id: 'y', parentId: 'x' },
     ];
     expect(ancestorsOf(cyclic, 'x')).toEqual(['y']);
+  });
+});
+
+describe('flattenVisible', () => {
+  const none = new Set<string>();
+
+  it('lists rows in the order they appear, with depth', () => {
+    expect(flattenVisible(nodes, none, null).map((r) => [r.id, r.depth])).toEqual([
+      ['root', 0],
+      ['a', 1],
+      ['a1', 2],
+      ['a2', 2],
+      ['b', 1],
+      ['b1', 2],
+    ]);
+  });
+
+  it('stops descending into a folded node but still lists it', () => {
+    const rows = flattenVisible(nodes, new Set(['a']), null);
+    expect(rows.map((r) => r.id)).toEqual(['root', 'a', 'b', 'b1']);
+    expect(rows.find((r) => r.id === 'a')?.hasChildren).toBe(true);
+  });
+
+  it('ignores folds while a filter is active', () => {
+    // A folded ancestor would hide the very matches the filter exists to show.
+    const keep = computeVisibleSet(nodes, new Set(['a1']));
+    const rows = flattenVisible(nodes, new Set(['a', 'root']), keep);
+    expect(rows.map((r) => r.id)).toEqual(['root', 'a', 'a1']);
+  });
+
+  it('reports whether a node has VISIBLE children, not any children', () => {
+    const keep = computeVisibleSet(nodes, new Set(['a']));
+    const rows = flattenVisible(nodes, none, keep);
+    expect(rows.find((r) => r.id === 'a')?.hasChildren).toBe(false);
+  });
+
+  it('terminates on a parent cycle', () => {
+    const cyclic = [
+      { id: 'x', parentId: null },
+      { id: 'y', parentId: 'x' },
+      { id: 'z', parentId: 'y' },
+    ];
+    expect(flattenVisible(cyclic, none, null).map((r) => r.id)).toEqual(['x', 'y', 'z']);
   });
 });

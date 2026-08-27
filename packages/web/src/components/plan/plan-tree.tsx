@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PlanTreeNode } from '@/lib/api-client';
 import { statusDot, statusLabel } from './plan-status';
-import { ancestorsOf, computeVisibleSet } from './plan-tree-filter';
+import { ancestorsOf, computeVisibleSet, flattenVisible } from './plan-tree-filter';
 
 /**
  * Hierarchy only — no edges.
@@ -12,6 +12,12 @@ import { ancestorsOf, computeVisibleSet } from './plan-tree-filter';
  * cross-links into it would turn a scannable outline into a graph nobody can
  * follow. The links live on the detail panel and the impact graph, where they
  * are the subject rather than the noise.
+ *
+ * Arrow keys select as they move, so the panel follows the cursor without a
+ * second keystroke. Selecting fetches the node and re-points the whole panel,
+ * so the select is DEBOUNCED: a held arrow key repeats every ~30ms and would
+ * otherwise fire a request per row it passed over. Enter/Space commits
+ * immediately for anyone who would rather not wait.
  */
 export function PlanTree({
   nodes,
@@ -26,41 +32,53 @@ export function PlanTree({
    *  the ancestors needed to keep the hierarchy readable. */
   matchIds?: ReadonlySet<string> | null;
 }) {
-  const byParent = useMemo(() => {
-    const m = new Map<string | null, PlanTreeNode[]>();
-    for (const n of nodes) {
-      const run = m.get(n.parentId);
-      if (run) run.push(n);
-      else m.set(n.parentId, [n]);
-    }
-    return m;
-  }, [nodes]);
-
+  const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   // Everything starts expanded down to the first two levels; deeper branches
   // collapse so a 400-node plan does not open as a wall of text.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     const deep = new Set<string>();
+    const kids = new Map<string | null, PlanTreeNode[]>();
+    for (const n of nodes) {
+      const run = kids.get(n.parentId);
+      if (run) run.push(n);
+      else kids.set(n.parentId, [n]);
+    }
     const walk = (id: string, depth: number): void => {
-      for (const child of byParent.get(id) ?? []) {
-        if (depth >= 1 && (byParent.get(child.id)?.length ?? 0) > 0) deep.add(child.id);
+      for (const child of kids.get(id) ?? []) {
+        if (depth >= 1 && (kids.get(child.id)?.length ?? 0) > 0) deep.add(child.id);
         walk(child.id, depth + 1);
       }
     };
-    for (const root of byParent.get(null) ?? []) walk(root.id, 0);
+    for (const root of kids.get(null) ?? []) walk(root.id, 0);
     return deep;
   });
 
-  const toggle = (id: string): void =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const expand = useCallback(
+    (id: string) =>
+      setCollapsed((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      }),
+    [],
+  );
+  const fold = useCallback(
+    (id: string) =>
+      setCollapsed((prev) => {
+        if (prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      }),
+    [],
+  );
+  const toggle = (id: string): void => (collapsed.has(id) ? expand(id) : fold(id));
 
   // Every match plus its ancestors. Extracted so the walk (cycle guard,
   // empty-set-is-still-a-filter) is unit-testable without a DOM.
   const keep = useMemo(() => computeVisibleSet(nodes, matchIds), [matchIds, nodes]);
+  const rows = useMemo(() => flattenVisible(nodes, collapsed, keep), [nodes, collapsed, keep]);
 
   // Reveal whatever is selected, however it got selected — a link row, an
   // impact hop, a breadcrumb. A selected row inside a folded branch is
@@ -88,62 +106,165 @@ export function PlanTree({
     selectedRef.current?.scrollIntoView({ block: 'nearest' });
   }, [selectedId, collapsed, keep]);
 
-  const render = (node: PlanTreeNode, depth: number): React.ReactNode => {
-    const children = (byParent.get(node.id) ?? []).filter((c) => !keep || keep.has(c.id));
-    // Filtering forces every kept branch open — a collapsed ancestor would
-    // hide the very matches the filter exists to show.
-    const isCollapsed = keep ? false : collapsed.has(node.id);
-    const isMatch = matchIds?.has(node.id) ?? false;
-    return (
-      <div key={node.id}>
-        <div
-          ref={node.id === selectedId ? selectedRef : undefined}
-          className={`flex items-center gap-1.5 rounded py-1 pl-1.5 pr-5 text-sm ${
-            node.id === selectedId ? 'bg-indigo-500/15 text-neutral-100' : 'text-neutral-300'
-          }`}
-          style={{ paddingLeft: `${depth * 14 + 6}px` }}
-        >
-          {children.length > 0 ? (
-            <button
-              type="button"
-              onClick={() => toggle(node.id)}
-              className="w-4 shrink-0 text-neutral-500"
-              aria-label={isCollapsed ? 'Expand' : 'Collapse'}
-            >
-              {isCollapsed ? '▸' : '▾'}
-            </button>
-          ) : (
-            <span className="w-4 shrink-0" />
-          )}
-          <span
-            className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDot(node.rolledStatus)}`}
-            title={statusLabel(node.rolledStatus)}
-          />
-          <button
-            type="button"
-            onClick={() => onSelect(node.id)}
-            className={`flex-1 truncate text-left hover:text-neutral-100 ${
-              isMatch ? 'font-medium text-neutral-100' : ''
-            }`}
-          >
-            {node.title}
-          </button>
-          {node.totalDescendants > 0 && (
-            <span className="shrink-0 text-[11px] text-neutral-600">{node.totalDescendants}</span>
-          )}
-        </div>
-        {!isCollapsed && children.map((c) => render(c, depth + 1))}
-      </div>
-    );
+  // The keyboard cursor. Follows the selection when it changes from elsewhere,
+  // so tabbing into the tree resumes where the user actually is.
+  const [cursorId, setCursorId] = useState<string | null>(null);
+  useEffect(() => {
+    if (selectedId) setCursorId(selectedId);
+  }, [selectedId]);
+  const cursor = cursorId && rows.some((r) => r.id === cursorId) ? cursorId : (rows[0]?.id ?? null);
+
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const selectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (selectTimer.current) clearTimeout(selectTimer.current);
+    },
+    [],
+  );
+
+  /** Select what the cursor landed on, once it stops moving. Skipped when it is
+   *  already the selection: onSelect TOGGLES, so re-sending it would close the
+   *  panel the arrow key was meant to fill. */
+  const selectSoon = (id: string): void => {
+    if (selectTimer.current) clearTimeout(selectTimer.current);
+    selectTimer.current = setTimeout(() => {
+      if (id !== selectedId) onSelect(id);
+    }, 180);
   };
 
-  const roots = (byParent.get(null) ?? []).filter((r) => !keep || keep.has(r.id));
-  if (roots.length === 0) {
+  const focusRow = (id: string): void => {
+    setCursorId(id);
+    selectSoon(id);
+    // Focus rather than scrollIntoView: it moves the cursor AND reveals the row
+    // in one step, and keeps the browser's own focus ring where the user is.
+    hostRef.current
+      ?.querySelector<HTMLButtonElement>(`[data-row-id="${CSS.escape(id)}"]`)
+      ?.focus({ preventScroll: false });
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (!cursor) return;
+    const i = rows.findIndex((r) => r.id === cursor);
+    if (i < 0) return;
+    const row = rows[i]!;
+    const move = (to: number): void => {
+      const next = rows[to];
+      if (next) focusRow(next.id);
+    };
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        move(i + 1);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        move(i - 1);
+        break;
+      case 'ArrowRight':
+        e.preventDefault();
+        // Open what is closed, then step into it — the two halves of "go
+        // deeper", in the order a tree widget is expected to do them.
+        if (row.hasChildren && collapsed.has(row.id) && !keep) expand(row.id);
+        else if (row.hasChildren) move(i + 1);
+        break;
+      case 'ArrowLeft': {
+        e.preventDefault();
+        if (row.hasChildren && !collapsed.has(row.id) && !keep) {
+          fold(row.id);
+          break;
+        }
+        // Already closed (or a leaf): the way out is up to the parent.
+        const parent = row.parentId;
+        if (parent) focusRow(parent);
+        break;
+      }
+      case 'Home':
+        e.preventDefault();
+        move(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        move(rows.length - 1);
+        break;
+      case 'Enter':
+      case ' ':
+        e.preventDefault();
+        if (selectTimer.current) clearTimeout(selectTimer.current);
+        onSelect(cursor);
+        break;
+      default:
+        break;
+    }
+  };
+
+  if (rows.length === 0) {
     return (
       <p className="px-2 py-3 text-sm text-neutral-500">
         {keep ? 'Nothing matched.' : 'No plan yet.'}
       </p>
     );
   }
-  return <div className="flex flex-col">{roots.map((r) => render(r, 0))}</div>;
+
+  return (
+    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-to-interactive-role
+    <div ref={hostRef} role="tree" onKeyDown={onKeyDown} className="flex flex-col">
+      {rows.map((row) => {
+        const node = byId.get(row.id);
+        if (!node) return null;
+        const isCollapsed = keep ? false : collapsed.has(row.id);
+        const isMatch = matchIds?.has(row.id) ?? false;
+        const isSelected = row.id === selectedId;
+        return (
+          <div
+            key={row.id}
+            ref={isSelected ? selectedRef : undefined}
+            role="treeitem"
+            aria-level={row.depth + 1}
+            aria-selected={isSelected}
+            aria-expanded={row.hasChildren ? !isCollapsed : undefined}
+            className={`flex items-center gap-1.5 rounded py-1 pl-1.5 pr-5 text-sm ${
+              isSelected ? 'bg-indigo-500/15 text-neutral-100' : 'text-neutral-300'
+            }`}
+            style={{ paddingLeft: `${row.depth * 14 + 6}px` }}
+          >
+            {row.hasChildren ? (
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => toggle(row.id)}
+                className="w-4 shrink-0 text-neutral-500"
+                aria-label={isCollapsed ? 'Expand' : 'Collapse'}
+              >
+                {isCollapsed ? '▸' : '▾'}
+              </button>
+            ) : (
+              <span className="w-4 shrink-0" />
+            )}
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDot(node.rolledStatus)}`}
+              title={statusLabel(node.rolledStatus)}
+            />
+            <button
+              type="button"
+              data-row-id={row.id}
+              // Roving tabindex: one stop for the whole tree, so Tab reaches it
+              // once and the arrows take over from there.
+              tabIndex={row.id === cursor ? 0 : -1}
+              onFocus={() => setCursorId(row.id)}
+              onClick={() => onSelect(row.id)}
+              className={`flex-1 truncate text-left hover:text-neutral-100 ${
+                isMatch ? 'font-medium text-neutral-100' : ''
+              }`}
+            >
+              {node.title}
+            </button>
+            {node.totalDescendants > 0 && (
+              <span className="shrink-0 text-[11px] text-neutral-600">{node.totalDescendants}</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }

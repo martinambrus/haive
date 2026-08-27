@@ -59,3 +59,50 @@ export function ancestorsOf(
   }
   return chain;
 }
+
+export interface PlanTreeRow {
+  id: string;
+  parentId: string | null;
+  depth: number;
+  hasChildren: boolean;
+}
+
+/**
+ * The rows the tree actually shows, in the order they appear on screen.
+ *
+ * Keyboard navigation is the reason this exists as data rather than as the
+ * shape of a recursive render: "the next row down" is only answerable against
+ * the flattened, filtered, folded-aware order, and deriving it from the DOM
+ * would make the answer depend on what happened to be painted.
+ *
+ * A filter forces every kept branch open — a folded ancestor would hide the
+ * very matches the filter exists to show — so `collapsed` is ignored while
+ * `keep` is set.
+ */
+export function flattenVisible(
+  nodes: Pick<PlanTreeNode, 'id' | 'parentId'>[],
+  collapsed: ReadonlySet<string>,
+  keep: ReadonlySet<string> | null,
+): PlanTreeRow[] {
+  const byParent = new Map<string | null, Pick<PlanTreeNode, 'id' | 'parentId'>[]>();
+  for (const n of nodes) {
+    const run = byParent.get(n.parentId);
+    if (run) run.push(n);
+    else byParent.set(n.parentId, [n]);
+  }
+  const rows: PlanTreeRow[] = [];
+  const seen = new Set<string>();
+  const walk = (parentId: string | null, depth: number): void => {
+    for (const node of byParent.get(parentId) ?? []) {
+      if (keep && !keep.has(node.id)) continue;
+      // The parent chain is data; a cycle must not spin the walk.
+      if (seen.has(node.id)) continue;
+      seen.add(node.id);
+      const children = (byParent.get(node.id) ?? []).filter((c) => !keep || keep.has(c.id));
+      rows.push({ id: node.id, parentId: node.parentId, depth, hasChildren: children.length > 0 });
+      if (children.length > 0 && (keep ? true : !collapsed.has(node.id))) walk(node.id, depth + 1);
+    }
+  };
+  walk(null, 0);
+  return rows;
+}
