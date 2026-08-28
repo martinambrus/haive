@@ -206,6 +206,52 @@ function headerContentType(raw: string | undefined): string | null {
   return v.slice(0, 128);
 }
 
+/**
+ * Write one attachment: bytes to the task's uploads dir, a row in
+ * `task_attachments`.
+ *
+ * Extracted so the streaming upload route and the plan-build document import
+ * share ONE implementation. The interesting part is not the write, it is the
+ * ownership dance around it — the api runs as root while the sandbox user is
+ * uid 1000, so a file written without the chown is invisible to the agent that
+ * is supposed to read it, and that failure only shows up inside a container.
+ *
+ * Returns the inserted row.
+ */
+export async function writeTaskAttachment(args: {
+  taskId: string;
+  userId: string;
+  filename: string;
+  content: string | Buffer;
+  contentType?: string | null;
+  description?: string | null;
+}) {
+  const dir = await resolveTaskUploadsDir(args.taskId, args.userId);
+  await mkdir(dir, { recursive: true });
+  await harmonizeDirOwnership(dir);
+
+  const safeName = await uniqueFilename(dir, sanitizeAttachmentFilename(args.filename));
+  const destPath = join(dir, safeName);
+  await writeFile(destPath, args.content);
+  const { size } = await stat(destPath);
+  await chmod(destPath, 0o644).catch(() => {});
+  await chown(destPath, NODE_UID, NODE_GID).catch(() => {});
+
+  const inserted = await getDb()
+    .insert(schema.taskAttachments)
+    .values({
+      taskId: args.taskId,
+      userId: args.userId,
+      filename: safeName,
+      storedPath: destPath,
+      sizeBytes: size,
+      contentType: args.contentType ?? null,
+      description: args.description ?? null,
+    })
+    .returning();
+  return inserted[0]!;
+}
+
 attachmentRoutes.post('/:id/attachments', async (c) => {
   const userId = c.get('userId');
   const taskId = c.req.param('id');

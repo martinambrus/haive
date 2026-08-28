@@ -219,14 +219,41 @@ export type CreatePlanEdgeRequest = z.infer<typeof createPlanEdgeRequestSchema>;
 export const planBuildModeSchema = z.enum(['from_repo', 'from_md']);
 export type PlanBuildMode = z.infer<typeof planBuildModeSchema>;
 
-export const planBuildRequestSchema = z.object({
-  mode: planBuildModeSchema,
-  cliProviderId: z.string().uuid().optional(),
-  title: z.string().trim().max(512).optional(),
-  /** Free-text brief for a greenfield `from_md`-less build — what the product is
-   *  meant to be, when there is no repo to read and no document to decompose. */
-  description: z.string().max(100_000).optional(),
+/** A plan document carried inline with the build request.
+ *
+ *  Inline rather than a second upload call so the file and the task are created
+ *  in ONE request: the build's `seed` hook writes it before the job is enqueued,
+ *  and the worker starts immediately, so a separate upload would race detect.
+ *
+ *  Capped at 1 MiB where the streaming attachment route allows 25. That route is
+ *  a stream and this is a JSON field; a MiB of markdown is roughly 250k words,
+ *  far past any plan document, and anything larger belongs on an ordinary task
+ *  as a normal attachment. */
+export const planBuildDocumentSchema = z.object({
+  filename: z.string().trim().min(1).max(255),
+  content: z.string().min(1).max(1_048_576),
 });
+export type PlanBuildDocument = z.infer<typeof planBuildDocumentSchema>;
+
+export const planBuildRequestSchema = z
+  .object({
+    mode: planBuildModeSchema,
+    cliProviderId: z.string().uuid().optional(),
+    title: z.string().trim().max(512).optional(),
+    /** Free-text brief for a greenfield `from_md`-less build — what the product is
+     *  meant to be, when there is no repo to read and no document to decompose. */
+    description: z.string().max(100_000).optional(),
+    /** The document `from_md` decomposes. Required by that mode, refused by the
+     *  others. */
+    document: planBuildDocumentSchema.optional(),
+  })
+  .refine((v) => v.mode !== 'from_md' || v.document !== undefined, {
+    // The from_md prompt tells the agent to read "the attached document". Letting
+    // that dispatch with nothing attached spends a CLI invocation drafting a plan
+    // for a file that does not exist.
+    message: 'from_md requires a document',
+    path: ['document'],
+  });
 export type PlanBuildRequest = z.infer<typeof planBuildRequestSchema>;
 
 export const planChatRequestSchema = z.object({

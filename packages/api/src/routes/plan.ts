@@ -34,6 +34,7 @@ import {
 import { getDb } from '../db.js';
 import { resolveRepoRoot } from './repos.js';
 import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
+import { writeTaskAttachment } from './tasks/attachments.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { spawnPlanTask } from '../lib/spawn-plan-task.js';
@@ -675,6 +676,23 @@ planRoutes.post('/:id/plan/build', async (c) => {
     description: body.description,
     metadata: { planBuildMode: body.mode },
     cliProviderId,
+    // The document has to be on disk before the job is enqueued: the step's
+    // detect reads the uploads dir, and the worker picks a job up immediately.
+    // Same race the chat's opening turn lost before this hook existed.
+    ...(body.document
+      ? {
+          seed: async (newTaskId: string) => {
+            await writeTaskAttachment({
+              taskId: newTaskId,
+              userId,
+              filename: body.document!.filename,
+              content: body.document!.content,
+              contentType: 'text/markdown',
+              description: 'Plan document to decompose',
+            });
+          },
+        }
+      : {}),
   });
   return c.json({ taskId }, 201);
 });

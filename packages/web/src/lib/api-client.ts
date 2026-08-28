@@ -1544,6 +1544,9 @@ export function buildPlan(
     cliProviderId?: string;
     title?: string;
     description?: string;
+    /** Carried inline so the file lands before the build job is enqueued.
+     *  Required by `from_md`; the server rejects that mode without it. */
+    document?: { filename: string; content: string };
   },
 ): Promise<{ taskId: string }> {
   return api.post<{ taskId: string }>(`${planBase(repositoryId)}/build`, body);

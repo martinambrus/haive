@@ -102,6 +102,8 @@ export default function PlanPage() {
   // fetch resolves.
   const [view, setView] = useState<'tree' | 'tiles'>('tiles');
   const [deleting, setDeleting] = useState(false);
+  const [planDoc, setPlanDoc] = useState<{ filename: string; content: string } | null>(null);
+  const [brief, setBrief] = useState('');
   const [splitPct, setSplitPct] = useState(55);
   const [isWide, setIsWide] = useState(false);
   const prefsRef = useRef<UiPrefs>({});
@@ -364,11 +366,14 @@ export default function PlanPage() {
     }
   }
 
-  async function build(mode: 'from_repo' | 'from_md') {
+  async function build(
+    mode: 'from_repo' | 'from_md',
+    extra: { description?: string; document?: { filename: string; content: string } } = {},
+  ) {
     setBusy(true);
     setError(null);
     try {
-      const { taskId } = await buildPlan(repositoryId, { mode });
+      const { taskId } = await buildPlan(repositoryId, { mode, ...extra });
       // Straight to the task the click just created, the same as the research
       // action on a node. Building is the only thing happening now and it
       // happens over there; leaving the user on an empty plan behind a notice
@@ -449,27 +454,90 @@ export default function PlanPage() {
             <CardDescription>
               A plan is a durable tree of what this project is meant to be, drilling down from the
               whole product to leaves you can turn into tasks. Derive one from the repository&apos;s
-              knowledge base, or start it by hand.
+              knowledge base, import a plan you have already written, describe what you want built,
+              or start it by hand.
             </CardDescription>
           </CardHeader>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-col gap-4">
             {/* A repo that was never onboarded has no knowledge base to build
-                from — only the by-hand starter exists for it. */}
+                from — the other three starters still apply to it. */}
             {onboarded !== false && (
-              <Button size="sm" disabled={busy} onClick={() => void build('from_repo')}>
-                Build from the knowledge base
-              </Button>
+              <div>
+                <Button size="sm" disabled={busy} onClick={() => void build('from_repo')}>
+                  Build from the knowledge base
+                </Button>
+              </div>
             )}
-            <div className="flex gap-2">
+
+            {/* Import a plan somebody already wrote. Read in the browser and
+                sent with the request rather than uploaded separately, so the
+                document is on disk before the build job is enqueued. */}
+            <div className="flex flex-col gap-1.5 border-t border-neutral-800 pt-3">
+              <p className="text-xs font-medium text-neutral-400">
+                Or import a plan you already have
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="file"
+                  accept=".md,.markdown,text/markdown"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return setPlanDoc(null);
+                    void file
+                      .text()
+                      .then((content) => setPlanDoc({ filename: file.name, content }))
+                      .catch(() => setError('Could not read that file'));
+                  }}
+                  className="text-xs text-neutral-400 file:mr-2 file:rounded file:border file:border-neutral-700 file:bg-neutral-900 file:px-2 file:py-1 file:text-xs file:text-neutral-200"
+                />
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy || !planDoc}
+                  onClick={() => planDoc && void build('from_md', { document: planDoc })}
+                >
+                  Import and decompose
+                </Button>
+              </div>
+              {planDoc && (
+                <p className="text-[11px] text-neutral-500">
+                  {planDoc.filename} — {planDoc.content.length.toLocaleString()} characters
+                </p>
+              )}
+            </div>
+
+            {/* Nothing to read from and nothing written down: say what the
+                project is meant to be and let the agent draft the tree. The one
+                starter that works on a repository created empty. */}
+            <div className="flex flex-col gap-1.5 border-t border-neutral-800 pt-3">
+              <p className="text-xs font-medium text-neutral-400">
+                Or describe what you want built
+              </p>
+              <textarea
+                value={brief}
+                onChange={(e) => setBrief(e.target.value)}
+                rows={3}
+                placeholder="A content management system for small clubs: pages, members, a mailing list…"
+                className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100"
+              />
+              <div>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy || brief.trim().length === 0}
+                  onClick={() => void build('from_repo', { description: brief.trim() })}
+                >
+                  Draft a plan from this
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 border-t border-neutral-800 pt-3">
               <Input
                 value={newTitle}
                 onChange={(e) => setNewTitle(e.target.value)}
-                placeholder={
-                  onboarded === false
-                    ? 'Name the project to start creating its plan/map'
-                    : 'Or name the project to start by hand'
-                }
-                className={onboarded === false ? 'w-96' : 'w-72'}
+                placeholder="Or name the project to start by hand"
+                className="w-72"
               />
               <Button
                 size="sm"

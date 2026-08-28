@@ -70,6 +70,23 @@ describe('spawnPlanTask seeding', () => {
     expect(order).toEqual(['insert', 'enqueue']);
   });
 
+  it('writes a plan document before the job is enqueued', async () => {
+    // The from_md case. The step's detect reads the uploads dir, and the worker
+    // picks a job up immediately, so a document written after the enqueue is a
+    // document the build may never see.
+    const writes: string[] = [];
+    await spawnPlanTask({
+      ...args,
+      type: 'plan_build' as const,
+      seed: async (taskId) => {
+        writes.push('attachment');
+        order.push(`seed:${taskId}`);
+      },
+    });
+    expect(order).toEqual(['insert', 'seed:task-1', 'enqueue']);
+    expect(writes).toEqual(['attachment']);
+  });
+
   it('does not enqueue a task whose seed failed', async () => {
     // Half a chat - a task row with no opening message - would park asking for
     // a message the user believes they already sent.
