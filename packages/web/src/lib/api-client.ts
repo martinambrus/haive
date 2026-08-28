@@ -262,6 +262,12 @@ export interface Repository {
    *  workflow-config.json, .haive-data/knowledge_base). Sent by the list endpoint only
    *  (undefined on the single-repo detail payload); false for non-ready repos. */
   onboarded?: boolean;
+  /** The repo holds nothing an onboarding run could learn from — a project
+   *  created empty, scaffolded but with no source yet. Distinct from
+   *  `onboarded`: there is no knowledge base, and there is nothing to build one
+   *  from either, so offering to onboard would offer an action that cannot
+   *  accomplish anything. Flips back on its own once the repo has code. */
+  nothingToOnboard?: boolean;
   sizeBytes: number | null;
   openTaskCount: number;
   activeTaskCount: number;
@@ -562,6 +568,8 @@ export type ExecutionPath = 'quick_bugfix' | 'plan_tasklist' | 'full_workflow';
 
 export interface OnboardingStatus {
   onboarded: boolean;
+  /** See Repository.nothingToOnboard. */
+  nothingToOnboard: boolean;
   present: string[];
   missing: string[];
 }

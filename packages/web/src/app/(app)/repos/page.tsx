@@ -292,7 +292,13 @@ function RepoCard(props: RepoCardProps) {
   // route its primary CTA to onboarding — the new-task page auto-selects the
   // onboarding flow for a non-onboarded repo. (undefined = unknown → treat as
   // onboarded so nothing is hidden on a stale payload.)
-  const notOnboarded = repo.status === 'ready' && repo.onboarded === false;
+  //
+  // Except when there is nothing to onboard: a repository created empty has the
+  // scaffold but no source, so an onboarding run would have nothing to read.
+  // This one flag drives all three consequences — no badge, no Onboard button,
+  // and the ordinary CTAs below become available instead.
+  const notOnboarded =
+    repo.status === 'ready' && repo.onboarded === false && repo.nothingToOnboard !== true;
   const excludedCount = repo.scopeExcludeGlobs?.length ?? 0;
   const counts = scope ? fileCountsFromIncluded(scope.tree, scope.included) : null;
 

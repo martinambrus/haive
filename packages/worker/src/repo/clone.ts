@@ -17,6 +17,7 @@ import {
 } from '@haive/shared';
 import { detectFromDirectory } from './framework-detect.js';
 import { importPlanMirror } from '../plan/mirror.js';
+import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper } from './git-push.js';
 
 export function buildAuthenticatedUrl(url: string, username: string, secret: string): string {
@@ -394,7 +395,26 @@ export async function handleInit(
     `# ${repoName}\n\nCreated by Haive as a blank project.\n`,
     'utf8',
   );
-  await gitRun(dest, ['add', '--', 'README.md']);
+  // The deterministic half of onboarding, up front. A blank project has nothing
+  // to mine a knowledge base from, but the agent specs, skills and workflow
+  // config never depended on the code — so a repo created empty arrives able to
+  // run a task instead of demanding an onboarding pass over an empty tree.
+  // Best-effort: a scaffold that cannot be rendered must not sink the whole
+  // init, which would leave the user with no repository at all.
+  let scaffold: string[] = [];
+  try {
+    scaffold = await seedBlankScaffold(
+      db,
+      { userId: payload.userId, repositoryId: payload.repositoryId, repoName: row?.name ?? null },
+      dest,
+    );
+  } catch (err) {
+    logger.warn({ err, repositoryId: payload.repositoryId }, 'blank scaffold seeding failed');
+  }
+
+  // Committed WITH the README rather than left staged: a repository the user has
+  // just created should not open on a diff they did not write.
+  await gitRun(dest, ['add', '--', 'README.md', ...scaffold]);
   await gitRun(dest, ['commit', '-m', 'chore: initialise blank repository'], INIT_GIT_IDENTITY);
 
   await persistDetection(db, payload.repositoryId, dest);

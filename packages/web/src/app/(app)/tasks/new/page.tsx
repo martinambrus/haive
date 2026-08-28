@@ -298,9 +298,13 @@ export default function NewTaskPage() {
       setError('Waiting for onboarding status check');
       return;
     }
+    // `nothingToOnboard` counts as onboarded HERE and only here: without it a
+    // repository created empty can never run a workflow task, because a missing
+    // knowledge base forces the first task to be an onboarding pass over a tree
+    // with nothing in it.
     const type: WorkflowType = isRunApp
       ? 'run_app'
-      : onboardingStatus?.onboarded
+      : onboardingStatus?.onboarded || onboardingStatus?.nothingToOnboard
         ? 'workflow'
         : 'onboarding';
     const repoName = repos?.find((r) => r.id === repositoryId)?.name;
@@ -381,7 +385,7 @@ export default function NewTaskPage() {
   const inferredType: WorkflowType | null = isRunApp
     ? 'run_app'
     : onboardingStatus
-      ? onboardingStatus.onboarded
+      ? onboardingStatus.onboarded || onboardingStatus.nothingToOnboard
         ? 'workflow'
         : 'onboarding'
       : null;
@@ -465,20 +469,37 @@ export default function NewTaskPage() {
                       className={
                         onboardingStatus.onboarded
                           ? 'rounded bg-green-950/50 px-2 py-0.5 text-green-300'
-                          : 'rounded bg-amber-950/50 px-2 py-0.5 text-amber-300'
+                          : onboardingStatus.nothingToOnboard
+                            ? 'rounded bg-neutral-800 px-2 py-0.5 text-neutral-300'
+                            : 'rounded bg-amber-950/50 px-2 py-0.5 text-amber-300'
                       }
                     >
-                      {onboardingStatus.onboarded ? 'Onboarded' : 'Not onboarded'}
+                      {/* Neutral, not amber: an empty project is not a repo in a
+                          bad state, and an amber "Not onboarded" sitting beside
+                          "Will run: workflow" reads as a contradiction. */}
+                      {onboardingStatus.onboarded
+                        ? 'Onboarded'
+                        : onboardingStatus.nothingToOnboard
+                          ? 'Empty project'
+                          : 'Not onboarded'}
                     </span>
                     <span className="text-neutral-400">
                       Will run: <strong>{inferredType}</strong>
                     </span>
                   </div>
-                  {!onboardingStatus.onboarded && onboardingStatus.missing.length > 0 && (
+                  {onboardingStatus.nothingToOnboard && (
                     <p className="text-neutral-500">
-                      Missing: {onboardingStatus.missing.join(', ')}
+                      Nothing to onboard yet — this project has no source to build a knowledge base
+                      from. Onboarding becomes available once it has code.
                     </p>
                   )}
+                  {!onboardingStatus.onboarded &&
+                    !onboardingStatus.nothingToOnboard &&
+                    onboardingStatus.missing.length > 0 && (
+                      <p className="text-neutral-500">
+                        Missing: {onboardingStatus.missing.join(', ')}
+                      </p>
+                    )}
                   {onboardingStatus.onboarded && (
                     <p className="text-neutral-500">
                       Use &quot;Re-run onboarding&quot; above to wipe the generated workflow files

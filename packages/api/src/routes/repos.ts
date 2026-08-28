@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir, open, readFile, rm, stat, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rm, stat, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -12,6 +12,8 @@ import {
   initRepoUploadRequestSchema,
   REPO_JOB_NAMES,
   updateRepoExclusionsRequestSchema,
+  CLI_PROVIDER_LIST,
+  HAIVE_DATA_DIR,
   type ArchiveFormat,
 } from '@haive/shared';
 import { buildScopeTree } from '@haive/shared/scope-tree';
@@ -148,16 +150,21 @@ repoRoutes.get('/', async (c) => {
       // repos page. Only meaningful for ready repos (cloning/error have no tree);
       // the check is a few parallel stats per repo.
       const root = repo.storagePath ?? repo.localPath;
-      const onboarded =
-        repo.status === 'ready' && root
-          ? (await checkOnboardingMarkers(root)).missing.length === 0
-          : false;
+      const markers = repo.status === 'ready' && root ? await checkOnboardingMarkers(root) : null;
+      const onboarded = markers ? markers.missing.length === 0 : false;
+      // An empty project: scaffolded, but with nothing to build a knowledge base
+      // from. Offering to onboard it would offer an action that cannot
+      // accomplish anything, and forcing the first task to be an onboarding run
+      // (which is what `onboarded: false` does) blocks the user outright.
+      const nothingToOnboard =
+        markers !== null && !onboarded && root ? !(await hasOnboardableSource(root)) : false;
       return {
         ...rest,
         topLevelPaths: deriveTopLevelPaths(fileTree),
         openTaskCount: counts.open,
         activeTaskCount: counts.active,
         onboarded,
+        nothingToOnboard,
       };
     }),
   );
@@ -717,6 +724,59 @@ const ONBOARDING_MARKERS = [
   '.claude/workflow-config.json',
 ];
 
+/**
+ * Top-level entries Haive itself puts in a repository, so a tree holding only
+ * these has no source to mine.
+ *
+ * The per-CLI parts are DERIVED from `CLI_PROVIDER_LIST` rather than listed:
+ * the blank-repo scaffold emits one agents directory per enabled provider, and
+ * a hardcoded list silently stops matching the day a CLI is added — the repo
+ * would then look like it had source and go back to demanding onboarding.
+ * MEASURED on a seeded repo: `.agents`, `.codex` and `.grok` all appeared
+ * beside `.claude`, and an earlier hardcoded set knew only the last two.
+ *
+ * Built on first use, not at module load: it reads ONBOARDING_RULES_FILES,
+ * which is declared further down this file, and a module-level const reading it
+ * eagerly would hit the temporal dead zone on import.
+ */
+let scaffoldEntries: Set<string> | null = null;
+function getScaffoldEntries(): Set<string> {
+  scaffoldEntries ??= new Set<string>([
+    '.git',
+    HAIVE_DATA_DIR,
+    'README.md',
+    '.ripgreprc',
+    ...ONBOARDING_RULES_FILES,
+    // Just the first segment: `.claude/agents` exists in the root as `.claude`,
+    // which is what a readdir actually returns.
+    ...CLI_PROVIDER_LIST.flatMap((m) =>
+      m.projectAgentsDir ? [m.projectAgentsDir.split('/')[0]!] : [],
+    ),
+  ]);
+  return scaffoldEntries;
+}
+
+/**
+ * Whether the repository holds anything an onboarding run could learn from.
+ *
+ * Read from DISK rather than `repositories.file_tree`: that column is written
+ * once by persistDetection at clone/init time, so a blank repo that later grows
+ * would still describe an empty project and the offer would never come back.
+ *
+ * A root that cannot be read counts as HAVING source. The offer standing when it
+ * should not is a wasted click; withdrawing it when the user does have code to
+ * onboard would hide the feature outright.
+ */
+export async function hasOnboardableSource(root: string): Promise<boolean> {
+  try {
+    const entries = await readdir(root);
+    const scaffold = getScaffoldEntries();
+    return entries.some((e) => !scaffold.has(e));
+  } catch {
+    return true;
+  }
+}
+
 /** A repo is "onboarded" once all ONBOARDING_MARKERS exist on disk. Marker
  *  checks run in parallel; results keep marker order so the detail endpoint's
  *  present/missing lists stay stable. */
@@ -790,7 +850,13 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const root = await resolveRepoRoot(db, userId, id);
 
   const { present, missing } = await checkOnboardingMarkers(root);
-  return c.json({ onboarded: missing.length === 0, present, missing });
+  const onboarded = missing.length === 0;
+  return c.json({
+    onboarded,
+    present,
+    missing,
+    nothingToOnboard: onboarded ? false : !(await hasOnboardableSource(root)),
+  });
 });
 
 repoRoutes.get('/:id/archive', async (c) => {
