@@ -1,5 +1,6 @@
 import type { StepRegistry } from '../../registry.js';
 import { planBuildStep } from './01-plan-build.js';
+import { planCoverageStep } from './02-plan-coverage.js';
 import { planChatStep } from './01-plan-chat.js';
 import { advisoryResearchStep } from './01-advisory-research.js';
 import { advisoryDecisionStep } from './02-advisory-decision.js';
@@ -9,6 +10,8 @@ import { advisoryDecisionStep } from './02-advisory-decision.js';
  *  advisory (research a blocker, then let a HUMAN close it). */
 export function registerPlanSteps(registry: StepRegistry): void {
   registry.register(planBuildStep);
+  // Runs after the build; reports what it left undone and offers to redo it.
+  registry.register(planCoverageStep);
   registry.register(planChatStep);
   registry.register(advisoryResearchStep);
   registry.register(advisoryDecisionStep);

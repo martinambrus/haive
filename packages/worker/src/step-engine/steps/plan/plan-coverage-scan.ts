@@ -1,0 +1,198 @@
+/**
+ * Which sections of a source document the plan does not appear to cover.
+ *
+ * Deterministic on purpose. The step that uses this REPORTS — a human decides
+ * whether a candidate is a real gap — so this only has to be a good shortlist,
+ * not a judge. An LLM judging coverage would cost a pass over the whole document
+ * on every build and could invent gaps; a person dismisses a false positive in
+ * one click.
+ */
+
+/** A heading in the source document, with the text beneath it. */
+export interface DocSection {
+  /** `## 4.4 SRS and mastery contract` -> `4.4 SRS and mastery contract`. */
+  title: string;
+  /** Heading depth: 2 for `##`, 3 for `###`. */
+  level: number;
+  /** Line number in the document, for the reader to go and look. */
+  line: number;
+  /** The section's own text, used as the brief when re-decomposing it. */
+  body: string;
+}
+
+export interface CoverageCandidate {
+  title: string;
+  line: number;
+  /** Distinctive terms from the heading that appear NOWHERE in the plan. */
+  missingTerms: string[];
+  /** How many plan nodes matched two or more of the heading's terms. */
+  matchedNodes: number;
+  /** 0..1 — the share of the heading's terms present anywhere in the plan. */
+  score: number;
+}
+
+/** Words that carry no subject. Matching on these finds every section in every
+ *  plan, which is the same as matching on nothing. */
+const STOP = new Set(
+  `the a an and or of to for in on with by from is are be as at into per its this that not no
+   using use used all any each new must may shall when then if than which what where who whom while
+   also only both same other others one two three four five six seven eight nine ten first second
+   third section see above below etc via out over under between during after before document rules
+   rule contract contracts model layout surface policy boundary boundaries state states`.split(
+    /\s+/,
+  ),
+);
+
+/** Terms a heading is ABOUT. Short words are dropped because they match
+ *  everywhere; a numbering prefix (`4.5a`) is not a subject. */
+export function headingTerms(title: string): string[] {
+  const withoutNumber = title.replace(/^[\d.]+[a-z]?\s+/i, '');
+  return [
+    ...new Set(
+      withoutNumber
+        .toLowerCase()
+        .replace(/[—–\-,:()/[\]]/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length > 3 && !STOP.has(w)),
+    ),
+  ];
+}
+
+/** Sections no NODE is about, worst first.
+ *
+ *  Coverage is per-node, deliberately. Asking whether a heading's words appear
+ *  anywhere in the corpus is nearly free to satisfy: MEASURED, removing a
+ *  92-node component from a 791-node plan still left every term present
+ *  somewhere in the remaining megabyte of node bodies, so that test reported no
+ *  gaps at all. What matters is whether SOME node is about the subject.
+ *
+ *  Node bodies are still read — a subject introduced in a body and not the title
+ *  is covered — but the terms must co-occur in ONE node rather than be scattered
+ *  across the plan.
+ */
+export function findCoverageGaps(
+  sections: DocSection[],
+  nodeTexts: string[],
+  opts: { threshold?: number } = {},
+): CoverageCandidate[] {
+  const threshold = opts.threshold ?? 0.5;
+  const lowered = nodeTexts.map((t) => t.toLowerCase());
+
+  const out: CoverageCandidate[] = [];
+  for (const section of sections) {
+    const terms = headingTerms(section.title);
+    // A heading with no distinctive words says nothing to look for. Reporting it
+    // would be reporting the absence of a question, not of an answer.
+    if (terms.length === 0) continue;
+
+    // The single node that best matches this heading, and how much of it that
+    // node accounts for.
+    let best: string[] = [];
+    let matchedNodes = 0;
+    for (const text of lowered) {
+      const hit = terms.filter((t) => text.includes(t));
+      if (hit.length >= Math.min(2, terms.length)) matchedNodes += 1;
+      if (hit.length > best.length) best = hit;
+    }
+    const score = best.length / terms.length;
+    if (score >= threshold) continue;
+    out.push({
+      title: section.title,
+      line: section.line,
+      missingTerms: terms.filter((t) => !best.includes(t)),
+      matchedNodes,
+      score: Number(score.toFixed(2)),
+    });
+  }
+  return out.sort((a, b) => a.score - b.score || a.line - b.line);
+}
+
+/** Split a markdown document into its `##`+ sections, each carrying its own text. */
+export function parseDocSections(markdown: string): DocSection[] {
+  const lines = markdown.split('\n');
+  const heads: { title: string; level: number; line: number; at: number }[] = [];
+  lines.forEach((raw, i) => {
+    const m = /^(#{2,6})\s+(.*\S)\s*$/.exec(raw);
+    if (m) heads.push({ title: m[2]!, level: m[1]!.length, line: i + 1, at: i });
+  });
+  return heads.map((h, i) => ({
+    title: h.title,
+    level: h.level,
+    line: h.line,
+    body: lines.slice(h.at + 1, heads[i + 1]?.at ?? lines.length).join('\n'),
+  }));
+}
+
+/** A node that should have been decomposed and was not. */
+export interface StructuralGap {
+  nodeId: string;
+  title: string;
+  /** Why it is suspect, in the words the gate will show. */
+  reason: string;
+}
+
+/**
+ * Components the build left undecomposed, and expansions it lost.
+ *
+ * This is the signal that would have caught the real defect. A term-coverage
+ * scan would NOT have: when a component was left with zero children, its own
+ * title and body still named its subject, so every word of the corresponding
+ * document section was present. The tree SHAPE was the tell, not the vocabulary
+ * — MEASURED twice, on two separate builds.
+ *
+ * `decision`, `research` and `external` nodes are excluded because the frontier
+ * deliberately never expands them: a decision is not decomposed, it is made.
+ */
+/** The node an expansion agent was working on, from its id. One extractor for
+ *  both passes below: a substring match would let one node's id match another's
+ *  agent, and the whole point of these ids is that they name a node exactly. */
+function expandedNodeId(agentId: string): string | null {
+  // The uuid shape is spelled out rather than a loose run of hex-and-dashes: a
+  // greedy class swallowed the hyphen before the `-p1` wave suffix and returned
+  // an id that matched no node.
+  return (
+    /(?:plan-expand|cover-node)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(
+      agentId,
+    )?.[1] ?? null
+  );
+}
+
+export function findStructuralGaps(
+  nodes: { id: string; title: string; kind: string; parentId: string | null }[],
+  agents: { agentId: string; errorMessage: string | null }[],
+  prefixes: { failure: string; partial: string },
+): StructuralGap[] {
+  const hasChild = new Set(nodes.map((n) => n.parentId).filter((p): p is string => !!p));
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const out: StructuralGap[] = [];
+
+  for (const n of nodes) {
+    if (n.kind !== 'component' || hasChild.has(n.id) || n.parentId === null) continue;
+    // A leaf component is normal — most of the plan is leaves. Only one whose
+    // expansion was ATTEMPTED and produced nothing is suspect, which is what the
+    // agent rows below decide.
+    const agent = agents.find(
+      (a) => expandedNodeId(a.agentId) === n.id && a.errorMessage?.startsWith(prefixes.failure),
+    );
+    if (agent) {
+      out.push({ nodeId: n.id, title: n.title, reason: 'its decomposition was rejected and lost' });
+    }
+  }
+
+  // Losses that did not leave a childless node: a wave that was thinned rather
+  // than rejected outright. Reported because a silently smaller patch is how a
+  // plan loses content with nothing to see.
+  for (const a of agents) {
+    if (!a.errorMessage?.startsWith(prefixes.partial)) continue;
+    const id = expandedNodeId(a.agentId);
+    const node = id ? byId.get(id) : undefined;
+    if (!node || out.some((g) => g.nodeId === node.id)) continue;
+    const dropped = a.errorMessage.split('; ').length;
+    out.push({
+      nodeId: node.id,
+      title: node.title,
+      reason: `${dropped} operation(s) were dropped from its decomposition`,
+    });
+  }
+  return out;
+}

@@ -307,6 +307,9 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   // plan canvas — 02-advisory-decision is deliberately absent: it runs no CLI,
   // because closing a non-code blocker is the user's call, not an agent's.
   { id: '01-plan-build', workflowType: 'plan_build', title: 'Build the plan' },
+  // Dispatches only what a person ticked at its gate — a clean build spends
+  // nothing here — but it CAN dispatch, which is what this list records.
+  { id: '02-plan-coverage', workflowType: 'plan_build', title: 'Coverage check' },
   { id: '01-plan-chat', workflowType: 'plan_chat', title: 'Plan conversation' },
   { id: '01-advisory-research', workflowType: 'advisory', title: 'Research' },
 ];
