@@ -2,7 +2,7 @@ import { PLAN_PATCH_MAX_OPS } from '@haive/shared';
 import { PlanPatchError, applyPlanPatch, type ApplyPlanPatchResult } from '@haive/shared/plan';
 import type { Database } from '@haive/database';
 import { RetryableParseError } from '../../step-definition.js';
-import { parseJsonLoose } from '../_fenced-json.js';
+import { parseAgentJson } from '../workflow/_agent-json.js';
 
 /**
  * The one description of the patch contract every plan agent is given.
@@ -70,14 +70,33 @@ Rules:
 - At most ${PLAN_PATCH_MAX_OPS} ops. Never invent a uuid — only use ones shown to you.
 - Do not restate the whole plan. Send only what changes.`;
 
-/** Extract a patch object from an agent's raw reply. Returns null when nothing
- *  patch-shaped is there, so the caller decides whether that is a retry or a
- *  legitimate "no change". */
+/**
+ * Extract a patch object from an agent's raw reply. Returns null when nothing
+ * patch-shaped is there, so the caller decides whether that is a retry or a
+ * legitimate "no change".
+ *
+ * Takes the LAST patch-shaped block, not the first. An agent that spots a
+ * mistake in its own draft corrects it by emitting a second block — MEASURED on
+ * a real build, where one wrote "my draft above contains placeholder link churn
+ * that should not be applied. Use this reply instead:" and the retracted draft
+ * was applied anyway. Its hallucinated uuid then failed the one-transaction
+ * apply and took 12 legitimate nodes down with it, silently.
+ *
+ * `parseAgentJson` is the existing wrapper for this; the guard below is the same
+ * shape test this function already applied, now used to reject a candidate and
+ * move on rather than to reject the whole reply.
+ */
 export function parsePlanPatch(
   raw: unknown,
 ): { ops: unknown[]; summary?: string; reply?: string } | null {
-  const parsed =
-    typeof raw === 'string' ? parseJsonLoose(raw) : (raw as Record<string, unknown> | null);
+  const parsed = parseAgentJson<Record<string, unknown>>(raw, (candidate) => {
+    if (!candidate || typeof candidate !== 'object') return null;
+    const c = candidate as Record<string, unknown>;
+    const spoke = typeof c.summary === 'string' || typeof c.reply === 'string';
+    // The same admission rule as below: an ops array, or an object that plainly
+    // spoke. Anything else is not a patch and must not outrank a later one.
+    return Array.isArray(c.ops) || (c.ops === undefined && spoke) ? c : null;
+  });
   if (!parsed || typeof parsed !== 'object') return null;
   const summaryField = (parsed as { summary?: unknown }).summary;
   const replyField = (parsed as { reply?: unknown }).reply;

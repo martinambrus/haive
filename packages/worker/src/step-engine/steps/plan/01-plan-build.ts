@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, type FormSchema, type FormValues } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
@@ -171,7 +171,11 @@ export function withMinedStatus(ops: unknown[], mode: BuildMode): unknown[] {
  *  broken down" replies, which must not re-fire every wave. */
 const EXPAND_AGENT_RE = /^plan-expand-([0-9a-f-]{36})-p(\d+)$/;
 
-function askedState(results: { agentId: string }[]): {
+/** Marks a mining row whose reply parsed but whose PATCH was rejected, as
+ *  opposed to a CLI failure. Written by the fold, read by `askedState`. */
+export const APPLY_FAILURE_PREFIX = 'plan patch not applied:';
+
+export function askedState(results: { agentId: string; errorMessage?: string | null }[]): {
   asked: Set<string>;
   waves: number;
   expandAsked: number;
@@ -179,6 +183,18 @@ function askedState(results: { agentId: string }[]): {
   const asked = new Set<string>();
   let waves = 0;
   for (const r of results) {
+    // An expansion whose patch never applied did not answer the question, so the
+    // node has not really been asked and returns to the frontier for a later
+    // wave. MEASURED: an agent self-corrected in prose, the retracted draft was
+    // applied, its bad uuid rolled the transaction back, and the node counted as
+    // asked forever with nothing under it.
+    //
+    // Only an APPLY failure re-opens a node. A clean reply with zero ops — "this
+    // cannot be broken down further" — carries no error and stays asked, which
+    // is the case the wave counter below must not re-fire on. MAX_WAVES bounds
+    // the retries either way, so a node that keeps failing is left alone rather
+    // than spinning.
+    if (r.errorMessage && r.errorMessage.startsWith(APPLY_FAILURE_PREFIX)) continue;
     const m = EXPAND_AGENT_RE.exec(r.agentId);
     if (m) {
       asked.add(m[1]!);
@@ -517,9 +533,29 @@ export function createPlanBuildStep(
             },
           );
         } catch (err) {
-          failures.push(
-            `${result.agentTitle ?? result.agentId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          const message = err instanceof Error ? err.message : String(err);
+          failures.push(`${result.agentTitle ?? result.agentId}: ${message}`);
+          // Durable, on the agent's OWN row. `failures` is local to this apply
+          // pass and the next wave rebuilds it, so a wave that lost nodes
+          // reported clean once a later pass succeeded — MEASURED, a build that
+          // dropped 12 nodes finished with `output.failures` empty. The row
+          // outlives the pass, and section C reads it to re-ask the node.
+          await ctx.db
+            .update(schema.taskStepAgentMinings)
+            .set({ errorMessage: `plan patch not applied: ${message}`.slice(0, 2000) })
+            .where(
+              and(
+                eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
+                eq(schema.taskStepAgentMinings.agentId, result.agentId),
+              ),
+            )
+            .catch((e: unknown) => {
+              // Best-effort: losing the annotation must not also lose the wave.
+              ctx.logger.warn(
+                { err: e, agentId: result.agentId },
+                'could not record apply failure',
+              );
+            });
         }
       }
 

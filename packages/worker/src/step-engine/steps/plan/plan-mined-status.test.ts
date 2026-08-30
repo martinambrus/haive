@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { computeFrontier, withMinedStatus } from './01-plan-build.js';
+import {
+  APPLY_FAILURE_PREFIX,
+  askedState,
+  computeFrontier,
+  withMinedStatus,
+} from './01-plan-build.js';
 import { rollUpStatus, type PlanNodeStatus } from '@haive/shared';
 import type { PlanNodeSkeleton } from '@haive/shared/plan';
 
@@ -124,5 +129,61 @@ describe('what a mined plan renders as', () => {
     // The whole point: an explicit todo leaf makes its ancestors amber, so
     // outstanding work stands out instead of drowning in 644 todos.
     expect(rollUpStatus('done', ['done', 'todo', 'done'] as PlanNodeStatus[])).toBe('in_progress');
+  });
+});
+
+describe('askedState and an expansion that never landed', () => {
+  const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+  it('counts a clean expansion as asked', () => {
+    const { asked } = askedState([{ agentId: `plan-expand-${A}-p1`, errorMessage: null }]);
+    expect([...asked]).toEqual([A]);
+  });
+
+  it('still counts a "cannot be broken down" reply as asked', () => {
+    // That agent applied cleanly with zero ops. Re-asking it every wave is the
+    // thrash the asked-set exists to prevent.
+    const { asked } = askedState([{ agentId: `plan-expand-${A}-p1`, errorMessage: null }]);
+    expect(asked.has(A)).toBe(true);
+  });
+
+  it('does NOT count an expansion whose patch was rejected', () => {
+    // The measured incident: the reply parsed, the patch was rolled back, and
+    // the node counted as asked forever with nothing under it.
+    const { asked } = askedState([
+      { agentId: `plan-expand-${A}-p1`, errorMessage: `${APPLY_FAILURE_PREFIX} node not found` },
+    ]);
+    expect(asked.has(A)).toBe(false);
+  });
+
+  it('leaves a CLI failure asked, which the retry machinery already owns', () => {
+    // Only an APPLY failure re-opens a node here; a dead CLI run is re-rolled by
+    // the runner, and treating it as unasked too would fan out twice.
+    const { asked } = askedState([
+      {
+        agentId: `plan-expand-${A}-p1`,
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+      },
+    ]);
+    expect(asked.has(A)).toBe(true);
+  });
+
+  it('re-opens only the node that failed', () => {
+    const { asked } = askedState([
+      { agentId: `plan-expand-${A}-p1`, errorMessage: `${APPLY_FAILURE_PREFIX} boom` },
+      { agentId: `plan-expand-${B}-p1`, errorMessage: null },
+    ]);
+    expect(asked.has(A)).toBe(false);
+    expect(asked.has(B)).toBe(true);
+  });
+
+  it('does not let a lost wave inflate the wave counter', () => {
+    // waves drives the MAX_WAVES budget; counting a wave that wrote nothing
+    // would spend the budget on work that never happened.
+    const { waves } = askedState([
+      { agentId: `plan-expand-${A}-p3`, errorMessage: `${APPLY_FAILURE_PREFIX} boom` },
+    ]);
+    expect(waves).toBe(0);
   });
 });
