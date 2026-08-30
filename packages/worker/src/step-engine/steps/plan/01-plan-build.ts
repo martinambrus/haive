@@ -175,6 +175,11 @@ const EXPAND_AGENT_RE = /^plan-expand-([0-9a-f-]{36})-p(\d+)$/;
  *  opposed to a CLI failure. Written by the fold, read by `askedState`. */
 export const APPLY_FAILURE_PREFIX = 'plan patch not applied:';
 
+/** Marks a row whose patch DID apply with some ops discarded. Deliberately not
+ *  the failure prefix: the node got its children, so `askedState` must leave it
+ *  asked. */
+export const PARTIAL_APPLY_PREFIX = 'plan patch partially applied:';
+
 export function askedState(results: { agentId: string; errorMessage?: string | null }[]): {
   asked: Set<string>;
   waves: number;
@@ -522,7 +527,11 @@ export function createPlanBuildStep(
         // atomic node burns the whole retry budget every wave.
         if (patch.ops.length === 0) continue;
         try {
-          await applyAgentPatch(
+          // The node this agent was expanding, recovered from its own id, so its
+          // children can be parented with `self` instead of a transcribed uuid —
+          // the single commonest thing an agent gets wrong.
+          const expanding = EXPAND_AGENT_RE.exec(result.agentId)?.[1];
+          const applied = await applyAgentPatch(
             ctx.db,
             { ...patch, ops: withMinedStatus(patch.ops, d.mode) },
             {
@@ -530,8 +539,33 @@ export function createPlanBuildStep(
               sourceTaskId: ctx.taskId,
               derivedAtCommit,
               retryable: args.isFinalMiningAttempt !== true,
+              ...(expanding ? { selfNodeId: expanding } : {}),
             },
           );
+          if (applied.dropped.length > 0) {
+            // A DIFFERENT prefix from the failure case, and the difference is
+            // load-bearing: `askedState` re-asks a node only on "not applied",
+            // and this node did get its children. Recorded so a thinner patch is
+            // still visible rather than silently smaller.
+            failures.push(
+              `${result.agentTitle ?? result.agentId}: ${applied.dropped.length} op(s) dropped`,
+            );
+            await ctx.db
+              .update(schema.taskStepAgentMinings)
+              .set({
+                errorMessage: `${PARTIAL_APPLY_PREFIX} ${applied.dropped.join('; ')}`.slice(
+                  0,
+                  2000,
+                ),
+              })
+              .where(
+                and(
+                  eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
+                  eq(schema.taskStepAgentMinings.agentId, result.agentId),
+                ),
+              )
+              .catch(() => undefined);
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           failures.push(`${result.agentTitle ?? result.agentId}: ${message}`);

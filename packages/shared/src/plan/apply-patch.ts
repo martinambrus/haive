@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   planPatchSchema,
@@ -31,6 +31,28 @@ export interface ApplyPlanPatchOptions {
   origin: PlanNodeOrigin;
   /** The task whose step produced this patch, if any. */
   sourceTaskId?: string | null;
+  /**
+   * What to do with an op naming a node that does not exist.
+   *
+   * `fail` (the default) rejects the whole patch, which is right for a PERSON
+   * editing the plan: a bad id is a mistake they should be told about, not
+   * silently trimmed.
+   *
+   * `drop` discards only the offending op. For an AGENT patch that is the
+   * difference between losing an edge and losing a subtree — MEASURED, 22 of 82
+   * expansion agents had a 30 KB reply discarded over one unresolvable uuid, 17
+   * of them in a cross-link to another node rather than in their own work.
+   */
+  onUnresolvableRef?: 'fail' | 'drop';
+  /**
+   * The node this patch is ABOUT, addressable as the ref `self`.
+   *
+   * An expansion agent decomposes exactly one node and otherwise has to
+   * transcribe that node's 36-character uuid to parent its children to it. This
+   * removes the transcription: `"parentRef": "self"` resolves through the same
+   * ref map a temp id uses, with no separate resolution path.
+   */
+  selfNodeId?: string;
 }
 
 export interface ApplyPlanPatchResult {
@@ -43,6 +65,11 @@ export interface ApplyPlanPatchResult {
   /** patch-local ref -> real uuid, so a caller can report what an LLM's
    *  placeholder became and a chat transcript stays interpretable after the fact. */
   refs: Record<string, string>;
+  /** Ops discarded under `onUnresolvableRef: 'drop'`, described for the caller to
+   *  record. Empty under `fail`, which throws instead. Reported rather than
+   *  swallowed: a silently thinner patch is how a plan loses content without
+   *  anyone noticing. */
+  dropped: string[];
 }
 
 interface NodeRow {
@@ -81,6 +108,87 @@ export async function applyPlanPatch(
   return db.transaction(async (tx) => applyOps(tx, parsed.data, opts));
 }
 
+/**
+ * Remove the ops of a patch that name a node which does not exist.
+ *
+ * The alternative is what used to happen: one unresolvable uuid anywhere in a
+ * reply aborts the transaction, so an agent that decomposed a component into
+ * twelve children and then mistyped ONE id in a cross-link loses all twelve.
+ * MEASURED across 22 such replies — 17 of the bad ids were in `link.toRef`,
+ * pointing at some other node entirely, and dropping just those links would have
+ * landed 191 nodes.
+ *
+ * A ref resolves if it is a temp id this patch introduces, a live node in THIS
+ * repository, or an alias already seeded (`self`). Anything else is unresolvable.
+ *
+ * Cascades: dropping an upsert also drops the temp id it would have introduced,
+ * so ops naming that id go with it. Iterated to a fixed point rather than done in
+ * one pass, because a temp-ref chain — create a subtree, then link within it — is
+ * the ordinary shape of these replies, not an edge case.
+ */
+export async function dropUnresolvableOps(
+  tx: DbOrTx,
+  ops: PlanPatch['ops'],
+  repositoryId: string,
+  seeded: Map<string, string>,
+  report: string[],
+): Promise<PlanPatch['ops']> {
+  const refsOf = (op: PlanPatch['ops'][number]): string[] => {
+    switch (op.op) {
+      case 'upsert':
+        return op.parentRef ? [op.parentRef] : [];
+      case 'link':
+      case 'unlink':
+        return [op.fromRef, op.toRef];
+      case 'delete':
+        return [op.nodeRef];
+      default:
+        return [];
+    }
+  };
+
+  // Every uuid-shaped ref the patch names, asked once rather than per op.
+  const wanted = new Set<string>();
+  for (const op of ops) {
+    for (const r of refsOf(op)) if (UUID_RE.test(r)) wanted.add(r);
+    if (op.op === 'upsert' && UUID_RE.test(op.nodeRef)) wanted.add(op.nodeRef);
+  }
+  const live = new Set<string>(seeded.values());
+  for (const k of seeded.keys()) live.add(k);
+  if (wanted.size > 0) {
+    const rows = await tx
+      .select({ id: schema.planNodes.id })
+      .from(schema.planNodes)
+      .where(
+        and(
+          eq(schema.planNodes.repositoryId, repositoryId),
+          inArray(schema.planNodes.id, [...wanted]),
+        ),
+      );
+    for (const r of rows) live.add(r.id);
+  }
+
+  let kept = [...ops];
+  for (;;) {
+    // Temp ids the SURVIVING upserts still introduce. Recomputed each round, so
+    // an op whose provider was dropped stops resolving on the next one.
+    const provided = new Set<string>();
+    for (const op of kept)
+      if (op.op === 'upsert' && !UUID_RE.test(op.nodeRef)) provided.add(op.nodeRef);
+
+    const next = kept.filter((op) => {
+      const bad = refsOf(op).filter((r) => !live.has(r) && !provided.has(r));
+      if (bad.length === 0) return true;
+      report.push(
+        `${op.op} dropped: unknown node reference ${bad.map((b) => `'${b}'`).join(', ')}`,
+      );
+      return false;
+    });
+    if (next.length === kept.length) return next;
+    kept = next;
+  }
+}
+
 async function applyOps(
   tx: DbOrTx,
   patch: PlanPatch,
@@ -95,9 +203,13 @@ async function applyOps(
     unlinked: 0,
     codeLinked: 0,
     refs: {},
+    dropped: [],
   };
   /** patch-local ref (temp id or uuid) -> real uuid. */
   const refs = new Map<string, string>();
+  // `self` is the node this patch is about, available before any op runs so an
+  // agent never has to transcribe the uuid of the thing it was asked to expand.
+  if (opts.selfNodeId) refs.set('self', opts.selfNodeId);
   /** Nodes deleted earlier in THIS patch. A later op naming one is a contract
    *  error, not a silent no-op — the model believed it still existed. */
   const dead = new Set<string>();
@@ -362,7 +474,18 @@ async function applyOps(
     await createNode(op, opIndex);
   }
 
-  for (const [opIndex, op] of patch.ops.entries()) {
+  // Pre-flight: under `drop`, remove the ops that CANNOT resolve rather than
+  // letting the first of them abort the transaction and take the rest with it.
+  //
+  // Ops that would fail are never submitted, so the all-or-nothing guarantee of
+  // the transaction is untouched — this decides what the patch IS, not how much
+  // of it survives partway through.
+  const ops =
+    opts.onUnresolvableRef === 'drop'
+      ? await dropUnresolvableOps(tx, patch.ops, repositoryId, refs, result.dropped)
+      : patch.ops;
+
+  for (const [opIndex, op] of ops.entries()) {
     switch (op.op) {
       case 'upsert':
         await applyUpsert(op, opIndex);

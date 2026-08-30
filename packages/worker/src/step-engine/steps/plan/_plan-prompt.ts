@@ -68,6 +68,9 @@ Rules:
   \`affects\` (changing the target forces a change here), \`implements\` (this
   realises the target).
 - At most ${PLAN_PATCH_MAX_OPS} ops. Never invent a uuid — only use ones shown to you.
+- An id you get wrong by one character names nothing, and that op is DISCARDED.
+  Copy ids; do not retype them. When you are expanding one node, write
+  \`"parentRef": "self"\` for its children rather than repeating its uuid.
 - Do not restate the whole plan. Send only what changes.`;
 
 /**
@@ -175,6 +178,9 @@ export async function applyAgentPatch(
     /** HEAD at the time the agent read the tree, stamped on any code links it
      *  emitted so a stale one can be dated. */
     derivedAtCommit?: string | null;
+    /** The node this reply is ABOUT, addressable as `self` so the agent never
+     *  transcribes its uuid. Set by the expansion fan-out. */
+    selfNodeId?: string;
   },
 ): Promise<ApplyPlanPatchResult> {
   try {
@@ -183,6 +189,11 @@ export async function applyAgentPatch(
       origin: 'llm',
       sourceTaskId: opts.sourceTaskId,
       derivedAtCommit: opts.derivedAtCommit ?? null,
+      // An AGENT patch loses the offending op, never the reply. A person editing
+      // in the UI still gets `fail`, which is the default — a human who typed a
+      // bad id should be told, not silently trimmed.
+      onUnresolvableRef: 'drop',
+      ...(opts.selfNodeId ? { selfNodeId: opts.selfNodeId } : {}),
     });
   } catch (err) {
     if (err instanceof PlanPatchError && err.kind === 'invalid' && opts.retryable) {
