@@ -106,17 +106,62 @@ function breadthCap(values: FormValues): number {
  * person. `taskable` is excluded too — the user (or an earlier wave) has already
  * said that node is a unit of work.
  */
-function computeFrontier(nodes: PlanNodeSkeleton[], maxDepth: number): PlanNodeSkeleton[] {
+export function computeFrontier(
+  nodes: PlanNodeSkeleton[],
+  maxDepth: number,
+  /** The build doing the asking. Its OWN nodes are exempt from the `done`
+   *  filter below — a from_repo build creates them done because the code
+   *  already exists, and without this exemption the wave machine would find an
+   *  empty frontier after level 1 and stop. */
+  sourceTaskId?: string,
+): PlanNodeSkeleton[] {
   const withChildren = new Set(nodes.map((n) => n.parentId).filter(Boolean) as string[]);
+  const minedByThisBuild = (n: PlanNodeSkeleton): boolean =>
+    sourceTaskId !== undefined && n.sourceTaskId === sourceTaskId;
   return nodes.filter(
     (n) =>
       !withChildren.has(n.id) &&
       !n.taskable &&
       n.kind === 'component' &&
-      n.status !== 'done' &&
+      // `not_applicable` is never exempt: it is a decision that this does not
+      // apply, and the only way a node this build created carries it is that the
+      // agent said so — expanding it would ask another agent to decompose
+      // something already declared out of scope.
       n.status !== 'not_applicable' &&
+      // `done` stops a MERGE re-expanding work already finished, which is the
+      // case this filter exists for. A node this run just wrote is not that: it
+      // is done because it describes existing code, not because someone
+      // finished it.
+      (minedByThisBuild(n) || n.status !== 'done') &&
       planNodeDepth(n.path) < maxDepth,
   );
+}
+
+/**
+ * The status a mined node should arrive with.
+ *
+ * A plan built FROM a repository describes code that already exists, so `todo`
+ * is false on arrival — MEASURED, a real build produced 644 nodes and every one
+ * of them said there was work to do. `done` is applied only where the agent did
+ * not speak: an explicit status wins, which is how a component the prompt asked
+ * it to include but that is NOT built yet stays `todo` and, through
+ * `rollUpStatus`, renders its whole ancestor chain in_progress.
+ *
+ * Only for `from_repo`. A document or a brief describes a project that does not
+ * exist, where `todo` is already the truth.
+ *
+ * Ops are `unknown` here — zod validates them inside applyPlanPatch — so this
+ * touches only what it can recognise and passes everything else through
+ * untouched rather than reshaping input it does not understand.
+ */
+export function withMinedStatus(ops: unknown[], mode: BuildMode): unknown[] {
+  if (mode !== 'from_repo') return ops;
+  return ops.map((op) => {
+    if (!op || typeof op !== 'object') return op;
+    const o = op as Record<string, unknown>;
+    if (o.op !== 'upsert' || o.status !== undefined) return op;
+    return { ...o, status: 'done' };
+  });
 }
 
 /** Node ids an expansion agent has already been asked about, parsed from the
@@ -172,6 +217,12 @@ function sourceGuidance(d: PlanBuildDetect): string {
     'The plan records what the project is MEANT to be, so a component belongs in it even when',
     'the code for it does not exist yet — but every component that DOES exist should be named',
     'the way the codebase names it, not the way you would have named it.',
+    '',
+    'STATUS: you are mapping a codebase that already exists, so a component that IS built needs',
+    'no status — it is recorded as done for you. Set `"status": "todo"` explicitly ONLY on a',
+    'component you name that is NOT built yet. That is the one thing separating the work still',
+    'outstanding from the work already finished, and marking everything todo says the whole',
+    'project is unbuilt.',
   ].join('\n');
 }
 
@@ -455,12 +506,16 @@ export function createPlanBuildStep(
         // atomic node burns the whole retry budget every wave.
         if (patch.ops.length === 0) continue;
         try {
-          await applyAgentPatch(ctx.db, patch, {
-            repositoryId,
-            sourceTaskId: ctx.taskId,
-            derivedAtCommit,
-            retryable: args.isFinalMiningAttempt !== true,
-          });
+          await applyAgentPatch(
+            ctx.db,
+            { ...patch, ops: withMinedStatus(patch.ops, d.mode) },
+            {
+              repositoryId,
+              sourceTaskId: ctx.taskId,
+              derivedAtCommit,
+              retryable: args.isFinalMiningAttempt !== true,
+            },
+          );
         } catch (err) {
           failures.push(
             `${result.agentTitle ?? result.agentId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -486,7 +541,7 @@ export function createPlanBuildStep(
       const root = nodes.find((n) => n.parentId === null) ?? null;
       if (root) asked.add(root.id);
 
-      const frontierAll = computeFrontier(nodes, depthBudget(args.formValues)).filter(
+      const frontierAll = computeFrontier(nodes, depthBudget(args.formValues), ctx.taskId).filter(
         (n) => !asked.has(n.id),
       );
       // Failure aggregation for the output: every failed row across ALL waves,
