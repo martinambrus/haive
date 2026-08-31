@@ -98,6 +98,9 @@ export interface CliCommandSpec {
    *  open for steering never signals end-of-prompt, and the CLI would wait for
    *  input that is never coming and die on the timeout. */
   stdinPrompt?: string;
+  /** Written into the sandbox before the run, for a CLI whose prompt arrives by
+   *  PATH rather than argv or stdin. */
+  promptFile?: { containerPath: string; content: string };
   /** When set, the sandbox runner mounts a WRITABLE directory at
    *  `captureFile.containerDir` and, after the run, reads `<containerDir>/<fileName>`
    *  back out as `CliExecutionResult.capturedLog`. Used to recover a CLI's own log

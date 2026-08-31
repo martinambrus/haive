@@ -115,13 +115,23 @@ export class GrokAdapter extends BaseCliAdapter {
 
     // Prompt last, mirroring the antigravity adapter: keep every flag ahead of the
     // value-taking `-p` so none can be mistaken for part of the prompt.
-    // `-p, --single <PROMPT>` takes a value and grok documents no stdin form,
-    // so an oversized prompt refuses by name rather than as a bare E2BIG.
-    args.push('-p', ...deliverPrompt(prompt, { adapter: 'grok', stdin: false }).argv);
+    // `-p, --single <PROMPT>` takes a value, and grok's REPL needs a TTY, so
+    // stdin is not a route (verified: bare `grok` with piped input dies with
+    // ENXIO). It does offer `--prompt-file`, which has no size limit — verified
+    // against the real binary with a live call. The `-p` is dropped entirely in
+    // that mode; the two are alternative ways to say the same thing.
+    const delivery = deliverPrompt(prompt, {
+      adapter: 'grok',
+      stdin: false,
+      fileFlag: '--prompt-file',
+    });
+    if (delivery.promptFile) args.push(...delivery.argv);
+    else args.push('-p', ...delivery.argv);
 
     return {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(provider, args),
+      ...(delivery.promptFile ? { promptFile: delivery.promptFile } : {}),
       env,
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',

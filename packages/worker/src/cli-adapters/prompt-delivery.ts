@@ -39,11 +39,18 @@ export class PromptTooLargeError extends Error {
 }
 
 export interface PromptDelivery {
-  /** Push into `args` where the prompt belongs. Empty when it goes over stdin. */
+  /** Push into `args` where the prompt belongs. Empty when it travels another way. */
   argv: string[];
   /** Set on the spec; the runner writes it and CLOSES stdin. */
   stdinPrompt?: string;
+  /** Written into the sandbox for a CLI that reads its prompt from a PATH. */
+  promptFile?: { containerPath: string; content: string };
 }
+
+/** Where a prompt file is placed inside the sandbox. Under /tmp because it is
+ *  scratch for one invocation, and outside the mounted worktree so it can never
+ *  be mistaken for part of the repository or picked up by a git status. */
+export const PROMPT_FILE_PATH = '/tmp/haive-prompt.txt';
 
 /**
  * Decide how one prompt travels.
@@ -58,10 +65,23 @@ export interface PromptDelivery {
  */
 export function deliverPrompt(
   prompt: string,
-  opts: { adapter: string; stdin: boolean },
+  opts: {
+    adapter: string;
+    stdin: boolean;
+    /** The flag that takes a PATH to read the prompt from, for a CLI that offers
+     *  one — grok's `--prompt-file`. Verified against the real binary: a file
+     *  has no size limit at all, so it beats stdin where both exist. */
+    fileFlag?: string;
+  },
 ): PromptDelivery {
   if (Buffer.byteLength(prompt, 'utf8') <= PROMPT_ARGV_LIMIT_BYTES) {
     return { argv: [prompt] };
+  }
+  if (opts.fileFlag) {
+    return {
+      argv: [opts.fileFlag, PROMPT_FILE_PATH],
+      promptFile: { containerPath: PROMPT_FILE_PATH, content: prompt },
+    };
   }
   if (!opts.stdin) {
     throw new PromptTooLargeError(opts.adapter, Buffer.byteLength(prompt, 'utf8'));

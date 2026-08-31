@@ -31,11 +31,13 @@ const build = (name: string, prompt: string) =>
 
 /** Reads a prompt from stdin, per its own --help in the shipped sandbox image. */
 const STDIN_CAPABLE = ['codex', 'amp', 'claude-code', 'zai', 'ollama', 'muse', 'openrouter'];
-/** Documents no stdin form; an oversized prompt must refuse by name. */
-const ARGV_ONLY = ['gemini', 'grok', 'antigravity'];
+/** Takes the prompt from a PATH instead — verified against the real binary. */
+const FILE_CAPABLE = ['grok'];
+/** No documented route for a large prompt yet; must refuse by name. */
+const ARGV_ONLY = ['gemini', 'antigravity'];
 
 describe('every adapter, ordinary prompt', () => {
-  for (const name of [...STDIN_CAPABLE, ...ARGV_ONLY]) {
+  for (const name of [...STDIN_CAPABLE, ...FILE_CAPABLE, ...ARGV_ONLY]) {
     it(`${name} still passes it as an argument`, () => {
       // The guard on every existing run: below the threshold nothing changed.
       const spec = build(name, SMALL);
@@ -58,6 +60,20 @@ describe('every adapter, oversized prompt', () => {
   for (const name of ARGV_ONLY) {
     it(`${name} refuses by name rather than failing as E2BIG`, () => {
       expect(() => build(name, HUGE)).toThrow(PromptTooLargeError);
+    });
+  }
+
+  for (const name of FILE_CAPABLE) {
+    it(`${name} writes it to a file and points at the path`, () => {
+      // grok's REPL needs a TTY so stdin is not a route (bare `grok` with piped
+      // input dies with ENXIO), but `--prompt-file` has no size limit at all.
+      const spec = build(name, HUGE);
+      expect(spec.promptFile?.content).toBe(HUGE);
+      expect(spec.args).toContain('--prompt-file');
+      expect(spec.args).toContain(spec.promptFile!.containerPath);
+      // `-p` is dropped: the two are alternative ways to say the same thing.
+      expect(spec.args).not.toContain('-p');
+      expect(spec.args.some((a) => a.length > PROMPT_ARGV_LIMIT_BYTES)).toBe(false);
     });
   }
 });
