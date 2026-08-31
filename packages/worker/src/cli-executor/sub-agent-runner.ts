@@ -6,6 +6,7 @@ import type {
 } from '../cli-adapters/types.js';
 import type { CliExecutionResult, CliSpawner, SpawnOptions } from './runner.js';
 import { extractCodexJsonlOutput } from './codex-jsonl.js';
+import { extractAntigravityStreamOutput } from './antigravity-stream.js';
 import { extractGeminiJsonOutput, sumTokenUsage } from './usage-extract.js';
 
 export interface SubAgentStepTrace {
@@ -97,6 +98,10 @@ async function runOneStep(
   let tokenUsage: CliTokenUsage | null = null;
   if (spec.outputFormat === 'codex-jsonl') {
     const extracted = extractCodexJsonlOutput(result.stdout);
+    if (extracted.eventCount > 0 && extracted.text !== null) text = extracted.text;
+    tokenUsage = extracted.tokenUsage;
+  } else if (spec.outputFormat === 'antigravity-stream-json') {
+    const extracted = extractAntigravityStreamOutput(result.stdout);
     if (extracted.eventCount > 0 && extracted.text !== null) text = extracted.text;
     tokenUsage = extracted.tokenUsage;
   } else if (spec.outputFormat === 'gemini-json') {

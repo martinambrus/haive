@@ -1,6 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
-import { deliverPrompt } from './prompt-delivery.js';
 
 // agy reports provider-fatal errors (quota 429 / auth / 5xx) ONLY to its log file
 // while exiting 0 with empty stdout, so Haive redirects that log via `--log-file` to
@@ -10,6 +9,22 @@ import { deliverPrompt } from './prompt-delivery.js';
 // one invocation per container.
 export const AGY_LOG_DIR = '/haive/agy-log';
 export const AGY_LOG_FILE = 'agy.log';
+
+// agy caps a whole print-mode run at --print-timeout, default 5m0s, and aborts
+// with `{"status":"ERROR","error":"timeout waiting for response"}`. MEASURED:
+// `--print-timeout 8s` on a prompt that sleeps 25s killed the run at ~10s. That
+// default silently truncated every antigravity invocation at five minutes, well
+// inside Haive's own multi-hour budget. Set far above any Haive timeout so the
+// CLI's internal cap never fires first and the existing timeout ladder stays the
+// single authority — the same position every other adapter is in by having no
+// internal cap at all.
+const AGY_PRINT_TIMEOUT = '24h';
+
+/** One NDJSON user message, the input `--input-format stream-json` consumes.
+ *  VERIFIED end-to-end against the live binary: agy answered and exited 0. */
+export function antigravityStdinPrompt(prompt: string): string {
+  return `${JSON.stringify({ event: 'user', message: { role: 'user', content: prompt } })}\n`;
+}
 
 export class AntigravityAdapter extends BaseCliAdapter {
   readonly providerName = 'antigravity' as const;
@@ -71,21 +86,34 @@ export class AntigravityAdapter extends BaseCliAdapter {
   ): CliCommandSpec {
     return {
       command: this.resolveExecutable(provider),
-      // agy has no --output-format/stream-json (plain text print), so this
-      // mirrors gemini's plain -p. --dangerously-skip-permissions keeps tool
-      // use non-interactive during autonomous step execution. --log-file is placed
-      // BEFORE -p so a greedy -p can't swallow it; agy writes provider-fatal errors
-      // ONLY to that log (exiting 0), which the runner reads back via captureFile.
+      // agy's own --help: `--input-format stream-json` "reads one NDJSON message
+      // per line from stdin and runs a turn for each; it requires --output-format
+      // stream-json". So the prompt goes over stdin and NOT in argv, which takes
+      // antigravity out of the E2BIG class entirely (a 128 KiB argv entry is what
+      // killed 27 agents of a plan build) rather than merely refusing loudly.
+      //
+      // `-p` is DELIBERATELY absent: it is a STRING flag (`--prompt` is its alias),
+      // so a bare `-p` fails flag parsing with "flag needs an argument: -p" —
+      // MEASURED. stream-json input is print mode on its own.
+      //
+      // --log-file is kept even though status/error now arrive as fields on the
+      // result event: the exit-0-on-quota path (classifyAntigravityDiagnostic)
+      // reads that log, and quota is the one fatal class not reproducible here.
       args: this.mergedArgs(provider, [
         '--dangerously-skip-permissions',
         '--log-file',
         `${AGY_LOG_DIR}/${AGY_LOG_FILE}`,
-        '-p',
-        // No documented stdin form; an oversized prompt refuses by name.
-        ...deliverPrompt(prompt, { adapter: 'antigravity', stdin: false }).argv,
+        '--print-timeout',
+        AGY_PRINT_TIMEOUT,
+        '--input-format',
+        'stream-json',
+        '--output-format',
+        'stream-json',
       ]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
+      outputFormat: 'antigravity-stream-json',
+      stdinPrompt: antigravityStdinPrompt(prompt),
       captureFile: { containerDir: AGY_LOG_DIR, fileName: AGY_LOG_FILE },
     };
   }

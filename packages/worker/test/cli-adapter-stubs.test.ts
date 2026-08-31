@@ -162,16 +162,23 @@ describe('antigravity adapter', () => {
     expect(adapter.rulesFileMode).toBe('native');
   });
 
-  it('builds a non-interactive agy invocation with --log-file (before -p) and captureFile', () => {
+  it('builds a non-interactive agy stream-json invocation with the prompt on stdin', () => {
     const spec = adapter.buildCliInvocation(provider, 'hello', opts);
     expect(spec.command).toBe('agy');
     expect(spec.args).toEqual([
       '--dangerously-skip-permissions',
       '--log-file',
       '/haive/agy-log/agy.log',
-      '-p',
-      'hello',
+      '--print-timeout',
+      '24h',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
     ]);
+    // The prompt is no longer an argument at all, so it cannot hit MAX_ARG_STRLEN.
+    expect(spec.args).not.toContain('hello');
+    expect(spec.stdinPrompt).toContain('"content":"hello"');
     // captureFile drives the runner's writable log mount + readback — agy reports
     // provider-fatal errors (quota/auth/5xx) ONLY to its log while exiting 0.
     expect(spec.captureFile).toEqual({ containerDir: '/haive/agy-log', fileName: 'agy.log' });
@@ -189,7 +196,7 @@ describe('adapter outputFormat declarations', () => {
     ['amp', 'claude-stream-json'],
     ['codex', 'codex-jsonl'],
     ['gemini', 'gemini-json'],
-    ['antigravity', undefined],
+    ['antigravity', 'antigravity-stream-json'],
   ];
   for (const [name, expected] of cases) {
     it(`${name} declares outputFormat ${expected ?? '(none)'}`, () => {

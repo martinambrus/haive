@@ -76,7 +76,8 @@ export type CliRulesFileMode = 'native' | 'import' | 'copy';
 
 /** How exec-core / the sequential sub-agent runner should interpret the CLI's
  *  stdout. Undefined = legacy heuristic (claude NDJSON collector probe). */
-export type CliOutputFormat = 'plain' | 'claude-stream-json' | 'codex-jsonl' | 'gemini-json';
+export type CliOutputFormat =
+  'plain' | 'claude-stream-json' | 'codex-jsonl' | 'antigravity-stream-json' | 'gemini-json';
 
 export interface CliCommandSpec {
   command: string;

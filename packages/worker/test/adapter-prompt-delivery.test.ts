@@ -34,7 +34,11 @@ const STDIN_CAPABLE = ['codex', 'amp', 'claude-code', 'zai', 'ollama', 'muse', '
 /** Takes the prompt from a PATH instead — verified against the real binary. */
 const FILE_CAPABLE = ['grok'];
 /** No documented route for a large prompt yet; must refuse by name. */
-const ARGV_ONLY = ['gemini', 'antigravity'];
+const ARGV_ONLY = ['gemini'];
+/** Takes the prompt as an NDJSON line on stdin at EVERY size, so it is never
+ *  exposed to the argv limit in the first place — `--input-format stream-json`
+ *  has no argv form to fall back to. */
+const STDIN_ALWAYS = ['antigravity'];
 
 describe('every adapter, ordinary prompt', () => {
   for (const name of [...STDIN_CAPABLE, ...FILE_CAPABLE, ...ARGV_ONLY]) {
@@ -47,7 +51,25 @@ describe('every adapter, ordinary prompt', () => {
   }
 });
 
+describe('stdin-only adapters, ordinary prompt', () => {
+  for (const name of STDIN_ALWAYS) {
+    it(`${name} sends even a small prompt over stdin`, () => {
+      const spec = build(name, SMALL);
+      expect(spec.stdinPrompt).toContain(SMALL);
+      expect(spec.args).not.toContain(SMALL);
+    });
+  }
+});
+
 describe('every adapter, oversized prompt', () => {
+  for (const name of STDIN_ALWAYS) {
+    it(`${name} keeps it out of argv at any size`, () => {
+      const spec = build(name, HUGE);
+      expect(spec.stdinPrompt).toContain(HUGE);
+      expect(spec.args.some((a) => a.length > PROMPT_ARGV_LIMIT_BYTES)).toBe(false);
+    });
+  }
+
   for (const name of STDIN_CAPABLE) {
     it(`${name} sends it over stdin instead of argv`, () => {
       const spec = build(name, HUGE);

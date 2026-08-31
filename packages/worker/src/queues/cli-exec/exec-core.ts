@@ -23,6 +23,7 @@ import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliCommandSpec } from '../../cli-adapters/types.js';
 import {
   createCodexJsonlCollector,
+  createAntigravityStreamCollector,
   extractGeminiJsonOutput,
   type CliExecutionResult,
   type CliSpawner,
@@ -652,8 +653,16 @@ export async function executeCliSpec(
     onRetry,
     onRetryResolved,
   );
-  const codexCollector =
-    outputFormat === 'codex-jsonl' ? createCodexJsonlCollector(onProseText) : null;
+  // codex and antigravity both speak line-delimited JSON and expose the same
+  // collector shape, so they share the branch below. The only per-provider
+  // difference is the wording when a stream carries no answer.
+  const jsonlCollector =
+    outputFormat === 'codex-jsonl'
+      ? createCodexJsonlCollector(onProseText)
+      : outputFormat === 'antigravity-stream-json'
+        ? createAntigravityStreamCollector(onProseText)
+        : null;
+  const jsonlCliName = outputFormat === 'antigravity-stream-json' ? 'antigravity' : 'codex';
 
   // While the CLI streams, persist a running token-usage snapshot on a throttle
   // so the task page + terminal polls show a live, growing count before the
@@ -664,7 +673,7 @@ export async function executeCliSpec(
   if (onUsageSnapshot) {
     let lastUsageJson = '';
     usageTimer = setInterval(() => {
-      const usage = (codexCollector ?? collector).getTokenUsage();
+      const usage = (jsonlCollector ?? collector).getTokenUsage();
       if (!usage) return;
       const json = JSON.stringify(usage);
       if (json === lastUsageJson) return;
@@ -679,7 +688,7 @@ export async function executeCliSpec(
       timeoutMs,
       onStdoutChunk: (chunk: string) => {
         streamBuf.push(chunk);
-        if (codexCollector) codexCollector.onChunk(chunk);
+        if (jsonlCollector) jsonlCollector.onChunk(chunk);
         else collector.onChunk(chunk);
       },
       onStderrChunk: (chunk: string) => {
@@ -711,27 +720,31 @@ export async function executeCliSpec(
     extra: Omit<ModelIdentityInput, 'specRequested'> = {},
   ): ModelIdentity | null => buildModelIdentity({ specRequested: specRequestedModel, ...extra });
 
-  if (codexCollector && codexCollector.isJsonl()) {
-    const codexText = codexCollector.getResult();
-    const tokenUsage = codexCollector.getTokenUsage();
-    if (codexText !== null) {
+  if (jsonlCollector && jsonlCollector.isJsonl()) {
+    const jsonlText = jsonlCollector.getResult();
+    const tokenUsage = jsonlCollector.getTokenUsage();
+    if (jsonlText !== null) {
       // rawOutput = the model's answer text — the step parsers' fenced-JSON
       // contract (parsedOutput ?? rawOutput) is preserved.
       return {
         exitCode: result.exitCode,
-        rawOutput: codexText,
-        parsedOutput: tryJsonParse(codexText),
+        rawOutput: jsonlText,
+        parsedOutput: tryJsonParse(jsonlText),
         errorMessage: formatCliErrorMessage(
           result.exitCode,
           result.stderr,
-          codexText,
+          jsonlText,
           result.error,
         ),
         tokenUsage,
         // codex names no model on any typed event (verified against a complete
-        // successful run), so this carries the argv value only, with served null.
-        modelIdentity: modelIdentityFrom(),
+        // successful run), so it carries the argv value only, served null.
+        // antigravity's init event names none either; its --log-file is the one
+        // place it does. `capturedLog` is set by that adapter alone, so both of
+        // these are no-ops on the codex path.
+        modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
         streamLog,
+        providerDiagnosticLog: result.capturedLog ?? undefined,
       };
     }
     // JSONL stream without an agent message — partial usage is still recorded.
@@ -743,15 +756,16 @@ export async function executeCliSpec(
       errorMessage:
         result.error ??
         formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
-        codexCollector.getNoResultReason() ??
-        'codex emitted no agent message',
+        jsonlCollector.getNoResultReason() ??
+        `${jsonlCliName} emitted no agent message`,
       tokenUsage,
-      modelIdentity: modelIdentityFrom(),
+      modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
       streamLog,
       providerErrorScan,
+      providerDiagnosticLog: result.capturedLog ?? undefined,
     };
   }
-  // codexCollector with zero events: old binary ignored --json — fall through
+  // jsonlCollector with zero events: old binary ignored --json — fall through
   // to the plain path below, byte-for-byte legacy behavior (usage null).
 
   const streamResult = collector.getResult();
