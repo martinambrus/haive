@@ -56,6 +56,9 @@ interface CoverageApply {
 /** One line per gap in the gate's list, and the value the multi-select stores. */
 const structuralKey = (g: StructuralGap): string => `node:${g.nodeId}`;
 const sectionKey = (c: CoverageCandidate): string => `doc:${c.line}`;
+/** One derivation, used by both the dispatcher and the already-handled filter —
+ *  two spellings of this would silently stop matching. */
+const sectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
 
 export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
   metadata: {
@@ -104,6 +107,36 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
         and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '01-plan-build')),
       );
 
+    // What a previous pass of THIS step already re-decomposed. The build's agent
+    // rows record "1 operation dropped" forever — that fact does not stop being
+    // true once the gap is filled — so without this the report would re-offer
+    // work already done, and running it twice would grow the plan for no reason.
+    // Only a pass that actually LANDED counts: an agent whose own patch failed
+    // leaves the item outstanding.
+    const handled = new Set(
+      (
+        await ctx.db
+          .select({
+            agentId: schema.taskStepAgentMinings.agentId,
+            status: schema.taskStepAgentMinings.status,
+            errorMessage: schema.taskStepAgentMinings.errorMessage,
+          })
+          .from(schema.taskStepAgentMinings)
+          .innerJoin(
+            schema.taskSteps,
+            eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId),
+          )
+          .where(
+            and(
+              eq(schema.taskSteps.taskId, ctx.taskId),
+              eq(schema.taskSteps.stepId, '02-plan-coverage'),
+            ),
+          )
+      )
+        .filter((a) => a.status === 'done' && !a.errorMessage)
+        .map((a) => a.agentId),
+    );
+
     const structural = findStructuralGaps(
       skeletons.map((n) => ({
         id: n.id,
@@ -113,7 +146,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       })),
       agents,
       { failure: APPLY_FAILURE_PREFIX, partial: PARTIAL_APPLY_PREFIX },
-    );
+    ).filter((g) => !handled.has(`cover-node-${g.nodeId}`));
 
     // The source document, when this build had one. A from_repo build has no
     // single authority to check against, so the section half simply does not run.
@@ -141,7 +174,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
         sections = findCoverageGaps(
           parsed,
           skeletons.map((n, i) => `${texts[i] ?? ''} ${byId.get(n.id) ?? ''}`),
-        );
+        ).filter((c) => !handled.has(sectionAgentId(sectionKey(c))));
         for (const c of sections) {
           sectionBodies[sectionKey(c)] = parsed.find((p) => p.line === c.line)?.body ?? '';
         }
@@ -275,8 +308,26 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
           sourceTaskId: ctx.taskId,
           retryable: false,
           ...(self ? { selfNodeId: self } : {}),
-        }).catch((err: unknown) => {
+        }).catch(async (err: unknown) => {
+          // Stamped so the item stays OUTSTANDING: the already-handled filter in
+          // detect() counts only agents whose patch landed.
           ctx.logger.warn({ err, agentId: r.agentId }, 'coverage re-decomposition patch failed');
+          await ctx.db
+            .update(schema.taskStepAgentMinings)
+            .set({
+              errorMessage:
+                `${APPLY_FAILURE_PREFIX} ${err instanceof Error ? err.message : String(err)}`.slice(
+                  0,
+                  2000,
+                ),
+            })
+            .where(
+              and(
+                eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
+                eq(schema.taskStepAgentMinings.agentId, r.agentId),
+              ),
+            )
+            .catch(() => undefined);
         });
       }
       result.decision = 'redecomposed';

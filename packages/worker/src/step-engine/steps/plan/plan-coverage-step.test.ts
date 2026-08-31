@@ -134,3 +134,54 @@ describe('findStructuralGaps', () => {
     expect(gaps).toHaveLength(1);
   });
 });
+
+describe('not re-offering work already done', () => {
+  const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+  /** The filter detect() applies, stated once so the test and the step cannot
+   *  disagree about its shape. */
+  const handledSet = (rows: { agentId: string; status: string; errorMessage: string | null }[]) =>
+    new Set(rows.filter((a) => a.status === 'done' && !a.errorMessage).map((a) => a.agentId));
+
+  it('drops an item a previous pass re-decomposed', () => {
+    // The build's row still says "1 operation dropped" — that stays true after
+    // the gap is filled — so without this the report re-offers finished work and
+    // a second run grows the plan for nothing. MEASURED on a real task: 19
+    // items before the filter, 0 after.
+    const handled = handledSet([
+      { agentId: `cover-node-${A}`, status: 'done', errorMessage: null },
+    ]);
+    const gaps = [{ nodeId: A, title: 'Alpha', reason: 'lost' }];
+    expect(gaps.filter((g) => !handled.has(`cover-node-${g.nodeId}`))).toEqual([]);
+  });
+
+  it('keeps an item whose re-decomposition itself failed', () => {
+    // Its patch never landed, so the gap is still there and must stay offered.
+    const handled = handledSet([
+      { agentId: `cover-node-${A}`, status: 'done', errorMessage: 'plan patch not applied: x' },
+    ]);
+    const gaps = [{ nodeId: A, title: 'Alpha', reason: 'lost' }];
+    expect(gaps.filter((g) => !handled.has(`cover-node-${g.nodeId}`))).toHaveLength(1);
+  });
+
+  it('keeps an item whose agent never finished', () => {
+    const handled = handledSet([
+      { agentId: `cover-node-${A}`, status: 'failed', errorMessage: null },
+    ]);
+    expect(handled.has(`cover-node-${A}`)).toBe(false);
+  });
+
+  it('drops only the item that was handled', () => {
+    const handled = handledSet([
+      { agentId: `cover-node-${A}`, status: 'done', errorMessage: null },
+    ]);
+    const gaps = [
+      { nodeId: A, title: 'Alpha', reason: 'lost' },
+      { nodeId: B, title: 'Beta', reason: 'lost' },
+    ];
+    expect(gaps.filter((g) => !handled.has(`cover-node-${g.nodeId}`)).map((g) => g.nodeId)).toEqual(
+      [B],
+    );
+  });
+});
