@@ -31,6 +31,7 @@ export interface AntigravityStreamCollector {
    *  premature-end. Null when a result exists. */
   getNoResultReason: () => string | null;
   getMalformedLineCount: () => number;
+  getEventCount: () => number;
 }
 
 /** `input + output = total` in every observed run, and `thinking_tokens` is a
@@ -109,6 +110,7 @@ export function createAntigravityStreamCollector(
     },
     getResult: () => response,
     isJsonl: () => eventCount > 0,
+    getEventCount: () => eventCount,
     getTokenUsage: () => usage,
     getNoResultReason: () =>
       response
@@ -127,12 +129,10 @@ export function extractAntigravityStreamOutput(stdout: string): {
   text: string | null;
   tokenUsage: CliTokenUsage | null;
 } {
-  let eventCount = 0;
   const collector = createAntigravityStreamCollector();
   collector.onChunk(stdout.endsWith('\n') ? stdout : `${stdout}\n`);
-  eventCount = collector.isJsonl() ? 1 : 0;
   return {
-    eventCount,
+    eventCount: collector.getEventCount(),
     text: collector.getResult(),
     tokenUsage: collector.getTokenUsage(),
   };

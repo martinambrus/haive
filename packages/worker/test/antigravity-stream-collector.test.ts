@@ -107,7 +107,9 @@ describe('antigravity stream-json collector', () => {
   it('one-shot extraction agrees with the streaming collector', () => {
     const x = extractAntigravityStreamOutput(REAL_RUN);
     expect(x.text).toBe('OK\n');
-    expect(x.eventCount).toBeGreaterThan(0);
+    // The real event count, not a 0/1 flag: the caller uses it to tell a
+    // structured run from an old binary's plain text.
+    expect(x.eventCount).toBe(5);
     expect(x.tokenUsage?.totalTokens).toBe(13914);
   });
 });
