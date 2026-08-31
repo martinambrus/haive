@@ -5,6 +5,7 @@ import type { FormSchema, FormValues } from '@haive/shared';
 import { loadPlanSkeletons, renderPlanMarkdown } from '@haive/shared/plan';
 import type { StepDefinition } from '../../step-definition.js';
 import { MiningWaveError } from '../../step-definition.js';
+import { writePlanMirror } from '../../../plan/mirror.js';
 import { APPLY_FAILURE_PREFIX, PARTIAL_APPLY_PREFIX } from './01-plan-build.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
 import {
@@ -329,6 +330,16 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
             )
             .catch(() => undefined);
         });
+      }
+      // Every plan-step apply refreshes the committed mirror. Without it the
+      // nodes this step recovered exist only in the database, and a restore or a
+      // fresh clone silently drops exactly the work the check was run to get
+      // back. Best-effort, as elsewhere: a mirror that cannot be written must
+      // not undo the patches that just landed.
+      try {
+        await writePlanMirror(ctx.db, d.repositoryId, ctx.repoPath);
+      } catch (err) {
+        ctx.logger.warn({ err }, 'plan mirror write failed after coverage re-decomposition');
       }
       result.decision = 'redecomposed';
       result.dispatched = fold.length;
