@@ -105,20 +105,21 @@ export class OpenRouterAdapter extends BaseCliAdapter {
     // gateway, so suppress it for the same reason ollama does.
     env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
     const steering = opts.steeringMode === true;
+    const invocation = claudeFamilyArgs({
+      steering,
+      prompt,
+      disallowedTools: opts.disallowedTools,
+      disableTools: opts.disableTools,
+    });
     const spec: CliCommandSpec = {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(
-        provider,
-        claudeFamilyArgs({
-          steering,
-          prompt,
-          disallowedTools: opts.disallowedTools,
-          disableTools: opts.disableTools,
-        }),
-      ),
+      args: this.mergedArgs(provider, invocation.args),
       env,
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',
+      // Only when the prompt was too large for argv; steering delivers it as a
+      // stdin user-message and leaves this unset.
+      ...(invocation.stdinPrompt ? { stdinPrompt: invocation.stdinPrompt } : {}),
     };
     if (steering) {
       spec.stdinInitial = steeringUserMessageLine(prompt);

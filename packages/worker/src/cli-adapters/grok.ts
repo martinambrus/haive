@@ -8,6 +8,7 @@ import type {
   PluginInstallCommand,
   PluginInstallOpts,
 } from './types.js';
+import { deliverPrompt } from './prompt-delivery.js';
 
 // PHP intentionally absent — see the CLAUDE_LSP_PLUGINS note in claude-code.ts.
 // Haive installs no phpactor binary; PHP LSP is intelephense via the local
@@ -114,7 +115,9 @@ export class GrokAdapter extends BaseCliAdapter {
 
     // Prompt last, mirroring the antigravity adapter: keep every flag ahead of the
     // value-taking `-p` so none can be mistaken for part of the prompt.
-    args.push('-p', prompt);
+    // `-p, --single <PROMPT>` takes a value and grok documents no stdin form,
+    // so an oversized prompt refuses by name rather than as a bare E2BIG.
+    args.push('-p', ...deliverPrompt(prompt, { adapter: 'grok', stdin: false }).argv);
 
     return {
       command: this.resolveExecutable(provider),

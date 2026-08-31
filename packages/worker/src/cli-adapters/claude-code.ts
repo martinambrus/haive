@@ -56,7 +56,7 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
     opts: InvokeOpts,
   ): CliCommandSpec {
     const steering = opts.steeringMode === true;
-    const baseArgs = claudeFamilyArgs({
+    const invocation = claudeFamilyArgs({
       steering,
       prompt,
       disallowedTools: opts.disallowedTools,
@@ -64,7 +64,7 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
     });
     const spec: CliCommandSpec = {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, baseArgs),
+      args: this.mergedArgs(provider, invocation.args),
       env: {
         // Claude Code caps a single response at 32000 output tokens by default and
         // hard-fails when a step exceeds it (skill generation emits many sub-skill
@@ -82,6 +82,9 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
       },
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',
+      // Set only when the prompt was too large for argv; steering never sets it
+      // because it delivers the prompt as a stdin user-message instead.
+      ...(invocation.stdinPrompt ? { stdinPrompt: invocation.stdinPrompt } : {}),
     };
     if (steering) {
       spec.stdinInitial = steeringUserMessageLine(prompt);

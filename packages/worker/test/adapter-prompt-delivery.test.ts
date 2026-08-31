@@ -1,0 +1,63 @@
+import { describe, expect, it } from 'vitest';
+import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
+import {
+  PromptTooLargeError,
+  PROMPT_ARGV_LIMIT_BYTES,
+} from '../src/cli-adapters/prompt-delivery.js';
+import type { CliProviderRecord } from '../src/cli-adapters/types.js';
+
+const SMALL = 'expand this node';
+const HUGE = 'x'.repeat(PROMPT_ARGV_LIMIT_BYTES + 1);
+
+const provider = (name: string): CliProviderRecord =>
+  ({
+    id: 'p1',
+    name,
+    label: name,
+    enabled: true,
+    authMode: 'subscription',
+    envVars: {},
+    cliArgs: [],
+    executablePath: '',
+    // ollama refuses to build a command without one, by design.
+    model: name === 'ollama' ? 'gpt-oss:20b' : null,
+    effortLevel: null,
+  }) as unknown as CliProviderRecord;
+
+const build = (name: string, prompt: string) =>
+  cliAdapterRegistry.get(name as never).buildCliInvocation(provider(name), prompt, {
+    cwd: '/haive/workdir',
+  } as never);
+
+/** Reads a prompt from stdin, per its own --help in the shipped sandbox image. */
+const STDIN_CAPABLE = ['codex', 'amp', 'claude-code', 'zai', 'ollama', 'muse', 'openrouter'];
+/** Documents no stdin form; an oversized prompt must refuse by name. */
+const ARGV_ONLY = ['gemini', 'grok', 'antigravity'];
+
+describe('every adapter, ordinary prompt', () => {
+  for (const name of [...STDIN_CAPABLE, ...ARGV_ONLY]) {
+    it(`${name} still passes it as an argument`, () => {
+      // The guard on every existing run: below the threshold nothing changed.
+      const spec = build(name, SMALL);
+      expect(spec.args).toContain(SMALL);
+      expect(spec.stdinPrompt).toBeUndefined();
+    });
+  }
+});
+
+describe('every adapter, oversized prompt', () => {
+  for (const name of STDIN_CAPABLE) {
+    it(`${name} sends it over stdin instead of argv`, () => {
+      const spec = build(name, HUGE);
+      expect(spec.stdinPrompt).toBe(HUGE);
+      // The whole point: nothing that large may reach the argument list.
+      expect(spec.args.some((a) => a.length > PROMPT_ARGV_LIMIT_BYTES)).toBe(false);
+    });
+  }
+
+  for (const name of ARGV_ONLY) {
+    it(`${name} refuses by name rather than failing as E2BIG`, () => {
+      expect(() => build(name, HUGE)).toThrow(PromptTooLargeError);
+    });
+  }
+});

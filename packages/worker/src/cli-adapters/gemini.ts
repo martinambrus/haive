@@ -1,5 +1,6 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
+import { deliverPrompt } from './prompt-delivery.js';
 
 export class GeminiAdapter extends BaseCliAdapter {
   readonly providerName = 'gemini' as const;
@@ -46,7 +47,14 @@ export class GeminiAdapter extends BaseCliAdapter {
       // per-invocation output small (e.g. the 09_5 skill loop emits one skill per
       // call). If a large-output gemini step truncates, add the override in the
       // runtime settings.json writer and VERIFY it against the pinned CLI version.
-      args: this.mergedArgs(provider, ['-p', prompt, '--output-format', 'json']),
+      // No stdin form documented by `gemini --help`, so an oversized prompt
+      // refuses by name here instead of failing as a bare E2BIG in spawn.
+      args: this.mergedArgs(provider, [
+        '-p',
+        ...deliverPrompt(prompt, { adapter: 'gemini', stdin: false }).argv,
+        '--output-format',
+        'json',
+      ]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
       outputFormat: 'gemini-json',

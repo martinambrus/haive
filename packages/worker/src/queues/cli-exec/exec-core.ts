@@ -1174,6 +1174,7 @@ export function createSandboxSpawner(
         signal: opts.signal,
         interactive: spec.steerable === true,
         stdinInitial: spec.stdinInitial,
+        stdinPrompt: spec.stdinPrompt,
         onStdinWritable: opts.onStdinWritable,
         // Set only by the antigravity adapter — recover agy's own log file (where it
         // reports provider-fatal errors while exiting 0) out of the --rm sandbox.

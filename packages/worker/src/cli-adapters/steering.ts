@@ -30,13 +30,22 @@ export function steeringUserMessageLine(text: string): string {
  *  prompt, stopping a high-effort model from burning the timeout crawling the repo.
  *  Shared by every claude-binary adapter (claude-code / zai / ollama) so the
  *  behavior is uniform. */
+import { deliverPrompt } from './prompt-delivery.js';
+
+/** The argv for a claude-family run, plus the prompt when it was too large to
+ *  travel in argv and must go over stdin instead. */
+export interface ClaudeFamilyInvocation {
+  args: string[];
+  stdinPrompt?: string;
+}
+
 export function claudeFamilyArgs(opts: {
   steering: boolean;
   prompt: string;
   tail?: string[];
   disallowedTools?: string[];
   disableTools?: boolean;
-}): string[] {
+}): ClaudeFamilyInvocation {
   const tail = opts.tail ?? [];
   // Placed before `tail`: a trailing flag like ollama's `--model` terminates
   // each variadic tool list so `--disallowedTools Agent --model X` and
@@ -50,28 +59,41 @@ export function claudeFamilyArgs(opts: {
   // mergedArgs spreads it verbatim; exec-core/docker-runner never filter it.
   const noTools = opts.disableTools ? ['--tools', ''] : [];
   if (opts.steering) {
-    return [
+    // Steering already sends the prompt over stdin as an NDJSON user message,
+    // so it never reaches argv and needs no delivery decision.
+    return {
+      args: [
+        '--dangerously-skip-permissions',
+        '-p',
+        '--input-format',
+        'stream-json',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        ...deny,
+        ...noTools,
+        ...tail,
+      ],
+    };
+  }
+  // The non-steering branch passes the prompt as argv and is exposed to the
+  // same 128 KiB kernel limit as every other adapter — steering escapes it only
+  // because it sends the text over stdin. `claude -p` with no positional reads
+  // stdin, which is exactly what the steering path already relies on, so the
+  // large case takes a route this binary is known to serve.
+  const delivery = deliverPrompt(opts.prompt, { adapter: 'claude', stdin: true });
+  return {
+    args: [
       '--dangerously-skip-permissions',
       '-p',
-      '--input-format',
-      'stream-json',
+      ...delivery.argv,
       '--output-format',
       'stream-json',
       '--verbose',
       ...deny,
       ...noTools,
       ...tail,
-    ];
-  }
-  return [
-    '--dangerously-skip-permissions',
-    '-p',
-    opts.prompt,
-    '--output-format',
-    'stream-json',
-    '--verbose',
-    ...deny,
-    ...noTools,
-    ...tail,
-  ];
+    ],
+    stdinPrompt: delivery.stdinPrompt,
+  };
 }

@@ -91,6 +91,13 @@ export interface CliCommandSpec {
   /** Written to the CLI's stdin immediately after start (the prompt as an NDJSON
    *  user-message). Only present when steerable. */
   stdinInitial?: string;
+  /** The prompt, delivered over stdin because it is too large to pass as an
+   *  argument (see prompt-delivery.ts). The runner writes it and then CLOSES
+   *  stdin — that close is the difference from `stdinInitial`, which stays open
+   *  for the life of a steerable run. Mutually exclusive with it: a stream held
+   *  open for steering never signals end-of-prompt, and the CLI would wait for
+   *  input that is never coming and die on the timeout. */
+  stdinPrompt?: string;
   /** When set, the sandbox runner mounts a WRITABLE directory at
    *  `captureFile.containerDir` and, after the run, reads `<containerDir>/<fileName>`
    *  back out as `CliExecutionResult.capturedLog`. Used to recover a CLI's own log

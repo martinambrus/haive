@@ -138,6 +138,9 @@ export interface SandboxRunSpec {
   /** Written to the container's stdin immediately after start (the prompt as an
    *  NDJSON user-message). Only used when interactive. */
   stdinInitial?: string;
+  /** The prompt when it is too large for argv; the runner writes it and closes
+   *  stdin. See CliCommandSpec.stdinPrompt. */
+  stdinPrompt?: string;
   /** Receives the container's writable stdin so the caller can inject more
    *  input mid-run. Only invoked when interactive. */
   onStdinWritable?: (writable: NodeJS.WritableStream) => void;
@@ -336,6 +339,7 @@ export async function runInSandbox(
       signal: spec.signal,
       interactive: spec.interactive,
       stdinInitial: spec.stdinInitial,
+      stdinPrompt: spec.stdinPrompt,
       onStdinWritable: spec.onStdinWritable,
     });
     // Read the captured log back out of the volume (best-effort, tail-capped). Done

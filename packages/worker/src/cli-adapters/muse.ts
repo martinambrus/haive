@@ -92,20 +92,21 @@ export class MuseAdapter extends BaseCliAdapter {
     const model = provider.model ?? env.ANTHROPIC_MODEL ?? this.defaultModel;
     if (model) env.ANTHROPIC_MODEL = model;
     const steering = opts.steeringMode === true;
+    const invocation = claudeFamilyArgs({
+      steering,
+      prompt,
+      disallowedTools: opts.disallowedTools,
+      disableTools: opts.disableTools,
+    });
     const spec: CliCommandSpec = {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(
-        provider,
-        claudeFamilyArgs({
-          steering,
-          prompt,
-          disallowedTools: opts.disallowedTools,
-          disableTools: opts.disableTools,
-        }),
-      ),
+      args: this.mergedArgs(provider, invocation.args),
       env,
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',
+      // Only when the prompt was too large for argv; steering delivers it as a
+      // stdin user-message and leaves this unset.
+      ...(invocation.stdinPrompt ? { stdinPrompt: invocation.stdinPrompt } : {}),
     };
     if (steering) {
       spec.stdinInitial = steeringUserMessageLine(prompt);

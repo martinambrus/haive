@@ -6,6 +6,7 @@ import type {
   EnvInjection,
   InvokeOpts,
 } from './types.js';
+import { deliverPrompt } from './prompt-delivery.js';
 
 // Mirrors shared/catalog's CODEX_EFFORT_SCALE. Duplicated here because the
 // adapter layer reads the scale directly off itself (effortScale is on every
@@ -50,6 +51,10 @@ export class CodexAdapter extends BaseCliAdapter {
     // existed the stored model could not reach the run at all, which made the
     // field look configurable while doing nothing.
     const modelArgs = provider.model ? ['-m', provider.model] : [];
+    // `codex exec` reads instructions from stdin when no PROMPT argument is
+    // given (its own --help says so), which is the only way a plan prompt over
+    // 128 KiB can reach it at all.
+    const delivery = deliverPrompt(prompt, { adapter: 'codex', stdin: true });
     return {
       command: this.resolveExecutable(provider),
       // Haive runs every CLI inside an isolated per-task Docker container, so
@@ -77,8 +82,9 @@ export class CodexAdapter extends BaseCliAdapter {
         ...reasoningArgs,
         ...modelArgs,
         '--skip-git-repo-check',
-        prompt,
+        ...delivery.argv,
       ]),
+      ...(delivery.stdinPrompt ? { stdinPrompt: delivery.stdinPrompt } : {}),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
       outputFormat: 'codex-jsonl',

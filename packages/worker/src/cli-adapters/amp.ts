@@ -1,5 +1,6 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
+import { deliverPrompt } from './prompt-delivery.js';
 
 export class AmpAdapter extends BaseCliAdapter {
   readonly providerName = 'amp' as const;
@@ -20,6 +21,8 @@ export class AmpAdapter extends BaseCliAdapter {
     prompt: string,
     opts: InvokeOpts,
   ): CliCommandSpec {
+    // amp's own --help: the prompt arrives "as an argument, or via stdin".
+    const delivery = deliverPrompt(prompt, { adapter: 'amp', stdin: true });
     return {
       command: this.resolveExecutable(provider),
       // amp auto-promotes to execute mode when stdout is redirected, but
@@ -37,12 +40,15 @@ export class AmpAdapter extends BaseCliAdapter {
         '--settings-file',
         '/etc/haive-amp-settings.json',
         '-x',
-        prompt,
+        ...delivery.argv,
         '--stream-json',
       ]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',
+      // Set only when the prompt was too large for argv; `-x` then carries no
+      // value and amp reads the message from stdin, which its --help documents.
+      ...(delivery.stdinPrompt ? { stdinPrompt: delivery.stdinPrompt } : {}),
     };
   }
 

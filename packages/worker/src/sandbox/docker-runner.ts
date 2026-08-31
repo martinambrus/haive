@@ -78,6 +78,9 @@ export interface DockerRunOpts {
   /** Written to the container's stdin immediately after start. Only used when
    *  interactive (e.g. the prompt as an NDJSON user-message). */
   stdinInitial?: string;
+  /** The prompt, when it is too large to pass as an argument. Written once and
+   *  the stream closed; see CliCommandSpec.stdinPrompt. */
+  stdinPrompt?: string;
   /** Receives the writable attached to the container's stdin so the caller can
    *  inject more input mid-run. Only invoked when interactive. */
   onStdinWritable?: (writable: NodeJS.WritableStream) => void;
@@ -136,6 +139,9 @@ async function spawnAndCollect(
     env?: Record<string, string>;
     interactive?: boolean;
     stdinInitial?: string;
+    /** The prompt when it is too large for argv; written once, then stdin is
+     *  closed. See CliCommandSpec.stdinPrompt. */
+    stdinPrompt?: string;
     onStdinWritable?: (writable: NodeJS.WritableStream) => void;
   },
 ): Promise<{
@@ -154,10 +160,21 @@ async function spawnAndCollect(
     let errorMessage: string | undefined;
 
     const interactive = opts.interactive === true;
+    // A prompt delivered over stdin needs the pipe just as much as a steerable
+    // run does, but for one write rather than a conversation.
+    const needsStdin = interactive || typeof opts.stdinPrompt === 'string';
     const child = spawn(command, args, {
-      stdio: [interactive ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      stdio: [needsStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...opts.env },
     });
+
+    if (!interactive && typeof opts.stdinPrompt === 'string' && child.stdin) {
+      child.stdin.on('error', () => {});
+      // Written and CLOSED. Without the end() the CLI waits for more input and
+      // the run dies on its timeout instead — which reads as a slow model rather
+      // than a wiring mistake, so it is the one part of this worth stating.
+      child.stdin.end(opts.stdinPrompt);
+    }
 
     if (interactive && child.stdin) {
       // Swallow EPIPE: stdin can close (container exits, or we end it on the
@@ -395,6 +412,7 @@ export const defaultDockerRunner: DockerRunner = {
         signal: opts.signal,
         interactive: opts.interactive,
         stdinInitial: opts.stdinInitial,
+        stdinPrompt: opts.stdinPrompt,
         onStdinWritable: opts.onStdinWritable,
       });
       if (result.timedOut || result.exitCode === null) await forceRemove();
@@ -435,6 +453,7 @@ export const defaultDockerRunner: DockerRunner = {
       signal: opts.signal,
       interactive: opts.interactive,
       stdinInitial: opts.stdinInitial,
+      stdinPrompt: opts.stdinPrompt,
       onStdinWritable: opts.onStdinWritable,
     });
     if (result.timedOut || result.exitCode === null) await forceRemove();
