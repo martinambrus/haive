@@ -2,9 +2,9 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 const { spawnMock, calls } = vi.hoisted(() => {
-  const calls: { stdio: unknown; written: string[]; ended: boolean }[] = [];
+  const calls: { args: string[]; stdio: unknown; written: string[]; ended: boolean }[] = [];
   const spawnMock = vi.fn((_cmd: string, _args: string[], opts: { stdio: unknown }) => {
-    const rec = { stdio: opts.stdio, written: [] as string[], ended: false };
+    const rec = { args: _args, stdio: opts.stdio, written: [] as string[], ended: false };
     calls.push(rec);
     const child = new EventEmitter() as EventEmitter & Record<string, unknown>;
     const mkStream = () => Object.assign(new EventEmitter(), { setEncoding: () => {} });
@@ -60,5 +60,38 @@ describe('a prompt delivered over stdin', () => {
     await run({ interactive: true, stdinInitial: '{"type":"user"}\n' });
     expect(calls[0]!.ended).toBe(false);
     expect(calls[0]!.written.join('')).toContain('user');
+  });
+});
+
+describe('the container gets a stdin to read', () => {
+  beforeEach(() => {
+    calls.length = 0;
+  });
+
+  // The node-side pipe above is only half the wiring. Docker gives a container no
+  // stdin unless asked, so without these the prompt was written into a stream
+  // nothing was reading: the pipe existed, the write succeeded, and the CLI still
+  // hung until the run timed out. Asserting the pipe alone is what hid it.
+  it('passes -i to docker run when a prompt goes over stdin', async () => {
+    await run({ stdinPrompt: 'a huge prompt' });
+    const args = calls[0]!.args;
+    expect(args[0]).toBe('run');
+    expect(args).toContain('-i');
+  });
+
+  it('passes -i to docker create on the multi-network path', async () => {
+    // `docker start -a` cannot attach stdin to a container created without
+    // OpenStdin, so the flag has to be on create — it cannot be added later.
+    await run({ stdinPrompt: 'a huge prompt', connectNetworks: ['net-a'] });
+    const create = calls.find((c) => c.args[0] === 'create')!;
+    expect(create.args).toContain('-i');
+    const start = calls.find((c) => c.args[0] === 'start')!;
+    expect(start.args).toContain('--interactive');
+  });
+
+  it('adds no stdin flag to an ordinary run', async () => {
+    // Every run that sends nothing on stdin must spawn exactly as before.
+    await run({});
+    expect(calls[0]!.args).not.toContain('-i');
   });
 });

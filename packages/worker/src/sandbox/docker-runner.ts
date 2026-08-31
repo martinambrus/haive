@@ -399,11 +399,19 @@ export const defaultDockerRunner: DockerRunner = {
         () => undefined,
       );
 
+    // Attaching the container's stdin is needed by BOTH stdin users, not just
+    // steering: `stdinPrompt` writes the prompt once and closes. Gating this on
+    // `interactive` alone opened a node-side pipe into a container docker had
+    // given no stdin, so the prompt was written into a stream nothing read and
+    // the CLI sat waiting until the run timed out — a hang that looks like a slow
+    // model. Every adapter that delivers a large prompt over stdin depends on it.
+    const attachStdin = opts.interactive === true || typeof opts.stdinPrompt === 'string';
+
     // Plain path: a single `docker run`. `-i` keeps the container's stdin open
-    // for mid-run steering when interactive (no `-t`: NDJSON wants a clean pipe).
+    // (no `-t`: NDJSON wants a clean pipe).
     if (!opts.connectNetworks?.length) {
       const runArgs = ['run', '--rm'];
-      if (opts.interactive) runArgs.push('-i');
+      if (attachStdin) runArgs.push('-i');
       runArgs.push('--name', containerName, ...flagArgs, opts.image, ...opts.cmd);
       const result = await spawnAndCollect('docker', runArgs, {
         timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
@@ -425,7 +433,7 @@ export const defaultDockerRunner: DockerRunner = {
     // `-i` on create is mandatory for stdin attach: `docker start -a` cannot
     // attach stdin to a container created without OpenStdin (Hole A).
     const createArgs = ['create', '--rm'];
-    if (opts.interactive) createArgs.push('-i');
+    if (attachStdin) createArgs.push('-i');
     createArgs.push('--name', containerName, ...flagArgs, opts.image, ...opts.cmd);
     const created = await spawnAndCollect('docker', createArgs, { timeoutMs: 30_000 });
     if (created.exitCode !== 0) {
@@ -444,7 +452,7 @@ export const defaultDockerRunner: DockerRunner = {
       }
     }
     const startArgs = ['start', '--attach'];
-    if (opts.interactive) startArgs.push('--interactive');
+    if (attachStdin) startArgs.push('--interactive');
     startArgs.push(containerName);
     const result = await spawnAndCollect('docker', startArgs, {
       timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
