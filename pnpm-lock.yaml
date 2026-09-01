@@ -220,8 +220,8 @@ importers:
         specifier: ^9.0.0
         version: 9.0.0
       lucide-react:
-        specifier: ^1.30.0
-        version: 1.31.0(react@19.2.8)
+        specifier: ^1.37.0
+        version: 1.37.0(react@19.2.8)
       mermaid:
         specifier: ^11.16.1
         version: 11.16.1
@@ -2449,8 +2449,8 @@ packages:
   lowlight@3.3.0:
     resolution: {integrity: sha512-0JNhgFoPvP6U6lE/UdVsSq99tn6DhjjpAj5MxG49ewd2mOBVtwWYIT8ClyABhq198aXXODMU6Ox8DrGy/CpTZQ==}
 
-  lucide-react@1.31.0:
-    resolution: {integrity: sha512-G8u2eEtoHUnUa9f8lbvqDhCiORMnYLdUEo06EEG9MQvHQrInKcX3Pa2TH39MM5qyzRcWETxB0+aOwAPI1g1kEg==}
+  lucide-react@1.37.0:
+    resolution: {integrity: sha512-LPsB4rD1TD6wZu1djKOf9vUnS1jTNaHbolXebXDgiTdb6jeA1agIJhJsIybCmjKmQClcOaal1o1OaiYahEftyQ==}
     peerDependencies:
       react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
@@ -5105,7 +5105,7 @@ snapshots:
       devlop: 1.1.0
       highlight.js: 11.11.1
 
-  lucide-react@1.31.0(react@19.2.8):
+  lucide-react@1.37.0(react@19.2.8):
     dependencies:
       react: 19.2.8
 
