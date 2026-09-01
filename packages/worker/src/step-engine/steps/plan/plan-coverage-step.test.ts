@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { planCoverageStep } from './02-plan-coverage.js';
+import { continuationDispatchCount, planCoverageStep } from './02-plan-coverage.js';
 import { PLAN_AGENT_TIMEOUT_MS } from './01-plan-build.js';
 import { findStructuralGaps } from './plan-coverage-scan.js';
 import type { FormSchema } from '@haive/shared';
@@ -16,6 +16,12 @@ const detected = (over: Partial<Detected> = {}): Detected =>
     planMarkdown: '# Plan',
     nodeCount: 791,
     docName: 'spec.md',
+    buildDetect: null,
+    buildFormValues: { depthBudget: 6, breadthCap: 12 },
+    buildStopped: 'complete',
+    frontierRemaining: 0,
+    frontierPreview: [],
+    continuationBatch: 1,
     ...over,
   }) as Detected;
 
@@ -47,6 +53,26 @@ describe('the coverage gate', () => {
     expect(form!.fields.map((f) => f.id)).toEqual(['decision', 'items', 'note']);
   });
 
+  it('parks when the builder stopped with a live frontier', () => {
+    const form = formOf(
+      detected({
+        buildStopped: 'node_budget',
+        frontierRemaining: 512,
+        frontierPreview: ['Unfinished branch'],
+      }),
+    );
+    expect(form).not.toBeNull();
+    expect(form!.fields.map((field) => field.id)).toEqual(['decision']);
+    const decision = form!.fields[0] as {
+      default?: string;
+      options: { value: string }[];
+    };
+    expect(decision.default).toBe('continue');
+    expect(decision.options.map((option) => option.value)).toEqual(['continue', 'accept']);
+    expect(form!.description).toContain('512 component node(s)');
+    expect(form!.description).toContain('bounded batch');
+  });
+
   it('pre-ticks a known loss but not a heuristic guess', () => {
     // A lost decomposition is a fact the build recorded. An uncovered section is
     // a guess from term matching, so it must not be actioned by default.
@@ -76,6 +102,17 @@ describe('the coverage gate', () => {
       detected({ structural: [{ nodeId: 'n1', title: 'X', reason: 'lost' }], docName: null }),
     );
     expect(form!.description).not.toContain('undefined');
+  });
+});
+
+describe('bounded coverage continuation', () => {
+  it('never dispatches more than twelve agents in one wave', () => {
+    expect(continuationDispatchCount(512, 0)).toBe(12);
+  });
+
+  it('clamps the last wave to sixty agents per approval', () => {
+    expect(continuationDispatchCount(512, 58)).toBe(2);
+    expect(continuationDispatchCount(512, 60)).toBe(0);
   });
 });
 
@@ -130,6 +167,21 @@ describe('findStructuralGaps', () => {
         reason: 'its decomposition terminal failed before producing children',
       },
     ]);
+  });
+
+  it('flags a failed bounded-continuation terminal', () => {
+    const gaps = findStructuralGaps(
+      nodes,
+      [
+        {
+          agentId: `plan-continue-b2-${A}-p4`,
+          status: 'failed',
+          errorMessage: 'CLI process exceeded its time budget (60m).',
+        },
+      ],
+      P,
+    );
+    expect(gaps.map((gap) => gap.nodeId)).toEqual([A]);
   });
 
   it('does not mistake a clean atomic reply for a failed decomposition', () => {

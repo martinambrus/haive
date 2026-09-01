@@ -151,7 +151,7 @@ function expandedNodeId(agentId: string): string | null {
   // greedy class swallowed the hyphen before the `-p1` wave suffix and returned
   // an id that matched no node.
   return (
-    /(?:plan-expand|cover-node)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(
+    /(?:plan-expand|cover-node|plan-continue-b\d+)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(
       agentId,
     )?.[1] ?? null
   );

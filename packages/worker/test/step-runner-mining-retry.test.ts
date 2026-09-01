@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
-import { MiningRetryError, MiningWaveError } from '../src/step-engine/step-definition.js';
+import {
+  MiningRetryError,
+  MiningWaveError,
+  ReopenStepFormError,
+} from '../src/step-engine/step-definition.js';
 import type { StepApplyArgs, StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
@@ -424,6 +428,70 @@ function noRetryMiningStep(applyCalls: StepApplyArgs[]): StepDefinition {
     },
   } as unknown as StepDefinition;
 }
+
+function reopeningFormStep(): StepDefinition {
+  return {
+    metadata: {
+      id: 'test-mining-step',
+      workflowType: 'workflow',
+      index: 0,
+      title: 'test',
+      description: 'test',
+      requiresCli: false,
+    },
+    async detect() {
+      return { remaining: 42 };
+    },
+    form(_ctx, detected) {
+      return {
+        title: 'More work remains',
+        description: `${(detected as { remaining: number }).remaining} items remain`,
+        fields: [
+          {
+            type: 'radio',
+            id: 'decision',
+            label: 'Continue?',
+            options: [
+              { value: 'continue', label: 'Continue' },
+              { value: 'accept', label: 'Accept' },
+            ],
+            required: true,
+          },
+        ],
+      };
+    },
+    async apply() {
+      throw new ReopenStepFormError('bounded batch finished');
+    },
+  } as StepDefinition;
+}
+
+describe('advanceStep apply-to-form continuation', () => {
+  it('refreshes detection, clears the prior answer, and parks the same step', async () => {
+    const state = freshState([miningRow('prior-batch-agent', 1)]);
+    state.taskStepRow.formSchema = {
+      title: 'Old form',
+      fields: [],
+    };
+    state.taskStepRow.formValues = { decision: 'continue' };
+
+    const result = await run(makeMockDb(state), reopeningFormStep(), []);
+
+    expect(result.status).toBe('waiting_form');
+    expect(state.taskStepRow.status).toBe('waiting_form');
+    expect(state.taskStepRow.formValues).toBeNull();
+    expect(state.taskStepRow.detectOutput).toEqual({ remaining: 42 });
+    expect(state.taskStepRow.formSchema).toMatchObject({
+      title: 'More work remains',
+      description: '42 items remain',
+    });
+    expect(
+      state.updates.some(
+        (update) => update.table === 'task_step_agent_minings' && update.consumedAt instanceof Date,
+      ),
+    ).toBe(true);
+  });
+});
 
 describe('advanceStep agentMining user-requested re-run', () => {
   it('re-runs only the marked terminal and leaves a done sibling alone', async () => {

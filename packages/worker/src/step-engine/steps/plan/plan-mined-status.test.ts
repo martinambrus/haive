@@ -3,6 +3,7 @@ import {
   APPLY_FAILURE_PREFIX,
   askedState,
   computeFrontier,
+  planWaveDispatchCount,
   withMinedStatus,
 } from './01-plan-build.js';
 import { rollUpStatus, type PlanNodeStatus } from '@haive/shared';
@@ -157,6 +158,13 @@ describe('askedState and an expansion that never landed', () => {
     expect(asked.has(A)).toBe(false);
   });
 
+  it('still charges a rejected patch against the terminal safety budget', () => {
+    const { expandDispatched } = askedState([
+      { agentId: `plan-expand-${A}-p1`, errorMessage: `${APPLY_FAILURE_PREFIX} node not found` },
+    ]);
+    expect(expandDispatched).toBe(1);
+  });
+
   it('leaves a CLI failure asked, which the retry machinery already owns', () => {
     // Only an APPLY failure re-opens a node here; a dead CLI run is re-rolled by
     // the runner, and treating it as unasked too would fan out twice.
@@ -185,5 +193,19 @@ describe('askedState and an expansion that never landed', () => {
       { agentId: `plan-expand-${A}-p3`, errorMessage: `${APPLY_FAILURE_PREFIX} boom` },
     ]);
     expect(waves).toBe(0);
+  });
+});
+
+describe('plan expansion safety budget', () => {
+  it('clamps the final wave to the exact remaining total budget', () => {
+    expect(planWaveDispatchCount(100, 58)).toBe(2);
+  });
+
+  it('dispatches nothing once the total budget is spent', () => {
+    expect(planWaveDispatchCount(100, 60)).toBe(0);
+  });
+
+  it('still caps an ordinary wave at twelve agents', () => {
+    expect(planWaveDispatchCount(100, 0)).toBe(12);
   });
 });

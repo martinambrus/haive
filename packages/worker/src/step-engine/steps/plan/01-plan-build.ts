@@ -92,14 +92,25 @@ export interface PlanBuildApply {
   failures: string[];
 }
 
-function depthBudget(values: FormValues): number {
+export function depthBudget(values: FormValues): number {
   const n = Number(values.depthBudget);
   return Number.isFinite(n) && n >= 1 && n <= 6 ? Math.floor(n) : DEFAULT_DEPTH;
 }
 
-function breadthCap(values: FormValues): number {
+export function breadthCap(values: FormValues): number {
   const n = Number(values.breadthCap);
   return Number.isFinite(n) && n >= 2 && n <= 12 ? Math.floor(n) : DEFAULT_BREADTH;
+}
+
+/** Number of agents the next build wave may dispatch without crossing either
+ *  safety cap. Keeping this calculation in one place prevents the last wave
+ *  from overshooting MAX_TOTAL_EXPAND (for example 58 already asked + a full
+ *  12-agent wave used to land at 70). */
+export function planWaveDispatchCount(frontierCount: number, expandDispatched: number): number {
+  return Math.max(
+    0,
+    Math.min(MAX_AGENTS_PER_WAVE, frontierCount, MAX_TOTAL_EXPAND - expandDispatched),
+  );
 }
 
 /**
@@ -190,10 +201,15 @@ export function askedState(results: { agentId: string; errorMessage?: string | n
   asked: Set<string>;
   waves: number;
   expandAsked: number;
+  expandDispatched: number;
 } {
   const asked = new Set<string>();
   let waves = 0;
+  let expandDispatched = 0;
   for (const r of results) {
+    const m = EXPAND_AGENT_RE.exec(r.agentId);
+    if (!m) continue;
+    expandDispatched += 1;
     // An expansion whose patch never applied did not answer the question, so the
     // node has not really been asked and returns to the frontier for a later
     // wave. MEASURED: an agent self-corrected in prose, the retracted draft was
@@ -206,13 +222,10 @@ export function askedState(results: { agentId: string; errorMessage?: string | n
     // the retries either way, so a node that keeps failing is left alone rather
     // than spinning.
     if (r.errorMessage && r.errorMessage.startsWith(APPLY_FAILURE_PREFIX)) continue;
-    const m = EXPAND_AGENT_RE.exec(r.agentId);
-    if (m) {
-      asked.add(m[1]!);
-      waves = Math.max(waves, Number(m[2]));
-    }
+    asked.add(m[1]!);
+    waves = Math.max(waves, Number(m[2]));
   }
-  return { asked, waves, expandAsked: asked.size };
+  return { asked, waves, expandAsked: asked.size, expandDispatched };
 }
 
 async function listKbFiles(ctx: StepContext): Promise<string[]> {
@@ -279,7 +292,7 @@ function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string {
     .join('\n');
 }
 
-function buildExpandPrompt(
+export function buildExpandPrompt(
   d: PlanBuildDetect,
   values: FormValues,
   node: PlanNodeSkeleton,
@@ -617,7 +630,7 @@ export function createPlanBuildStep(
         loadPlanSkeletons(ctx.db, repositoryId),
         loadPlanEdges(ctx.db, repositoryId),
       ]);
-      const { asked, waves, expandAsked } = askedState(cumulative);
+      const { asked, waves, expandDispatched } = askedState(cumulative);
       const root = nodes.find((n) => n.parentId === null) ?? null;
       // There is nothing for the coverage step to inspect or repair when the
       // outline terminal exhausted its retries before creating even the root.
@@ -638,14 +651,17 @@ export function createPlanBuildStep(
         .map((r) => `${r.agentTitle ?? r.agentId}: ${r.errorMessage ?? 'failed'}`);
 
       const waveBudgetLeft = waves < MAX_WAVES;
-      const nodeBudgetLeft = expandAsked < MAX_TOTAL_EXPAND;
+      const nodeBudgetLeft = expandDispatched < MAX_TOTAL_EXPAND;
       // miningWaveExhausted = the runner could dispatch none of the last wave's
       // agents. Asking again would spin, so the build settles with what it has.
       const exhausted = args.miningWaveExhausted === true;
 
       if (frontierAll.length > 0 && waveBudgetLeft && nodeBudgetLeft && !exhausted && root) {
         const nextWave = waves + 1;
-        const slice = frontierAll.slice(0, MAX_AGENTS_PER_WAVE);
+        const slice = frontierAll.slice(
+          0,
+          planWaveDispatchCount(frontierAll.length, expandDispatched),
+        );
         // Rendered ONCE for the whole wave: every agent gets the same view of the
         // plan, which is what stops two siblings inventing the same child.
         const planMarkdown = await renderPlanMarkdown(ctx.db, repositoryId, {
@@ -675,7 +691,7 @@ export function createPlanBuildStep(
           : exhausted
             ? 'dispatch_failed'
             : !waveBudgetLeft || !nodeBudgetLeft
-              ? frontierAll.length > 0 && expandAsked >= MAX_TOTAL_EXPAND
+              ? frontierAll.length > 0 && expandDispatched >= MAX_TOTAL_EXPAND
                 ? 'node_budget'
                 : 'wave_budget'
               : 'complete';

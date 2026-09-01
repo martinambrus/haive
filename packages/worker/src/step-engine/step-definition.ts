@@ -360,6 +360,23 @@ export class MiningWaveError extends Error {
   }
 }
 
+/**
+ * Throw from apply() when a bounded unit of user-approved work finished but the
+ * same step still has another decision to present. The runner refreshes detect(),
+ * rebuilds the form, clears the prior answer, and parks on `waiting_form` without
+ * finalizing the step.
+ *
+ * This is intentionally different from a mining wave: MiningWaveError is an
+ * automated continuation inside one approval, while this signal returns control
+ * to the person before another bounded batch is dispatched.
+ */
+export class ReopenStepFormError extends Error {
+  constructor(message = 'step has another decision to present') {
+    super(message);
+    this.name = 'ReopenStepFormError';
+  }
+}
+
 export interface StepLoopPassRecord {
   iteration: number;
   llmOutput: unknown;

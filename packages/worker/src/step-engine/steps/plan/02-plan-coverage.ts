@@ -3,14 +3,23 @@ import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
 import { loadPlanSkeletons, renderPlanMarkdown } from '@haive/shared/plan';
-import type { StepDefinition } from '../../step-definition.js';
-import { MiningWaveError } from '../../step-definition.js';
+import type { PlanNodeSkeleton } from '@haive/shared/plan';
+import type { AgentMiningResult, StepContext, StepDefinition } from '../../step-definition.js';
+import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
+import { augmentPromptWithAttachments } from '../../attachments-context.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import {
   APPLY_FAILURE_PREFIX,
   PARTIAL_APPLY_PREFIX,
   PLAN_AGENT_TIMEOUT_MS,
+  askedState,
+  buildExpandPrompt,
+  computeFrontier,
+  depthBudget,
+  type PlanBuildApply,
+  type PlanBuildDetect,
+  withMinedStatus,
 } from './01-plan-build.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
 import {
@@ -49,6 +58,18 @@ interface CoverageDetect {
   planMarkdown: string;
   nodeCount: number;
   docName: string | null;
+  /** The builder's original controls are reused by continuation agents so a
+   *  retry of step 2 keeps the same requested depth and breadth. */
+  buildDetect: PlanBuildDetect | null;
+  buildFormValues: FormValues;
+  buildStopped: PlanBuildApply['stopped'] | null;
+  /** Live, unasked component leaves above the requested depth. Unlike the
+   *  builder's output snapshot, this is recomputed after every bounded batch. */
+  frontierRemaining: number;
+  frontierPreview: string[];
+  /** Agent ids carry this number, separating each user-approved batch from the
+   *  previous one while retaining all rows as durable asked-history. */
+  continuationBatch: number;
 }
 
 interface CoverageApply {
@@ -56,7 +77,64 @@ interface CoverageApply {
   structural: number;
   sections: number;
   dispatched: number;
-  decision: 'clean' | 'accepted' | 'redecomposed';
+  frontierRemaining: number;
+  decision: 'clean' | 'accepted' | 'redecomposed' | 'continued';
+}
+
+type MiningRow = {
+  agentId: string;
+  status: 'pending' | 'running' | 'done' | 'failed';
+  errorMessage: string | null;
+};
+
+/** Each click approves at most this much additional model work. The wave cap
+ *  keeps simultaneous terminals modest; the batch cap makes the form a real
+ *  safety gate instead of permission to exhaust an arbitrarily large frontier. */
+const CONTINUATION_AGENTS_PER_WAVE = 12;
+const CONTINUATION_AGENTS_PER_BATCH = 60;
+const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const CONTINUATION_AGENT_RE = new RegExp(`^plan-continue-b(\\d+)-(${UUID_SOURCE})-p(\\d+)$`, 'i');
+
+export function continuationAgentId(batch: number, nodeId: string, wave: number): string {
+  return `plan-continue-b${batch}-${nodeId}-p${wave}`;
+}
+
+export function continuationDispatchCount(frontierCount: number, agentsUsed: number): number {
+  return Math.max(
+    0,
+    Math.min(
+      CONTINUATION_AGENTS_PER_WAVE,
+      frontierCount,
+      CONTINUATION_AGENTS_PER_BATCH - agentsUsed,
+    ),
+  );
+}
+
+function continuationState(rows: Pick<MiningRow, 'agentId' | 'errorMessage'>[]): {
+  asked: Set<string>;
+  maxBatch: number;
+  wavesByBatch: Map<number, number>;
+  agentsByBatch: Map<number, number>;
+} {
+  const asked = new Set<string>();
+  const wavesByBatch = new Map<number, number>();
+  const agentsByBatch = new Map<number, number>();
+  let maxBatch = 0;
+  for (const row of rows) {
+    const match = CONTINUATION_AGENT_RE.exec(row.agentId);
+    if (!match) continue;
+    const batch = Number(match[1]);
+    const nodeId = match[2]!;
+    const wave = Number(match[3]);
+    maxBatch = Math.max(maxBatch, batch);
+    wavesByBatch.set(batch, Math.max(wavesByBatch.get(batch) ?? 0, wave));
+    agentsByBatch.set(batch, (agentsByBatch.get(batch) ?? 0) + 1);
+    // A rejected patch did not answer the question and may be re-asked in a
+    // later wave. CLI failures and clean empty replies are terminal answers;
+    // coverage reports the former as a structural loss instead of spinning.
+    if (!row.errorMessage?.startsWith(APPLY_FAILURE_PREFIX)) asked.add(nodeId);
+  }
+  return { asked, maxBatch, wavesByBatch, agentsByBatch };
 }
 
 /** One line per gap in the gate's list, and the value the multi-select stores. */
@@ -65,6 +143,254 @@ const sectionKey = (c: CoverageCandidate): string => `doc:${c.line}`;
 /** One derivation, used by both the dispatcher and the already-handled filter —
  *  two spellings of this would silently stop matching. */
 const sectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
+
+async function loadMiningRows(ctx: StepContext, stepId: string): Promise<MiningRow[]> {
+  return ctx.db
+    .select({
+      agentId: schema.taskStepAgentMinings.agentId,
+      status: schema.taskStepAgentMinings.status,
+      errorMessage: schema.taskStepAgentMinings.errorMessage,
+    })
+    .from(schema.taskStepAgentMinings)
+    .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId))
+    .where(and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, stepId)));
+}
+
+function liveFrontier(
+  nodes: PlanNodeSkeleton[],
+  ctx: StepContext,
+  buildFormValues: FormValues,
+  buildRows: MiningRow[],
+  coverageRows: MiningRow[],
+): PlanNodeSkeleton[] {
+  const buildAsked = askedState(buildRows).asked;
+  const root = nodes.find((node) => node.parentId === null);
+  // The root outline is the builder's first question even though it has a
+  // different agent-id shape from expansion waves.
+  if (root) buildAsked.add(root.id);
+  const continued = continuationState(coverageRows).asked;
+  return computeFrontier(nodes, depthBudget(buildFormValues), ctx.taskId).filter(
+    (node) => !buildAsked.has(node.id) && !continued.has(node.id),
+  );
+}
+
+function hasCoverageWork(detected: CoverageDetect): boolean {
+  return (
+    detected.frontierRemaining > 0 || detected.structural.length > 0 || detected.sections.length > 0
+  );
+}
+
+async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
+  const [task] = await ctx.db
+    .select({ repositoryId: schema.tasks.repositoryId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, ctx.taskId))
+    .limit(1);
+  const repositoryId = task?.repositoryId ?? null;
+  const empty: CoverageDetect = {
+    repositoryId,
+    structural: [],
+    sections: [],
+    sectionBodies: {},
+    planMarkdown: '',
+    nodeCount: 0,
+    docName: null,
+    buildDetect: null,
+    buildFormValues: {},
+    buildStopped: null,
+    frontierRemaining: 0,
+    frontierPreview: [],
+    continuationBatch: 1,
+  };
+  if (!repositoryId) return empty;
+
+  const [buildStep] = await ctx.db
+    .select({
+      detectOutput: schema.taskSteps.detectOutput,
+      formValues: schema.taskSteps.formValues,
+      output: schema.taskSteps.output,
+    })
+    .from(schema.taskSteps)
+    .where(
+      and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '01-plan-build')),
+    )
+    .limit(1);
+  const buildDetect = (buildStep?.detectOutput ?? null) as PlanBuildDetect | null;
+  const buildFormValues = (buildStep?.formValues ?? {}) as FormValues;
+  const buildOutput = (buildStep?.output ?? null) as PlanBuildApply | null;
+
+  const skeletons = await loadPlanSkeletons(ctx.db, repositoryId);
+  if (skeletons.length === 0) {
+    return {
+      ...empty,
+      buildDetect,
+      buildFormValues,
+      buildStopped: buildOutput?.stopped ?? null,
+    };
+  }
+
+  // The build's OWN record of what it lost, plus this gate's continuation
+  // rows. Both outlive step-output retries and make failed branches durable.
+  const [buildRows, coverageRows] = await Promise.all([
+    loadMiningRows(ctx, '01-plan-build'),
+    loadMiningRows(ctx, '02-plan-coverage'),
+  ]);
+
+  // What a previous pass of THIS step already re-decomposed. Only a patch that
+  // actually landed counts; an agent whose own patch failed remains outstanding.
+  const handled = new Set(
+    coverageRows
+      .filter((row) => row.status === 'done' && !row.errorMessage)
+      .map((row) => row.agentId),
+  );
+
+  const structural = findStructuralGaps(
+    skeletons.map((node) => ({
+      id: node.id,
+      title: node.title,
+      kind: String(node.kind),
+      parentId: node.parentId,
+    })),
+    [...buildRows, ...coverageRows],
+    { failure: APPLY_FAILURE_PREFIX, partial: PARTIAL_APPLY_PREFIX },
+  ).filter((gap) => !handled.has(`cover-node-${gap.nodeId}`));
+
+  const frontier = liveFrontier(skeletons, ctx, buildFormValues, buildRows, coverageRows);
+
+  // The source document, when this build had one. A from_repo build has no
+  // single authority to check against, so the section half simply does not run.
+  let sections: CoverageCandidate[] = [];
+  const sectionBodies: Record<string, string> = {};
+  let docName: string | null = null;
+  const [attachment] = await ctx.db
+    .select({
+      filename: schema.taskAttachments.filename,
+      storedPath: schema.taskAttachments.storedPath,
+    })
+    .from(schema.taskAttachments)
+    .where(eq(schema.taskAttachments.taskId, ctx.taskId))
+    .limit(1);
+  if (attachment) {
+    try {
+      const doc = await readFile(attachment.storedPath, 'utf8');
+      const parsed = parseDocSections(doc);
+      const texts = skeletons.map((node) => node.title);
+      const bodies = await ctx.db
+        .select({ id: schema.planNodes.id, body: schema.planNodes.body })
+        .from(schema.planNodes)
+        .where(eq(schema.planNodes.repositoryId, repositoryId));
+      const byId = new Map(bodies.map((body) => [body.id, body.body ?? '']));
+      sections = findCoverageGaps(
+        parsed,
+        skeletons.map((node, index) => `${texts[index] ?? ''} ${byId.get(node.id) ?? ''}`),
+      ).filter((candidate) => !handled.has(sectionAgentId(sectionKey(candidate))));
+      for (const candidate of sections) {
+        sectionBodies[sectionKey(candidate)] =
+          parsed.find((part) => part.line === candidate.line)?.body ?? '';
+      }
+      docName = attachment.filename;
+    } catch (err) {
+      // A document we cannot read is not a coverage failure. Report the
+      // structural/frontier halves rather than failing over a missing file.
+      ctx.logger.warn({ err }, 'coverage: could not read the source document');
+    }
+  }
+
+  return {
+    repositoryId,
+    structural,
+    sections,
+    sectionBodies,
+    planMarkdown: await renderPlanMarkdown(ctx.db, repositoryId, { titlesOnly: true }),
+    nodeCount: skeletons.length,
+    docName,
+    buildDetect,
+    buildFormValues,
+    buildStopped: buildOutput?.stopped ?? null,
+    frontierRemaining: frontier.length,
+    frontierPreview: frontier.slice(0, 20).map((node) => node.title),
+    continuationBatch: continuationState(coverageRows).maxBatch + 1,
+  };
+}
+
+function coverageSelfNodeId(agentId: string): string | null {
+  const recovery = new RegExp(`^cover-node-(${UUID_SOURCE})$`, 'i').exec(agentId)?.[1];
+  return recovery ?? CONTINUATION_AGENT_RE.exec(agentId)?.[2] ?? null;
+}
+
+async function stampMiningError(ctx: StepContext, agentId: string, errorMessage: string) {
+  await ctx.db
+    .update(schema.taskStepAgentMinings)
+    .set({ errorMessage: errorMessage.slice(0, 2000) })
+    .where(
+      and(
+        eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
+        eq(schema.taskStepAgentMinings.agentId, agentId),
+      ),
+    )
+    .catch(() => undefined);
+}
+
+async function foldCoverageResults(
+  ctx: StepContext,
+  detected: CoverageDetect,
+  results: AgentMiningResult[],
+): Promise<{ hadFailure: boolean }> {
+  let hadFailure = false;
+  for (const result of results) {
+    if (result.status !== 'done') {
+      hadFailure = true;
+      continue;
+    }
+    const patch = parsePlanPatch(result.output ?? result.rawOutput);
+    if (!patch) {
+      hadFailure = true;
+      await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} no patch in reply`);
+      continue;
+    }
+    // An empty patch is a legitimate atomic-node verdict. It remains in asked
+    // history so the continuation does not hammer the same node forever.
+    if (patch.ops.length === 0) continue;
+    const self = coverageSelfNodeId(result.agentId);
+    try {
+      const applied = await applyAgentPatch(
+        ctx.db,
+        {
+          ...patch,
+          ops: withMinedStatus(patch.ops, detected.buildDetect?.mode ?? 'from_md'),
+        },
+        {
+          repositoryId: detected.repositoryId!,
+          sourceTaskId: ctx.taskId,
+          retryable: false,
+          ...(self ? { selfNodeId: self } : {}),
+        },
+      );
+      if (applied.dropped.length > 0) {
+        hadFailure = true;
+        await stampMiningError(
+          ctx,
+          result.agentId,
+          `${PARTIAL_APPLY_PREFIX} ${applied.dropped.join('; ')}`,
+        );
+      }
+    } catch (err) {
+      hadFailure = true;
+      const message = err instanceof Error ? err.message : String(err);
+      ctx.logger.warn({ err, agentId: result.agentId }, 'coverage decomposition patch failed');
+      await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} ${message}`);
+    }
+  }
+  return { hadFailure };
+}
+
+async function refreshPlanMirror(ctx: StepContext, repositoryId: string): Promise<void> {
+  try {
+    await writePlanMirror(ctx.db, repositoryId, ctx.repoPath);
+  } catch (err) {
+    ctx.logger.warn({ err }, 'plan mirror write failed after coverage decomposition');
+  }
+}
 
 export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
   metadata: {
@@ -79,136 +405,13 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
     requiresCli: false,
   },
 
-  async detect(ctx): Promise<CoverageDetect> {
-    const [task] = await ctx.db
-      .select({ repositoryId: schema.tasks.repositoryId })
-      .from(schema.tasks)
-      .where(eq(schema.tasks.id, ctx.taskId))
-      .limit(1);
-    const repositoryId = task?.repositoryId ?? null;
-    const empty: CoverageDetect = {
-      repositoryId,
-      structural: [],
-      sections: [],
-      sectionBodies: {},
-      planMarkdown: '',
-      nodeCount: 0,
-      docName: null,
-    };
-    if (!repositoryId) return empty;
-
-    const skeletons = await loadPlanSkeletons(ctx.db, repositoryId);
-    if (skeletons.length === 0) return empty;
-
-    // The build's OWN record of what it lost. Written by 01-plan-build on the
-    // agent rows, which outlive the step output that a retry nulls.
-    const agents = await ctx.db
-      .select({
-        agentId: schema.taskStepAgentMinings.agentId,
-        status: schema.taskStepAgentMinings.status,
-        errorMessage: schema.taskStepAgentMinings.errorMessage,
-      })
-      .from(schema.taskStepAgentMinings)
-      .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId))
-      .where(
-        and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '01-plan-build')),
-      );
-
-    // What a previous pass of THIS step already re-decomposed. The build's agent
-    // rows record "1 operation dropped" forever — that fact does not stop being
-    // true once the gap is filled — so without this the report would re-offer
-    // work already done, and running it twice would grow the plan for no reason.
-    // Only a pass that actually LANDED counts: an agent whose own patch failed
-    // leaves the item outstanding.
-    const handled = new Set(
-      (
-        await ctx.db
-          .select({
-            agentId: schema.taskStepAgentMinings.agentId,
-            status: schema.taskStepAgentMinings.status,
-            errorMessage: schema.taskStepAgentMinings.errorMessage,
-          })
-          .from(schema.taskStepAgentMinings)
-          .innerJoin(
-            schema.taskSteps,
-            eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId),
-          )
-          .where(
-            and(
-              eq(schema.taskSteps.taskId, ctx.taskId),
-              eq(schema.taskSteps.stepId, '02-plan-coverage'),
-            ),
-          )
-      )
-        .filter((a) => a.status === 'done' && !a.errorMessage)
-        .map((a) => a.agentId),
-    );
-
-    const structural = findStructuralGaps(
-      skeletons.map((n) => ({
-        id: n.id,
-        title: n.title,
-        kind: String(n.kind),
-        parentId: n.parentId,
-      })),
-      agents,
-      { failure: APPLY_FAILURE_PREFIX, partial: PARTIAL_APPLY_PREFIX },
-    ).filter((g) => !handled.has(`cover-node-${g.nodeId}`));
-
-    // The source document, when this build had one. A from_repo build has no
-    // single authority to check against, so the section half simply does not run.
-    let sections: CoverageCandidate[] = [];
-    const sectionBodies: Record<string, string> = {};
-    let docName: string | null = null;
-    const [attachment] = await ctx.db
-      .select({
-        filename: schema.taskAttachments.filename,
-        storedPath: schema.taskAttachments.storedPath,
-      })
-      .from(schema.taskAttachments)
-      .where(eq(schema.taskAttachments.taskId, ctx.taskId))
-      .limit(1);
-    if (attachment) {
-      try {
-        const doc = await readFile(attachment.storedPath, 'utf8');
-        const parsed = parseDocSections(doc);
-        const texts = skeletons.map((n) => n.title);
-        const bodies = await ctx.db
-          .select({ id: schema.planNodes.id, body: schema.planNodes.body })
-          .from(schema.planNodes)
-          .where(eq(schema.planNodes.repositoryId, repositoryId));
-        const byId = new Map(bodies.map((b) => [b.id, b.body ?? '']));
-        sections = findCoverageGaps(
-          parsed,
-          skeletons.map((n, i) => `${texts[i] ?? ''} ${byId.get(n.id) ?? ''}`),
-        ).filter((c) => !handled.has(sectionAgentId(sectionKey(c))));
-        for (const c of sections) {
-          sectionBodies[sectionKey(c)] = parsed.find((p) => p.line === c.line)?.body ?? '';
-        }
-        docName = attachment.filename;
-      } catch (err) {
-        // A document we cannot read is not a coverage failure. Report the
-        // structural half rather than failing the step over a missing file.
-        ctx.logger.warn({ err }, 'coverage: could not read the source document');
-      }
-    }
-
-    return {
-      repositoryId,
-      structural,
-      sections,
-      sectionBodies,
-      planMarkdown: await renderPlanMarkdown(ctx.db, repositoryId, { titlesOnly: true }),
-      nodeCount: skeletons.length,
-      docName,
-    };
-  },
+  detect: detectCoverage,
 
   /** Null when there is nothing to show, so a clean build finishes unattended
    *  exactly as it did before this step existed. */
   form(_ctx, detected): FormSchema | null {
-    const total = detected.structural.length + detected.sections.length;
-    if (total === 0) return null;
+    if (!hasCoverageWork(detected)) return null;
+    const gapTotal = detected.structural.length + detected.sections.length;
 
     const options = [
       ...detected.structural.map((g) => ({
@@ -221,10 +424,44 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       })),
     ];
 
+    const decisionOptions = [
+      ...(gapTotal > 0
+        ? [
+            {
+              value: 'redecompose',
+              label: 'Re-run the decomposition for the items I pick',
+            },
+          ]
+        : []),
+      ...(detected.frontierRemaining > 0
+        ? [
+            {
+              value: 'continue',
+              label: `Continue up to ${CONTINUATION_AGENTS_PER_BATCH} more nodes`,
+            },
+          ]
+        : []),
+      { value: 'accept', label: 'Accept the plan as it is' },
+    ];
+    const defaultDecision =
+      detected.structural.length > 0
+        ? 'redecompose'
+        : detected.frontierRemaining > 0
+          ? 'continue'
+          : 'redecompose';
+    const frontierBody = detected.frontierPreview.map((title) => `- ${title}`).join('\n');
+
     return {
       title: 'Coverage check',
       description: [
-        `The plan has ${detected.nodeCount} nodes. ${total} thing(s) look unfinished:`,
+        `The plan has ${detected.nodeCount} nodes.`,
+        detected.frontierRemaining > 0
+          ? `${detected.frontierRemaining} component node(s) are still eligible for decomposition at the depth you requested${
+              detected.buildStopped && detected.buildStopped !== 'complete'
+                ? `; the builder stopped at its ${detected.buildStopped.replace('_', ' ')} safety limit`
+                : ''
+            }.`
+          : '',
         detected.structural.length > 0
           ? `${detected.structural.length} node(s) whose decomposition was lost or thinned.`
           : '',
@@ -232,15 +469,28 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
           ? `${detected.sections.length} section(s) of ${detected.docName} that no node appears to cover.`
           : '',
         '',
-        'Re-running asks one agent per item to add what is missing. Accepting leaves the plan as it is — nothing here is deleted either way.',
+        detected.frontierRemaining > 0
+          ? `Continuing runs a bounded batch of at most ${CONTINUATION_AGENTS_PER_BATCH} agents, then checks the live frontier and asks again if work remains.`
+          : '',
+        gapTotal > 0 ? 'Re-running asks one agent per selected item to add what is missing.' : '',
+        'Accepting leaves the plan as it is — nothing here is deleted either way.',
       ]
         .filter(Boolean)
         .join('\n'),
       infoSections: [
         {
           title: 'What was found',
-          preview: `${detected.structural.length} lost, ${detected.sections.length} uncovered`,
-          body: options.map((o) => `- ${o.label}`).join('\n'),
+          preview: `${detected.frontierRemaining} still expandable, ${detected.structural.length} lost, ${detected.sections.length} uncovered`,
+          body: [
+            detected.frontierRemaining > 0
+              ? `Still expandable (first ${detected.frontierPreview.length}):\n${frontierBody}`
+              : '',
+            options.length > 0
+              ? `Other gaps:\n${options.map((o) => `- ${o.label}`).join('\n')}`
+              : '',
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
           defaultOpen: true,
         },
       ],
@@ -249,30 +499,31 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
           type: 'radio',
           id: 'decision',
           label: 'What do you want to do?',
-          options: [
-            { value: 'redecompose', label: 'Re-run the decomposition for the items I pick' },
-            { value: 'accept', label: 'Accept the plan as it is' },
-          ],
-          default: 'redecompose',
+          options: decisionOptions,
+          default: defaultDecision,
           required: true,
         },
-        {
-          type: 'multi-select',
-          id: 'items',
-          label: 'Which ones?',
-          options,
-          // Pre-ticked: a lost decomposition is a known loss, not a suggestion.
-          // An uncovered section is a heuristic, so it starts unticked.
-          defaults: detected.structural.map(structuralKey),
-          visibleWhen: { field: 'decision', equals: 'redecompose' },
-        },
-        {
-          type: 'textarea',
-          id: 'note',
-          label: 'Anything to tell the agents (optional)',
-          rows: 3,
-          visibleWhen: { field: 'decision', equals: 'redecompose' },
-        },
+        ...(gapTotal > 0
+          ? [
+              {
+                type: 'multi-select' as const,
+                id: 'items',
+                label: 'Which ones?',
+                options,
+                // Pre-ticked: a lost decomposition is a known loss, not a suggestion.
+                // An uncovered section is a heuristic, so it starts unticked.
+                defaults: detected.structural.map(structuralKey),
+                visibleWhen: { field: 'decision', equals: 'redecompose' },
+              },
+              {
+                type: 'textarea' as const,
+                id: 'note',
+                label: 'Anything to tell the agents (optional)',
+                rows: 3,
+                visibleWhen: { field: 'decision', equals: 'redecompose' },
+              },
+            ]
+          : []),
       ],
       submitLabel: 'Record decision',
     };
@@ -302,120 +553,171 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       structural: d.structural.length,
       sections: d.sections.length,
       dispatched: 0,
+      frontierRemaining: d.frontierRemaining,
       decision: 'clean',
     };
-    if (!d.repositoryId || d.structural.length + d.sections.length === 0) return result;
-
-    // Fold whatever the re-decomposition agents returned. Same applier as the
-    // builder, so these patches inherit the last-block parser, the drop of
-    // unresolvable refs, and `self`.
-    const fold = args.newAgentMiningResults ?? args.agentMiningResults ?? [];
-    if (fold.length > 0) {
-      for (const r of fold) {
-        if (r.status !== 'done') continue;
-        const patch = parsePlanPatch(r.output ?? r.rawOutput);
-        if (!patch || patch.ops.length === 0) continue;
-        const self = /^cover-node-([0-9a-f-]{36})$/.exec(r.agentId)?.[1];
-        await applyAgentPatch(ctx.db, patch, {
-          repositoryId: d.repositoryId,
-          sourceTaskId: ctx.taskId,
-          retryable: false,
-          ...(self ? { selfNodeId: self } : {}),
-        }).catch(async (err: unknown) => {
-          // Stamped so the item stays OUTSTANDING: the already-handled filter in
-          // detect() counts only agents whose patch landed.
-          ctx.logger.warn({ err, agentId: r.agentId }, 'coverage re-decomposition patch failed');
-          await ctx.db
-            .update(schema.taskStepAgentMinings)
-            .set({
-              errorMessage:
-                `${APPLY_FAILURE_PREFIX} ${err instanceof Error ? err.message : String(err)}`.slice(
-                  0,
-                  2000,
-                ),
-            })
-            .where(
-              and(
-                eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
-                eq(schema.taskStepAgentMinings.agentId, r.agentId),
-              ),
-            )
-            .catch(() => undefined);
-        });
-      }
-      // Every plan-step apply refreshes the committed mirror. Without it the
-      // nodes this step recovered exist only in the database, and a restore or a
-      // fresh clone silently drops exactly the work the check was run to get
-      // back. Best-effort, as elsewhere: a mirror that cannot be written must
-      // not undo the patches that just landed.
-      try {
-        await writePlanMirror(ctx.db, d.repositoryId, ctx.repoPath);
-      } catch (err) {
-        ctx.logger.warn({ err }, 'plan mirror write failed after coverage re-decomposition');
-      }
-      result.decision = 'redecomposed';
-      result.dispatched = fold.length;
-      return result;
-    }
+    if (!d.repositoryId || !hasCoverageWork(d)) return result;
 
     const values = (args.formValues ?? {}) as FormValues;
-    if (values.decision !== 'redecompose') {
-      result.decision = 'accepted';
-      return result;
+    const fold = args.newAgentMiningResults ?? args.agentMiningResults ?? [];
+    if (fold.length > 0) {
+      await foldCoverageResults(ctx, d, fold);
+      await refreshPlanMirror(ctx, d.repositoryId);
     }
-    const picked = Array.isArray(values.items) ? (values.items as string[]) : [];
-    if (picked.length === 0) {
+
+    if (values.decision === 'accept') {
       result.decision = 'accepted';
       return result;
     }
 
-    const note = typeof values.note === 'string' && values.note.trim() ? values.note.trim() : null;
-    const dispatches = picked.map((key) => {
-      const structural = d.structural.find((g) => structuralKey(g) === key);
-      const section = d.sections.find((c) => sectionKey(c) === key);
-      const subject = structural
-        ? `the plan node "${structural.title}" (${structural.reason})`
-        : `the source document section "${section?.title ?? key}"`;
-      return {
-        // The node id rides in the agent id so apply() can hand the patch a
-        // `self` ref and the agent never transcribes a uuid.
-        agentId: structural
-          ? `cover-node-${structural.nodeId}`
-          : `cover-${key.replace(/\W+/g, '-')}`,
-        agentTitle: `Cover: ${(structural?.title ?? section?.title ?? key).slice(0, 60)}`,
+    if (values.decision === 'redecompose') {
+      result.decision = 'redecomposed';
+      result.dispatched = fold.length;
+
+      // We have just folded the selected recovery agents. Re-detect before
+      // finalizing: a subset may remain, recovered children may expose a live
+      // frontier, or a recovery terminal may itself have failed.
+      if (fold.length > 0) {
+        const refreshed = await detectCoverage(ctx);
+        result.frontierRemaining = refreshed.frontierRemaining;
+        if (hasCoverageWork(refreshed)) {
+          throw new ReopenStepFormError('coverage repairs finished; more plan work remains');
+        }
+        return result;
+      }
+
+      const picked = Array.isArray(values.items) ? (values.items as string[]) : [];
+      if (picked.length === 0) {
+        result.decision = 'accepted';
+        return result;
+      }
+
+      const note =
+        typeof values.note === 'string' && values.note.trim() ? values.note.trim() : null;
+      const dispatches = picked.map((key) => {
+        const structural = d.structural.find((gap) => structuralKey(gap) === key);
+        const section = d.sections.find((candidate) => sectionKey(candidate) === key);
+        const subject = structural
+          ? `the plan node "${structural.title}" (${structural.reason})`
+          : `the source document section "${section?.title ?? key}"`;
+        return {
+          // The node id rides in the agent id so apply() can hand the patch a
+          // `self` ref and the agent never transcribes a uuid.
+          agentId: structural
+            ? `cover-node-${structural.nodeId}`
+            : `cover-${key.replace(/\W+/g, '-')}`,
+          agentTitle: `Cover: ${(structural?.title ?? section?.title ?? key).slice(0, 60)}`,
+          roleKey: 'expand',
+          prompt: [
+            `You are completing a project plan that is missing work under ${subject}.`,
+            '',
+            structural
+              ? [
+                  'Its decomposition was attempted and lost, so it currently has no children.',
+                  'Rebuild the missing subtree: add the children that the failed terminal should',
+                  'have produced, plus any necessary descendants, until its leaves are taskable',
+                  'at the same granularity as the rest of the plan.',
+                ].join(' ')
+              : 'No node in the plan covers this section. Add what it describes, under whichever existing node fits best.',
+            '',
+            section
+              ? `The section reads:\n\n${(d.sectionBodies[key] ?? '').slice(0, 20_000)}\n`
+              : '',
+            note ? `The user adds: ${note}\n` : '',
+            'The plan as it stands (titles only):',
+            '',
+            d.planMarkdown.slice(0, 60_000),
+            '',
+            'Add ONLY what is missing. Do not restate nodes that already exist, and do not',
+            'duplicate a sibling under a different name — the reader is looking at this plan',
+            'and will see both.',
+            '',
+            PLAN_PATCH_CONTRACT,
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        };
+      });
+
+      throw new MiningWaveError(
+        dispatches,
+        `coverage re-decomposition: ${dispatches.length} agent(s)`,
+      );
+    }
+
+    if (values.decision !== 'continue') {
+      result.decision = 'accepted';
+      return result;
+    }
+
+    result.decision = 'continued';
+    const [nodes, buildRows, coverageRows] = await Promise.all([
+      loadPlanSkeletons(ctx.db, d.repositoryId),
+      loadMiningRows(ctx, '01-plan-build'),
+      loadMiningRows(ctx, '02-plan-coverage'),
+    ]);
+    const frontier = liveFrontier(nodes, ctx, d.buildFormValues, buildRows, coverageRows);
+    const continuation = continuationState(coverageRows);
+    const agentsUsed = continuation.agentsByBatch.get(d.continuationBatch) ?? 0;
+    const nextWave = (continuation.wavesByBatch.get(d.continuationBatch) ?? 0) + 1;
+    result.dispatched = agentsUsed;
+    result.frontierRemaining = frontier.length;
+
+    // A provider-less wave wrote terminal failed rows but dispatched nothing.
+    // Return to the gate so those failures are visible; asking the same wave in
+    // this apply loop would spin on the same unique agent ids.
+    if (args.miningWaveExhausted) {
+      throw new ReopenStepFormError('continuation could not dispatch; review the remaining plan');
+    }
+
+    if (frontier.length === 0) {
+      // The live frontier is complete, but a continuation terminal may have
+      // failed or a document/structural gap may still exist. Refresh once at the
+      // boundary so the task only finalizes when the whole gate is clean.
+      const refreshed = await detectCoverage(ctx);
+      if (hasCoverageWork(refreshed)) {
+        throw new ReopenStepFormError('decomposition frontier finished; coverage gaps remain');
+      }
+      return result;
+    }
+
+    if (agentsUsed >= CONTINUATION_AGENTS_PER_BATCH) {
+      throw new ReopenStepFormError('bounded continuation batch finished; frontier remains');
+    }
+
+    const count = continuationDispatchCount(frontier.length, agentsUsed);
+    const slice = frontier.slice(0, count);
+    if (slice.length === 0) {
+      throw new ReopenStepFormError('continuation safety limit reached; frontier remains');
+    }
+    const buildDetect =
+      d.buildDetect ??
+      ({
+        mode: 'from_md',
+        repositoryId: d.repositoryId,
+        existingNodeCount: d.nodeCount,
+        hasRoot: true,
+        kbFiles: [],
+        brief: '',
+        repoName: 'this project',
+      } satisfies PlanBuildDetect);
+    // Every agent in a wave sees the same live tree, avoiding sibling overlap.
+    const planMarkdown = await renderPlanMarkdown(ctx.db, d.repositoryId, { titlesOnly: true });
+    const dispatches = await Promise.all(
+      slice.map(async (node) => ({
+        agentId: continuationAgentId(d.continuationBatch, node.id, nextWave),
+        agentTitle: `Continue: ${node.title}`,
         roleKey: 'expand',
-        prompt: [
-          `You are completing a project plan that is missing work under ${subject}.`,
-          '',
-          structural
-            ? [
-                'Its decomposition was attempted and lost, so it currently has no children.',
-                'Rebuild the missing subtree: add the children that the failed terminal should',
-                'have produced, plus any necessary descendants, until its leaves are taskable',
-                'at the same granularity as the rest of the plan.',
-              ].join(' ')
-            : 'No node in the plan covers this section. Add what it describes, under whichever existing node fits best.',
-          '',
-          section ? `The section reads:\n\n${(d.sectionBodies[key] ?? '').slice(0, 20_000)}\n` : '',
-          note ? `The user adds: ${note}\n` : '',
-          'The plan as it stands (titles only):',
-          '',
-          d.planMarkdown.slice(0, 60_000),
-          '',
-          'Add ONLY what is missing. Do not restate nodes that already exist, and do not',
-          'duplicate a sibling under a different name — the reader is looking at this plan',
-          'and will see both.',
-          '',
-          PLAN_PATCH_CONTRACT,
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      };
-    });
-
+        prompt: await augmentPromptWithAttachments(
+          ctx.db,
+          ctx.taskId,
+          buildExpandPrompt(buildDetect, d.buildFormValues, node, planMarkdown),
+        ),
+      })),
+    );
     throw new MiningWaveError(
       dispatches,
-      `coverage re-decomposition: ${dispatches.length} agent(s)`,
+      `bounded plan continuation: ${dispatches.length} node(s) (${agentsUsed + dispatches.length}/${CONTINUATION_AGENTS_PER_BATCH})`,
     );
   },
 };

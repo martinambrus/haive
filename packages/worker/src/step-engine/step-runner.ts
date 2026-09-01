@@ -55,6 +55,7 @@ import {
   TaskCancelledError,
   MiningRetryError,
   MiningWaveError,
+  ReopenStepFormError,
   type AgentMiningDispatch,
   type AgentMiningResult,
   type StepApplyArgs,
@@ -1994,6 +1995,41 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         output = await stepDef.apply(ctx, { ...applyArgs });
         break;
       } catch (applyErr) {
+        // A bounded, user-approved apply batch completed but produced another
+        // decision for the same step. Refresh detection and the form instead of
+        // finalizing, and consume all mining rows so none of their patches are
+        // folded a second time after the next submission.
+        if (
+          applyErr instanceof ReopenStepFormError &&
+          stepDef.detect &&
+          stepDef.form &&
+          !stepDef.loop
+        ) {
+          await db
+            .update(schema.taskStepAgentMinings)
+            .set({ consumedAt: new Date(), updatedAt: new Date() })
+            .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+          const refreshedDetected = await stepDef.detect(ctx);
+          if (stepDef.prepareForm) {
+            await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);
+          }
+          const refreshedSchema = stepDef.form(ctx, refreshedDetected, llmOutput);
+          if (!refreshedSchema) {
+            throw new Error(
+              `${meta.id} requested another form, but refreshed detection produced no form`,
+            );
+          }
+          current = await updateRow(db, current.id, {
+            status: 'waiting_form',
+            detectOutput: refreshedDetected,
+            formSchema: refreshedSchema,
+            formValues: null,
+            statusMessage: null,
+            errorMessage: null,
+          });
+          ctx.logger.info({ stepId: meta.id }, 'apply batch completed; reopened step form');
+          return { status: 'waiting_form', row: current, formSchema: refreshedSchema };
+        }
         // A second mining wave: agents whose prompts depend on what the first wave found.
         // Fresh rows, so the fan-out barrier re-parks the step; apply() runs again with
         // both waves in agentMiningResults. See MiningWaveError for why no other phase
