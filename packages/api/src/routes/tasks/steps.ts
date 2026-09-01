@@ -1084,6 +1084,7 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
       mode: schema.cliInvocations.mode,
       exitCode: schema.cliInvocations.exitCode,
       durationMs: schema.cliInvocations.durationMs,
+      timeoutMs: schema.cliInvocations.timeoutMs,
       startedAt: schema.cliInvocations.startedAt,
       endedAt: schema.cliInvocations.endedAt,
       createdAt: schema.cliInvocations.createdAt,

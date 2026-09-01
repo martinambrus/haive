@@ -279,10 +279,10 @@ function formatAuthDetail(existing: string | null): string {
 async function resolveInvocationTimeoutMs(
   requested: number | undefined,
   provider: { name: CliProviderName } | null | undefined,
-): Promise<number | undefined> {
-  if (provider?.name !== 'ollama') return requested;
+): Promise<number> {
+  if (provider?.name !== 'ollama') return requested ?? DEFAULT_RUN_TIMEOUT_MS;
   const floor = await configService.getNumber(CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS, 7_200_000);
-  return Math.max(requested ?? 0, floor);
+  return Math.max(requested ?? DEFAULT_RUN_TIMEOUT_MS, floor);
 }
 
 /** A read-only bind of the task's OWN uploads dir into the sandbox, at the path the
@@ -325,6 +325,27 @@ export async function executeByKind(
   deps: CliExecDeps,
   secrets: Record<string, string>,
 ): Promise<ExecutionOutcome> {
+  // Resolve and persist the ACTUAL hard budget when this queued job starts. Keeping it on the
+  // invocation makes the live terminal truthful across retry escalation and provider-specific
+  // floors; reading the step definition later would only reveal the current setting. The other
+  // invocation kinds intentionally keep their existing semantics (requested budget or the
+  // sandbox default), so the Ollama floor is limited to the two kinds that already applied it.
+  const timeoutProvider =
+    (payload.kind === 'cli' || payload.kind === 'agent_mining') && payload.cliProviderId
+      ? await db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, payload.cliProviderId),
+          columns: { name: true },
+        })
+      : null;
+  const timeoutMs = await resolveInvocationTimeoutMs(payload.timeoutMs, timeoutProvider);
+  await db
+    .update(schema.cliInvocations)
+    .set({ timeoutMs })
+    .where(eq(schema.cliInvocations.id, payload.invocationId));
+  // Pass the resolved value through every execution path so the persisted denominator and the
+  // timeout handed to the sandbox can never drift apart.
+  payload = { ...payload, timeoutMs };
+
   // Isolate this invocation to ONE git worktree: mount it ALONE at the workdir root
   // (payload.worktreeSubpath for a DAG/merge sibling, else the task's feature worktree)
   // so the agent cannot reach the repo-root checkout or any sibling worktree. The
@@ -429,11 +450,10 @@ export async function executeByKind(
       const statusUpdater = payload.taskStepId
         ? createStepStatusUpdater(db, payload.taskStepId, payload.invocationId)
         : undefined;
-      const timeoutMs = await resolveInvocationTimeoutMs(payload.timeoutMs, providerRow);
       return executeCliSpec(
         payload.spec as CliCommandSpec,
         deps,
-        timeoutMs,
+        payload.timeoutMs,
         secrets,
         wrapperContent,
         sandboxImage,

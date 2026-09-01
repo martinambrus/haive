@@ -14,6 +14,16 @@ export function formatDuration(ms: number, opts?: { alwaysSeconds?: boolean }): 
   return `${hours}h ${minutes % 60}m`;
 }
 
+/** A configured timeout budget, kept in minutes even at 60m+ so a live terminal reads
+ *  "8m 53s / 60m" and matches the timeout values used throughout the product. */
+export function formatTimeoutBudget(ms: number): string {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+}
+
 /** Compact colon-style hours:minutes for the estimate-vs-effort comparison
  *  (header indicator + footer verdict), e.g. 1h15m -> "1:15", 2.5h -> "2:30",
  *  45m -> "0:45", 0 -> "0:00". Minutes zero-padded, hours unpadded. Seconds are

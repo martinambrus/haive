@@ -828,6 +828,11 @@ export const cliInvocations = pgTable(
      *  error). text, not a pg enum, because the union changes in code and nothing joins on it.
      *  Migration 0129; NULL on legacy rows. */
     providerFatalClass: text('provider_fatal_class'),
+    /** Actual hard process budget for this invocation, resolved by the worker when the
+     *  queued job starts. This is per invocation (rather than read from the step) because
+     *  retries can escalate their timeout and provider floors can raise it further. NULL on
+     *  legacy rows and while a job is still queued. */
+    timeoutMs: integer('timeout_ms'),
     durationMs: integer('duration_ms'),
     containerId: varchar('container_id', { length: 255 }),
     errorMessage: text('error_message'),

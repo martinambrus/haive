@@ -1034,6 +1034,8 @@ export interface CliInvocationSummary {
   mode: CliInvocationMode;
   exitCode: number | null;
   durationMs: number | null;
+  /** Actual hard process budget resolved for this run. Null for a queued or legacy row. */
+  timeoutMs: number | null;
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;

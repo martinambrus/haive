@@ -11,7 +11,7 @@ import {
   shouldFollowActiveTerminals,
   useAutoScrollTerminals,
 } from '@/lib/terminal-autoscroll';
-import { formatDuration } from '@/lib/format-duration';
+import { formatDuration, formatTimeoutBudget } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
 import { invocationBanner } from '@/lib/step-banners';
 import { useGlobalPause } from '@/lib/use-global-pause';
@@ -345,6 +345,7 @@ function InvocationPanel({
         <InvocationRuntime
           startedAt={invocation.startedAt}
           durationMs={invocation.durationMs}
+          timeoutMs={invocation.timeoutMs}
           isActive={invocation.isActive}
         />
         {invocation.tokenUsage &&
@@ -447,10 +448,12 @@ function InvocationPanel({
 function InvocationRuntime({
   startedAt,
   durationMs,
+  timeoutMs,
   isActive,
 }: {
   startedAt: string | null;
   durationMs: number | null;
+  timeoutMs: number | null;
   isActive: boolean;
 }) {
   const ticking = isActive && !!startedAt;
@@ -467,9 +470,16 @@ function InvocationRuntime({
   return (
     <span
       className={isActive ? 'text-yellow-300' : 'text-neutral-400'}
-      title={isActive ? 'Running for' : 'Total runtime'}
+      title={
+        isActive && timeoutMs !== null
+          ? `Running time / ${formatTimeoutBudget(timeoutMs)} hard timeout`
+          : isActive
+            ? 'Running for'
+            : 'Total runtime'
+      }
     >
-      {formatDuration(ms)}
+      {formatDuration(ms, { alwaysSeconds: isActive })}
+      {isActive && timeoutMs !== null ? ` / ${formatTimeoutBudget(timeoutMs)}` : ''}
     </span>
   );
 }
