@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { planCoverageStep } from './02-plan-coverage.js';
+import { PLAN_AGENT_TIMEOUT_MS } from './01-plan-build.js';
 import { findStructuralGaps } from './plan-coverage-scan.js';
 import type { FormSchema } from '@haive/shared';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
@@ -22,6 +23,7 @@ const formOf = (d: Detected) => planCoverageStep.form!({} as never, d) as FormSc
 
 describe('the coverage gate', () => {
   it('retries a transiently failed recovery terminal once', () => {
+    expect(planCoverageStep.agentMining?.timeoutMs).toBe(PLAN_AGENT_TIMEOUT_MS);
     expect(planCoverageStep.agentMining?.retry).toEqual({
       maxAttempts: 2,
       retryOnInvocationFailure: shouldRetryMiningTerminalFailure,

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { planBuildStep } from './01-plan-build.js';
+import { PLAN_AGENT_TIMEOUT_MS, planBuildStep } from './01-plan-build.js';
 import type { AgentMiningSelectArgs } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 
@@ -32,6 +32,8 @@ describe('plan-build selectAgents under smoke bypass', () => {
   });
 
   it('opts into per-terminal transient failure retries', () => {
+    expect(planBuildStep.agentMining?.timeoutMs).toBe(PLAN_AGENT_TIMEOUT_MS);
+    expect(PLAN_AGENT_TIMEOUT_MS).toBe(60 * 60 * 1000);
     expect(planBuildStep.agentMining?.retry).toEqual({
       maxAttempts: 2,
       retryOnInvocationFailure: shouldRetryMiningTerminalFailure,

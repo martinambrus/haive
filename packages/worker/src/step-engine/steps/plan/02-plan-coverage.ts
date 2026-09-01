@@ -7,7 +7,11 @@ import type { StepDefinition } from '../../step-definition.js';
 import { MiningWaveError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
-import { APPLY_FAILURE_PREFIX, PARTIAL_APPLY_PREFIX } from './01-plan-build.js';
+import {
+  APPLY_FAILURE_PREFIX,
+  PARTIAL_APPLY_PREFIX,
+  PLAN_AGENT_TIMEOUT_MS,
+} from './01-plan-build.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
 import {
   findCoverageGaps,
@@ -277,6 +281,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
   agentMining: {
     requiredCapabilities: ['tool_use'],
     toolProfile: 'rag_only',
+    timeoutMs: PLAN_AGENT_TIMEOUT_MS,
     // A recovery terminal is the last automated chance to replace missing plan
     // work. Retry transient infrastructure failures before returning control to
     // the gate; a final failure remains outstanding on a step retry because the

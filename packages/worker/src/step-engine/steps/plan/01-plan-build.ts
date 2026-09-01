@@ -48,6 +48,11 @@ import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-pr
 
 const DEFAULT_DEPTH = 3;
 const DEFAULT_BREADTH = 6;
+/** Plan decomposition agents read a large source document plus the accumulated
+ *  plan and must finish by emitting one valid patch. A short hard kill loses the
+ *  whole branch, so both the initial builder and coverage recovery share this
+ *  deliberately generous first-attempt budget. */
+export const PLAN_AGENT_TIMEOUT_MS = 60 * 60 * 1000;
 /** Hard ceiling on agents dispatched in ONE wave. The agent-pool governor bounds
  *  concurrency, but nothing else bounds the WIDTH of a level, and a plan whose
  *  level 2 is 80 nodes wide would otherwise queue 80 invocations at once. Nodes
@@ -447,7 +452,7 @@ export function createPlanBuildStep(
       // knowledge base (its own file tools still work) but has nothing to do with a
       // browser or a container.
       toolProfile: 'rag_only',
-      timeoutMs: 20 * 60 * 1000,
+      timeoutMs: PLAN_AGENT_TIMEOUT_MS,
       // A single expansion can time out while its siblings finish. The all-wave
       // retry in apply() cannot recover that case, so opt into the runner's
       // per-agent transient-failure retry as well. A second failure is left for
