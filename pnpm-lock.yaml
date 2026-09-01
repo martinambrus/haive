@@ -94,8 +94,8 @@ importers:
         specifier: ^8.21.1
         version: 8.21.3
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.5.2
+        version: 4.5.2
     devDependencies:
       '@types/archiver':
         specifier: ^8.0.0
@@ -162,8 +162,8 @@ importers:
         specifier: ^3.4.5
         version: 3.4.9
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.5.2
+        version: 4.5.2
     devDependencies:
       typescript:
         specifier: ^5.7.3
@@ -305,8 +305,8 @@ importers:
         specifier: ^2.9.0
         version: 2.9.0
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.5.2
+        version: 4.5.2
     devDependencies:
       '@types/dockerode':
         specifier: ^4.0.1
@@ -3291,8 +3291,8 @@ packages:
     resolution: {integrity: sha512-dSvYKdvLsAHCDqPOhIwk/q5CvuWtTB3Dgpoe0uVEFjTzIOAmsQpprX25InCvrvJsirEbu1OHyy67n/kAj1Sw/w==}
     engines: {node: '>=18'}
 
-  zod@4.4.3:
-    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+  zod@4.5.2:
+    resolution: {integrity: sha512-XkYXCol10+ba/6F/cueWV+TezUeOqXW0hdeJt5CdXjTYeAgAQg5N03RQdJ80mhfFE72+pblvYMW4wy2Qp4Qbrg==}
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
@@ -6272,6 +6272,6 @@ snapshots:
       normalize-path: 3.0.0
       readable-stream: 4.7.0
 
-  zod@4.4.3: {}
+  zod@4.5.2: {}
 
   zwitch@2.0.4: {}
