@@ -479,7 +479,12 @@ function InvocationRuntime({
       }
     >
       {formatDuration(ms, { alwaysSeconds: isActive })}
-      {isActive && timeoutMs !== null ? ` / ${formatTimeoutBudget(timeoutMs)}` : ''}
+      {isActive && timeoutMs !== null && (
+        <>
+          <span className="font-normal text-yellow-300"> / </span>
+          <span className="font-normal text-neutral-400">{formatTimeoutBudget(timeoutMs)}</span>
+        </>
+      )}
     </span>
   );
 }
