@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
-import { rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { access, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { and, asc, desc, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -12,6 +14,7 @@ import {
   planAdvisoryRequestSchema,
   planBuildRequestSchema,
   planChatRequestSchema,
+  planSnapshotSaveRequestSchema,
   logger,
   updatePlanNodeRequestSchema,
   type PlanPatch,
@@ -38,6 +41,9 @@ import { writeTaskAttachment } from './tasks/attachments.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { spawnPlanTask } from '../lib/spawn-plan-task.js';
+import { enqueuePlanMirrorRefresh, savePlanMirror } from '../lib/plan-mirror.js';
+
+const exec = promisify(execFile);
 
 export const planRoutes = new Hono<AppEnv>();
 
@@ -84,6 +90,16 @@ async function requireNode(repositoryId: string, nodeId: string) {
   return node;
 }
 
+async function gitRead(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
+  try {
+    const { stdout } = await exec('git', args, { cwd, timeout: 5_000 });
+    return { ok: true, stdout: stdout.toString().trim() };
+  } catch (err) {
+    const e = err as { stdout?: string };
+    return { ok: false, stdout: (e.stdout ?? '').toString().trim() };
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Reads                                                               */
 /* ------------------------------------------------------------------ */
@@ -108,6 +124,93 @@ planRoutes.get('/:id/plan', async (c) => {
     children: toNodeViews(skeletons, children),
     nodeCount: skeletons.length,
   });
+});
+
+/** The four boundaries a portable plan crosses: DB -> files -> commit -> remote. */
+planRoutes.get('/:id/plan/snapshot', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  const db = getDb();
+  const state = await db.query.planMirrorState.findFirst({
+    where: eq(schema.planMirrorState.repositoryId, repositoryId),
+  });
+  const repoRoot = await resolveRepoRoot(db, userId, repositoryId).catch(() => null);
+  const paths = [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown];
+  const filesExist = repoRoot
+    ? (
+        await Promise.all(
+          paths.map((rel) =>
+            access(path.join(repoRoot, rel))
+              .then(() => true)
+              .catch(() => false),
+          ),
+        )
+      ).every(Boolean)
+    : false;
+
+  let gitAvailable = false;
+  let tracked = false;
+  let uncommitted = false;
+  let branch: string | null = null;
+  let pushed: boolean | null = null;
+  if (repoRoot) {
+    const inside = await gitRead(repoRoot, ['rev-parse', '--is-inside-work-tree']);
+    gitAvailable = inside.ok && inside.stdout === 'true';
+    if (gitAvailable) {
+      const [trackedResults, status, branchResult, upstream] = await Promise.all([
+        Promise.all(
+          paths.map((rel) => gitRead(repoRoot, ['ls-files', '--error-unmatch', '--', rel])),
+        ),
+        gitRead(repoRoot, ['status', '--porcelain', '--', ...paths]),
+        gitRead(repoRoot, ['branch', '--show-current']),
+        gitRead(repoRoot, ['rev-parse', '--abbrev-ref', '@{upstream}']),
+      ]);
+      tracked = trackedResults.every((result) => result.ok);
+      uncommitted = status.ok && status.stdout.length > 0;
+      branch = branchResult.ok ? branchResult.stdout || null : null;
+      if (tracked && !uncommitted && upstream.ok) {
+        const ahead = await gitRead(repoRoot, ['rev-list', '--count', '@{upstream}..HEAD']);
+        pushed = ahead.ok ? Number(ahead.stdout) === 0 : null;
+      }
+    }
+  }
+
+  const revision = state?.revision ?? 0;
+  const writtenRevision = state?.writtenRevision ?? 0;
+  return c.json({
+    revision,
+    writtenRevision,
+    snapshotWritten: filesExist && revision > 0 && revision === writtenRevision,
+    lastError: state?.lastError ?? null,
+    filesExist,
+    gitAvailable,
+    tracked,
+    uncommitted,
+    committed: filesExist && tracked && !uncommitted,
+    pushed,
+    branch,
+  });
+});
+
+planRoutes.post('/:id/plan/snapshot/save', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  await requirePlanCanvasEnabled();
+  const body = planSnapshotSaveRequestSchema.parse(await c.req.json().catch(() => ({})));
+  try {
+    return c.json(
+      await savePlanMirror({
+        repositoryId,
+        userId,
+        push: body.push,
+        ...(body.commitMessage ? { commitMessage: body.commitMessage } : {}),
+      }),
+    );
+  } catch (err) {
+    throw new HttpError(
+      409,
+      err instanceof Error ? err.message : 'Could not save the plan snapshot',
+      'plan_snapshot_save_failed',
+    );
+  }
 });
 
 /** Hierarchy only — id, title, status, parentage. Feeds the tree view, which the
@@ -387,7 +490,7 @@ planRoutes.get('/:id/plan/impact/:nodeId', async (c) => {
 /* ------------------------------------------------------------------ */
 
 planRoutes.post('/:id/plan/nodes', async (c) => {
-  const { repositoryId } = await requireOwnedRepo(c);
+  const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = createPlanNodeRequestSchema.parse(await c.req.json());
   const db = getDb();
@@ -421,6 +524,7 @@ planRoutes.post('/:id/plan/nodes', async (c) => {
       { repositoryId, origin: 'user' },
     );
     const created = res.created[0]!;
+    await enqueuePlanMirrorRefresh(repositoryId, userId);
     return c.json({ node: await loadPlanNode(db, repositoryId, created) }, 201);
   } catch (err) {
     planError(err);
@@ -428,7 +532,7 @@ planRoutes.post('/:id/plan/nodes', async (c) => {
 });
 
 planRoutes.patch('/:id/plan/nodes/:nodeId', async (c) => {
-  const { repositoryId } = await requireOwnedRepo(c);
+  const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const nodeId = c.req.param('nodeId');
   const body = updatePlanNodeRequestSchema.parse(await c.req.json());
@@ -456,6 +560,7 @@ planRoutes.patch('/:id/plan/nodes/:nodeId', async (c) => {
       },
       { repositoryId, origin: 'user' },
     );
+    await enqueuePlanMirrorRefresh(repositoryId, userId);
     return c.json({ node: await loadPlanNode(db, repositoryId, nodeId) });
   } catch (err) {
     planError(err);
@@ -520,6 +625,7 @@ planRoutes.delete('/:id/plan', async (c) => {
     { ops: [{ op: 'delete', nodeRef: root.id }] },
     { repositoryId, origin: 'user' },
   );
+  await enqueuePlanMirrorRefresh(repositoryId, userId);
 
   // Mirror second: the database is the source of truth and these files are
   // derived from it. A file that is already gone is success. A file that
@@ -540,7 +646,7 @@ planRoutes.delete('/:id/plan', async (c) => {
 });
 
 planRoutes.delete('/:id/plan/nodes/:nodeId', async (c) => {
-  const { repositoryId } = await requireOwnedRepo(c);
+  const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const nodeId = c.req.param('nodeId');
   const db = getDb();
@@ -551,6 +657,7 @@ planRoutes.delete('/:id/plan/nodes/:nodeId', async (c) => {
       { ops: [{ op: 'delete', nodeRef: nodeId }] },
       { repositoryId, origin: 'user' },
     );
+    await enqueuePlanMirrorRefresh(repositoryId, userId);
     return c.json({ deleted: res.deleted });
   } catch (err) {
     planError(err);
@@ -558,7 +665,7 @@ planRoutes.delete('/:id/plan/nodes/:nodeId', async (c) => {
 });
 
 planRoutes.post('/:id/plan/edges', async (c) => {
-  const { repositoryId } = await requireOwnedRepo(c);
+  const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = createPlanEdgeRequestSchema.parse(await c.req.json());
   const db = getDb();
@@ -578,6 +685,7 @@ planRoutes.post('/:id/plan/edges', async (c) => {
       },
       { repositoryId, origin: 'user' },
     );
+    await enqueuePlanMirrorRefresh(repositoryId, userId);
     const edges = await loadPlanEdges(db, repositoryId);
     const created = edges.find(
       (e) =>
@@ -590,7 +698,7 @@ planRoutes.post('/:id/plan/edges', async (c) => {
 });
 
 planRoutes.delete('/:id/plan/edges/:edgeId', async (c) => {
-  const { repositoryId } = await requireOwnedRepo(c);
+  const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const edgeId = c.req.param('edgeId');
   const db = getDb();
@@ -610,6 +718,7 @@ planRoutes.delete('/:id/plan/edges/:edgeId', async (c) => {
       },
       { repositoryId, origin: 'user' },
     );
+    await enqueuePlanMirrorRefresh(repositoryId, userId);
     return c.json({ deleted: edgeId });
   } catch (err) {
     planError(err);

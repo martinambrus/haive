@@ -1,5 +1,96 @@
 import { describe, it, expect } from 'vitest';
-import { planPatchSchema, rollUpStatus, type PlanNodeStatus } from './plan.js';
+import {
+  planMirrorPayloadSchema,
+  planPatchSchema,
+  rollUpStatus,
+  type PlanNodeStatus,
+} from './plan.js';
+
+const ROOT_ID = '11111111-1111-4111-8111-111111111111';
+const CHILD_ID = '22222222-2222-4222-8222-222222222222';
+
+function portableMirror() {
+  return {
+    schemaVersion: 2 as const,
+    nodes: [
+      {
+        id: ROOT_ID,
+        parentId: null,
+        ordinal: 0,
+        title: 'Product',
+        kind: 'component',
+        body: '# Product plan',
+        status: 'in_progress',
+        taskable: false,
+      },
+      {
+        id: CHILD_ID,
+        parentId: ROOT_ID,
+        ordinal: 0,
+        title: 'API',
+        kind: 'component',
+        body: 'Portable description',
+        status: 'todo',
+        taskable: true,
+      },
+    ],
+    edges: [
+      {
+        fromNodeId: CHILD_ID,
+        toNodeId: ROOT_ID,
+        kind: 'implements',
+        note: 'The API implements the product contract',
+      },
+    ],
+    codeLinks: [
+      {
+        nodeId: CHILD_ID,
+        repoPath: 'src/api/index.ts',
+        symbol: 'createApi',
+        evidence: 'API entry point',
+        derivedAtCommit: '0123456789abcdef0123456789abcdef01234567',
+        stale: true,
+      },
+    ],
+  };
+}
+
+describe('planMirrorPayloadSchema', () => {
+  it('accepts the complete v2 portable plan product state', () => {
+    expect(planMirrorPayloadSchema.parse(portableMirror())).toEqual(portableMirror());
+  });
+
+  it('keeps the shipped v1 node-and-edge snapshot readable', () => {
+    const value = portableMirror();
+    const legacy = {
+      schemaVersion: 1,
+      nodes: value.nodes.map((node) => ({ ...node, createdBy: 'llm' })),
+      edges: value.edges,
+    };
+    expect(planMirrorPayloadSchema.parse(legacy)).toEqual(legacy);
+  });
+
+  it('rejects machine-escaping code paths', () => {
+    const value = portableMirror();
+    value.codeLinks[0]!.repoPath = '../outside-the-repository';
+    expect(() => planMirrorPayloadSchema.parse(value)).toThrow();
+  });
+
+  it('rejects chat, task, origin and version metadata at the snapshot boundary', () => {
+    const withChat = { ...portableMirror(), messages: [{ body: 'transient chat' }] };
+    const withTask = {
+      ...portableMirror(),
+      nodes: [{ ...portableMirror().nodes[0], sourceTaskId: ROOT_ID }],
+    };
+    const withVersion = {
+      ...portableMirror(),
+      nodes: [{ ...portableMirror().nodes[0], version: 3, createdBy: 'llm' }],
+    };
+    expect(() => planMirrorPayloadSchema.parse(withChat)).toThrow();
+    expect(() => planMirrorPayloadSchema.parse(withTask)).toThrow();
+    expect(() => planMirrorPayloadSchema.parse(withVersion)).toThrow();
+  });
+});
 
 describe('rollUpStatus', () => {
   it('returns the node own status when it is a leaf', () => {

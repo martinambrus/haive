@@ -19,7 +19,9 @@ describe('markPlanNodeTaskable', () => {
 
   it('writes the flag with the version it read', async () => {
     applyPlanPatch.mockResolvedValueOnce(undefined);
-    await markPlanNodeTaskable(db, { id: 'n1', taskable: false, version: 4 }, 'r1');
+    await expect(
+      markPlanNodeTaskable(db, { id: 'n1', taskable: false, version: 4 }, 'r1'),
+    ).resolves.toBe(true);
     expect(applyPlanPatch).toHaveBeenCalledWith(
       db,
       {
@@ -30,7 +32,9 @@ describe('markPlanNodeTaskable', () => {
   });
 
   it('skips the write when the node is already taskable', async () => {
-    await markPlanNodeTaskable(db, { id: 'n1', taskable: true, version: 4 }, 'r1');
+    await expect(
+      markPlanNodeTaskable(db, { id: 'n1', taskable: true, version: 4 }, 'r1'),
+    ).resolves.toBe(false);
     expect(applyPlanPatch).not.toHaveBeenCalled();
   });
 
@@ -38,6 +42,6 @@ describe('markPlanNodeTaskable', () => {
     applyPlanPatch.mockRejectedValueOnce(new Error('modified by someone else'));
     await expect(
       markPlanNodeTaskable(db, { id: 'n1', taskable: false, version: 4 }, 'r1'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
   });
 });

@@ -11,6 +11,7 @@ import {
   index,
   uniqueIndex,
   primaryKey,
+  check,
   pgEnum,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
@@ -77,6 +78,40 @@ export const planEdgeKindEnum = pgEnum('plan_edge_kind', ['depends_on', 'affects
  *  markdown import. Kept for the same reason `review_findings.reviewer_id` is:
  *  without it nothing can say whether the LLM decomposition is any good. */
 export const planNodeOriginEnum = pgEnum('plan_node_origin', ['user', 'llm', 'import']);
+
+/**
+ * Revisioned outbox for the committed plan projection.
+ *
+ * Plan writes happen in both the API and worker, while the repository filesystem
+ * is reconciled by the worker. Every portable-state transaction increments
+ * `revision`; a mirror write advances `writtenRevision` only after both files
+ * have been atomically replaced. `revision > writtenRevision` is therefore the
+ * durable retry signal after a crash or a missed queue notification.
+ */
+export const planMirrorState = pgTable(
+  'plan_mirror_state',
+  {
+    repositoryId: uuid('repository_id')
+      .primaryKey()
+      .references(() => repositories.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull().default(0),
+    writtenRevision: integer('written_revision').notNull().default(0),
+    lastError: text('last_error'),
+    writtenAt: timestamp('written_at'),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    check('plan_mirror_state_revision_nonnegative', sql`${table.revision} >= 0`),
+    check('plan_mirror_state_written_nonnegative', sql`${table.writtenRevision} >= 0`),
+    check(
+      'plan_mirror_state_written_not_ahead',
+      sql`${table.writtenRevision} <= ${table.revision}`,
+    ),
+    index('plan_mirror_state_dirty_idx')
+      .on(table.repositoryId)
+      .where(sql`${table.writtenRevision} < ${table.revision}`),
+  ],
+);
 
 export const planNodes = pgTable(
   'plan_nodes',
@@ -341,4 +376,11 @@ export const planNodeMessagesRelations = relations(planNodeMessages, ({ one }) =
 export const planNodeTasksRelations = relations(planNodeTasks, ({ one }) => ({
   node: one(planNodes, { fields: [planNodeTasks.nodeId], references: [planNodes.id] }),
   task: one(tasks, { fields: [planNodeTasks.taskId], references: [tasks.id] }),
+}));
+
+export const planMirrorStateRelations = relations(planMirrorState, ({ one }) => ({
+  repository: one(repositories, {
+    fields: [planMirrorState.repositoryId],
+    references: [repositories.id],
+  }),
 }));

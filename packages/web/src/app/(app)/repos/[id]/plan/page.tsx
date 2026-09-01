@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { LayoutGrid, ListTree, Plus, Trash2 } from 'lucide-react';
+import { CloudUpload, LayoutGrid, ListTree, Plus, Save, Trash2 } from 'lucide-react';
 import {
   buildPlan,
   createPlanNode,
@@ -13,10 +13,13 @@ import {
   putUiPrefs,
   getPlanOverview,
   getPlanTree,
+  getPlanSnapshot,
+  savePlanSnapshot,
   searchPlan,
   type PlanNodeDetail,
   type PlanSearchMatch,
   type PlanTreeNode,
+  type PlanSnapshotHealth,
   type UiPrefs,
 } from '@/lib/api-client';
 import { getPlanNode } from '@/lib/api-client';
@@ -47,6 +50,7 @@ import { PlanDeleteDialog } from '@/components/plan/plan-delete-dialog';
  *  it answers "did a reply land somewhere else", which is a matter of seconds
  *  mattering to nobody, and the query runs for every node of the repo. */
 const UNREAD_POLL_MS = 15_000;
+const SNAPSHOT_POLL_MS = 10_000;
 
 export default function PlanPage() {
   usePageTitle('Plan');
@@ -87,6 +91,8 @@ export default function PlanPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const [snapshot, setSnapshot] = useState<PlanSnapshotHealth | null>(null);
   const [newTitle, setNewTitle] = useState('');
   // The breadcrumb's add-a-child input. Closed by default: it is an action,
   // not a permanent field, and it lives under the crumb whose child it makes.
@@ -240,6 +246,27 @@ export default function PlanPage() {
     };
   }, [repositoryId]);
 
+  // File reconciliation is asynchronous: an API edit commits the DB revision,
+  // then wakes the worker. Poll just the compact health endpoint so the header
+  // moves from "updating" to "ready to commit" without reloading the plan.
+  useEffect(() => {
+    let cancelled = false;
+    const load = (): void => {
+      if (document.hidden) return;
+      void getPlanSnapshot(repositoryId)
+        .then((value) => !cancelled && setSnapshot(value))
+        .catch(() => {});
+    };
+    load();
+    const timer = setInterval(load, SNAPSHOT_POLL_MS);
+    document.addEventListener('visibilitychange', load);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', load);
+    };
+  }, [repositoryId]);
+
   const loadRoot = useCallback(async (): Promise<string | null> => {
     const [overview, treeRes] = await Promise.all([
       getPlanOverview(repositoryId),
@@ -256,6 +283,19 @@ export default function PlanPage() {
     setTree(treeRes.nodes);
     return overview.root?.id ?? null;
   }, [repositoryId]);
+
+  async function saveSnapshot(push: boolean): Promise<void> {
+    setSnapshotBusy(true);
+    setError(null);
+    try {
+      await savePlanSnapshot(repositoryId, { push });
+      setSnapshot(await getPlanSnapshot(repositoryId));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save the plan snapshot');
+    } finally {
+      setSnapshotBusy(false);
+    }
+  }
 
   const refresh = useCallback(async () => {
     // A plan chat rooted anywhere may patch anywhere, so a refresh reloads the
@@ -409,6 +449,19 @@ export default function PlanPage() {
   const currentParentId = focus?.node.id ?? rootId;
   const cards = matches ?? focus?.children ?? [];
   const crumbs = focus?.ancestry ?? [];
+  const snapshotLabel = !snapshot
+    ? 'Checking snapshot…'
+    : snapshot.lastError
+      ? 'Snapshot error'
+      : !snapshot.snapshotWritten
+        ? 'Snapshot updating…'
+        : !snapshot.committed
+          ? 'Not committed'
+          : snapshot.pushed === true
+            ? 'Committed and pushed'
+            : snapshot.pushed === false
+              ? 'Committed, not pushed'
+              : 'Committed';
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -437,6 +490,44 @@ export default function PlanPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          {(nodeCount > 0 || snapshot?.lastError) && (
+            <span
+              title={snapshot?.lastError ?? 'Repository-backed plan snapshot status'}
+              className={`self-center text-xs ${
+                snapshot?.lastError
+                  ? 'text-red-400'
+                  : snapshot?.committed
+                    ? 'text-emerald-400'
+                    : 'text-amber-400'
+              }`}
+            >
+              {snapshotLabel}
+            </span>
+          )}
+          {nodeCount > 0 && (
+            <>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={snapshotBusy}
+                onClick={() => void saveSnapshot(false)}
+                title="Refresh and commit plan.json plus the full plan.md"
+              >
+                <Save className="mr-1 h-3.5 w-3.5" />
+                Save plan
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={snapshotBusy}
+                onClick={() => void saveSnapshot(true)}
+                title="Refresh, commit and push the portable plan snapshot"
+              >
+                <CloudUpload className="mr-1 h-3.5 w-3.5" />
+                Save &amp; push
+              </Button>
+            </>
+          )}
           <Link href={`/repos`}>
             <Button size="sm" variant="ghost">
               Back to repositories
@@ -446,6 +537,7 @@ export default function PlanPage() {
       </div>
 
       <FormError message={error} />
+      <FormError message={snapshot?.lastError ? `Plan snapshot: ${snapshot.lastError}` : null} />
 
       {nodeCount === 0 ? (
         <Card>

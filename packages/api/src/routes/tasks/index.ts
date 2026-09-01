@@ -25,6 +25,7 @@ import {
 } from '@haive/shared';
 import { clampVoteScore } from '@haive/shared/fair-priority';
 import { markPlanNodeTaskable } from '../../lib/mark-plan-node-taskable.js';
+import { enqueuePlanMirrorRefresh } from '../../lib/plan-mirror.js';
 import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
@@ -475,7 +476,9 @@ taskRoutes.post('/', async (c) => {
       .values({ nodeId: body.planNodeId, taskId: task.id })
       .onConflictDoNothing();
 
-    await markPlanNodeTaskable(db, planNode, body.repositoryId!);
+    if (await markPlanNodeTaskable(db, planNode, body.repositoryId!)) {
+      await enqueuePlanMirrorRefresh(body.repositoryId!, userId);
+    }
   }
 
   await appendTaskEvent(db, task.id, null, 'task.created', { userId });

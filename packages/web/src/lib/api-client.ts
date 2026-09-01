@@ -1309,6 +1309,32 @@ export interface PlanOverview {
   nodeCount: number;
 }
 
+export interface PlanSnapshotHealth {
+  revision: number;
+  writtenRevision: number;
+  snapshotWritten: boolean;
+  lastError: string | null;
+  filesExist: boolean;
+  gitAvailable: boolean;
+  tracked: boolean;
+  uncommitted: boolean;
+  committed: boolean;
+  /** null = no/freshly unknown upstream; false = local commits are ahead. */
+  pushed: boolean | null;
+  branch: string | null;
+}
+
+export interface PlanSnapshotSaveResult {
+  repositoryId: string;
+  revision: number;
+  writtenRevision: number;
+  files: string[];
+  committed: boolean;
+  commitSha: string | null;
+  pushed: boolean;
+  branch: string | null;
+}
+
 export interface PlanTreeNode {
   id: string;
   parentId: string | null;
@@ -1377,6 +1403,17 @@ const planBase = (repositoryId: string) => `/repositories/${encodeURIComponent(r
 
 export function getPlanOverview(repositoryId: string): Promise<PlanOverview> {
   return api.get<PlanOverview>(planBase(repositoryId));
+}
+
+export function getPlanSnapshot(repositoryId: string): Promise<PlanSnapshotHealth> {
+  return api.get<PlanSnapshotHealth>(`${planBase(repositoryId)}/snapshot`);
+}
+
+export function savePlanSnapshot(
+  repositoryId: string,
+  body: { push?: boolean; commitMessage?: string } = {},
+): Promise<PlanSnapshotSaveResult> {
+  return api.post<PlanSnapshotSaveResult>(`${planBase(repositoryId)}/snapshot/save`, body);
 }
 
 export function getPlanTree(repositoryId: string): Promise<{ nodes: PlanTreeNode[] }> {

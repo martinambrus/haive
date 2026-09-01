@@ -2,6 +2,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { applyPlanPatch } from '@haive/shared/plan';
+import { flushPlanMirrorForRepository } from './mirror.js';
 
 /**
  * A completed workflow task greens the plan node it was created from.
@@ -68,6 +69,9 @@ export async function completePlanNodesForTask(db: Database, taskId: string): Pr
         },
         { repositoryId, origin: 'user', sourceTaskId: taskId },
       );
+      await flushPlanMirrorForRepository(db, repositoryId).catch((err) => {
+        logger.warn({ err, repositoryId }, 'plan mirror refresh after task completion failed');
+      });
     }
     logger.info(
       { taskId, nodes: advance.map((n) => n.id) },

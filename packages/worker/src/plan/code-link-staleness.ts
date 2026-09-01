@@ -1,6 +1,8 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { markPlanMirrorDirty } from '@haive/shared/plan';
+import { flushPlanMirrorForRepository } from './mirror.js';
 
 /**
  * Mark a plan's code links stale for the paths a task changed.
@@ -39,23 +41,30 @@ export async function markPlanCodeLinksStale(
     // Scoped to paths this task actually touched, and to links that are not
     // already flagged — re-flagging an old one would reset nothing and write for
     // no reason.
-    const marked = await db
-      .update(schema.planNodeCodeLinks)
-      .set({ stale: true, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.planNodeCodeLinks.repositoryId, task.repositoryId),
-          inArray(schema.planNodeCodeLinks.repoPath, paths),
-          eq(schema.planNodeCodeLinks.stale, false),
-        ),
-      )
-      .returning({ id: schema.planNodeCodeLinks.id });
+    const marked = await db.transaction(async (tx) => {
+      const rows = await tx
+        .update(schema.planNodeCodeLinks)
+        .set({ stale: true, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.planNodeCodeLinks.repositoryId, task.repositoryId!),
+            inArray(schema.planNodeCodeLinks.repoPath, paths),
+            eq(schema.planNodeCodeLinks.stale, false),
+          ),
+        )
+        .returning({ id: schema.planNodeCodeLinks.id });
+      if (rows.length > 0) await markPlanMirrorDirty(tx, task.repositoryId!);
+      return rows;
+    });
 
     if (marked.length > 0) {
       logger.info(
         { taskId, repositoryId: task.repositoryId, marked: marked.length },
         'plan code links marked stale for paths this task changed',
       );
+      await flushPlanMirrorForRepository(db, task.repositoryId).catch((err) => {
+        logger.warn({ err, repositoryId: task.repositoryId }, 'stale-link mirror refresh failed');
+      });
     }
     return { marked: marked.length };
   } catch (err) {

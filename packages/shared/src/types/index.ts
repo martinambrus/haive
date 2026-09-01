@@ -234,16 +234,12 @@ export const HAIVE_DATA_FILES = {
   planMarkdown: `${HAIVE_DATA_DIR}/plan.md`,
 } as const;
 
-export const PLAN_MIRROR_SCHEMA_VERSION = 1;
+export const PLAN_MIRROR_SCHEMA_VERSION = 2;
 
-/** Committed mirror of a repo's plan canvas (`.haive-data/plan.json`), restored
- *  on clone by persistDetection. schemaVersion-gated like the onboarding mirrors:
- *  a future format bump is ignored rather than mis-parsed. Node ids are carried
- *  VERBATIM — plan node ids are what the technical-spec writer names in its
- *  "Affected components" section, so a re-import that renumbered them would
- *  silently break every stored reference. */
-export interface PlanMirror {
-  schemaVersion: number;
+/** Legacy committed mirror. Kept readable so repositories saved before the v2
+ *  portable-state boundary still restore after an upgrade. */
+export interface PlanMirrorV1 {
+  schemaVersion: 1;
   nodes: {
     id: string;
     parentId: string | null;
@@ -262,6 +258,44 @@ export interface PlanMirror {
     note: string | null;
   }[];
 }
+
+/**
+ * Portable product state for the plan canvas.
+ *
+ * The ids are opaque snapshot-local refs: the current importer preserves the
+ * UUIDs, but consumers may only use them to reconnect records inside this
+ * payload. Construction history (chat, task/provider links, read markers,
+ * versions and timestamps) is intentionally absent.
+ */
+export interface PlanMirror {
+  schemaVersion: 2;
+  nodes: {
+    id: string;
+    parentId: string | null;
+    ordinal: number;
+    title: string;
+    kind: string;
+    body: string | null;
+    status: string;
+    taskable: boolean;
+  }[];
+  edges: {
+    fromNodeId: string;
+    toNodeId: string;
+    kind: string;
+    note: string | null;
+  }[];
+  codeLinks: {
+    nodeId: string;
+    repoPath: string;
+    symbol: string | null;
+    evidence: string | null;
+    derivedAtCommit: string | null;
+    stale: boolean;
+  }[];
+}
+
+export type PlanMirrorPayload = PlanMirrorV1 | PlanMirror;
 
 export type CustomBundleSourceType = 'zip' | 'git';
 export type CustomBundleStatus = 'active' | 'syncing' | 'failed';

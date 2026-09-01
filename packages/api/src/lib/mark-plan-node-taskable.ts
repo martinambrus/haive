@@ -9,8 +9,8 @@ export async function markPlanNodeTaskable(
   db: Parameters<typeof applyPlanPatch>[0],
   node: { id: string; taskable: boolean; version: number },
   repositoryId: string,
-): Promise<void> {
-  if (node.taskable) return;
+): Promise<boolean> {
+  if (node.taskable) return false;
   try {
     await applyPlanPatch(
       db,
@@ -26,7 +26,9 @@ export async function markPlanNodeTaskable(
       },
       { repositoryId, origin: 'user' },
     );
+    return true;
   } catch (err) {
     logger.warn({ err, nodeId: node.id }, 'taskable auto-mark on task create failed');
+    return false;
   }
 }

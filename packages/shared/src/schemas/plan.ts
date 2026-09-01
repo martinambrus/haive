@@ -29,6 +29,89 @@ export type PlanEdgeKind = z.infer<typeof planEdgeKindSchema>;
 export const planNodeOriginSchema = z.enum(['user', 'llm', 'import']);
 export type PlanNodeOrigin = z.infer<typeof planNodeOriginSchema>;
 
+/* ------------------------------------------------------------------ */
+/* Repository mirror                                                   */
+/* ------------------------------------------------------------------ */
+
+const planMirrorNodeBaseSchema = z
+  .object({
+    id: z.string().uuid(),
+    parentId: z.string().uuid().nullable(),
+    ordinal: z.number().int().min(0).max(100_000),
+    title: z.string().trim().min(1).max(512),
+    kind: planNodeKindSchema,
+    body: z.string().max(200_000).nullable(),
+    status: planNodeStatusSchema,
+    taskable: z.boolean(),
+  })
+  .strict();
+
+const planMirrorEdgeSchema = z
+  .object({
+    fromNodeId: z.string().uuid(),
+    toNodeId: z.string().uuid(),
+    kind: planEdgeKindSchema,
+    note: z.string().max(2_000).nullable(),
+  })
+  .strict();
+
+/** A code path committed into the repository may never escape that repository
+ *  when it is restored. Keep this browser-safe (no node:path import) because the
+ *  plan schemas are also used by the web package. */
+const portableRepoPathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(1024)
+  .refine(
+    (p) =>
+      !p.startsWith('/') &&
+      !p.startsWith('\\') &&
+      !/^[A-Za-z]:[\\/]/.test(p) &&
+      !p.split(/[\\/]/).includes('..') &&
+      !p.includes('\0'),
+    'code link must be a safe repository-relative path',
+  );
+
+export const planMirrorV1Schema = z
+  .object({
+    schemaVersion: z.literal(1),
+    nodes: z
+      .array(planMirrorNodeBaseSchema.extend({ createdBy: planNodeOriginSchema }).strict())
+      .min(1)
+      .max(20_000),
+    edges: z.array(planMirrorEdgeSchema).max(100_000),
+  })
+  .strict();
+
+export const planMirrorV2Schema = z
+  .object({
+    schemaVersion: z.literal(2),
+    nodes: z.array(planMirrorNodeBaseSchema).min(1).max(20_000),
+    edges: z.array(planMirrorEdgeSchema).max(100_000),
+    codeLinks: z
+      .array(
+        z
+          .object({
+            nodeId: z.string().uuid(),
+            repoPath: portableRepoPathSchema,
+            symbol: z.string().trim().max(512).nullable(),
+            evidence: z.string().max(2_000).nullable(),
+            derivedAtCommit: z.string().max(40).nullable(),
+            stale: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(100_000),
+  })
+  .strict();
+
+export const planMirrorPayloadSchema = z.discriminatedUnion('schemaVersion', [
+  planMirrorV1Schema,
+  planMirrorV2Schema,
+]);
+export type PlanMirrorPayloadInput = z.infer<typeof planMirrorPayloadSchema>;
+
 /** A node reference: either an existing node's uuid, or a patch-local temporary
  *  id the same patch introduces. Temp ids are what let ONE turn create a subtree
  *  and immediately link into it — without them an agent would need a round trip
@@ -49,7 +132,7 @@ export const planNodeRefSchema = z.string().trim().min(1).max(128);
  *  required in spirit if not in type: an impact list without it is an
  *  unfalsifiable claim, and a human cannot tell a real link from a guess. */
 export const planCodeLinkSchema = z.object({
-  repoPath: z.string().trim().min(1).max(1024),
+  repoPath: portableRepoPathSchema,
   symbol: z.string().trim().max(512).optional(),
   evidence: z.string().max(2_000).optional(),
   confidence: z.number().min(0).max(1).optional(),
@@ -267,6 +350,12 @@ export const planAdvisoryRequestSchema = z.object({
   cliProviderId: z.string().uuid().optional(),
 });
 export type PlanAdvisoryRequest = z.infer<typeof planAdvisoryRequestSchema>;
+
+export const planSnapshotSaveRequestSchema = z.object({
+  push: z.boolean().optional().default(false),
+  commitMessage: z.string().trim().min(1).max(500).optional(),
+});
+export type PlanSnapshotSaveRequest = z.infer<typeof planSnapshotSaveRequestSchema>;
 
 /* ------------------------------------------------------------------ */
 /* Status roll-up                                                      */

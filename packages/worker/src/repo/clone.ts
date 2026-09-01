@@ -16,7 +16,7 @@ import {
   type RepoJobPayload,
 } from '@haive/shared';
 import { detectFromDirectory } from './framework-detect.js';
-import { importPlanMirror } from '../plan/mirror.js';
+import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper } from './git-push.js';
 
@@ -193,6 +193,7 @@ async function persistDetection(
   try {
     const res = await importPlanMirror(db, repositoryId, storagePath);
     if (!res.imported && res.reason && res.reason !== 'no plan mirror') {
+      await recordPlanMirrorError(db, repositoryId, `Plan snapshot not imported: ${res.reason}`);
       logger.info({ repositoryId, reason: res.reason }, 'plan mirror not imported');
     }
   } catch (err) {

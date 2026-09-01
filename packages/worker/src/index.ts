@@ -16,6 +16,11 @@ import {
 } from './queues/cli-exec-queue.js';
 import { startRepoWorker } from './queues/repo-queue.js';
 import {
+  schedulePlanMirrorSweep,
+  startPlanMirrorWorker,
+  sweepDirtyPlanMirrors,
+} from './queues/plan-mirror-queue.js';
+import {
   backfillMissingRunSeq,
   closeTaskQueue,
   reconcileEmbedModelResidency,
@@ -99,6 +104,7 @@ async function main(): Promise<void> {
   // Watches every waiting_pr task's forge PR (~3 min); on merge auto-finalizes the
   // 13-pr-wait step (auto mode) or surfaces the state for a manual Finalize.
   const prPollWorker = startPrPollWorker();
+  const planMirrorWorker = startPlanMirrorWorker();
   // Recover steps a prior worker orphaned mid-step (their sandboxes were reaped
   // above): resume waiting_cli steps and re-drive running steps whose advance-step
   // job died mid-execution, so neither hangs after a restart/crash/power loss.
@@ -114,6 +120,12 @@ async function main(): Promise<void> {
   // before sending keep_alive:0): evict any resident RAG model no live task needs.
   await reconcileEmbedModelResidency(getDb()).catch((err) => {
     logger.warn({ err }, 'embed-model residency reconciliation on boot failed');
+  });
+  await sweepDirtyPlanMirrors().catch((err) => {
+    logger.warn({ err }, 'plan mirror reconciliation on boot failed');
+  });
+  await schedulePlanMirrorSweep().catch((err) => {
+    logger.warn({ err }, 'failed to schedule plan mirror sweep');
   });
   await scheduleCliVersionRefresh().catch((err) => {
     logger.warn({ err }, 'failed to schedule cli version refresh');
@@ -222,6 +234,7 @@ async function main(): Promise<void> {
       ddevControlWorker.close(true),
       usagePollWorker.close(true),
       prPollWorker.close(true),
+      planMirrorWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
       closePrPollQueue(),

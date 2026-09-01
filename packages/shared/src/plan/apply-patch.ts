@@ -16,7 +16,7 @@ import {
   wouldDetachSubtree,
 } from './paths.js';
 
-type DbOrTx = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+export type DbOrTx = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
 type UpsertOp = Extract<PlanPatchOp, { op: 'upsert' }>;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -106,6 +106,25 @@ export async function applyPlanPatch(
     throw new PlanPatchError('invalid', `plan patch failed validation: ${parsed.error.message}`);
   }
   return db.transaction(async (tx) => applyOps(tx, parsed.data, opts));
+}
+
+/**
+ * Mark the repository projection dirty in the same transaction as its source
+ * mutation. Queue delivery is only a wake-up hint; this row is the durable
+ * outbox a boot/scheduled sweep can always recover.
+ */
+export async function markPlanMirrorDirty(tx: DbOrTx, repositoryId: string): Promise<void> {
+  await tx
+    .insert(schema.planMirrorState)
+    .values({ repositoryId, revision: 1, writtenRevision: 0, updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: schema.planMirrorState.repositoryId,
+      set: {
+        revision: sql`${schema.planMirrorState.revision} + 1`,
+        lastError: null,
+        updatedAt: new Date(),
+      },
+    });
 }
 
 /**
@@ -551,6 +570,17 @@ async function applyOps(
         break;
       }
     }
+  }
+
+  if (
+    result.created.length > 0 ||
+    result.updated.length > 0 ||
+    result.deleted.length > 0 ||
+    result.linked > 0 ||
+    result.unlinked > 0 ||
+    result.codeLinked > 0
+  ) {
+    await markPlanMirrorDirty(tx, repositoryId);
   }
 
   result.refs = Object.fromEntries(refs);

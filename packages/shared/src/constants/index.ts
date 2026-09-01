@@ -28,7 +28,33 @@ export const QUEUE_NAMES = {
   DDEV_CONTROL: 'haive-ddev-control',
   USAGE_POLL: 'haive-usage-poll',
   PR_POLL: 'haive-pr-poll',
+  PLAN_MIRROR: 'haive-plan-mirror',
 } as const;
+
+export const PLAN_MIRROR_JOB_NAMES = {
+  REFRESH: 'refresh-plan-mirror',
+  SAVE: 'save-plan-mirror',
+  SWEEP: 'sweep-plan-mirrors',
+} as const;
+
+export interface PlanMirrorJobPayload {
+  repositoryId?: string;
+  userId?: string;
+  /** SAVE only. Refresh always writes files but never changes Git history. */
+  push?: boolean;
+  commitMessage?: string;
+}
+
+export interface PlanMirrorJobResult {
+  repositoryId: string;
+  revision: number;
+  writtenRevision: number;
+  files: string[];
+  committed: boolean;
+  commitSha: string | null;
+  pushed: boolean;
+  branch: string | null;
+}
 
 export const REPO_JOB_NAMES = {
   CLONE: 'clone-repo',

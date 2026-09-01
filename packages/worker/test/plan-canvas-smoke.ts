@@ -6,19 +6,28 @@
  * a patch is ONE transaction, `path` is rewritten for every descendant of a moved
  * subtree by a SQL substring, a delete cascades through a self-FK, and
  * `expectedVersion` has to lose a race with a concurrent write. The second half
- * covers the `.haive-data/` mirror, whose whole job is to restore a plan
- * VERBATIM onto a fresh clone.
+ * covers the `.haive-data/` mirror, whose whole job is to restore the portable
+ * plan model onto a fresh clone.
  */
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 // Subpath, not the root barrel: the plan applier reaches the database, and the
 // barrel is what pulls ioredis/dns into anything that imports it.
-import { PlanPatchError, applyPlanPatch, findPlanRoot } from '@haive/shared/plan';
+import {
+  PlanPatchError,
+  applyPlanPatch,
+  findPlanRoot,
+  loadPlanEdges,
+  loadPlanNodes,
+  loadPlanSkeletons,
+  renderPlanMarkdownFrom,
+  toNodeViews,
+} from '@haive/shared/plan';
 import { markPlanCodeLinksStale } from '../src/plan/code-link-staleness.js';
 import { HAIVE_DATA_FILES, PLAN_MIRROR_SCHEMA_VERSION, type PlanMirror } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
@@ -415,6 +424,101 @@ async function main(): Promise<void> {
 
   /* --- 12. the .haive-data mirror round-trips onto a fresh clone ----------- */
 
+  const opsNode = await byTitle('Ops');
+  const legalNode = await byTitle('Legal');
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        {
+          op: 'upsert',
+          nodeRef: linkTarget!.id,
+          body: 'The customer-facing application shell.',
+          status: 'in_progress',
+          taskable: true,
+        },
+        {
+          op: 'upsert',
+          nodeRef: opsNode!.id,
+          body: 'Deployment and runtime operations.',
+          status: 'done',
+        },
+        {
+          op: 'upsert',
+          nodeRef: legalNode!.id,
+          body: 'External approval required.',
+          status: 'blocked_human',
+        },
+        {
+          op: 'upsert',
+          nodeRef: 'portable-decision',
+          parentRef: root!.id,
+          title: 'Architecture decision',
+          kind: 'decision',
+          body: 'The decision has been superseded.',
+          status: 'not_applicable',
+          // Deliberate collision with an existing sibling: the snapshot must
+          // preserve display order without exporting createdAt as a tie-breaker.
+          ordinal: 0,
+        },
+        {
+          op: 'upsert',
+          nodeRef: 'portable-research',
+          parentRef: root!.id,
+          title: 'Market research',
+          kind: 'research',
+          body: 'Research still to do.',
+          status: 'todo',
+        },
+        {
+          op: 'link',
+          fromRef: linkTarget!.id,
+          toRef: opsNode!.id,
+          kind: 'depends_on',
+          note: 'Deployment must exist before the application ships.',
+        },
+        {
+          op: 'link',
+          fromRef: legalNode!.id,
+          toRef: linkTarget!.id,
+          kind: 'affects',
+          note: 'Approval affects the application release.',
+        },
+        {
+          op: 'link',
+          fromRef: opsNode!.id,
+          toRef: api!.id,
+          kind: 'implements',
+          note: 'Operations implements the API deployment.',
+        },
+      ],
+    },
+    { repositoryId, origin: 'user', sourceTaskId: linkTaskId },
+  );
+
+  // These rows are deliberately present when the mirror is written. They are
+  // useful local construction/audit state, but they must not travel to a fresh
+  // machine with the plan product state.
+  await db.insert(schema.planNodeMessages).values({
+    nodeId: linkTarget!.id,
+    taskId: linkTaskId,
+    role: 'assistant',
+    body: 'transient plan-building conversation',
+  });
+  await db.insert(schema.planNodeTasks).values({ nodeId: linkTarget!.id, taskId: linkTaskId });
+  await db
+    .insert(schema.userPlanNodeReads)
+    .values({ userId, nodeId: linkTarget!.id, lastReadAt: new Date() });
+
+  const dirtyMirrorState = await db.query.planMirrorState.findFirst({
+    where: eq(schema.planMirrorState.repositoryId, repositoryId),
+  });
+  check(
+    'portable mutations leave a durable dirty mirror revision',
+    !!dirtyMirrorState && dirtyMirrorState.revision > dirtyMirrorState.writtenRevision,
+    dirtyMirrorState,
+  );
+
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'plan-mirror-'));
   state.tmpDir = tmpDir;
   const written = await writePlanMirror(db, repositoryId, tmpDir);
@@ -423,14 +527,112 @@ async function main(): Promise<void> {
     written.includes(HAIVE_DATA_FILES.plan) && written.includes(HAIVE_DATA_FILES.planMarkdown),
     written,
   );
+  const writtenMirrorState = await db.query.planMirrorState.findFirst({
+    where: eq(schema.planMirrorState.repositoryId, repositoryId),
+  });
+  check(
+    'a successful projection catches written revision up to DB revision',
+    !!writtenMirrorState && writtenMirrorState.revision === writtenMirrorState.writtenRevision,
+    writtenMirrorState,
+  );
 
   const mirrorRaw = await readFile(path.join(tmpDir, HAIVE_DATA_FILES.plan), 'utf8');
   const mirror = JSON.parse(mirrorRaw) as PlanMirror;
   const sourceNodes = await nodes();
+  const sourcePlanRecords = await loadPlanNodes(db, repositoryId);
+  const nextPortableOrdinal = new Map<string, number>();
+  const sourcePortableNodes = sourcePlanRecords.map((node) => {
+    const parentKey = node.parentId ?? '<root>';
+    const ordinal = nextPortableOrdinal.get(parentKey) ?? 0;
+    nextPortableOrdinal.set(parentKey, ordinal + 1);
+    return {
+      id: node.id,
+      parentId: node.parentId,
+      ordinal,
+      title: node.title,
+      kind: node.kind,
+      body: node.body,
+      status: node.status,
+      taskable: node.taskable,
+    };
+  });
+  const sourceEdges = await db
+    .select({
+      fromNodeId: schema.planNodeEdges.fromNodeId,
+      toNodeId: schema.planNodeEdges.toNodeId,
+      kind: schema.planNodeEdges.kind,
+      note: schema.planNodeEdges.note,
+    })
+    .from(schema.planNodeEdges)
+    .where(eq(schema.planNodeEdges.repositoryId, repositoryId));
+  const sourceCodeLinks = await db
+    .select({
+      nodeId: schema.planNodeCodeLinks.nodeId,
+      repoPath: schema.planNodeCodeLinks.repoPath,
+      symbol: schema.planNodeCodeLinks.symbol,
+      evidence: schema.planNodeCodeLinks.evidence,
+      derivedAtCommit: schema.planNodeCodeLinks.derivedAtCommit,
+      stale: schema.planNodeCodeLinks.stale,
+    })
+    .from(schema.planNodeCodeLinks)
+    .where(eq(schema.planNodeCodeLinks.repositoryId, repositoryId));
+  const sourceSkeletons = await loadPlanSkeletons(db, repositoryId);
+  const sourceBadges = toNodeViews(sourceSkeletons, sourceSkeletons)
+    .map((node) => ({
+      title: node.title,
+      rolledStatus: node.rolledStatus,
+      directChildren: node.directChildren,
+      totalDescendants: node.totalDescendants,
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title));
   check('the mirror carries every node', mirror.nodes.length === sourceNodes.length, {
     mirror: mirror.nodes.length,
     db: sourceNodes.length,
   });
+  check(
+    'the mirror carries titles, descriptions, badges and statuses',
+    JSON.stringify([...mirror.nodes].sort((a, b) => a.id.localeCompare(b.id))) ===
+      JSON.stringify([...sourcePortableNodes].sort((a, b) => a.id.localeCompare(b.id))),
+    mirror.nodes,
+  );
+  check(
+    'the mirror carries typed plan links and their descriptions',
+    JSON.stringify([...mirror.edges].sort((a, b) => a.fromNodeId.localeCompare(b.fromNodeId))) ===
+      JSON.stringify([...sourceEdges].sort((a, b) => a.fromNodeId.localeCompare(b.fromNodeId))),
+    mirror.edges,
+  );
+  check(
+    'the mirror carries code-link evidence and staleness',
+    JSON.stringify(
+      [...mirror.codeLinks].sort((a, b) =>
+        `${a.nodeId}:${a.repoPath}:${a.symbol ?? ''}`.localeCompare(
+          `${b.nodeId}:${b.repoPath}:${b.symbol ?? ''}`,
+        ),
+      ),
+    ) ===
+      JSON.stringify(
+        [...sourceCodeLinks].sort((a, b) =>
+          `${a.nodeId}:${a.repoPath}:${a.symbol ?? ''}`.localeCompare(
+            `${b.nodeId}:${b.repoPath}:${b.symbol ?? ''}`,
+          ),
+        ),
+      ),
+    mirror.codeLinks,
+  );
+  const mirrorRecord = JSON.parse(mirrorRaw) as Record<string, unknown>;
+  const firstMirrorNode = mirror.nodes[0] as unknown as Record<string, unknown>;
+  const firstMirrorCodeLink = mirror.codeLinks[0] as unknown as Record<string, unknown>;
+  check(
+    'the mirror excludes chat, tasks, read state and node construction metadata',
+    !('messages' in mirrorRecord) &&
+      !('tasks' in mirrorRecord) &&
+      !('reads' in mirrorRecord) &&
+      !('version' in firstMirrorNode) &&
+      !('createdBy' in firstMirrorNode) &&
+      !('sourceTaskId' in firstMirrorNode) &&
+      !('confidence' in firstMirrorCodeLink),
+    mirrorRecord,
+  );
 
   const markdown = await readFile(path.join(tmpDir, HAIVE_DATA_FILES.planMarkdown), 'utf8');
   check(
@@ -444,8 +646,9 @@ async function main(): Promise<void> {
 
   // A schemaVersion the reader does not know is ignored, not mis-parsed.
   const bumpedDir = await mkdtemp(path.join(os.tmpdir(), 'plan-mirror-v'));
+  await mkdir(path.join(bumpedDir, '.haive-data'), { recursive: true });
   await writeFile(
-    path.join(bumpedDir, 'plan.json'),
+    path.join(bumpedDir, HAIVE_DATA_FILES.plan),
     JSON.stringify({ ...mirror, schemaVersion: PLAN_MIRROR_SCHEMA_VERSION + 1 }),
     'utf8',
   );
@@ -455,6 +658,77 @@ async function main(): Promise<void> {
     .returning();
   const rejected = await importPlanMirror(db, freshRepoA!.id, bumpedDir);
   check('a future schemaVersion imports nothing', rejected.imported === false, rejected);
+
+  await writeFile(
+    path.join(bumpedDir, HAIVE_DATA_FILES.plan),
+    JSON.stringify({
+      ...mirror,
+      edges: [
+        ...mirror.edges,
+        {
+          fromNodeId: mirror.nodes[0]!.id,
+          toNodeId: randomUUID(),
+          kind: 'affects',
+          note: null,
+        },
+      ],
+    }),
+    'utf8',
+  );
+  const danglingEdge = await importPlanMirror(db, freshRepoA!.id, bumpedDir);
+  check(
+    'a dangling plan link imports nothing',
+    danglingEdge.imported === false && danglingEdge.reason?.includes('dangling plan link') === true,
+    danglingEdge,
+  );
+
+  await writeFile(
+    path.join(bumpedDir, HAIVE_DATA_FILES.plan),
+    JSON.stringify({
+      ...mirror,
+      codeLinks: [
+        ...mirror.codeLinks,
+        {
+          nodeId: randomUUID(),
+          repoPath: 'src/dangling.ts',
+          symbol: null,
+          evidence: null,
+          derivedAtCommit: null,
+          stale: false,
+        },
+      ],
+    }),
+    'utf8',
+  );
+  const danglingCodeLink = await importPlanMirror(db, freshRepoA!.id, bumpedDir);
+  check(
+    'a dangling code link imports nothing',
+    danglingCodeLink.imported === false &&
+      danglingCodeLink.reason?.includes('dangling code link') === true,
+    danglingCodeLink,
+  );
+
+  await writeFile(
+    path.join(bumpedDir, HAIVE_DATA_FILES.plan),
+    JSON.stringify({
+      ...mirror,
+      nodes: mirror.nodes.map((node) =>
+        node.parentId === null ? { ...node, parentId: mirror.nodes[1]!.id } : node,
+      ),
+    }),
+    'utf8',
+  );
+  const rootless = await importPlanMirror(db, freshRepoA!.id, bumpedDir);
+  check(
+    'a malformed tree imports nothing',
+    rootless.imported === false && rootless.reason?.includes('exactly one root') === true,
+    rootless,
+  );
+  const malformedRows = await db
+    .select({ id: schema.planNodes.id })
+    .from(schema.planNodes)
+    .where(eq(schema.planNodes.repositoryId, freshRepoA!.id));
+  check('all rejected snapshots leave no partial rows', malformedRows.length === 0, malformedRows);
   await db.delete(schema.repositories).where(eq(schema.repositories.id, freshRepoA!.id));
   await rm(bumpedDir, { recursive: true, force: true });
 
@@ -490,12 +764,17 @@ async function main(): Promise<void> {
       id: schema.planNodes.id,
       parentId: schema.planNodes.parentId,
       path: schema.planNodes.path,
+      ordinal: schema.planNodes.ordinal,
       title: schema.planNodes.title,
+      kind: schema.planNodes.kind,
+      body: schema.planNodes.body,
+      status: schema.planNodes.status,
+      taskable: schema.planNodes.taskable,
     })
     .from(schema.planNodes)
     .where(eq(schema.planNodes.repositoryId, freshRepoB!.id));
   check(
-    'restore preserves node ids verbatim',
+    'restore recreates every opaque node reference',
     restoredNodes.length === sourceNodes.length &&
       sourceNodes.every((n) => restoredNodes.some((r) => r.id === n.id)),
     { restored: restoredNodes.length, source: sourceNodes.length },
@@ -505,14 +784,112 @@ async function main(): Promise<void> {
     restoredNodes.every((r) => sourceNodes.find((n) => n.id === r.id)?.path === r.path),
     restoredNodes.map((r) => r.path),
   );
+  check(
+    'restore preserves the complete portable node state',
+    JSON.stringify(
+      restoredNodes
+        .map(({ path: _path, ...node }) => node)
+        .sort((a, b) => a.id.localeCompare(b.id)),
+    ) === JSON.stringify([...sourcePortableNodes].sort((a, b) => a.id.localeCompare(b.id))),
+    restoredNodes,
+  );
   const restoredEdges = await db
-    .select({ id: schema.planNodeEdges.id })
+    .select({
+      fromNodeId: schema.planNodeEdges.fromNodeId,
+      toNodeId: schema.planNodeEdges.toNodeId,
+      kind: schema.planNodeEdges.kind,
+      note: schema.planNodeEdges.note,
+    })
     .from(schema.planNodeEdges)
     .where(eq(schema.planNodeEdges.repositoryId, freshRepoB!.id));
   check('restore carries the edges', restoredEdges.length === mirror.edges.length, {
     restored: restoredEdges.length,
     mirror: mirror.edges.length,
   });
+  const restoredCodeLinks = await db
+    .select({
+      nodeId: schema.planNodeCodeLinks.nodeId,
+      repoPath: schema.planNodeCodeLinks.repoPath,
+      symbol: schema.planNodeCodeLinks.symbol,
+      evidence: schema.planNodeCodeLinks.evidence,
+      derivedAtCommit: schema.planNodeCodeLinks.derivedAtCommit,
+      stale: schema.planNodeCodeLinks.stale,
+    })
+    .from(schema.planNodeCodeLinks)
+    .where(eq(schema.planNodeCodeLinks.repositoryId, freshRepoB!.id));
+  check(
+    'restore carries code links and their state',
+    JSON.stringify(
+      [...restoredCodeLinks].sort((a, b) =>
+        `${a.nodeId}:${a.repoPath}:${a.symbol ?? ''}`.localeCompare(
+          `${b.nodeId}:${b.repoPath}:${b.symbol ?? ''}`,
+        ),
+      ),
+    ) ===
+      JSON.stringify(
+        [...sourceCodeLinks].sort((a, b) =>
+          `${a.nodeId}:${a.repoPath}:${a.symbol ?? ''}`.localeCompare(
+            `${b.nodeId}:${b.repoPath}:${b.symbol ?? ''}`,
+          ),
+        ),
+      ),
+    restoredCodeLinks,
+  );
+
+  const restoredSkeletons = await loadPlanSkeletons(db, freshRepoB!.id);
+  const restoredBadges = toNodeViews(restoredSkeletons, restoredSkeletons)
+    .map((node) => ({
+      title: node.title,
+      rolledStatus: node.rolledStatus,
+      directChildren: node.directChildren,
+      totalDescendants: node.totalDescendants,
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title));
+  check(
+    'restore recomputes roll-up and count badges from portable inputs',
+    JSON.stringify(restoredBadges) === JSON.stringify(sourceBadges),
+    { sourceBadges, restoredBadges },
+  );
+
+  const restoredConstruction = await db
+    .select({ sourceTaskId: schema.planNodes.sourceTaskId })
+    .from(schema.planNodes)
+    .where(eq(schema.planNodes.repositoryId, freshRepoB!.id));
+  check(
+    'restore does not recreate source-task provenance',
+    restoredConstruction.every((node) => node.sourceTaskId === null),
+    restoredConstruction,
+  );
+
+  const [restoredMarkdownNodes, restoredMarkdownEdges] = await Promise.all([
+    loadPlanNodes(db, freshRepoB!.id),
+    loadPlanEdges(db, freshRepoB!.id),
+  ]);
+  check(
+    'restore reconstructs the complete committed plan.md',
+    renderPlanMarkdownFrom(restoredMarkdownNodes, restoredMarkdownEdges) === markdown,
+  );
+
+  const restoredIds = restoredNodes.map((node) => node.id);
+  const [restoredMessages, restoredTaskLinks, restoredReads] = await Promise.all([
+    db
+      .select({ id: schema.planNodeMessages.id })
+      .from(schema.planNodeMessages)
+      .where(inArray(schema.planNodeMessages.nodeId, restoredIds)),
+    db
+      .select({ id: schema.planNodeTasks.id })
+      .from(schema.planNodeTasks)
+      .where(inArray(schema.planNodeTasks.nodeId, restoredIds)),
+    db
+      .select({ nodeId: schema.userPlanNodeReads.nodeId })
+      .from(schema.userPlanNodeReads)
+      .where(inArray(schema.userPlanNodeReads.nodeId, restoredIds)),
+  ]);
+  check(
+    'restore does not recreate chat, task links or read markers',
+    restoredMessages.length === 0 && restoredTaskLinks.length === 0 && restoredReads.length === 0,
+    { restoredMessages, restoredTaskLinks, restoredReads },
+  );
 
   /* --- 13. deleting the ROOT clears every attached table ------------------- */
 
@@ -531,7 +908,7 @@ async function main(): Promise<void> {
     repoPath: 'src/index.ts',
     symbol: 'main',
     evidence: 'line 1',
-    commitSha: 'deadbeef',
+    derivedAtCommit: 'deadbeef',
   });
   await db.insert(schema.planNodeMessages).values({
     nodeId: victim.id,

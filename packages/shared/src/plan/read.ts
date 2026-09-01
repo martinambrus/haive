@@ -10,6 +10,9 @@ import type {
 } from '../schemas/plan.js';
 import { rollUpStatus } from '../schemas/plan.js';
 
+/** The relational select surface shared by the root database and a transaction. */
+type PlanReadDb = Pick<Database, 'select'>;
+
 /** A node's structural fields — everything except the (potentially large) body.
  *  The whole repo's worth of these is loaded to compute counts and status
  *  roll-up; bodies are fetched only for the node actually being read. */
@@ -51,7 +54,7 @@ export interface PlanEdgeRecord {
  * not "the counting happens in SQL".
  */
 export async function loadPlanSkeletons(
-  db: Database,
+  db: PlanReadDb,
   repositoryId: string,
 ): Promise<PlanNodeSkeleton[]> {
   return db
@@ -77,7 +80,10 @@ export async function loadPlanSkeletons(
 
 /** As above, with bodies. Used by the markdown render (which is both the prompt
  *  input and the committed mirror) and by the single-node read. */
-export async function loadPlanNodes(db: Database, repositoryId: string): Promise<PlanNodeRecord[]> {
+export async function loadPlanNodes(
+  db: PlanReadDb,
+  repositoryId: string,
+): Promise<PlanNodeRecord[]> {
   return db
     .select({
       id: schema.planNodes.id,
@@ -100,7 +106,10 @@ export async function loadPlanNodes(db: Database, repositoryId: string): Promise
     .orderBy(asc(schema.planNodes.ordinal), asc(schema.planNodes.createdAt));
 }
 
-export async function loadPlanEdges(db: Database, repositoryId: string): Promise<PlanEdgeRecord[]> {
+export async function loadPlanEdges(
+  db: PlanReadDb,
+  repositoryId: string,
+): Promise<PlanEdgeRecord[]> {
   return db
     .select({
       id: schema.planNodeEdges.id,
@@ -114,7 +123,7 @@ export async function loadPlanEdges(db: Database, repositoryId: string): Promise
 }
 
 export async function loadPlanNode(
-  db: Database,
+  db: PlanReadDb,
   repositoryId: string,
   nodeId: string,
 ): Promise<PlanNodeRecord | null> {
