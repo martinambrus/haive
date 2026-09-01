@@ -18,6 +18,7 @@ import path from 'node:path';
 const exec = promisify(execFile);
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
+import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { augmentPromptWithAttachments } from '../../attachments-context.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
@@ -447,7 +448,11 @@ export function createPlanBuildStep(
       // browser or a container.
       toolProfile: 'rag_only',
       timeoutMs: 20 * 60 * 1000,
-      retry: { maxAttempts: 2 },
+      // A single expansion can time out while its siblings finish. The all-wave
+      // retry in apply() cannot recover that case, so opt into the runner's
+      // per-agent transient-failure retry as well. A second failure is left for
+      // 02-plan-coverage to report as a known structural loss.
+      retry: { maxAttempts: 2, retryOnInvocationFailure: shouldRetryMiningTerminalFailure },
 
       async selectAgents({ ctx, detected, formValues }) {
         // Smokes run the whole registered list under HAIVE_TEST_BYPASS_LLM; a
@@ -609,6 +614,13 @@ export function createPlanBuildStep(
       ]);
       const { asked, waves, expandAsked } = askedState(cumulative);
       const root = nodes.find((n) => n.parentId === null) ?? null;
+      // There is nothing for the coverage step to inspect or repair when the
+      // outline terminal exhausted its retries before creating even the root.
+      // Do not turn that into a successful zero-node plan: leave the step
+      // failed so Resume can re-run the terminal.
+      if (!root && cumulative.length > 0) {
+        throw new Error('Plan outline did not produce a root node. Re-run the failed terminal.');
+      }
       if (root) asked.add(root.id);
 
       const frontierAll = computeFrontier(nodes, depthBudget(args.formValues), ctx.taskId).filter(

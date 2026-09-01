@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { planCoverageStep } from './02-plan-coverage.js';
 import { findStructuralGaps } from './plan-coverage-scan.js';
 import type { FormSchema } from '@haive/shared';
+import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 
 type Detected = Parameters<NonNullable<typeof planCoverageStep.form>>[1];
 
@@ -20,6 +21,13 @@ const detected = (over: Partial<Detected> = {}): Detected =>
 const formOf = (d: Detected) => planCoverageStep.form!({} as never, d) as FormSchema | null;
 
 describe('the coverage gate', () => {
+  it('retries a transiently failed recovery terminal once', () => {
+    expect(planCoverageStep.agentMining?.retry).toEqual({
+      maxAttempts: 2,
+      retryOnInvocationFailure: shouldRetryMiningTerminalFailure,
+    });
+  });
+
   it('does not park when the build left nothing behind', () => {
     // A clean build must finish unattended, exactly as before this step existed.
     expect(formOf(detected())).toBeNull();
@@ -86,10 +94,50 @@ describe('findStructuralGaps', () => {
   it('flags a childless component whose expansion was rejected', () => {
     const gaps = findStructuralGaps(
       nodes,
-      [{ agentId: `plan-expand-${A}-p1`, errorMessage: 'plan patch not applied: node not found' }],
+      [
+        {
+          agentId: `plan-expand-${A}-p1`,
+          status: 'done',
+          errorMessage: 'plan patch not applied: node not found',
+        },
+      ],
       P,
     );
     expect(gaps.map((g) => g.nodeId)).toEqual([A]);
+  });
+
+  it('flags a childless component whose terminal timed out', () => {
+    // A partial wave can have successful siblings, so apply() degrades instead
+    // of retrying the whole wave. If this agent also exhausts its per-agent
+    // retry, coverage must preserve the missing parent as a known loss.
+    const gaps = findStructuralGaps(
+      nodes,
+      [
+        {
+          agentId: `plan-expand-${A}-p1`,
+          status: 'failed',
+          errorMessage: 'CLI process exceeded its time budget (20m).',
+        },
+      ],
+      P,
+    );
+    expect(gaps).toEqual([
+      {
+        nodeId: A,
+        title: 'Alpha',
+        reason: 'its decomposition terminal failed before producing children',
+      },
+    ]);
+  });
+
+  it('does not mistake a clean atomic reply for a failed decomposition', () => {
+    expect(
+      findStructuralGaps(
+        nodes,
+        [{ agentId: `plan-expand-${A}-p1`, status: 'done', errorMessage: null }],
+        P,
+      ),
+    ).toEqual([]);
   });
 
   it('leaves an ordinary childless leaf alone', () => {
@@ -101,7 +149,13 @@ describe('findStructuralGaps', () => {
   it('never flags a decision, which is made rather than decomposed', () => {
     const gaps = findStructuralGaps(
       nodes,
-      [{ agentId: `plan-expand-${D}-p1`, errorMessage: 'plan patch not applied: x' }],
+      [
+        {
+          agentId: `plan-expand-${D}-p1`,
+          status: 'done',
+          errorMessage: 'plan patch not applied: x',
+        },
+      ],
       P,
     );
     expect(gaps.map((g) => g.nodeId)).not.toContain(D);
@@ -114,6 +168,7 @@ describe('findStructuralGaps', () => {
       [
         {
           agentId: `plan-expand-${A}-p1`,
+          status: 'done',
           errorMessage: 'plan patch partially applied: link dropped: x',
         },
       ],
@@ -126,8 +181,16 @@ describe('findStructuralGaps', () => {
     const gaps = findStructuralGaps(
       nodes,
       [
-        { agentId: `plan-expand-${A}-p1`, errorMessage: 'plan patch not applied: x' },
-        { agentId: `plan-expand-${A}-p2`, errorMessage: 'plan patch partially applied: y' },
+        {
+          agentId: `plan-expand-${A}-p1`,
+          status: 'done',
+          errorMessage: 'plan patch not applied: x',
+        },
+        {
+          agentId: `plan-expand-${A}-p2`,
+          status: 'done',
+          errorMessage: 'plan patch partially applied: y',
+        },
       ],
       P,
     );

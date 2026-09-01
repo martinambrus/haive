@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { planBuildStep } from './01-plan-build.js';
 import type { AgentMiningSelectArgs } from '../../step-definition.js';
+import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 
 /**
  * The CI onboarding smoke wedged here once: it runs the full registered step
@@ -28,5 +29,12 @@ describe('plan-build selectAgents under smoke bypass', () => {
     const spec = planBuildStep.agentMining!;
     // No db/ctx touch may even happen before the guard: the smoke's ctx is bare.
     expect(await spec.selectAgents(args)).toEqual([]);
+  });
+
+  it('opts into per-terminal transient failure retries', () => {
+    expect(planBuildStep.agentMining?.retry).toEqual({
+      maxAttempts: 2,
+      retryOnInvocationFailure: shouldRetryMiningTerminalFailure,
+    });
   });
 });

@@ -5,6 +5,7 @@ import type { FormSchema, FormValues } from '@haive/shared';
 import { loadPlanSkeletons, renderPlanMarkdown } from '@haive/shared/plan';
 import type { StepDefinition } from '../../step-definition.js';
 import { MiningWaveError } from '../../step-definition.js';
+import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { APPLY_FAILURE_PREFIX, PARTIAL_APPLY_PREFIX } from './01-plan-build.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
@@ -100,6 +101,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
     const agents = await ctx.db
       .select({
         agentId: schema.taskStepAgentMinings.agentId,
+        status: schema.taskStepAgentMinings.status,
         errorMessage: schema.taskStepAgentMinings.errorMessage,
       })
       .from(schema.taskStepAgentMinings)
@@ -275,6 +277,11 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
   agentMining: {
     requiredCapabilities: ['tool_use'],
     toolProfile: 'rag_only',
+    // A recovery terminal is the last automated chance to replace missing plan
+    // work. Retry transient infrastructure failures before returning control to
+    // the gate; a final failure remains outstanding on a step retry because the
+    // handled filter counts only clean, completed agents.
+    retry: { maxAttempts: 2, retryOnInvocationFailure: shouldRetryMiningTerminalFailure },
     // Every agent of this step is dispatched from apply() once the user has
     // picked. Nothing fans out before the gate — the whole point is that the
     // model is spent only on confirmed gaps.
@@ -376,7 +383,12 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
           `You are completing a project plan that is missing work under ${subject}.`,
           '',
           structural
-            ? 'Its decomposition was attempted and lost, so it currently has no children. Add them.'
+            ? [
+                'Its decomposition was attempted and lost, so it currently has no children.',
+                'Rebuild the missing subtree: add the children that the failed terminal should',
+                'have produced, plus any necessary descendants, until its leaves are taskable',
+                'at the same granularity as the rest of the plan.',
+              ].join(' ')
             : 'No node in the plan covers this section. Add what it describes, under whichever existing node fits best.',
           '',
           section ? `The section reads:\n\n${(d.sectionBodies[key] ?? '').slice(0, 20_000)}\n` : '',

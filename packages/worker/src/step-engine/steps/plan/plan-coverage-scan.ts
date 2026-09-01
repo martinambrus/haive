@@ -159,7 +159,11 @@ function expandedNodeId(agentId: string): string | null {
 
 export function findStructuralGaps(
   nodes: { id: string; title: string; kind: string; parentId: string | null }[],
-  agents: { agentId: string; errorMessage: string | null }[],
+  agents: {
+    agentId: string;
+    status: 'pending' | 'running' | 'done' | 'failed';
+    errorMessage: string | null;
+  }[],
   prefixes: { failure: string; partial: string },
 ): StructuralGap[] {
   const hasChild = new Set(nodes.map((n) => n.parentId).filter((p): p is string => !!p));
@@ -172,10 +176,19 @@ export function findStructuralGaps(
     // expansion was ATTEMPTED and produced nothing is suspect, which is what the
     // agent rows below decide.
     const agent = agents.find(
-      (a) => expandedNodeId(a.agentId) === n.id && a.errorMessage?.startsWith(prefixes.failure),
+      (a) =>
+        expandedNodeId(a.agentId) === n.id &&
+        (a.status === 'failed' || a.errorMessage?.startsWith(prefixes.failure)),
     );
     if (agent) {
-      out.push({ nodeId: n.id, title: n.title, reason: 'its decomposition was rejected and lost' });
+      out.push({
+        nodeId: n.id,
+        title: n.title,
+        reason:
+          agent.status === 'failed'
+            ? 'its decomposition terminal failed before producing children'
+            : 'its decomposition was rejected and lost',
+      });
     }
   }
 
