@@ -37,6 +37,7 @@ interface MockRunner extends DockerRunner {
   readyVolumes: Set<string>;
   createCalls: string[];
   removeCalls: string[];
+  stoppedContainerCleanupCalls: string[];
   runCalls: DockerRunOpts[];
 }
 
@@ -51,6 +52,7 @@ function makeRunner(
   const readyVolumes = new Set<string>(opts.readyVolumes ?? []);
   const createCalls: string[] = [];
   const removeCalls: string[] = [];
+  const stoppedContainerCleanupCalls: string[] = [];
   const runCalls: DockerRunOpts[] = [];
 
   const defaultRunHandler = (runOpts: DockerRunOpts): DockerRunResult => {
@@ -81,6 +83,7 @@ function makeRunner(
     readyVolumes,
     createCalls,
     removeCalls,
+    stoppedContainerCleanupCalls,
     runCalls,
     async build() {
       throw new Error('build should not be called');
@@ -108,6 +111,10 @@ function makeRunner(
       volumeSet.delete(name);
       readyVolumes.delete(name);
       return { ok: true, stderr: '' };
+    },
+    async removeStoppedContainersUsingVolume(name) {
+      stoppedContainerCleanupCalls.push(name);
+      return { ok: true, removed: [], stderr: '' };
     },
   };
   return runner;
@@ -292,6 +299,7 @@ describe('cleanupTaskAuthVolumes', () => {
       ].sort(),
     );
     expect(result.failed).toEqual([]);
+    expect(runner.stoppedContainerCleanupCalls.sort()).toEqual(result.removed.sort());
   });
 
   it('is a no-op when no task volumes exist', async () => {
@@ -299,6 +307,7 @@ describe('cleanupTaskAuthVolumes', () => {
     const result = await cleanupTaskAuthVolumes('task-0000', runner);
     expect(result.removed).toEqual([]);
     expect(runner.removeCalls).toEqual([]);
+    expect(runner.stoppedContainerCleanupCalls).toEqual([]);
   });
 
   it('reports failures without throwing', async () => {

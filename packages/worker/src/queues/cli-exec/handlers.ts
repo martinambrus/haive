@@ -76,6 +76,10 @@ import {
 import { markProvidersReady, probeCliPath, removeOrphanedPreviousImage } from './images.js';
 import { resolveInvocationCost } from './invocation-cost.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
+import {
+  cleanupTaskAuthVolumes,
+  syncRefreshedAuthToUserVolumes,
+} from '../../sandbox/task-auth-volume.js';
 
 /** The auth volume a provider row owns. Both users here (the pre-login chown and sign-out)
  *  must agree with what a task actually mounts, so they resolve it through the same shared
@@ -258,6 +262,7 @@ export async function handleCliExecJob(
           });
         }
       }
+      await cleanupAuthAfterTerminalSummary(db, payload.taskId);
       return;
     }
 
@@ -299,7 +304,10 @@ export async function handleCliExecJob(
       .where(eq(schema.cliInvocations.id, row.id));
     // Summarizer is best-effort: on failure leave summary null and do not resume or
     // retry (taskStepId is null so resumeStepIfLinked is a no-op anyway).
-    if (payload.purpose === 'step_summary') return;
+    if (payload.purpose === 'step_summary') {
+      await cleanupAuthAfterTerminalSummary(db, payload.taskId);
+      return;
+    }
     if (payload.agentMiningId) {
       await db
         .update(schema.taskStepAgentMinings)
@@ -323,6 +331,39 @@ export async function handleCliExecJob(
     if (payload.taskStepId) await markCliParkBegin(db, payload.taskStepId);
     await resumeStepIfLinked(payload, false, message);
     throw err;
+  }
+}
+
+/** Task completion deliberately does not wait for its best-effort summary invocation. That
+ *  makes the normal terminal cleanup race the summary's still-mounted auth volume. Give the
+ *  LAST summary to finish a second cleanup pass; earlier summaries simply observe another
+ *  running mount and leave it for the last one. Sync credentials again first because the CLI
+ *  may have rotated a single-use OAuth refresh token after completion's first sync pass. */
+async function cleanupAuthAfterTerminalSummary(db: Database, taskId: string): Promise<void> {
+  try {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { status: true },
+    });
+    if (!task || !['completed', 'failed', 'cancelled'].includes(task.status)) return;
+    await syncRefreshedAuthToUserVolumes(db, taskId);
+    const result = await cleanupTaskAuthVolumes(taskId);
+    if (result.removed.length > 0) {
+      log.info(
+        { taskId, volumes: result.removed.length },
+        'terminal step summary removed deferred task auth volumes',
+      );
+    }
+    if (result.failed.length > 0) {
+      log.warn(
+        { taskId, volumes: result.failed.map((f) => f.name) },
+        'terminal step summary could not remove every deferred task auth volume',
+      );
+    }
+  } catch (err) {
+    // The summary is best-effort and already finalized. Cleanup trouble must not turn its
+    // successful task back into a failed queue job; boot's orphan reaper is the final backstop.
+    log.warn({ err, taskId }, 'terminal step summary auth cleanup failed');
   }
 }
 

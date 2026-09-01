@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { isCliAuthTaskVolume, logger } from '@haive/shared';
+import { defaultDockerRunner } from './docker-runner.js';
 
 const log = logger.child({ module: 'auth-volume-reaper' });
 
@@ -30,6 +31,7 @@ export function selectOrphanTaskAuthVolumes(names: string[], liveSlugs: Set<stri
 
 export interface AuthVolumeReaperDeps {
   listTaskAuthVolumes: () => Promise<string[]>;
+  removeStoppedContainersUsingVolume?: (name: string) => Promise<void>;
   removeVolume: (name: string) => Promise<void>;
 }
 
@@ -58,7 +60,14 @@ const defaultDeps: AuthVolumeReaperDeps = {
     return out.split(/\s+/).filter((s) => s.length > 0);
   },
   async removeVolume(name) {
-    await runDocker(['volume', 'rm', '-f', name], 15_000);
+    const result = await defaultDockerRunner.volumeRemove(name);
+    if (!result.ok) throw new Error(result.stderr || `failed to remove volume ${name}`);
+  },
+  async removeStoppedContainersUsingVolume(name) {
+    const result = await defaultDockerRunner.removeStoppedContainersUsingVolume?.(name);
+    if (result && !result.ok) {
+      throw new Error(result.stderr || `failed to remove stopped containers using ${name}`);
+    }
   },
 };
 
@@ -102,8 +111,15 @@ export async function reapOrphanedTaskAuthVolumes(
     { orphans: orphans.length, total: names.length, live: liveSlugs.size },
     'reaping orphaned per-task auth volumes left by an interrupted teardown',
   );
+  let removed = 0;
   for (const name of orphans) {
-    await deps.removeVolume(name);
+    try {
+      await deps.removeStoppedContainersUsingVolume?.(name);
+      await deps.removeVolume(name);
+      removed += 1;
+    } catch (err) {
+      log.warn({ err, volume: name }, 'orphaned task auth volume cleanup failed');
+    }
   }
-  return orphans.length;
+  return removed;
 }

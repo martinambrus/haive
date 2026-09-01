@@ -828,6 +828,23 @@ export async function cleanupTaskAuthVolumes(
     for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
       const taskVol = cliAuthTaskVolumeName(taskId, meta.name, idx);
       if (!(await runner.volumeExists(taskVol))) continue;
+      // `docker run --rm` cannot remove a container when the worker itself dies between
+      // Docker's create and start phases. Those helpers remain in Created state, keep this
+      // volume mounted, and make `docker volume rm --force` fail forever. Reap only STOPPED
+      // users of this exact task volume before removing it; a running final step-summary is
+      // deliberately spared and gets a second cleanup chance when it finishes.
+      const containerCleanup = await runner.removeStoppedContainersUsingVolume?.(taskVol);
+      if (containerCleanup && !containerCleanup.ok) {
+        log.warn(
+          { taskVol, stderr: containerCleanup.stderr },
+          'stopped auth helper container cleanup failed',
+        );
+      } else if (containerCleanup && containerCleanup.removed.length > 0) {
+        log.info(
+          { taskVol, containers: containerCleanup.removed.length },
+          'removed stopped auth helper containers',
+        );
+      }
       const result = await runner.volumeRemove(taskVol);
       if (result.ok) {
         removed.push(taskVol);

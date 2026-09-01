@@ -112,6 +112,13 @@ export interface DockerVolumeOpResult {
   error?: string;
 }
 
+export interface DockerContainerCleanupResult {
+  ok: boolean;
+  removed: string[];
+  stderr: string;
+  error?: string;
+}
+
 export interface DockerRunner {
   build(opts: DockerBuildOpts): Promise<DockerBuildResult>;
   run(opts: DockerRunOpts): Promise<DockerRunResult>;
@@ -120,6 +127,10 @@ export interface DockerRunner {
   volumeCreate(name: string): Promise<DockerVolumeOpResult>;
   volumeExists(name: string): Promise<boolean>;
   volumeRemove(name: string): Promise<DockerVolumeOpResult>;
+  /** Remove only non-running containers that still mount this volume. A worker killed
+   *  between `docker create` and `docker start` can otherwise leave a Created helper
+   *  container pinning an auth volume forever. Running containers are never selected. */
+  removeStoppedContainersUsingVolume?(name: string): Promise<DockerContainerCleanupResult>;
 }
 
 const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -487,5 +498,46 @@ export const defaultDockerRunner: DockerRunner = {
       timeoutMs: 30_000,
     });
     return { ok: result.exitCode === 0, stderr: result.stderr, error: result.error };
+  },
+
+  async removeStoppedContainersUsingVolume(name) {
+    // Multiple values for one Docker filter are ORed. Deliberately exclude `running`,
+    // `paused` and `restarting`: task completion can race its best-effort step-summary
+    // invocation, and cleanup must never kill work that is still in flight.
+    const listed = await spawnAndCollect(
+      'docker',
+      [
+        'ps',
+        '-aq',
+        '--filter',
+        `volume=${name}`,
+        '--filter',
+        'status=created',
+        '--filter',
+        'status=exited',
+        '--filter',
+        'status=dead',
+      ],
+      { timeoutMs: 15_000 },
+    );
+    if (listed.exitCode !== 0) {
+      return {
+        ok: false,
+        removed: [],
+        stderr: listed.stderr,
+        error: listed.error,
+      };
+    }
+    const ids = listed.stdout.split(/\s+/).filter((id) => id.length > 0);
+    if (ids.length === 0) return { ok: true, removed: [], stderr: '' };
+    const removed = await spawnAndCollect('docker', ['rm', '-f', ...ids], {
+      timeoutMs: 30_000,
+    });
+    return {
+      ok: removed.exitCode === 0,
+      removed: removed.exitCode === 0 ? ids : [],
+      stderr: removed.stderr,
+      error: removed.error,
+    };
   },
 };

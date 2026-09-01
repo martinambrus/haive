@@ -43,6 +43,7 @@ describe('reapOrphanedTaskAuthVolumes', () => {
     } as unknown as Database;
 
     const removed: string[] = [];
+    const stoppedContainersCleaned: string[] = [];
     const present = [
       `haive_cli_auth_task_${liveSlug}_claude-code_0`, // live → keep
       'haive_cli_auth_task_dead00000000_ollama_0', // dead → reap
@@ -50,12 +51,16 @@ describe('reapOrphanedTaskAuthVolumes', () => {
     ];
     const count = await reapOrphanedTaskAuthVolumes(db, {
       listTaskAuthVolumes: async () => present,
+      removeStoppedContainersUsingVolume: async (name) => {
+        stoppedContainersCleaned.push(name);
+      },
       removeVolume: async (name) => {
         removed.push(name);
       },
     });
 
     expect(count).toBe(1);
+    expect(stoppedContainersCleaned).toEqual(['haive_cli_auth_task_dead00000000_ollama_0']);
     expect(removed).toEqual(['haive_cli_auth_task_dead00000000_ollama_0']);
   });
 
@@ -70,5 +75,26 @@ describe('reapOrphanedTaskAuthVolumes', () => {
       },
     });
     expect(count).toBe(0);
+  });
+
+  it('counts only volumes that were actually removed and continues after a failure', async () => {
+    const db = {
+      select: () => ({ from: () => ({ where: async () => [] }) }),
+    } as unknown as Database;
+    const removed: string[] = [];
+    const count = await reapOrphanedTaskAuthVolumes(db, {
+      listTaskAuthVolumes: async () => [
+        'haive_cli_auth_task_dead00000001_codex_0',
+        'haive_cli_auth_task_dead00000002_codex_0',
+      ],
+      removeStoppedContainersUsingVolume: async () => undefined,
+      removeVolume: async (name) => {
+        if (name.includes('00000001')) throw new Error('still in use');
+        removed.push(name);
+      },
+    });
+
+    expect(count).toBe(1);
+    expect(removed).toEqual(['haive_cli_auth_task_dead00000002_codex_0']);
   });
 });
