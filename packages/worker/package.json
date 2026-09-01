@@ -37,7 +37,7 @@
   "dependencies": {
     "@haive/database": "workspace:*",
     "@haive/shared": "workspace:*",
-    "bullmq": "^6.1.2",
+    "bullmq": "^6.3.2",
     "dockerode": "^5.0.1",
     "drizzle-orm": "0.45.2",
     "ioredis": "^6.0.0",
