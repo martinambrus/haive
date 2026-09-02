@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AUTO_CONVERGENCE_AGENTS_PER_PASS,
   continuationDispatchCount,
   effectiveCoverageMiningRow,
-  findPatchBreadthViolations,
   planCoverageStep,
+  unresolvedExpansionNodeIds,
 } from './02-plan-coverage.js';
+import { findPatchBreadthViolations } from './_plan-breadth.js';
 import { PLAN_AGENT_TIMEOUT_MS } from './01-plan-build.js';
 import { findStructuralGaps } from './plan-coverage-scan.js';
 import type { FormSchema } from '@haive/shared';
@@ -28,6 +30,7 @@ const detected = (over: Partial<Detected> = {}): Detected =>
     frontierRemaining: 0,
     frontierPreview: [],
     continuationBatch: 1,
+    automaticLimitReached: false,
     ...over,
   }) as Detected;
 
@@ -59,12 +62,25 @@ describe('the coverage gate', () => {
     expect(form!.fields.map((f) => f.id)).toEqual(['decision', 'items', 'note']);
   });
 
-  it('parks when the builder stopped with a live frontier', () => {
+  it('runs semantic frontier review without parking the user', () => {
+    expect(
+      formOf(
+        detected({
+          buildStopped: 'node_budget',
+          frontierRemaining: 512,
+          frontierPreview: ['Unfinished branch'],
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it('parks only when an automatic semantic pass reaches its safety budget', () => {
     const form = formOf(
       detected({
         buildStopped: 'node_budget',
         frontierRemaining: 512,
         frontierPreview: ['Unfinished branch'],
+        automaticLimitReached: true,
       }),
     );
     expect(form).not.toBeNull();
@@ -73,10 +89,10 @@ describe('the coverage gate', () => {
       default?: string;
       options: { value: string }[];
     };
-    expect(decision.default).toBe('continue');
-    expect(decision.options.map((option) => option.value)).toEqual(['continue', 'accept']);
+    expect(decision.default).toBe('converge');
+    expect(decision.options.map((option) => option.value)).toEqual(['converge', 'accept']);
     expect(form!.description).toContain('512 component node(s)');
-    expect(form!.description).toContain('bounded batch');
+    expect(form!.description).toContain('safety budget');
   });
 
   it('pre-ticks a known loss but not a heuristic guess', () => {
@@ -116,9 +132,72 @@ describe('bounded coverage continuation', () => {
     expect(continuationDispatchCount(512, 0)).toBe(12);
   });
 
-  it('clamps the last wave to sixty agents per approval', () => {
-    expect(continuationDispatchCount(512, 58)).toBe(2);
-    expect(continuationDispatchCount(512, 60)).toBe(0);
+  it('clamps the last wave to the automatic semantic-pass budget', () => {
+    expect(AUTO_CONVERGENCE_AGENTS_PER_PASS).toBe(240);
+    expect(continuationDispatchCount(512, 238)).toBe(2);
+    expect(continuationDispatchCount(512, 240)).toBe(0);
+  });
+
+  it('revisits clean legacy empty replies but blocks failed expansion terminals', () => {
+    const cleanLegacy = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const failedBuild = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const rejectedContinuation = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const failedRecovery = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const recoveredBuild = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const postRecoveryFailure = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    const blocked = unresolvedExpansionNodeIds([
+      {
+        agentId: `plan-expand-${cleanLegacy}-p1`,
+        status: 'done',
+        errorMessage: null,
+      },
+      {
+        agentId: `plan-expand-${failedBuild}-p2`,
+        status: 'failed',
+        errorMessage: 'CLI exited 1',
+      },
+      {
+        agentId: `plan-continue-b1-${rejectedContinuation}-p3`,
+        status: 'done',
+        errorMessage: 'plan patch not applied: breadth exceeded',
+      },
+      {
+        agentId: `cover-node-${failedRecovery}`,
+        status: 'running',
+        errorMessage: null,
+      },
+      {
+        agentId: `plan-expand-${recoveredBuild}-p1`,
+        status: 'failed',
+        errorMessage: 'CLI exited 1',
+      },
+      {
+        agentId: `plan-expand-${recoveredBuild}-p2`,
+        status: 'done',
+        errorMessage: null,
+      },
+      {
+        agentId: `cover-node-${postRecoveryFailure}`,
+        status: 'done',
+        errorMessage: null,
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+      },
+      {
+        agentId: `plan-continue-b2-${postRecoveryFailure}-p1`,
+        status: 'failed',
+        errorMessage: 'CLI exited 1',
+        createdAt: new Date('2026-01-02T00:00:00Z'),
+      },
+    ]);
+
+    expect(blocked.has(cleanLegacy)).toBe(false);
+    expect(blocked.has(recoveredBuild)).toBe(false);
+    expect([...blocked]).toEqual([
+      failedBuild,
+      rejectedContinuation,
+      failedRecovery,
+      postRecoveryFailure,
+    ]);
   });
 });
 
@@ -298,6 +377,23 @@ describe('findStructuralGaps', () => {
     ).toEqual([]);
   });
 
+  it('does not preserve an older failure after a later clean retry', () => {
+    expect(
+      findStructuralGaps(
+        nodes,
+        [
+          {
+            agentId: `plan-expand-${A}-p1`,
+            status: 'failed',
+            errorMessage: 'CLI exited 1',
+          },
+          { agentId: `plan-expand-${A}-p2`, status: 'done', errorMessage: null },
+        ],
+        P,
+      ),
+    ).toEqual([]);
+  });
+
   it('leaves an ordinary childless leaf alone', () => {
     // Most of a plan is leaves. Only one whose expansion was ATTEMPTED and lost
     // is suspect; flagging every leaf would report the plan itself.
@@ -358,51 +454,52 @@ describe('findStructuralGaps', () => {
 
 describe('not re-offering work already done', () => {
   const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-  const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-
-  /** The filter detect() applies, stated once so the test and the step cannot
-   *  disagree about its shape. */
-  const handledSet = (rows: { agentId: string; status: string; errorMessage: string | null }[]) =>
-    new Set(rows.filter((a) => a.status === 'done' && !a.errorMessage).map((a) => a.agentId));
+  const nodes = [
+    { id: 'root', title: 'Root', kind: 'component', parentId: null },
+    { id: A, title: 'Alpha', kind: 'component', parentId: 'root' },
+  ];
+  const P = { failure: 'plan patch not applied:', partial: 'plan patch partially applied:' };
 
   it('drops an item a previous pass re-decomposed', () => {
     // The build's row still says "1 operation dropped" — that stays true after
     // the gap is filled — so without this the report re-offers finished work and
     // a second run grows the plan for nothing. MEASURED on a real task: 19
-    // items before the filter, 0 after.
-    const handled = handledSet([
-      { agentId: `cover-node-${A}`, status: 'done', errorMessage: null },
-    ]);
-    const gaps = [{ nodeId: A, title: 'Alpha', reason: 'lost' }];
-    expect(gaps.filter((g) => !handled.has(`cover-node-${g.nodeId}`))).toEqual([]);
+    // items before latest-attempt resolution, 0 after.
+    expect(
+      findStructuralGaps(
+        nodes,
+        [
+          {
+            agentId: `plan-expand-${A}-p1`,
+            status: 'done',
+            errorMessage: 'plan patch partially applied: one op dropped',
+          },
+          { agentId: `cover-node-${A}`, status: 'done', errorMessage: null },
+        ],
+        P,
+      ),
+    ).toEqual([]);
   });
 
-  it('keeps an item whose re-decomposition itself failed', () => {
-    // Its patch never landed, so the gap is still there and must stay offered.
-    const handled = handledSet([
-      { agentId: `cover-node-${A}`, status: 'done', errorMessage: 'plan patch not applied: x' },
-    ]);
-    const gaps = [{ nodeId: A, title: 'Alpha', reason: 'lost' }];
-    expect(gaps.filter((g) => !handled.has(`cover-node-${g.nodeId}`))).toHaveLength(1);
-  });
-
-  it('keeps an item whose agent never finished', () => {
-    const handled = handledSet([
-      { agentId: `cover-node-${A}`, status: 'failed', errorMessage: null },
-    ]);
-    expect(handled.has(`cover-node-${A}`)).toBe(false);
-  });
-
-  it('drops only the item that was handled', () => {
-    const handled = handledSet([
-      { agentId: `cover-node-${A}`, status: 'done', errorMessage: null },
-    ]);
-    const gaps = [
-      { nodeId: A, title: 'Alpha', reason: 'lost' },
-      { nodeId: B, title: 'Beta', reason: 'lost' },
-    ];
-    expect(gaps.filter((g) => !handled.has(`cover-node-${g.nodeId}`)).map((g) => g.nodeId)).toEqual(
-      [B],
+  it('keeps a later failure visible after an earlier clean recovery', () => {
+    const gaps = findStructuralGaps(
+      nodes,
+      [
+        {
+          agentId: `cover-node-${A}`,
+          status: 'done',
+          errorMessage: null,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+        {
+          agentId: `plan-continue-b2-${A}-p1`,
+          status: 'failed',
+          errorMessage: 'CLI exited 1',
+          createdAt: new Date('2026-01-02T00:00:00Z'),
+        },
+      ],
+      P,
     );
+    expect(gaps.map((gap) => gap.nodeId)).toEqual([A]);
   });
 });

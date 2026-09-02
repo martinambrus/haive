@@ -22,6 +22,8 @@ import { augmentPromptWithAttachments } from '../../attachments-context.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
+import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
+import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 
 /**
  * Build a repository's plan, one LEVEL per mining wave.
@@ -318,8 +320,11 @@ export function buildExpandPrompt(
       ? 'This is the LAST level. Mark each child `"taskable": true` — they must be small enough that one developer task implements each.'
       : `You may go ${remainingDepth} level(s) deeper, but prefer ONE level now: later waves expand what you leave. Mark a child \`"taskable": true\` only when it is already small enough for a single developer task.`,
     '',
-    'If this node genuinely cannot be broken down further, reply with an empty `ops` array and',
-    'say so in `summary` — do NOT invent children to fill the space.',
+    'First make a semantic stopping decision. If this node is already specific enough for one',
+    'developer task, do NOT invent children: mark THIS existing node taskable with',
+    `\`{ "op": "upsert", "nodeRef": "${node.id}", "expectedVersion": ${node.version}, "taskable": true }\`.`,
+    'Otherwise decompose it. An empty `ops` array is not a stopping decision because it leaves',
+    'the plan unable to distinguish an implementation-ready leaf from an unfinished branch.',
     '',
     'Add `link` ops where this part depends on, affects, or implements something already in the',
     'plan. Those links are what later answers "if I change this, what else must change".',
@@ -546,18 +551,30 @@ export function createPlanBuildStep(
           failures.push(`${result.agentTitle ?? result.agentId}: no patch in reply`);
           continue;
         }
-        // An empty ops array is a legitimate answer — "this cannot be broken down
-        // further" — and must not be retried as a parse failure, or a genuinely
-        // atomic node burns the whole retry budget every wave.
-        if (patch.ops.length === 0) continue;
         try {
           // The node this agent was expanding, recovered from its own id, so its
           // children can be parented with `self` instead of a transcribed uuid —
           // the single commonest thing an agent gets wrong.
           const expanding = EXPAND_AGENT_RE.exec(result.agentId)?.[1];
+          if (patch.ops.length === 0 && !expanding) {
+            throw new Error('plan outline returned no operations');
+          }
+          const ops = await ensureSemanticExpansionResolution(
+            ctx.db,
+            repositoryId,
+            expanding ?? null,
+            patch.ops,
+          );
+          await assertPlanPatchWithinBreadth(
+            ctx.db,
+            repositoryId,
+            ops,
+            expanding ?? null,
+            breadthCap(args.formValues),
+          );
           const applied = await applyAgentPatch(
             ctx.db,
-            { ...patch, ops: withMinedStatus(patch.ops, d.mode) },
+            { ...patch, ops: withMinedStatus(ops, d.mode) },
             {
               repositoryId,
               sourceTaskId: ctx.taskId,

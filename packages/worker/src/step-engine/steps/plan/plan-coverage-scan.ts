@@ -1,11 +1,9 @@
 /**
  * Which sections of a source document the plan does not appear to cover.
  *
- * Deterministic on purpose. The step that uses this REPORTS — a human decides
- * whether a candidate is a real gap — so this only has to be a good shortlist,
- * not a judge. An LLM judging coverage would cost a pass over the whole document
- * on every build and could invent gaps; a person dismisses a false positive in
- * one click.
+ * Deterministic on purpose. Document candidates remain a human decision because
+ * this is a heuristic shortlist, not a judge. Semantic leaf completion is a
+ * separate automatic pass with an explicit persisted stopping state.
  */
 
 /** A heading in the source document, with the text beneath it. */
@@ -143,18 +141,81 @@ export interface StructuralGap {
  * `decision`, `research` and `external` nodes are excluded because the frontier
  * deliberately never expands them: a decision is not decomposed, it is made.
  */
-/** The node an expansion agent was working on, from its id. One extractor for
- *  both passes below: a substring match would let one node's id match another's
- *  agent, and the whole point of these ids is that they name a node exactly. */
-function expandedNodeId(agentId: string): string | null {
-  // The uuid shape is spelled out rather than a loose run of hex-and-dashes: a
-  // greedy class swallowed the hyphen before the `-p1` wave suffix and returned
-  // an id that matched no node.
-  return (
-    /(?:plan-expand|cover-node|plan-continue-b\d+)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(
-      agentId,
-    )?.[1] ?? null
-  );
+const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const BUILD_ATTEMPT_RE = new RegExp(`^plan-expand-(${UUID_SOURCE})-p(\\d+)$`, 'i');
+const CONTINUE_ATTEMPT_RE = new RegExp(`^plan-continue-b(\\d+)-(${UUID_SOURCE})-p(\\d+)$`, 'i');
+const RECOVERY_ATTEMPT_RE = new RegExp(`^cover-node-(${UUID_SOURCE})$`, 'i');
+
+export interface ExpansionAttemptRow {
+  agentId: string;
+  status: 'pending' | 'running' | 'done' | 'failed';
+  errorMessage: string | null;
+  createdAt?: Date | null;
+}
+
+function expansionAttemptKey(
+  agentId: string,
+): { nodeId: string; order: readonly [number, number, number] } | null {
+  const recovery = RECOVERY_ATTEMPT_RE.exec(agentId);
+  if (recovery) return { nodeId: recovery[1]!, order: [2, 0, 0] };
+  const continuation = CONTINUE_ATTEMPT_RE.exec(agentId);
+  if (continuation) {
+    return {
+      nodeId: continuation[2]!,
+      order: [1, Number(continuation[1]), Number(continuation[3])],
+    };
+  }
+  const build = BUILD_ATTEMPT_RE.exec(agentId);
+  if (build) return { nodeId: build[1]!, order: [0, 0, Number(build[2])] };
+  return null;
+}
+
+function isLaterAttempt(
+  candidate: readonly [number, number, number],
+  current: readonly [number, number, number],
+): boolean {
+  for (let index = 0; index < candidate.length; index += 1) {
+    if (candidate[index] === current[index]) continue;
+    return candidate[index]! > current[index]!;
+  }
+  return false;
+}
+
+/**
+ * One effective attempt per focus node. A clean retry must supersede an older
+ * failure, while a later failure must not be hidden by an earlier clean row.
+ * Persisted creation time is authoritative. Agent-id lifecycle and wave/batch
+ * order provide the deterministic fallback used by older/test rows without it.
+ */
+export function latestExpansionAttempts<T extends ExpansionAttemptRow>(
+  agents: T[],
+): Map<string, T> {
+  const latest = new Map<string, { row: T; order: readonly [number, number, number] }>();
+  for (const row of agents) {
+    const attempt = expansionAttemptKey(row.agentId);
+    if (!attempt) continue;
+    const current = latest.get(attempt.nodeId);
+    const candidateTime = row.createdAt?.getTime();
+    const currentTime = current?.row.createdAt?.getTime();
+    const isLaterByTime =
+      candidateTime !== undefined &&
+      currentTime !== undefined &&
+      candidateTime !== currentTime &&
+      candidateTime > currentTime;
+    const isEarlierByTime =
+      candidateTime !== undefined &&
+      currentTime !== undefined &&
+      candidateTime !== currentTime &&
+      candidateTime < currentTime;
+    if (
+      !current ||
+      isLaterByTime ||
+      (!isEarlierByTime && isLaterAttempt(attempt.order, current.order))
+    ) {
+      latest.set(attempt.nodeId, { row, order: attempt.order });
+    }
+  }
+  return new Map([...latest].map(([nodeId, value]) => [nodeId, value.row]));
 }
 
 export function findStructuralGaps(
@@ -168,6 +229,7 @@ export function findStructuralGaps(
 ): StructuralGap[] {
   const hasChild = new Set(nodes.map((n) => n.parentId).filter((p): p is string => !!p));
   const byId = new Map(nodes.map((n) => [n.id, n]));
+  const latestAttempts = latestExpansionAttempts(agents);
   const out: StructuralGap[] = [];
 
   for (const n of nodes) {
@@ -175,12 +237,8 @@ export function findStructuralGaps(
     // A leaf component is normal — most of the plan is leaves. Only one whose
     // expansion was ATTEMPTED and produced nothing is suspect, which is what the
     // agent rows below decide.
-    const agent = agents.find(
-      (a) =>
-        expandedNodeId(a.agentId) === n.id &&
-        (a.status === 'failed' || a.errorMessage?.startsWith(prefixes.failure)),
-    );
-    if (agent) {
+    const agent = latestAttempts.get(n.id);
+    if (agent && (agent.status === 'failed' || agent.errorMessage?.startsWith(prefixes.failure))) {
       out.push({
         nodeId: n.id,
         title: n.title,
@@ -195,10 +253,9 @@ export function findStructuralGaps(
   // Losses that did not leave a childless node: a wave that was thinned rather
   // than rejected outright. Reported because a silently smaller patch is how a
   // plan loses content with nothing to see.
-  for (const a of agents) {
+  for (const [id, a] of latestAttempts) {
     if (!a.errorMessage?.startsWith(prefixes.partial)) continue;
-    const id = expandedNodeId(a.agentId);
-    const node = id ? byId.get(id) : undefined;
+    const node = byId.get(id);
     if (!node || out.some((g) => g.nodeId === node.id)) continue;
     const dropped = a.errorMessage.split('; ').length;
     out.push({

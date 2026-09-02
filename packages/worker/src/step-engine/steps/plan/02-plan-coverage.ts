@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
 import { loadPlanSkeletons, renderPlanMarkdown } from '@haive/shared/plan';
@@ -13,7 +13,6 @@ import {
   APPLY_FAILURE_PREFIX,
   PARTIAL_APPLY_PREFIX,
   PLAN_AGENT_TIMEOUT_MS,
-  askedState,
   breadthCap,
   buildExpandPrompt,
   computeFrontier,
@@ -26,20 +25,23 @@ import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-pr
 import {
   findCoverageGaps,
   findStructuralGaps,
+  latestExpansionAttempts,
   parseDocSections,
   type CoverageCandidate,
   type StructuralGap,
 } from './plan-coverage-scan.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
+import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
+import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 
 /**
- * What the build did not cover, reported for a person to rule on.
+ * What the build did not cover, repaired to a semantic fixed point.
  *
- * Runs after 01-plan-build and REPORTS. It never edits the plan on its own: an
- * agent asked "what is missing?" against a 200 KB document and 800 nodes always
- * finds something, so an autonomous fixer has no fixed point and would grow the
- * plan on every run. The human tick is the fixed point, and the model is spent
- * only on gaps someone confirmed.
+ * Runs after 01-plan-build. Ordinary component leaves are assessed automatically:
+ * each assessor must either mark the exact existing node taskable or add a real
+ * decomposition. Those persisted states are the fixed point, so retries do not
+ * grow already-finished branches. People are asked only about recorded terminal
+ * losses, heuristic document gaps, or an unusually large automatic-pass budget.
  *
  * Detection is deterministic, and its PRIMARY signal is structural rather than
  * textual. That is not a shortcut — it is what the evidence says. A term-coverage
@@ -65,13 +67,16 @@ interface CoverageDetect {
   buildDetect: PlanBuildDetect | null;
   buildFormValues: FormValues;
   buildStopped: PlanBuildApply['stopped'] | null;
-  /** Live, unasked component leaves above the requested depth. Unlike the
+  /** Live, unresolved component leaves above the requested depth. Unlike the
    *  builder's output snapshot, this is recomputed after every bounded batch. */
   frontierRemaining: number;
   frontierPreview: string[];
-  /** Agent ids carry this number, separating each user-approved batch from the
-   *  previous one while retaining all rows as durable asked-history. */
+  /** Agent ids carry this number, separating bounded automatic passes while
+   *  retaining their rows as durable accounting and failure history. */
   continuationBatch: number;
+  /** The preceding automatic pass reached its model-work safety budget. A new
+   *  pass needs one explicit user approval; ordinary waves do not. */
+  automaticLimitReached: boolean;
 }
 
 interface CoverageApply {
@@ -87,6 +92,7 @@ type MiningRow = {
   agentId: string;
   status: 'pending' | 'running' | 'done' | 'failed';
   errorMessage: string | null;
+  createdAt?: Date | null;
 };
 
 type MiningRowWithInvocation = MiningRow & {
@@ -95,13 +101,11 @@ type MiningRowWithInvocation = MiningRow & {
   invocationErrorMessage: string | null;
 };
 
-/** Each click approves at most this much additional model work. The wave cap
- *  keeps simultaneous terminals modest; the batch cap makes the form a real
- *  safety gate instead of permission to exhaust an arbitrarily large frontier. */
+/** Semantic convergence runs unattended in modest waves. The larger pass cap
+ *  is a runaway guard, not a cadence at which the user must keep clicking. */
 const CONTINUATION_AGENTS_PER_WAVE = 12;
-const CONTINUATION_AGENTS_PER_BATCH = 60;
+export const AUTO_CONVERGENCE_AGENTS_PER_PASS = 240;
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-const UUID_RE = new RegExp(`^${UUID_SOURCE}$`, 'i');
 const CONTINUATION_AGENT_RE = new RegExp(`^plan-continue-b(\\d+)-(${UUID_SOURCE})-p(\\d+)$`, 'i');
 
 export function continuationAgentId(batch: number, nodeId: string, wave: number): string {
@@ -114,18 +118,16 @@ export function continuationDispatchCount(frontierCount: number, agentsUsed: num
     Math.min(
       CONTINUATION_AGENTS_PER_WAVE,
       frontierCount,
-      CONTINUATION_AGENTS_PER_BATCH - agentsUsed,
+      AUTO_CONVERGENCE_AGENTS_PER_PASS - agentsUsed,
     ),
   );
 }
 
-function continuationState(rows: Pick<MiningRow, 'agentId' | 'errorMessage'>[]): {
-  asked: Set<string>;
+function continuationState(rows: Pick<MiningRow, 'agentId'>[]): {
   maxBatch: number;
   wavesByBatch: Map<number, number>;
   agentsByBatch: Map<number, number>;
 } {
-  const asked = new Set<string>();
   const wavesByBatch = new Map<number, number>();
   const agentsByBatch = new Map<number, number>();
   let maxBatch = 0;
@@ -133,17 +135,29 @@ function continuationState(rows: Pick<MiningRow, 'agentId' | 'errorMessage'>[]):
     const match = CONTINUATION_AGENT_RE.exec(row.agentId);
     if (!match) continue;
     const batch = Number(match[1]);
-    const nodeId = match[2]!;
     const wave = Number(match[3]);
     maxBatch = Math.max(maxBatch, batch);
     wavesByBatch.set(batch, Math.max(wavesByBatch.get(batch) ?? 0, wave));
     agentsByBatch.set(batch, (agentsByBatch.get(batch) ?? 0) + 1);
-    // A rejected patch did not answer the question and may be re-asked in a
-    // later wave. CLI failures and clean empty replies are terminal answers;
-    // coverage reports the former as a structural loss instead of spinning.
-    if (!row.errorMessage?.startsWith(APPLY_FAILURE_PREFIX)) asked.add(nodeId);
   }
-  return { asked, maxBatch, wavesByBatch, agentsByBatch };
+  return { maxBatch, wavesByBatch, agentsByBatch };
+}
+
+/**
+ * Expansion failures are recovery work, not semantic-review work. Keeping their
+ * focus nodes out of the automatic frontier prevents a failed provider or a
+ * rejected patch from being retried forever while deterministic gap detection
+ * presents the loss to the user. Clean legacy empty replies are deliberately
+ * absent from this set: because they persisted neither children nor `taskable`,
+ * they need one pass under the new explicit semantic-stop contract.
+ */
+export function unresolvedExpansionNodeIds(rows: MiningRow[]): Set<string> {
+  const unresolved = new Set<string>();
+  for (const [nodeId, row] of latestExpansionAttempts(rows)) {
+    if (row.status === 'done' && !row.errorMessage) continue;
+    unresolved.add(nodeId);
+  }
+  return unresolved;
 }
 
 /** One line per gap in the gate's list, and the value the multi-select stores. */
@@ -174,9 +188,15 @@ export function effectiveCoverageMiningRow(row: MiningRowWithInvocation): Mining
         row.errorMessage ??
         row.invocationErrorMessage ??
         `agent invocation exited without a result (exit ${row.invocationExitCode ?? 'unknown'})`,
+      ...(row.createdAt ? { createdAt: row.createdAt } : {}),
     };
   }
-  return { agentId: row.agentId, status: row.status, errorMessage: row.errorMessage };
+  return {
+    agentId: row.agentId,
+    status: row.status,
+    errorMessage: row.errorMessage,
+    ...(row.createdAt ? { createdAt: row.createdAt } : {}),
+  };
 }
 
 async function loadMiningRows(ctx: StepContext, stepId: string): Promise<MiningRow[]> {
@@ -185,6 +205,7 @@ async function loadMiningRows(ctx: StepContext, stepId: string): Promise<MiningR
       agentId: schema.taskStepAgentMinings.agentId,
       status: schema.taskStepAgentMinings.status,
       errorMessage: schema.taskStepAgentMinings.errorMessage,
+      createdAt: schema.taskStepAgentMinings.createdAt,
       invocationExitCode: schema.cliInvocations.exitCode,
       invocationEndedAt: schema.cliInvocations.endedAt,
       invocationErrorMessage: schema.cliInvocations.errorMessage,
@@ -206,20 +227,21 @@ function liveFrontier(
   buildRows: MiningRow[],
   coverageRows: MiningRow[],
 ): PlanNodeSkeleton[] {
-  const buildAsked = askedState(buildRows).asked;
-  const root = nodes.find((node) => node.parentId === null);
-  // The root outline is the builder's first question even though it has a
-  // different agent-id shape from expansion waves.
-  if (root) buildAsked.add(root.id);
-  const continued = continuationState(coverageRows).asked;
+  const blocked = unresolvedExpansionNodeIds([...buildRows, ...coverageRows]);
   return computeFrontier(nodes, depthBudget(buildFormValues), ctx.taskId).filter(
-    (node) => !buildAsked.has(node.id) && !continued.has(node.id),
+    (node) => !blocked.has(node.id),
   );
 }
 
 function hasCoverageWork(detected: CoverageDetect): boolean {
   return (
     detected.frontierRemaining > 0 || detected.structural.length > 0 || detected.sections.length > 0
+  );
+}
+
+function coverageNeedsUserInput(detected: CoverageDetect): boolean {
+  return (
+    detected.structural.length > 0 || detected.sections.length > 0 || detected.automaticLimitReached
   );
 }
 
@@ -244,6 +266,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     frontierRemaining: 0,
     frontierPreview: [],
     continuationBatch: 1,
+    automaticLimitReached: false,
   };
   if (!repositoryId) return empty;
 
@@ -279,9 +302,9 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     loadMiningRows(ctx, '02-plan-coverage'),
   ]);
 
-  // What a previous pass of THIS step already re-decomposed. Only a patch that
-  // actually landed counts; an agent whose own patch failed remains outstanding.
-  const handled = new Set(
+  // Document-section agents have no focus node whose current tree state can
+  // prove completion, so their clean rows are the durable handled marker.
+  const handledSections = new Set(
     coverageRows
       .filter((row) => row.status === 'done' && !row.errorMessage)
       .map((row) => row.agentId),
@@ -296,7 +319,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     })),
     [...buildRows, ...coverageRows],
     { failure: APPLY_FAILURE_PREFIX, partial: PARTIAL_APPLY_PREFIX },
-  ).filter((gap) => !handled.has(`cover-node-${gap.nodeId}`));
+  );
 
   const frontier = liveFrontier(skeletons, ctx, buildFormValues, buildRows, coverageRows);
 
@@ -326,7 +349,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
       sections = findCoverageGaps(
         parsed,
         skeletons.map((node, index) => `${texts[index] ?? ''} ${byId.get(node.id) ?? ''}`),
-      ).filter((candidate) => !handled.has(sectionAgentId(sectionKey(candidate))));
+      ).filter((candidate) => !handledSections.has(sectionAgentId(sectionKey(candidate))));
       for (const candidate of sections) {
         sectionBodies[sectionKey(candidate)] =
           parsed.find((part) => part.line === candidate.line)?.body ?? '';
@@ -338,6 +361,9 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
       ctx.logger.warn({ err }, 'coverage: could not read the source document');
     }
   }
+
+  const continuation = continuationState(coverageRows);
+  const latestAutomaticAgents = continuation.agentsByBatch.get(continuation.maxBatch) ?? 0;
 
   return {
     repositoryId,
@@ -352,118 +378,17 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     buildStopped: buildOutput?.stopped ?? null,
     frontierRemaining: frontier.length,
     frontierPreview: frontier.slice(0, 20).map((node) => node.title),
-    continuationBatch: continuationState(coverageRows).maxBatch + 1,
+    continuationBatch: continuation.maxBatch + 1,
+    automaticLimitReached:
+      frontier.length > 0 &&
+      continuation.maxBatch > 0 &&
+      latestAutomaticAgents >= AUTO_CONVERGENCE_AGENTS_PER_PASS,
   };
 }
 
 function coverageSelfNodeId(agentId: string): string | null {
   const recovery = new RegExp(`^cover-node-(${UUID_SOURCE})$`, 'i').exec(agentId)?.[1];
   return recovery ?? CONTINUATION_AGENT_RE.exec(agentId)?.[2] ?? null;
-}
-
-export interface PatchBreadthViolation {
-  parentRef: string;
-  existingChildren: number;
-  newChildren: number;
-  totalChildren: number;
-}
-
-/**
- * Count NEW nodes by their direct parent before a plan patch reaches the
- * database. Existing-node updates carry UUID refs and do not consume another
- * child slot; temporary refs are creations. `self` is normalised to the real
- * focus id so its already-persisted children can be included in the limit.
- */
-function newPatchChildrenByParent(ops: unknown[], selfNodeId: string | null): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const op of ops) {
-    if (!op || typeof op !== 'object') continue;
-    const candidate = op as Record<string, unknown>;
-    if (
-      candidate.op !== 'upsert' ||
-      typeof candidate.nodeRef !== 'string' ||
-      candidate.nodeRef === 'self' ||
-      UUID_RE.test(candidate.nodeRef) ||
-      typeof candidate.parentRef !== 'string'
-    ) {
-      continue;
-    }
-    const parentRef =
-      candidate.parentRef === 'self' && selfNodeId ? selfNodeId : candidate.parentRef;
-    counts.set(parentRef, (counts.get(parentRef) ?? 0) + 1);
-  }
-  return counts;
-}
-
-/** Pure boundary used by both the database-backed guard and its regression tests. */
-export function findPatchBreadthViolations(
-  ops: unknown[],
-  maxChildren: number,
-  options: {
-    selfNodeId?: string | null;
-    existingChildren?: ReadonlyMap<string, number>;
-  } = {},
-): PatchBreadthViolation[] {
-  const counts = newPatchChildrenByParent(ops, options.selfNodeId ?? null);
-  const violations: PatchBreadthViolation[] = [];
-  for (const [parentRef, newChildren] of counts) {
-    const existingChildren = options.existingChildren?.get(parentRef) ?? 0;
-    const totalChildren = existingChildren + newChildren;
-    if (totalChildren > maxChildren) {
-      violations.push({ parentRef, existingChildren, newChildren, totalChildren });
-    }
-  }
-  return violations;
-}
-
-/**
- * Recovery agents can emit a whole subtree in one reply, unlike the ordinary
- * one-level continuation. Enforce the user's breadth choice transactionally:
- * an over-wide reply is rejected before ANY op lands and remains a visible gap
- * that can be re-run, instead of silently creating a 25-child parent.
- */
-async function assertPatchWithinBreadth(
-  ctx: StepContext,
-  repositoryId: string,
-  ops: unknown[],
-  selfNodeId: string | null,
-  maxChildren: number,
-): Promise<void> {
-  const patchCounts = newPatchChildrenByParent(ops, selfNodeId);
-  const persistedParentIds = [...patchCounts.keys()].filter((ref) => UUID_RE.test(ref));
-  const existingChildren = new Map<string, number>();
-  if (persistedParentIds.length > 0) {
-    const rows = await ctx.db
-      .select({
-        parentId: schema.planNodes.parentId,
-        count: sql<number>`count(*)::int`,
-      })
-      .from(schema.planNodes)
-      .where(
-        and(
-          eq(schema.planNodes.repositoryId, repositoryId),
-          inArray(schema.planNodes.parentId, persistedParentIds),
-        ),
-      )
-      .groupBy(schema.planNodes.parentId);
-    for (const row of rows) {
-      if (row.parentId) existingChildren.set(row.parentId, row.count);
-    }
-  }
-
-  const violations = findPatchBreadthViolations(ops, maxChildren, {
-    selfNodeId,
-    existingChildren,
-  });
-  if (violations.length === 0) return;
-  const details = violations
-    .slice(0, 5)
-    .map(
-      (violation) =>
-        `${violation.parentRef}: ${violation.existingChildren} existing + ${violation.newChildren} new = ${violation.totalChildren}`,
-    )
-    .join('; ');
-  throw new Error(`breadth cap ${maxChildren} exceeded (${details})`);
 }
 
 async function stampMiningError(ctx: StepContext, agentId: string, errorMessage: string) {
@@ -496,15 +421,21 @@ async function foldCoverageResults(
       await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} no patch in reply`);
       continue;
     }
-    // An empty patch is a legitimate atomic-node verdict. It remains in asked
-    // history so the continuation does not hammer the same node forever.
-    if (patch.ops.length === 0) continue;
     const self = coverageSelfNodeId(result.agentId);
     try {
-      await assertPatchWithinBreadth(
-        ctx,
+      const ops = await ensureSemanticExpansionResolution(
+        ctx.db,
         detected.repositoryId!,
+        self,
         patch.ops,
+      );
+      // A document-coverage agent may legitimately conclude that the section
+      // was already represented. It has no single focus node to mark.
+      if (ops.length === 0) continue;
+      await assertPlanPatchWithinBreadth(
+        ctx.db,
+        detected.repositoryId!,
+        ops,
         self,
         breadthCap(detected.buildFormValues),
       );
@@ -512,7 +443,7 @@ async function foldCoverageResults(
         ctx.db,
         {
           ...patch,
-          ops: withMinedStatus(patch.ops, detected.buildDetect?.mode ?? 'from_md'),
+          ops: withMinedStatus(ops, detected.buildDetect?.mode ?? 'from_md'),
         },
         {
           repositoryId: detected.repositoryId!,
@@ -547,6 +478,46 @@ async function refreshPlanMirror(ctx: StepContext, repositoryId: string): Promis
   }
 }
 
+async function buildAutomaticConvergenceWave(
+  ctx: StepContext,
+  detected: CoverageDetect,
+  nodes: PlanNodeSkeleton[],
+  frontier: PlanNodeSkeleton[],
+  agentsUsed: number,
+  wave: number,
+) {
+  const count = continuationDispatchCount(frontier.length, agentsUsed);
+  const slice = frontier.slice(0, count);
+  const buildDetect =
+    detected.buildDetect ??
+    ({
+      mode: 'from_md',
+      repositoryId: detected.repositoryId,
+      existingNodeCount: detected.nodeCount,
+      hasRoot: true,
+      kbFiles: [],
+      brief: '',
+      repoName: 'this project',
+    } satisfies PlanBuildDetect);
+  return Promise.all(
+    slice.map(async (node) => ({
+      agentId: continuationAgentId(detected.continuationBatch, node.id, wave),
+      agentTitle: `Assess: ${node.title}`,
+      roleKey: 'expand',
+      prompt: await augmentPromptWithAttachments(
+        ctx.db,
+        ctx.taskId,
+        buildExpandPrompt(
+          buildDetect,
+          detected.buildFormValues,
+          node,
+          buildPlanExpansionContext(nodes, node),
+        ),
+      ),
+    })),
+  );
+}
+
 export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
   metadata: {
     id: '02-plan-coverage',
@@ -554,19 +525,21 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
     index: 1,
     title: 'Coverage check',
     description:
-      'Reports what the build left undecomposed or lost, and offers to re-run the decomposition for the parts you pick.',
-    // The check itself is deterministic; a CLI is spent only on the gaps a
-    // person ticks, which is dispatched as mining from apply().
-    requiresCli: false,
+      'Repairs lost branches, semantically reviews unfinished leaves, and selectively decomposes only what is not implementation-ready.',
+    requiresCli: true,
   },
 
   detect: detectCoverage,
 
-  /** Null when there is nothing to show, so a clean build finishes unattended
-   *  exactly as it did before this step existed. */
+  /**
+   * Ordinary frontier work is semantic model work, not a user decision, so it
+   * runs without a form. Stop only for known failures/heuristic document gaps,
+   * or when one unusually large automatic pass reaches its safety budget.
+   */
   form(_ctx, detected): FormSchema | null {
     if (!hasCoverageWork(detected)) return null;
     const gapTotal = detected.structural.length + detected.sections.length;
+    if (!coverageNeedsUserInput(detected)) return null;
 
     const options = [
       ...detected.structural.map((g) => ({
@@ -591,8 +564,8 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       ...(detected.frontierRemaining > 0
         ? [
             {
-              value: 'continue',
-              label: `Continue up to ${CONTINUATION_AGENTS_PER_BATCH} more nodes`,
+              value: 'converge',
+              label: `Continue automatic semantic review (up to ${AUTO_CONVERGENCE_AGENTS_PER_PASS} nodes)`,
             },
           ]
         : []),
@@ -602,7 +575,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       detected.structural.length > 0
         ? 'redecompose'
         : detected.frontierRemaining > 0
-          ? 'continue'
+          ? 'converge'
           : 'redecompose';
     const frontierBody = detected.frontierPreview.map((title) => `- ${title}`).join('\n');
 
@@ -625,7 +598,9 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
           : '',
         '',
         detected.frontierRemaining > 0
-          ? `Continuing runs a bounded batch of at most ${CONTINUATION_AGENTS_PER_BATCH} agents, then checks the live frontier and asks again if work remains.`
+          ? detected.automaticLimitReached
+            ? `The preceding automatic semantic-review pass reached its ${AUTO_CONVERGENCE_AGENTS_PER_PASS}-node safety budget. Continuing starts another bounded pass; it will not ask again after each wave.`
+            : 'The remaining leaves are reviewed automatically: each is either marked taskable or selectively decomposed. The user is not asked between ordinary waves.'
           : '',
         gapTotal > 0 ? 'Re-running asks one agent per selected item to add what is missing.' : '',
         'Accepting leaves the plan as it is — nothing here is deleted either way.',
@@ -693,11 +668,25 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
     // the gate; a final failure remains outstanding on a step retry because the
     // handled filter counts only clean, completed agents.
     retry: { maxAttempts: 2, retryOnInvocationFailure: shouldRetryMiningTerminalFailure },
-    // Every agent of this step is dispatched from apply() once the user has
-    // picked. Nothing fans out before the gate — the whole point is that the
-    // model is spent only on confirmed gaps.
-    async selectAgents() {
-      return [];
+    async selectAgents({ ctx, detected, formValues }) {
+      if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
+      const d = detected as CoverageDetect | null;
+      if (!d?.repositoryId) return [];
+      const decision = typeof formValues.decision === 'string' ? formValues.decision : 'converge';
+      // Ambiguous document gaps and explicit recovery selections are still
+      // dispatched from apply(), after the user has chosen the exact items.
+      if (decision === 'accept' || decision === 'redecompose') return [];
+
+      const [nodes, buildRows, coverageRows] = await Promise.all([
+        loadPlanSkeletons(ctx.db, d.repositoryId),
+        loadMiningRows(ctx, '01-plan-build'),
+        loadMiningRows(ctx, '02-plan-coverage'),
+      ]);
+      const frontier = liveFrontier(nodes, ctx, d.buildFormValues, buildRows, coverageRows);
+      const state = continuationState(coverageRows);
+      const agentsUsed = state.agentsByBatch.get(d.continuationBatch) ?? 0;
+      const wave = (state.wavesByBatch.get(d.continuationBatch) ?? 0) + 1;
+      return buildAutomaticConvergenceWave(ctx, d, nodes, frontier, agentsUsed, wave);
     },
   },
 
@@ -714,18 +703,19 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
     if (!d.repositoryId || !hasCoverageWork(d)) return result;
 
     const values = (args.formValues ?? {}) as FormValues;
+    const decision = typeof values.decision === 'string' ? values.decision : 'converge';
     const fold = args.newAgentMiningResults ?? args.agentMiningResults ?? [];
     if (fold.length > 0) {
       await foldCoverageResults(ctx, d, fold);
       await refreshPlanMirror(ctx, d.repositoryId);
     }
 
-    if (values.decision === 'accept') {
+    if (decision === 'accept') {
       result.decision = 'accepted';
       return result;
     }
 
-    if (values.decision === 'redecompose') {
+    if (decision === 'redecompose') {
       result.decision = 'redecomposed';
       result.dispatched = fold.length;
 
@@ -735,8 +725,52 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       if (fold.length > 0) {
         const refreshed = await detectCoverage(ctx);
         result.frontierRemaining = refreshed.frontierRemaining;
-        if (hasCoverageWork(refreshed)) {
+        if (coverageNeedsUserInput(refreshed)) {
           throw new ReopenStepFormError('coverage repairs finished; more plan work remains');
+        }
+        if (refreshed.frontierRemaining > 0) {
+          // Stay in the convergence pass that began with this step run. A fresh
+          // detect normally proposes maxBatch+1 for a future automatic pass;
+          // adopting that after every wave would reset the safety budget and
+          // make the automatic loop effectively unbounded.
+          const automaticDetected: CoverageDetect = {
+            ...refreshed,
+            continuationBatch: d.continuationBatch,
+          };
+          const [nodes, buildRows, coverageRows] = await Promise.all([
+            loadPlanSkeletons(ctx.db, refreshed.repositoryId!),
+            loadMiningRows(ctx, '01-plan-build'),
+            loadMiningRows(ctx, '02-plan-coverage'),
+          ]);
+          const frontier = liveFrontier(
+            nodes,
+            ctx,
+            refreshed.buildFormValues,
+            buildRows,
+            coverageRows,
+          );
+          const state = continuationState(coverageRows);
+          const agentsUsed = state.agentsByBatch.get(automaticDetected.continuationBatch) ?? 0;
+          const wave = (state.wavesByBatch.get(automaticDetected.continuationBatch) ?? 0) + 1;
+          if (agentsUsed >= AUTO_CONVERGENCE_AGENTS_PER_PASS) {
+            throw new ReopenStepFormError(
+              'automatic semantic-review safety budget reached; frontier remains',
+            );
+          }
+          const dispatches = await buildAutomaticConvergenceWave(
+            ctx,
+            automaticDetected,
+            nodes,
+            frontier,
+            agentsUsed,
+            wave,
+          );
+          if (dispatches.length > 0) {
+            throw new MiningWaveError(
+              dispatches,
+              `coverage repaired; automatic semantic convergence: ${dispatches.length} node(s)`,
+            );
+          }
         }
         return result;
       }
@@ -803,7 +837,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       );
     }
 
-    if (values.decision !== 'continue') {
+    if (decision !== 'continue' && decision !== 'converge') {
       result.decision = 'accepted';
       return result;
     }
@@ -821,11 +855,11 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
     result.dispatched = agentsUsed;
     result.frontierRemaining = frontier.length;
 
-    // A provider-less wave wrote terminal failed rows but dispatched nothing.
-    // Return to the gate so those failures are visible; asking the same wave in
-    // this apply loop would spin on the same unique agent ids.
+    // A provider-less wave dispatched nothing. There may be no mining row from
+    // which refreshed detection can build a form, so fail explicitly rather
+    // than spinning or pretending semantic convergence completed.
     if (args.miningWaveExhausted) {
-      throw new ReopenStepFormError('continuation could not dispatch; review the remaining plan');
+      throw new Error('Automatic plan convergence could not dispatch a CLI agent.');
     }
 
     if (frontier.length === 0) {
@@ -839,49 +873,29 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       return result;
     }
 
-    if (agentsUsed >= CONTINUATION_AGENTS_PER_BATCH) {
-      throw new ReopenStepFormError('bounded continuation batch finished; frontier remains');
+    if (agentsUsed >= AUTO_CONVERGENCE_AGENTS_PER_PASS) {
+      throw new ReopenStepFormError(
+        'automatic semantic-review safety budget reached; frontier remains',
+      );
     }
 
-    const count = continuationDispatchCount(frontier.length, agentsUsed);
-    const slice = frontier.slice(0, count);
-    if (slice.length === 0) {
-      throw new ReopenStepFormError('continuation safety limit reached; frontier remains');
-    }
-    const buildDetect =
-      d.buildDetect ??
-      ({
-        mode: 'from_md',
-        repositoryId: d.repositoryId,
-        existingNodeCount: d.nodeCount,
-        hasRoot: true,
-        kbFiles: [],
-        brief: '',
-        repoName: 'this project',
-      } satisfies PlanBuildDetect);
-    // Every agent derives a bounded view from the same live node snapshot. The
-    // compaction happens before provider selection and therefore protects every
-    // supported CLI, not only the provider that first exposed the transport cap.
-    const dispatches = await Promise.all(
-      slice.map(async (node) => ({
-        agentId: continuationAgentId(d.continuationBatch, node.id, nextWave),
-        agentTitle: `Continue: ${node.title}`,
-        roleKey: 'expand',
-        prompt: await augmentPromptWithAttachments(
-          ctx.db,
-          ctx.taskId,
-          buildExpandPrompt(
-            buildDetect,
-            d.buildFormValues,
-            node,
-            buildPlanExpansionContext(nodes, node),
-          ),
-        ),
-      })),
+    // Every assessor derives a bounded view from the same live node snapshot.
+    // It first decides whether the leaf is already taskable and only then
+    // decomposes it; compaction and breadth enforcement are provider-neutral.
+    const dispatches = await buildAutomaticConvergenceWave(
+      ctx,
+      d,
+      nodes,
+      frontier,
+      agentsUsed,
+      nextWave,
     );
+    if (dispatches.length === 0) {
+      throw new Error('Automatic plan convergence found a frontier but could not build a wave.');
+    }
     throw new MiningWaveError(
       dispatches,
-      `bounded plan continuation: ${dispatches.length} node(s) (${agentsUsed + dispatches.length}/${CONTINUATION_AGENTS_PER_BATCH})`,
+      `automatic semantic convergence: ${dispatches.length} node(s) (${agentsUsed + dispatches.length}/${AUTO_CONVERGENCE_AGENTS_PER_PASS})`,
     );
   },
 };

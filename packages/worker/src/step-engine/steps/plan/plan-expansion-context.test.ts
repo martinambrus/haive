@@ -4,6 +4,8 @@ import {
   buildPlanExpansionContext,
   PLAN_EXPANSION_CONTEXT_MAX_CHARS,
 } from './_plan-expansion-context.js';
+import { buildExpandPrompt, type PlanBuildDetect } from './01-plan-build.js';
+import { hasSemanticExpansionResolution } from './_plan-semantic-stop.js';
 
 function node(id: string, title: string, parentId: string | null, path: string): PlanNodeSkeleton {
   return {
@@ -67,5 +69,54 @@ describe('provider-neutral plan expansion context', () => {
     expect(text).toContain('Ancestor: Commerce (`node:parent`');
     expect(text).toContain('Target: Checkout (`node:focus`');
     expect(text).toContain('Sibling: Cart (`node:sibling`');
+  });
+});
+
+describe('semantic expansion stopping', () => {
+  it('requires an explicit taskable verdict instead of an ambiguous empty patch', () => {
+    const focus = node('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Checkout', null, '0001');
+    const detected: PlanBuildDetect = {
+      mode: 'from_md',
+      repositoryId: 'repo-1',
+      existingNodeCount: 1,
+      hasRoot: true,
+      kbFiles: [],
+      brief: '',
+      repoName: 'Product',
+    };
+    const prompt = buildExpandPrompt(
+      detected,
+      { depthBudget: 3, breadthCap: 6 },
+      focus,
+      buildPlanExpansionContext([focus], focus),
+    );
+
+    expect(prompt).toContain('First make a semantic stopping decision');
+    expect(prompt).toContain(`"nodeRef": "${focus.id}"`);
+    expect(prompt).toContain('"taskable": true');
+    expect(prompt).toContain('An empty `ops` array is not a stopping decision');
+  });
+
+  it('accepts only a taskable self verdict or a real direct-child decomposition', () => {
+    const self = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    expect(hasSemanticExpansionResolution([], self)).toBe(false);
+    expect(
+      hasSemanticExpansionResolution(
+        [{ op: 'link', fromRef: self, toRef: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }],
+        self,
+      ),
+    ).toBe(false);
+    expect(
+      hasSemanticExpansionResolution(
+        [{ op: 'upsert', nodeRef: self, expectedVersion: 1, taskable: true }],
+        self,
+      ),
+    ).toBe(true);
+    expect(
+      hasSemanticExpansionResolution(
+        [{ op: 'upsert', nodeRef: 'tmp-child', parentRef: 'self', title: 'Child' }],
+        self,
+      ),
+    ).toBe(true);
   });
 });
