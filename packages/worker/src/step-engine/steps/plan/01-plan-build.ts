@@ -7,7 +7,6 @@ import {
   loadPlanEdges,
   loadPlanSkeletons,
   planNodeDepth,
-  renderPlanMarkdown,
   type PlanNodeSkeleton,
 } from '@haive/shared/plan';
 import { execFile } from 'node:child_process';
@@ -22,6 +21,7 @@ import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { augmentPromptWithAttachments } from '../../attachments-context.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
+import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 
 /**
  * Build a repository's plan, one LEVEL per mining wave.
@@ -302,8 +302,9 @@ export function buildExpandPrompt(
   return [
     `You are expanding ONE part of the plan for "${d.repoName}".`,
     '',
-    'Here is the whole plan as it stands, so you can see where your part sits and avoid',
-    'duplicating a sibling. Each node shows its id, kind and status.',
+    'Here is a compact view of the plan as it stands, so you can see where your part sits',
+    'and avoid duplicating a sibling. The target neighborhood keeps exact node refs; the',
+    'whole-plan title index deliberately omits verbose bodies and dependency-edge detail.',
     '',
     planMarkdown,
     '',
@@ -662,11 +663,10 @@ export function createPlanBuildStep(
           0,
           planWaveDispatchCount(frontierAll.length, expandDispatched),
         );
-        // Rendered ONCE for the whole wave: every agent gets the same view of the
-        // plan, which is what stops two siblings inventing the same child.
-        const planMarkdown = await renderPlanMarkdown(ctx.db, repositoryId, {
-          titlesOnly: true,
-        });
+        // Every agent derives a bounded view from the SAME node snapshot. Exact
+        // refs for its local neighborhood are always retained; the global title
+        // index is compacted before provider selection, so this contract is the
+        // same for every supported CLI.
         const dispatches = await Promise.all(
           slice.map(async (node) => ({
             agentId: `plan-expand-${node.id}-p${nextWave}`,
@@ -675,7 +675,7 @@ export function createPlanBuildStep(
             prompt: await augmentPromptWithAttachments(
               ctx.db,
               ctx.taskId,
-              buildExpandPrompt(d, args.formValues, node, planMarkdown),
+              buildExpandPrompt(d, args.formValues, node, buildPlanExpansionContext(nodes, node)),
             ),
           })),
         );

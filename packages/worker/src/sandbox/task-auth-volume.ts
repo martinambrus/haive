@@ -64,6 +64,37 @@ const VOLUME_READY_POLL_MS = 1_500;
 const VOLUME_READY_MAX_WAIT_MS = 30_000;
 const VOLUME_REMOVE_RETRIES = 5;
 
+/**
+ * Fan-out agents share one writable auth volume per (task, CLI). Coalesce the
+ * preparation writes inside this worker process: without this, twelve sibling
+ * invocations can simultaneously create/copy the volume and run RTK / MCP
+ * writers as root while another sibling is already starting the CLI. The
+ * measured result was an intermittently root-owned config.toml and four
+ * `Permission denied` terminals in one plan wave.
+ *
+ * Separate maps keep the phases ordered by their callers while coalescing each
+ * identical phase. This applies to provider metadata, never a particular CLI's
+ * file layout.
+ */
+const ensureVolumeRuns = new Map<string, Promise<void>>();
+const rtkSeedRuns = new Map<string, Promise<void>>();
+const cliMcpMergeRuns = new Map<string, Promise<void>>();
+
+function coalesceAuthPreparation(
+  runs: Map<string, Promise<void>>,
+  key: string,
+  work: () => Promise<void>,
+): Promise<void> {
+  const existing = runs.get(key);
+  if (existing) return existing;
+  let tracked: Promise<void>;
+  tracked = work().finally(() => {
+    if (runs.get(key) === tracked) runs.delete(key);
+  });
+  runs.set(key, tracked);
+  return tracked;
+}
+
 /** Distinct exit code from the rtk seed helper script when the sandbox image
  *  has no rtk binary on PATH. Exported so tests can assert on the boundary. */
 export const RTK_HELPER_MISSING_BINARY_EXIT = 2;
@@ -80,10 +111,20 @@ function hostRelativeOfTilde(p: string): string | null {
   return null;
 }
 
-export async function ensureTaskAuthVolumes(
+export function ensureTaskAuthVolumes(
   ctx: ProviderAuthCtx,
   taskId: string,
   runner: DockerRunner = defaultDockerRunner,
+): Promise<void> {
+  return coalesceAuthPreparation(ensureVolumeRuns, `${taskId}:${ctx.providerName}`, () =>
+    ensureTaskAuthVolumesUnlocked(ctx, taskId, runner),
+  );
+}
+
+async function ensureTaskAuthVolumesUnlocked(
+  ctx: ProviderAuthCtx,
+  taskId: string,
+  runner: DockerRunner,
 ): Promise<void> {
   const meta = getCliProviderMetadata(ctx.providerName);
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
@@ -284,10 +325,20 @@ export function resolveTaskSkillMounts(providerName: CliProviderName): DockerVol
  * insertions. Failures are logged but do not throw — rtk seeding is a
  * best-effort layer over the auth-restore path.
  */
-export async function seedRtkInTaskVolume(
+export function seedRtkInTaskVolume(
   taskId: string,
   providerName: CliProviderName,
   runner: DockerRunner = defaultDockerRunner,
+): Promise<void> {
+  return coalesceAuthPreparation(rtkSeedRuns, `${taskId}:${providerName}`, () =>
+    seedRtkInTaskVolumeUnlocked(taskId, providerName, runner),
+  );
+}
+
+async function seedRtkInTaskVolumeUnlocked(
+  taskId: string,
+  providerName: CliProviderName,
+  runner: DockerRunner,
 ): Promise<void> {
   const flag = rtkInitFlagFor(providerName);
   if (flag === undefined) {
@@ -452,12 +503,28 @@ function shellQuote(value: string): string {
  * Best-effort by contract, like {@link mergeGeminiMcpIntoSettings}: every failure is logged and
  * swallowed. A missing MCP server degrades a run; throwing here would kill it.
  */
-export async function mergeCliMcpIntoTaskVolume(
+export function mergeCliMcpIntoTaskVolume(
   taskId: string,
   providerName: CliProviderName,
   image: string | null,
   servers: McpServerSpec[],
   runner: DockerRunner = defaultDockerRunner,
+): Promise<void> {
+  // The surface is the same for siblings of one fan-out. Include it in the key
+  // so only byte-equivalent preparations coalesce; a genuinely different
+  // surface still runs its own reconciliation.
+  const surfaceKey = JSON.stringify({ image, servers });
+  return coalesceAuthPreparation(cliMcpMergeRuns, `${taskId}:${providerName}:${surfaceKey}`, () =>
+    mergeCliMcpIntoTaskVolumeUnlocked(taskId, providerName, image, servers, runner),
+  );
+}
+
+async function mergeCliMcpIntoTaskVolumeUnlocked(
+  taskId: string,
+  providerName: CliProviderName,
+  image: string | null,
+  servers: McpServerSpec[],
+  runner: DockerRunner,
 ): Promise<void> {
   const meta = getCliProviderMetadata(providerName);
   // Index 0 is the CLI's own home dir for both cli-merge providers (`~/.grok`, `~/.codex`).

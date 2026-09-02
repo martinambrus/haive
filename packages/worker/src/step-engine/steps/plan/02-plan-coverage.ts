@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
 import { loadPlanSkeletons, renderPlanMarkdown } from '@haive/shared/plan';
@@ -14,6 +14,7 @@ import {
   PARTIAL_APPLY_PREFIX,
   PLAN_AGENT_TIMEOUT_MS,
   askedState,
+  breadthCap,
   buildExpandPrompt,
   computeFrontier,
   depthBudget,
@@ -29,6 +30,7 @@ import {
   type CoverageCandidate,
   type StructuralGap,
 } from './plan-coverage-scan.js';
+import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 
 /**
  * What the build did not cover, reported for a person to rule on.
@@ -87,12 +89,19 @@ type MiningRow = {
   errorMessage: string | null;
 };
 
+type MiningRowWithInvocation = MiningRow & {
+  invocationExitCode: number | null;
+  invocationEndedAt: Date | null;
+  invocationErrorMessage: string | null;
+};
+
 /** Each click approves at most this much additional model work. The wave cap
  *  keeps simultaneous terminals modest; the batch cap makes the form a real
  *  safety gate instead of permission to exhaust an arbitrarily large frontier. */
 const CONTINUATION_AGENTS_PER_WAVE = 12;
 const CONTINUATION_AGENTS_PER_BATCH = 60;
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const UUID_RE = new RegExp(`^${UUID_SOURCE}$`, 'i');
 const CONTINUATION_AGENT_RE = new RegExp(`^plan-continue-b(\\d+)-(${UUID_SOURCE})-p(\\d+)$`, 'i');
 
 export function continuationAgentId(batch: number, nodeId: string, wave: number): string {
@@ -144,16 +153,50 @@ const sectionKey = (c: CoverageCandidate): string => `doc:${c.line}`;
  *  two spellings of this would silently stop matching. */
 const sectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
 
+/**
+ * A CLI completion and its mining-row fold are two writes. Usually the handler
+ * performs them back-to-back, but a final fan-out barrier can observe the first
+ * before the second (or inherit it after a worker interruption). Coverage must
+ * not call that childless node healthy during the gap: an ended, failed backing
+ * invocation is already conclusive evidence that its decomposition was lost.
+ */
+export function effectiveCoverageMiningRow(row: MiningRowWithInvocation): MiningRow {
+  const invocationFailed =
+    row.invocationEndedAt !== null &&
+    (row.invocationExitCode === null ||
+      row.invocationExitCode !== 0 ||
+      (row.invocationErrorMessage?.trim().length ?? 0) > 0);
+  if ((row.status === 'pending' || row.status === 'running') && invocationFailed) {
+    return {
+      agentId: row.agentId,
+      status: 'failed',
+      errorMessage:
+        row.errorMessage ??
+        row.invocationErrorMessage ??
+        `agent invocation exited without a result (exit ${row.invocationExitCode ?? 'unknown'})`,
+    };
+  }
+  return { agentId: row.agentId, status: row.status, errorMessage: row.errorMessage };
+}
+
 async function loadMiningRows(ctx: StepContext, stepId: string): Promise<MiningRow[]> {
-  return ctx.db
+  const rows = await ctx.db
     .select({
       agentId: schema.taskStepAgentMinings.agentId,
       status: schema.taskStepAgentMinings.status,
       errorMessage: schema.taskStepAgentMinings.errorMessage,
+      invocationExitCode: schema.cliInvocations.exitCode,
+      invocationEndedAt: schema.cliInvocations.endedAt,
+      invocationErrorMessage: schema.cliInvocations.errorMessage,
     })
     .from(schema.taskStepAgentMinings)
     .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId))
+    .leftJoin(
+      schema.cliInvocations,
+      eq(schema.cliInvocations.id, schema.taskStepAgentMinings.cliInvocationId),
+    )
     .where(and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, stepId)));
+  return rows.map(effectiveCoverageMiningRow);
 }
 
 function liveFrontier(
@@ -318,6 +361,111 @@ function coverageSelfNodeId(agentId: string): string | null {
   return recovery ?? CONTINUATION_AGENT_RE.exec(agentId)?.[2] ?? null;
 }
 
+export interface PatchBreadthViolation {
+  parentRef: string;
+  existingChildren: number;
+  newChildren: number;
+  totalChildren: number;
+}
+
+/**
+ * Count NEW nodes by their direct parent before a plan patch reaches the
+ * database. Existing-node updates carry UUID refs and do not consume another
+ * child slot; temporary refs are creations. `self` is normalised to the real
+ * focus id so its already-persisted children can be included in the limit.
+ */
+function newPatchChildrenByParent(ops: unknown[], selfNodeId: string | null): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const op of ops) {
+    if (!op || typeof op !== 'object') continue;
+    const candidate = op as Record<string, unknown>;
+    if (
+      candidate.op !== 'upsert' ||
+      typeof candidate.nodeRef !== 'string' ||
+      candidate.nodeRef === 'self' ||
+      UUID_RE.test(candidate.nodeRef) ||
+      typeof candidate.parentRef !== 'string'
+    ) {
+      continue;
+    }
+    const parentRef =
+      candidate.parentRef === 'self' && selfNodeId ? selfNodeId : candidate.parentRef;
+    counts.set(parentRef, (counts.get(parentRef) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Pure boundary used by both the database-backed guard and its regression tests. */
+export function findPatchBreadthViolations(
+  ops: unknown[],
+  maxChildren: number,
+  options: {
+    selfNodeId?: string | null;
+    existingChildren?: ReadonlyMap<string, number>;
+  } = {},
+): PatchBreadthViolation[] {
+  const counts = newPatchChildrenByParent(ops, options.selfNodeId ?? null);
+  const violations: PatchBreadthViolation[] = [];
+  for (const [parentRef, newChildren] of counts) {
+    const existingChildren = options.existingChildren?.get(parentRef) ?? 0;
+    const totalChildren = existingChildren + newChildren;
+    if (totalChildren > maxChildren) {
+      violations.push({ parentRef, existingChildren, newChildren, totalChildren });
+    }
+  }
+  return violations;
+}
+
+/**
+ * Recovery agents can emit a whole subtree in one reply, unlike the ordinary
+ * one-level continuation. Enforce the user's breadth choice transactionally:
+ * an over-wide reply is rejected before ANY op lands and remains a visible gap
+ * that can be re-run, instead of silently creating a 25-child parent.
+ */
+async function assertPatchWithinBreadth(
+  ctx: StepContext,
+  repositoryId: string,
+  ops: unknown[],
+  selfNodeId: string | null,
+  maxChildren: number,
+): Promise<void> {
+  const patchCounts = newPatchChildrenByParent(ops, selfNodeId);
+  const persistedParentIds = [...patchCounts.keys()].filter((ref) => UUID_RE.test(ref));
+  const existingChildren = new Map<string, number>();
+  if (persistedParentIds.length > 0) {
+    const rows = await ctx.db
+      .select({
+        parentId: schema.planNodes.parentId,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(schema.planNodes)
+      .where(
+        and(
+          eq(schema.planNodes.repositoryId, repositoryId),
+          inArray(schema.planNodes.parentId, persistedParentIds),
+        ),
+      )
+      .groupBy(schema.planNodes.parentId);
+    for (const row of rows) {
+      if (row.parentId) existingChildren.set(row.parentId, row.count);
+    }
+  }
+
+  const violations = findPatchBreadthViolations(ops, maxChildren, {
+    selfNodeId,
+    existingChildren,
+  });
+  if (violations.length === 0) return;
+  const details = violations
+    .slice(0, 5)
+    .map(
+      (violation) =>
+        `${violation.parentRef}: ${violation.existingChildren} existing + ${violation.newChildren} new = ${violation.totalChildren}`,
+    )
+    .join('; ');
+  throw new Error(`breadth cap ${maxChildren} exceeded (${details})`);
+}
+
 async function stampMiningError(ctx: StepContext, agentId: string, errorMessage: string) {
   await ctx.db
     .update(schema.taskStepAgentMinings)
@@ -353,6 +501,13 @@ async function foldCoverageResults(
     if (patch.ops.length === 0) continue;
     const self = coverageSelfNodeId(result.agentId);
     try {
+      await assertPatchWithinBreadth(
+        ctx,
+        detected.repositoryId!,
+        patch.ops,
+        self,
+        breadthCap(detected.buildFormValues),
+      );
       const applied = await applyAgentPatch(
         ctx.db,
         {
@@ -594,6 +749,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
 
       const note =
         typeof values.note === 'string' && values.note.trim() ? values.note.trim() : null;
+      const maxChildren = breadthCap(d.buildFormValues);
       const dispatches = picked.map((key) => {
         const structural = d.structural.find((gap) => structuralKey(gap) === key);
         const section = d.sections.find((candidate) => sectionKey(candidate) === key);
@@ -624,6 +780,8 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
               ? `The section reads:\n\n${(d.sectionBodies[key] ?? '').slice(0, 20_000)}\n`
               : '',
             note ? `The user adds: ${note}\n` : '',
+            `Hard breadth limit: no parent touched by this patch may have more than ${maxChildren} direct children in total. If a subject needs more parts, group them under meaningful intermediate nodes, with at most ${maxChildren} children under each group.`,
+            '',
             'The plan as it stands (titles only):',
             '',
             d.planMarkdown.slice(0, 60_000),
@@ -701,8 +859,9 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
         brief: '',
         repoName: 'this project',
       } satisfies PlanBuildDetect);
-    // Every agent in a wave sees the same live tree, avoiding sibling overlap.
-    const planMarkdown = await renderPlanMarkdown(ctx.db, d.repositoryId, { titlesOnly: true });
+    // Every agent derives a bounded view from the same live node snapshot. The
+    // compaction happens before provider selection and therefore protects every
+    // supported CLI, not only the provider that first exposed the transport cap.
     const dispatches = await Promise.all(
       slice.map(async (node) => ({
         agentId: continuationAgentId(d.continuationBatch, node.id, nextWave),
@@ -711,7 +870,12 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
         prompt: await augmentPromptWithAttachments(
           ctx.db,
           ctx.taskId,
-          buildExpandPrompt(buildDetect, d.buildFormValues, node, planMarkdown),
+          buildExpandPrompt(
+            buildDetect,
+            d.buildFormValues,
+            node,
+            buildPlanExpansionContext(nodes, node),
+          ),
         ),
       })),
     );

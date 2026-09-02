@@ -152,6 +152,17 @@ describe('ensureTaskAuthVolumes', () => {
     expect(copyCall?.mounts?.some((m) => m.target === '/src')).toBe(false);
   });
 
+  it('coalesces concurrent sibling setup into one volume copy', async () => {
+    const runner = makeRunner();
+    await Promise.all(
+      Array.from({ length: 12 }, () =>
+        ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-concurrent-volume', runner),
+      ),
+    );
+    expect(runner.createCalls).toHaveLength(1);
+    expect(runner.runCalls.filter((call) => call.cmd[0] === 'bash')).toHaveLength(1);
+  });
+
   it('is idempotent when task volume already exists and is ready', async () => {
     const taskVol = 'haive_cli_auth_task_task333_codex_0';
     const runner = makeRunner({
@@ -424,6 +435,14 @@ describe('seedRtkInTaskVolume', () => {
     await seedRtkInTaskVolume('task-rtk-6', 'amp', runner);
     expect(runner.runCalls).toHaveLength(0);
   });
+
+  it('coalesces concurrent sibling RTK seeding', async () => {
+    const runner = makeRunner();
+    await Promise.all(
+      Array.from({ length: 12 }, () => seedRtkInTaskVolume('task-rtk-concurrent', 'codex', runner)),
+    );
+    expect(runner.runCalls).toHaveLength(1);
+  });
 });
 
 describe('mergeCliMcpIntoTaskVolume', () => {
@@ -483,6 +502,17 @@ describe('mergeCliMcpIntoTaskVolume', () => {
     const runner = makeRunner();
     await mergeCliMcpIntoTaskVolume('taskmcp-0000', 'grok', 'img:tag', [RAG], runner);
     expect(runner.runCalls).toHaveLength(0);
+  });
+
+  it('coalesces an identical MCP merge across fan-out siblings', async () => {
+    const concurrentTaskVol = 'haive_cli_auth_task_taskmcpconc_grok_0';
+    const runner = makeRunner({ preExistingVolumes: [concurrentTaskVol] });
+    await Promise.all(
+      Array.from({ length: 12 }, () =>
+        mergeCliMcpIntoTaskVolume('task-mcp-conc', 'grok', 'img:tag', [RAG], runner),
+      ),
+    );
+    expect(runner.runCalls).toHaveLength(1);
   });
 });
 

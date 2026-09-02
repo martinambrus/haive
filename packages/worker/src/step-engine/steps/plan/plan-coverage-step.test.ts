@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { continuationDispatchCount, planCoverageStep } from './02-plan-coverage.js';
+import {
+  continuationDispatchCount,
+  effectiveCoverageMiningRow,
+  findPatchBreadthViolations,
+  planCoverageStep,
+} from './02-plan-coverage.js';
 import { PLAN_AGENT_TIMEOUT_MS } from './01-plan-build.js';
 import { findStructuralGaps } from './plan-coverage-scan.js';
 import type { FormSchema } from '@haive/shared';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
+import { MiningWaveError } from '../../step-definition.js';
 
 type Detected = Parameters<NonNullable<typeof planCoverageStep.form>>[1];
 
@@ -113,6 +119,104 @@ describe('bounded coverage continuation', () => {
   it('clamps the last wave to sixty agents per approval', () => {
     expect(continuationDispatchCount(512, 58)).toBe(2);
     expect(continuationDispatchCount(512, 60)).toBe(0);
+  });
+});
+
+describe('bounded coverage recovery', () => {
+  const TARGET = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const create = (nodeRef: string, parentRef: string) => ({
+    op: 'upsert',
+    nodeRef,
+    parentRef,
+    title: nodeRef,
+  });
+
+  it('puts the configured hard breadth limit in every recovery prompt', async () => {
+    const applyError = await planCoverageStep.apply!(
+      {} as never,
+      {
+        detected: detected({
+          buildFormValues: { depthBudget: 6, breadthCap: 7 },
+          structural: [{ nodeId: TARGET, title: 'Privacy', reason: 'lost' }],
+        }),
+        formValues: { decision: 'redecompose', items: [`node:${TARGET}`] },
+      } as never,
+    ).catch((error: unknown) => error);
+
+    expect(applyError).toBeInstanceOf(MiningWaveError);
+    expect((applyError as MiningWaveError).dispatches[0]?.prompt).toContain(
+      'no parent touched by this patch may have more than 7 direct children in total',
+    );
+  });
+
+  it('rejects more new siblings than the configured breadth', () => {
+    const ops = Array.from({ length: 13 }, (_, index) => create(`tmp-${index}`, 'self'));
+    expect(findPatchBreadthViolations(ops, 12, { selfNodeId: TARGET })).toEqual([
+      {
+        parentRef: TARGET,
+        existingChildren: 0,
+        newChildren: 13,
+        totalChildren: 13,
+      },
+    ]);
+  });
+
+  it('includes already-persisted children in the hard limit', () => {
+    const ops = [create('tmp-a', TARGET), create('tmp-b', TARGET)];
+    expect(
+      findPatchBreadthViolations(ops, 12, {
+        existingChildren: new Map([[TARGET, 11]]),
+      }),
+    ).toEqual([
+      {
+        parentRef: TARGET,
+        existingChildren: 11,
+        newChildren: 2,
+        totalChildren: 13,
+      },
+    ]);
+  });
+
+  it('allows a wide subject when the patch groups it into bounded parents', () => {
+    const groups = [create('tmp-group-a', 'self'), create('tmp-group-b', 'self')];
+    const leaves = Array.from({ length: 12 }, (_, index) =>
+      create(`tmp-leaf-${index}`, index < 6 ? 'tmp-group-a' : 'tmp-group-b'),
+    );
+    expect(findPatchBreadthViolations([...groups, ...leaves], 6, { selfNodeId: TARGET })).toEqual(
+      [],
+    );
+  });
+});
+
+describe('coverage mining settlement', () => {
+  it('surfaces an ended failed invocation while its mining row still lags at running', () => {
+    expect(
+      effectiveCoverageMiningRow({
+        agentId: 'plan-continue-b1-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-p3',
+        status: 'running',
+        errorMessage: null,
+        invocationExitCode: 1,
+        invocationEndedAt: new Date(),
+        invocationErrorMessage: 'prompt exceeded provider input limit',
+      }),
+    ).toEqual({
+      agentId: 'plan-continue-b1-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-p3',
+      status: 'failed',
+      errorMessage: 'prompt exceeded provider input limit',
+    });
+  });
+
+  it('does not promote an ended success before its mining output has folded', () => {
+    expect(
+      effectiveCoverageMiningRow({
+        agentId: 'a',
+        status: 'running',
+        errorMessage: null,
+        invocationExitCode: 0,
+        invocationEndedAt: new Date(),
+        invocationErrorMessage: null,
+      }).status,
+    ).toBe('running');
   });
 });
 
