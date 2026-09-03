@@ -8,9 +8,16 @@ import {
   DEFAULT_CLI_TIMEOUT_LADDER,
 } from '../constants/index.js';
 
-/** Default per-file cap for task attachments (25 MiB). Admin-tunable via
- *  CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES. */
-export const DEFAULT_TASK_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+/** Default per-file cap for task attachments (256 MiB). Admin-tunable via
+ *  CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES.
+ *
+ *  Generous on purpose. The upload is STREAMED to disk with the cap applied as a
+ *  running byte count, so this bounds disk rather than memory — a smaller number
+ *  buys no safety, it only refuses files. And the files this exists for are
+ *  exactly the large ones: a design or wireframe PDF is big because of its
+ *  images, and an export routinely passes 25 MiB. Refusing those is refusing the
+ *  input the plan is meant to be built from. */
+export const DEFAULT_TASK_ATTACHMENT_MAX_BYTES = 256 * 1024 * 1024;
 
 /** Default retention window for CLI transcripts: 0 = keep forever. Off by default
  *  because the sweep nulls the column and that cannot be undone. Admin-tunable via
@@ -611,6 +618,7 @@ export class ConfigService {
     });
 
     await this.seedDefaults();
+    await this.reconcileRaisedDefaults();
     await this.ensureEncryptionKey();
 
     this.initialized = true;
@@ -625,6 +633,44 @@ export class ConfigService {
     const results = await pipeline.exec();
     if (results?.some(([, result]) => result === 1)) {
       logger.info('Default configuration seeded');
+    }
+  }
+
+  /**
+   * Defaults that were RAISED after an install had already seeded the old value.
+   *
+   * `seedDefaults` is `setnx`, so a changed default is inert on every install
+   * that already ran once — the new number ships and nothing anywhere uses it.
+   * That is the "db-only change with no deploy path" trap: the fix has to run on
+   * every environment as an ordinary part of starting up, not as something
+   * someone remembers to click in /admin.
+   *
+   * Idempotent by construction: the raise fires only while the stored value is
+   * still the exact PREVIOUS default, so the second boot is a no-op and an admin
+   * who has since chosen their own number is never overwritten. The one case it
+   * cannot distinguish is an admin who deliberately set the old default back —
+   * indistinguishable from untouched — and that is the accepted cost of the
+   * entries below moving in the permissive direction, where the worst outcome is
+   * a larger allowance the admin can lower again.
+   */
+  private async reconcileRaisedDefaults(): Promise<void> {
+    const raises: { key: string; previous: string; next: string; why: string }[] = [
+      {
+        key: CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES,
+        previous: String(25 * 1024 * 1024),
+        next: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),
+        why: 'a wireframe or design PDF is routinely larger than 25 MiB, and the upload is streamed so the cap bounds disk rather than memory',
+      },
+    ];
+    for (const raise of raises) {
+      const stored = await this.redis!.get(raise.key);
+      if (stored !== raise.previous) continue;
+      await this.redis!.set(raise.key, raise.next);
+      this.localCache.delete(raise.key);
+      logger.info(
+        { key: raise.key, from: raise.previous, to: raise.next, why: raise.why },
+        'raised a configuration default that this install had already seeded',
+      );
     }
   }
 
