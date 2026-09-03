@@ -21,6 +21,12 @@ import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper } from './git-push.js';
 
 export function buildAuthenticatedUrl(url: string, username: string, secret: string): string {
+  // Only http(s) carries userinfo. An `ssh://` or scp-style address
+  // (`git@host:path`) authenticates with a key handled outside Haive, and an
+  // scp address is not a URL at all — `new URL` THROWS on it, which would fail
+  // the clone with "Invalid URL" instead of the real problem. Returning it
+  // unchanged is what git then does with it, correctly.
+  if (!/^https?:\/\//i.test(url)) return url;
   const u = new URL(url);
   u.username = encodeURIComponent(username);
   u.password = encodeURIComponent(secret);

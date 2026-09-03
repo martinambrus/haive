@@ -20,6 +20,7 @@ import {
   type ArchiveFormat,
 } from '@haive/shared';
 import { buildScopeTree } from '@haive/shared/scope-tree';
+import { parseScpLikeGitUrl } from '@haive/shared/schemas';
 import {
   KB_DIR,
   LEARNINGS_DIR,
@@ -69,12 +70,21 @@ function deriveRepoName(opts: {
 }): string {
   if (opts.name?.trim()) return opts.name.trim();
   if (opts.remoteUrl) {
-    try {
-      const last = new URL(opts.remoteUrl).pathname.split('/').filter(Boolean).pop();
-      if (last) return last.replace(/\.git$/, '');
-    } catch {
-      // malformed URL — fall through
-    }
+    // An scp-style address (`git@github.com:owner/repo.git`) is not a URL and
+    // makes `new URL` throw, so it is parsed on its own terms first. Without
+    // this the whole branch falls through and the repository is named from
+    // nothing.
+    const scp = parseScpLikeGitUrl(opts.remoteUrl);
+    const last = scp
+      ? scp.path.split('/').filter(Boolean).pop()
+      : (() => {
+          try {
+            return new URL(opts.remoteUrl!).pathname.split('/').filter(Boolean).pop();
+          } catch {
+            return undefined;
+          }
+        })();
+    if (last) return last.replace(/\.git$/, '');
   }
   if (opts.localPath) {
     const base = path.basename(opts.localPath);

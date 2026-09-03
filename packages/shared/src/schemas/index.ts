@@ -1,5 +1,6 @@
 export * from './form.js';
 export * from './auth.js';
+export * from './git-url.js';
 export * from './repos.js';
 export * from './db-dumps.js';
 export * from './task-attachments.js';

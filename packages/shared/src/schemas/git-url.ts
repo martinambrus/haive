@@ -38,26 +38,96 @@ import { z } from 'zod';
  */
 const ALLOWED_GIT_URL_SCHEMES = new Set(['https:', 'http:', 'ssh:']);
 
+/** A user in an scp-style address. Must START alphanumeric, which is what keeps
+ *  a leading `-` out — an argument that begins with a dash can be read as an
+ *  option by whatever it is handed to. */
+const SCP_USER = '[A-Za-z0-9][A-Za-z0-9._~+-]*';
+/** One hostname label: alphanumeric at both ends, hyphens only inside. Excludes
+ *  `/` and `:` by construction, so `foo/bar:baz` cannot pass as a host, and
+ *  excludes `=` and a leading `-`, so `-oProxyCommand=sh` cannot become an ssh
+ *  option. */
+const SCP_HOST_LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
+const SCP_LIKE = new RegExp(
+  `^(?:(${SCP_USER})@)?(${SCP_HOST_LABEL}(?:\\.${SCP_HOST_LABEL})*):(.+)$`,
+);
+
+export interface ScpLikeGitUrl {
+  user: string | null;
+  host: string;
+  /** Verbatim, and NOT rewritten into a URL path. In scp-style a path without a
+   *  leading slash is relative to the remote user's home; `ssh://host/path` is
+   *  absolute. Normalising one into the other silently changes which repository
+   *  is meant, so the address is stored exactly as typed and handed to git. */
+  path: string;
+}
+
+/**
+ * Parse `[user@]host:path`, or null if it is not that.
+ *
+ * The caller must already have established there is no `://` in the string —
+ * that is git's OWN test for "this is a URL, not an scp-style address", and
+ * using the same one is what stops this validator and git disagreeing about
+ * which of the two a string is.
+ */
+export function parseScpLikeGitUrl(value: string): ScpLikeGitUrl | null {
+  const m = SCP_LIKE.exec(value);
+  if (!m) return null;
+  const user = m[1] ?? null;
+  const host = m[2]!;
+  // STRICTER THAN GIT, deliberately. git imposes nothing here, so `javascript:
+  // alert(1)` and `data:text/plain,hi` are addresses to a host called
+  // "javascript" or "data" as far as it is concerned — inert, since neither
+  // resolves, but a URL validator that accepts them is one nobody can read and
+  // trust. A real scp address carries a user (`git@…`) or a dotted host
+  // (`github.com:…`); a bare `word:rest` is far likelier to be a mistyped URL.
+  // The cost is one documented case — a single-label LAN host with no user must
+  // be written `ssh://gitserver/repo.git` — and the message says so.
+  if (!user && !host.includes('.')) return null;
+  return { user, host, path: m[3]! };
+}
+
+/** git's own rule for telling a URL from an scp-style address. */
+function looksLikeUrl(value: string): boolean {
+  return value.includes('://');
+}
+
+export function isAllowedGitRemoteUrl(value: string): boolean {
+  if (looksLikeUrl(value)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      return false;
+    }
+    // A host is required for the same reason `file:` is excluded: a scheme that
+    // parses but names no server is not pointing at a remote.
+    return ALLOWED_GIT_URL_SCHEMES.has(parsed.protocol) && parsed.hostname.length > 0;
+  }
+  // scp-style is ssh, which is already an allowed scheme — this is the same
+  // permission written the way people actually type it.
+  return parseScpLikeGitUrl(value) !== null;
+}
+
 export const gitRemoteUrlSchema = z
   .string()
   .trim()
   .min(1)
   .max(2048)
-  .refine(
-    (value) => {
-      let parsed: URL;
-      try {
-        parsed = new URL(value);
-      } catch {
-        return false;
-      }
-      // A host is required for the same reason `file:` is excluded: a scheme
-      // that parses but names no server is not pointing at a remote.
-      return ALLOWED_GIT_URL_SCHEMES.has(parsed.protocol) && parsed.hostname.length > 0;
-    },
-    {
-      message:
-        'must be an https, http or ssh URL with a host — a local file:// path is not a remote, ' +
-        'and scp-style git@host:path addresses are not supported',
-    },
-  );
+  .refine(isAllowedGitRemoteUrl, {
+    message:
+      'must be an https, http or ssh URL, or an scp-style address with a user or a ' +
+      'dotted host (git@github.com:owner/repo.git). A local file:// path is not a ' +
+      'remote; for a single-word host write ssh://host/path.',
+  });
+
+/* MEASURED against git 2.54.0, which is what decides whether any of this is
+ * right:
+ *   file:///tmp/src   reads the local repository        -> must stay blocked
+ *   /tmp/src          reads the local repository        -> must stay blocked
+ *   file:/tmp/src     "cannot run ssh" (host "file")    -> inert; rejected here
+ *                                                          anyway, having neither
+ *                                                          a user nor a dotted host
+ *   tmp/src           "does not appear to be a git repository"
+ * The middle case is why the split is on `://` rather than on a scheme list of
+ * this module's own devising: git resolves a schemeless colon form as a HOST, so
+ * keying on anything else would let the two disagree about what a string means. */

@@ -99,7 +99,7 @@ export function LinkOriginDialog({
             autoFocus
             value={url}
             disabled={saving}
-            placeholder="https://github.com/you/your-repo.git"
+            placeholder="https://github.com/you/your-repo.git  or  git@github.com:you/your-repo.git"
             onChange={(e) => setUrl(e.target.value)}
           />
         </div>
@@ -121,8 +121,9 @@ export function LinkOriginDialog({
             ))}
           </select>
           <p className="text-[11px] text-neutral-600">
-            A private remote needs one, or the first push will fail. Add credentials on the
-            repositories page.
+            A private <strong>https</strong> remote needs one, or the first push will fail. An ssh
+            or <code>git@host:path</code> remote authenticates with a key outside Haive, so leave
+            this as None.
           </p>
         </div>
 
