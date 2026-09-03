@@ -5,7 +5,23 @@ FROM node:26-alpine AS base
 # socket mount is supplied by docker-compose; the binary must live in the
 # image. Install once in the base layer so dev (`target: deps`) and prod
 # (`production`) both have it.
-RUN apk add --no-cache python3 make g++ libc6-compat docker-cli
+#
+# git: the plan-snapshot status endpoint reads whether the committed
+# `.haive-data/plan.{json,md}` are tracked, dirty and pushed, which is four
+# read-only `git` invocations against the haive_repos mount this image already
+# has. Without the binary every probe failed identically to "this is not a Git
+# checkout", so the plan header read "Not committed" on a repository whose
+# snapshot was committed and pushed — a wrong answer that looked like a real
+# one. Read-only status only; anything that WRITES history (commit, push, the
+# fast-forward pull) still runs in the worker, which is why this is not a
+# widening of the api/worker boundary.
+RUN apk add --no-cache python3 make g++ libc6-compat docker-cli git
+# The repos in the shared volume are owned by uid 1000 and this image runs as
+# root, so git 2.35.2+ refuses every command with "detected dubious ownership".
+# The worker's Dockerfile carries the identical line for the identical reason;
+# without it, installing the binary above changes nothing — MEASURED, the probe
+# still reported "not a Git checkout" with git 2.54.0 present.
+RUN git config --system --add safe.directory '*'
 # Node 26 unbundled corepack, so install it before enabling. corepack then
 # downloads pnpm from the npm registry with no retry; a transient ECONNRESET
 # fails the whole build (seen in CI), so retry up to 3 times.
