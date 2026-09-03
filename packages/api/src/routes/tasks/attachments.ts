@@ -31,6 +31,13 @@ export const attachmentRoutes = new Hono<AppEnv>();
 const NODE_UID = 1000;
 const NODE_GID = 1000;
 const MANIFEST_NAME = '_ATTACHMENTS.md';
+/** Names the uploads dir owns. An upload allowed to take one of these is
+ *  overwritten the next time that file is generated — the user's document
+ *  silently replaced by our index, with their attachment row still pointing at
+ *  it. `_PLAN_INPUTS.md` is written by the worker's 00-plan-inputs step; it is
+ *  listed here rather than imported because the api must not depend on the
+ *  worker, and a name the api hands out is a name the api has to reserve. */
+const RESERVED_NAMES = new Set([MANIFEST_NAME, '_PLAN_INPUTS.md']);
 
 /** Resolve the task's on-disk uploads dir, enforcing ownership + a writable
  *  volume-backed repo. Throws 404/409 with an actionable message otherwise. */
@@ -118,7 +125,7 @@ async function pathExists(p: string): Promise<boolean> {
 
 /** De-dupe a basename within `dir` by appending ` (n)` before the extension. */
 async function uniqueFilename(dir: string, name: string): Promise<string> {
-  if (!(await pathExists(join(dir, name))) && name !== MANIFEST_NAME) return name;
+  if (!(await pathExists(join(dir, name))) && !RESERVED_NAMES.has(name)) return name;
   const dot = name.lastIndexOf('.');
   const stem = dot > 0 ? name.slice(0, dot) : name;
   const ext = dot > 0 ? name.slice(dot) : '';
@@ -127,7 +134,7 @@ async function uniqueFilename(dir: string, name: string): Promise<string> {
   do {
     n += 1;
     candidate = `${stem} (${n})${ext}`;
-  } while ((await pathExists(join(dir, candidate))) || candidate === MANIFEST_NAME);
+  } while ((await pathExists(join(dir, candidate))) || RESERVED_NAMES.has(candidate));
   return candidate;
 }
 
@@ -207,16 +214,53 @@ function headerContentType(raw: string | undefined): string | null {
 }
 
 /**
- * Write one attachment: bytes to the task's uploads dir, a row in
- * `task_attachments`.
+ * Everything that happens AFTER an attachment's bytes are on disk: permissions,
+ * the `task_attachments` row, and the manifest rewrite.
  *
- * Extracted so the streaming upload route and the plan-build document import
- * share ONE implementation. The interesting part is not the write, it is the
- * ownership dance around it — the api runs as root while the sandbox user is
- * uid 1000, so a file written without the chown is invisible to the agent that
- * is supposed to read it, and that failure only shows up inside a container.
+ * One tail for every write path, because two of the three things it does fail
+ * invisibly. The api runs as root while the sandbox user is uid 1000, so a file
+ * written without the chown reaches the agent as a permission error and only
+ * inside a container. And `augmentPromptWithAttachments` tells EVERY agent to
+ * read `_ATTACHMENTS.md` unconditionally — a write path that skips the manifest
+ * therefore hands the agent a prompt pointing at a file that does not exist.
  *
  * Returns the inserted row.
+ */
+async function finalizeAttachment(args: {
+  dir: string;
+  destPath: string;
+  filename: string;
+  taskId: string;
+  userId: string;
+  sizeBytes: number;
+  contentType: string | null;
+  description: string | null;
+}) {
+  await chmod(args.destPath, 0o644).catch(() => {});
+  await chown(args.destPath, NODE_UID, NODE_GID).catch(() => {});
+
+  const inserted = await getDb()
+    .insert(schema.taskAttachments)
+    .values({
+      taskId: args.taskId,
+      userId: args.userId,
+      filename: args.filename,
+      storedPath: args.destPath,
+      sizeBytes: args.sizeBytes,
+      contentType: args.contentType,
+      description: args.description,
+    })
+    .returning();
+
+  await regenerateManifest(args.dir, args.taskId);
+  return inserted[0]!;
+}
+
+/**
+ * Write one attachment from bytes already in memory.
+ *
+ * Sibling of the streaming route below, sharing its tail. Kept separate because
+ * the route streams with a byte cap and this takes a whole buffer.
  */
 export async function writeTaskAttachment(args: {
   taskId: string;
@@ -234,22 +278,17 @@ export async function writeTaskAttachment(args: {
   const destPath = join(dir, safeName);
   await writeFile(destPath, args.content);
   const { size } = await stat(destPath);
-  await chmod(destPath, 0o644).catch(() => {});
-  await chown(destPath, NODE_UID, NODE_GID).catch(() => {});
 
-  const inserted = await getDb()
-    .insert(schema.taskAttachments)
-    .values({
-      taskId: args.taskId,
-      userId: args.userId,
-      filename: safeName,
-      storedPath: destPath,
-      sizeBytes: size,
-      contentType: args.contentType ?? null,
-      description: args.description ?? null,
-    })
-    .returning();
-  return inserted[0]!;
+  return finalizeAttachment({
+    dir,
+    destPath,
+    filename: safeName,
+    taskId: args.taskId,
+    userId: args.userId,
+    sizeBytes: size,
+    contentType: args.contentType ?? null,
+    description: args.description ?? null,
+  });
 }
 
 attachmentRoutes.post('/:id/attachments', async (c) => {
@@ -276,25 +315,17 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
   const safeName = await uniqueFilename(dir, sanitizeAttachmentFilename(query.filename));
   const destPath = join(dir, safeName);
   const size = await streamToFileWithCap(body, destPath, maxBytes);
-  await chmod(destPath, 0o644).catch(() => {});
-  await chown(destPath, NODE_UID, NODE_GID).catch(() => {});
 
-  const db = getDb();
-  const inserted = await db
-    .insert(schema.taskAttachments)
-    .values({
-      taskId,
-      userId,
-      filename: safeName,
-      storedPath: destPath,
-      sizeBytes: size,
-      contentType: headerContentType(c.req.header('content-type')),
-      description: query.description ?? null,
-    })
-    .returning();
-  const row = inserted[0]!;
-
-  await regenerateManifest(dir, taskId);
+  const row = await finalizeAttachment({
+    dir,
+    destPath,
+    filename: safeName,
+    taskId,
+    userId,
+    sizeBytes: size,
+    contentType: headerContentType(c.req.header('content-type')),
+    description: query.description ?? null,
+  });
   return c.json({ attachment: toClient(row) }, 201);
 });
 
