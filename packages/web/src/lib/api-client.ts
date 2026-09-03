@@ -1139,8 +1139,11 @@ export interface TaskEvent {
 
 /** `pause` holds a task so its CLI subscription budget goes to the other tasks — the run in
  *  flight finishes, then the orchestrator stops handing it work. `resume` clears it. Neither
- *  is terminal and neither touches the environment. */
-export type TaskAction = 'cancel' | 'retry' | 'pause' | 'resume';
+ *  is terminal and neither touches the environment.
+ *
+ *  `start` enqueues a task that was created and deliberately never started, so its
+ *  attachments could be uploaded first. Idempotent server-side. */
+export type TaskAction = 'cancel' | 'retry' | 'pause' | 'resume' | 'start';
 
 export type StepAction = 'retry' | 'retry_ai' | 'resume' | 'skip' | 'abort';
 
@@ -1607,16 +1610,26 @@ export function setPlanChatProvider(taskId: string, cliProviderId: string): Prom
 export function buildPlan(
   repositoryId: string,
   body: {
-    mode: 'from_repo' | 'from_md';
+    mode: 'from_repo' | 'greenfield';
     cliProviderId?: string;
     title?: string;
     description?: string;
-    /** Carried inline so the file lands before the build job is enqueued.
-     *  Required by `from_md`; the server rejects that mode without it. */
-    document?: { filename: string; content: string };
+    /** Create the task WITHOUT starting it, so attachments can be uploaded
+     *  first. Finalize with `startTask` once every file has landed — the worker
+     *  picks a job up immediately, so uploading afterwards would race the first
+     *  step's detect. */
+    deferStart?: boolean;
   },
-): Promise<{ taskId: string }> {
-  return api.post<{ taskId: string }>(`${planBase(repositoryId)}/build`, body);
+): Promise<{ taskId: string; deferred: boolean }> {
+  return api.post<{ taskId: string; deferred: boolean }>(`${planBase(repositoryId)}/build`, body);
+}
+
+/** Enqueue a task that was created but never started. Idempotent server-side, so
+ *  a double-click cannot start it twice. */
+export function startTask(taskId: string): Promise<{ ok: true; started: boolean; status: string }> {
+  return api.post<{ ok: true; started: boolean; status: string }>(`/tasks/${taskId}/action`, {
+    action: 'start',
+  });
 }
 
 export function startPlanChat(

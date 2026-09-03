@@ -1621,6 +1621,20 @@ export default function TaskDetailPage() {
               started and where a dead token has to be repaired, there was no reading of what
               allowance is left. */}
           <HeaderUsageChip providerIds={usageProviderIds} providers={providers} />
+          {/* A task created but never enqueued — the plan builder does that so
+              attachments land before the first step reads them. Keyed on the
+              STATUS, which is what actually proves it never started; the
+              metadata only records how it was made. Idempotent server-side, so
+              a double-click cannot enqueue two starts. */}
+          {task.status === 'created' && (
+            <Button
+              size="sm"
+              onClick={() => void runAction('start')}
+              title="Start this task. It was created without being started so its attachments could be uploaded first."
+            >
+              Start
+            </Button>
+          )}
           {canRetry &&
             (() => {
               // Mirror the failed step's own primary button (primaryRecovery) instead of
