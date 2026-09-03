@@ -1,9 +1,12 @@
 # syntax=docker/dockerfile:1.7
 FROM node:26-alpine AS base
 # Native build deps + git/unzip for repo ops + docker CLI for sandbox orchestration.
+# poppler-utils is `pdftotext`, used by the plan step to give a PDF attachment a
+# text form beside the original — no CLI-agnostic way exists to make a model read
+# a PDF, and nothing in the pnpm store parses one.
 RUN apk add --no-cache \
       python3 make g++ libc6-compat \
-      git unzip curl ca-certificates \
+      git unzip curl ca-certificates poppler-utils \
       docker-cli docker-cli-buildx
 # Host-mounted repos have a different UID than the worker process; bypass git's
 # safe.directory ownership check so repo ops don't fail with "dubious ownership".
