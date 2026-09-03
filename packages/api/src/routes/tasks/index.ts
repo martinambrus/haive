@@ -47,6 +47,7 @@ import {
   enrichStepsWithSkipFlag,
   findActiveCliInvocation,
   findQueuedInvocationStepIds,
+  resolveCurrentStepCliProviderIds,
   sumTaskTokens,
   sumTaskProviderBreakdown,
   resolveCostDisplay,
@@ -264,6 +265,10 @@ taskRoutes.get('/', async (c) => {
         ).map((p) => [p.id, p.name])
       : [],
   );
+  // Which subscription each row actually spends, for the listing's usage strip: the current
+  // step's explicit CLI preference wins over the task column, which is only the fallback (see
+  // resolveCurrentStepCliProviderIds). Batched across the page — three queries, not per row.
+  const stepCliProviderIds = await resolveCurrentStepCliProviderIds(db, userId, rows);
   const tasks = rows.map((t) => {
     const steps = stepsByTask.get(t.id) ?? [];
     const startMs = t.startedAt ? t.startedAt.getTime() : null;
@@ -293,6 +298,10 @@ taskRoutes.get('/', async (c) => {
       // task header instead of printing the raw step slug. Same helper, same rows, on both
       // endpoints — the two cannot drift.
       currentStepLabel: currentStepLabel(steps, t.currentStepId, t.currentRound),
+      // Every CLI the current step will spend (step/seat prefs resolved, task provider as the
+      // fallback), so the usage strip meters what these rows actually run on rather than what
+      // the task row happens to name.
+      currentStepCliProviderIds: stepCliProviderIds.get(t.id) ?? [],
       // Running-but-queued: which capacity cap this task is parked behind, or null when it is
       // genuinely working. Derived per poll rather than stored, so it cannot go stale.
       slotWait: deriveSlotWait({

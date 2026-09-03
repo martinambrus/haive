@@ -106,7 +106,17 @@ export function selectMetersForProviderIds(
   return meters.sort((a, b) => a.allowanceKey.localeCompare(b.allowanceKey));
 }
 
-/** The meters for the task rows on screen — every subscription those rows spend. */
+/** The meters for the task rows on screen — every subscription those rows spend.
+ *
+ *  `currentStepCliProviderIds` is what the rows RUN on: the listing resolves each task's
+ *  current step against its explicit per-step and per-seat CLI preferences, exactly as the
+ *  worker does at dispatch, and `cliProviderId` is only the fallback that survives when no
+ *  preference applies. Keying on the task column alone left the strip blank on a task whose
+ *  steps were pinned to another CLI — measured: a task whose task provider was an unused
+ *  ollama fixture had spent 233 codex and 14 claude-code invocations, both metered.
+ *
+ *  The fallback below is for an older api that omits the field, not for an empty one: a task
+ *  that names no usable provider returns [] and must contribute nothing. */
 export function selectStripMeters(
   tasks: readonly Task[] | null,
   snapshots: readonly UsageWindowSnapshot[] | null,
@@ -114,7 +124,7 @@ export function selectStripMeters(
 ): StripMeter[] {
   if (!tasks) return [];
   return selectMetersForProviderIds(
-    tasks.map((t) => t.cliProviderId),
+    tasks.flatMap((t) => t.currentStepCliProviderIds ?? [t.cliProviderId]),
     snapshots,
     allowanceKeys,
   );

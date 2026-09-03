@@ -84,6 +84,100 @@ export function mimeForExtension(ext: string): string {
   return IMAGE_MIME_TYPES[ext] ?? 'application/octet-stream';
 }
 
+/** The explicit per-step CLI preference rows, keyed by step. Loaded once for a set of steps
+ *  and shared by the two readers of the same rules: the step enricher below (one task, every
+ *  step) and the listing's provider resolution (many tasks, one current step each), which
+ *  would otherwise need an enricher call — and its queries — per row of a 3s-polled page. */
+interface StepCliPrefRows {
+  byStep: Map<string, string>;
+  byStepEffort: Map<string, string | null>;
+  roleByStep: Map<string, Map<string, string>>;
+  roleEffortByStep: Map<string, Map<string, string | null>>;
+}
+
+function emptyStepCliPrefRows(): StepCliPrefRows {
+  return {
+    byStep: new Map(),
+    byStepEffort: new Map(),
+    roleByStep: new Map(),
+    roleEffortByStep: new Map(),
+  };
+}
+
+async function loadStepCliPrefRows(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  stepIds: string[],
+): Promise<StepCliPrefRows> {
+  const out = emptyStepCliPrefRows();
+  if (stepIds.length === 0) return out;
+  const prefs = await db
+    .select()
+    .from(schema.userStepCliPreferences)
+    .where(
+      and(
+        eq(schema.userStepCliPreferences.userId, userId),
+        inArray(schema.userStepCliPreferences.stepId, stepIds),
+        // Only explicit per-step overrides surface in the UI; legacy
+        // auto-recorded rows (explicit=false) fall back to the task default.
+        eq(schema.userStepCliPreferences.explicit, true),
+      ),
+    );
+  for (const p of prefs) {
+    out.byStep.set(p.stepId, p.cliProviderId);
+    out.byStepEffort.set(p.stepId, p.effortLevel);
+  }
+
+  // Per-role prefs, only for steps that declare CLI roles or fan-out seats. Both kinds
+  // live in the same (user, step, role) table, so one query serves both.
+  const roleStepIds = stepIds.filter((sid) => STEP_CLI_ROLES[sid] ?? STEP_MINING_SEATS[sid]);
+  if (roleStepIds.length > 0) {
+    const rolePrefs = await db
+      .select()
+      .from(schema.userStepCliRolePreferences)
+      .where(
+        and(
+          eq(schema.userStepCliRolePreferences.userId, userId),
+          inArray(schema.userStepCliRolePreferences.stepId, roleStepIds),
+          eq(schema.userStepCliRolePreferences.explicit, true),
+        ),
+      );
+    for (const p of rolePrefs) {
+      const m = out.roleByStep.get(p.stepId) ?? new Map<string, string>();
+      m.set(p.role, p.cliProviderId);
+      out.roleByStep.set(p.stepId, m);
+      const me = out.roleEffortByStep.get(p.stepId) ?? new Map<string, string | null>();
+      me.set(p.role, p.effortLevel);
+      out.roleEffortByStep.set(p.stepId, me);
+    }
+  }
+  return out;
+}
+
+/** `task_step_cli_touched` as taskId -> stepId -> roles. Loaded only for tasks that set
+ *  ignore_saved_step_clis: under that flag a saved pref is honored only where the user
+ *  explicitly (re)set it WITHIN this task, and everything else falls back to the task
+ *  provider. */
+async function loadTouchedRoles(
+  db: ReturnType<typeof getDb>,
+  taskIds: string[],
+): Promise<Map<string, Map<string, Set<string>>>> {
+  const out = new Map<string, Map<string, Set<string>>>();
+  if (taskIds.length === 0) return out;
+  const touched = await db
+    .select()
+    .from(schema.taskStepCliTouched)
+    .where(inArray(schema.taskStepCliTouched.taskId, taskIds));
+  for (const t of touched) {
+    const byStep = out.get(t.taskId) ?? new Map<string, Set<string>>();
+    const set = byStep.get(t.stepId) ?? new Set<string>();
+    set.add(t.role);
+    byStep.set(t.stepId, set);
+    out.set(t.taskId, byStep);
+  }
+  return out;
+}
+
 export async function enrichStepsWithCliPreferences<T extends { stepId: string }>(
   db: ReturnType<typeof getDb>,
   userId: string,
@@ -111,68 +205,17 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
   })[]
 > {
   const stepIds = [...new Set(steps.map((s) => s.stepId))];
-  const byStep = new Map<string, string>();
-  const byStepEffort = new Map<string, string | null>();
-  const roleByStep = new Map<string, Map<string, string>>();
-  const roleEffortByStep = new Map<string, Map<string, string | null>>();
-  // When the task opted out of saved per-step prefs (ignore_saved_step_clis),
-  // only prefs the user explicitly (re)set WITHIN this task are honored — tracked
-  // by task_step_cli_touched. Load that touched set once and gate each surfaced
-  // pref by its (step, role); untouched steps fall back to the task provider.
-  const touchedByStep = new Map<string, Set<string>>();
-  if (ignoreSaved && stepIds.length > 0) {
-    const touched = await db
-      .select()
-      .from(schema.taskStepCliTouched)
-      .where(eq(schema.taskStepCliTouched.taskId, taskId));
-    for (const t of touched) {
-      const set = touchedByStep.get(t.stepId) ?? new Set<string>();
-      set.add(t.role);
-      touchedByStep.set(t.stepId, set);
-    }
-  }
-  if (stepIds.length > 0) {
-    const prefs = await db
-      .select()
-      .from(schema.userStepCliPreferences)
-      .where(
-        and(
-          eq(schema.userStepCliPreferences.userId, userId),
-          inArray(schema.userStepCliPreferences.stepId, stepIds),
-          // Only explicit per-step overrides surface in the UI; legacy
-          // auto-recorded rows (explicit=false) fall back to the task default.
-          eq(schema.userStepCliPreferences.explicit, true),
-        ),
-      );
-    for (const p of prefs) {
-      byStep.set(p.stepId, p.cliProviderId);
-      byStepEffort.set(p.stepId, p.effortLevel);
-    }
-
-    // Per-role prefs, only for steps that declare CLI roles or fan-out seats. Both kinds
-    // live in the same (user, step, role) table, so one query serves both.
-    const roleStepIds = stepIds.filter((sid) => STEP_CLI_ROLES[sid] ?? STEP_MINING_SEATS[sid]);
-    if (roleStepIds.length > 0) {
-      const rolePrefs = await db
-        .select()
-        .from(schema.userStepCliRolePreferences)
-        .where(
-          and(
-            eq(schema.userStepCliRolePreferences.userId, userId),
-            inArray(schema.userStepCliRolePreferences.stepId, roleStepIds),
-            eq(schema.userStepCliRolePreferences.explicit, true),
-          ),
-        );
-      for (const p of rolePrefs) {
-        const m = roleByStep.get(p.stepId) ?? new Map<string, string>();
-        m.set(p.role, p.cliProviderId);
-        roleByStep.set(p.stepId, m);
-        const me = roleEffortByStep.get(p.stepId) ?? new Map<string, string | null>();
-        me.set(p.role, p.effortLevel);
-        roleEffortByStep.set(p.stepId, me);
-      }
-    }
-  }
+  const { byStep, byStepEffort, roleByStep, roleEffortByStep } = await loadStepCliPrefRows(
+    db,
+    userId,
+    stepIds,
+  );
+  // When the task opted out of saved per-step prefs (ignore_saved_step_clis), gate each
+  // surfaced pref by its (step, role) marker; untouched steps fall back to the task provider.
+  const touchedByStep =
+    ignoreSaved && stepIds.length > 0
+      ? ((await loadTouchedRoles(db, [taskId])).get(taskId) ?? new Map<string, Set<string>>())
+      : new Map<string, Set<string>>();
   return steps.map((s) => {
     const roles = STEP_CLI_ROLES[s.stepId];
     const seats = STEP_MINING_SEATS[s.stepId];
@@ -212,6 +255,81 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
         : {}),
     };
   });
+}
+
+/** Every CLI provider each task's CURRENT step will actually spend, keyed by task id.
+ *
+ *  `tasks.cli_provider_id` is the fallback of LAST RESORT, not the answer: an explicit
+ *  per-step preference — and, on a fan-out/multi-role step, a per-seat one — overrides it,
+ *  exactly as the worker's `resolvePreferredCli` resolves it at dispatch. The listing's usage
+ *  strip is scoped to the rows on screen and had only the task column to key on, so it named
+ *  an allowance the tasks were not spending: MEASURED on the dev install, two tasks whose task
+ *  provider was an ollama fixture had run 233 codex and 14 claude-code invocations and zero
+ *  ollama ones, and the strip therefore drew nothing at all while both subscriptions had live
+ *  meters.
+ *
+ *  Same fall-through, `enabled` filter and dedup as web's `stepCliProviderIds`, which does
+ *  this on the task DETAIL page from the already-enriched step objects. This is the batched
+ *  server-side twin for listing rows, which carry no steps: three queries for a whole page.
+ *
+ *  A task with no current step (or whose step has no pref) yields just its own provider, i.e.
+ *  what the listing already showed. The result is never empty-by-accident: an empty array
+ *  means the task names no usable provider at all. */
+export async function resolveCurrentStepCliProviderIds(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  tasks: readonly {
+    id: string;
+    currentStepId: string | null;
+    cliProviderId: string | null;
+    ignoreSavedStepClis: boolean;
+  }[],
+): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (tasks.length === 0) return out;
+  const stepIds = [...new Set(tasks.map((t) => t.currentStepId).filter((s): s is string => !!s))];
+  // A pref pointing at a deleted or disabled provider is ignored, exactly as the worker
+  // ignores it — the step runs on the fallback, so the fallback is what the strip must meter.
+  const enabledRows = await db
+    .select({ id: schema.cliProviders.id })
+    .from(schema.cliProviders)
+    .where(and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)));
+  const enabled = new Set(enabledRows.map((p) => p.id));
+  const prefs = await loadStepCliPrefRows(db, userId, stepIds);
+  const touched = await loadTouchedRoles(
+    db,
+    tasks.filter((t) => t.ignoreSavedStepClis).map((t) => t.id),
+  );
+
+  for (const task of tasks) {
+    const stepId = task.currentStepId;
+    const touchedRoles = stepId ? touched.get(task.id)?.get(stepId) : undefined;
+    const honor = (role: string, value: string | null): string | null =>
+      !task.ignoreSavedStepClis || touchedRoles?.has(role) ? value : null;
+    const usable = (id: string | null): string | null => (id && enabled.has(id) ? id : null);
+    const roleProviders =
+      (stepId ? prefs.roleByStep.get(stepId) : undefined) ?? new Map<string, string>();
+    const stepDefault =
+      usable(stepId ? honor('default', prefs.byStep.get(stepId) ?? null) : null) ??
+      task.cliProviderId ??
+      null;
+
+    const ids: string[] = [];
+    const push = (id: string | null) => {
+      if (id && !ids.includes(id)) ids.push(id);
+    };
+    push(stepDefault);
+    // The step default is kept even when every seat is set: it is the fallthrough for a seat
+    // the user never touched, and it runs a fan-out step's summary pass.
+    for (const seat of (stepId ? STEP_MINING_SEATS[stepId] : undefined) ?? []) {
+      push(usable(honor(seat.id, roleProviders.get(seat.id) ?? null)) ?? stepDefault);
+    }
+    for (const role of (stepId ? STEP_CLI_ROLES[stepId] : undefined) ?? []) {
+      push(usable(honor(role.id, roleProviders.get(role.id) ?? null)) ?? stepDefault);
+    }
+    out.set(task.id, ids);
+  }
+  return out;
 }
 
 export async function findActiveCliInvocation(

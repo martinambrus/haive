@@ -647,6 +647,12 @@ export interface Task {
    *  points at another linked bug fix. */
   parentTaskId?: string | null;
   cliProviderId: string | null;
+  /** Every CLI provider the task's CURRENT step will actually spend, resolved server-side:
+   *  an explicit per-step (or per-seat) preference wins, `cliProviderId` is only the
+   *  fallback. The usage strip meters THESE — keying on the task column alone showed no
+   *  meter for a task whose steps run on a different CLI. Listing endpoint only; absent on
+   *  an older api, where callers fall back to `cliProviderId`. */
+  currentStepCliProviderIds?: string[];
   type: WorkflowType;
   /** Execution path chosen at the 00-triage step (workflow tasks only). null until
    *  triage records it, and on non-workflow tasks. */

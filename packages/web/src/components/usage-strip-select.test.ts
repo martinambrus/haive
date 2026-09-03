@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { Task, UsageWindowSnapshot } from '@/lib/api-client';
 import { selectMetersForProviderIds, selectStripMeters } from './usage-strip-select';
 
-const task = (cliProviderId: string | null): Task => ({ id: 'x', cliProviderId }) as Task;
+/** A listing row. `currentStepCliProviderIds` omitted = an older api that sends only the
+ *  task column, which is the fallback path. */
+const task = (cliProviderId: string | null, currentStepCliProviderIds?: string[]): Task =>
+  ({ id: 'x', cliProviderId, currentStepCliProviderIds }) as Task;
 
 const snap = (over: Partial<UsageWindowSnapshot> = {}): UsageWindowSnapshot => ({
   providerId: 'p1',
@@ -185,6 +188,25 @@ describe('selectStripMeters', () => {
         KEYS,
       ),
     ).toEqual([]);
+  });
+
+  it('meters what the current step runs on, not the task column', () => {
+    // The bug this exists for: both listed tasks named an ollama fixture as their task
+    // provider (no meter of its own) while every invocation they had run went to codex and
+    // claude-code, so the strip resolved an allowance nothing spends and drew nothing.
+    const meters = selectStripMeters([task('ollama', ['x1'])], [...CLAUDE, CODEX], KEYS);
+    expect(meters.map((m) => m.allowanceKey)).toEqual(['shared:codex']);
+  });
+
+  it('meters every seat of a fan-out step, not just its default', () => {
+    const meters = selectStripMeters([task('ollama', ['c1', 'x1'])], [...CLAUDE, CODEX], KEYS);
+    expect(meters.map((m) => m.allowanceKey)).toEqual(['shared:claude-code', 'shared:codex']);
+  });
+
+  it('shows nothing for a row that resolves to no usable provider', () => {
+    // An empty array is an ANSWER (the task names no enabled CLI), not a missing field, so it
+    // must not fall through to the task column.
+    expect(selectStripMeters([task('c1', [])], CLAUDE, KEYS)).toEqual([]);
   });
 
   it('falls back to per-provider keys when the api omits allowanceKeys', () => {
