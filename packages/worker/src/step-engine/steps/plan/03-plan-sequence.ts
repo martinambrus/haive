@@ -11,7 +11,7 @@ import {
 } from '@haive/shared/plan';
 import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
 import type { AgentMiningResult, StepContext, StepDefinition } from '../../step-definition.js';
-import { MiningWaveError } from '../../step-definition.js';
+import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { APPLY_FAILURE_PREFIX, PLAN_AGENT_TIMEOUT_MS } from './01-plan-build.js';
@@ -54,6 +54,25 @@ interface SequenceTarget {
   childCount: number;
 }
 
+/**
+ * A recorded `depends_on` that an agent, ordering the same siblings without
+ * being shown it, put the wrong way round.
+ *
+ * NOT a defect: unlike a cycle or an ancestor dependency this is perfectly
+ * satisfiable, and nothing structural says it is wrong. It is two independent
+ * judgements disagreeing — the edge says A waits for B, the agent said do A
+ * first — and only a person can say which is right.
+ */
+export interface SequenceDisagreement {
+  edgeId: string;
+  fromNodeId: string;
+  fromTitle: string;
+  toNodeId: string;
+  toTitle: string;
+  /** The reason recorded on the edge when it was written. */
+  note: string | null;
+}
+
 export interface PlanSequenceDetect {
   repositoryId: string | null;
   nodeCount: number;
@@ -69,6 +88,7 @@ export interface PlanSequenceDetect {
   ancestorDeps: number;
   agentsUsed: number;
   wave: number;
+  disagreements: SequenceDisagreement[];
 }
 
 export interface PlanSequenceApply {
@@ -76,6 +96,11 @@ export interface PlanSequenceApply {
   dispatched: number;
   remaining: number;
   decision: 'sequenced' | 'deterministic_only' | 'skipped' | 'nothing_to_do';
+  /** Edges an independent ordering contradicted, and how many of them the
+   *  developer chose to remove. Reported even when none were removed: the
+   *  disagreement is the finding, the removal is the optional response. */
+  disagreements: number;
+  edgesRemoved: number;
 }
 
 /** Matches 02-plan-coverage's cadence: modest waves, with a per-pass ceiling
@@ -95,7 +120,12 @@ function sequenceSelfNodeId(agentId: string): string | null {
   return SEQUENCE_AGENT_RE.exec(agentId)?.[1] ?? null;
 }
 
-type MiningRow = { agentId: string; status: string };
+export type MiningRow = {
+  agentId: string;
+  status: string;
+  output: unknown;
+  rawOutput: string | null;
+};
 
 async function loadSequenceRows(ctx: StepContext): Promise<MiningRow[]> {
   // Keyed on this step's own row rather than joined through `task_steps` on a
@@ -105,6 +135,8 @@ async function loadSequenceRows(ctx: StepContext): Promise<MiningRow[]> {
     .select({
       agentId: schema.taskStepAgentMinings.agentId,
       status: schema.taskStepAgentMinings.status,
+      output: schema.taskStepAgentMinings.output,
+      rawOutput: schema.taskStepAgentMinings.rawOutput,
     })
     .from(schema.taskStepAgentMinings)
     .where(eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId));
@@ -230,6 +262,7 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
       ancestorDeps: 0,
       agentsUsed: 0,
       wave: 0,
+      disagreements: [],
     };
   }
 
@@ -251,6 +284,7 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
     ancestorDeps: derived.ancestorDeps.length,
     agentsUsed: state.agents,
     wave: state.wave,
+    disagreements: collectDisagreements(nodes, edges, agentOrdinals(rows)),
   };
 }
 
@@ -320,6 +354,10 @@ async function buildWave(
   const planMarkdown = await renderPlanMarkdown(ctx.db, detected.repositoryId!, {
     titlesOnly: true,
     maxDepth: 3,
+    // The order this agent returns is COMPARED against the recorded
+    // `depends_on` edges. Showing it those edges would make it an echo of the
+    // claim under test rather than a second reader of the work.
+    omitLinks: true,
   });
   const byParent = childrenByParent(nodes);
   return slice.map((target) => ({
@@ -418,12 +456,124 @@ async function foldSequenceResults(
   return applied;
 }
 
+/**
+ * Every build order an agent of THIS step actually stated, node id -> ordinal.
+ *
+ * Read back from the mining rows rather than carried in memory, for the same
+ * reason the asked-set is: apply passes are independent calls and the step row
+ * is rewritten each wave. Agents cover disjoint sibling runs, so the assignments
+ * never collide.
+ */
+export function agentOrdinals(rows: MiningRow[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const row of rows) {
+    if (row.status !== 'done') continue;
+    const patch = parsePlanPatch(row.output ?? row.rawOutput);
+    if (!patch) continue;
+    for (const raw of keepOrderingOps(patch.ops).ops) {
+      const op = raw as { op?: string; nodeRef?: unknown; ordinal?: unknown };
+      if (op.op !== 'upsert') continue;
+      if (typeof op.nodeRef !== 'string' || typeof op.ordinal !== 'number') continue;
+      out.set(op.nodeRef.toLowerCase(), op.ordinal);
+    }
+  }
+  return out;
+}
+
+/**
+ * The independent second opinion.
+ *
+ * Each agent was asked to order one sibling run WITHOUT being shown the
+ * `depends_on` edges among those siblings (`omitLinks` on the plan render). So
+ * where its stated order puts a node BEFORE something that node is recorded as
+ * waiting for, two independent judgements have contradicted each other about
+ * the same pair.
+ *
+ * This is the only check available for a dependency written the wrong way round
+ * between two ordinary nodes. It closes no loop and touches no ancestor, so
+ * nothing structural can refuse it at the write — MEASURED, a lexical check on
+ * the edge's own note is worse than useless: on a real plan, narrowing to
+ * containment verbs still left roughly two correct edges for every wrong one,
+ * because "A is invoked by B" and "A is driven by B" are the same sentence and
+ * only one of them is an inversion.
+ *
+ * Reported, never applied. The agent is not more authoritative than the edge —
+ * it is a second reader, and the value is that it read independently.
+ */
+export function collectDisagreements(
+  nodes: PlanNodeSkeleton[],
+  edges: PlanEdgeRecord[],
+  ordinals: Map<string, number>,
+): SequenceDisagreement[] {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const out: SequenceDisagreement[] = [];
+  for (const edge of edges) {
+    if (edge.kind !== 'depends_on') continue;
+    const from = byId.get(edge.fromNodeId);
+    const to = byId.get(edge.toNodeId);
+    // Only within one sibling run: that is the only scope an agent was asked
+    // about, so it is the only scope its silence or its order means anything in.
+    if (!from || !to || from.parentId === null || from.parentId !== to.parentId) continue;
+    const fromOrdinal = ordinals.get(edge.fromNodeId.toLowerCase());
+    const toOrdinal = ordinals.get(edge.toNodeId.toLowerCase());
+    if (fromOrdinal === undefined || toOrdinal === undefined) continue;
+    // `from` waits for `to`, so `to` must be built first. The agent said otherwise.
+    if (fromOrdinal >= toOrdinal) continue;
+    out.push({
+      edgeId: edge.id,
+      fromNodeId: from.id,
+      fromTitle: from.title,
+      toNodeId: to.id,
+      toTitle: to.title,
+      note: edge.note,
+    });
+  }
+  return out;
+}
+
+/** The end-of-pass review: edges an independent ordering contradicted.
+ *
+ *  Nothing is preselected. Neither reader outranks the other — the edge is an
+ *  explicit claim someone wrote down, the ordering is a fresh judgement made
+ *  without seeing it — so the default is to keep what is recorded and let a
+ *  person who knows the system decide. */
+function disagreementForm(detected: PlanSequenceDetect): FormSchema {
+  return {
+    title: 'Dependencies a second opinion disagreed with',
+    description:
+      `${detected.disagreements.length} recorded dependency(ies) point the opposite way to the ` +
+      'build order a model chose for the same group — and it chose that order WITHOUT being ' +
+      'shown them, so this is two independent readings contradicting each other rather than a ' +
+      'model marking its own work. Neither is automatically right. Nothing is selected: tick ' +
+      'only the ones you can see are backwards, and the rest stay exactly as they are.',
+    fields: [
+      {
+        id: 'removeEdges',
+        type: 'multi-select',
+        label: 'Dependencies to remove',
+        defaults: [],
+        options: detected.disagreements.map((d) => ({
+          value: d.edgeId,
+          label: `"${d.fromTitle}" waits for "${d.toTitle}" — the ordering put it first instead`,
+          ...(d.note ? { description: `Recorded reason: ${d.note}` } : {}),
+        })),
+      },
+    ],
+  };
+}
+
 function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
   if (!detected.repositoryId || detected.nodeCount === 0) return null;
-  // Only the FIRST pass asks. Once a wave has gone out the user has already
-  // agreed to the budget, and re-parking every twelve agents would turn an
+  // Only the FIRST pass asks about the budget. Once a wave has gone out the user
+  // has already agreed to it, and re-parking every twelve agents would turn an
   // unattended pass into a clicking exercise.
-  if (detected.agentsUsed > 0) return null;
+  if (detected.agentsUsed > 0) {
+    // ...but the END of the pass asks once more, because by then there is
+    // something to show that did not exist when the budget was agreed.
+    return detected.targets.length === 0 && detected.disagreements.length > 0
+      ? disagreementForm(detected)
+      : null;
+  }
   if (detected.targets.length === 0) return null;
 
   const defects = detected.cycles + detected.ancestorDeps;
@@ -516,40 +666,85 @@ export function createPlanSequenceStep(opts: {
         dispatched: 0,
         remaining: d.targets.length,
         decision: 'nothing_to_do',
+        disagreements: d.disagreements.length,
+        edgesRemoved: 0,
       };
       if (!d.repositoryId || d.nodeCount === 0) return result;
 
       const values = (args.formValues ?? {}) as FormValues;
+
+      /** Write the order the recorded edges already imply, then flush. Runs at
+       *  the END of a pass, never before the agents: ordering the siblings first
+       *  would hand every agent the edge-derived order as its starting point,
+       *  and an agent anchored on the claim it is being used to check is not a
+       *  second opinion. */
+      const settle = async (): Promise<void> => {
+        const [nodes, edges] = await Promise.all([
+          loadPlanSkeletons(ctx.db, d.repositoryId!),
+          loadPlanEdges(ctx.db, d.repositoryId!),
+        ]);
+        result.reordered += await applyDeterministicOrder(ctx, d.repositoryId!, nodes, edges);
+        result.remaining = computeTargets(nodes, edges).targets.length;
+        if (result.reordered === 0) return;
+        try {
+          await writePlanMirror(ctx.db, d.repositoryId!, ctx.repoPath);
+        } catch (err) {
+          ctx.logger.warn({ err }, 'plan mirror write failed after sequencing');
+        }
+      };
+
+      // The review answer. Checked FIRST and returning unconditionally, so the
+      // reopen below can never loop: once this key exists the step finishes.
+      if ('removeEdges' in values) {
+        const chosen = Array.isArray(values.removeEdges)
+          ? values.removeEdges.filter((v): v is string => typeof v === 'string')
+          : [];
+        const byId = new Map(d.disagreements.map((x) => [x.edgeId, x]));
+        const ops = chosen.flatMap((edgeId) => {
+          const x = byId.get(edgeId);
+          return x
+            ? [
+                {
+                  op: 'unlink' as const,
+                  fromRef: x.fromNodeId,
+                  toRef: x.toNodeId,
+                  kind: 'depends_on' as const,
+                },
+              ]
+            : [];
+        });
+        if (ops.length > 0) {
+          const removed = await applyPlanPatch(
+            ctx.db,
+            { ops, summary: 'removed dependencies a second opinion contradicted' },
+            { repositoryId: d.repositoryId, origin: 'user', sourceTaskId: ctx.taskId },
+          );
+          result.edgesRemoved = removed.unlinked;
+        }
+        await settle();
+        result.decision = 'sequenced';
+        return result;
+      }
+
       const decision = typeof values.decision === 'string' ? values.decision : 'sequence';
       if (decision === 'skip') {
         result.decision = 'skipped';
         return result;
       }
 
-      // Fold the wave that just came back BEFORE re-reading the tree: the
-      // deterministic pass below must see the edges those agents just added.
       const fold = args.newAgentMiningResults ?? args.agentMiningResults ?? [];
       if (fold.length > 0) result.reordered += await foldSequenceResults(ctx, d.repositoryId, fold);
+
+      if (decision === 'deterministic_only') {
+        await settle();
+        result.decision = 'deterministic_only';
+        return result;
+      }
 
       const [nodes, edges] = await Promise.all([
         loadPlanSkeletons(ctx.db, d.repositoryId),
         loadPlanEdges(ctx.db, d.repositoryId),
       ]);
-      result.reordered += await applyDeterministicOrder(ctx, d.repositoryId, nodes, edges);
-      if (result.reordered > 0) {
-        try {
-          await writePlanMirror(ctx.db, d.repositoryId, ctx.repoPath);
-        } catch (err) {
-          ctx.logger.warn({ err }, 'plan mirror write failed after sequencing');
-        }
-      }
-
-      if (decision === 'deterministic_only') {
-        result.decision = 'deterministic_only';
-        result.remaining = computeTargets(nodes, edges).targets.length;
-        return result;
-      }
-
       // The frontier is recomputed from the DATABASE every wave, minus the
       // parents whose ids already appear among this step's agents — so a parent
       // is never asked twice even though apply passes are independent calls.
@@ -561,25 +756,38 @@ export function createPlanSequenceStep(opts: {
       result.decision = 'sequenced';
 
       if (
-        pending.length === 0 ||
-        state.agents >= SEQUENCE_AGENTS_PER_PASS ||
-        args.miningWaveExhausted
+        pending.length > 0 &&
+        state.agents < SEQUENCE_AGENTS_PER_PASS &&
+        !args.miningWaveExhausted
       ) {
-        return result;
+        const dispatches = await buildWave(
+          ctx,
+          { ...d, targets: pending, agentsUsed: state.agents },
+          nodes,
+          state.wave + 1,
+        );
+        if (dispatches.length > 0) {
+          result.dispatched = dispatches.length;
+          throw new MiningWaveError(
+            dispatches,
+            `build order: ${dispatches.length} group(s) (${state.agents + dispatches.length}/${SEQUENCE_AGENTS_PER_PASS})`,
+          );
+        }
       }
 
-      const dispatches = await buildWave(
-        ctx,
-        { ...d, targets: pending, agentsUsed: state.agents },
-        nodes,
-        state.wave + 1,
-      );
-      if (dispatches.length === 0) return result;
-      result.dispatched = dispatches.length;
-      throw new MiningWaveError(
-        dispatches,
-        `build order: ${dispatches.length} group(s) (${state.agents + dispatches.length}/${SEQUENCE_AGENTS_PER_PASS})`,
-      );
+      // Pass finished. `detected` was computed BEFORE this apply folded the last
+      // wave, so it cannot see that wave's disagreements — re-park so detect runs
+      // again over everything and the form has the complete set.
+      const disagreements = collectDisagreements(nodes, edges, agentOrdinals(rows));
+      if (disagreements.length > 0) {
+        result.disagreements = disagreements.length;
+        throw new ReopenStepFormError(
+          `${disagreements.length} recorded dependency(ies) contradict the order chosen without them`,
+        );
+      }
+
+      await settle();
+      return result;
     },
   };
 }

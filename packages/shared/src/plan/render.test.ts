@@ -119,6 +119,16 @@ describe('renderPlanMarkdownFrom', () => {
     expect(out).not.toContain('Auth');
   });
 
+  it('omits every link under omitLinks', () => {
+    // The sequencing agent is asked for an order that is then compared against
+    // these very claims; showing them makes it an echo, not a second opinion.
+    const edges = [
+      { fromNodeId: AUTH, toNodeId: API, kind: 'depends_on' as const, note: 'needs the router' },
+    ];
+    expect(renderPlanMarkdownFrom(NODES, edges, { omitLinks: true })).not.toContain('depends on');
+    expect(renderPlanMarkdownFrom(NODES, edges)).toContain('depends on');
+  });
+
   it('marks the focused node', () => {
     expect(renderPlanMarkdownFrom(NODES, [], { focusNodeId: AUTH })).toContain('you are here');
   });

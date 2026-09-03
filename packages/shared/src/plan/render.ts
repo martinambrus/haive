@@ -52,6 +52,14 @@ export interface RenderPlanOptions {
   /** Mark one node as the conversation's focus, so a plan_chat prompt can say
    *  "you are here" without a second copy of the tree. */
   focusNodeId?: string;
+  /** Omit the typed cross-links entirely.
+   *
+   *  For the sequencing step, whose agents are asked to decide a build order
+   *  that is then COMPARED against the `depends_on` edges already recorded. An
+   *  agent shown those edges is not a second opinion, it is an echo — and the
+   *  whole point of the comparison is to catch an edge pointing the wrong way,
+   *  which is exactly the claim the agent would be reading. */
+  omitLinks?: boolean;
 }
 
 export function renderPlanMarkdownFrom(
@@ -105,7 +113,7 @@ export function renderPlanMarkdownFrom(
     ];
     lines.push(`\`${attrs.join('\` · \`')}\``);
 
-    const links = outgoing.get(node.id) ?? [];
+    const links = opts.omitLinks ? [] : (outgoing.get(node.id) ?? []);
     for (const link of links) {
       const target = titleById.get(link.toNodeId);
       if (!target) continue;
