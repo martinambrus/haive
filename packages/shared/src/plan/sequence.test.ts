@@ -264,6 +264,89 @@ describe('computePlanSequence — blocking', () => {
   });
 });
 
+describe('computePlanSequence — drift', () => {
+  const at = (iso: string): Date => new Date(iso);
+  const touch = (nodeId: string, completedAt: string) => ({
+    nodeId,
+    taskId: `task-${nodeId.slice(0, 4)}-${completedAt}`,
+    title: 'a task',
+    completedAt: at(completedAt),
+  });
+
+  const tree = (over: Partial<PlanSequenceNode> = {}) => {
+    const root = id('root');
+    const parent = id('parent');
+    const leaf = id('leaf');
+    return {
+      root,
+      parent,
+      leaf,
+      nodes: [node(root, null, 0), node(parent, root, 0, over), node(leaf, parent, 0, over)],
+    };
+  };
+
+  it('counts a task that finished after the node was last reviewed', () => {
+    const { leaf, nodes } = tree({ lastReviewedAt: at('2026-01-01') });
+    const r = computePlanSequence(nodes, [], [touch(leaf, '2026-02-01')]);
+    expect(r.statsById.get(leaf)!.driftedTasks).toBe(1);
+  });
+
+  it('ignores a task that finished before the last review', () => {
+    // The agent looked at the node AFTER that task landed, so there is nothing
+    // outstanding to tell anyone about.
+    const { leaf, nodes } = tree({ lastReviewedAt: at('2026-03-01') });
+    const r = computePlanSequence(nodes, [], [touch(leaf, '2026-02-01')]);
+    expect(r.statsById.get(leaf)!.driftedTasks).toBe(0);
+  });
+
+  it('measures a never-reviewed node from its creation, not from zero', () => {
+    // Treating "never reviewed" as reviewed would start every plan clean and
+    // hide exactly the drift this counts.
+    const { leaf, nodes } = tree({ lastReviewedAt: null, createdAt: at('2026-01-01') });
+    expect(
+      computePlanSequence(nodes, [], [touch(leaf, '2026-02-01')]).statsById.get(leaf)!.driftedTasks,
+    ).toBe(1);
+    // ...and a task that finished before the node existed is not about it.
+    expect(
+      computePlanSequence(nodes, [], [touch(leaf, '2025-12-01')]).statsById.get(leaf)!.driftedTasks,
+    ).toBe(0);
+  });
+
+  it('rolls the count up to every ancestor', () => {
+    // A container is exactly as out of date as the things inside it; nobody
+    // should have to open six leaves to discover one moved.
+    const { root, parent, leaf, nodes } = tree({ lastReviewedAt: at('2026-01-01') });
+    const r = computePlanSequence(
+      nodes,
+      [],
+      [touch(leaf, '2026-02-01'), touch(leaf, '2026-02-02')],
+    );
+    expect(r.statsById.get(leaf)!.driftedTasks).toBe(2);
+    expect(r.statsById.get(parent)!.driftedTasks).toBe(2);
+    expect(r.statsById.get(root)!.driftedTasks).toBe(2);
+  });
+
+  it('does not count a task against a node it never touched', () => {
+    const { root, parent, nodes } = tree({ lastReviewedAt: at('2026-01-01') });
+    const r = computePlanSequence(nodes, [], [touch(parent, '2026-02-01')]);
+    expect(r.statsById.get(parent)!.driftedTasks).toBe(1);
+    expect(r.statsById.get(root)!.driftedTasks).toBe(1);
+  });
+
+  it('ignores a touch naming a node that is not in the plan', () => {
+    const { nodes, root } = tree();
+    expect(
+      computePlanSequence(nodes, [], [touch(id('ghost'), '2026-02-01')]).statsById.get(root)!
+        .driftedTasks,
+    ).toBe(0);
+  });
+
+  it('reports zero drift when nothing touched anything', () => {
+    const { root, nodes } = tree();
+    expect(computePlanSequence(nodes, []).statsById.get(root)!.driftedTasks).toBe(0);
+  });
+});
+
 describe('computePlanSequence — defects', () => {
   it('reports a mutual depends_on pair as a cycle', () => {
     // MEASURED on the dev install: 8 such pairs on one plan. Neither end can

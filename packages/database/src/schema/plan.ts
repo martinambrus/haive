@@ -154,6 +154,17 @@ export const planNodes = pgTable(
      *  expectedVersion and a mismatch is a 409 the UI must surface — silently
      *  refetching would discard the loser's edit without telling anyone. */
     version: integer('version').notNull().default(1),
+    /** When a plan AGENT last wrote this node — the build, the coverage pass, a
+     *  plan chat, the reconcile step. NOT `updated_at`, which any status flip or
+     *  hand edit moves: a drift warning cleared by an unrelated edit is a false
+     *  negative, and a warning that reads "current" when it is not is the exact
+     *  failure this column exists to prevent.
+     *
+     *  Set through `applyPlanPatch`'s explicit `marksReviewed` option rather than
+     *  by keying on `origin`, which is documented as affecting created nodes only
+     *  and is already used by a deterministic reordering pass that reviews
+     *  nothing. NULL means no agent has looked since the node was created. */
+    lastReviewedAt: timestamp('last_reviewed_at'),
     createdBy: planNodeOriginEnum('created_by').notNull().default('user'),
     /** Which task last wrote this node. Set null (not cascade) so a node outlives
      *  the task that produced it — the plan is the point, the task is the receipt.

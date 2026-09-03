@@ -1,0 +1,16 @@
+-- When a plan AGENT last wrote a node, so the canvas can say "N tasks changed
+-- code under this since anyone reviewed it" instead of drifting silently.
+--
+-- Deliberately NOT derived from `updated_at`: that moves on any status flip or
+-- hand edit, so an unrelated change would clear the warning while nobody had
+-- reviewed anything. A warning that silently reads "current" is the failure this
+-- exists to prevent, so it gets its own column with one writer.
+--
+-- NULL means no agent has looked at the node since it was created, which is the
+-- honest starting point for every existing row: back-filling it to `now()` would
+-- claim a review that never happened and hide real drift on day one.
+--
+-- Rollback: remove `lastReviewedAt` from `schema/plan.ts` and
+--   ALTER TABLE "plan_nodes" DROP COLUMN IF EXISTS "last_reviewed_at";
+-- Nothing else reads it; the drift count simply disappears from the node views.
+ALTER TABLE "plan_nodes" ADD COLUMN IF NOT EXISTS "last_reviewed_at" timestamp;

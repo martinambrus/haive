@@ -2,7 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PlanTreeNode } from '@/lib/api-client';
-import { BLOCKED_GLYPH, sequenceChip, sequenceLabel, statusDot, statusLabel } from './plan-status';
+import {
+  BLOCKED_GLYPH,
+  DRIFT_GLYPH,
+  driftLabel,
+  sequenceChip,
+  sequenceLabel,
+  statusDot,
+  statusLabel,
+} from './plan-status';
 import { ancestorsOf, computeVisibleSet, flattenVisible } from './plan-tree-filter';
 
 /**
@@ -281,6 +289,14 @@ export function PlanTree({
             >
               {node.title}
             </button>
+            {node.driftedTasks > 0 && (
+              <span
+                className="shrink-0 text-[11px] text-amber-500"
+                title={driftLabel(node.driftedTasks)}
+              >
+                {DRIFT_GLYPH}
+              </span>
+            )}
             {(unread?.[row.id] ?? 0) > 0 && (
               <span
                 title={`${unread?.[row.id]} unread chat repl${unread?.[row.id] === 1 ? 'y' : 'ies'}`}

@@ -211,6 +211,9 @@ export async function applyAgentPatch(
       // in the UI still gets `fail`, which is the default — a human who typed a
       // bad id should be told, not silently trimmed.
       onUnresolvableRef: 'drop',
+      // An agent wrote these nodes, which is exactly what the drift signal asks
+      // about: "has anyone looked at this since the code changed?".
+      marksReviewed: true,
       ...(opts.selfNodeId ? { selfNodeId: opts.selfNodeId } : {}),
     });
   } catch (err) {

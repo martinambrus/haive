@@ -120,6 +120,22 @@ export function sequenceChip(blockedCount: number): string {
     : 'border-neutral-700 bg-neutral-900 text-neutral-300';
 }
 
+/** The glyph a node carries when work has moved underneath it since a plan
+ *  agent last looked. A GLYPH again, and a different one from the lock, because
+ *  drift and blocking are unrelated states a node can be in at the same time —
+ *  one says "you cannot start this yet", the other says "what this describes may
+ *  no longer be true". */
+export const DRIFT_GLYPH = '\u26A0';
+
+/** One line for the drift marker, sized to what the reader can act on. */
+export function driftLabel(driftedTasks: number): string {
+  if (driftedTasks <= 0) return '';
+  return (
+    `${driftedTasks} task${driftedTasks === 1 ? '' : 's'} changed code under this since a plan ` +
+    'agent last reviewed it'
+  );
+}
+
 /** One line naming what a node is waiting on, for a tooltip or a banner.
  *  Beyond three the names stop helping and the count starts. */
 export function blockedLabel(blockers: PlanBlocker[]): string {

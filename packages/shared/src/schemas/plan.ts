@@ -243,6 +243,10 @@ export interface PlanNodeView {
    *  a node that is ready to start. Direct only — never inherited from an
    *  ancestor. */
   blockedBy: PlanBlocker[];
+  /** Tasks that changed code under this node — itself or a descendant — since a
+   *  plan agent last reviewed it. The canvas admitting it is behind rather than
+   *  rendering as current. 0 means nothing has moved underneath it. */
+  driftedTasks: number;
   createdAt: string;
   updatedAt: string;
 }

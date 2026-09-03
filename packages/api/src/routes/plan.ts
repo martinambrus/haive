@@ -33,6 +33,7 @@ import {
   loadPlanNode,
   loadPlanNodes,
   loadPlanSkeletons,
+  loadPlanTouchedTasks,
   renderImpactMermaid,
   toEdgeViews,
   toNodeViews,
@@ -111,9 +112,10 @@ async function gitRead(cwd: string, args: string[]): Promise<{ ok: boolean; stdo
 planRoutes.get('/:id/plan', async (c) => {
   const { repositoryId, repo } = await requireOwnedRepo(c);
   const db = getDb();
-  const [skeletons, edges] = await Promise.all([
+  const [skeletons, edges, touched] = await Promise.all([
     loadPlanSkeletons(db, repositoryId),
     loadPlanEdges(db, repositoryId),
+    loadPlanTouchedTasks(db, repositoryId),
   ]);
   const root = skeletons.find((n) => n.parentId === null) ?? null;
   if (!root) {
@@ -125,7 +127,7 @@ planRoutes.get('/:id/plan', async (c) => {
       defects: { cycles: [], ancestorDeps: [] },
     });
   }
-  const derived = computePlanSequence(skeletons, edges);
+  const derived = computePlanSequence(skeletons, edges, touched);
   const children = skeletons.filter((n) => n.parentId === root.id);
   const bodies = new Map([
     [root.id, (await loadPlanNode(db, repositoryId, root.id))?.body ?? null],
@@ -268,11 +270,12 @@ planRoutes.get('/:id/plan/tree', async (c) => {
   // has to load them now, because whether a node is blocked is a function of
   // them — one indexed query against the biggest payload, rather than a tree
   // that renders every node as ready.
-  const [skeletons, edges] = await Promise.all([
+  const [skeletons, edges, touched] = await Promise.all([
     loadPlanSkeletons(db, repositoryId),
     loadPlanEdges(db, repositoryId),
+    loadPlanTouchedTasks(db, repositoryId),
   ]);
-  const derived = computePlanSequence(skeletons, edges);
+  const derived = computePlanSequence(skeletons, edges, touched);
   return c.json({
     nodes: toNodeViews(skeletons, derived).map((n) => ({
       id: n.id,
@@ -289,6 +292,7 @@ planRoutes.get('/:id/plan/tree', async (c) => {
       // on the dev install) and the detail read already carries the list for
       // the one node a person is looking at.
       blockedCount: n.blockedBy.length,
+      driftedTasks: n.driftedTasks,
     })),
   });
 });
@@ -363,10 +367,11 @@ planRoutes.get('/:id/plan/search', async (c) => {
   if (q.length < 2) return c.json({ matches: [] });
 
   const db = getDb();
-  const [skeletons, nodes, edges] = await Promise.all([
+  const [skeletons, nodes, edges, touched] = await Promise.all([
     loadPlanSkeletons(db, repositoryId),
     loadPlanNodes(db, repositoryId),
     loadPlanEdges(db, repositoryId),
+    loadPlanTouchedTasks(db, repositoryId),
   ]);
   const bodyById = new Map(nodes.map((n) => [n.id, n.body ?? '']));
   const hits = skeletons.filter(
@@ -375,7 +380,7 @@ planRoutes.get('/:id/plan/search', async (c) => {
   // The breadcrumb ships with each hit so the UI can jump straight to a match at
   // depth 6 without walking the tree a level at a time to get there.
   return c.json({
-    matches: toNodeViews(hits, computePlanSequence(skeletons, edges)).map((n) => ({
+    matches: toNodeViews(hits, computePlanSequence(skeletons, edges, touched)).map((n) => ({
       ...n,
       body: null,
       ancestry: ancestryOf(skeletons, n.id).map((a) => ({ id: a.id, title: a.title })),
@@ -389,12 +394,13 @@ planRoutes.get('/:id/plan/nodes/:nodeId', async (c) => {
   const nodeId = c.req.param('nodeId');
   const db = getDb();
   const node = await requireNode(repositoryId, nodeId);
-  const [skeletons, edges] = await Promise.all([
+  const [skeletons, edges, touched] = await Promise.all([
     loadPlanSkeletons(db, repositoryId),
     loadPlanEdges(db, repositoryId),
+    loadPlanTouchedTasks(db, repositoryId),
   ]);
   const children = skeletons.filter((n) => n.parentId === nodeId);
-  const derived = computePlanSequence(skeletons, edges);
+  const derived = computePlanSequence(skeletons, edges, touched);
   const titleById = new Map(skeletons.map((n) => [n.id, n.title]));
 
   const codeLinks = await db

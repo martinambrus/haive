@@ -37,6 +37,18 @@ export interface PlanSequenceNode {
   ordinal: number;
   title: string;
   status: PlanNodeStatus;
+  /** When a plan agent last wrote this node. Null = never since creation. */
+  lastReviewedAt?: Date | null;
+  createdAt?: Date;
+}
+
+/** A task that CHANGED CODE this node covers, and when it finished.
+ *  `plan_node_tasks` rows with `role = 'touched'`, joined to their task. */
+export interface PlanTouchedTask {
+  nodeId: string;
+  taskId: string;
+  title: string;
+  completedAt: Date;
 }
 
 /** As above for `PlanEdgeRecord`. Only `depends_on` is read; `affects` and
@@ -53,6 +65,13 @@ export interface PlanNodeStats {
   directChildren: number;
   totalDescendants: number;
   rolledStatus: PlanNodeStatus;
+  /** Tasks that changed code under this node — itself or any descendant — after
+   *  a plan agent last reviewed that node. The canvas admitting it is behind.
+   *
+   *  Rolled up, because a container is exactly as out of date as the things
+   *  inside it, and a person looking at a branch head must not have to open
+   *  every leaf to find out that six of them moved. */
+  driftedTasks: number;
 }
 
 export interface PlanSequenceResult {
@@ -271,6 +290,7 @@ function findDependencyCycles(ids: string[], dependsOn: Map<string, Set<string>>
 export function computePlanSequence(
   nodes: PlanSequenceNode[],
   edges: PlanSequenceEdge[],
+  touched: PlanTouchedTask[] = [],
 ): PlanSequenceResult {
   const sequenceById = new Map<string, number>();
   const statsById = new Map<string, PlanNodeStats>();
@@ -279,6 +299,19 @@ export function computePlanSequence(
 
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const dependsOn = indexDependsOn(nodes, edges);
+
+  // A task drifts a node when it finished AFTER the node was last reviewed. A
+  // node no agent has looked at since creation is measured from its creation,
+  // not treated as reviewed — the opposite would start every plan clean and hide
+  // exactly the drift this is for.
+  const driftOwn = new Map<string, number>();
+  for (const t of touched) {
+    const node = byId.get(t.nodeId);
+    if (!node) continue;
+    const since = node.lastReviewedAt ?? node.createdAt ?? null;
+    if (since && t.completedAt.getTime() <= since.getTime()) continue;
+    driftOwn.set(t.nodeId, (driftOwn.get(t.nodeId) ?? 0) + 1);
+  }
 
   // Sibling runs in STORED order — the order `loadPlanNodes` returned, which is
   // `ordinal`. See `orderSiblingsByDependency` for why the refinement lives on
@@ -317,16 +350,22 @@ export function computePlanSequence(
       counter++;
       sequenceById.set(frame.node.id, counter);
       const statuses: PlanNodeStatus[] = [];
+      // Drift rolls up on the SAME post-order pass: by the time a container is
+      // popped every descendant already has its total, so this is one addition
+      // per node rather than a second walk of the tree.
+      let drift = driftOwn.get(frame.node.id) ?? 0;
       for (const child of frame.children) {
         if (!sequenceById.has(child.id)) continue;
         statuses.push(child.status, ...(descendantStatuses.get(child.id) ?? []));
         descendantStatuses.delete(child.id);
+        drift += statsById.get(child.id)?.driftedTasks ?? 0;
       }
       descendantStatuses.set(frame.node.id, statuses);
       statsById.set(frame.node.id, {
         directChildren: frame.children.length,
         totalDescendants: statuses.length,
         rolledStatus: rollUpStatus(frame.node.status, statuses),
+        driftedTasks: drift,
       });
       stack.pop();
     }

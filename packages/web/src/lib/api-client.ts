@@ -1308,6 +1308,9 @@ export interface PlanNode {
    *  blocked. Server-derived; `PlanEdge` carries no status, so the client could
    *  not work this out from the edges it is sent. */
   blockedBy: PlanBlocker[];
+  /** Tasks that changed code under this node — itself or a descendant — since a
+   *  plan agent last reviewed it. The canvas admitting it is behind. */
+  driftedTasks: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -1450,6 +1453,7 @@ export interface PlanTreeNode {
    *  payload is the whole plan (4106 nodes on the dev install); the names ride
    *  the detail read for the one node a person is looking at. */
   blockedCount: number;
+  driftedTasks: number;
 }
 
 export interface PlanNodeDetail {

@@ -54,6 +54,20 @@ export interface ApplyPlanPatchOptions {
    * ref map a temp id uses, with no separate resolution path.
    */
   selfNodeId?: string;
+  /**
+   * Stamp `last_reviewed_at` on every node this patch creates or updates.
+   *
+   * Set by `applyAgentPatch` and therefore by every plan AGENT step, and by
+   * nothing else. It is an explicit option rather than a check on `origin`
+   * because `origin` is documented as affecting CREATED nodes only, and because
+   * one of the two `origin: 'llm'` call sites is a deterministic reordering pass
+   * that recomputes ordinals from existing edges — arithmetic, not a review.
+   *
+   * A human's own edit deliberately does NOT count: the point of the timestamp
+   * is "an agent has looked at this since the code changed", and a person
+   * flipping a status has not answered that question.
+   */
+  marksReviewed?: boolean;
 }
 
 export interface ApplyPlanPatchResult {
@@ -543,6 +557,8 @@ async function applyOps(
       taskable: op.taskable ?? false,
       createdBy: origin,
       sourceTaskId,
+      // A node an agent just wrote has been looked at by definition.
+      ...(opts.marksReviewed ? { lastReviewedAt: new Date() } : {}),
     });
 
     refs.set(op.nodeRef, id);
@@ -557,6 +573,7 @@ async function applyOps(
       version: row.version + 1,
       updatedAt: new Date(),
       sourceTaskId,
+      ...(opts.marksReviewed ? { lastReviewedAt: new Date() } : {}),
     };
     if (op.title !== undefined) set.title = op.title;
     if (op.body !== undefined) set.body = op.body;

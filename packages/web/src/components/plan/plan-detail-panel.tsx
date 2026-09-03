@@ -35,9 +35,11 @@ import { PlanChat } from './plan-chat';
 import { PlanGraph } from './plan-graph';
 import {
   BLOCKED_GLYPH,
+  DRIFT_GLYPH,
   PLAN_KINDS,
   PLAN_STATUSES,
   blockedLabel,
+  driftLabel,
   isRolledUp,
   kindLabel,
   sequenceChip,
@@ -438,6 +440,22 @@ export function PlanDetailPanel({
           ))}
           . Finish {node.blockedBy.length === 1 ? 'it' : 'those'} first, or drop the dependency in
           the Links tab.
+        </p>
+      )}
+
+      {node.driftedTasks > 0 && (
+        // Amber, and deliberately NOT the same treatment as blocking: those are
+        // unrelated states a node can be in at once. Blocking says "you cannot
+        // start this yet"; this says "what this node describes may no longer be
+        // true". The Chat tab is named because a plan conversation is the thing
+        // that actually clears it — an agent writing the node is what moves
+        // last_reviewed_at.
+        <p className="rounded border border-amber-900 bg-amber-950/30 px-2 py-1 text-[11px] text-amber-200">
+          {DRIFT_GLYPH} {driftLabel(node.driftedTasks)}. Open the{' '}
+          <button type="button" onClick={() => onTabChange('chat')} className="underline">
+            Chat
+          </button>{' '}
+          tab to review it against the code as it stands.
         </p>
       )}
 

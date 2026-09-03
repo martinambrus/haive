@@ -21,6 +21,7 @@ function node(id: string, parentId: string | null, title = id.slice(0, 4)): Plan
     version: 1,
     createdBy: 'llm',
     sourceTaskId: null,
+    lastReviewedAt: null,
     createdAt: new Date('2026-01-01'),
     updatedAt: new Date('2026-01-01'),
   };

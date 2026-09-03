@@ -12,7 +12,7 @@ import type {
   PlanDefectsView,
 } from '../schemas/plan.js';
 import { rollUpStatus } from '../schemas/plan.js';
-import type { PlanSequenceResult } from './sequence.js';
+import type { PlanSequenceResult, PlanTouchedTask } from './sequence.js';
 
 /** The relational select surface shared by the root database and a transaction. */
 type PlanReadDb = Pick<Database, 'select'>;
@@ -32,6 +32,7 @@ export interface PlanNodeSkeleton {
   version: number;
   createdBy: PlanNodeOrigin;
   sourceTaskId: string | null;
+  lastReviewedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -74,6 +75,7 @@ export async function loadPlanSkeletons(
       version: schema.planNodes.version,
       createdBy: schema.planNodes.createdBy,
       sourceTaskId: schema.planNodes.sourceTaskId,
+      lastReviewedAt: schema.planNodes.lastReviewedAt,
       createdAt: schema.planNodes.createdAt,
       updatedAt: schema.planNodes.updatedAt,
     })
@@ -102,12 +104,45 @@ export async function loadPlanNodes(
       version: schema.planNodes.version,
       createdBy: schema.planNodes.createdBy,
       sourceTaskId: schema.planNodes.sourceTaskId,
+      lastReviewedAt: schema.planNodes.lastReviewedAt,
       createdAt: schema.planNodes.createdAt,
       updatedAt: schema.planNodes.updatedAt,
     })
     .from(schema.planNodes)
     .where(eq(schema.planNodes.repositoryId, repositoryId))
     .orderBy(asc(schema.planNodes.ordinal), asc(schema.planNodes.createdAt));
+}
+
+/**
+ * Tasks that CHANGED CODE a node covers, for the drift count.
+ *
+ * `role = 'touched'` only — an `implements` link is the task that finished the
+ * node, and `completePlanNodesForTask` already greened it. Completed tasks only:
+ * a task still running has not changed anything the plan needs to catch up with
+ * yet, and a cancelled one never will.
+ */
+export async function loadPlanTouchedTasks(
+  db: PlanReadDb,
+  repositoryId: string,
+): Promise<PlanTouchedTask[]> {
+  const rows = await db
+    .select({
+      nodeId: schema.planNodeTasks.nodeId,
+      taskId: schema.planNodeTasks.taskId,
+      title: schema.tasks.title,
+      completedAt: schema.tasks.completedAt,
+    })
+    .from(schema.planNodeTasks)
+    .innerJoin(schema.planNodes, eq(schema.planNodes.id, schema.planNodeTasks.nodeId))
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.planNodeTasks.taskId))
+    .where(
+      and(
+        eq(schema.planNodes.repositoryId, repositoryId),
+        eq(schema.planNodeTasks.role, 'touched'),
+        eq(schema.tasks.status, 'completed'),
+      ),
+    );
+  return rows.flatMap((r) => (r.completedAt ? [{ ...r, completedAt: r.completedAt }] : []));
 }
 
 export async function loadPlanEdges(
@@ -145,6 +180,7 @@ export async function loadPlanNode(
       version: schema.planNodes.version,
       createdBy: schema.planNodes.createdBy,
       sourceTaskId: schema.planNodes.sourceTaskId,
+      lastReviewedAt: schema.planNodes.lastReviewedAt,
       createdAt: schema.planNodes.createdAt,
       updatedAt: schema.planNodes.updatedAt,
     })
@@ -191,6 +227,7 @@ export function toNodeViews(
       directChildren: 0,
       totalDescendants: 0,
       rolledStatus: rollUpStatus(n.status, []),
+      driftedTasks: 0,
     };
     return {
       id: n.id,
@@ -210,6 +247,7 @@ export function toNodeViews(
       rolledStatus: stats.rolledStatus,
       sequence: derived.sequenceById.get(n.id) ?? 0,
       blockedBy: derived.blockedById.get(n.id) ?? [],
+      driftedTasks: stats.driftedTasks,
       createdAt: n.createdAt.toISOString(),
       updatedAt: n.updatedAt.toISOString(),
     };

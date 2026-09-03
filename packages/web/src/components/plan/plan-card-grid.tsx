@@ -5,7 +5,9 @@ import { Badge } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import {
   BLOCKED_GLYPH,
+  DRIFT_GLYPH,
   blockedLabel,
+  driftLabel,
   countLabel,
   kindLabel,
   sequenceChip,
@@ -91,6 +93,12 @@ export function PlanCardGrid({
             {node.blockedBy.length > 0 && (
               <p className="text-[11px] text-neutral-500">
                 {BLOCKED_GLYPH} {blockedLabel(node.blockedBy)}
+              </p>
+            )}
+
+            {node.driftedTasks > 0 && (
+              <p className="text-[11px] text-amber-500/90">
+                {DRIFT_GLYPH} {driftLabel(node.driftedTasks)}
               </p>
             )}
 
