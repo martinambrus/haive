@@ -157,7 +157,12 @@ export interface StructuralGap {
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const BUILD_ATTEMPT_RE = new RegExp(`^plan-expand-(${UUID_SOURCE})-p(\\d+)$`, 'i');
 const CONTINUE_ATTEMPT_RE = new RegExp(`^plan-continue-b(\\d+)-(${UUID_SOURCE})-p(\\d+)$`, 'i');
-const RECOVERY_ATTEMPT_RE = new RegExp(`^cover-node-(${UUID_SOURCE})$`, 'i');
+/** The trailing `-r<N>` is the gate round that dispatched the repair, present
+ *  since manual repairs became re-dispatchable. Optional so rows written before
+ *  that still resolve to their focus node rather than silently going unmatched —
+ *  an unmatched row drops out of the attempt map, which reads as "never
+ *  attempted". */
+const RECOVERY_ATTEMPT_RE = new RegExp(`^cover-node-(${UUID_SOURCE})(?:-r(\\d+))?$`, 'i');
 
 export interface ExpansionAttemptRow {
   agentId: string;
@@ -170,7 +175,7 @@ function expansionAttemptKey(
   agentId: string,
 ): { nodeId: string; order: readonly [number, number, number] } | null {
   const recovery = RECOVERY_ATTEMPT_RE.exec(agentId);
-  if (recovery) return { nodeId: recovery[1]!, order: [2, 0, 0] };
+  if (recovery) return { nodeId: recovery[1]!, order: [2, 0, Number(recovery[2] ?? 1)] };
   const continuation = CONTINUE_ATTEMPT_RE.exec(agentId);
   if (continuation) {
     return {

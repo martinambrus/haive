@@ -550,3 +550,106 @@ describe('not re-offering work already done', () => {
     expect(gaps.map((gap) => gap.nodeId)).toEqual([A]);
   });
 });
+
+describe('re-offering a gap the gate already tried', () => {
+  const TARGET = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const SECOND = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+  const dispatchIds = async (over: Partial<Detected>, items: string[], exhausted = false) => {
+    const error = await planCoverageStep.apply!(
+      {} as never,
+      {
+        detected: detected(over),
+        formValues: { decision: 'redecompose', items },
+        ...(exhausted ? { miningWaveExhausted: true } : {}),
+      } as never,
+    ).catch((err: unknown) => err);
+    return error;
+  };
+
+  const gap = (nodeId: string) => ({ nodeId, title: nodeId, reason: 'lost' });
+  const section = (line: number) => ({
+    source: 'spec.md',
+    line,
+    title: `section ${line}`,
+    score: 0,
+    matchedNodes: 0,
+    missingTerms: ['x'],
+  });
+
+  it('numbers a never-attempted gap as the first round', async () => {
+    const error = await dispatchIds({ structural: [gap(TARGET)] }, [`node:${TARGET}`]);
+    expect(error).toBeInstanceOf(MiningWaveError);
+    expect((error as MiningWaveError).dispatches.map((d) => d.agentId)).toEqual([
+      `cover-node-${TARGET}-r1`,
+    ]);
+  });
+
+  // The failure this scoping exists for: a repair agent finished but its patch
+  // was dropped, so the gap stood and the gate re-offered it. Re-using the first
+  // attempt's id hit the unique (task_step_id, agent_id) index, every dispatch
+  // was skipped as a duplicate, and the step failed with the wave's own message.
+  it('gives a re-offered gap a fresh id rather than the one that failed it', async () => {
+    const error = await dispatchIds(
+      {
+        structural: [gap(TARGET)],
+        manualRounds: { [`cover-node-${TARGET}`]: 1 },
+      },
+      [`node:${TARGET}`],
+    );
+    expect((error as MiningWaveError).dispatches[0]?.agentId).toBe(`cover-node-${TARGET}-r2`);
+  });
+
+  it('counts each gap separately', async () => {
+    const error = await dispatchIds(
+      {
+        structural: [gap(TARGET), gap(SECOND)],
+        sections: [section(1784)],
+        manualRounds: { [`cover-node-${TARGET}`]: 2 },
+      },
+      [`node:${TARGET}`, `node:${SECOND}`, 'doc:spec.md:1784'],
+    );
+    expect((error as MiningWaveError).dispatches.map((d) => d.agentId)).toEqual([
+      `cover-node-${TARGET}-r3`,
+      `cover-node-${SECOND}-r1`,
+      'cover-doc-spec-md-1784-r1',
+    ]);
+  });
+
+  it('tolerates a detect snapshot written before rounds existed', async () => {
+    // `detect_output` is persisted JSON, so a step already in flight when this
+    // shipped is retried against a snapshot with no `manualRounds` field.
+    const error = await dispatchIds({ structural: [gap(TARGET)], manualRounds: undefined }, [
+      `node:${TARGET}`,
+    ]);
+    expect((error as MiningWaveError).dispatches[0]?.agentId).toBe(`cover-node-${TARGET}-r1`);
+  });
+
+  // Asking twice makes the runner fall through to the generic failure handler,
+  // which stamps the wave's message as the step error — a status line naming no
+  // cause. Say what actually happened instead.
+  it('does not ask for a second wave the runner already said is not coming', async () => {
+    const error = await dispatchIds({ structural: [gap(TARGET)] }, [`node:${TARGET}`], true);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(MiningWaveError);
+    expect((error as Error).message).toContain('could not dispatch a CLI agent');
+    expect((error as Error).message).toContain('1 selected gap');
+  });
+
+  it('still resolves a round-scoped recovery id back to its focus node', async () => {
+    // The scan's attempt regex is anchored; an id it cannot parse drops out of
+    // the attempt map entirely, which reads as "never attempted".
+    const blocked = unresolvedExpansionNodeIds([
+      { agentId: `cover-node-${TARGET}-r1`, status: 'failed', errorMessage: 'CLI exited 1' },
+    ]);
+    expect(blocked.has(TARGET)).toBe(true);
+  });
+
+  it('lets a later round supersede an earlier one', async () => {
+    const blocked = unresolvedExpansionNodeIds([
+      { agentId: `cover-node-${TARGET}-r1`, status: 'failed', errorMessage: 'CLI exited 1' },
+      { agentId: `cover-node-${TARGET}-r2`, status: 'done', errorMessage: null },
+    ]);
+    expect(blocked.has(TARGET)).toBe(false);
+  });
+});

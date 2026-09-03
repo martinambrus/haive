@@ -84,6 +84,9 @@ interface CoverageDetect {
   /** Agent ids carry this number, separating bounded automatic passes while
    *  retaining their rows as durable accounting and failure history. */
   continuationBatch: number;
+  /** Highest manual repair attempt per gap, so a re-offered gap is dispatched
+   *  under a fresh agent id instead of colliding with the row that failed it. */
+  manualRounds: Record<string, number>;
   /** The preceding automatic pass reached its model-work safety budget. A new
    *  pass needs one explicit user approval; ordinary waves do not. */
   automaticLimitReached: boolean;
@@ -179,6 +182,50 @@ const sectionKey = (c: CoverageCandidate): string => `doc:${c.source}:${c.line}`
 /** One derivation, used by both the dispatcher and the already-handled filter —
  *  two spellings of this would silently stop matching. */
 const sectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
+
+/**
+ * The gate can offer the SAME gap twice, so its agent id has to say which round
+ * asked.
+ *
+ * A repair agent that finished but whose patch was dropped leaves its gap
+ * standing, and detect correctly re-offers it. Without a round in the id the
+ * second dispatch reused the first's `(task_step_id, agent_id)`, which is a
+ * unique index — every re-dispatch hit `onConflictDoNothing`, the wave went out
+ * empty, and the step failed wearing the wave's own message. MEASURED: a gate
+ * offering six repeat gaps dispatched none of them. The builder
+ * (`plan-expand-<uuid>-p<N>`) and this step's own automatic pass
+ * (`plan-continue-b<N>-<uuid>-p<N>`) were already scoped; only the manual repair
+ * path was not, so the one retry the gate exists to offer was the one it could
+ * not perform.
+ *
+ * Per GAP rather than per wave: a gap first offered in round 3 is on its first
+ * attempt, and numbering it 3 would claim two attempts that never happened.
+ */
+const MANUAL_AGENT_ROUND_RE = /-r(\d+)$/;
+/** A round-scoped id back to the form it takes in `handledSections` and in the
+ *  scan's attempt regex. Legacy rows carry no suffix and pass through unchanged,
+ *  so a plan mid-flight when this shipped still matches. */
+const manualAgentBase = (agentId: string): string => agentId.replace(MANUAL_AGENT_ROUND_RE, '');
+const manualAgentId = (base: string, round: number): string => `${base}-r${round}`;
+/** Highest attempt already recorded per gap, keyed by base id. Counted in detect
+ *  rather than re-queried in apply: the rows that produced the form the user just
+ *  answered are exactly the rows a fresh id has to avoid. */
+function manualRoundsByBase(rows: MiningRow[]): Record<string, number> {
+  const rounds: Record<string, number> = {};
+  for (const row of rows) {
+    if (!row.agentId.startsWith('cover-')) continue;
+    const base = manualAgentBase(row.agentId);
+    const match = MANUAL_AGENT_ROUND_RE.exec(row.agentId);
+    rounds[base] = Math.max(rounds[base] ?? 0, match ? Number(match[1]) : 1);
+  }
+  return rounds;
+}
+
+/** One past the highest recorded, or 1 for a gap nobody has attempted. Tolerates
+ *  a missing record: `detect_output` is persisted JSON, so a step already in
+ *  flight when this shipped is retried against a snapshot without the field. */
+const nextManualRound = (base: string, rounds: Record<string, number> | undefined): number =>
+  (rounds?.[base] ?? 0) + 1;
 
 /**
  * A CLI completion and its mining-row fold are two writes. Usually the handler
@@ -340,6 +387,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     frontierRemaining: 0,
     frontierPreview: [],
     continuationBatch: 1,
+    manualRounds: {},
     automaticLimitReached: false,
   };
   if (!repositoryId) return empty;
@@ -381,7 +429,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
   const handledSections = new Set(
     coverageRows
       .filter((row) => row.status === 'done' && !row.errorMessage)
-      .map((row) => row.agentId),
+      .map((row) => manualAgentBase(row.agentId)),
   );
 
   const structural = findStructuralGaps(
@@ -440,6 +488,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     frontierRemaining: frontier.length,
     frontierPreview: frontier.slice(0, 20).map((node) => node.title),
     continuationBatch: continuation.maxBatch + 1,
+    manualRounds: manualRoundsByBase(coverageRows),
     automaticLimitReached:
       frontier.length > 0 &&
       continuation.maxBatch > 0 &&
@@ -448,7 +497,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
 }
 
 function coverageSelfNodeId(agentId: string): string | null {
-  const recovery = new RegExp(`^cover-node-(${UUID_SOURCE})$`, 'i').exec(agentId)?.[1];
+  const recovery = new RegExp(`^cover-node-(${UUID_SOURCE})(?:-r\\d+)?$`, 'i').exec(agentId)?.[1];
   return recovery ?? CONTINUATION_AGENT_RE.exec(agentId)?.[2] ?? null;
 }
 
@@ -850,6 +899,18 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
         return result;
       }
 
+      // The runner re-runs apply() with this set when a wave dispatched nothing,
+      // and the contract is that apply must not ask a second time — a step that
+      // does falls through to the generic failure handler wearing the wave's own
+      // message, which reads as a status line and names no cause. Say what
+      // happened instead. Reachable now only when no provider could take the
+      // agents; the duplicate-id case that used to land here is fixed above.
+      if (args.miningWaveExhausted) {
+        throw new Error(
+          `Coverage repair could not dispatch a CLI agent for ${picked.length} selected gap(s).`,
+        );
+      }
+
       const note =
         typeof values.note === 'string' && values.note.trim() ? values.note.trim() : null;
       const maxChildren = breadthCap(d.buildFormValues);
@@ -859,10 +920,11 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
         const subject = structural
           ? `the plan node "${structural.title}" (${structural.reason})`
           : `the source document section "${section?.title ?? key}"`;
+        // The node id rides in the agent id so apply() can hand the patch a
+        // `self` ref and the agent never transcribes a uuid.
+        const base = structural ? `cover-node-${structural.nodeId}` : sectionAgentId(key);
         return {
-          // The node id rides in the agent id so apply() can hand the patch a
-          // `self` ref and the agent never transcribes a uuid.
-          agentId: structural ? `cover-node-${structural.nodeId}` : sectionAgentId(key),
+          agentId: manualAgentId(base, nextManualRound(base, d.manualRounds)),
           agentTitle: `Cover: ${(structural?.title ?? section?.title ?? key).slice(0, 60)}`,
           roleKey: 'expand',
           prompt: [
