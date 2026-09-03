@@ -21,6 +21,59 @@ import { log } from './_shared.js';
 import { createSandboxSpawner } from './exec-core.js';
 import { handleBuildSandboxImageJob } from './handlers.js';
 
+/** How long a background caller waits for ANOTHER builder to finish the image it needs,
+ *  and how often it re-checks. Giving up instantly instead turns a routine rebuild into a
+ *  dead task: a CLI version bump queues one, and MEASURED, a plan_build burned both its
+ *  mining attempts 590 ms apart while a 65 s codex rebuild was 49 s in, then failed for
+ *  "no root node" because no agent had produced anything to build a plan from.
+ *  Waiting spends no slot the inline path was not already spending — the cache-miss branch
+ *  below builds INLINE and holds the same slot for the whole build. Bounded well under that
+ *  build's own 20 min timeout because NOTHING resets a `building` row after a worker crash,
+ *  so one stale row must not hang an entire fan-out. */
+const IN_FLIGHT_BUILD_WAIT_MS = 5 * 60 * 1000;
+const IN_FLIGHT_BUILD_POLL_MS = 2_000;
+
+type InFlightBuildOutcome =
+  /** The image is on the host — whoever was building it is done. */
+  | { done: 'image_ready' }
+  /** The builder recorded a failure; nothing to wait for and no point racing it. */
+  | { done: 'build_failed'; error: string | null }
+  /** Status left `building` with no image (build skipped, or image pruned since). */
+  | { done: 'not_building' }
+  /** Budget spent while the row still read `building`. */
+  | { done: 'timeout' };
+
+/** Poll until an in-flight build of `tag` resolves. The IMAGE is inspected before the status
+ *  column is read, because a present image is definitive whatever any row says, while the row
+ *  can still read `building` for a moment after the final layer is committed. A zero budget
+ *  returns `timeout` without issuing a single query — that is what keeps the interactive
+ *  probe answering "build in progress" immediately instead of spinning on a spinner. */
+export async function waitForInFlightBuild(
+  db: Database,
+  providerId: string,
+  tag: string,
+  timeoutMs: number,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<InFlightBuildOutcome> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, IN_FLIGHT_BUILD_POLL_MS));
+    if ((await runner.inspect(tag)).exists) return { done: 'image_ready' };
+    const row = await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, providerId),
+      columns: { sandboxImageBuildStatus: true, sandboxImageBuildError: true },
+    });
+    const status = row?.sandboxImageBuildStatus;
+    if (status === 'failed') {
+      return { done: 'build_failed', error: row?.sandboxImageBuildError ?? null };
+    }
+    // Also covers a provider row that vanished mid-wait: stop waiting and let the
+    // caller's build path raise the real "provider not found" instead of timing out.
+    if (status !== 'building') return { done: 'not_building' };
+  }
+  return { done: 'timeout' };
+}
+
 async function ensureProviderSandboxImage(
   db: Database,
   provider: {
@@ -30,6 +83,9 @@ async function ensureProviderSandboxImage(
     cliVersion: string | null;
     sandboxDockerfileExtra: string | null;
   },
+  /** 0 answers immediately when another builder holds the image — what an interactive
+   *  probe wants. Background callers pass a budget and wait it out instead. */
+  waitForInFlightBuildMs = 0,
 ): Promise<string | null> {
   const resolution = resolveImageTag({
     name: provider.name as CliProviderName,
@@ -47,7 +103,27 @@ async function ensureProviderSandboxImage(
     columns: { sandboxImageBuildStatus: true },
   });
   if (fresh?.sandboxImageBuildStatus === 'building') {
-    throw new Error('sandbox image build is in progress, please wait for it to finish and retry');
+    const outcome = await waitForInFlightBuild(
+      db,
+      provider.id,
+      resolution.tag,
+      waitForInFlightBuildMs,
+    );
+    if (outcome.done === 'image_ready') {
+      log.info(
+        { providerId: provider.id, tag: resolution.tag },
+        'waited out an in-flight sandbox image build',
+      );
+      return resolution.tag;
+    }
+    if (outcome.done === 'build_failed') {
+      throw new Error(`sandbox image build failed: ${outcome.error ?? 'unknown'}`);
+    }
+    if (outcome.done === 'timeout') {
+      throw new Error('sandbox image build is in progress, please wait for it to finish and retry');
+    }
+    // 'not_building' — the other builder left without an image, so fall through and
+    // build it here rather than failing on a lock nobody holds any more.
   }
 
   log.info(
@@ -83,7 +159,7 @@ export async function resolveSandboxImageTag(
     });
     if (composedTag) return composedTag;
   }
-  return ensureProviderSandboxImage(db, provider);
+  return ensureProviderSandboxImage(db, provider, IN_FLIGHT_BUILD_WAIT_MS);
 }
 
 export async function probeCliPath(
