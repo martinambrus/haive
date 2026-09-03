@@ -23,7 +23,8 @@ const detected = (over: Partial<Detected> = {}): Detected =>
     sectionBodies: {},
     planMarkdown: '# Plan',
     nodeCount: 791,
-    docName: 'spec.md',
+    docNames: ['spec.md'],
+    hasVisualInputs: false,
     buildDetect: null,
     buildFormValues: { depthBudget: 6, breadthCap: 12 },
     buildStopped: 'complete',
@@ -102,7 +103,14 @@ describe('the coverage gate', () => {
       detected({
         structural: [{ nodeId: 'n1', title: 'Privacy', reason: 'lost' }],
         sections: [
-          { title: '7.8 Music', line: 9, missingTerms: ['music'], matchedNodes: 0, score: 0 },
+          {
+            title: '7.8 Music',
+            line: 9,
+            source: 'spec.md',
+            missingTerms: ['music'],
+            matchedNodes: 0,
+            score: 0,
+          },
         ],
       }),
     );
@@ -118,12 +126,51 @@ describe('the coverage gate', () => {
     expect(decision.options.map((o) => o.value)).toEqual(['redecompose', 'accept']);
   });
 
-  it('names the document only when there was one', () => {
-    // A from_repo build has no single authority to check against.
+  it('names the documents only when there were some', () => {
+    // A from_repo build has no written authority to check against.
     const form = formOf(
-      detected({ structural: [{ nodeId: 'n1', title: 'X', reason: 'lost' }], docName: null }),
+      detected({ structural: [{ nodeId: 'n1', title: 'X', reason: 'lost' }], docNames: [] }),
     );
     expect(form!.description).not.toContain('undefined');
+  });
+
+  it('names every document a gap came from, not just the first', () => {
+    // A plan can be built from several files at once; "3 sections of spec.md"
+    // sends the reader to the wrong one.
+    const form = formOf(
+      detected({
+        docNames: ['requirements.docx', 'fields.xlsx'],
+        sections: [
+          {
+            title: '4.2 Reporting',
+            line: 12,
+            source: 'requirements.docx',
+            missingTerms: ['reporting'],
+            matchedNodes: 0,
+            score: 0,
+          },
+        ],
+      }),
+    );
+    expect(form!.description).toContain('requirements.docx, fields.xlsx');
+    const items = form!.fields.find((f) => f.id === 'items') as {
+      options: { value: string; label: string }[];
+    };
+    // The key is source-scoped, so two files' line 12 stay two gaps.
+    expect(items.options.map((o) => o.value)).toContain('doc:requirements.docx:12');
+    expect(items.options[0]!.label).toContain('(requirements.docx)');
+  });
+
+  it('says a term scan cannot see the images that were attached', () => {
+    // Otherwise a clean scan reads as "the wireframe was covered". It was not
+    // looked at: the scan reads text and an image contributes none.
+    const form = formOf(
+      detected({
+        hasVisualInputs: true,
+        structural: [{ nodeId: 'n1', title: 'X', reason: 'lost' }],
+      }),
+    );
+    expect(form!.description).toContain('Images were attached');
   });
 });
 

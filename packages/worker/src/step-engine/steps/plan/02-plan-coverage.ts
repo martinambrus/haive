@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
@@ -28,8 +29,10 @@ import {
   latestExpansionAttempts,
   parseDocSections,
   type CoverageCandidate,
+  type DocSection,
   type StructuralGap,
 } from './plan-coverage-scan.js';
+import type { PlanInputsApply } from './00-plan-inputs.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
@@ -61,7 +64,13 @@ interface CoverageDetect {
   sectionBodies: Record<string, string>;
   planMarkdown: string;
   nodeCount: number;
-  docName: string | null;
+  /** The inputs the section gaps came from, original filenames. Plural because a
+   *  plan can be built from several documents at once; empty for a from_repo
+   *  build, which has no written authority to check against. */
+  docNames: string[];
+  /** Images were attached. They contribute no sections, so a clean term scan must
+   *  not be read as covering them. */
+  hasVisualInputs: boolean;
   /** The builder's original controls are reused by continuation agents so a
    *  retry of step 2 keeps the same requested depth and breadth. */
   buildDetect: PlanBuildDetect | null;
@@ -162,7 +171,10 @@ export function unresolvedExpansionNodeIds(rows: MiningRow[]): Set<string> {
 
 /** One line per gap in the gate's list, and the value the multi-select stores. */
 const structuralKey = (g: StructuralGap): string => `node:${g.nodeId}`;
-const sectionKey = (c: CoverageCandidate): string => `doc:${c.line}`;
+/** Scoped by SOURCE as well as line: two documents' line 12 are two different
+ *  gaps, and a key that conflated them would mark the second handled the moment
+ *  the first was. */
+const sectionKey = (c: CoverageCandidate): string => `doc:${c.source}:${c.line}`;
 /** One derivation, used by both the dispatcher and the already-handled filter —
  *  two spellings of this would silently stop matching. */
 const sectionAgentId = (key: string): string => `cover-${key.replace(/\W+/g, '-')}`;
@@ -245,6 +257,56 @@ function coverageNeedsUserInput(detected: CoverageDetect): boolean {
   );
 }
 
+/**
+ * Every attached input that has a TEXTUAL form, split into sections.
+ *
+ * The normalised set, taken from `00-plan-inputs` — the original for a text
+ * file, the extracted sidecar for a `.docx`/`.xlsx`/`.pdf`, and nothing at all
+ * for an image or an unrecognised binary. That last exclusion is the point: this
+ * used to read the FIRST attachment and decode it as UTF-8 regardless of what it
+ * was, so a PNG arrived as mojibake whose "headings" were whatever bytes
+ * happened to follow a newline and a hash.
+ *
+ * A plan built before `00-plan-inputs` existed has no such output, and one whose
+ * sidecar cannot be read has no text: both yield no sections rather than a
+ * failure. The structural half of coverage is the primary signal and still runs.
+ */
+async function loadInputSections(
+  ctx: StepContext,
+): Promise<{ sections: DocSection[]; hasVisualInputs: boolean }> {
+  const [row] = await ctx.db
+    .select({ output: schema.taskSteps.output })
+    .from(schema.taskSteps)
+    .where(
+      and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '00-plan-inputs')),
+    )
+    .limit(1);
+  const prepared = (row?.output ?? null) as PlanInputsApply | null;
+  if (!prepared || prepared.inputs.length === 0) return { sections: [], hasVisualInputs: false };
+
+  const dir = path.join(ctx.repoPath, '.haive', 'task-uploads', ctx.taskId);
+  const out: DocSection[] = [];
+  for (const input of prepared.inputs) {
+    // `sidecar` is set exactly when the original is not readable as text, so it
+    // doubles as the "is there anything to scan" test.
+    const readable = input.sidecar ?? (input.kind === 'text' ? input.filename : null);
+    if (!readable) continue;
+    const text = await readFile(path.join(dir, readable), 'utf8').catch((err: unknown) => {
+      ctx.logger.warn({ err, file: readable }, 'coverage: could not read a prepared plan input');
+      return null;
+    });
+    // Attributed to the ORIGINAL, never the sidecar: the reader is going to open
+    // `requirements.docx`, not `requirements.docx.extracted.md`.
+    if (text) out.push(...parseDocSections(text, input.filename));
+  }
+  // Images, plus any document nothing readable came out of — a wireframe PDF is
+  // as invisible to a term scan as a PNG is.
+  return {
+    sections: out,
+    hasVisualInputs: prepared.hasImageInputs === true || (prepared.visualOnly?.length ?? 0) > 0,
+  };
+}
+
 async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
   const [task] = await ctx.db
     .select({ repositoryId: schema.tasks.repositoryId })
@@ -259,7 +321,8 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     sectionBodies: {},
     planMarkdown: '',
     nodeCount: 0,
-    docName: null,
+    docNames: [],
+    hasVisualInputs: false,
     buildDetect: null,
     buildFormValues: {},
     buildStopped: null,
@@ -323,42 +386,28 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
 
   const frontier = liveFrontier(skeletons, ctx, buildFormValues, buildRows, coverageRows);
 
-  // The source document, when this build had one. A from_repo build has no
-  // single authority to check against, so the section half simply does not run.
+  // The source documents, when this build had any. A from_repo build has no
+  // written authority to check against, so the section half simply does not run.
   let sections: CoverageCandidate[] = [];
   const sectionBodies: Record<string, string> = {};
-  let docName: string | null = null;
-  const [attachment] = await ctx.db
-    .select({
-      filename: schema.taskAttachments.filename,
-      storedPath: schema.taskAttachments.storedPath,
-    })
-    .from(schema.taskAttachments)
-    .where(eq(schema.taskAttachments.taskId, ctx.taskId))
-    .limit(1);
-  if (attachment) {
-    try {
-      const doc = await readFile(attachment.storedPath, 'utf8');
-      const parsed = parseDocSections(doc);
-      const texts = skeletons.map((node) => node.title);
-      const bodies = await ctx.db
-        .select({ id: schema.planNodes.id, body: schema.planNodes.body })
-        .from(schema.planNodes)
-        .where(eq(schema.planNodes.repositoryId, repositoryId));
-      const byId = new Map(bodies.map((body) => [body.id, body.body ?? '']));
-      sections = findCoverageGaps(
-        parsed,
-        skeletons.map((node, index) => `${texts[index] ?? ''} ${byId.get(node.id) ?? ''}`),
-      ).filter((candidate) => !handledSections.has(sectionAgentId(sectionKey(candidate))));
-      for (const candidate of sections) {
-        sectionBodies[sectionKey(candidate)] =
-          parsed.find((part) => part.line === candidate.line)?.body ?? '';
-      }
-      docName = attachment.filename;
-    } catch (err) {
-      // A document we cannot read is not a coverage failure. Report the
-      // structural/frontier halves rather than failing over a missing file.
-      ctx.logger.warn({ err }, 'coverage: could not read the source document');
+  const { sections: parsedSections, hasVisualInputs } = await loadInputSections(ctx);
+  const docNames = [...new Set(parsedSections.map((s) => s.source))];
+  if (parsedSections.length > 0) {
+    const texts = skeletons.map((node) => node.title);
+    const bodies = await ctx.db
+      .select({ id: schema.planNodes.id, body: schema.planNodes.body })
+      .from(schema.planNodes)
+      .where(eq(schema.planNodes.repositoryId, repositoryId));
+    const byId = new Map(bodies.map((body) => [body.id, body.body ?? '']));
+    sections = findCoverageGaps(
+      parsedSections,
+      skeletons.map((node, index) => `${texts[index] ?? ''} ${byId.get(node.id) ?? ''}`),
+    ).filter((candidate) => !handledSections.has(sectionAgentId(sectionKey(candidate))));
+    for (const candidate of sections) {
+      sectionBodies[sectionKey(candidate)] =
+        parsedSections.find(
+          (part) => part.source === candidate.source && part.line === candidate.line,
+        )?.body ?? '';
     }
   }
 
@@ -372,7 +421,8 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     sectionBodies,
     planMarkdown: await renderPlanMarkdown(ctx.db, repositoryId, { titlesOnly: true }),
     nodeCount: skeletons.length,
-    docName,
+    docNames,
+    hasVisualInputs,
     buildDetect,
     buildFormValues,
     buildStopped: buildOutput?.stopped ?? null,
@@ -548,7 +598,9 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       })),
       ...detected.sections.map((c) => ({
         value: sectionKey(c),
-        label: `§${c.title} — no node covers ${c.missingTerms.slice(0, 4).join(', ')}`,
+        // The filename is part of the label, not decoration: with several inputs
+        // "§4.2 Reporting" does not say which document to go and open.
+        label: `§${c.title}${c.source ? ` (${c.source})` : ''} — no node covers ${c.missingTerms.slice(0, 4).join(', ')}`,
       })),
     ];
 
@@ -593,8 +645,14 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
         detected.structural.length > 0
           ? `${detected.structural.length} node(s) whose decomposition was lost or thinned.`
           : '',
-        detected.sections.length > 0 && detected.docName
-          ? `${detected.sections.length} section(s) of ${detected.docName} that no node appears to cover.`
+        detected.sections.length > 0 && detected.docNames.length > 0
+          ? `${detected.sections.length} section(s) of ${detected.docNames.join(', ')} that no node appears to cover.`
+          : '',
+        // Said explicitly because a clean term scan otherwise reads as "the
+        // wireframe was covered". It cannot see one: the scan reads text, and an
+        // image contributes none.
+        detected.hasVisualInputs
+          ? 'The term scan below covers only the written inputs. Images were attached and cannot be scanned — check the plan against them yourself.'
           : '',
         '',
         detected.frontierRemaining > 0

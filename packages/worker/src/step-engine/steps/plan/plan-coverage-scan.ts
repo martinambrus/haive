@@ -16,11 +16,18 @@ export interface DocSection {
   line: number;
   /** The section's own text, used as the brief when re-decomposing it. */
   body: string;
+  /** Which input the section came from — an original filename, or the sidecar's
+   *  original. A plan can be built from several documents at once, and "§4.2
+   *  Reporting" means nothing to a reader who has three files open. */
+  source: string;
 }
 
 export interface CoverageCandidate {
   title: string;
   line: number;
+  /** The input this heading is in. Carried through so the gate can attribute a
+   *  gap, and so two files' line 12 are two different gaps. */
+  source: string;
   /** Distinctive terms from the heading that appear NOWHERE in the plan. */
   missingTerms: string[];
   /** How many plan nodes matched two or more of the heading's terms. */
@@ -97,16 +104,21 @@ export function findCoverageGaps(
     out.push({
       title: section.title,
       line: section.line,
+      source: section.source,
       missingTerms: terms.filter((t) => !best.includes(t)),
       matchedNodes,
       score: Number(score.toFixed(2)),
     });
   }
-  return out.sort((a, b) => a.score - b.score || a.line - b.line);
+  // Worst first, then by source so one file's gaps stay together in the gate's
+  // list, then by line within it.
+  return out.sort(
+    (a, b) => a.score - b.score || a.source.localeCompare(b.source) || a.line - b.line,
+  );
 }
 
 /** Split a markdown document into its `##`+ sections, each carrying its own text. */
-export function parseDocSections(markdown: string): DocSection[] {
+export function parseDocSections(markdown: string, source = ''): DocSection[] {
   const lines = markdown.split('\n');
   const heads: { title: string; level: number; line: number; at: number }[] = [];
   lines.forEach((raw, i) => {
@@ -118,6 +130,7 @@ export function parseDocSections(markdown: string): DocSection[] {
     level: h.level,
     line: h.line,
     body: lines.slice(h.at + 1, heads[i + 1]?.at ?? lines.length).join('\n'),
+    source,
   }));
 }
 
