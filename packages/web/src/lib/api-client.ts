@@ -1400,6 +1400,11 @@ export interface PlanSnapshotHealth {
   /** null = no/freshly unknown upstream; false = local commits are ahead. */
   pushed: boolean | null;
   branch: string | null;
+  /** Whether the checkout has an `origin` remote at all. Read from git, not from
+   *  the repository row, because git is what push and pull obey. Push and pull
+   *  are HIDDEN without one rather than shown and failing. */
+  hasOrigin: boolean;
+  originUrl: string | null;
 }
 
 export interface PlanSnapshotSaveResult {
@@ -1520,6 +1525,18 @@ export function savePlanSnapshot(
  *  the local one. The only direction that reads the repository into the plan. */
 export function pullPlanSnapshot(repositoryId: string): Promise<PlanSnapshotSaveResult> {
   return api.post<PlanSnapshotSaveResult>(`${planBase(repositoryId)}/snapshot/pull`, {});
+}
+
+/** Point a repository with no origin at one. Sets `origin` on the checkout and
+ *  records it on the repository; pushes nothing. */
+export function linkRepositoryRemote(
+  repositoryId: string,
+  body: { remoteUrl: string; credentialsId?: string; branch?: string },
+): Promise<{ ok: true; remoteUrl: string; relinked: boolean }> {
+  return api.post<{ ok: true; remoteUrl: string; relinked: boolean }>(
+    `/repositories/${repositoryId}/remote`,
+    body,
+  );
 }
 
 export function getPlanTree(repositoryId: string): Promise<{ nodes: PlanTreeNode[] }> {

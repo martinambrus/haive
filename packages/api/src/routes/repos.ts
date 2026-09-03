@@ -7,9 +7,12 @@ import { Hono } from 'hono';
 import { eq, and, desc, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   createRepoRequestSchema,
   initRepoUploadRequestSchema,
+  linkRepoRemoteRequestSchema,
   REPO_JOB_NAMES,
   updateRepoExclusionsRequestSchema,
   CLI_PROVIDER_LIST,
@@ -828,6 +831,98 @@ async function stripHaiveContent(full: string): Promise<{ changed: boolean; dele
  *  on delete and must resolve the root exactly as every other file route does —
  *  a second copy of this would be a second place for the storage/local
  *  fallback to drift. */
+const execGit = promisify(execFile);
+
+/**
+ * Bind a repository that has no origin to one.
+ *
+ * A repository created `blank` or by upload has a real `git init` checkout and
+ * no remote, so nothing can leave it — including the committed plan snapshot,
+ * which is the only way a plan reaches another Haive install. Without this the
+ * only route was to delete the repository and re-add it from a URL, which
+ * throws away its plan, its tasks and its knowledge base.
+ *
+ * Runs in the api rather than the worker. `git remote set-url` writes one config
+ * key: it moves no HEAD, touches no working tree and rewrites no history, which
+ * is the line everything else respects — commit, push and the fast-forward pull
+ * all remain worker jobs. The api already shells out (docker-cli, and the
+ * read-only git probes behind the plan snapshot) against this same checkout.
+ *
+ * `source` is left alone on purpose. It records how the repository came to
+ * exist, which is still true, and resolvers key on it.
+ */
+repoRoutes.post('/:id/remote', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const body = linkRepoRemoteRequestSchema.parse(await c.req.json());
+  const db = getDb();
+
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { id: true, storagePath: true, localPath: true, remoteUrl: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  const root = repo.storagePath ?? repo.localPath;
+  if (!root) throw new HttpError(409, 'This repository has no resolvable path');
+
+  if (body.credentialsId) {
+    const cred = await db.query.repoCredentials.findFirst({
+      where: and(
+        eq(schema.repoCredentials.id, body.credentialsId),
+        eq(schema.repoCredentials.userId, userId),
+      ),
+      columns: { id: true },
+    });
+    if (!cred) throw new HttpError(404, 'Credentials not found');
+  }
+
+  const git = async (args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> => {
+    try {
+      const { stdout, stderr } = await execGit('git', args, { cwd: root, timeout: 10_000 });
+      return { ok: true, stdout: stdout.toString().trim(), stderr: stderr.toString().trim() };
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string };
+      return {
+        ok: false,
+        stdout: (e.stdout ?? '').toString().trim(),
+        stderr: (e.stderr ?? '').toString().trim(),
+      };
+    }
+  };
+
+  const inside = await git(['rev-parse', '--is-inside-work-tree']);
+  if (!inside.ok || inside.stdout !== 'true') {
+    throw new HttpError(409, 'This repository is not a Git checkout, so it cannot have a remote');
+  }
+
+  // add-then-set-url rather than a `git remote` listing first: idempotent in one
+  // round trip, and re-pointing an existing origin is a legitimate use of this.
+  const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
+  if (!added.ok) {
+    if (!/already exists/i.test(added.stderr)) {
+      throw new HttpError(409, `Could not add the remote: ${added.stderr || added.stdout}`);
+    }
+    const updated = await git(['remote', 'set-url', 'origin', body.remoteUrl]);
+    if (!updated.ok) {
+      throw new HttpError(409, `Could not update the remote: ${updated.stderr || updated.stdout}`);
+    }
+  }
+
+  // The row is written only after git accepted the URL, so the column can never
+  // claim a remote the checkout does not have.
+  await db
+    .update(schema.repositories)
+    .set({
+      remoteUrl: body.remoteUrl,
+      ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
+      ...(body.branch ? { branch: body.branch } : {}),
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.repositories.id, id));
+
+  return c.json({ ok: true, remoteUrl: body.remoteUrl, relinked: repo.remoteUrl !== null });
+});
+
 export async function resolveRepoRoot(
   db: ReturnType<typeof getDb>,
   userId: string,

@@ -91,6 +91,24 @@ export const createRepoRequestSchema = z
 
 export type CreateRepoRequest = z.infer<typeof createRepoRequestSchema>;
 
+/** Point an existing repository at a Git remote it does not have yet.
+ *
+ *  A repository created `blank` or by upload has a working `git init` checkout
+ *  and no origin, so nothing can be pushed or pulled from it — including the
+ *  committed plan snapshot, which is how a plan travels between Haive installs.
+ *  This binds one without recreating the repository.
+ *
+ *  `source` is deliberately NOT changed: it records how the repository came to
+ *  exist, which stays true, and several resolvers key on it. */
+export const linkRepoRemoteRequestSchema = z.object({
+  remoteUrl: z.string().url().max(2048),
+  /** A stored credential for a private remote. Omitted for a public remote, or
+   *  for SSH/manual auth handled outside Haive. */
+  credentialsId: z.string().uuid().optional(),
+  branch: z.string().max(255).optional(),
+});
+export type LinkRepoRemoteRequest = z.infer<typeof linkRepoRemoteRequestSchema>;
+
 export const updateRepoExclusionsRequestSchema = z.object({
   /** The onboarding/RAG scope deny list (repositories.scope_exclude_globs):
    *  directory path globs excluded from mining + RAG. Nested paths allowed

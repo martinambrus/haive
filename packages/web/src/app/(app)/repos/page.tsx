@@ -8,6 +8,7 @@ import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/c
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 import { ToolingUpgradeBanner } from '@/components/tooling-upgrade-banner';
+import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 import { usePageTitle } from '@/lib/use-page-title';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
 import { stripManagedKnowledgeGlobs } from '@haive/shared/knowledge-paths';
@@ -252,6 +253,7 @@ export default function ReposPage() {
               onDelete={() => handleDelete(repo.id)}
               onRetry={() => handleRetry(repo.id)}
               onChangeIncluded={(paths) => handleChangeIncluded(repo.id, paths)}
+              onReload={reload}
             />
           ))}
         </div>
@@ -270,6 +272,8 @@ interface RepoCardProps {
   onDelete: () => void;
   onRetry: () => Promise<void>;
   onChangeIncluded: (paths: string[]) => void;
+  /** Reload the list after something changed the repository row itself. */
+  onReload: () => Promise<void>;
 }
 
 function RepoCard(props: RepoCardProps) {
@@ -283,6 +287,7 @@ function RepoCard(props: RepoCardProps) {
     onDelete,
     onRetry,
     onChangeIncluded,
+    onReload,
   } = props;
 
   // The exclusions editor is available once onboarding has produced a scope deny
@@ -305,6 +310,7 @@ function RepoCard(props: RepoCardProps) {
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [linkingOrigin, setLinkingOrigin] = useState(false);
 
   async function handleRetryClick() {
     setRetrying(true);
@@ -418,6 +424,15 @@ function RepoCard(props: RepoCardProps) {
               </Button>
             </Link>
           )}
+          {/* A repository with no remote cannot push ANYTHING — not the plan
+              snapshot, not a finished task's branch. Offered here as well as on
+              the plan page because the gap belongs to the repository, and this
+              is the page where a repository is managed. */}
+          {repo.status === 'ready' && !repo.remoteUrl && (
+            <Button variant="secondary" size="sm" onClick={() => setLinkingOrigin(true)}>
+              Link to origin
+            </Button>
+          )}
           {repo.status === 'ready' && (
             <Button variant="secondary" size="sm" onClick={downloadArchive} disabled={downloading}>
               {downloading ? 'Zipping...' : 'Download'}
@@ -438,6 +453,14 @@ function RepoCard(props: RepoCardProps) {
           </Button>
         </div>
       </div>
+      {linkingOrigin && (
+        <LinkOriginDialog
+          repositoryId={repo.id}
+          currentUrl={repo.remoteUrl}
+          onClose={() => setLinkingOrigin(false)}
+          onLinked={() => void onReload()}
+        />
+      )}
       {downloadError && <p className="text-xs text-red-400">{downloadError}</p>}
       {repo.detectedLanguages && (
         <div className="flex flex-wrap gap-1">

@@ -170,10 +170,16 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
   let uncommitted = false;
   let branch: string | null = null;
   let pushed: boolean | null = null;
+  // Whether there is anywhere to push TO. Read from git rather than from
+  // `repositories.remote_url`, because it is git that push and pull obey — a
+  // column saying otherwise would offer the user a button that cannot work.
+  let originUrl: string | null = null;
   if (repoRoot) {
     const inside = await gitRead(repoRoot, ['rev-parse', '--is-inside-work-tree']);
     gitAvailable = inside.ok && inside.stdout === 'true';
     if (gitAvailable) {
+      const origin = await gitRead(repoRoot, ['remote', 'get-url', 'origin']);
+      originUrl = origin.ok ? origin.stdout || null : null;
       const [trackedResults, status, branchResult, upstream] = await Promise.all([
         Promise.all(
           paths.map((rel) => gitRead(repoRoot, ['ls-files', '--error-unmatch', '--', rel])),
@@ -206,6 +212,8 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
     committed: filesExist && tracked && !uncommitted,
     pushed,
     branch,
+    hasOrigin: originUrl !== null,
+    originUrl,
   });
 });
 

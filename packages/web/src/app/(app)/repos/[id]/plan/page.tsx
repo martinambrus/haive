@@ -8,6 +8,7 @@ import {
   CloudUpload,
   LayoutGrid,
   ListOrdered,
+  Link2,
   ListTree,
   Plus,
   Save,
@@ -44,6 +45,7 @@ import { PlanDetailPanel, type PlanPanelTab } from '@/components/plan/plan-detai
 import { PlanTree } from '@/components/plan/plan-tree';
 import { PlanDeleteDialog } from '@/components/plan/plan-delete-dialog';
 import { PlanStarter } from '@/components/plan/plan-starter';
+import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 
 /**
  * The plan canvas.
@@ -85,6 +87,8 @@ export default function PlanPage() {
   const [sequencing, setSequencing] = useState(false);
   const [pullReport, setPullReport] = useState<PlanPullOutcome | null>(null);
   const [removingEdge, setRemovingEdge] = useState(false);
+  const [saveReport, setSaveReport] = useState<string | null>(null);
+  const [linkingOrigin, setLinkingOrigin] = useState(false);
   // Fetched only while the plan is empty: it decides whether the "build from
   // the knowledge base" offer can exist at all. Null = unknown, treated as
   // onboarded so nothing hides on a failed check (same stance as the repos
@@ -300,8 +304,21 @@ export default function PlanPage() {
   async function saveSnapshot(push: boolean): Promise<void> {
     setSnapshotBusy(true);
     setError(null);
+    setSaveReport(null);
+    setPullReport(null);
     try {
-      await savePlanSnapshot(repositoryId, { push });
+      const result = await savePlanSnapshot(repositoryId, { push });
+      // Say which of the three things happened. The commit is already skipped
+      // when the staged files are unchanged, so a second Save is a no-op — but
+      // silence looked identical to a second commit, which is exactly the doubt
+      // this line removes.
+      setSaveReport(
+        result.committed
+          ? `Committed ${result.commitSha?.slice(0, 12) ?? ''}${result.pushed ? ` and pushed to ${result.branch ?? 'origin'}` : ''}.`
+          : result.pushed
+            ? `Already committed — pushed to ${result.branch ?? 'origin'}.`
+            : 'Already up to date — the committed snapshot already matches this plan.',
+      );
       setSnapshot(await getPlanSnapshot(repositoryId));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save the plan snapshot');
@@ -341,6 +358,7 @@ export default function PlanPage() {
     setSnapshotBusy(true);
     setError(null);
     setPullReport(null);
+    setSaveReport(null);
     try {
       const result = await pullPlanSnapshot(repositoryId);
       setPullReport(result.pulled ?? null);
@@ -575,26 +593,44 @@ export default function PlanPage() {
                 <Save className="mr-1 h-3.5 w-3.5" />
                 Save plan
               </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={snapshotBusy}
-                onClick={() => void saveSnapshot(true)}
-                title="Refresh, commit and push the portable plan snapshot"
-              >
-                <CloudUpload className="mr-1 h-3.5 w-3.5" />
-                Save &amp; push
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={snapshotBusy}
-                onClick={() => void pullSnapshot()}
-                title="Fast-forward this checkout from origin and merge the committed plan into this one"
-              >
-                <CloudDownload className="mr-1 h-3.5 w-3.5" />
-                Pull
-              </Button>
+              {/* Both of these need somewhere to talk to. Offered without an
+                  origin they are buttons whose only outcome is an error, so the
+                  one affordance that fixes that takes their place instead. */}
+              {snapshot?.hasOrigin ? (
+                <>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={snapshotBusy}
+                    onClick={() => void saveSnapshot(true)}
+                    title={`Refresh, commit and push the portable plan snapshot to ${snapshot.originUrl ?? 'origin'}`}
+                  >
+                    <CloudUpload className="mr-1 h-3.5 w-3.5" />
+                    Save &amp; push
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={snapshotBusy}
+                    onClick={() => void pullSnapshot()}
+                    title="Fast-forward this checkout from origin and merge the committed plan into this one"
+                  >
+                    <CloudDownload className="mr-1 h-3.5 w-3.5" />
+                    Pull
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={snapshotBusy || !snapshot}
+                  onClick={() => setLinkingOrigin(true)}
+                  title="This repository has no origin remote, so the plan cannot be pushed or pulled"
+                >
+                  <Link2 className="mr-1 h-3.5 w-3.5" />
+                  Link to origin
+                </Button>
+              )}
             </>
           )}
           <Link href={`/repos`}>
@@ -607,6 +643,12 @@ export default function PlanPage() {
 
       <FormError message={error} />
       <FormError message={snapshot?.lastError ? `Plan snapshot: ${snapshot.lastError}` : null} />
+
+      {saveReport && (
+        <p className="rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-300">
+          {saveReport}
+        </p>
+      )}
 
       {pullReport && (
         <div className="flex flex-col gap-1 rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-300">
@@ -966,6 +1008,20 @@ export default function PlanPage() {
             </section>
           )}
         </div>
+      )}
+
+      {linkingOrigin && (
+        <LinkOriginDialog
+          repositoryId={repositoryId}
+          currentUrl={snapshot?.originUrl ?? null}
+          onClose={() => setLinkingOrigin(false)}
+          onLinked={() => {
+            setSaveReport('Origin linked. Save & push is available now.');
+            void getPlanSnapshot(repositoryId)
+              .then(setSnapshot)
+              .catch(() => undefined);
+          }}
+        />
       )}
 
       <PlanDeleteDialog
