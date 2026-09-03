@@ -8,6 +8,7 @@ import {
   type PlanPatchOp,
 } from '../schemas/plan.js';
 import { PlanPatchError } from './errors.js';
+import { PLAN_NODE_REF_PREFIX } from './render.js';
 import {
   descendantPathSqlOffset,
   descendantsLikePattern,
@@ -125,6 +126,59 @@ export async function markPlanMirrorDirty(tx: DbOrTx, repositoryId: string): Pro
         updatedAt: new Date(),
       },
     });
+}
+
+/**
+ * Strip the `node:` marker off a ref that carries one.
+ *
+ * `renderPlanMarkdown` shows every id as `node:<uuid>` — deliberately visible, so
+ * a model that ignores HTML comments can still quote it back — and the patch
+ * contract tells the agent to COPY ids rather than retype them. An agent obeying
+ * both sends `"parentRef": "node:<uuid>"`, which is not uuid-shaped, so it was
+ * never looked up and its op was discarded as an unknown reference: following the
+ * instructions was what broke it. MEASURED on the dev install — 11 of 13
+ * unknown-reference drops carried the prefix, across the plan builder and the
+ * coverage gate alike, and every uuid behind one named a live node in the right
+ * repository.
+ *
+ * Stripped ONLY when the remainder is uuid-shaped, so a temp id an agent happens
+ * to call `node:api` still introduces a new node. Keyed on the constant the
+ * renderer writes with, not a literal, because two spellings of this would drift
+ * apart silently — the failure mode is a dropped op, not an error.
+ */
+function stripNodeRefPrefix(ref: string): string {
+  if (!ref.toLowerCase().startsWith(PLAN_NODE_REF_PREFIX)) return ref;
+  const bare = ref.slice(PLAN_NODE_REF_PREFIX.length);
+  return UUID_RE.test(bare) ? bare : ref;
+}
+
+/** Every ref field of every op, normalised. Ops are rewritten rather than fixed
+ *  in place: the caller's parsed patch is also what a retry would re-read.
+ *  Exported for the unit test — `applyOps` is the only caller. */
+export function normalizeOpRefs(ops: PlanPatch['ops']): PlanPatch['ops'] {
+  return ops.map((op) => {
+    switch (op.op) {
+      case 'upsert':
+        return {
+          ...op,
+          nodeRef: stripNodeRefPrefix(op.nodeRef),
+          ...(typeof op.parentRef === 'string'
+            ? { parentRef: stripNodeRefPrefix(op.parentRef) }
+            : {}),
+        };
+      case 'delete':
+        return { ...op, nodeRef: stripNodeRefPrefix(op.nodeRef) };
+      case 'link':
+      case 'unlink':
+        return {
+          ...op,
+          fromRef: stripNodeRefPrefix(op.fromRef),
+          toRef: stripNodeRefPrefix(op.toRef),
+        };
+      default:
+        return op;
+    }
+  });
 }
 
 /**
@@ -499,10 +553,15 @@ async function applyOps(
   // Ops that would fail are never submitted, so the all-or-nothing guarantee of
   // the transaction is untouched — this decides what the patch IS, not how much
   // of it survives partway through.
+  //
+  // Refs are normalised FIRST, once, feeding both the drop pre-flight and the op
+  // loop below. Normalising in only one of them would make an op's survival
+  // depend on which of the two looked at it.
+  const patchOps = normalizeOpRefs(patch.ops);
   const ops =
     opts.onUnresolvableRef === 'drop'
-      ? await dropUnresolvableOps(tx, patch.ops, repositoryId, refs, result.dropped)
-      : patch.ops;
+      ? await dropUnresolvableOps(tx, patchOps, repositoryId, refs, result.dropped)
+      : patchOps;
 
   for (const [opIndex, op] of ops.entries()) {
     switch (op.op) {

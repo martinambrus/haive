@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dropUnresolvableOps } from './apply-patch.js';
+import { dropUnresolvableOps, normalizeOpRefs } from './apply-patch.js';
 import type { PlanPatch } from '../schemas/plan.js';
 
 const LIVE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -86,5 +86,53 @@ describe('dropUnresolvableOps', () => {
     const { kept, report } = await run(ops);
     expect(kept).toEqual(ops);
     expect(report).toEqual([]);
+  });
+});
+
+describe('normalizeOpRefs', () => {
+  // `renderPlanMarkdown` shows every id as `node:<uuid>` and the patch contract
+  // tells the agent to copy ids rather than retype them. Obeying both produced a
+  // ref that matched no live node, and the op was dropped as unknown.
+  it('strips the marker the plan markdown shows ids with', () => {
+    const [op] = normalizeOpRefs([
+      { op: 'upsert', nodeRef: 'a', parentRef: `node:${LIVE}`, title: 'A' },
+    ] as PlanPatch['ops']);
+    expect((op as { parentRef: string }).parentRef).toBe(LIVE);
+  });
+
+  it('normalises every ref field, not just parentRef', () => {
+    const ops = normalizeOpRefs([
+      { op: 'upsert', nodeRef: `node:${LIVE}`, body: 'x' },
+      { op: 'delete', nodeRef: `node:${LIVE}` },
+      { op: 'link', fromRef: `node:${LIVE}`, toRef: `node:${GONE}`, kind: 'affects' },
+      { op: 'unlink', fromRef: `node:${LIVE}`, toRef: `node:${GONE}`, kind: 'affects' },
+    ] as PlanPatch['ops']);
+    expect(JSON.stringify(ops)).not.toContain('node:');
+  });
+
+  it('leaves a temp id that merely starts with the marker alone', () => {
+    // Only a uuid remainder is stripped, so an invented `node:api` still creates.
+    const [op] = normalizeOpRefs([
+      { op: 'upsert', nodeRef: 'node:api', parentRef: LIVE, title: 'API' },
+    ] as PlanPatch['ops']);
+    expect((op as { nodeRef: string }).nodeRef).toBe('node:api');
+  });
+
+  it('keeps a null parentRef null', () => {
+    // `null` is the plan root, a different statement from "no parentRef given".
+    const [op] = normalizeOpRefs([
+      { op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' },
+    ] as PlanPatch['ops']);
+    expect((op as { parentRef: unknown }).parentRef).toBeNull();
+  });
+
+  it('lets a prefixed ref survive the drop pre-flight', async () => {
+    // The two composed in the order `applyOps` runs them. Un-normalised, this
+    // op is discarded even though LIVE is a live node.
+    const ops = [
+      { op: 'upsert', nodeRef: 'a', parentRef: `node:${LIVE}`, title: 'A' },
+    ] as PlanPatch['ops'];
+    expect((await run(ops)).kept).toHaveLength(0);
+    expect((await run(normalizeOpRefs(ops))).kept).toHaveLength(1);
   });
 });
