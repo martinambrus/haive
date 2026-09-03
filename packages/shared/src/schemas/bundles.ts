@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { gitRemoteUrlSchema } from './git-url.js';
 import { archiveFormatSchema } from './repos.js';
 
 export const customBundleSourceTypeSchema = z.enum(['zip', 'git']);
@@ -12,7 +13,7 @@ export const createGitBundleRequestSchema = z.object({
   repositoryId: z.string().uuid(),
   name: z.string().min(1).max(255),
   enabledKinds: z.array(customBundleItemKindSchema).min(1).default(['agent', 'skill']),
-  gitUrl: z.string().url(),
+  gitUrl: gitRemoteUrlSchema,
   gitBranch: z.string().min(1).max(255).optional(),
   gitCredentialsId: z.string().uuid().optional(),
 });

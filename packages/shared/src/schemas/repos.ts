@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { gitRemoteUrlSchema } from './git-url.js';
 
 export const repoSourceSchema = z.enum([
   'local_path',
@@ -45,7 +46,7 @@ export const createRepoRequestSchema = z
     name: z.string().max(255).optional(),
     source: repoSourceSchema,
     localPath: z.string().optional(),
-    remoteUrl: z.string().url().optional(),
+    remoteUrl: gitRemoteUrlSchema.optional(),
     branch: z.string().max(255).optional(),
     credentialsId: z.string().uuid().optional(),
     writable: z.boolean().optional(),
@@ -101,7 +102,7 @@ export type CreateRepoRequest = z.infer<typeof createRepoRequestSchema>;
  *  `source` is deliberately NOT changed: it records how the repository came to
  *  exist, which stays true, and several resolvers key on it. */
 export const linkRepoRemoteRequestSchema = z.object({
-  remoteUrl: z.string().url().max(2048),
+  remoteUrl: gitRemoteUrlSchema,
   /** A stored credential for a private remote. Omitted for a public remote, or
    *  for SSH/manual auth handled outside Haive. */
   credentialsId: z.string().uuid().optional(),

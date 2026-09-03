@@ -1533,8 +1533,10 @@ export function linkRepositoryRemote(
   repositoryId: string,
   body: { remoteUrl: string; credentialsId?: string; branch?: string },
 ): Promise<{ ok: true; remoteUrl: string; relinked: boolean }> {
+  // `/repos`, not `/repositories`: the repository routes mount at the former and
+  // only the plan routes use the latter.
   return api.post<{ ok: true; remoteUrl: string; relinked: boolean }>(
-    `/repositories/${repositoryId}/remote`,
+    `/repos/${repositoryId}/remote`,
     body,
   );
 }
