@@ -530,7 +530,13 @@ export const defaultDockerRunner: DockerRunner = {
     }
     const ids = listed.stdout.split(/\s+/).filter((id) => id.length > 0);
     if (ids.length === 0) return { ok: true, removed: [], stderr: '' };
-    const removed = await spawnAndCollect('docker', ['rm', '-f', ...ids], {
+    // No `-f`. The status filter selects stopped containers, but listing and removing are
+    // two calls: a `created` helper can reach `running` in between, and `-f` would then kill
+    // exactly the in-flight work the filter exists to spare. Plain `rm` refuses a running
+    // container, so the daemon enforces that invariant instead of a stale snapshot. A `dead`
+    // container may resist without force; it stays listed and the next sweep retries, which
+    // is the cheaper failure — a leaked volume costs disk, a killed agent costs a task step.
+    const removed = await spawnAndCollect('docker', ['rm', ...ids], {
       timeoutMs: 30_000,
     });
     return {
