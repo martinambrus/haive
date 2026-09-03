@@ -31,6 +31,7 @@ import { fairPriority } from '@haive/shared/fair-priority';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
 import { completePlanNodesForTask } from '../plan/task-link.js';
+import { markPlanCodeLinksStale } from '../plan/code-link-staleness.js';
 import { getBullRedis, getRedis } from '../redis.js';
 import { reapAllSessionsForTask } from '../sandbox/terminal-session-reaper.js';
 import {
@@ -399,6 +400,13 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
   // Hooked to COMPLETION specifically: cancel and fail write through their own
   // functions, so an abandoned task can never green a plan node.
   await completePlanNodesForTask(db, taskId);
+  // The code-link staleness pass ALSO runs here, not only in 11c-rag-reindex.
+  // 11c lives in PLAN_TASKLIST_EXTRA rather than SPINE, so a quick_bugfix task
+  // never reaches it, and it is user-skippable on the paths that do — either way
+  // a task would finish having changed the very files a plan link points at
+  // while the link still claimed to be current. Idempotent (it only touches rows
+  // that are not already stale), so the earlier mid-run call stays for its flush.
+  await markPlanCodeLinksStale(db, taskId);
 }
 
 async function markTaskFailed(db: Database, taskId: string, message: string): Promise<void> {

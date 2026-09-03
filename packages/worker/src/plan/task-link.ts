@@ -1,4 +1,4 @@
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { applyPlanPatch } from '@haive/shared/plan';
@@ -21,10 +21,17 @@ import { flushPlanMirrorForRepository } from './mirror.js';
  */
 export async function completePlanNodesForTask(db: Database, taskId: string): Promise<void> {
   try {
+    // `implements` ONLY. A `touched` row says this task changed code the node
+    // covers, which the spec writer records for every affected component — and a
+    // task that touched twelve components has not finished twelve components.
+    // Greening on blast radius would be the same bookkeeping lie the status
+    // roll-up refuses to make for a parent over unfinished children.
     const links = await db
       .select({ nodeId: schema.planNodeTasks.nodeId })
       .from(schema.planNodeTasks)
-      .where(eq(schema.planNodeTasks.taskId, taskId));
+      .where(
+        and(eq(schema.planNodeTasks.taskId, taskId), eq(schema.planNodeTasks.role, 'implements')),
+      );
     if (links.length === 0) return;
 
     const nodes = await db

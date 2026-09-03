@@ -33,6 +33,7 @@ import { markPlanCodeLinksStale } from '../src/plan/code-link-staleness.js';
 import { HAIVE_DATA_FILES, PLAN_MIRROR_SCHEMA_VERSION, type PlanMirror } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { importPlanMirror, reconcilePlanMirror, writePlanMirror } from '../src/plan/mirror.js';
+import { completePlanNodesForTask } from '../src/plan/task-link.js';
 
 const log = logger.child({ module: 'plan-patch-smoke' });
 
@@ -985,6 +986,93 @@ async function main(): Promise<void> {
     'restore does not recreate chat, task links or read markers',
     restoredMessages.length === 0 && restoredTaskLinks.length === 0 && restoredReads.length === 0,
     { restoredMessages, restoredTaskLinks, restoredReads },
+  );
+
+  /* --- 12.4 completion greens `implements`, never `touched` ---------------- */
+
+  // The whole point of the role column. The spec writer records every component
+  // a task AFFECTS; greening those would turn a statement about blast radius
+  // into a claim the work is finished.
+  const roleRoot = (await loadPlanNodes(db, freshRepoB!.id)).find((n) => n.parentId === null)!;
+  const rolePatch = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'tmp-impl', parentRef: roleRoot.id, title: 'Work this task IS' },
+        {
+          op: 'upsert',
+          nodeRef: 'tmp-touch',
+          parentRef: roleRoot.id,
+          title: 'Work this task merely touched',
+        },
+      ],
+    },
+    { repositoryId: freshRepoB!.id, origin: 'user' },
+  );
+  const implNodeId = rolePatch.created[0]!;
+  const touchedNodeId = rolePatch.created[1]!;
+
+  const [roleTask] = await db
+    .insert(schema.tasks)
+    .values({
+      userId,
+      type: 'workflow',
+      title: 'plan-smoke role fixture',
+      repositoryId: freshRepoB!.id,
+      status: 'running',
+    })
+    .returning();
+  await db.insert(schema.planNodeTasks).values([
+    { nodeId: implNodeId, taskId: roleTask!.id, role: 'implements' },
+    { nodeId: touchedNodeId, taskId: roleTask!.id, role: 'touched' },
+  ]);
+
+  // The touched-writer must never downgrade an existing implements row.
+  await db
+    .insert(schema.planNodeTasks)
+    .values({ nodeId: implNodeId, taskId: roleTask!.id, role: 'touched' })
+    .onConflictDoNothing();
+  const [stillImplements] = await db
+    .select({ role: schema.planNodeTasks.role })
+    .from(schema.planNodeTasks)
+    .where(
+      and(
+        eq(schema.planNodeTasks.nodeId, implNodeId),
+        eq(schema.planNodeTasks.taskId, roleTask!.id),
+      ),
+    );
+  check(
+    'a touched write cannot downgrade an implements link',
+    stillImplements?.role === 'implements',
+    stillImplements,
+  );
+
+  await completePlanNodesForTask(db, roleTask!.id);
+  const afterRole = await loadPlanNodes(db, freshRepoB!.id);
+  check(
+    'completion greens the node the task implements',
+    afterRole.find((n) => n.id === implNodeId)?.status === 'done',
+    afterRole.find((n) => n.id === implNodeId)?.status,
+  );
+  check(
+    'completion leaves a node the task merely touched alone',
+    afterRole.find((n) => n.id === touchedNodeId)?.status === 'todo',
+    afterRole.find((n) => n.id === touchedNodeId)?.status,
+  );
+  await db.delete(schema.tasks).where(eq(schema.tasks.id, roleTask!.id));
+  // Clean up after this section. The pull reconcile below counts nodes that
+  // exist only locally, and two fixture nodes left behind are two local-only
+  // nodes — a fixture that quietly changes a later assertion is worse than no
+  // fixture at all.
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'delete', nodeRef: implNodeId },
+        { op: 'delete', nodeRef: touchedNodeId },
+      ],
+    },
+    { repositoryId: freshRepoB!.id, origin: 'user' },
   );
 
   /* --- 12.5 reconciling a PULLED snapshot onto a plan that exists ---------- */

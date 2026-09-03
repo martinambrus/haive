@@ -309,6 +309,47 @@ export function stubPrePlanning(detect: PrePlanningDetect): { summary: string; s
   return { summary, spec: specLines.join('\n') };
 }
 
+/**
+ * Record the components this task affects as `touched` links.
+ *
+ * The affected set was already resolved for gate 1's diagram and then lived only
+ * in this step's `task_steps.output`, which `_step-reset` nulls on a Retry — so
+ * nothing downstream could ever use it. As a link it survives, and it is what
+ * lets the plan say "three tasks changed code under this since anyone reviewed
+ * it" instead of drifting silently.
+ *
+ * `touched`, never `implements`: this is blast radius, not completion.
+ * `completePlanNodesForTask` greens only `implements`, so these rows can never
+ * turn "this task affects twelve components" into "twelve components are done".
+ *
+ * `onConflictDoNothing` on the existing (node, task) unique index, so a task
+ * created FROM a node keeps its `implements` row — a downgrade here would
+ * silently stop that node ever going green.
+ *
+ * Best-effort: this is provenance, and it must never fail the spec step that
+ * produced it.
+ */
+async function recordTouchedPlanNodes(
+  ctx: StepContext,
+  affected: PrePlanningApply['affectedComponents'],
+): Promise<void> {
+  // `named` are the ids the spec itself cited; `reached` are what the edge walk
+  // added, which are affected for the same reason the walk exists.
+  const unique = [
+    ...new Set([...(affected?.named ?? []), ...(affected?.reached ?? [])].map((n) => n.id)),
+  ];
+  if (unique.length === 0) return;
+  try {
+    await ctx.db
+      .insert(schema.planNodeTasks)
+      .values(unique.map((nodeId) => ({ nodeId, taskId: ctx.taskId, role: 'touched' as const })))
+      .onConflictDoNothing();
+    ctx.logger.info({ nodes: unique.length }, 'recorded touched plan nodes for this task');
+  } catch (err) {
+    ctx.logger.warn({ err }, 'touched plan-node link write failed (non-fatal)');
+  }
+}
+
 export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanningApply> = {
   metadata: {
     id: '04-phase-0b-pre-planning',
@@ -499,6 +540,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         args.detected.planRepositoryId,
         parsed.spec,
       );
+      await recordTouchedPlanNodes(ctx, affected);
       return {
         summary: parsed.summary,
         spec: parsed.spec,

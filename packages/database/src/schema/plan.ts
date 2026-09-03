@@ -306,6 +306,17 @@ export const userPlanNodeReads = pgTable(
   (table) => [primaryKey({ columns: [table.userId, table.nodeId] })],
 );
 
+/** Why a task is attached to a plan node, and it decides whether finishing the
+ *  task greens the node.
+ *
+ *  - implements: the task was created FROM this node. It IS the unit of work, so
+ *    completing it means the node is done.
+ *  - touched: the task changed code the node is linked to — recorded by the
+ *    spec writer's affected-components pass. Provenance only. A task touching
+ *    twelve components does not finish twelve components, and greening on
+ *    "affected" would turn the canvas into a claim nobody made. */
+export const planNodeTaskRoleEnum = pgEnum('plan_node_task_role', ['implements', 'touched']);
+
 export const planNodeTasks = pgTable(
   'plan_node_tasks',
   {
@@ -318,9 +329,16 @@ export const planNodeTasks = pgTable(
     taskId: uuid('task_id')
       .notNull()
       .references(() => tasks.id, { onDelete: 'cascade' }),
+    /** Defaults to `implements` so every row written before this column existed
+     *  keeps the meaning it had: they all came from the create-task endpoint,
+     *  which is the "created from this node" path. */
+    role: planNodeTaskRoleEnum('role').notNull().default('implements'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
   },
   (table) => [
+    // One row per (node, task): a task that was created FROM a node and also
+    // touches it is still one relationship. The touched-writer inserts with
+    // ON CONFLICT DO NOTHING so it can never downgrade an `implements` row.
     uniqueIndex('plan_node_tasks_unique_idx').on(table.nodeId, table.taskId),
     index('plan_node_tasks_task_idx').on(table.taskId),
   ],
