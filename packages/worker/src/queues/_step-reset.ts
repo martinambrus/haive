@@ -1,6 +1,7 @@
-import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema, resetDagCurrentLevelForRetry, type Database } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
+import { isFatalProviderFailure } from './cli-exec/failure-class.js';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
 // detect. Used by the `revise` route (handleResult): a review step asks to re-run an
@@ -127,13 +128,14 @@ export async function resetStepAndDownstream(
 
 /** Auto-resume a task that FAILED on a provider outage (session/rate-limit or 5xx), once the
  *  usage poller decides the provider is back (CONFIG_KEYS.ALLOWANCE_WATCH_MODE 'auto'). RESUME
- *  semantics — supersede only the failed pass's live invocation and flip the step back to
+ *  semantics — supersede only the step's failed blocking invocation and flip the step back to
  *  `running` WITHOUT clearing iterations/output, so a loop step (e.g. skill-generation)
- *  re-dispatches the failed pass and keeps every completed pass. Mirrors the API `resume`
- *  action (packages/api/src/routes/tasks/steps.ts) — keep them in sync — but runs worker-side
- *  and, unlike the manual resume, INCREMENTS the anti-thrash counter and stamps
- *  allowance_auto_resumed_at (the web notifier's distinct "auto-resumed" signal) instead of
- *  resetting the counter.
+ *  re-dispatches the failed pass and keeps every completed pass, and a FAN-OUT step keeps every
+ *  terminal that finished while the ones the outage killed are marked for re-dispatch. Mirrors
+ *  both arms of the API `resume` action (packages/api/src/routes/tasks/steps.ts) — keep them in
+ *  sync — but runs worker-side and, unlike the manual resume, INCREMENTS the anti-thrash counter
+ *  and stamps allowance_auto_resumed_at (the web notifier's distinct "auto-resumed" signal)
+ *  instead of resetting the counter.
  *
  *  The task flip is guarded on `status='failed'`, so a concurrent MANUAL resume (which flips
  *  it to running first) wins and this no-ops → returns false and the caller skips the enqueue.
@@ -187,18 +189,87 @@ export async function autoResumeFailedStep(
     if (bumped.length === 0) return; // already resumed elsewhere / not failed → no-op
     flipped = true;
 
-    // Supersede the failed pass's live invocation so resolveLlmPhase sees no live invocation
-    // and re-dispatches a fresh wave at upcomingIteration = completed passes.
-    await tx
-      .update(schema.cliInvocations)
-      .set({ supersededAt: now })
+    // Clear this step's own blocking invocation so resolveLlmPhase sees no live invocation and
+    // re-dispatches a fresh wave at upcomingIteration = completed passes. The TRAILING
+    // non-mining run, and only when it FAILED — mirror of the api's supersedeBlockingInvocation
+    // (routes/tasks/steps.ts), keep the two in sync. Deliberately NOT a blanket sweep of every
+    // open row: `agent_mining` invocations are never consumed (MEASURED: 0 of 321 on the dev
+    // install), and the api filters `superseded_at IS NULL` in the per-step invocation panel and
+    // in every cost/usage rollup, so a blanket supersede erases the terminals that already
+    // SUCCEEDED — 109 of them on one armed plan_build — and their spend with them. It would also
+    // discard a successful, unconsumed llm output on the two steps that own both an llm and a
+    // fan-out (03-phase-0a-discovery, 09_5-skill-generation) and buy a fresh CLI call for it.
+    const blockerRows = await tx
+      .select({
+        id: schema.cliInvocations.id,
+        endedAt: schema.cliInvocations.endedAt,
+        exitCode: schema.cliInvocations.exitCode,
+        errorMessage: schema.cliInvocations.errorMessage,
+      })
+      .from(schema.cliInvocations)
       .where(
         and(
           eq(schema.cliInvocations.taskStepId, step.id),
           isNull(schema.cliInvocations.supersededAt),
           isNull(schema.cliInvocations.consumedAt),
+          ne(schema.cliInvocations.mode, 'agent_mining'),
+        ),
+      )
+      .orderBy(desc(schema.cliInvocations.createdAt))
+      .limit(1);
+    const blocker = blockerRows[0];
+    // A non-zero exit, a null exit (killed / orphaned), or any error text — the same three the
+    // llm resolver treats as a failed invocation.
+    if (
+      blocker &&
+      blocker.endedAt != null &&
+      (blocker.exitCode == null ||
+        blocker.exitCode !== 0 ||
+        (blocker.errorMessage?.trim().length ?? 0) > 0)
+    ) {
+      await tx
+        .update(schema.cliInvocations)
+        .set({ supersededAt: now })
+        .where(eq(schema.cliInvocations.id, blocker.id));
+    }
+
+    // Fan-out arm: mark the terminals the outage killed for re-dispatch, keeping every `done`
+    // row. Same marker the human's Resume writes, read by the fan-out barrier's user-requested
+    // arm (step-runner.ts) — the ONLY route to a partial re-dispatch, since the barrier returns
+    // early once any mining row exists and so never re-runs selectAgents. Without it the barrier
+    // walks on to its fatal-provider guard, reads the SAME stored rate-limit text off the failed
+    // rows and re-fails the step within a second, on every attempt, until the cap gives up.
+    //
+    // Scoped to that guard's own predicate rather than to every failed row (what the human's
+    // Resume marks): a machine must not spend the recovered quota on agents that died of
+    // something else, and clearing exactly the set the guard scans is what lets the step get
+    // past it — the remaining failures then degrade through apply() as they normally would.
+    // MEASURED on one armed plan_build: 8 of its 47 failed rows were the rate limit; the other
+    // 39 were an oversized prompt or a config permission error and would fail again identically.
+    const failedAgents = await tx
+      .select({
+        id: schema.taskStepAgentMinings.id,
+        errorMessage: schema.taskStepAgentMinings.errorMessage,
+      })
+      .from(schema.taskStepAgentMinings)
+      .where(
+        and(
+          eq(schema.taskStepAgentMinings.taskStepId, step.id),
+          eq(schema.taskStepAgentMinings.status, 'failed'),
         ),
       );
+    const outageAgents = failedAgents.filter((a) => isFatalProviderFailure(a.errorMessage));
+    if (outageAgents.length > 0) {
+      await tx
+        .update(schema.taskStepAgentMinings)
+        .set({ userRetryRequestedAt: now, updatedAt: now })
+        .where(
+          inArray(
+            schema.taskStepAgentMinings.id,
+            outageAgents.map((a) => a.id),
+          ),
+        );
+    }
     // Preserve iterations/output/detect/form so the loop resumes at the failed pass.
     await tx
       .update(schema.taskSteps)
