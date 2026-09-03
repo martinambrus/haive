@@ -140,7 +140,7 @@ planRoutes.get('/:id/plan', async (c) => {
     // to report it. MEASURED on the dev install, one 4106-node plan carries 5
     // dependency cycles and 11 dependencies on an own ancestor — all
     // permanently unsatisfiable, and none of them visible anywhere before this.
-    defects: describePlanDefects(skeletons, derived),
+    defects: describePlanDefects(skeletons, edges, derived),
   });
 });
 

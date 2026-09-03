@@ -263,16 +263,30 @@ export interface PlanDefectNodeView {
   title: string;
 }
 
+/** One `depends_on` edge on a defect, carrying the id needed to remove it.
+ *  `edgeId` is null only if the edge vanished between the read and the report,
+ *  which is a stale row rather than an error — the UI drops the affordance. */
+export interface PlanDefectEdgeView {
+  edgeId: string | null;
+  from: PlanDefectNodeView;
+  to: PlanDefectNodeView;
+}
+
 /** Dependency knots that can NEVER resolve, as distinct from work that is
  *  merely waiting. A property of the plan rather than of any one node — a cycle
  *  has two ends and neither is the place to report it — so this rides the
- *  overview, not a node view. */
+ *  overview, not a node view.
+ *
+ *  Both kinds are reported as the EDGES that form them rather than the nodes
+ *  they trap, because an edge is the only thing a person can act on: removing
+ *  any one hop breaks a loop, and the nodes themselves are usually fine. */
 export interface PlanDefectsView {
-  /** `depends_on` loops. Every member is permanently blocked by the others. */
-  cycles: PlanDefectNodeView[][];
+  /** `depends_on` loops, each as the hops around it. Every member is
+   *  permanently blocked by the others until one hop goes. */
+  cycles: PlanDefectEdgeView[][];
   /** A node depending on its own ancestor: the roll-up cannot green the
    *  ancestor while the descendant waiting on it is outstanding. */
-  ancestorDeps: { from: PlanDefectNodeView; to: PlanDefectNodeView }[];
+  ancestorDeps: PlanDefectEdgeView[];
 }
 
 export interface PlanEdgeView {

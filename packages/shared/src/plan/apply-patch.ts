@@ -335,6 +335,100 @@ async function applyOps(
     );
   }
 
+  /**
+   * The repository's `depends_on` adjacency, loaded once per patch and kept
+   * current as the patch adds links.
+   *
+   * Only this edge kind is checked. `affects` and `implements` cycle by
+   * construction — two components that each affect the other is a normal thing
+   * for a plan to say, which is why `computeImpact` is a BFS with a visited set
+   * rather than a recursive CTE. `depends_on` is the one kind that HOLDS WORK
+   * BACK, so a loop in it is not expressive, it is a deadlock.
+   */
+  let dependsOnGraph: Map<string, Set<string>> | null = null;
+
+  async function dependsOnAdjacency(): Promise<Map<string, Set<string>>> {
+    if (dependsOnGraph) return dependsOnGraph;
+    const rows = await tx
+      .select({
+        fromNodeId: schema.planNodeEdges.fromNodeId,
+        toNodeId: schema.planNodeEdges.toNodeId,
+      })
+      .from(schema.planNodeEdges)
+      .where(
+        and(
+          eq(schema.planNodeEdges.repositoryId, repositoryId),
+          eq(schema.planNodeEdges.kind, 'depends_on'),
+        ),
+      );
+    const graph = new Map<string, Set<string>>();
+    for (const row of rows) {
+      const run = graph.get(row.fromNodeId);
+      if (run) run.add(row.toNodeId);
+      else graph.set(row.fromNodeId, new Set([row.toNodeId]));
+    }
+    dependsOnGraph = graph;
+    return graph;
+  }
+
+  function noteDependency(fromId: string, toId: string): void {
+    if (!dependsOnGraph) return;
+    const run = dependsOnGraph.get(fromId);
+    if (run) run.add(toId);
+    else dependsOnGraph.set(fromId, new Set([toId]));
+  }
+
+  /**
+   * Why this `depends_on` could never be satisfied, or null if it can be.
+   *
+   * Two shapes, both deadlocks rather than waits, and both were MEASURED on the
+   * dev install before this guard existed — one 4106-node plan held 5 dependency
+   * cycles and 11 nodes depending on an own ancestor, every one of them written
+   * by a build agent that was never told it could not.
+   *
+   *  - ON AN ANCESTOR: `rollUpStatus` cannot green a container while a
+   *    descendant is outstanding, and the descendant is waiting on the
+   *    container. Neither side can move first.
+   *  - CLOSING A LOOP: every node on the loop waits for the next one.
+   *
+   * Refused at the WRITE, not merely discouraged in a prompt. The prompt is
+   * advisory and the agents proved it: telling a model not to do something is
+   * not a constraint, it is a hope, and a plan that has already recorded the
+   * deadlock needs a person to find and delete the edge.
+   */
+  async function unsatisfiableDependency(from: NodeRow, to: NodeRow): Promise<string | null> {
+    // Paths are self-inclusive and slash-terminated, so `to` is an ancestor of
+    // `from` exactly when from's ancestry starts with to's.
+    if (from.path.startsWith(to.path)) {
+      return (
+        `a node cannot depend on its own ancestor (${to.id}): the ancestor cannot finish ` +
+        'before the thing inside it, so neither could ever start'
+      );
+    }
+    // A dependency the other way round is NOT refused. A container waiting on
+    // its own child is redundant — the roll-up already says that — but it is
+    // satisfiable, and refusing satisfiable-but-redundant is how a guard starts
+    // rejecting things people meant.
+    const graph = await dependsOnAdjacency();
+    const seen = new Set<string>([to.id]);
+    const queue = [to.id];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current === from.id) {
+        return (
+          `this dependency would close a loop: ${to.id} already depends on ${from.id}, ` +
+          'directly or through other nodes, so neither could ever start'
+        );
+      }
+      for (const next of graph.get(current) ?? []) {
+        if (seen.has(next)) continue;
+        seen.add(next);
+        queue.push(next);
+      }
+    }
+    return null;
+  }
+
   async function nextOrdinal(parentId: string | null): Promise<number> {
     const [row] = await tx
       .select({ max: sql<number | null>`max(${schema.planNodes.ordinal})` })
@@ -585,6 +679,9 @@ async function applyOps(
             ),
           );
         await tx.delete(schema.planNodes).where(eq(schema.planNodes.id, row.id));
+        // The cascade takes this subtree's edges with it, so a dependency graph
+        // cached before now would report paths that no longer exist.
+        dependsOnGraph = null;
         for (const d of doomed) dead.add(d.id);
         result.deleted.push(row.id);
         break;
@@ -595,6 +692,21 @@ async function applyOps(
         const to = await resolveExisting(op.toRef, opIndex);
         if (from.id === to.id) {
           throw new PlanPatchError('invalid', 'a node cannot link to itself', opIndex);
+        }
+        if (op.kind === 'depends_on') {
+          const refusal = await unsatisfiableDependency(from, to);
+          if (refusal) {
+            // Same policy as an unresolvable ref, and for the same measured
+            // reason: an agent that decomposed a component into twelve children
+            // and then declared one impossible dependency should lose the link,
+            // not the twelve children. A PERSON gets told.
+            if (opts.onUnresolvableRef === 'drop') {
+              result.dropped.push(`link dropped: ${refusal}`);
+              break;
+            }
+            throw new PlanPatchError('invalid', refusal, opIndex);
+          }
+          noteDependency(from.id, to.id);
         }
         const inserted = await tx
           .insert(schema.planNodeEdges)
@@ -625,6 +737,7 @@ async function applyOps(
             ),
           )
           .returning({ id: schema.planNodeEdges.id });
+        if (removed.length > 0) dependsOnGraph = null;
         result.unlinked += removed.length;
         break;
       }

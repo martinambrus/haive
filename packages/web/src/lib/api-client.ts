@@ -1326,14 +1326,23 @@ export interface PlanDefectNode {
   title: string;
 }
 
+/** One `depends_on` edge on a defect, with the id needed to remove it. */
+export interface PlanDefectEdge {
+  edgeId: string | null;
+  from: PlanDefectNode;
+  to: PlanDefectNode;
+}
+
 /** Dependency knots that can NEVER resolve, as distinct from work that is
  *  merely waiting. A property of the plan rather than of any one node, so it
- *  arrives with the overview. */
+ *  arrives with the overview. Reported as the EDGES that form them, because an
+ *  edge is the only thing a person can act on — removing any one hop breaks a
+ *  loop, and the nodes it traps are usually fine. */
 export interface PlanDefects {
-  /** `depends_on` loops: every member permanently blocks the others. */
-  cycles: PlanDefectNode[][];
+  /** `depends_on` loops, each as the hops around it. */
+  cycles: PlanDefectEdge[][];
   /** A node depending on its own ancestor — unsatisfiable in both directions. */
-  ancestorDeps: { from: PlanDefectNode; to: PlanDefectNode }[];
+  ancestorDeps: PlanDefectEdge[];
 }
 
 export interface PlanCrumb {

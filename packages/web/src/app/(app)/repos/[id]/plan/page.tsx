@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import {
   createPlanNode,
+  deletePlanEdge,
   getPlanUnread,
   getRepoOnboardingStatus,
   getUiPrefs,
@@ -83,6 +84,7 @@ export default function PlanPage() {
   const [defectsOpen, setDefectsOpen] = useState(false);
   const [sequencing, setSequencing] = useState(false);
   const [pullReport, setPullReport] = useState<PlanPullOutcome | null>(null);
+  const [removingEdge, setRemovingEdge] = useState(false);
   // Fetched only while the plan is empty: it decides whether the "build from
   // the knowledge base" offer can exist at all. Null = unknown, treated as
   // onboarded so nothing hides on a failed check (same stance as the repos
@@ -305,6 +307,22 @@ export default function PlanPage() {
       setError(e instanceof Error ? e.message : 'Failed to save the plan snapshot');
     } finally {
       setSnapshotBusy(false);
+    }
+  }
+
+  /** Delete one dependency edge from the defect report. Never automatic: the
+   *  plan says two things depend on each other and only a person knows which of
+   *  them is the wrong claim. */
+  async function removeDefectEdge(edgeId: string): Promise<void> {
+    setRemovingEdge(true);
+    setError(null);
+    try {
+      await deletePlanEdge(repositoryId, edgeId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not remove the dependency');
+    } finally {
+      setRemovingEdge(false);
     }
   }
 
@@ -641,16 +659,33 @@ export default function PlanPage() {
           </button>
           {defectsOpen && (
             <>
-              {defects.cycles.map((loop) => (
-                <p key={loop.map((n) => n.nodeId).join('-')}>
-                  Loop: {loop.map((n) => `#${n.sequence} ${n.title}`).join(' → ')} → #
-                  {loop[0]?.sequence}
-                </p>
+              {defects.cycles.map((loop, i) => (
+                <div
+                  key={loop.map((h) => h.from.nodeId).join('-')}
+                  className="flex flex-col gap-0.5"
+                >
+                  <p>Loop {i + 1} — remove any ONE of these to break it:</p>
+                  {loop.map((hop) => (
+                    <p key={`${hop.from.nodeId}-${hop.to.nodeId}`} className="pl-3">
+                      #{hop.from.sequence} {hop.from.title} → #{hop.to.sequence} {hop.to.title}
+                      <DefectEdgeRemove
+                        edgeId={hop.edgeId}
+                        busy={removingEdge}
+                        onRemove={removeDefectEdge}
+                      />
+                    </p>
+                  ))}
+                </div>
               ))}
-              {defects.ancestorDeps.map((d) => (
-                <p key={`${d.from.nodeId}-${d.to.nodeId}`}>
-                  #{d.from.sequence} {d.from.title} depends on its own parent #{d.to.sequence}{' '}
-                  {d.to.title}, which cannot finish first.
+              {defects.ancestorDeps.map((hop) => (
+                <p key={`${hop.from.nodeId}-${hop.to.nodeId}`}>
+                  #{hop.from.sequence} {hop.from.title} depends on its own parent #{hop.to.sequence}{' '}
+                  {hop.to.title}, which cannot finish first.
+                  <DefectEdgeRemove
+                    edgeId={hop.edgeId}
+                    busy={removingEdge}
+                    onRemove={removeDefectEdge}
+                  />
                 </p>
               ))}
             </>
@@ -948,5 +983,42 @@ export default function PlanPage() {
         }}
       />
     </div>
+  );
+}
+
+/** The "remove this dependency" affordance on a defect line.
+ *
+ *  Its own component only because it appears once per hop of every loop and once
+ *  per ancestor dependency, and repeating the confirm text at each site is how
+ *  two of them come to say different things.
+ *
+ *  Confirmed, and never automatic: the plan is asserting that two things depend
+ *  on each other, and only a person knows which of the two claims is the wrong
+ *  one. Removing the edge the code happened to walk first would be a guess
+ *  written into the plan. */
+function DefectEdgeRemove({
+  edgeId,
+  busy,
+  onRemove,
+}: {
+  edgeId: string | null;
+  busy: boolean;
+  onRemove: (edgeId: string) => Promise<void>;
+}) {
+  // A hop whose edge vanished between the read and the render is stale, not
+  // broken — offering a button that deletes nothing would be worse than none.
+  if (!edgeId) return null;
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => {
+        if (!window.confirm('Remove this dependency? The nodes stay; only the link goes.')) return;
+        void onRemove(edgeId);
+      }}
+      className="ml-2 underline disabled:opacity-50"
+    >
+      remove
+    </button>
   );
 }

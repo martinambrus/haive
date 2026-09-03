@@ -236,6 +236,95 @@ async function main(): Promise<void> {
     (await byTitle('Auth (renamed)'))?.path === movedAuth?.path,
   );
 
+  /* --- 5.5 an unsatisfiable depends_on is refused at the WRITE ------------- */
+
+  // These were being MINTED by the build agents: one 4106-node plan on the dev
+  // install held 5 dependency cycles and 11 nodes depending on an own ancestor,
+  // every one of them permanently blocking whatever sat on it. Telling a model
+  // not to do something is a hope, not a constraint, so the applier refuses.
+  await expectPatchError('a dependency on an own ancestor is refused', 'invalid', () =>
+    applyPlanPatch(
+      db,
+      { ops: [{ op: 'link', fromRef: login!.id, toRef: auth!.id, kind: 'depends_on' }] },
+      { repositoryId, origin: 'user' },
+    ),
+  );
+
+  // The other direction is redundant, not impossible — the roll-up already says
+  // a container waits for its children — and refusing satisfiable-but-redundant
+  // is how a guard starts rejecting things people meant.
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'link', fromRef: auth!.id, toRef: login!.id, kind: 'depends_on' }] },
+    { repositoryId, origin: 'user' },
+  );
+  check(
+    'a dependency on an own DESCENDANT is allowed',
+    (await loadPlanEdges(db, repositoryId)).some(
+      (e) => e.fromNodeId === auth!.id && e.toNodeId === login!.id && e.kind === 'depends_on',
+    ),
+  );
+
+  await expectPatchError('a dependency closing a loop is refused', 'invalid', () =>
+    applyPlanPatch(
+      db,
+      { ops: [{ op: 'link', fromRef: login!.id, toRef: auth!.id, kind: 'depends_on' }] },
+      { repositoryId, origin: 'user' },
+    ),
+  );
+
+  // `affects` and `implements` cycle by construction — two components that each
+  // affect the other is a normal thing for a plan to say. Only the kind that
+  // HOLDS WORK BACK is constrained.
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'link', fromRef: login!.id, toRef: auth!.id, kind: 'affects' },
+        { op: 'link', fromRef: auth!.id, toRef: login!.id, kind: 'affects' },
+      ],
+    },
+    { repositoryId, origin: 'user' },
+  );
+  check(
+    'affects may still cycle',
+    (await loadPlanEdges(db, repositoryId)).filter((e) => e.kind === 'affects').length >= 2,
+  );
+
+  // An AGENT loses the impossible link, not the rest of its reply — the same
+  // policy an unresolvable ref gets, for the same reason.
+  const agentPatch = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'kept', parentRef: root!.id, title: 'Survives the bad link' },
+        { op: 'link', fromRef: login!.id, toRef: auth!.id, kind: 'depends_on' },
+      ],
+    },
+    { repositoryId, origin: 'llm', onUnresolvableRef: 'drop' },
+  );
+  check(
+    'an agent keeps its work and loses only the impossible link',
+    agentPatch.created.length === 1 && agentPatch.dropped.length === 1,
+    agentPatch,
+  );
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: agentPatch.created[0]! }] },
+    { repositoryId, origin: 'user' },
+  );
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'unlink', fromRef: auth!.id, toRef: login!.id, kind: 'depends_on' },
+        { op: 'unlink', fromRef: login!.id, toRef: auth!.id, kind: 'affects' },
+        { op: 'unlink', fromRef: auth!.id, toRef: login!.id, kind: 'affects' },
+      ],
+    },
+    { repositoryId, origin: 'user' },
+  );
+
   /* --- 6. a failing op rolls the WHOLE patch back -------------------------- */
 
   const beforeCount = (await nodes()).length;

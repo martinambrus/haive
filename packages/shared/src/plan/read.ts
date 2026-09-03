@@ -8,6 +8,7 @@ import type {
   PlanNodeStatus,
   PlanNodeView,
   PlanDefectNodeView,
+  PlanDefectEdgeView,
   PlanDefectsView,
 } from '../schemas/plan.js';
 import { rollUpStatus } from '../schemas/plan.js';
@@ -222,20 +223,32 @@ export function toNodeViews(
  *  named by the same number the rest of the UI shows it under. */
 export function describePlanDefects(
   nodes: PlanNodeSkeleton[],
+  edges: PlanEdgeRecord[],
   derived: PlanSequenceResult,
 ): PlanDefectsView {
   const byId = new Map(nodes.map((n) => [n.id, n]));
+  const edgeIdByPair = new Map(
+    edges
+      .filter((e) => e.kind === 'depends_on')
+      .map((e) => [`${e.fromNodeId}\0${e.toNodeId}`, e.id]),
+  );
   const describe = (nodeId: string): PlanDefectNodeView => ({
     nodeId,
     sequence: derived.sequenceById.get(nodeId) ?? 0,
     title: byId.get(nodeId)?.title ?? 'unknown node',
   });
+  const hop = (fromNodeId: string, toNodeId: string): PlanDefectEdgeView => ({
+    edgeId: edgeIdByPair.get(`${fromNodeId}\0${toNodeId}`) ?? null,
+    from: describe(fromNodeId),
+    to: describe(toNodeId),
+  });
   return {
-    cycles: derived.cycles.map((loop) => loop.map(describe)),
-    ancestorDeps: derived.ancestorDeps.map((d) => ({
-      from: describe(d.fromNodeId),
-      to: describe(d.toNodeId),
-    })),
+    // `cycles` lists the loop's nodes in walk order, so the hops are consecutive
+    // pairs and the last one closes back onto the first.
+    cycles: derived.cycles.map((loop) =>
+      loop.map((nodeId, i) => hop(nodeId, loop[(i + 1) % loop.length]!)),
+    ),
+    ancestorDeps: derived.ancestorDeps.map((d) => hop(d.fromNodeId, d.toNodeId)),
   };
 }
 
