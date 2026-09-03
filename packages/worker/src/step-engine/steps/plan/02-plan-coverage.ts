@@ -793,9 +793,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
         return {
           // The node id rides in the agent id so apply() can hand the patch a
           // `self` ref and the agent never transcribes a uuid.
-          agentId: structural
-            ? `cover-node-${structural.nodeId}`
-            : `cover-${key.replace(/\W+/g, '-')}`,
+          agentId: structural ? `cover-node-${structural.nodeId}` : sectionAgentId(key),
           agentTitle: `Cover: ${(structural?.title ?? section?.title ?? key).slice(0, 60)}`,
           roleKey: 'expand',
           prompt: [
