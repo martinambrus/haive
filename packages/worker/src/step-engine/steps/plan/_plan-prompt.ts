@@ -52,6 +52,16 @@ Rules:
   thing that holds work back. Never make a node depend on its own parent or
   ancestor, and never create a loop — neither can ever be satisfied, so both
   strand every node on them.
+- \`depends_on\` means ONE thing: this node cannot START until the target is
+  DONE. It does not mean "uses", "calls", "is part of" or "is governed by".
+  Those relationships are already carried by the tree or by \`affects\`, and
+  writing them as \`depends_on\` stops real work.
+  Watch the direction. "A is invoked by B" means B depends on A — NOT the
+  reverse. A thing being called does not wait for its caller, and a stage inside
+  a pipeline does not wait for the pipeline. MEASURED on a real 4106-node plan:
+  15 of 16 unsatisfiable dependencies were exactly this, and the agents' own
+  notes said so — "is invoked by", "runs as a stage of", "consumes what this
+  ancestor defines".
 - \`codeLinks\` names the files that already implement a node, so the plan can later
   answer "if I change this, what else must change". Add it ONLY for a file you have
   actually looked at, and say in \`evidence\` what made you link it. A guessed path is
