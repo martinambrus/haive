@@ -12,6 +12,7 @@ import {
   parseSharedStrings,
   sidecarName,
   xlsxSheetToMarkdown,
+  resolveInside,
 } from './_plan-inputs.js';
 import { planInputsStep, type PlanInputsDetect } from './00-plan-inputs.js';
 import { planAgentCapabilities, type PlanBuildDetect } from './01-plan-build.js';
@@ -396,5 +397,37 @@ describe('deciding whether a document says anything', () => {
     const out = await extractPlanInput('xlsx', path.join(dir, 'junk.xlsx'));
     expect(out.error).toBeTruthy();
     expect(out.hasContent).toBe(false);
+  });
+});
+
+describe('keeping a database-supplied name inside the uploads directory', () => {
+  // filename is a COLUMN. The api sanitises it on upload, but this package
+  // cannot see that sanitiser and cannot prove it ran on an older row — and what
+  // is built from it is a file this step writes and a file coverage reads into a
+  // prompt, so an unchecked `../` is an arbitrary write and an arbitrary read.
+  const dir = '/var/lib/haive/repos/u/r/.haive/task-uploads/t1';
+
+  it('accepts an ordinary name', () => {
+    expect(resolveInside(dir, 'spec.docx.extracted.md')).toBe(`${dir}/spec.docx.extracted.md`);
+  });
+
+  it('refuses a traversal', () => {
+    expect(resolveInside(dir, '../../../../../../etc/passwd')).toBeNull();
+    expect(resolveInside(dir, '..')).toBeNull();
+    expect(resolveInside(dir, 'a/../../b')).toBeNull();
+  });
+
+  it('refuses an absolute path, which join would not even keep', () => {
+    expect(resolveInside(dir, '/etc/passwd')).toBeNull();
+  });
+
+  it('refuses a sibling directory that merely shares the prefix', () => {
+    // The reason the check appends a separator: without it `<dir>-evil` starts
+    // with `<dir>` and would pass.
+    expect(resolveInside(dir, '../t1-evil/x')).toBeNull();
+  });
+
+  it('allows a nested path that stays inside', () => {
+    expect(resolveInside(dir, 'sub/file.md')).toBe(`${dir}/sub/file.md`);
   });
 });

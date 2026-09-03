@@ -446,3 +446,25 @@ export async function extractPlanInput(
 export function sidecarName(filename: string): string {
   return `${filename}.extracted.md`;
 }
+
+/**
+ * `dir/name`, but only when the result is still inside `dir`. Null otherwise.
+ *
+ * `name` comes from `task_attachments.filename` — a column, not a literal. The
+ * api sanitises it on upload today, but this package cannot see that sanitiser
+ * and cannot be sure it ran: a row written before it existed, or by any future
+ * writer, arrives here unchecked. The two things built from that column are a
+ * file this step WRITES and a file coverage READS straight into a prompt, so an
+ * unchecked `../` is an arbitrary write and an arbitrary read.
+ *
+ * Checked on the RESOLVED path rather than by scanning the string for `..`,
+ * which is the test that actually holds: it survives encoding tricks, a
+ * separator this platform accepts and the pattern does not, and an absolute path
+ * (which `join` would not even keep). The trailing separator matters too —
+ * without it `/uploads/<id>` would admit `/uploads/<id>-evil`.
+ */
+export function resolveInside(dir: string, name: string): string | null {
+  const base = path.resolve(dir);
+  const candidate = path.resolve(base, name);
+  return candidate === base || candidate.startsWith(base + path.sep) ? candidate : null;
+}

@@ -33,6 +33,7 @@ import {
   type StructuralGap,
 } from './plan-coverage-scan.js';
 import type { PlanInputsApply } from './00-plan-inputs.js';
+import { resolveInside } from './_plan-inputs.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
@@ -291,7 +292,17 @@ async function loadInputSections(
     // doubles as the "is there anything to scan" test.
     const readable = input.sidecar ?? (input.kind === 'text' ? input.filename : null);
     if (!readable) continue;
-    const text = await readFile(path.join(dir, readable), 'utf8').catch((err: unknown) => {
+    // The name is a database column and this read feeds a prompt, so a path that
+    // escapes the uploads dir would put an arbitrary file in front of an agent.
+    const source = resolveInside(dir, readable);
+    if (source === null) {
+      ctx.logger.warn(
+        { file: readable },
+        'coverage: refusing a prepared input whose name escapes the uploads directory',
+      );
+      continue;
+    }
+    const text = await readFile(source, 'utf8').catch((err: unknown) => {
       ctx.logger.warn({ err, file: readable }, 'coverage: could not read a prepared plan input');
       return null;
     });

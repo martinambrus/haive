@@ -8,6 +8,7 @@ import {
   classifyPlanInput,
   extractPlanInput,
   needsExtraction,
+  resolveInside,
   sidecarName,
   type PlanInputKind,
 } from './_plan-inputs.js';
@@ -236,6 +237,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
     const inputs: PlanInputRow[] = [];
     const unreadable: string[] = [];
     let extracted = 0;
+    const uploadsDir = d.uploadsDir;
 
     for (const attachment of d.attachments) {
       const kind = classifyPlanInput(attachment.filename, attachment.contentType);
@@ -265,7 +267,16 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
           );
         } else {
           const name = sidecarName(attachment.filename);
-          const dest = path.join(path.dirname(attachment.storedPath), name);
+          // Built from the uploads dir this step already resolved, NOT from the
+          // row's stored path, and rejected unless it lands inside — the name is
+          // a database column, and a sidecar written outside the tree is an
+          // arbitrary file write.
+          const dest = uploadsDir === null ? null : resolveInside(uploadsDir, name);
+          if (dest === null) {
+            throw new Error(
+              `Refusing to write a sidecar for "${attachment.filename}": the name does not resolve inside the task's uploads directory.`,
+            );
+          }
           const body =
             result.markdown.length > 0
               ? `# ${attachment.filename}\n\n${result.markdown}\n`
@@ -287,8 +298,8 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
     }
 
     let indexPath: string | null = null;
-    if (inputs.length > 0 && d.uploadsDir) {
-      const dest = path.join(d.uploadsDir, PLAN_INPUTS_INDEX);
+    if (inputs.length > 0 && uploadsDir) {
+      const dest = path.join(uploadsDir, PLAN_INPUTS_INDEX);
       await writeFile(dest, renderIndex(ctx.taskId, inputs), 'utf8');
       await harmonizeOwnership(dest);
       indexPath = `${SANDBOX_WORKDIR}/.haive/task-uploads/${ctx.taskId}/${PLAN_INPUTS_INDEX}`;
