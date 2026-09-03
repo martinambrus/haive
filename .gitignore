@@ -24,6 +24,7 @@ build/
 # Claude Code (dev-local)
 .claude/settings.local.json
 .claude/mcp_settings.json
+.claude/scheduled_tasks.lock
 
 # OS
 .DS_Store
