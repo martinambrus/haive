@@ -8,8 +8,10 @@ import { usePageTitle } from '@/lib/use-page-title';
 import {
   api,
   API_BASE_URL,
+  getPlanNode,
   uploadTaskAttachment,
   type CliProvider,
+  type PlanBlocker,
   type OnboardingStatus,
   type Repository,
   type Task,
@@ -98,6 +100,12 @@ export default function NewTaskPage() {
    *  than picked here, because the node is chosen ON the canvas where its
    *  context is visible. */
   const planNodeId = searchParams.get('planNodeId');
+  /** What that node is waiting on, if anything. Fetched rather than passed in
+   *  the query: the canvas link can be typed by hand or bookmarked, and the API
+   *  refuses a blocked node either way — so this page has to be able to explain
+   *  the refusal rather than surface it as a bare 409. */
+  const [planBlockers, setPlanBlockers] = useState<PlanBlocker[] | null>(null);
+  const [overrideBlocked, setOverrideBlocked] = useState(false);
   const presetAppliedRef = useRef(false);
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
@@ -185,6 +193,24 @@ export default function NewTaskPage() {
   useEffect(() => {
     void refreshStatus(repositoryId);
   }, [repositoryId, refreshStatus]);
+
+  useEffect(() => {
+    if (!planNodeId || !repositoryId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const detail = await getPlanNode(repositoryId, planNodeId);
+        if (!cancelled) setPlanBlockers(detail.node.blockedBy);
+      } catch {
+        // A node that cannot be read is not a node that is blocked. Say nothing
+        // and let the API's own refusal be the authority.
+        if (!cancelled) setPlanBlockers([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [planNodeId, repositoryId]);
 
   // QOL: preselect the CLI dropdown from this repo's last-used CLI (the
   // cli_provider_id of the most-recent task on this repo). Only sets when that
@@ -318,6 +344,10 @@ export default function NewTaskPage() {
       setError('Description is required for workflow tasks');
       return;
     }
+    if (planBlockers && planBlockers.length > 0 && !overrideBlocked) {
+      setError('This plan node is waiting on other work. Tick "start it anyway" to go ahead.');
+      return;
+    }
 
     setError(null);
     setSubmitting(true);
@@ -335,6 +365,7 @@ export default function NewTaskPage() {
       if (cliProviderId) body.cliProviderId = cliProviderId;
       if (ignoreSavedStepClis) body.ignoreSavedStepClis = true;
       if (planNodeId) body.planNodeId = planNodeId;
+      if (planNodeId && overrideBlocked) body.overrideBlocked = true;
       if (type === 'workflow') {
         body.isBugFix = isBugFix;
         if (feature.trim()) body.feature = feature.trim();
@@ -549,6 +580,27 @@ export default function NewTaskPage() {
           <p className="rounded border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
             This task is linked to a plan node. When it completes, that node goes green.
           </p>
+        )}
+
+        {planNodeId && planBlockers && planBlockers.length > 0 && (
+          // An override rather than a wall: a plan can contain a dependency that
+          // is unsatisfiable by construction (a cycle, or a node depending on
+          // its own ancestor), and without a way past it a bad edge would wedge
+          // that branch permanently.
+          <div className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-300">
+            <p>
+              That plan node is waiting on{' '}
+              {planBlockers.map((b) => `#${b.sequence} ${b.title}`).join(', ')}.
+            </p>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={overrideBlocked}
+                onChange={(e) => setOverrideBlocked(e.target.checked)}
+              />
+              Start it anyway, before those are done
+            </label>
+          </div>
         )}
 
         {!isRunApp && (

@@ -3,7 +3,17 @@
 import type { PlanNode } from '@/lib/api-client';
 import { Badge } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
-import { countLabel, kindLabel, statusBadge, statusDot, statusLabel } from './plan-status';
+import {
+  BLOCKED_GLYPH,
+  blockedLabel,
+  countLabel,
+  kindLabel,
+  sequenceChip,
+  sequenceLabel,
+  statusBadge,
+  statusDot,
+  statusLabel,
+} from './plan-status';
 
 /**
  * One level of the plan as a grid of cards.
@@ -64,11 +74,25 @@ export function PlanCardGrid({
           >
             <div className="flex items-start gap-2">
               <span
+                className={`shrink-0 rounded border px-1 py-0.5 font-mono text-[10px] tabular-nums ${sequenceChip(node.blockedBy.length)}`}
+                title={`${sequenceLabel(node.sequence)} in build order`}
+              >
+                {node.sequence}
+              </span>
+              <span
                 className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${statusDot(node.rolledStatus)}`}
                 title={statusLabel(node.rolledStatus)}
               />
               <span className="flex-1 text-sm font-medium text-neutral-100">{node.title}</span>
             </div>
+
+            {/* Named, not just counted: "waiting on 2 things" tells you to stop,
+                the numbers tell you where to go instead. */}
+            {node.blockedBy.length > 0 && (
+              <p className="text-[11px] text-neutral-500">
+                {BLOCKED_GLYPH} {blockedLabel(node.blockedBy)}
+              </p>
+            )}
 
             {node.body && (
               <div className="line-clamp-2 text-xs text-neutral-500">

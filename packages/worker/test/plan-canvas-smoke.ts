@@ -21,6 +21,7 @@ import { logger } from '@haive/shared';
 import {
   PlanPatchError,
   applyPlanPatch,
+  computePlanSequence,
   findPlanRoot,
   loadPlanEdges,
   loadPlanNodes,
@@ -31,7 +32,7 @@ import {
 import { markPlanCodeLinksStale } from '../src/plan/code-link-staleness.js';
 import { HAIVE_DATA_FILES, PLAN_MIRROR_SCHEMA_VERSION, type PlanMirror } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
-import { importPlanMirror, writePlanMirror } from '../src/plan/mirror.js';
+import { importPlanMirror, reconcilePlanMirror, writePlanMirror } from '../src/plan/mirror.js';
 
 const log = logger.child({ module: 'plan-patch-smoke' });
 
@@ -577,7 +578,10 @@ async function main(): Promise<void> {
     .from(schema.planNodeCodeLinks)
     .where(eq(schema.planNodeCodeLinks.repositoryId, repositoryId));
   const sourceSkeletons = await loadPlanSkeletons(db, repositoryId);
-  const sourceBadges = toNodeViews(sourceSkeletons, sourceSkeletons)
+  const sourceBadges = toNodeViews(
+    sourceSkeletons,
+    computePlanSequence(sourceSkeletons, await loadPlanEdges(db, repositoryId)),
+  )
     .map((node) => ({
       title: node.title,
       rolledStatus: node.rolledStatus,
@@ -837,7 +841,10 @@ async function main(): Promise<void> {
   );
 
   const restoredSkeletons = await loadPlanSkeletons(db, freshRepoB!.id);
-  const restoredBadges = toNodeViews(restoredSkeletons, restoredSkeletons)
+  const restoredBadges = toNodeViews(
+    restoredSkeletons,
+    computePlanSequence(restoredSkeletons, await loadPlanEdges(db, freshRepoB!.id)),
+  )
     .map((node) => ({
       title: node.title,
       rolledStatus: node.rolledStatus,
@@ -890,6 +897,138 @@ async function main(): Promise<void> {
     restoredMessages.length === 0 && restoredTaskLinks.length === 0 && restoredReads.length === 0,
     { restoredMessages, restoredTaskLinks, restoredReads },
   );
+
+  /* --- 12.5 reconciling a PULLED snapshot onto a plan that exists ---------- */
+
+  // What a `git pull` does to a plan that is already here. `importPlanMirror`
+  // refuses this case outright, which is exactly why the reconcile exists — and
+  // the property that matters is the one a merge cannot infer: a node present
+  // only locally is KEPT, because "someone added it here" and "someone deleted
+  // it there" are indistinguishable from the file and only one is reversible.
+  const pullDir = await mkdtemp(path.join(os.tmpdir(), 'plan-pull-'));
+  await mkdir(path.join(pullDir, '.haive-data'), { recursive: true });
+
+  const localOnly = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        {
+          op: 'upsert',
+          nodeRef: 'tmp-local',
+          parentRef: mirror.nodes.find((n) => n.parentId === null)!.id,
+          title: 'Added here, never pushed',
+        },
+      ],
+    },
+    { repositoryId: freshRepoB!.id, origin: 'user' },
+  );
+  const localOnlyId = localOnly.created[0]!;
+
+  const incomingId = randomUUID();
+  const incomingMirror = {
+    ...mirror,
+    nodes: [
+      ...mirror.nodes.map((n, i) => (i === 0 ? { ...n, title: 'Retitled on the other side' } : n)),
+      {
+        id: incomingId,
+        parentId: mirror.nodes.find((n) => n.parentId === null)!.id,
+        ordinal: 99,
+        title: 'Added on the other side',
+        kind: 'component' as const,
+        body: null,
+        status: 'todo' as const,
+        taskable: false,
+      },
+    ],
+  };
+  await writeFile(
+    path.join(pullDir, HAIVE_DATA_FILES.plan),
+    JSON.stringify(incomingMirror),
+    'utf8',
+  );
+
+  const pulled = await reconcilePlanMirror(db, freshRepoB!.id, pullDir);
+  check(
+    'a pull adds the incoming node and updates the shared ones',
+    pulled.nodesCreated === 1 && pulled.nodesUpdated === mirror.nodes.length,
+    pulled,
+  );
+  check(
+    'a pull KEEPS a node that exists only locally, and names it',
+    pulled.keptLocal.length === 1 && pulled.keptLocal[0] === localOnlyId,
+    pulled.keptLocal,
+  );
+
+  const afterPull = await loadPlanNodes(db, freshRepoB!.id);
+  check(
+    'the local-only node survives the pull',
+    afterPull.some((n) => n.id === localOnlyId),
+    afterPull.length,
+  );
+  check(
+    'the incoming node lands with its own id',
+    afterPull.some((n) => n.id === incomingId && n.title === 'Added on the other side'),
+  );
+  check(
+    'a title changed on the other side lands here',
+    afterPull.some((n) => n.id === mirror.nodes[0]!.id && n.title === 'Retitled on the other side'),
+  );
+  // A kept node can sit under a parent the snapshot MOVED, so the ancestry is
+  // rebuilt for the whole plan rather than for the rows that look affected.
+  const pathById = new Map(afterPull.map((n) => [n.id, n.path]));
+  check(
+    'every path still closes against its parent after the merge',
+    afterPull.every(
+      (n) => n.path === `${n.parentId === null ? '/' : pathById.get(n.parentId)}${n.id}/`,
+    ),
+    afterPull.map((n) => n.path),
+  );
+
+  // Atomicity: a snapshot whose parentage does not resolve must change nothing.
+  const beforeBad = (await loadPlanNodes(db, freshRepoB!.id)).length;
+  await writeFile(
+    path.join(pullDir, HAIVE_DATA_FILES.plan),
+    JSON.stringify({
+      ...incomingMirror,
+      nodes: [
+        ...incomingMirror.nodes,
+        {
+          id: randomUUID(),
+          parentId: randomUUID(),
+          ordinal: 0,
+          title: 'Orphan',
+          kind: 'component' as const,
+          body: null,
+          status: 'todo' as const,
+          taskable: false,
+        },
+      ],
+    }),
+    'utf8',
+  );
+  let refused = false;
+  try {
+    await reconcilePlanMirror(db, freshRepoB!.id, pullDir);
+  } catch {
+    refused = true;
+  }
+  check('a snapshot with unresolvable parentage is refused', refused);
+  check(
+    'the refused pull changed nothing',
+    (await loadPlanNodes(db, freshRepoB!.id)).length === beforeBad,
+  );
+
+  // No snapshot at all is a RESULT, not a failure: a repo that has never had one
+  // committed is the common case.
+  const emptyDir = await mkdtemp(path.join(os.tmpdir(), 'plan-pull-empty-'));
+  const nothing = await reconcilePlanMirror(db, freshRepoB!.id, emptyDir);
+  check(
+    'a repo with no committed snapshot reports it rather than failing',
+    nothing.skipped !== null,
+    nothing,
+  );
+  await rm(pullDir, { recursive: true, force: true }).catch(() => {});
+  await rm(emptyDir, { recursive: true, force: true }).catch(() => {});
 
   /* --- 13. deleting the ROOT clears every attached table ------------------- */
 

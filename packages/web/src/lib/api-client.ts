@@ -559,7 +559,8 @@ export type WorkflowType =
   | 'kb_author'
   | 'plan_build'
   | 'plan_chat'
-  | 'advisory';
+  | 'advisory'
+  | 'plan_sequence';
 
 /** Execution path chosen at the 00-triage step (workflow tasks). Mirrors
  *  ExecutionPath in @haive/shared; redefined here so the browser bundle never
@@ -1295,8 +1296,44 @@ export interface PlanNode {
   /** Status after roll-up against descendants — what the card actually renders.
    *  Server-derived; the client never has the subtree to compute it from. */
   rolledStatus: PlanNodeStatus;
+  /** 1-based position in build order: every descendant is numbered before its
+   *  container, so following the numbers builds the plan bottom-up. Derived
+   *  server-side from the tree plus `ordinal`, never stored.
+   *
+   *  A POSITION, not an id. Inserting a node shifts every number after it, so
+   *  never persist one and never use one to refer to a node across time. */
+  sequence: number;
+  /** This node's own unmet prerequisites, lowest number first — empty when it is
+   *  ready to start. Direct only: a child of a blocked node is not itself
+   *  blocked. Server-derived; `PlanEdge` carries no status, so the client could
+   *  not work this out from the edges it is sent. */
+  blockedBy: PlanBlocker[];
   createdAt: string;
   updatedAt: string;
+}
+
+/** One unmet prerequisite of a node, named the way a person reads it. */
+export interface PlanBlocker {
+  nodeId: string;
+  sequence: number;
+  title: string;
+}
+
+/** A node named in a plan defect report. */
+export interface PlanDefectNode {
+  nodeId: string;
+  sequence: number;
+  title: string;
+}
+
+/** Dependency knots that can NEVER resolve, as distinct from work that is
+ *  merely waiting. A property of the plan rather than of any one node, so it
+ *  arrives with the overview. */
+export interface PlanDefects {
+  /** `depends_on` loops: every member permanently blocks the others. */
+  cycles: PlanDefectNode[][];
+  /** A node depending on its own ancestor — unsatisfiable in both directions. */
+  ancestorDeps: { from: PlanDefectNode; to: PlanDefectNode }[];
 }
 
 export interface PlanCrumb {
@@ -1338,6 +1375,7 @@ export interface PlanOverview {
   root: PlanNode | null;
   children: PlanNode[];
   nodeCount: number;
+  defects: PlanDefects;
 }
 
 export interface PlanSnapshotHealth {
@@ -1364,6 +1402,23 @@ export interface PlanSnapshotSaveResult {
   commitSha: string | null;
   pushed: boolean;
   branch: string | null;
+  /** Pull only. */
+  pulled?: PlanPullOutcome;
+}
+
+/** What a pulled snapshot did to the local plan. `keptLocal` is the one to read:
+ *  nodes that exist here and not in the snapshot are KEPT, because "added
+ *  locally" and "deleted over there" look identical from the file and only one
+ *  of those is reversible. */
+export interface PlanPullOutcome {
+  previousCommit: string | null;
+  fastForwarded: boolean;
+  nodesCreated: number;
+  nodesUpdated: number;
+  keptLocal: string[];
+  edgesAdded: number;
+  codeLinksAdded: number;
+  skipped: string | null;
 }
 
 export interface PlanTreeNode {
@@ -1376,6 +1431,11 @@ export interface PlanTreeNode {
   taskable: boolean;
   directChildren: number;
   totalDescendants: number;
+  sequence: number;
+  /** How many unmet prerequisites this node has — the COUNT, not the list. This
+   *  payload is the whole plan (4106 nodes on the dev install); the names ride
+   *  the detail read for the one node a person is looking at. */
+  blockedCount: number;
 }
 
 export interface PlanNodeDetail {
@@ -1445,6 +1505,12 @@ export function savePlanSnapshot(
   body: { push?: boolean; commitMessage?: string } = {},
 ): Promise<PlanSnapshotSaveResult> {
   return api.post<PlanSnapshotSaveResult>(`${planBase(repositoryId)}/snapshot/save`, body);
+}
+
+/** Fast-forward the checkout from origin and reconcile the committed plan onto
+ *  the local one. The only direction that reads the repository into the plan. */
+export function pullPlanSnapshot(repositoryId: string): Promise<PlanSnapshotSaveResult> {
+  return api.post<PlanSnapshotSaveResult>(`${planBase(repositoryId)}/snapshot/pull`, {});
 }
 
 export function getPlanTree(repositoryId: string): Promise<{ nodes: PlanTreeNode[] }> {
@@ -1630,6 +1696,15 @@ export function startTask(taskId: string): Promise<{ ok: true; started: boolean;
   return api.post<{ ok: true; started: boolean; status: string }>(`/tasks/${taskId}/action`, {
     action: 'start',
   });
+}
+
+/** Put an existing plan into build order: the declared dependencies first, then
+ *  a model for every group of siblings they leave undecided. */
+export function startPlanSequence(
+  repositoryId: string,
+  body: { cliProviderId?: string } = {},
+): Promise<{ taskId: string }> {
+  return api.post<{ taskId: string }>(`${planBase(repositoryId)}/sequence`, body);
 }
 
 export function startPlanChat(

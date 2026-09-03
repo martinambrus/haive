@@ -43,12 +43,43 @@ const NODES: PlanNodeRecord[] = [
   }),
 ];
 
+/** Auth with a sibling to wait on, so a blocking case does not accidentally
+ *  point at its own parent. Rows are in loader order (ORDER BY ordinal), so
+ *  Database is #1 and Auth is #2. */
+const DB = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const WITH_SIBLING: PlanNodeRecord[] = [
+  NODES[0]!,
+  NODES[1]!,
+  node({ id: DB, path: planNodePath(apiPath, DB), parentId: API, title: 'Database', ordinal: 0 }),
+  { ...NODES[2]!, ordinal: 1 },
+];
+
 describe('renderPlanMarkdownFrom', () => {
-  it('nests headings by depth', () => {
+  it('nests headings by depth and numbers them in build order', () => {
+    // Post-order: the deepest node is 1 and the root is last, because a
+    // container is finished when the things inside it are.
     const out = renderPlanMarkdownFrom(NODES, []);
-    expect(out).toContain('# Product');
-    expect(out).toContain('## API');
-    expect(out).toContain('### Auth');
+    expect(out).toContain('# 3. Product');
+    expect(out).toContain('## 2. API');
+    expect(out).toContain('### 1. Auth');
+  });
+
+  it('names a node’s unmet prerequisites by number', () => {
+    // Auth waits on its SIBLING. Depending on an ancestor is a different thing
+    // — unsatisfiable, because the roll-up cannot green the ancestor first —
+    // and `computePlanSequence` reports it separately.
+    const out = renderPlanMarkdownFrom(WITH_SIBLING, [
+      { fromNodeId: AUTH, toNodeId: DB, kind: 'depends_on', note: null },
+    ]);
+    expect(out).toContain('blocked by #1');
+  });
+
+  it('says nothing about blocking when the prerequisite is settled', () => {
+    const settled = WITH_SIBLING.map((n) => (n.id === DB ? { ...n, status: 'done' as const } : n));
+    const out = renderPlanMarkdownFrom(settled, [
+      { fromNodeId: AUTH, toNodeId: DB, kind: 'depends_on', note: null },
+    ]);
+    expect(out).not.toContain('blocked by');
   });
 
   it('stamps every node with a quotable id', () => {
@@ -83,9 +114,9 @@ describe('renderPlanMarkdownFrom', () => {
 
   it('honours maxDepth', () => {
     const out = renderPlanMarkdownFrom(NODES, [], { maxDepth: 1 });
-    expect(out).toContain('# Product');
-    expect(out).toContain('## API');
-    expect(out).not.toContain('### Auth');
+    expect(out).toContain('# 3. Product');
+    expect(out).toContain('## 2. API');
+    expect(out).not.toContain('Auth');
   });
 
   it('marks the focused node', () => {

@@ -9,7 +9,7 @@ import { HttpError } from '../context.js';
 export async function spawnPlanTask(args: {
   userId: string;
   repositoryId: string;
-  type: 'plan_build' | 'plan_chat' | 'advisory';
+  type: 'plan_build' | 'plan_chat' | 'advisory' | 'plan_sequence';
   title: string;
   description?: string;
   metadata: Record<string, unknown>;

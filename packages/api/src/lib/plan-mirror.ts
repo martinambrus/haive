@@ -31,6 +31,22 @@ export async function enqueuePlanMirrorRefresh(
   }
 }
 
+/** Pull is synchronous for the same reason Save is, and for one more: it is the
+ *  only direction that CHANGES the local plan from outside, so the user has to
+ *  see what it did before they do anything else. */
+export async function pullPlanMirror(args: {
+  repositoryId: string;
+  userId: string;
+}): Promise<PlanMirrorJobResult> {
+  const queue = getPlanMirrorQueue();
+  const job = await queue.add(
+    PLAN_MIRROR_JOB_NAMES.PULL,
+    { repositoryId: args.repositoryId, userId: args.userId } satisfies PlanMirrorJobPayload,
+    { removeOnComplete: 100, removeOnFail: 100 },
+  );
+  return job.waitUntilFinished(getPlanMirrorQueueEvents(), 180_000) as Promise<PlanMirrorJobResult>;
+}
+
 /** Explicit Save is synchronous from the user's perspective: it does not claim
  *  success until the worker has refreshed, committed and optionally pushed. */
 export async function savePlanMirror(args: {

@@ -116,6 +116,15 @@ export const createTaskRequestSchema = z
      *  completes the node goes green. Set by the plan UI's "create a task from
      *  this leaf" button. */
     planNodeId: z.string().uuid().optional(),
+    /** Start work on a plan node whose prerequisites are not met yet.
+     *
+     *  Blocking is derived from `depends_on` edges, and a plan can contain
+     *  dependencies that are unsatisfiable by construction — a cycle, or a node
+     *  depending on its own ancestor. MEASURED on the dev install: one plan
+     *  carries 5 cycles and 11 ancestor dependencies. Without an override a bad
+     *  edge would wedge that part of the plan permanently, so the refusal is a
+     *  default a person can knowingly step past, never a wall. */
+    overrideBlocked: z.boolean().optional(),
     resourceLimits: resourceLimitsSchema,
     stepLoopLimits: stepLoopLimitsSchema,
   })

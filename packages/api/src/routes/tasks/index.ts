@@ -24,6 +24,7 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { clampVoteScore } from '@haive/shared/fair-priority';
+import { computePlanSequence, loadPlanEdges, loadPlanSkeletons } from '@haive/shared/plan';
 import { markPlanNodeTaskable } from '../../lib/mark-plan-node-taskable.js';
 import { enqueuePlanMirrorRefresh } from '../../lib/plan-mirror.js';
 import { currentStepLabel } from './_step-label.js';
@@ -441,6 +442,29 @@ taskRoutes.post('/', async (c) => {
     });
     if (!node) throw new HttpError(404, 'Plan node not found in this repository');
     planNode = node;
+
+    // Enforced HERE, not only in the plan UI: the canvas is one caller of this
+    // endpoint and a link can be typed by hand. The whole repository's nodes and
+    // edges are loaded because blocking is a function of the roll-up as well as
+    // the edges — a prerequisite whose own row says `done` is not settled while
+    // a child of it is outstanding — and this runs only when a plan node was
+    // named.
+    if (!body.overrideBlocked) {
+      const [skeletons, edges] = await Promise.all([
+        loadPlanSkeletons(db, body.repositoryId),
+        loadPlanEdges(db, body.repositoryId),
+      ]);
+      const blockers = computePlanSequence(skeletons, edges).blockedById.get(node.id) ?? [];
+      if (blockers.length > 0) {
+        throw new HttpError(
+          409,
+          `This plan node is waiting on ${blockers
+            .map((b) => `#${b.sequence} "${b.title}"`)
+            .join(', ')}. Finish those first, drop the dependency, or start it anyway.`,
+          'plan_node_blocked',
+        );
+      }
+    }
   }
 
   const metadata: Record<string, unknown> = {};

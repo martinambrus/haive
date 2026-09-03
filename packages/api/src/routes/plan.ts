@@ -14,6 +14,7 @@ import {
   planAdvisoryRequestSchema,
   planBuildRequestSchema,
   planChatRequestSchema,
+  planSequenceRequestSchema,
   planSnapshotSaveRequestSchema,
   logger,
   updatePlanNodeRequestSchema,
@@ -25,6 +26,8 @@ import {
   ancestryOf,
   applyPlanPatch,
   computeImpact,
+  computePlanSequence,
+  describePlanDefects,
   findPlanRoot,
   loadPlanEdges,
   loadPlanNode,
@@ -40,7 +43,7 @@ import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { spawnPlanTask } from '../lib/spawn-plan-task.js';
-import { enqueuePlanMirrorRefresh, savePlanMirror } from '../lib/plan-mirror.js';
+import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
 
 const exec = promisify(execFile);
 
@@ -108,20 +111,36 @@ async function gitRead(cwd: string, args: string[]): Promise<{ ok: boolean; stdo
 planRoutes.get('/:id/plan', async (c) => {
   const { repositoryId, repo } = await requireOwnedRepo(c);
   const db = getDb();
-  const skeletons = await loadPlanSkeletons(db, repositoryId);
+  const [skeletons, edges] = await Promise.all([
+    loadPlanSkeletons(db, repositoryId),
+    loadPlanEdges(db, repositoryId),
+  ]);
   const root = skeletons.find((n) => n.parentId === null) ?? null;
   if (!root) {
-    return c.json({ repositoryName: repo.name, root: null, children: [], nodeCount: 0 });
+    return c.json({
+      repositoryName: repo.name,
+      root: null,
+      children: [],
+      nodeCount: 0,
+      defects: { cycles: [], ancestorDeps: [] },
+    });
   }
+  const derived = computePlanSequence(skeletons, edges);
   const children = skeletons.filter((n) => n.parentId === root.id);
   const bodies = new Map([
     [root.id, (await loadPlanNode(db, repositoryId, root.id))?.body ?? null],
   ]);
   return c.json({
     repositoryName: repo.name,
-    root: toNodeViews(skeletons, [root], bodies)[0],
-    children: toNodeViews(skeletons, children),
+    root: toNodeViews([root], derived, bodies)[0],
+    children: toNodeViews(children, derived),
     nodeCount: skeletons.length,
+    // Dependency knots ride the overview because they are a property of the
+    // PLAN, not of any one node: a cycle has two ends and neither is the place
+    // to report it. MEASURED on the dev install, one 4106-node plan carries 5
+    // dependency cycles and 11 dependencies on an own ancestor — all
+    // permanently unsatisfiable, and none of them visible anywhere before this.
+    defects: describePlanDefects(skeletons, derived),
   });
 });
 
@@ -212,13 +231,42 @@ planRoutes.post('/:id/plan/snapshot/save', async (c) => {
   }
 });
 
+/** The one direction that reads the repository into the database: fast-forward
+ *  the checkout, then reconcile the committed snapshot onto the local plan.
+ *
+ *  Additive — a node that exists only here is KEPT and reported, never deleted,
+ *  because "someone added it locally" and "the other side removed it" look
+ *  identical from the snapshot and only one of those is reversible. */
+planRoutes.post('/:id/plan/snapshot/pull', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  await requirePlanCanvasEnabled();
+  try {
+    return c.json(await pullPlanMirror({ repositoryId, userId }));
+  } catch (err) {
+    throw new HttpError(
+      409,
+      err instanceof Error ? err.message : 'Could not pull the plan snapshot',
+      'plan_snapshot_pull_failed',
+    );
+  }
+});
+
 /** Hierarchy only — id, title, status, parentage. Feeds the tree view, which the
  *  user asked to show no edges. */
 planRoutes.get('/:id/plan/tree', async (c) => {
   const { repositoryId } = await requireOwnedRepo(c);
-  const skeletons = await loadPlanSkeletons(getDb(), repositoryId);
+  const db = getDb();
+  // This route deliberately served no edges: the tree shows hierarchy only. It
+  // has to load them now, because whether a node is blocked is a function of
+  // them — one indexed query against the biggest payload, rather than a tree
+  // that renders every node as ready.
+  const [skeletons, edges] = await Promise.all([
+    loadPlanSkeletons(db, repositoryId),
+    loadPlanEdges(db, repositoryId),
+  ]);
+  const derived = computePlanSequence(skeletons, edges);
   return c.json({
-    nodes: toNodeViews(skeletons, skeletons).map((n) => ({
+    nodes: toNodeViews(skeletons, derived).map((n) => ({
       id: n.id,
       parentId: n.parentId,
       title: n.title,
@@ -228,6 +276,11 @@ planRoutes.get('/:id/plan/tree', async (c) => {
       taskable: n.taskable,
       directChildren: n.directChildren,
       totalDescendants: n.totalDescendants,
+      sequence: n.sequence,
+      // The count, not the blockers: this payload is the WHOLE plan (2743 nodes
+      // on the dev install) and the detail read already carries the list for
+      // the one node a person is looking at.
+      blockedCount: n.blockedBy.length,
     })),
   });
 });
@@ -302,9 +355,10 @@ planRoutes.get('/:id/plan/search', async (c) => {
   if (q.length < 2) return c.json({ matches: [] });
 
   const db = getDb();
-  const [skeletons, nodes] = await Promise.all([
+  const [skeletons, nodes, edges] = await Promise.all([
     loadPlanSkeletons(db, repositoryId),
     loadPlanNodes(db, repositoryId),
+    loadPlanEdges(db, repositoryId),
   ]);
   const bodyById = new Map(nodes.map((n) => [n.id, n.body ?? '']));
   const hits = skeletons.filter(
@@ -313,7 +367,7 @@ planRoutes.get('/:id/plan/search', async (c) => {
   // The breadcrumb ships with each hit so the UI can jump straight to a match at
   // depth 6 without walking the tree a level at a time to get there.
   return c.json({
-    matches: toNodeViews(skeletons, hits).map((n) => ({
+    matches: toNodeViews(hits, computePlanSequence(skeletons, edges)).map((n) => ({
       ...n,
       body: null,
       ancestry: ancestryOf(skeletons, n.id).map((a) => ({ id: a.id, title: a.title })),
@@ -327,9 +381,12 @@ planRoutes.get('/:id/plan/nodes/:nodeId', async (c) => {
   const nodeId = c.req.param('nodeId');
   const db = getDb();
   const node = await requireNode(repositoryId, nodeId);
-  const skeletons = await loadPlanSkeletons(db, repositoryId);
+  const [skeletons, edges] = await Promise.all([
+    loadPlanSkeletons(db, repositoryId),
+    loadPlanEdges(db, repositoryId),
+  ]);
   const children = skeletons.filter((n) => n.parentId === nodeId);
-  const edges = await loadPlanEdges(db, repositoryId);
+  const derived = computePlanSequence(skeletons, edges);
   const titleById = new Map(skeletons.map((n) => [n.id, n.title]));
 
   const codeLinks = await db
@@ -352,9 +409,9 @@ planRoutes.get('/:id/plan/nodes/:nodeId', async (c) => {
     .orderBy(asc(schema.tasks.createdAt));
 
   return c.json({
-    node: toNodeViews(skeletons, [node], new Map([[node.id, node.body]]))[0],
+    node: toNodeViews([node], derived, new Map([[node.id, node.body]]))[0],
     ancestry: ancestryOf(skeletons, nodeId).map((a) => ({ id: a.id, title: a.title })),
-    children: toNodeViews(skeletons, children),
+    children: toNodeViews(children, derived),
     edges: toEdgeViews(edges.filter((e) => e.fromNodeId === nodeId || e.toNodeId === nodeId)).map(
       (e) => ({
         ...e,
@@ -799,6 +856,27 @@ planRoutes.post('/:id/plan/build', async (c) => {
     ...(body.deferStart ? { enqueue: false } : {}),
   });
   return c.json({ taskId, deferred: body.deferStart === true }, 201);
+});
+
+/** Order an existing plan. Its own endpoint for the same reason the other plan
+ *  task types have theirs: it needs a repository the generic create-task form
+ *  has no field for. */
+planRoutes.post('/:id/plan/sequence', async (c) => {
+  const { userId, repositoryId, repo } = await requireOwnedRepo(c);
+  await requirePlanCanvasEnabled();
+  const body = planSequenceRequestSchema.parse(await c.req.json().catch(() => ({})));
+  const root = await findPlanRoot(getDb(), repositoryId);
+  if (!root) throw new HttpError(409, 'This repository has no plan to order yet');
+  const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
+  const taskId = await spawnPlanTask({
+    userId,
+    repositoryId,
+    type: 'plan_sequence',
+    title: `Order plan: ${repo.name}`,
+    metadata: {},
+    cliProviderId,
+  });
+  return c.json({ taskId }, 201);
 });
 
 planRoutes.post('/:id/plan/nodes/:nodeId/chat', async (c) => {

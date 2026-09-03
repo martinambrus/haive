@@ -3,7 +3,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { CloudUpload, LayoutGrid, ListTree, Plus, Save, Trash2 } from 'lucide-react';
+import {
+  CloudDownload,
+  CloudUpload,
+  LayoutGrid,
+  ListOrdered,
+  ListTree,
+  Plus,
+  Save,
+  Trash2,
+} from 'lucide-react';
 import {
   createPlanNode,
   getPlanUnread,
@@ -13,11 +22,15 @@ import {
   getPlanOverview,
   getPlanTree,
   getPlanSnapshot,
+  pullPlanSnapshot,
   savePlanSnapshot,
   searchPlan,
+  startPlanSequence,
   type PlanNodeDetail,
   type PlanSearchMatch,
   type PlanTreeNode,
+  type PlanDefects,
+  type PlanPullOutcome,
   type PlanSnapshotHealth,
   type UiPrefs,
 } from '@/lib/api-client';
@@ -63,6 +76,13 @@ export default function PlanPage() {
 
   const [repoName, setRepoName] = useState('');
   const [nodeCount, setNodeCount] = useState(0);
+  // Dependency knots, from the overview. A property of the PLAN rather than of
+  // any node — a cycle has two ends and neither is the place to report it — so
+  // it is surfaced once here rather than on every node it touches.
+  const [defects, setDefects] = useState<PlanDefects | null>(null);
+  const [defectsOpen, setDefectsOpen] = useState(false);
+  const [sequencing, setSequencing] = useState(false);
+  const [pullReport, setPullReport] = useState<PlanPullOutcome | null>(null);
   // Fetched only while the plan is empty: it decides whether the "build from
   // the knowledge base" offer can exist at all. Null = unknown, treated as
   // onboarded so nothing hides on a failed check (same stance as the repos
@@ -269,6 +289,7 @@ export default function PlanPage() {
     ]);
     setRepoName(overview.repositoryName);
     setNodeCount(overview.nodeCount);
+    setDefects(overview.defects ?? null);
     setRootId(overview.root?.id ?? null);
     setTree(treeRes.nodes);
     return overview.root?.id ?? null;
@@ -282,6 +303,33 @@ export default function PlanPage() {
       setSnapshot(await getPlanSnapshot(repositoryId));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save the plan snapshot');
+    } finally {
+      setSnapshotBusy(false);
+    }
+  }
+
+  async function pullSnapshot(): Promise<void> {
+    // Confirmed, unlike Save: this is the one control that changes the local
+    // plan from outside, and the checkout moves with it.
+    if (
+      !window.confirm(
+        'Pull the latest commits and merge the committed plan into this one?\n\n' +
+          'Nodes are added and updated. Nodes that exist only here are KEPT, never deleted — ' +
+          'you will be told which.',
+      )
+    ) {
+      return;
+    }
+    setSnapshotBusy(true);
+    setError(null);
+    setPullReport(null);
+    try {
+      const result = await pullPlanSnapshot(repositoryId);
+      setPullReport(result.pulled ?? null);
+      setSnapshot(await getPlanSnapshot(repositoryId));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to pull the plan snapshot');
     } finally {
       setSnapshotBusy(false);
     }
@@ -418,6 +466,8 @@ export default function PlanPage() {
   const currentParentId = focus?.node.id ?? rootId;
   const cards = matches ?? focus?.children ?? [];
   const crumbs = focus?.ancestry ?? [];
+  const defectCount = (defects?.cycles.length ?? 0) + (defects?.ancestorDeps.length ?? 0);
+
   const snapshotLabel = !snapshot
     ? 'Checking snapshot…'
     : snapshot.lastError
@@ -478,6 +528,28 @@ export default function PlanPage() {
               <Button
                 size="sm"
                 variant="secondary"
+                disabled={sequencing}
+                onClick={() => {
+                  void (async () => {
+                    setError(null);
+                    setSequencing(true);
+                    try {
+                      const { taskId } = await startPlanSequence(repositoryId);
+                      router.push(`/tasks/${taskId}`);
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : 'Could not start the ordering run');
+                      setSequencing(false);
+                    }
+                  })();
+                }}
+                title="Order every group of sibling nodes so the plan can be followed by number"
+              >
+                <ListOrdered className="mr-1 h-3.5 w-3.5" />
+                {sequencing ? 'Starting…' : 'Order the plan'}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
                 disabled={snapshotBusy}
                 onClick={() => void saveSnapshot(false)}
                 title="Refresh and commit plan.json plus the full plan.md"
@@ -495,6 +567,16 @@ export default function PlanPage() {
                 <CloudUpload className="mr-1 h-3.5 w-3.5" />
                 Save &amp; push
               </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={snapshotBusy}
+                onClick={() => void pullSnapshot()}
+                title="Fast-forward this checkout from origin and merge the committed plan into this one"
+              >
+                <CloudDownload className="mr-1 h-3.5 w-3.5" />
+                Pull
+              </Button>
             </>
           )}
           <Link href={`/repos`}>
@@ -507,6 +589,74 @@ export default function PlanPage() {
 
       <FormError message={error} />
       <FormError message={snapshot?.lastError ? `Plan snapshot: ${snapshot.lastError}` : null} />
+
+      {pullReport && (
+        <div className="flex flex-col gap-1 rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-300">
+          {pullReport.skipped ? (
+            <p>Nothing to merge: {pullReport.skipped}.</p>
+          ) : (
+            <>
+              <p>
+                Pulled{pullReport.fastForwarded ? ' new commits' : ' (already up to date)'}:{' '}
+                {pullReport.nodesCreated} node(s) added, {pullReport.nodesUpdated} updated,{' '}
+                {pullReport.edgesAdded} link(s) added.
+              </p>
+              {pullReport.keptLocal.length > 0 && (
+                // Named rather than merely counted: these are the nodes the merge
+                // could not decide about, and the user is the one who can.
+                <p>
+                  {pullReport.keptLocal.length} node(s) exist only here and were KEPT. They are
+                  either yours and unpushed, or removed on the other side — delete them by hand if
+                  the removal was intended.
+                </p>
+              )}
+              {pullReport.previousCommit && (
+                <p className="text-neutral-500">
+                  Checkout was at {pullReport.previousCommit.slice(0, 12)} before this.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {defects && defectCount > 0 && (
+        // Red, unlike the "waiting on" notices: these dependencies can NEVER be
+        // satisfied, so the nodes on them are not waiting for anything — they
+        // are stuck until a person deletes an edge. Reporting them as ordinary
+        // blocking would hide that difference behind identical wording.
+        //
+        // Collapsed by default and it stays a summary until asked: MEASURED on
+        // this install, one plan carries 16, which unrolled is a wall of text
+        // above the tree the page is actually for.
+        <div className="flex flex-col gap-1 rounded border border-red-900 bg-red-950/30 px-3 py-2 text-xs text-red-200">
+          <button
+            type="button"
+            onClick={() => setDefectsOpen((v) => !v)}
+            className="text-left font-medium"
+          >
+            {defectsOpen ? '▾' : '▸'} This plan has {defectCount}{' '}
+            {defectCount === 1 ? 'dependency' : 'dependencies'} that can never be satisfied. Every
+            node on one stays blocked until an edge is removed.
+          </button>
+          {defectsOpen && (
+            <>
+              {defects.cycles.map((loop) => (
+                <p key={loop.map((n) => n.nodeId).join('-')}>
+                  Loop: {loop.map((n) => `#${n.sequence} ${n.title}`).join(' → ')} → #
+                  {loop[0]?.sequence}
+                </p>
+              ))}
+              {defects.ancestorDeps.map((d) => (
+                <p key={`${d.from.nodeId}-${d.to.nodeId}`}>
+                  #{d.from.sequence} {d.from.title} depends on its own parent #{d.to.sequence}{' '}
+                  {d.to.title}, which cannot finish first.
+                </p>
+              ))}
+            </>
+          )}
+        </div>
+      )}
 
       {nodeCount === 0 ? (
         <PlanStarter

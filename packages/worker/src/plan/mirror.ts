@@ -8,11 +8,13 @@ import {
   PLAN_MIRROR_SCHEMA_VERSION,
   logger,
   type PlanMirror,
+  type PlanPullOutcome,
 } from '@haive/shared';
 import { planMirrorPayloadSchema, planMirrorV2Schema } from '@haive/shared/schemas';
 import {
   loadPlanEdges,
   loadPlanNodes,
+  markPlanMirrorDirty,
   renderPlanMarkdownFrom,
   planNodePath,
 } from '@haive/shared/plan';
@@ -408,6 +410,269 @@ export async function importPlanMirror(
     'restored plan from .haive-data mirror',
   );
   return { imported: true };
+}
+
+/**
+ * Reconcile a PULLED plan snapshot onto a plan that already exists.
+ *
+ * `importPlanMirror` cannot serve this: it refuses whenever the repository has
+ * any plan rows, which is the entire case here. This is the second deliberate
+ * bypass of `applyPlanPatch`, for the reason the first one documents — node ids
+ * are restored VERBATIM, and the patch contract cannot express "create this node
+ * with exactly this id". Verbatim ids are also what makes reconciling tractable
+ * at all: two Haive instances that both restored from the same committed
+ * snapshot are talking about the same nodes.
+ *
+ * ADDITIVE ONLY, and that is the whole design:
+ *   - a node only in the snapshot is CREATED here
+ *   - a node in both is UPDATED here
+ *   - a node only HERE is KEPT, and reported
+ *
+ * The third case is where a merge would have to guess. A local-only node is
+ * either work someone added and has not pushed, or work the other side deleted,
+ * and the snapshot cannot tell those apart. Deleting is the one outcome with no
+ * undo, so it is not taken: the caller is handed the ids instead, and a person
+ * decides. Same for edges and code links, which are inserted and never removed.
+ *
+ * One transaction, so a failure leaves the plan exactly as it was.
+ */
+export async function reconcilePlanMirror(
+  db: Database,
+  repositoryId: string,
+  storagePath: string,
+): Promise<PlanPullOutcome> {
+  const empty = (skipped: string): PlanPullOutcome => ({
+    previousCommit: null,
+    fastForwarded: false,
+    nodesCreated: 0,
+    nodesUpdated: 0,
+    keptLocal: [],
+    edgesAdded: 0,
+    codeLinksAdded: 0,
+    skipped,
+  });
+
+  let rawPayload: unknown;
+  try {
+    rawPayload = JSON.parse(
+      await readFile(path.join(storagePath, HAIVE_DATA_FILES.plan), 'utf8'),
+    ) as unknown;
+  } catch {
+    return empty('this repository has no committed plan snapshot');
+  }
+
+  const parsed = planMirrorPayloadSchema.safeParse(rawPayload);
+  if (!parsed.success) {
+    throw new Error(
+      `the committed plan snapshot could not be read: ${parsed.error.issues[0]?.message ?? 'validation failed'}`,
+    );
+  }
+  const mirror = parsed.data;
+  const incoming =
+    mirror.schemaVersion === 1
+      ? mirror.nodes.map((n) => ({ ...n, createdBy: n.createdBy }))
+      : mirror.nodes.map((n) => ({ ...n, createdBy: 'import' as const }));
+  if (incoming.length === 0) return empty('the committed plan snapshot has no nodes');
+
+  const byId = new Map(incoming.map((n) => [n.id, n]));
+  for (const n of incoming) {
+    if (n.parentId !== null && !byId.has(n.parentId)) {
+      throw new Error(`the committed plan snapshot references a missing parent (${n.parentId})`);
+    }
+  }
+  const codeLinks = mirror.schemaVersion === 2 ? mirror.codeLinks : [];
+
+  return db.transaction(async (tx) => {
+    // Serialized against every mirror WRITE on the same repository: a reconcile
+    // that raced a flush could otherwise import a file the flush is mid-rename.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
+
+    const localRows = await tx
+      .select({ id: schema.planNodes.id })
+      .from(schema.planNodes)
+      .where(eq(schema.planNodes.repositoryId, repositoryId));
+    const localIds = new Set(localRows.map((r) => r.id));
+
+    // A node id is globally unique, so an incoming id that exists under ANOTHER
+    // repository is not this plan's node. Refuse whole rather than import half.
+    const foreignIds = incoming.map((n) => n.id).filter((id) => !localIds.has(id));
+    if (foreignIds.length > 0) {
+      const clash = await tx
+        .select({ id: schema.planNodes.id })
+        .from(schema.planNodes)
+        .where(inArray(schema.planNodes.id, foreignIds))
+        .limit(1);
+      if (clash.length > 0) {
+        throw new Error('the incoming plan contains nodes that belong to another repository');
+      }
+    }
+
+    // Parents before children, so a created node's `path` can be built from one
+    // that is already placed. `place()`'s cycle guard is what stops a snapshot
+    // whose parentage loops from hanging this.
+    const pathById = new Map<string, string>();
+    const ordered: typeof incoming = [];
+    const resolving = new Set<string>();
+    const place = (id: string): boolean => {
+      if (pathById.has(id)) return true;
+      if (resolving.has(id)) return false;
+      const node = byId.get(id);
+      if (!node) return false;
+      resolving.add(id);
+      let parentPath: string | null = null;
+      if (node.parentId !== null) {
+        if (!place(node.parentId)) {
+          resolving.delete(id);
+          return false;
+        }
+        parentPath = pathById.get(node.parentId)!;
+      }
+      resolving.delete(id);
+      pathById.set(id, planNodePath(parentPath, id));
+      ordered.push(node);
+      return true;
+    };
+    for (const n of incoming) {
+      if (!place(n.id)) {
+        throw new Error(`the incoming plan's parentage does not resolve for node ${n.id}`);
+      }
+    }
+
+    let nodesCreated = 0;
+    let nodesUpdated = 0;
+    for (const node of ordered) {
+      const fields = {
+        parentId: node.parentId,
+        path: pathById.get(node.id)!,
+        ordinal: node.ordinal,
+        title: node.title,
+        kind: node.kind as 'component',
+        body: node.body,
+        status: node.status as 'todo',
+        taskable: node.taskable,
+        updatedAt: new Date(),
+      };
+      if (localIds.has(node.id)) {
+        await tx
+          .update(schema.planNodes)
+          .set({ ...fields, version: sql`${schema.planNodes.version} + 1` })
+          .where(eq(schema.planNodes.id, node.id));
+        nodesUpdated++;
+      } else {
+        await tx
+          .insert(schema.planNodes)
+          .values({ id: node.id, repositoryId, createdBy: node.createdBy, ...fields });
+        nodesCreated++;
+      }
+    }
+
+    // A node kept locally may still sit under a parent the snapshot MOVED, so its
+    // stored ancestry is now wrong. Rebuild every path from parentage rather than
+    // patching the ones that look affected — the whole plan is a few thousand
+    // short strings and a wrong `path` is invisible to every read that depends on
+    // it.
+    const keptLocal = [...localIds].filter((id) => !byId.has(id));
+    if (keptLocal.length > 0) {
+      const all = await tx
+        .select({ id: schema.planNodes.id, parentId: schema.planNodes.parentId })
+        .from(schema.planNodes)
+        .where(eq(schema.planNodes.repositoryId, repositoryId));
+      const parentOf = new Map(all.map((r) => [r.id, r.parentId]));
+      const resolved = new Map<string, string>();
+      const walk = (id: string, seen: Set<string>): string | null => {
+        const cached = resolved.get(id);
+        if (cached) return cached;
+        if (seen.has(id)) return null;
+        seen.add(id);
+        const parentId = parentOf.get(id) ?? null;
+        let parentPath: string | null = null;
+        if (parentId !== null) {
+          parentPath = walk(parentId, seen);
+          if (parentPath === null) return null;
+        }
+        const own = planNodePath(parentPath, id);
+        resolved.set(id, own);
+        return own;
+      };
+      for (const row of all) {
+        const own = walk(row.id, new Set());
+        if (own)
+          await tx
+            .update(schema.planNodes)
+            .set({ path: own })
+            .where(eq(schema.planNodes.id, row.id));
+      }
+    }
+
+    // Edges and code links are INSERTED, never removed, for the same reason a
+    // local-only node is kept: a link that is here and not in the snapshot may be
+    // one someone added, and dropping it is not reversible.
+    const liveIds = new Set([...localIds, ...byId.keys()]);
+    const edges = (mirror.edges ?? []).filter(
+      (e) => liveIds.has(e.fromNodeId) && liveIds.has(e.toNodeId) && e.fromNodeId !== e.toNodeId,
+    );
+    let edgesAdded = 0;
+    if (edges.length > 0) {
+      const inserted = await tx
+        .insert(schema.planNodeEdges)
+        .values(
+          edges.map((e) => ({
+            repositoryId,
+            fromNodeId: e.fromNodeId,
+            toNodeId: e.toNodeId,
+            kind: e.kind as 'affects',
+            note: e.note,
+          })),
+        )
+        .onConflictDoNothing()
+        .returning({ id: schema.planNodeEdges.id });
+      edgesAdded = inserted.length;
+    }
+
+    const links = codeLinks.filter((l) => liveIds.has(l.nodeId));
+    let codeLinksAdded = 0;
+    if (links.length > 0) {
+      const inserted = await tx
+        .insert(schema.planNodeCodeLinks)
+        .values(
+          links.map((l) => ({
+            repositoryId,
+            nodeId: l.nodeId,
+            repoPath: l.repoPath,
+            symbol: l.symbol,
+            evidence: l.evidence,
+            derivedAtCommit: l.derivedAtCommit,
+            stale: l.stale,
+            confidence: null,
+          })),
+        )
+        .onConflictDoNothing()
+        .returning({ id: schema.planNodeCodeLinks.id });
+      codeLinksAdded = inserted.length;
+    }
+
+    // Dirty, not clean: the local-only nodes this kept mean the database now says
+    // something the pulled file does not, so the file has to be rewritten from
+    // the database rather than trusted as current.
+    if (nodesCreated > 0 || nodesUpdated > 0 || keptLocal.length > 0) {
+      await markPlanMirrorDirty(tx, repositoryId);
+    }
+
+    logger.info(
+      { repositoryId, nodesCreated, nodesUpdated, keptLocal: keptLocal.length, edgesAdded },
+      'reconciled plan from pulled .haive-data mirror',
+    );
+    return {
+      previousCommit: null,
+      fastForwarded: false,
+      nodesCreated,
+      nodesUpdated,
+      keptLocal,
+      edgesAdded,
+      codeLinksAdded,
+      skipped: null,
+    } satisfies PlanPullOutcome;
+  });
 }
 
 /** Resolve the repository's writable/readable checkout and flush its current

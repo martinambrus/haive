@@ -34,10 +34,14 @@ import {
 import { PlanChat } from './plan-chat';
 import { PlanGraph } from './plan-graph';
 import {
+  BLOCKED_GLYPH,
   PLAN_KINDS,
   PLAN_STATUSES,
+  blockedLabel,
   isRolledUp,
   kindLabel,
+  sequenceChip,
+  sequenceLabel,
   statusBadge,
   statusLabel,
 } from './plan-status';
@@ -318,7 +322,15 @@ export function PlanDetailPanel({
               className="w-full rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-base font-semibold text-neutral-100 outline-none focus:border-indigo-500"
             />
           ) : (
-            <h2 className="truncate text-base font-semibold text-neutral-100">{node.title}</h2>
+            <div className="flex min-w-0 items-baseline gap-2">
+              <span
+                className={`shrink-0 rounded border px-1 py-0.5 font-mono text-[11px] tabular-nums ${sequenceChip(node.blockedBy.length)}`}
+                title={`${sequenceLabel(node.sequence)} in build order`}
+              >
+                {node.sequence}
+              </span>
+              <h2 className="truncate text-base font-semibold text-neutral-100">{node.title}</h2>
+            </div>
           )}
         </div>
         <button type="button" onClick={onClose} className="text-sm text-neutral-500">
@@ -402,6 +414,30 @@ export function PlanDetailPanel({
         <p className="rounded border border-amber-900 bg-amber-950/30 px-2 py-1 text-[11px] text-amber-200">
           Shown as <strong>{statusLabel(node.rolledStatus)}</strong> because of what is below it.
           Its own status is {statusLabel(node.status)}.
+        </p>
+      )}
+
+      {node.blockedBy.length > 0 && (
+        // Neutral, not amber: amber already means "blocked, needs a person"
+        // everywhere in this UI, and this is the other thing — work waiting on
+        // work. Each blocker is a link, because the useful next action is to go
+        // and look at the thing in the way.
+        <p className="rounded border border-neutral-800 bg-neutral-900/60 px-2 py-1 text-[11px] text-neutral-300">
+          {BLOCKED_GLYPH} Waiting on{' '}
+          {node.blockedBy.map((b, i) => (
+            <span key={b.nodeId}>
+              {i > 0 && ', '}
+              <button
+                type="button"
+                onClick={() => onNavigate(b.nodeId)}
+                className="text-indigo-300 underline"
+              >
+                {sequenceLabel(b.sequence)} {b.title}
+              </button>
+            </span>
+          ))}
+          . Finish {node.blockedBy.length === 1 ? 'it' : 'those'} first, or drop the dependency in
+          the Links tab.
         </p>
       )}
 
@@ -511,13 +547,24 @@ export function PlanDetailPanel({
                 external work lives outside the system — if it needs
                 investigating first, that is what the `research` kind (or the
                 chat tab) is for. */}
-            {node.kind !== 'external' && node.kind !== 'research' && (
-              <Link
-                href={`/tasks/new?repositoryId=${repositoryId}&planNodeId=${nodeId}&title=${encodeURIComponent(node.title)}`}
-              >
-                <Button size="sm">Create a task from this</Button>
-              </Link>
-            )}
+            {node.kind !== 'external' &&
+              node.kind !== 'research' &&
+              // Blocked SHOWS the button disabled rather than hiding it, unlike
+              // the kind test above. Hiding reads as "this feature does not
+              // exist here"; the point is that it exists and is not available
+              // YET, which only a disabled control with a reason can say.
+              (node.blockedBy.length > 0 ? (
+                <Button size="sm" variant="secondary" disabled title={blockedLabel(node.blockedBy)}>
+                  {BLOCKED_GLYPH} Blocked — {node.blockedBy.length} thing
+                  {node.blockedBy.length === 1 ? '' : 's'} first
+                </Button>
+              ) : (
+                <Link
+                  href={`/tasks/new?repositoryId=${repositoryId}&planNodeId=${nodeId}&title=${encodeURIComponent(node.title)}`}
+                >
+                  <Button size="sm">Create a task from this</Button>
+                </Link>
+              ))}
             {node.kind === 'research' && (
               <Button
                 size="sm"

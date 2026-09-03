@@ -1,4 +1,4 @@
-import type { PlanNodeKind, PlanNodeStatus } from '@/lib/api-client';
+import type { PlanBlocker, PlanNodeKind, PlanNodeStatus } from '@/lib/api-client';
 
 /**
  * How a plan node's state is spelled and coloured.
@@ -87,4 +87,47 @@ export function countLabel(directChildren: number, totalDescendants: number): st
  *  user who set a node to `done` and sees amber deserves to know why. */
 export function isRolledUp(own: PlanNodeStatus, rolled: PlanNodeStatus): boolean {
   return own !== rolled;
+}
+
+/* ------------------------------------------------------------------ */
+/* Build order                                                         */
+/* ------------------------------------------------------------------ */
+
+/** The build-order number as it appears anywhere a node is named.
+ *
+ *  A POSITION in the current plan, not an id: inserting a node shifts every
+ *  number after it. `#—` is the honest rendering of a node the server did not
+ *  number, which should not happen and must not render as `#0`. */
+export function sequenceLabel(sequence: number): string {
+  return sequence > 0 ? `#${sequence}` : '#—';
+}
+
+/** The lock a blocked node's number carries. A GLYPH rather than a colour,
+ *  deliberately: every colour in this palette is already spoken for and says
+ *  something else — amber is "blocked, needs a person", indigo is "in progress",
+ *  red is failure — and "waiting on a prerequisite" is none of those. A fifth
+ *  colour would also put two different meanings on one card at once, since a
+ *  blocked node still has a status of its own to show. */
+export const BLOCKED_GLYPH = '\u{1F512}';
+
+/** Classes for the number chip. Blocked nodes are MUTED rather than
+ *  highlighted: on a plan where most work is waiting (MEASURED: 1302 of 4106
+ *  nodes), the useful signal is which numbers can be started now, so the ready
+ *  ones are the ones left legible. */
+export function sequenceChip(blockedCount: number): string {
+  return blockedCount > 0
+    ? 'border-neutral-800 bg-neutral-900 text-neutral-600'
+    : 'border-neutral-700 bg-neutral-900 text-neutral-300';
+}
+
+/** One line naming what a node is waiting on, for a tooltip or a banner.
+ *  Beyond three the names stop helping and the count starts. */
+export function blockedLabel(blockers: PlanBlocker[]): string {
+  if (blockers.length === 0) return '';
+  const named = blockers
+    .slice(0, 3)
+    .map((b) => `${sequenceLabel(b.sequence)} ${b.title}`)
+    .join(', ');
+  const rest = blockers.length - 3;
+  return `Waiting on ${named}${rest > 0 ? ` and ${rest} more` : ''}`;
 }

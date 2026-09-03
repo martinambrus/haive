@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PlanTreeNode } from '@/lib/api-client';
-import { statusDot, statusLabel } from './plan-status';
+import { BLOCKED_GLYPH, sequenceChip, sequenceLabel, statusDot, statusLabel } from './plan-status';
 import { ancestorsOf, computeVisibleSet, flattenVisible } from './plan-tree-filter';
 
 /**
@@ -249,6 +249,20 @@ export function PlanTree({
             ) : (
               <span className="w-4 shrink-0 py-1" />
             )}
+            {/* The number sits OUTSIDE the title button, which is `flex-1
+                truncate` — inside it, a long title would truncate the number
+                away exactly on the deep rows where it is hardest to find. */}
+            <span
+              className={`shrink-0 rounded border px-1 font-mono text-[10px] tabular-nums ${sequenceChip(node.blockedCount)}`}
+              title={
+                node.blockedCount > 0
+                  ? `${sequenceLabel(node.sequence)} in build order — waiting on ${node.blockedCount} thing${node.blockedCount === 1 ? '' : 's'}`
+                  : `${sequenceLabel(node.sequence)} in build order — ready to start`
+              }
+            >
+              {node.blockedCount > 0 ? `${BLOCKED_GLYPH} ` : ''}
+              {node.sequence}
+            </span>
             <span
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDot(node.rolledStatus)}`}
               title={statusLabel(node.rolledStatus)}

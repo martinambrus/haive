@@ -2,6 +2,7 @@ import type { Database } from '@haive/database';
 import type { PlanEdgeKind } from '../schemas/plan.js';
 import { loadPlanEdges, loadPlanNodes, indexChildren, type PlanNodeRecord } from './read.js';
 import { planNodeDepth } from './paths.js';
+import { computePlanSequence } from './sequence.js';
 
 /**
  * The plan as ONE markdown document.
@@ -69,6 +70,11 @@ export function renderPlanMarkdownFrom(
     else outgoing.set(e.fromNodeId, [e]);
   }
 
+  // The build-order number and the unmet prerequisites come from the same
+  // derivation the API serves, so the document an agent reads, the one committed
+  // to `.haive-data/plan.md` and the canvas all say the same thing.
+  const derived = computePlanSequence(nodes, edges);
+
   const lines: string[] = [];
 
   const emit = (node: PlanNodeRecord): void => {
@@ -80,13 +86,21 @@ export function renderPlanMarkdownFrom(
     // clamping silently would make level 7 and level 9 look identical.
     const hashes = '#'.repeat(Math.min(depth + 1, 6));
     const focus = opts.focusNodeId === node.id ? '  <- you are here' : '';
-    lines.push(`${hashes} ${node.title}${focus}`);
+    // The number leads the heading because it is what the reader is scanning
+    // for. It is a position in the CURRENT plan, not an id — the `node:` ref
+    // below is the thing to quote back.
+    const seq = derived.sequenceById.get(node.id);
+    lines.push(`${hashes} ${seq === undefined ? '' : `${seq}. `}${node.title}${focus}`);
 
+    const blockers = derived.blockedById.get(node.id) ?? [];
     const attrs = [
       `${PLAN_NODE_REF_PREFIX}${node.id}`,
       node.kind,
       node.status,
       ...(node.taskable ? ['taskable'] : []),
+      ...(blockers.length > 0
+        ? [`blocked by ${blockers.map((b) => `#${b.sequence}`).join(', ')}`]
+        : []),
       ...(depth >= 6 ? [`depth ${depth}`] : []),
     ];
     lines.push(`\`${attrs.join('\` · \`')}\``);

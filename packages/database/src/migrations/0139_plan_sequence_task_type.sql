@@ -1,0 +1,29 @@
+-- The plan is numbered in build order (post-order over the tree, so every
+-- descendant comes before its container), and that numbering is only as good as
+-- `plan_nodes.ordinal`. Until the sequencing step existed, `ordinal` was the
+-- order an expansion agent happened to emit its children in, so the number was
+-- real and meaningless at the same time.
+--
+-- `plan_sequence` is that step as its own task type. It is not merely a step of
+-- `plan_build` because plan_build runs its steps ONCE: a plan built before this
+-- existed — including the 4106-node plan on the dev install this was written
+-- for — could be ordered no other way. The step module is registered under both
+-- types, the same arrangement `createPlanBuildStep` already uses for its
+-- standalone and onboarding variants.
+--
+-- Like the other plan task types it is deliberately absent from
+-- `workflowTypeSchema` in @haive/shared: it needs a repository the generic
+-- create-task form has no field for, so it is spawned by its own endpoint
+-- (POST /repositories/:id/plan/sequence).
+--
+-- Additive and idempotent: IF NOT EXISTS makes a re-run a no-op, and the value
+-- is also declared in `schema/tasks.ts`, so `drizzle-kit push` (what the
+-- db-migrate service runs) reaches the same state on an environment that never
+-- sees this file.
+--
+-- Rollback: Postgres cannot remove a value from an enum. Undo by deleting
+-- 'plan_sequence' from the enum in `schema/tasks.ts`; the value then remains in
+-- the type, unused and inert. Nothing is destroyed in either direction, and no
+-- row references it until a plan_sequence task is created — delete those first
+-- if the type is being retired.
+ALTER TYPE "workflow_type" ADD VALUE IF NOT EXISTS 'plan_sequence';

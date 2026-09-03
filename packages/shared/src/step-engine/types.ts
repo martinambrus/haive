@@ -319,6 +319,9 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   // Dispatches only what a person ticked at its gate — a clean build spends
   // nothing here — but it CAN dispatch, which is what this list records.
   { id: '02-plan-coverage', workflowType: 'plan_build', title: 'Coverage check' },
+  { id: '03-plan-sequence', workflowType: 'plan_build', title: 'Build order' },
+  // The same step as its own task type, for a plan that already exists.
+  { id: '00-plan-sequence', workflowType: 'plan_sequence', title: 'Build order' },
   { id: '01-plan-chat', workflowType: 'plan_chat', title: 'Plan conversation' },
   { id: '01-advisory-research', workflowType: 'advisory', title: 'Research' },
 ];

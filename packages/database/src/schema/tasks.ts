@@ -68,9 +68,14 @@ export const workflowTypeEnum = pgEnum('workflow_type', [
   //     reviseLoop, so it re-parks on one card until the user submits blank.
   //   advisory:   research a `research`/`external` node (hosting, trademark, domain)
   //     and park on a decision form the USER resolves.
+  //   plan_sequence: put an EXISTING plan into build order, so its post-order
+  //     numbering means something. Its own type rather than a step of plan_build
+  //     alone because plan_build runs its steps once: a plan built before the
+  //     step existed, or one edited by hand since, can be reached no other way.
   'plan_build',
   'plan_chat',
   'advisory',
+  'plan_sequence',
 ]);
 export const taskStatusEnum = pgEnum('task_status', [
   'created',

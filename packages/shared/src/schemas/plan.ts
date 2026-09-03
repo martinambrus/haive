@@ -230,8 +230,49 @@ export interface PlanNodeView {
    *  (see `rollUpStatus`), never stored — a stored copy needs a trigger and
    *  drifts the moment one is missed. */
   rolledStatus: PlanNodeStatus;
+  /** 1-based position in build order — a POST-ORDER index over the tree, so
+   *  every descendant is numbered before its container. Derived at read time by
+   *  `computePlanSequence` for the same reason `rolledStatus` is, plus one of
+   *  its own: inserting a node shifts every number after it, which stored would
+   *  be thousands of row updates inside the applier's transaction.
+   *
+   *  It names a SLOT in the current plan, not a thing. Never persist one, and
+   *  never use one to refer to a node across time. */
+  sequence: number;
+  /** This node's own unmet `depends_on` targets, lowest number first. Empty for
+   *  a node that is ready to start. Direct only — never inherited from an
+   *  ancestor. */
+  blockedBy: PlanBlocker[];
   createdAt: string;
   updatedAt: string;
+}
+
+/** One unmet prerequisite, named the way a person reads it. Declared here beside
+ *  the other wire shapes rather than in `plan/sequence.ts`, which computes it:
+ *  that module imports this one, and the reverse would be a cycle. */
+export interface PlanBlocker {
+  nodeId: string;
+  sequence: number;
+  title: string;
+}
+
+/** A node named in a defect report: enough to render it and to click through. */
+export interface PlanDefectNodeView {
+  nodeId: string;
+  sequence: number;
+  title: string;
+}
+
+/** Dependency knots that can NEVER resolve, as distinct from work that is
+ *  merely waiting. A property of the plan rather than of any one node — a cycle
+ *  has two ends and neither is the place to report it — so this rides the
+ *  overview, not a node view. */
+export interface PlanDefectsView {
+  /** `depends_on` loops. Every member is permanently blocked by the others. */
+  cycles: PlanDefectNodeView[][];
+  /** A node depending on its own ancestor: the roll-up cannot green the
+   *  ancestor while the descendant waiting on it is outstanding. */
+  ancestorDeps: { from: PlanDefectNodeView; to: PlanDefectNodeView }[];
 }
 
 export interface PlanEdgeView {
@@ -336,6 +377,13 @@ export const planBuildRequestSchema = z
     path: ['description'],
   });
 export type PlanBuildRequest = z.infer<typeof planBuildRequestSchema>;
+
+/** Put an EXISTING plan into build order. No mode and no brief: the plan is
+ *  already there and the only input is which CLI to spend. */
+export const planSequenceRequestSchema = z.object({
+  cliProviderId: z.string().uuid().optional(),
+});
+export type PlanSequenceRequest = z.infer<typeof planSequenceRequestSchema>;
 
 export const planChatRequestSchema = z.object({
   message: z.string().trim().min(1).max(20_000),

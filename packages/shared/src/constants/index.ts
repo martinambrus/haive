@@ -35,6 +35,10 @@ export const PLAN_MIRROR_JOB_NAMES = {
   REFRESH: 'refresh-plan-mirror',
   SAVE: 'save-plan-mirror',
   SWEEP: 'sweep-plan-mirrors',
+  /** The only job that reads the repository INTO the database. Fast-forwards the
+   *  checkout from origin, then reconciles the committed plan mirror onto the
+   *  local plan. Everything else here writes DB -> files -> commit -> remote. */
+  PULL: 'pull-plan-mirror',
 } as const;
 
 export interface PlanMirrorJobPayload {
@@ -54,6 +58,36 @@ export interface PlanMirrorJobResult {
   commitSha: string | null;
   pushed: boolean;
   branch: string | null;
+  /** PULL only. What the incoming snapshot did to the local plan. */
+  pulled?: PlanPullOutcome;
+}
+
+/**
+ * The result of reconciling a pulled plan snapshot onto the local plan.
+ *
+ * `keptLocal` is the one that matters and the reason this is reported rather
+ * than counted: nodes that exist here and not in the incoming snapshot are KEPT.
+ * They are either work someone added locally and has not pushed, or work the
+ * other side deleted — and those two are indistinguishable from the snapshot
+ * alone. Keeping is the reversible choice; deleting is not.
+ */
+export interface PlanPullOutcome {
+  /** Commit the checkout was on before the fast-forward, so the git half of this
+   *  can be undone with a single `git reset --hard`. */
+  previousCommit: string | null;
+  /** Whether the checkout actually moved. False means the files were already
+   *  current and only the database was reconciled. */
+  fastForwarded: boolean;
+  nodesCreated: number;
+  nodesUpdated: number;
+  /** Local-only nodes left in place, by id — the repair list for a person who
+   *  wants the other side's deletion applied here too. */
+  keptLocal: string[];
+  edgesAdded: number;
+  codeLinksAdded: number;
+  /** Set when nothing was reconciled and why: no snapshot in the repo, or one
+   *  that is byte-identical to what this plan already says. */
+  skipped: string | null;
 }
 
 export const REPO_JOB_NAMES = {

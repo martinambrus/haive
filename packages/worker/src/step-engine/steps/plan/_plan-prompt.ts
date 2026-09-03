@@ -44,6 +44,14 @@ Rules:
   blocker — legal, a domain, hosting, an account).
 - \`taskable: true\` marks a leaf small enough that one developer task could
   implement it. Do not mark a node taskable if it still needs breaking down.
+- \`ordinal\` is BUILD ORDER among a node's children: 0 is built first. It is not
+  cosmetic — the plan is numbered from it, and a reader follows those numbers to
+  decide what to work on next. List children in the order someone would actually
+  build them, and when one genuinely cannot start until another lands, say so
+  with a \`depends_on\` link as well; the order is a suggestion, the link is the
+  thing that holds work back. Never make a node depend on its own parent or
+  ancestor, and never create a loop — neither can ever be satisfied, so both
+  strand every node on them.
 - \`codeLinks\` names the files that already implement a node, so the plan can later
   answer "if I change this, what else must change". Add it ONLY for a file you have
   actually looked at, and say in \`evidence\` what made you link it. A guessed path is

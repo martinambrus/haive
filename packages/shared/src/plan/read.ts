@@ -7,8 +7,11 @@ import type {
   PlanNodeOrigin,
   PlanNodeStatus,
   PlanNodeView,
+  PlanDefectNodeView,
+  PlanDefectsView,
 } from '../schemas/plan.js';
 import { rollUpStatus } from '../schemas/plan.js';
+import type { PlanSequenceResult } from './sequence.js';
 
 /** The relational select surface shared by the root database and a transaction. */
 type PlanReadDb = Pick<Database, 'select'>;
@@ -163,41 +166,31 @@ export function indexChildren<T extends { id: string; parentId: string | null }>
   return byParent;
 }
 
-/** Descendant STATUSES for every node, keyed by node id. One pass over the
- *  children index rather than one subtree query per card. */
-function collectDescendantStatuses(
-  nodes: PlanNodeSkeleton[],
-): Map<string, { statuses: PlanNodeStatus[]; direct: number }> {
-  const byParent = indexChildren(nodes);
-  const out = new Map<string, { statuses: PlanNodeStatus[]; direct: number }>();
-
-  const walk = (id: string): PlanNodeStatus[] => {
-    const cached = out.get(id);
-    if (cached) return cached.statuses;
-    const children = byParent.get(id) ?? [];
-    const statuses: PlanNodeStatus[] = [];
-    for (const child of children) {
-      statuses.push(child.status, ...walk(child.id));
-    }
-    out.set(id, { statuses, direct: children.length });
-    return statuses;
-  };
-
-  for (const n of nodes) walk(n.id);
-  return out;
-}
-
-/** Turn skeletons into the API's node view, with server-computed counts and the
- *  derived roll-up status. `bodies` supplies bodies for the nodes that need one
- *  (the client is never sent every body). */
+/** Turn skeletons into the API's node view, with server-computed counts, the
+ *  derived roll-up status, the build-order number and any unmet prerequisites.
+ *
+ *  `derived` is `computePlanSequence` over the WHOLE repository's nodes and
+ *  edges, computed once per request and passed in. It is required, and it
+ *  replaced the old "whole tree" parameter: counts, roll-up, numbering and
+ *  blocking are all functions of the entire plan, and one walk now produces all
+ *  four. Requiring it also removes the failure mode an optional edge list would
+ *  have carried — a caller that forgot the edges would have served a page
+ *  saying nothing is blocked, which is a silently wrong answer rather than a
+ *  missing one.
+ *
+ *  `bodies` supplies bodies for the nodes that need one (the client is never
+ *  sent every body). */
 export function toNodeViews(
-  nodes: PlanNodeSkeleton[],
   pick: PlanNodeSkeleton[],
+  derived: PlanSequenceResult,
   bodies: Map<string, string | null> = new Map(),
 ): PlanNodeView[] {
-  const stats = collectDescendantStatuses(nodes);
   return pick.map((n) => {
-    const s = stats.get(n.id) ?? { statuses: [], direct: 0 };
+    const stats = derived.statsById.get(n.id) ?? {
+      directChildren: 0,
+      totalDescendants: 0,
+      rolledStatus: rollUpStatus(n.status, []),
+    };
     return {
       id: n.id,
       parentId: n.parentId,
@@ -211,13 +204,39 @@ export function toNodeViews(
       version: n.version,
       createdBy: n.createdBy,
       sourceTaskId: n.sourceTaskId,
-      directChildren: s.direct,
-      totalDescendants: s.statuses.length,
-      rolledStatus: rollUpStatus(n.status, s.statuses),
+      directChildren: stats.directChildren,
+      totalDescendants: stats.totalDescendants,
+      rolledStatus: stats.rolledStatus,
+      sequence: derived.sequenceById.get(n.id) ?? 0,
+      blockedBy: derived.blockedById.get(n.id) ?? [],
       createdAt: n.createdAt.toISOString(),
       updatedAt: n.updatedAt.toISOString(),
     };
   });
+}
+
+/** Render the unsatisfiable dependency knots for a person.
+ *
+ *  Kept beside `toNodeViews` because it is the same job — turning one
+ *  `computePlanSequence` result into wire views — and because a defect must be
+ *  named by the same number the rest of the UI shows it under. */
+export function describePlanDefects(
+  nodes: PlanNodeSkeleton[],
+  derived: PlanSequenceResult,
+): PlanDefectsView {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const describe = (nodeId: string): PlanDefectNodeView => ({
+    nodeId,
+    sequence: derived.sequenceById.get(nodeId) ?? 0,
+    title: byId.get(nodeId)?.title ?? 'unknown node',
+  });
+  return {
+    cycles: derived.cycles.map((loop) => loop.map(describe)),
+    ancestorDeps: derived.ancestorDeps.map((d) => ({
+      from: describe(d.fromNodeId),
+      to: describe(d.toNodeId),
+    })),
+  };
 }
 
 export function toEdgeViews(edges: PlanEdgeRecord[]): PlanEdgeView[] {
