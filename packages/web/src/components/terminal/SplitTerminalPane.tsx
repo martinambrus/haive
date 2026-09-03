@@ -1,7 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { api, type CliInvocationOutput, type CliInvocationSummary } from '@/lib/api-client';
+import {
+  api,
+  type CliInvocationListResponse,
+  type CliInvocationOutput,
+  type CliInvocationSummary,
+} from '@/lib/api-client';
 import type { PaneSide } from '@/lib/split-pane';
 import { CliStreamViewer } from './CliStreamViewer';
 
@@ -41,10 +46,15 @@ export function SplitTerminalPane({ taskId, stepRowId, side, onMove }: SplitTerm
   const [replay, setReplay] = useState<CliInvocationOutput | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // `historyLimit=1` is the whole history this column needs: pickInvocation wants the newest
+  // RUNNING run, else the newest queued one, else the newest run overall — and the api always
+  // returns every active run in full, so one completed row covers the last fallback. Asking
+  // for the unbounded list here pulled hundreds of rows every 2 seconds for a column that
+  // renders exactly one of them.
   const reload = useCallback(async () => {
     try {
-      const data = await api.get<{ invocations: CliInvocationSummary[] }>(
-        `/tasks/${taskId}/steps/${stepRowId}/cli-invocations`,
+      const data = await api.get<CliInvocationListResponse>(
+        `/tasks/${taskId}/steps/${stepRowId}/cli-invocations?historyLimit=1`,
       );
       setInvocations(data.invocations);
       setError(null);

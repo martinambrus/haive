@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, sql } from 'drizzle-orm';
+import type { SQL } from 'drizzle-orm';
 import { schema, resetDagCurrentLevelForRetry, type Database } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import {
@@ -17,6 +18,7 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { getDb } from '../../db.js';
+import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
@@ -1060,13 +1062,28 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   throw new HttpError(400, 'Unknown step action');
 });
 
-/** List CLI invocations for a single step (most-recent first). Used by the
- *  per-step inline terminal to enumerate live + historical runs. Excludes
- *  superseded rows so retried invocations don't clutter the UI. */
+/** List CLI invocations for a single step (most-recent first).
+ *
+ *  ACTIVE runs (`ended_at IS NULL`) are ALWAYS returned in full: a live terminal must
+ *  never be paged away, and their number is bounded by the agent concurrency cap.
+ *  COMPLETED runs come back one bounded page at a time, newest-first, walked with
+ *  `historyCursor`. `historyTotal` is the full completed count so the caller can render
+ *  "N older runs" and decide whether another page exists without a probe request, and
+ *  each row carries its `runNumber` within the step's whole ordering (`totalCount`).
+ *
+ *  Unbounded was the old behaviour and it does not survive a real step: the worst step on
+ *  the dev install has 156 invocations, and the web UI mounted an xterm plus the whole
+ *  persisted stream_log for every one of them at once.
+ *
+ *  Excludes superseded rows so retried invocations don't clutter the UI. */
 stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const stepId = c.req.param('stepId');
+  const { limit: historyLimit, cursor: historyCursor } = parseInvocationHistoryQuery({
+    historyLimit: c.req.query('historyLimit'),
+    historyCursor: c.req.query('historyCursor'),
+  });
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
@@ -1078,62 +1095,116 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
     columns: { id: true },
   });
   if (!step) throw new HttpError(404, 'Step not found');
-  const rows = await db
-    .select({
-      id: schema.cliInvocations.id,
-      mode: schema.cliInvocations.mode,
-      exitCode: schema.cliInvocations.exitCode,
-      durationMs: schema.cliInvocations.durationMs,
-      timeoutMs: schema.cliInvocations.timeoutMs,
-      startedAt: schema.cliInvocations.startedAt,
-      endedAt: schema.cliInvocations.endedAt,
-      createdAt: schema.cliInvocations.createdAt,
-      errorMessage: schema.cliInvocations.errorMessage,
-      tokenUsage: schema.cliInvocations.tokenUsage,
-      // The reasoning-effort level this run actually got, and where it came from. Recorded
-      // per invocation because nothing else keeps it: the preference row holds only its
-      // CURRENT value, so comparing two past runs at different levels is otherwise guesswork.
-      effort: schema.cliInvocations.effort,
-      // Provider that ran this invocation, so the terminal badge can show which
-      // CLI/model it was — important for multi-CLI loop steps (spec-quality).
-      providerLabel: schema.cliProviders.label,
-      providerName: schema.cliProviders.name,
-      // The agent running this terminal: the mining persona (e.g.
-      // "accessibility-specialist"), or — for multi-CLI loop steps — the role of this
-      // pass (Validator / Fixer) stored on the invocation itself. Coalesce the two.
-      agentTitle: sql<
-        string | null
-      >`coalesce(${schema.cliInvocations.agentTitle}, ${schema.taskStepAgentMinings.agentTitle})`,
-      // This terminal's own latest activity line (per-invocation, not the shared
-      // step status), so each terminal shows what it is actually doing.
-      statusMessage: schema.cliInvocations.statusMessage,
-      // Why a failed run failed, as a structural verdict — drives the persistent
-      // provider-verdict banner below the terminal (a content_filter refusal), read from the
-      // row so it outlives the 600s stream. NULL for a success or a genuine code error.
-      providerFatalClass: schema.cliInvocations.providerFatalClass,
-      // This invocation's own requested-vs-served model. match:'differs' means the provider
-      // swapped the served model (e.g. a Fable request served claude-opus-4-8 on a security
-      // prompt) — the other half of the same banner.
-      modelIdentity: schema.cliInvocations.modelIdentity,
+
+  const columns = {
+    id: schema.cliInvocations.id,
+    mode: schema.cliInvocations.mode,
+    exitCode: schema.cliInvocations.exitCode,
+    durationMs: schema.cliInvocations.durationMs,
+    timeoutMs: schema.cliInvocations.timeoutMs,
+    startedAt: schema.cliInvocations.startedAt,
+    endedAt: schema.cliInvocations.endedAt,
+    createdAt: schema.cliInvocations.createdAt,
+    errorMessage: schema.cliInvocations.errorMessage,
+    tokenUsage: schema.cliInvocations.tokenUsage,
+    // The reasoning-effort level this run actually got, and where it came from. Recorded
+    // per invocation because nothing else keeps it: the preference row holds only its
+    // CURRENT value, so comparing two past runs at different levels is otherwise guesswork.
+    effort: schema.cliInvocations.effort,
+    // Provider that ran this invocation, so the terminal badge can show which
+    // CLI/model it was — important for multi-CLI loop steps (spec-quality).
+    providerLabel: schema.cliProviders.label,
+    providerName: schema.cliProviders.name,
+    // The agent running this terminal: the mining persona (e.g.
+    // "accessibility-specialist"), or — for multi-CLI loop steps — the role of this
+    // pass (Validator / Fixer) stored on the invocation itself. Coalesce the two.
+    agentTitle: sql<
+      string | null
+    >`coalesce(${schema.cliInvocations.agentTitle}, ${schema.taskStepAgentMinings.agentTitle})`,
+    // This terminal's own latest activity line (per-invocation, not the shared
+    // step status), so each terminal shows what it is actually doing.
+    statusMessage: schema.cliInvocations.statusMessage,
+    // Why a failed run failed, as a structural verdict — drives the persistent
+    // provider-verdict banner below the terminal (a content_filter refusal), read from the
+    // row so it outlives the 600s stream. NULL for a success or a genuine code error.
+    providerFatalClass: schema.cliInvocations.providerFatalClass,
+    // This invocation's own requested-vs-served model. match:'differs' means the provider
+    // swapped the served model (e.g. a Fable request served claude-opus-4-8 on a security
+    // prompt) — the other half of the same banner.
+    modelIdentity: schema.cliInvocations.modelIdentity,
+  };
+
+  const baseWhere = and(
+    eq(schema.cliInvocations.taskStepId, step.id),
+    isNull(schema.cliInvocations.supersededAt),
+  );
+
+  const selectRows = (extra: SQL | undefined) =>
+    db
+      .select(columns)
+      .from(schema.cliInvocations)
+      .leftJoin(
+        schema.cliProviders,
+        eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId),
+      )
+      .leftJoin(
+        schema.taskStepAgentMinings,
+        eq(schema.taskStepAgentMinings.cliInvocationId, schema.cliInvocations.id),
+      )
+      .where(extra ? and(baseWhere, extra) : baseWhere)
+      // (created_at, id), not created_at alone: `created_at` defaults to now(), which is
+      // the TRANSACTION timestamp, so a fan-out inserting its invocations together gives
+      // every row the same value — and a keyset page over a non-unique order silently
+      // drops or repeats rows.
+      .orderBy(desc(schema.cliInvocations.createdAt), desc(schema.cliInvocations.id));
+
+  // The cursor tuple is resolved INSIDE the query from the cursor row itself, so the
+  // microsecond-precision `created_at` never round-trips through a millisecond JS Date.
+  const olderThanCursor = historyCursor
+    ? sql`(${schema.cliInvocations.createdAt}, ${schema.cliInvocations.id}) <
+        (select c.created_at, c.id from ${schema.cliInvocations} c where c.id = ${historyCursor})`
+    : undefined;
+
+  const [activeRows, historyRows, ranking] = await Promise.all([
+    selectRows(isNull(schema.cliInvocations.endedAt)),
+    historyLimit > 0
+      ? selectRows(and(isNotNull(schema.cliInvocations.endedAt), olderThanCursor)).limit(
+          historyLimit,
+        )
+      : Promise.resolve([]),
+    // Run numbers are assigned SERVER-side over the step's whole non-superseded set.
+    // The client cannot derive them any more: it holds a bounded window, and that window
+    // is not even a contiguous newest-suffix of the ordering — every active run is always
+    // returned, and an active run can be older than the completed page's floor (one long
+    // agent still going while its faster siblings started and finished). Counting inside
+    // the page would then label the same run differently depending on how much history
+    // the user had scrolled back through. Ids + ended_at only: a few hundred narrow rows,
+    // never the prompts or the stream logs, which live on the per-invocation output route.
+    db
+      .select({ id: schema.cliInvocations.id, endedAt: schema.cliInvocations.endedAt })
+      .from(schema.cliInvocations)
+      .where(baseWhere)
+      .orderBy(asc(schema.cliInvocations.createdAt), asc(schema.cliInvocations.id)),
+  ]);
+
+  const runNumbers = new Map(ranking.map((r, i) => [r.id, i + 1]));
+  const historyTotal = ranking.reduce((n, r) => (r.endedAt === null ? n : n + 1), 0);
+
+  // Merged back into one newest-first list, because the two halves interleave: an ACTIVE
+  // run can be OLDER than a completed one (a long agent still going while two short
+  // siblings started and finished), so concatenating them would break the ordering the
+  // route promises and that the split-terminal column's "newest run overall" fallback reads.
+  const invocations = [...activeRows, ...historyRows]
+    .sort((a, b) => {
+      const d = b.createdAt.getTime() - a.createdAt.getTime();
+      return d !== 0 ? d : a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
     })
-    .from(schema.cliInvocations)
-    .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
-    .leftJoin(
-      schema.taskStepAgentMinings,
-      eq(schema.taskStepAgentMinings.cliInvocationId, schema.cliInvocations.id),
-    )
-    .where(
-      and(
-        eq(schema.cliInvocations.taskStepId, step.id),
-        isNull(schema.cliInvocations.supersededAt),
-      ),
-    )
-    .orderBy(desc(schema.cliInvocations.createdAt));
-  const invocations = rows.map((r) => ({
-    ...r,
-    isActive: r.endedAt === null,
-  }));
-  return c.json({ invocations });
+    .map((r) => ({
+      ...r,
+      isActive: r.endedAt === null,
+      runNumber: runNumbers.get(r.id) ?? null,
+    }));
+  return c.json({ invocations, historyTotal, totalCount: ranking.length });
 });
 
 /** Write (or clear) one (user, step, role) CLI preference. `role: 'default'` targets the

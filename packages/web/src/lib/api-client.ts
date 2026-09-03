@@ -1092,6 +1092,28 @@ export interface CliInvocationSummary {
     served: string | null;
     match: 'exact' | 'differs' | 'unknown';
   } | null;
+  /** This run's 1-based position in the step's whole ordering, assigned by the api over
+   *  every non-superseded row. Not derivable client-side: the loaded window is bounded and
+   *  is not even a contiguous newest-suffix, since every ACTIVE run is returned whatever
+   *  its age. Optional so an older api simply renders no run label. */
+  runNumber?: number | null;
+}
+
+/** One page of a step's CLI invocations.
+ *
+ *  `invocations` always carries EVERY active run (a live terminal is never paged away)
+ *  plus one bounded page of completed runs, walked oldest-ward with `historyCursor`.
+ *  `historyTotal` is the step's full completed count, so the caller can size the
+ *  "load older" affordance and number runs correctly without holding the whole list. */
+export interface CliInvocationListResponse {
+  invocations: CliInvocationSummary[];
+  /** Total COMPLETED (ended) invocations on the step, ignoring the page limit.
+   *  Optional so a web build talking to an older api degrades to "no older runs"
+   *  rather than rendering a load button that fetches nothing. */
+  historyTotal?: number;
+  /** Every non-superseded invocation on the step, active ones included — the denominator
+   *  for "Run 7 of 156" and the test for whether run labels are worth showing at all. */
+  totalCount?: number;
 }
 
 export interface CliInvocationOutput {

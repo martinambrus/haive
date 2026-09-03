@@ -1,10 +1,22 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, type CliInvocationOutput, type CliInvocationSummary } from '@/lib/api-client';
+import {
+  api,
+  type CliInvocationListResponse,
+  type CliInvocationOutput,
+  type CliInvocationSummary,
+} from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { CliStreamViewer } from './CliStreamViewer';
 import { describeInvocationStatus } from './cli-stream-status';
+import {
+  INVOCATION_HISTORY_PAGE,
+  invocationHistoryPaging,
+  isInvocationExpanded,
+  mergeInvocationPage,
+  type InvocationOpenOverrides,
+} from '@/lib/invocation-history';
 import {
   type ActiveTerminalIds,
   scrollToNewestActiveTerminal,
@@ -39,6 +51,19 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     autoExpand,
   );
   const [invocations, setInvocations] = useState<CliInvocationSummary[] | null>(null);
+  // The step's full non-superseded / completed counts, straight from the api. Held apart
+  // from `invocations`, which is only the window currently loaded.
+  const [totalCount, setTotalCount] = useState(0);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  // Explicit per-run open/closed clicks. Absent id = no opinion, and the default (live runs
+  // expanded, finished ones collapsed) decides — see isInvocationExpanded.
+  const [openOverrides, setOpenOverrides] = useState<InvocationOpenOverrides>({});
+  // Ids seen ACTIVE at any point during this mount, so a run the user watched finish keeps
+  // its output on screen instead of collapsing the instant it exits. A ref, not state: it is
+  // always populated by the poll BEFORE the poll that reports the run ended, so the render
+  // that needs it already has it and no extra re-render is required.
+  const seenActiveRef = useRef<Set<string>>(new Set());
   const [loadError, setLoadError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useAutoScrollTerminals();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -63,17 +88,66 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     }
   }, [autoExpand]);
 
+  /** Fetch the HEAD page: every active run plus the newest page of finished ones. The poll
+   *  calls this, so it must never walk the cursor back over history the user has already
+   *  loaded — mergeInvocationPage folds it in, keeping older pages and dropping only what
+   *  the page is authoritative for. */
   const reload = useCallback(async () => {
     try {
-      const data = await api.get<{ invocations: CliInvocationSummary[] }>(
-        `/tasks/${taskId}/steps/${stepRowId}/cli-invocations`,
+      const data = await api.get<CliInvocationListResponse>(
+        `/tasks/${taskId}/steps/${stepRowId}/cli-invocations?historyLimit=${INVOCATION_HISTORY_PAGE}`,
       );
-      setInvocations(data.invocations);
+      for (const inv of data.invocations) {
+        if (inv.isActive) seenActiveRef.current.add(inv.id);
+      }
+      setInvocations((prev) =>
+        mergeInvocationPage({
+          prev: prev ?? [],
+          page: data.invocations,
+          limit: INVOCATION_HISTORY_PAGE,
+          append: false,
+        }),
+      );
+      setHistoryTotal(data.historyTotal ?? 0);
+      setTotalCount(data.totalCount ?? data.invocations.length);
       setLoadError(null);
     } catch (err) {
       setLoadError((err as Error).message ?? 'Failed to load CLI invocations');
     }
   }, [taskId, stepRowId]);
+
+  /** One page older, from the oldest finished run currently held. Appends only — nothing
+   *  already on screen is invalidated, and nothing here mounts a terminal: the runs it adds
+   *  arrive collapsed, exactly like the ones already there. */
+  const loadOlder = useCallback(
+    async (cursor: string) => {
+      setLoadingOlder(true);
+      try {
+        const data = await api.get<CliInvocationListResponse>(
+          `/tasks/${taskId}/steps/${stepRowId}/cli-invocations` +
+            `?historyLimit=${INVOCATION_HISTORY_PAGE}&historyCursor=${cursor}`,
+        );
+        setInvocations((prev) =>
+          mergeInvocationPage({
+            prev: prev ?? [],
+            page: data.invocations,
+            limit: INVOCATION_HISTORY_PAGE,
+            append: true,
+          }),
+        );
+        // Keep the counts we have if an older api omits them — zeroing them here would hide
+        // the very button that was just clicked.
+        setHistoryTotal((prevTotal) => data.historyTotal ?? prevTotal);
+        setTotalCount((prevTotal) => data.totalCount ?? prevTotal);
+        setLoadError(null);
+      } catch (err) {
+        setLoadError((err as Error).message ?? 'Failed to load CLI invocations');
+      } finally {
+        setLoadingOlder(false);
+      }
+    },
+    [taskId, stepRowId],
+  );
 
   useEffect(() => {
     if (!expanded) return;
@@ -133,8 +207,13 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     return () => timers.forEach(clearTimeout);
   }, [invocations, autoScroll]);
 
-  const count = invocations?.length ?? 0;
+  const loadedCount = invocations?.length ?? 0;
+  const count = Math.max(totalCount, loadedCount);
   const activeCount = invocations?.filter((i) => i.isActive).length ?? 0;
+  const paging = invocationHistoryPaging(invocations ?? [], historyTotal);
+  const toggleInvocation = useCallback((id: string, open: boolean) => {
+    setOpenOverrides((prev) => ({ ...prev, [id]: open }));
+  }, []);
 
   return (
     <div ref={containerRef} className="flex flex-col gap-2">
@@ -165,21 +244,33 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
               No CLI invocations recorded for this step yet.
             </div>
           )}
+          {/* Older history sits ABOVE the loaded runs, matching the oldest-on-top order
+              below — "load older" grows the list upward, the way a chat scrollback does. */}
+          {paging.remaining > 0 && paging.cursor !== null && (
+            <LoadOlderRuns
+              cursor={paging.cursor}
+              remaining={paging.remaining}
+              loading={loadingOlder}
+              onLoad={loadOlder}
+            />
+          )}
           {/* API returns newest-first; reverse so the oldest run sits on top
               and subsequent runs flow downward in execution order. Run 1 is
-              always the earliest invocation for the step. */}
+              always the earliest invocation for the step — the number comes from the
+              api, because the loaded window is bounded and cannot be counted from. */}
           {invocations
             ?.slice()
             .reverse()
-            .map((inv, idx) => (
+            .map((inv) => (
               <InvocationPanel
                 key={inv.id}
                 taskId={taskId}
                 invocation={inv}
-                idx={idx}
                 total={count}
                 statusMessage={statusMessage}
-                label={invocations.length > 1 ? `Run ${idx + 1}` : null}
+                label={count > 1 && inv.runNumber ? `Run ${inv.runNumber}` : null}
+                expanded={isInvocationExpanded(inv, openOverrides, seenActiveRef.current)}
+                onToggle={toggleInvocation}
               />
             ))}
           {invocations !== null && invocations.length > 0 && (
@@ -202,30 +293,60 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
   );
 }
 
+/** "Load 20 older runs · 136 older" — the only way older history enters the DOM. The runs it
+ *  adds arrive COLLAPSED like every other finished run, so loading history never mounts a
+ *  terminal or fetches an output blob. */
+function LoadOlderRuns({
+  cursor,
+  remaining,
+  loading,
+  onLoad,
+}: {
+  cursor: string;
+  remaining: number;
+  loading: boolean;
+  onLoad: (cursor: string) => Promise<void>;
+}) {
+  const batch = Math.min(INVOCATION_HISTORY_PAGE, remaining);
+  return (
+    <button
+      type="button"
+      disabled={loading}
+      onClick={() => void onLoad(cursor)}
+      className="self-start rounded border border-neutral-800 bg-neutral-900/60 px-2.5 py-1 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
+    >
+      {loading ? 'Loading…' : `Load ${batch} older run${batch === 1 ? '' : 's'}`}
+      <span className="pl-1.5 text-neutral-500">· {remaining} older</span>
+    </button>
+  );
+}
+
 interface InvocationPanelProps {
   taskId: string;
   invocation: CliInvocationSummary;
   label: string | null;
-  /** Zero-based position in the run list (0 = first/oldest run). */
-  idx: number;
-  /** Total runs in this step. The in-panel status box only renders for 2+ runs;
-   *  single-terminal steps already show their status above the terminal. */
+  /** Total runs in this step (api-wide, not the loaded window). The in-panel status box only
+   *  renders for 2+ runs; single-terminal steps already show their status above the terminal. */
   total: number;
   /** Step's live status_message, shown below this panel when it's an active run
    *  past the first (the top status line is off-screen by then). */
   statusMessage: string | null;
+  /** Whether this run's terminal body is mounted. Live runs default open, finished ones
+   *  collapsed — a finished panel that stays collapsed costs no xterm and no output fetch,
+   *  which is the whole point on a step with hundreds of runs. */
+  expanded: boolean;
+  onToggle: (id: string, open: boolean) => void;
 }
 
 function InvocationPanel({
   taskId,
   invocation,
   label,
-  idx,
   total,
   statusMessage,
+  expanded,
+  onToggle,
 }: InvocationPanelProps) {
-  const [replay, setReplay] = useState<CliInvocationOutput | null>(null);
-  const [replayError, setReplayError] = useState<string | null>(null);
   // Which state this invocation's copy belongs to — decided on startedAt, not on the words.
   // Under global pause a QUEUED run says so instead of claiming a slot is coming; a run that
   // already started is left alone, because pause never interrupts work in flight.
@@ -234,29 +355,9 @@ function InvocationPanel({
   // Persistent provider verdict (refusal / model swap), read from the row so it outlives the
   // stream. Null for a clean run, which is nearly all of them.
   const statusVerdict = describeInvocationStatus(invocation);
-
-  // Active invocation → live WebSocket via CliStreamViewer (no fetch needed).
-  // Ended invocation → fetch persisted rawOutput once and render statically.
-  useEffect(() => {
-    if (invocation.isActive) {
-      setReplay(null);
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const data = await api.get<CliInvocationOutput>(
-          `/tasks/${taskId}/cli-invocations/${invocation.id}/output`,
-        );
-        if (!cancelled) setReplay(data);
-      } catch (err) {
-        if (!cancelled) setReplayError((err as Error).message ?? 'Failed to load output');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [taskId, invocation.id, invocation.isActive]);
+  // "Past the first run" — from the api's run number, not a position in the loaded window,
+  // which is bounded and would call run 137 the first one after a plain page load.
+  const isLaterRun = (invocation.runNumber ?? 1) > 1;
 
   // "running" = started and not yet ended. isActive alone is true for a QUEUED
   // run too (endedAt is null), so the auto-scroll target must exclude those.
@@ -275,7 +376,15 @@ function InvocationPanel({
       data-cli-queued={isQueued ? '' : undefined}
       className="flex scroll-mt-12 flex-col gap-1.5 rounded border border-neutral-800 p-2"
     >
-      <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
+      {/* The header row is the expand control. Collapsed, this is ALL a finished run
+          renders: no xterm, no output request. */}
+      <button
+        type="button"
+        onClick={() => onToggle(invocation.id, !expanded)}
+        aria-expanded={expanded}
+        className="flex w-full flex-wrap items-center gap-2 text-left text-[11px] text-neutral-400"
+      >
+        <span className="text-neutral-500">{expanded ? '▼' : '▶'}</span>
         {label && <span className="font-medium text-neutral-200">{label}</span>}
         {/* Fan-out titles name the specific finding an agent works ("Refuter 2/4
             [reachability] — high installer/actions_step_4.php:36 · <issue>"), long enough to
@@ -373,35 +482,8 @@ function InvocationPanel({
             );
           })()}
         {invocation.startedAt && <span>{new Date(invocation.startedAt).toLocaleTimeString()}</span>}
-      </div>
-      {replayError && (
-        <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
-          {replayError}
-        </div>
-      )}
-      {invocation.isActive ? (
-        <CliStreamViewer
-          invocationId={invocation.id}
-          taskId={taskId}
-          height="h-[400px]"
-          cleanSupported={invocation.mode !== 'subagent_sequential'}
-          // Null while this run is queued, which is what keeps the stream-health badge quiet
-          // until the CLI is actually launched.
-          startedAt={invocation.startedAt}
-        />
-      ) : replay ? (
-        <CliStreamViewer
-          invocationId={invocation.id}
-          taskId={taskId}
-          staticOutput={replay.streamLog}
-          staticCleanOutput={replay.cleanOutput}
-          staticExitCode={replay.exitCode}
-          cleanSupported={invocation.mode !== 'subagent_sequential'}
-          height="h-[400px]"
-        />
-      ) : (
-        !replayError && <div className="text-xs text-neutral-500">Loading output…</div>
-      )}
+      </button>
+      {expanded && <InvocationBody taskId={taskId} invocation={invocation} />}
       {/* Persistent provider-verdict banner, BELOW the terminal and read from the invocation row
           (not the stream), so it survives the CLI ending and the 600s stream expiry: a provider
           refusing the prompt, or silently swapping the served model. See cli-stream-status.ts. */}
@@ -430,8 +512,8 @@ function InvocationPanel({
         // another terminal's work as its own. A queued run is handled by the branch above.
         total > 1 &&
         isRunning &&
-        (banner?.kind === 'running' || idx > 0) &&
-        (banner?.text ?? (idx > 0 ? statusMessage : null)) && (
+        (banner?.kind === 'running' || isLaterRun) &&
+        (banner?.text ?? (isLaterRun ? statusMessage : null)) && (
           <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
             <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
             {banner?.text ?? statusMessage}
@@ -439,6 +521,82 @@ function InvocationPanel({
         )
       )}
     </div>
+  );
+}
+
+/**
+ * One run's terminal, mounted ONLY while its panel is expanded.
+ *
+ * Its own component so collapsing genuinely tears the run down: unmounting drops the xterm
+ * instance, closes the live WebSocket, releases the fetched stream log, and — through this
+ * effect's cleanup — cancels an output request still in flight. Leaving the body inside
+ * InvocationPanel behind a `&&` would have kept the fetched megabytes alive in the parent's
+ * state, which is the cost this whole change exists to avoid.
+ */
+function InvocationBody({
+  taskId,
+  invocation,
+}: {
+  taskId: string;
+  invocation: CliInvocationSummary;
+}) {
+  const [replay, setReplay] = useState<CliInvocationOutput | null>(null);
+  const [replayError, setReplayError] = useState<string | null>(null);
+
+  // Active invocation → live WebSocket via CliStreamViewer (no fetch needed).
+  // Ended invocation → fetch persisted rawOutput once and render statically.
+  useEffect(() => {
+    if (invocation.isActive) {
+      setReplay(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await api.get<CliInvocationOutput>(
+          `/tasks/${taskId}/cli-invocations/${invocation.id}/output`,
+        );
+        if (!cancelled) setReplay(data);
+      } catch (err) {
+        if (!cancelled) setReplayError((err as Error).message ?? 'Failed to load output');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, invocation.id, invocation.isActive]);
+
+  return (
+    <>
+      {replayError && (
+        <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+          {replayError}
+        </div>
+      )}
+      {invocation.isActive ? (
+        <CliStreamViewer
+          invocationId={invocation.id}
+          taskId={taskId}
+          height="h-[400px]"
+          cleanSupported={invocation.mode !== 'subagent_sequential'}
+          // Null while this run is queued, which is what keeps the stream-health badge quiet
+          // until the CLI is actually launched.
+          startedAt={invocation.startedAt}
+        />
+      ) : replay ? (
+        <CliStreamViewer
+          invocationId={invocation.id}
+          taskId={taskId}
+          staticOutput={replay.streamLog}
+          staticCleanOutput={replay.cleanOutput}
+          staticExitCode={replay.exitCode}
+          cleanSupported={invocation.mode !== 'subagent_sequential'}
+          height="h-[400px]"
+        />
+      ) : (
+        !replayError && <div className="text-xs text-neutral-500">Loading output…</div>
+      )}
+    </>
   );
 }
 
