@@ -133,6 +133,19 @@ export interface AgentMiningDispatch {
    *  Unset means `'default'`, which resolves exactly as the whole fan-out did before
    *  per-seat selection existed: the step's own preference, then the task provider. */
   roleKey?: string;
+  /** Override `agentMining.requiredCapabilities` for THIS agent.
+   *
+   *  The spec's list is static, which is right for a capability the step always
+   *  needs. It cannot express one that depends on the task's own inputs: the plan
+   *  builder needs `vision` when a wireframe was attached and must not demand it
+   *  otherwise, or every build without an image would refuse a blind model for no
+   *  reason. Unset keeps the spec's list, so existing steps are unchanged. */
+  capabilities?: StepCapability[];
+  /** Order providers whose model is known to reject images LAST, without excluding
+   *  any. For an input that has BOTH a visual and a textual form — a PDF beside its
+   *  extracted text — seeing it is better and not seeing it is still workable, so
+   *  the hard `vision` capability would refuse a provider that can do the job. */
+  preferVision?: boolean;
 }
 
 export interface AgentMiningResult {

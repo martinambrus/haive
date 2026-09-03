@@ -454,3 +454,113 @@ describe('global KB digest', () => {
     expect(plan.effectivePrompt).not.toContain('haive_global_kb_index');
   });
 });
+
+describe('vision', () => {
+  // makeProvider builds a fixed literal and does not carry model/modelLimits, so
+  // they are attached here rather than by widening the shared helper.
+  const withModel = (
+    provider: CliProviderRecord,
+    model: string,
+    modelLimits: CliProviderRecord['modelLimits'] = null,
+  ): CliProviderRecord => ({ ...provider, model, modelLimits });
+
+  const blind = (id: string, name: 'claude-code' | 'codex' = 'codex'): CliProviderRecord =>
+    withModel(makeProvider({ id, name }), 'deepseek-v4-flash:cloud', {
+      // What a live `400 does not support image input` taught us, keyed to the
+      // model it was learned for.
+      model: 'deepseek-v4-flash:cloud',
+      vision: false,
+      learnedAt: '2026-01-01',
+    });
+
+  const sighted = (id: string): CliProviderRecord =>
+    withModel(makeProvider({ id, name: 'claude-code' }), 'claude-opus-5');
+
+  it('skips a provider whose model has already rejected an image', () => {
+    // Not a warning: the remedy for a blind model tells the agent not to open
+    // images at all, so handing it work that depends on one produces a confident
+    // answer that ignored the input.
+    const plan = resolveDispatch({
+      providers: [blind('prov-blind'), sighted('prov-sighted')],
+      preferredProviderId: 'prov-blind',
+      input: { kind: 'prompt', prompt: 'read the wireframe', capabilities: ['tool_use', 'vision'] },
+      invokeOpts: {},
+    });
+    expect(plan.providerId).toBe('prov-sighted');
+  });
+
+  it('fails with a message that says what to change', () => {
+    const plan = resolveDispatch({
+      providers: [blind('prov-blind')],
+      input: { kind: 'prompt', prompt: 'read the wireframe', capabilities: ['vision'] },
+      invokeOpts: {},
+    });
+    expect(plan.mode).toBe('skip');
+    // Worded for what is actually unreadable, which is not always an image: a
+    // wireframe PDF reaches this branch too, and "remove the images" would send
+    // the reader looking for a file they do not have.
+    expect(plan.reason).toContain('LOOKING at them');
+    expect(plan.reason).toContain('no text could be extracted');
+    expect(plan.reason).toContain('vision-capable');
+  });
+
+  it('leaves a blind provider alone when no image is involved', () => {
+    // Most builds carry no wireframe. Declaring the capability unconditionally
+    // would lock every blind model out of all of them.
+    const plan = resolveDispatch({
+      providers: [blind('prov-blind')],
+      input: { kind: 'prompt', prompt: 'plan this', capabilities: ['tool_use'] },
+      invokeOpts: {},
+    });
+    expect(plan.providerId).toBe('prov-blind');
+  });
+
+  it('stops applying a stale verdict once the model changes', () => {
+    // resolveModelLimits keys the learn to the model it was learned FOR, so
+    // switching to a vision model clears it with no invalidation step.
+    const swapped = withModel(makeProvider({ id: 'prov-swapped', name: 'codex' }), 'gpt-5.6-sol', {
+      model: 'deepseek-v4-flash:cloud',
+      vision: false,
+      learnedAt: '2026-01-01',
+    });
+    const plan = resolveDispatch({
+      providers: [swapped],
+      input: { kind: 'prompt', prompt: 'read the wireframe', capabilities: ['vision'] },
+      invokeOpts: {},
+    });
+    expect(plan.providerId).toBe('prov-swapped');
+  });
+
+  it('prefers a sighted provider without refusing a blind one', () => {
+    // The soft half, for an input with BOTH forms — a PDF beside its extracted
+    // text. Seeing it is better; not seeing it still works.
+    const preferred = resolveDispatch({
+      providers: [blind('prov-blind'), sighted('prov-sighted')],
+      preferredProviderId: 'prov-blind',
+      preferVision: true,
+      input: { kind: 'prompt', prompt: 'read the pdf', capabilities: ['tool_use'] },
+      invokeOpts: {},
+    });
+    expect(preferred.providerId).toBe('prov-sighted');
+
+    const onlyOption = resolveDispatch({
+      providers: [blind('prov-blind')],
+      preferVision: true,
+      input: { kind: 'prompt', prompt: 'read the pdf', capabilities: ['tool_use'] },
+      invokeOpts: {},
+    });
+    expect(onlyOption.mode).toBe('cli');
+    expect(onlyOption.providerId).toBe('prov-blind');
+  });
+
+  it('keeps the explicit preference when both providers can see', () => {
+    const plan = resolveDispatch({
+      providers: [sighted('prov-a'), sighted('prov-b')],
+      preferredProviderId: 'prov-b',
+      preferVision: true,
+      input: { kind: 'prompt', prompt: 'read the pdf', capabilities: ['tool_use'] },
+      invokeOpts: {},
+    });
+    expect(plan.providerId).toBe('prov-b');
+  });
+});

@@ -1,7 +1,16 @@
 import type { FormSchema, FormField } from '../schemas/form.js';
 import type { StepStatus } from '../types/index.js';
 
-export type StepCapability = 'subagents' | 'tool_use' | 'file_write';
+/** What a dispatch needs from whichever CLI serves it.
+ *
+ *  `vision` is a HARD requirement, not a preference: a provider whose model is
+ *  known to reject image input (`modelLimits.vision === false`, learned from a
+ *  live 400) is excluded rather than handed the work. The alternative is the
+ *  status quo for a task carrying a wireframe — the no-vision prompt boundary
+ *  tells the agent not to open images, so it silently plans around one and
+ *  reports success. Declare it only where an image is genuinely load-bearing;
+ *  a task that merely COULD have one must not lock every blind model out. */
+export type StepCapability = 'subagents' | 'tool_use' | 'file_write' | 'vision';
 
 export interface DetectResult {
   summary?: string;

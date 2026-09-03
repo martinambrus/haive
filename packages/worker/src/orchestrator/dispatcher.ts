@@ -26,6 +26,7 @@ import { withDdevGeneratedBoundary } from '../repo/ddev-generated-boundary.js';
 import { resolveMcpSurface, withMcpSurface, type McpSurface } from '../sandbox/mcp-surface.js';
 import { resolveAppReach, withAppReach, type AppReach } from '../queues/cli-exec/app-reach.js';
 import {
+  resolveModelLimits,
   visionDisallowedTools,
   withModelCapabilityBoundary,
 } from '../cli-adapters/model-capabilities.js';
@@ -109,6 +110,12 @@ export interface DispatchRequest {
    *  resolveTaskDispatch; exposed on the pure resolver only for deterministic
    *  unit tests. Empty means there is nothing to advertise. */
   globalKbDigest?: GlobalKbDigestEntry[];
+  /** Order providers with a learned `vision: false` LAST, without excluding any.
+   *  The soft counterpart to the `vision` capability, for an input that has both
+   *  a visual and a textual form (a PDF beside its extracted text): seeing it is
+   *  better, and not seeing it still works, so refusing a blind provider outright
+   *  would be wrong. */
+  preferVision?: boolean;
   registry?: CliAdapterRegistry;
 }
 
@@ -147,28 +154,60 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
     return skipPlan('no enabled cli providers');
   }
 
-  const ordered = orderProviders(enabled, req.preferredProviderId ?? null);
+  const ordered = orderProviders(
+    enabled,
+    req.preferredProviderId ?? null,
+    req.preferVision === true,
+  );
   const needsSubagents = req.input.capabilities.includes('subagents');
+  const needsVision = req.input.capabilities.includes('vision');
 
   for (const provider of ordered) {
     if (!registry.has(provider.name)) continue;
     const adapter = registry.get(provider.name);
 
-    const plan = tryBuildPlan(adapter, provider, req, needsSubagents);
+    const plan = tryBuildPlan(adapter, provider, req, needsSubagents, needsVision);
     if (plan) return plan;
   }
 
-  return skipPlan('no provider matched required capabilities');
+  // Name the capability that went unmet. The runner turns this straight into the
+  // step's failure message, and "no provider matched required capabilities" tells
+  // the reader nothing about what to change.
+  return skipPlan(
+    needsVision
+      ? 'this task has attachments that can only be read by LOOKING at them (an image, or a document no text could be extracted from) and no enabled CLI provider can see images — configure a vision-capable model, or remove those files'
+      : 'no provider matched required capabilities',
+  );
+}
+
+/** Known-blind: a provider whose CURRENT model has already rejected image input.
+ *  `resolveModelLimits` returns null once the model is changed, so switching to a
+ *  vision model clears the verdict with no separate invalidation step. */
+function isKnownBlind(provider: CliProviderRecord): boolean {
+  return resolveModelLimits(provider)?.vision === false;
 }
 
 function orderProviders(
   providers: CliProviderRecord[],
   preferredId: string | null,
+  preferVision: boolean,
 ): CliProviderRecord[] {
-  if (!preferredId) return providers;
-  const preferred = providers.find((p) => p.id === preferredId);
-  if (!preferred) return providers;
-  return [preferred, ...providers.filter((p) => p.id !== preferredId)];
+  const preferredFirst =
+    preferredId && providers.some((p) => p.id === preferredId)
+      ? [
+          providers.find((p) => p.id === preferredId)!,
+          ...providers.filter((p) => p.id !== preferredId),
+        ]
+      : providers;
+  if (!preferVision) return preferredFirst;
+  // A stable partition, so the explicit preference still wins WITHIN each half:
+  // the user's chosen provider stays first unless it is the blind one, in which
+  // case a sighted provider gets the work and the choice is honoured as far as it
+  // can be.
+  return [
+    ...preferredFirst.filter((p) => !isKnownBlind(p)),
+    ...preferredFirst.filter(isKnownBlind),
+  ];
 }
 
 function tryBuildPlan(
@@ -176,8 +215,14 @@ function tryBuildPlan(
   provider: CliProviderRecord,
   req: DispatchRequest,
   needsSubagents: boolean,
+  needsVision: boolean,
 ): DispatchPlan | null {
   if (!adapter.supportsCliAuth) return null;
+  // A hard exclusion, not a warning. The remedy for a blind model
+  // (NO_VISION_BOUNDARY_PROMPT) tells the agent not to open images at all, so
+  // handing it work that DEPENDS on one produces a confident answer that ignored
+  // the input — the one failure mode declaring this capability exists to stop.
+  if (needsVision && isKnownBlind(provider)) return null;
   return buildCliSidePlan(adapter, provider, req, needsSubagents);
 }
 

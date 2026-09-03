@@ -1260,6 +1260,56 @@ async function resolveAgentMiningPhase(
     null,
   );
 
+  // Nothing went out AND nothing is already in flight: no provider would take any
+  // of these agents (dispatchMiningAgents recorded each refusal on its own row).
+  // Parking here waits on a barrier that only a completing invocation can release,
+  // and there is no invocation — so the step hangs at `waiting_cli` forever,
+  // showing "Mining knowledge from 1 agent(s)..." while nothing runs. Fail with
+  // the reasons instead: a failed step names what to change and offers Retry.
+  //
+  // The pending count is what separates this from a RESUME, where the rows already
+  // exist (dispatchMiningAgents skips them as duplicates, so `dispatched` is 0) and
+  // real work is still running. Same reasoning the second-wave path already
+  // applies — see "Parking would hang the step on a barrier with nothing pending".
+  if (dispatched === 0) {
+    const live = await db
+      .select({ status: schema.taskStepAgentMinings.status })
+      .from(schema.taskStepAgentMinings)
+      .where(
+        and(
+          eq(schema.taskStepAgentMinings.taskStepId, current.id),
+          inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
+        ),
+      );
+    if (live.length === 0) {
+      const rows = await db
+        .select({
+          agentId: schema.taskStepAgentMinings.agentId,
+          errorMessage: schema.taskStepAgentMinings.errorMessage,
+        })
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+      // De-duplicated: a fan-out of twelve agents refused for one reason should
+      // say that reason once, not twelve times.
+      const reasons = [...new Set(rows.map((r) => r.errorMessage?.trim()).filter(Boolean))];
+      const message =
+        reasons.length > 0
+          ? `agent mining dispatched no agents: ${reasons.join('; ')}`
+          : 'agent mining dispatched no agents and none are pending';
+      ctx.logger.warn(
+        { stepId: stepDef.metadata.id, agentIds: dispatches.map((d) => d.agentId), reasons },
+        'agent mining fan-out dispatched nothing; failing the step rather than parking',
+      );
+      const failed = await updateRow(db, current.id, {
+        status: 'failed',
+        errorMessage: message.slice(0, 2000),
+        statusMessage: null,
+        endedAt: new Date(),
+      });
+      return { resolved: false, result: { status: 'failed', row: failed, error: message } };
+    }
+  }
+
   const updated = await updateRow(db, current.id, {
     status: 'waiting_cli',
     statusMessage: `Mining knowledge from ${dispatches.length} agent(s)...`,
@@ -1381,8 +1431,12 @@ async function dispatchMiningAgents(
       input: {
         kind: 'prompt',
         prompt,
-        capabilities: spec.requiredCapabilities,
+        // Per-agent when the dispatch says so: a capability that depends on the
+        // task's inputs (the plan builder's `vision`, when a wireframe was
+        // attached) cannot live on the step's static list.
+        capabilities: dispatch.capabilities ?? spec.requiredCapabilities,
       },
+      preferVision: dispatch.preferVision === true,
       toolProfile: spec.toolProfile,
       invokeOpts: {
         cwd: params.workspacePath,

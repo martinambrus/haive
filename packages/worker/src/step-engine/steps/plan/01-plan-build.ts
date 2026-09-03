@@ -1,6 +1,12 @@
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService, type FormSchema, type FormValues } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  type FormSchema,
+  type FormValues,
+  type StepCapability,
+} from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
   findPlanRoot,
@@ -24,6 +30,7 @@ import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-pr
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
+import type { PlanInputsApply } from './00-plan-inputs.js';
 
 /**
  * Build a repository's plan, one LEVEL per mining wave.
@@ -67,7 +74,21 @@ const MAX_TOTAL_EXPAND = 60;
  *  independent backstop for the slice-overflow case above. */
 const MAX_WAVES = 8;
 
-type BuildMode = 'from_repo' | 'from_md';
+/**
+ * Where the plan's content comes from.
+ *
+ * `from_md` is LEGACY and deliberately still here: the request schema no longer
+ * offers it, so nothing can create one, but tasks stored with it must keep
+ * running and stay retryable. `greenfield` is what replaced it — a brief plus
+ * any number of attachments, describing a project that does not exist yet.
+ *
+ * The distinction is load-bearing rather than cosmetic. `withMinedStatus` greens
+ * every node of a `from_repo` build because those nodes describe code that is
+ * already written; a greenfield build routed through that branch produces a
+ * project rendered as already finished, which is what a brief riding
+ * `from_repo` used to do.
+ */
+type BuildMode = 'from_repo' | 'from_md' | 'greenfield';
 
 export interface PlanBuildDetect {
   mode: BuildMode;
@@ -79,6 +100,21 @@ export interface PlanBuildDetect {
   kbFiles: string[];
   brief: string;
   repoName: string;
+  /** Sandbox path of the index `00-plan-inputs` wrote, or null when the task has
+   *  no attachments. Named in the prompt because several attachment kinds are
+   *  only readable through a sidecar the index points at. */
+  inputIndexPath?: string | null;
+  /** Inputs a model must SEE to understand: images, plus any document that
+   *  needed extraction and yielded no text (a wireframe PDF is exactly that —
+   *  large because of its pictures, with a handful of labels or nothing at all).
+   *
+   *  A HARD vision requirement on every dispatch. A model that cannot see one is
+   *  told by the no-vision boundary to skip it, and with no text form left it
+   *  would plan around the wireframe and report success. */
+  visualOnlyInputs?: string[];
+  /** PDFs that DID yield text. A SOFT preference only — the sidecar is a real
+   *  fallback, so a blind model can still read one and must not be refused. */
+  hasPdfInputs?: boolean;
 }
 
 export interface PlanBuildApply {
@@ -230,6 +266,35 @@ export function askedState(results: { agentId: string; errorMessage?: string | n
   return { asked, waves, expandAsked: asked.size, expandDispatched };
 }
 
+/** What `00-plan-inputs` found, or null when it did not run for this task (the
+ *  onboarding wrapper registers no such step). Never throws: a build must not
+ *  fail because the index lookup did. */
+async function loadPlanInputsOutput(ctx: StepContext): Promise<PlanInputsApply | null> {
+  try {
+    const [row] = await ctx.db
+      .select({ output: schema.taskSteps.output })
+      .from(schema.taskSteps)
+      .where(
+        and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, '00-plan-inputs')),
+      )
+      .limit(1);
+    return (row?.output as PlanInputsApply | null) ?? null;
+  } catch (err) {
+    ctx.logger.warn({ err }, 'could not read prepared plan inputs');
+    return null;
+  }
+}
+
+/** The capabilities every agent of THIS build needs.
+ *
+ *  `vision` is per-dispatch rather than on the mining spec because it is a
+ *  property of the task's inputs, not of the step: the same builder runs with and
+ *  without a wireframe attached, and declaring it statically would lock every
+ *  blind model out of the builds that have no image at all. */
+export function planAgentCapabilities(d: PlanBuildDetect): StepCapability[] {
+  return (d.visualOnlyInputs?.length ?? 0) > 0 ? ['tool_use', 'vision'] : ['tool_use'];
+}
+
 async function listKbFiles(ctx: StepContext): Promise<string[]> {
   try {
     const dir = path.join(ctx.repoPath, KB_DIR);
@@ -247,6 +312,32 @@ function sourceGuidance(d: PlanBuildDetect): string {
       'notice above). Read it and decompose WHAT IT SAYS. Do not invent scope it does not',
       'ask for, and do not silently drop scope it does ask for — if something in it does not',
       'fit the tree, add it as its own node rather than leaving it out.',
+    ].join('\n');
+  }
+  if (d.mode === 'greenfield') {
+    const index = d.inputIndexPath
+      ? [
+          `Read ${d.inputIndexPath} FIRST. It lists every attached file, what kind it is, and`,
+          'where its readable text is — several kinds are only readable through an extracted',
+          'sidecar that index names.',
+          '',
+        ]
+      : [];
+    return [
+      'This project does not exist yet. The brief above and the attached files ARE the',
+      'specification — they are what the user intends, not hints to improve on. Decompose what',
+      'they say. Do not invent scope they do not ask for, and do not silently drop scope they',
+      'do ask for: something that does not fit the tree gets its own node rather than being',
+      'left out.',
+      '',
+      ...index,
+      'Where two inputs CONTRADICT each other, or the brief leaves something genuinely open,',
+      'record that as a `decision` node (a choice still to be made) or a `research` node (needs',
+      'investigating first) and say in its body what the alternatives are. Do not pick one and',
+      'present it as settled — a plan that hides an open question is worse than one that names',
+      'it, because nobody goes looking for a decision the tree claims was already made.',
+      '',
+      'STATUS: nothing here is built. Leave status alone — every node is outstanding work.',
     ].join('\n');
   }
   const kb =
@@ -404,7 +495,15 @@ export function createPlanBuildStep(
 
       const repositoryId = task?.repositoryId ?? null;
       const meta = (task?.metadata ?? {}) as { planBuildMode?: string };
-      const mode: BuildMode = meta.planBuildMode === 'from_md' ? 'from_md' : 'from_repo';
+      // A default rather than a throw: an unrecognised value lands on the
+      // pre-greenfield behaviour, which is what a revert of this feature would
+      // also produce.
+      const mode: BuildMode =
+        meta.planBuildMode === 'from_md'
+          ? 'from_md'
+          : meta.planBuildMode === 'greenfield'
+            ? 'greenfield'
+            : 'from_repo';
 
       let repoName = 'this project';
       let existingNodeCount = 0;
@@ -421,6 +520,12 @@ export function createPlanBuildStep(
         hasRoot = nodes.some((n) => n.parentId === null);
       }
 
+      // Read from 00-plan-inputs rather than re-derived here. That step already
+      // classified every attachment and knows which sidecars it wrote; deriving
+      // it twice is how the prompt ends up naming a file the step did not write.
+      // Absent for the onboarding wrapper, which has no attachments at all.
+      const inputs = await loadPlanInputsOutput(ctx);
+
       return {
         mode,
         repositoryId,
@@ -429,6 +534,14 @@ export function createPlanBuildStep(
         kbFiles: mode === 'from_repo' ? await listKbFiles(ctx) : [],
         brief: (task?.description ?? '').trim(),
         repoName,
+        inputIndexPath: inputs?.indexPath ?? null,
+        // Images are always visual-only; a document joins them when nothing
+        // readable came out of it.
+        visualOnlyInputs: [
+          ...(inputs?.inputs ?? []).filter((i) => i.kind === 'image').map((i) => i.filename),
+          ...(inputs?.visualOnly ?? []),
+        ],
+        hasPdfInputs: inputs?.hasPdfInputs === true,
       };
     },
 
@@ -501,6 +614,8 @@ export function createPlanBuildStep(
             agentId: 'plan-root',
             agentTitle: 'Plan outline',
             roleKey: 'outline',
+            capabilities: planAgentCapabilities(d),
+            preferVision: d.hasPdfInputs === true,
             prompt: await augmentPromptWithAttachments(
               ctx.db,
               ctx.taskId,
@@ -689,6 +804,8 @@ export function createPlanBuildStep(
             agentId: `plan-expand-${node.id}-p${nextWave}`,
             agentTitle: `Expand: ${node.title}`,
             roleKey: 'expand',
+            capabilities: planAgentCapabilities(d),
+            preferVision: d.hasPdfInputs === true,
             prompt: await augmentPromptWithAttachments(
               ctx.db,
               ctx.taskId,
