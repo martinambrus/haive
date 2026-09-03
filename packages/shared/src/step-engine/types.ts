@@ -177,6 +177,7 @@ export const SKIPPABLE_STEP_IDS: readonly string[] = [
   '11b-kb-commit',
   '11c-rag-reindex',
   '11d-skill-sync',
+  '11f-plan-reconcile',
 ];
 
 export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
@@ -311,6 +312,7 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   { id: '08e-insights-triage', workflowType: 'workflow', title: 'Insight triage' },
   { id: '11-phase-8-learning', workflowType: 'workflow', title: 'Phase 8: Learning capture' },
   { id: '11d-skill-sync', workflowType: 'workflow', title: 'Skill sync' },
+  { id: '11f-plan-reconcile', workflowType: 'workflow', title: 'Plan reconcile' },
   // kb-author
   { id: '01-kb-enrich', workflowType: 'kb_author', title: 'Knowledge base enrichment' },
   // plan canvas — 02-advisory-decision is deliberately absent: it runs no CLI,

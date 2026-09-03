@@ -80,6 +80,10 @@ const PLAN_TASKLIST_EXTRA: readonly string[] = [
   '11b-kb-commit',
   '11c-rag-reindex',
   '11e-prompt-guidance',
+  // Same membership as 04-phase-0b, whose spec and affected-component set it
+  // reads. quick_bugfix has neither, and spending an agent to reconcile a plan
+  // against a one-line fix is not worth it — that path keeps the drift signal.
+  '11f-plan-reconcile',
 ];
 
 export const PATH_STEP_SETS: Record<
