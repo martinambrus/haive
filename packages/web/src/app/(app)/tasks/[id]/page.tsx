@@ -1493,7 +1493,11 @@ export default function TaskDetailPage() {
           {/* Usage chip centers in the gap between the left badges and the right
               pace chip: its ml-auto + the pace chip's own ml-auto split the free
               space evenly on each side. Collapses to the strip's gap-3 at low res. */}
-          <HeaderUsageChip providerIds={usageProviderIds} providers={providers} />
+          <HeaderUsageChip
+            providerIds={usageProviderIds}
+            providers={providers}
+            className="ml-auto"
+          />
           <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
         </div>
       )}
@@ -1612,10 +1616,11 @@ export default function TaskDetailPage() {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {/* Sits with the recovery buttons, not in the title strip: on a task that failed on
-              a dead CLI token this is the action, and the strip's copy only appears once the
-              user has scrolled the header away. */}
-          <HeaderUsageChip providerIds={usageProviderIds} providers={providers} reconnectOnly />
+          {/* The same chip the fixed title strip carries, because the strip only exists once
+              the header has scrolled away — at the top of the page, which is where a run is
+              started and where a dead token has to be repaired, there was no reading of what
+              allowance is left. */}
+          <HeaderUsageChip providerIds={usageProviderIds} providers={providers} />
           {canRetry &&
             (() => {
               // Mirror the failed step's own primary button (primaryRecovery) instead of
@@ -2535,7 +2540,8 @@ function HeaderPaceChip({
  *  strip is ONE line that also carries the back link, the vote score, the title, up to four
  *  badges and the pace chip, and a full meter is ~250px (name + a 50px bar per window + its
  *  reset time). Two is what fits on a laptop without the title truncating to nothing; the
- *  hidden ones keep their numbers in the "+N" tooltip. */
+ *  hidden ones keep their numbers in the "+N" tooltip. The page header applies the same cap
+ *  for the same reason — it shares its row with the recovery buttons. */
 const HEADER_METER_LIMIT = 2;
 
 /**
@@ -2554,17 +2560,16 @@ const HEADER_METER_LIMIT = 2;
 function HeaderUsageChip({
   providerIds,
   providers,
-  reconnectOnly,
+  className = '',
 }: {
   /** Every CLI this step will spend, from stepCliProviderIds — the step default plus each
    *  configured seat/role, already deduped. */
   providerIds: readonly string[];
   providers: CliProvider[];
-  /** Render the dead-token prompts and nothing else. The meters are a summary and can live
-   *  in the title strip the user only sees after scrolling; a repair is an action and has to
-   *  be on screen when the page opens, which is why the always-visible header mounts this
-   *  variant alongside the strip's full one. */
-  reconnectOnly?: boolean;
+  /** Extra classes for the chip's outer element. The strip's ml-auto centering is layout the
+   *  STRIP owns, not the chip: the page header mounts the same chip inline, ahead of the
+   *  recovery buttons, where an ml-auto would push it off on a wrapped row. */
+  className?: string;
 }) {
   const [snapshots, setSnapshots] = useState<UsageWindowSnapshot[] | null>(null);
   const [allowanceKeys, setAllowanceKeys] = useState<Record<string, string> | undefined>(undefined);
@@ -2674,15 +2679,6 @@ function HeaderUsageChip({
     );
   };
 
-  // Sits with the recovery buttons rather than in the title strip, so a repair is on screen
-  // without scrolling. Every dead subscription the step spends, not just its default one: a
-  // fan-out step whose SEAT token expired fails exactly as hard as one whose default did.
-  if (reconnectOnly) {
-    const repairs = meters.filter((m) => m.status !== 'ok');
-    if (repairs.length === 0) return null;
-    return <>{repairs.map(renderMeter)}</>;
-  }
-
   if (meters.length === 0) {
     // Nothing readable for ANY of the step's CLIs. Name WHY for the primary one instead of
     // going blank: four unrelated situations (unmetered CLI, never polled, failed fetch,
@@ -2700,7 +2696,7 @@ function HeaderUsageChip({
       <UsageFaultChip
         fault={state.fault}
         displayName={(row?.name && CLI_USAGE_LABEL[row.name]) || row?.label || 'CLI'}
-        className={`ml-auto ${chipClass(
+        className={`${className} ${chipClass(
           state.fault === 'not_connected'
             ? 'text-amber-400 hover:text-amber-300'
             : 'text-neutral-500',
@@ -2709,26 +2705,29 @@ function HeaderUsageChip({
     );
   }
 
-  const shown = meters.slice(0, HEADER_METER_LIMIT);
-  const hidden = meters.slice(HEADER_METER_LIMIT);
+  // Repairs are drawn first and are never collapsed into the "+N": a dead token is the one
+  // thing on this chip that needs a click, and every dead subscription the step spends counts,
+  // not just its default one — a fan-out step whose SEAT token expired fails exactly as hard.
+  // The cap applies to the readable meters, which are a summary and can afford to be hidden.
+  const repairs = meters.filter((m) => m.status !== 'ok');
+  const readable = meters.filter((m) => m.status === 'ok');
+  const shown = readable.slice(0, HEADER_METER_LIMIT);
+  const hidden = readable.slice(HEADER_METER_LIMIT);
   // Worst headroom a hidden meter has left, so "+N" carries the colour of the most depleted
   // thing it covers. The sort above is by allowance key — stable across polls, which is the
   // point, but arbitrary as an ordering — so without this a CLI at 3% could be invisible
-  // purely because its name sorts late. A meter with no readable window (a dead or repairing
-  // token) counts as 0: that is the most urgent thing the chip can be hiding.
+  // purely because its name sorts late. A meter the vendor reported no window for counts as
+  // 0 — it draws nothing, so "+N" is the only place it is represented at all.
   const worstOf = (m: StripMeter): number => {
     const pcts = usageWindowsOf(m.snapshot).map((x) => 100 - x.w.usedPct);
     return pcts.length === 0 ? 0 : Math.min(...pcts);
   };
   const hiddenLine = (m: StripMeter): string =>
-    m.status === 'needs_reconnect'
-      ? `${nameOf(m.snapshot)} — reconnect needed`
-      : m.status === 'pending'
-        ? `${nameOf(m.snapshot)} — reconnecting`
-        : `${nameOf(m.snapshot)} — ${usageTooltip(usageWindowsOf(m.snapshot), now)}`;
+    `${nameOf(m.snapshot)} — ${usageTooltip(usageWindowsOf(m.snapshot), now)}`;
 
   return (
-    <span className="ml-auto flex shrink-0 items-center gap-4">
+    <span className={`flex shrink-0 items-center gap-4 ${className}`}>
+      {repairs.map(renderMeter)}
       {shown.map(renderMeter)}
       {hidden.length > 0 && (
         <span
