@@ -37,7 +37,6 @@ import {
 import { getDb } from '../db.js';
 import { resolveRepoRoot } from './repos.js';
 import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
-import { writeTaskAttachment } from './tasks/attachments.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { spawnPlanTask } from '../lib/spawn-plan-task.js';
@@ -770,10 +769,11 @@ planRoutes.post('/:id/plan/build', async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = planBuildRequestSchema.parse(await c.req.json());
-  // from_md decomposes a document uploaded as a task attachment, which needs a
-  // volume-backed repo to land in — the same requirement the attachments route
-  // enforces, checked here so the user is told before a task is created.
-  if (body.mode === 'from_md' && !repo.storagePath) {
+  // A deferred start exists to let attachments land first, and they land in the
+  // repo's uploads dir — the same requirement the attachments route enforces,
+  // checked here so the user is told before a task is created rather than after
+  // the first upload 409s.
+  if (body.deferStart && !repo.storagePath) {
     throw new HttpError(409, 'This repository is not ready for uploads yet');
   }
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
@@ -783,27 +783,22 @@ planRoutes.post('/:id/plan/build', async (c) => {
     type: 'plan_build',
     title: body.title?.trim() || `Build plan: ${repo.name}`,
     description: body.description,
-    metadata: { planBuildMode: body.mode },
+    // `planBuildDeferred` records HOW the task was created and never changes;
+    // whether it has since started is `tasks.status`, which is the column that
+    // actually proves it. The UI's Start affordance keys on the status.
+    metadata: {
+      planBuildMode: body.mode,
+      ...(body.deferStart ? { planBuildDeferred: true } : {}),
+    },
     cliProviderId,
-    // The document has to be on disk before the job is enqueued: the step's
-    // detect reads the uploads dir, and the worker picks a job up immediately.
-    // Same race the chat's opening turn lost before this hook existed.
-    ...(body.document
-      ? {
-          seed: async (newTaskId: string) => {
-            await writeTaskAttachment({
-              taskId: newTaskId,
-              userId,
-              filename: body.document!.filename,
-              content: body.document!.content,
-              contentType: 'text/markdown',
-              description: 'Plan document to decompose',
-            });
-          },
-        }
-      : {}),
+    // Uploads cannot ride a seed hook: the api does not know how many files are
+    // coming or whether they all arrive. So the row is created unstarted and the
+    // client finalizes with the `start` action once every upload succeeds —
+    // which keeps the invariant the seed hook existed for (the files are on disk
+    // before the worker's first detect) without pretending to own the transfer.
+    ...(body.deferStart ? { enqueue: false } : {}),
   });
-  return c.json({ taskId }, 201);
+  return c.json({ taskId, deferred: body.deferStart === true }, 201);
 });
 
 planRoutes.post('/:id/plan/nodes/:nodeId/chat', async (c) => {

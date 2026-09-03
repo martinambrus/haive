@@ -297,45 +297,43 @@ export const createPlanEdgeRequestSchema = z.object({
 });
 export type CreatePlanEdgeRequest = z.infer<typeof createPlanEdgeRequestSchema>;
 
-/** `from_repo` derives the plan from the repo's knowledge base + RAG;
- *  `from_md` decomposes a markdown document uploaded as a task attachment. */
-export const planBuildModeSchema = z.enum(['from_repo', 'from_md']);
+/** `from_repo` derives the plan from the repo's knowledge base + RAG, and its
+ *  nodes arrive `done` because they describe code that already exists.
+ *  `greenfield` decomposes a written brief plus any attached documents into a
+ *  project that does NOT exist yet, so its nodes stay `todo`.
+ *
+ *  A third value, `from_md`, was how a single inline markdown document used to
+ *  arrive. It is deliberately absent HERE while remaining live in the worker:
+ *  nothing may newly create one, but tasks already carrying it must keep
+ *  running. A brief-only build used to ride `from_repo`, which was not merely
+ *  inaccurate prompt copy — it greened every node of a project nobody had
+ *  built. */
+export const planBuildModeSchema = z.enum(['from_repo', 'greenfield']);
 export type PlanBuildMode = z.infer<typeof planBuildModeSchema>;
-
-/** A plan document carried inline with the build request.
- *
- *  Inline rather than a second upload call so the file and the task are created
- *  in ONE request: the build's `seed` hook writes it before the job is enqueued,
- *  and the worker starts immediately, so a separate upload would race detect.
- *
- *  Capped at 1 MiB where the streaming attachment route allows 25. That route is
- *  a stream and this is a JSON field; a MiB of markdown is roughly 250k words,
- *  far past any plan document, and anything larger belongs on an ordinary task
- *  as a normal attachment. */
-export const planBuildDocumentSchema = z.object({
-  filename: z.string().trim().min(1).max(255),
-  content: z.string().min(1).max(1_048_576),
-});
-export type PlanBuildDocument = z.infer<typeof planBuildDocumentSchema>;
 
 export const planBuildRequestSchema = z
   .object({
     mode: planBuildModeSchema,
     cliProviderId: z.string().uuid().optional(),
     title: z.string().trim().max(512).optional(),
-    /** Free-text brief for a greenfield `from_md`-less build — what the product is
-     *  meant to be, when there is no repo to read and no document to decompose. */
+    /** The brief: what the product is meant to be, when there is no repo to read.
+     *  Authoritative for `greenfield` alongside the attachments. */
     description: z.string().max(100_000).optional(),
-    /** The document `from_md` decomposes. Required by that mode, refused by the
-     *  others. */
-    document: planBuildDocumentSchema.optional(),
+    /** Create the task but do NOT enqueue it: the caller is about to stream
+     *  attachments and will finalize with the `start` task action once they all
+     *  land. The worker picks a job up immediately, so uploading after the
+     *  enqueue races the first step's detect — which is the whole reason this
+     *  flag exists rather than a create-then-upload sequence. */
+    deferStart: z.boolean().optional(),
   })
-  .refine((v) => v.mode !== 'from_md' || v.document !== undefined, {
-    // The from_md prompt tells the agent to read "the attached document". Letting
-    // that dispatch with nothing attached spends a CLI invocation drafting a plan
-    // for a file that does not exist.
-    message: 'from_md requires a document',
-    path: ['document'],
+  .refine((v) => v.mode !== 'greenfield' || Boolean(v.description?.trim()) || v.deferStart, {
+    // A greenfield build with no brief and no incoming files has nothing to
+    // decompose, and dispatching it spends a CLI invocation to invent a project.
+    // `deferStart` is accepted in place of a brief because attachments have not
+    // been uploaded yet at this point; the worker re-checks once both are known
+    // and refuses there if neither arrived.
+    message: 'greenfield requires a description or attachments',
+    path: ['description'],
   });
 export type PlanBuildRequest = z.infer<typeof planBuildRequestSchema>;
 

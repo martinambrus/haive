@@ -18,6 +18,12 @@ export async function spawnPlanTask(args: {
    *  step's detect() must already see belongs here: once the job is on the
    *  queue the worker can pick it up immediately, and it does. */
   seed?: (taskId: string) => Promise<void>;
+  /** Default true. False creates the row and stops: the caller is going to write
+   *  something the seed hook cannot express — a stream of uploaded files, whose
+   *  count and success are only known to the client — and will enqueue with the
+   *  `start` task action once they all land. The row sits at `created`, which is
+   *  what that action claims. */
+  enqueue?: boolean;
 }): Promise<string> {
   const db = getDb();
   const [task] = await db
@@ -37,6 +43,8 @@ export async function spawnPlanTask(args: {
   if (!task) throw new HttpError(500, 'failed to create plan task');
 
   if (args.seed) await args.seed(task.id);
+
+  if (args.enqueue === false) return task.id;
 
   await getTaskQueue().add(
     TASK_JOB_NAMES.START,

@@ -152,7 +152,12 @@ export const MERGE_CLARIFICATION_ANSWERED_EVENT = 'merge_resolution.clarificatio
  *  Neither is terminal and neither touches the environment — unlike `cancel`, and unlike
  *  Stop (`/cancel-active-cli`), which fails the current step to get the task out of
  *  `running`. */
-export const taskActionSchema = z.enum(['cancel', 'retry', 'pause', 'resume']);
+/** `start` enqueues a task that was created but deliberately never enqueued — the
+ *  second half of a two-phase create, where the caller uploads attachments in
+ *  between so they exist before the first step's detect reads them. Idempotent by
+ *  construction (it claims the `created` status atomically), so a double-click
+ *  cannot enqueue two starts. */
+export const taskActionSchema = z.enum(['cancel', 'retry', 'pause', 'resume', 'start']);
 
 export const taskActionRequestSchema = z.object({
   action: taskActionSchema,

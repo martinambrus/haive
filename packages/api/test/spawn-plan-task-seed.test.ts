@@ -70,21 +70,28 @@ describe('spawnPlanTask seeding', () => {
     expect(order).toEqual(['insert', 'enqueue']);
   });
 
-  it('writes a plan document before the job is enqueued', async () => {
-    // The from_md case. The step's detect reads the uploads dir, and the worker
-    // picks a job up immediately, so a document written after the enqueue is a
-    // document the build may never see.
-    const writes: string[] = [];
+  it('creates without enqueueing when the start is deferred', async () => {
+    // A plan build whose attachments are still to be uploaded. The step's detect
+    // reads the uploads dir and the worker picks a job up immediately, so the
+    // row is created unstarted and the `start` action enqueues it once every
+    // file has landed. Enqueueing here would be the exact race the deferral
+    // exists to avoid.
+    const id = await spawnPlanTask({ ...args, type: 'plan_build' as const, enqueue: false });
+    expect(id).toBe('task-1');
+    expect(order).toEqual(['insert']);
+    expect(taskQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('still runs the seed when the start is deferred', async () => {
     await spawnPlanTask({
       ...args,
       type: 'plan_build' as const,
+      enqueue: false,
       seed: async (taskId) => {
-        writes.push('attachment');
         order.push(`seed:${taskId}`);
       },
     });
-    expect(order).toEqual(['insert', 'seed:task-1', 'enqueue']);
-    expect(writes).toEqual(['attachment']);
+    expect(order).toEqual(['insert', 'seed:task-1']);
   });
 
   it('does not enqueue a task whose seed failed', async () => {

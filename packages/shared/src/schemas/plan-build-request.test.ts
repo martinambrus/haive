@@ -1,58 +1,54 @@
 import { describe, expect, it } from 'vitest';
 import { planBuildRequestSchema } from './plan.js';
 
-const doc = { filename: 'plan.md', content: '# Plan\n' };
-
 describe('planBuildRequestSchema', () => {
-  it('accepts a knowledge-base build with no document', () => {
+  it('accepts a knowledge-base build with nothing else', () => {
     expect(planBuildRequestSchema.safeParse({ mode: 'from_repo' }).success).toBe(true);
   });
 
-  it('accepts a document build carrying its document', () => {
-    expect(planBuildRequestSchema.safeParse({ mode: 'from_md', document: doc }).success).toBe(true);
-  });
-
-  it('refuses a document build with nothing attached', () => {
-    // The from_md prompt tells the agent to read "the attached document";
-    // dispatching that with nothing there spends an invocation drafting a plan
-    // for a file that does not exist.
-    const out = planBuildRequestSchema.safeParse({ mode: 'from_md' });
-    expect(out.success).toBe(false);
-    expect(out.error?.issues[0]?.path).toEqual(['document']);
-  });
-
-  it('refuses a document larger than the inline cap', () => {
+  it('accepts a greenfield build carrying a brief', () => {
     const out = planBuildRequestSchema.safeParse({
-      mode: 'from_md',
-      document: { filename: 'huge.md', content: 'x'.repeat(1_048_577) },
-    });
-    expect(out.success).toBe(false);
-  });
-
-  it('refuses an empty document, which would decompose to nothing', () => {
-    expect(
-      planBuildRequestSchema.safeParse({
-        mode: 'from_md',
-        document: { filename: 'empty.md', content: '' },
-      }).success,
-    ).toBe(false);
-  });
-
-  it('refuses a document with no filename', () => {
-    expect(
-      planBuildRequestSchema.safeParse({
-        mode: 'from_md',
-        document: { filename: '   ', content: '# Plan' },
-      }).success,
-    ).toBe(false);
-  });
-
-  it('carries a greenfield brief', () => {
-    const out = planBuildRequestSchema.safeParse({
-      mode: 'from_repo',
+      mode: 'greenfield',
       description: 'A CMS for small clubs.',
     });
     expect(out.success).toBe(true);
     expect(out.data?.description).toBe('A CMS for small clubs.');
+  });
+
+  it('accepts a greenfield build with no brief when files are coming', () => {
+    // deferStart means the caller is about to stream attachments and finalize
+    // afterwards, so "no description" is not yet "nothing to plan from".
+    expect(planBuildRequestSchema.safeParse({ mode: 'greenfield', deferStart: true }).success).toBe(
+      true,
+    );
+  });
+
+  it('refuses a greenfield build with neither a brief nor incoming files', () => {
+    // Nothing to decompose. Dispatching it spends a CLI invocation inventing a
+    // project the user never described.
+    const out = planBuildRequestSchema.safeParse({ mode: 'greenfield' });
+    expect(out.success).toBe(false);
+    expect(out.error?.issues[0]?.path).toEqual(['description']);
+  });
+
+  it('treats a whitespace-only brief as no brief', () => {
+    expect(
+      planBuildRequestSchema.safeParse({ mode: 'greenfield', description: '   ' }).success,
+    ).toBe(false);
+  });
+
+  it('no longer accepts the retired inline-document mode', () => {
+    // `from_md` survives in the WORKER so stored tasks keep running, but nothing
+    // may create one: a plan document is now an ordinary task attachment.
+    expect(planBuildRequestSchema.safeParse({ mode: 'from_md' }).success).toBe(false);
+  });
+
+  it('ignores an inline document rather than accepting it', () => {
+    const out = planBuildRequestSchema.safeParse({
+      mode: 'from_repo',
+      document: { filename: 'plan.md', content: '# Plan\n' },
+    });
+    expect(out.success).toBe(true);
+    expect(out.data).not.toHaveProperty('document');
   });
 });

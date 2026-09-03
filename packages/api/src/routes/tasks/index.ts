@@ -929,6 +929,30 @@ taskRoutes.post('/:id/action', async (c) => {
   if (!task) throw new HttpError(404, 'Task not found');
 
   switch (body.action) {
+    case 'start': {
+      // The second half of a two-phase create (POST /plan/build with
+      // `deferStart`): the row was made unstarted so the caller could upload
+      // attachments, and this enqueues it once they landed.
+      //
+      // Idempotent by construction. The UPDATE claims the `created` status
+      // atomically, so a second click matches no row and enqueues nothing —
+      // guarding with a read-then-write instead would let two clicks both pass
+      // the read and put the same task on the queue twice.
+      const [claimed] = await db
+        .update(schema.tasks)
+        .set({ status: 'queued', updatedAt: new Date() })
+        .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'created')))
+        .returning({ id: schema.tasks.id });
+      if (!claimed) return c.json({ ok: true, started: false, status: task.status });
+      await appendTaskEvent(db, id, null, 'task.started', { by: userId });
+      await getTaskQueue().add(TASK_JOB_NAMES.START, { taskId: id, userId } as TaskJobPayload, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      });
+      return c.json({ ok: true, started: true, status: 'queued' });
+    }
     case 'cancel':
       if (task.status === 'completed' || task.status === 'cancelled') {
         return c.json({ ok: true, status: task.status });
