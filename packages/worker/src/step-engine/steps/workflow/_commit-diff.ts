@@ -38,6 +38,14 @@ export interface CommitDiffFile {
   truncated: boolean;
   oldContent: string;
   newContent: string;
+  /** Absolute path the web viewer may WRITE this file's new side back to, via
+   *  `PUT /tasks/:id/files/content`. Set only by builders whose gate offers
+   *  inline editing (the knowledge diff); absent means the file renders
+   *  read-only, which is every file of the gate-3 commit diff. Points at the
+   *  real worktree file for an on-disk change, and at a `.haive/` staging file
+   *  for a draft the step has not written yet — the viewer does not care which,
+   *  it just PUTs the path back. */
+  editPath?: string;
 }
 
 export interface CommitDiffArtifact {

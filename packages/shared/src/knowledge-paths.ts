@@ -16,6 +16,15 @@ import { HAIVE_DATA_DIR } from './types/index.js';
 /* (which drags ioredis -> dns into the browser build).                */
 /* ------------------------------------------------------------------ */
 
+/** Where a knowledge gate stages a draft that is not a file yet, so the web UI
+ *  can edit it before it is written (11-phase-8-learning stages its learnings and
+ *  its investigation here; the api's file-edit route accepts writes into it).
+ *
+ *  Under the git-excluded `.haive/` rather than `.haive-data/` precisely because a
+ *  draft is not knowledge until the gate writes it — an abandoned review must
+ *  leave nothing behind, and nothing staged may ever reach a commit. */
+export const LEARNING_DRAFTS_DIR = '.haive/learning-drafts';
+
 export const KB_DIR = `${HAIVE_DATA_DIR}/knowledge_base`;
 export const LEARNINGS_DIR = `${HAIVE_DATA_DIR}/learnings`;
 export const INVESTIGATIONS_DIR = `${KB_DIR}/investigations`;

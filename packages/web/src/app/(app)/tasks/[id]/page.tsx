@@ -3664,13 +3664,14 @@ function StepCardImpl({
                     })}
                     {screenshotGallery(step, taskId, 'detect')}
                   </>
-                ) : step.stepId === '11-phase-8-learning' &&
-                  step.status === 'waiting_form' &&
+                ) : step.status === 'waiting_form' &&
                   (step.detectOutput as { knowledgeDiffArtifactPath?: string | null } | null)
                     ?.knowledgeDiffArtifactPath ? (
-                  // Learning: the knowledge diff sits BELOW the drafted-artifact disclosures
-                  // but ABOVE the apply checkboxes / instruction / submit — review what will be
-                  // written, then decide.
+                  // Any knowledge gate that published a diff artifact — the learning capture
+                  // (11) and the KB commit (11b). Keyed on the artifact, not on a step id, so
+                  // a third gate needs no change here. It sits BELOW the drafted-artifact
+                  // disclosures but ABOVE the checkboxes / instruction / submit — review (and,
+                  // where the artifact allows it, correct) what will be written, then decide.
                   <CommitDiffViewer
                     taskId={taskId}
                     artifactPath={

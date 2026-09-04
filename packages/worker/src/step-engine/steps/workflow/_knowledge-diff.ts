@@ -15,15 +15,25 @@ import {
  *  its form-gate diff viewer. Lives under `.haive/`, which 01-worktree-setup adds
  *  to `.git/info/exclude`, so it is never staged or committed. */
 export const KNOWLEDGE_DIFF_ARTIFACT_NAME = 'learning-knowledge-diff.json';
+/** The same artifact for the commit gate (11b-kb-commit). Its own name so the two
+ *  gates do not overwrite each other's diff — and so the web viewer's collapsed
+ *  state, keyed on the basename, is per-gate. */
+export const KB_COMMIT_DIFF_ARTIFACT_NAME = 'kb-commit-diff.json';
 
-/** Builds the learning-step knowledge diff and writes it to
+/** Builds the knowledge diff and writes it to
  *  `<workspacePath>/.haive/learning-knowledge-diff.json`.
  *
- *  The git side is the agent's Feature KB Sync edits — the working tree vs HEAD,
- *  scoped to the knowledge-base root (old content from the HEAD blob, new from the
- *  working tree, reusing the gate-3 builder internals). `extraFiles` are
- *  caller-synthesized entries (the learning insert/update/delete ops, added in
- *  slice 2) that have no git working-tree representation yet.
+ *  The git side is on-disk knowledge changes — the working tree vs HEAD, scoped to
+ *  `pathspecs` (old content from the HEAD blob, new from the working tree, reusing
+ *  the gate-3 builder internals). `extraFiles` are caller-synthesized entries (the
+ *  learning insert/update/delete ops) that have no git working-tree representation
+ *  yet. Defaults to the knowledge-base root alone, which is what the learning step
+ *  wants — its learnings arrive as `extraFiles`; 11b-kb-commit passes both trees,
+ *  since by then the learnings are written files like any other.
+ *
+ *  Every git-side text file gets an `editPath`, so the gate's viewer can write the
+ *  new side back. Deleted, binary and truncated files do not: there is nothing to
+ *  edit, no text to show, and (for truncated) the content in hand is not the file.
  *
  *  Always writes, even with zero files, so the web viewer renders "No changes to
  *  show" rather than a fetch error. Returns the absolute artifact path. */
@@ -31,8 +41,16 @@ export async function buildKnowledgeDiffArtifact(
   workspacePath: string,
   gitRun: GitRun,
   extraFiles: CommitDiffFile[] = [],
+  opts: { pathspecs?: readonly string[]; artifactName?: string } = {},
 ): Promise<string> {
-  const statusRes = await gitRun(workspacePath, ['status', '--porcelain', '-z', '--', KB_DIR]);
+  const pathspecs = opts.pathspecs ?? [KB_DIR];
+  const statusRes = await gitRun(workspacePath, [
+    'status',
+    '--porcelain',
+    '-z',
+    '--',
+    ...pathspecs,
+  ]);
   const entries = parsePorcelainZ(statusRes.stdout).slice(0, MAX_FILES);
 
   const headShaRes = await gitRun(workspacePath, ['rev-parse', 'HEAD']);
@@ -43,6 +61,9 @@ export async function buildKnowledgeDiffArtifact(
   for (const e of entries) {
     const file = await buildFileEntry(workspacePath, gitRun, e, TOTAL_CONTENT_BUDGET - used);
     used += file.oldContent.length + file.newContent.length;
+    if (file.status !== 'deleted' && !file.binary && !file.truncated) {
+      file.editPath = path.join(workspacePath, file.path);
+    }
     kbFiles.push(file);
   }
 
@@ -54,7 +75,11 @@ export async function buildKnowledgeDiffArtifact(
     files,
   };
 
-  const artifactPath = path.join(workspacePath, '.haive', KNOWLEDGE_DIFF_ARTIFACT_NAME);
+  const artifactPath = path.join(
+    workspacePath,
+    '.haive',
+    opts.artifactName ?? KNOWLEDGE_DIFF_ARTIFACT_NAME,
+  );
   await mkdir(path.dirname(artifactPath), { recursive: true });
   await writeFile(artifactPath, JSON.stringify(artifact), 'utf8');
   return artifactPath;

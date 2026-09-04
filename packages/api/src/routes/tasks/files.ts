@@ -1,8 +1,23 @@
 import { createReadStream } from 'node:fs';
-import { open, readdir, stat } from 'node:fs/promises';
-import { basename, dirname, extname, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import {
+  chmod,
+  chown,
+  lstat,
+  open,
+  readdir,
+  readFile,
+  realpath,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
+import { basename, dirname, extname, join, relative } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { isReadOnlyLocalRepo } from '@haive/shared';
+import { KB_DIR, LEARNING_DRAFTS_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { createTaskArchiveStream } from '../../lib/task-archive.js';
@@ -165,4 +180,110 @@ fileRoutes.get('/:id/files/raw', async (c) => {
   c.header('Cache-Control', 'no-store');
 
   return c.body(Readable.toWeb(createReadStream(target)) as ReadableStream);
+});
+
+// --- Inline knowledge-base editing -----------------------------------------
+//
+// The one WRITE path into a task workspace. It exists so the knowledge gates
+// (11-phase-8-learning, 11b-kb-commit) can be reviewed AND corrected in the web
+// UI, instead of the user opening the Terminal or the code-server Editor tab to
+// fix a sentence in a drafted article.
+//
+// Deliberately narrow: it edits an EXISTING markdown file under the knowledge
+// trees or under the git-excluded draft-staging dir, and nothing else. It cannot
+// create a file, cannot reach code or config, and cannot walk out through a
+// symlink. The Editor tab already grants full write access to this same
+// worktree, so this adds no capability — it removes the reason to reach for one.
+
+/** Repo-relative prefixes this endpoint may write inside. `.haive/` is the
+ *  git-excluded dir where the learning gate stages drafts that are not files
+ *  yet; the other two are the committed knowledge trees. */
+const EDITABLE_PREFIXES = [`${KB_DIR}/`, `${LEARNINGS_DIR}/`, `${LEARNING_DRAFTS_DIR}/`] as const;
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/** 403 unless `target` is an editable knowledge file. Runs on the REPO-RELATIVE
+ *  path (validateWorkspacePath has already proven it is inside the root), and
+ *  then on the resolved parent, because a symlink is the one way a path that
+ *  passes the string check still writes somewhere else. */
+export async function assertEditableKnowledgePath(root: string, target: string): Promise<void> {
+  const rel = relative(root, target);
+  if (!EDITABLE_PREFIXES.some((p) => rel.startsWith(p))) {
+    throw new HttpError(403, 'Only knowledge-base files can be edited here');
+  }
+  if (extname(target).toLowerCase() !== '.md') {
+    throw new HttpError(403, 'Only markdown files can be edited here');
+  }
+  const link = await lstat(target).catch(() => null);
+  if (!link) throw new HttpError(404, 'File no longer exists');
+  if (link.isSymbolicLink()) throw new HttpError(403, 'Path is a symlink');
+  if (!link.isFile()) throw new HttpError(400, 'Path is not a file');
+  // A symlinked ANCESTOR would leave every check above happy while the write
+  // lands outside the workspace.
+  const realParent = await realpath(dirname(target));
+  const realRoot = await realpath(root);
+  if (relative(realRoot, realParent).startsWith('..')) {
+    throw new HttpError(403, 'Path is outside the task workspace');
+  }
+}
+
+/** 409 when the task's repository is read-only (mirrors the attachment upload
+ *  route) — nothing may write into a user's own checkout. */
+async function assertWritableRepo(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string | null,
+): Promise<void> {
+  if (!repositoryId) return;
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, repositoryId),
+    columns: { source: true, writable: true },
+  });
+  if (repo && isReadOnlyLocalRepo(repo)) {
+    throw new HttpError(409, 'This repository is read-only');
+  }
+}
+
+fileRoutes.put('/:id/files/content', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const { task, root } = await resolveWorkspaceRoot(db, id, userId);
+  await assertWritableRepo(db, task.repositoryId);
+
+  const body = (await c.req.json().catch(() => null)) as {
+    path?: unknown;
+    content?: unknown;
+    expectedSha?: unknown;
+  } | null;
+  if (!body || typeof body.path !== 'string' || typeof body.content !== 'string') {
+    throw new HttpError(400, 'path and content are required');
+  }
+  if (Buffer.byteLength(body.content, 'utf8') > MAX_FILE_CONTENT_BYTES) {
+    throw new HttpError(413, 'File is too large to edit here');
+  }
+
+  const target = validateWorkspacePath(root, body.path);
+  await assertEditableKnowledgePath(root, target);
+
+  // Optimistic concurrency against the bytes the client actually rendered: an
+  // agent re-run or a second tab can have rewritten the file since. Reported, not
+  // resolved — a silent overwrite of either side is the wrong answer.
+  const current = await readFile(target, 'utf8');
+  if (typeof body.expectedSha === 'string' && body.expectedSha !== sha256(current)) {
+    throw new HttpError(409, 'File changed since it was loaded; reload to see the current version');
+  }
+
+  await writeFile(target, body.content, 'utf8');
+  // The api runs as root while the sandbox user is uid 1000: without this the
+  // agent's next edit of its own file fails, and only inside a container.
+  await chmod(target, 0o644).catch(() => {});
+  await chown(target, 1000, 1000).catch(() => {});
+
+  return c.json({
+    path: target,
+    sha: sha256(body.content),
+    size: Buffer.byteLength(body.content, 'utf8'),
+  });
 });

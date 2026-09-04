@@ -2,7 +2,7 @@
 
 import { diffLines } from 'diff';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { API_BASE_URL } from '@/lib/api-client';
+import { api, API_BASE_URL, type ApiError } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 
 // Mirrors the worker artifact shape written by _commit-diff.ts.
@@ -16,6 +16,10 @@ interface CommitDiffFile {
   truncated: boolean;
   oldContent: string;
   newContent: string;
+  /** Set by the worker for files this gate lets the user correct in place (the
+   *  knowledge gates). Absent — every file of the gate-3 commit diff — renders
+   *  read-only. */
+  editPath?: string;
 }
 
 interface CommitDiffArtifact {
@@ -28,6 +32,23 @@ interface CommitDiffArtifact {
 interface CommitDiffViewerProps {
   taskId: string;
   artifactPath: string;
+}
+
+/** The file's current bytes plus the digest they hashed to, so a save can tell
+ *  the server which version it was editing. `sha` is null when the browser has no
+ *  SubtleCrypto (a non-secure-context origin), which drops the concurrency check
+ *  rather than the feature. */
+interface LiveContent {
+  text: string;
+  sha: string | null;
+}
+
+async function sha256(text: string): Promise<string | null> {
+  if (!globalThis.crypto?.subtle) return null;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 const STATUS_META: Record<CommitDiffStatus, { label: string; cls: string }> = {
@@ -250,6 +271,17 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
     `task-ui:${taskId}:diff:${artifactPath.split('/').pop() ?? artifactPath}`,
     false,
   );
+  // Inline editing (knowledge gates only — see CommitDiffFile.editPath).
+  // `live` is the file's current on-disk content, fetched per editable file so a
+  // reload shows what was saved rather than the stale bytes the worker baked into
+  // the artifact. `drafts` survives switching files, so a half-written correction
+  // is not lost by clicking the list.
+  const [live, setLive] = useState<Record<string, LiveContent>>({});
+  const [liveErrors, setLiveErrors] = useState<Record<string, string>>({});
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [editing, setEditing] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
 
@@ -336,17 +368,86 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
     [artifact, selected],
   );
   const renderable = selectedFile && !selectedFile.binary && !selectedFile.truncated;
+  // What the file says NOW: the fetched disk content once we have it, else the
+  // artifact's copy. Everything downstream (both diff views, the editor seed, the
+  // unsaved marker) reads this one value.
+  const currentNew =
+    (selectedFile?.editPath ? live[selectedFile.path]?.text : undefined) ??
+    selectedFile?.newContent ??
+    '';
   const inlineRows = useMemo(
-    () => (renderable ? toInlineRows(selectedFile.oldContent, selectedFile.newContent) : []),
-    [renderable, selectedFile],
+    () => (renderable ? toInlineRows(selectedFile.oldContent, currentNew) : []),
+    [renderable, selectedFile, currentNew],
   );
   const splitRows = useMemo(
-    () =>
-      renderable && view === 'split'
-        ? toSplitRows(selectedFile.oldContent, selectedFile.newContent)
-        : [],
-    [renderable, view, selectedFile],
+    () => (renderable && view === 'split' ? toSplitRows(selectedFile.oldContent, currentNew) : []),
+    [renderable, view, selectedFile, currentNew],
   );
+  // Pull the selected editable file's current bytes once. A failure disables
+  // editing for that file rather than falling back to the artifact copy: saving
+  // content we could not verify we were editing is how one silently clobbers an
+  // agent's rewrite.
+  const selectedEditPath = selectedFile?.editPath ?? null;
+  const selectedPath = selectedFile?.path ?? null;
+  useEffect(() => {
+    if (!selectedEditPath || !selectedPath) return;
+    if (live[selectedPath] || liveErrors[selectedPath]) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get<{ content: string | null; binary: boolean }>(
+          `/tasks/${taskId}/files/content?path=${encodeURIComponent(selectedEditPath)}`,
+        );
+        if (cancelled) return;
+        if (res.binary || res.content === null) {
+          setLiveErrors((m) => ({ ...m, [selectedPath]: 'not a text file' }));
+          return;
+        }
+        const text = res.content;
+        const sha = await sha256(text);
+        if (cancelled) return;
+        setLive((m) => ({ ...m, [selectedPath]: { text, sha } }));
+      } catch (err) {
+        if (!cancelled) {
+          setLiveErrors((m) => ({ ...m, [selectedPath]: (err as Error).message ?? 'load failed' }));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, selectedEditPath, selectedPath, live, liveErrors]);
+
+  const editable = Boolean(selectedEditPath && selectedPath && live[selectedPath]);
+  const draft = selectedPath !== null ? drafts[selectedPath] : undefined;
+  const hasUnsavedEdit = draft !== undefined && draft !== currentNew;
+
+  const saveEdit = async (): Promise<void> => {
+    if (!selectedEditPath || !selectedPath || draft === undefined) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await api.put<{ sha: string }>(`/tasks/${taskId}/files/content`, {
+        path: selectedEditPath,
+        content: draft,
+        ...(live[selectedPath]?.sha ? { expectedSha: live[selectedPath]!.sha } : {}),
+      });
+      setLive((m) => ({ ...m, [selectedPath]: { text: draft, sha: res.sha } }));
+      setDrafts((m) => {
+        const next = { ...m };
+        delete next[selectedPath];
+        return next;
+      });
+      setEditing(null);
+    } catch (err) {
+      // A 409 means the file moved under us — say so and leave the draft intact
+      // so nothing the user typed is thrown away by the failure.
+      setSaveError((err as ApiError).message ?? 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const added = inlineRows.filter((r) => r.kind === 'add').length;
   const removed = inlineRows.filter((r) => r.kind === 'remove').length;
 
@@ -467,6 +568,14 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                     {meta.label}
                   </span>
                   <span className="truncate text-neutral-200">{file.path}</span>
+                  {/* Marks a draft that DIFFERS from the file — opening the
+                      editor and changing nothing is not an unsaved edit. */}
+                  {drafts[file.path] !== undefined &&
+                    drafts[file.path] !== (live[file.path]?.text ?? file.newContent) && (
+                      <span className="shrink-0 text-[10px] text-amber-400" title="unsaved edit">
+                        •
+                      </span>
+                    )}
                 </button>
               );
             })}
@@ -505,10 +614,79 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                     {selectedFile.truncated && !selectedFile.binary && (
                       <span className="text-yellow-400">too large</span>
                     )}
+                    {hasUnsavedEdit && editing !== selectedFile.path && (
+                      <span className="text-amber-400">unsaved edit</span>
+                    )}
+                    {selectedEditPath && !editable && selectedPath && liveErrors[selectedPath] && (
+                      <span className="text-amber-400" title={liveErrors[selectedPath]}>
+                        not editable
+                      </span>
+                    )}
+                    {editable &&
+                      (editing === selectedFile.path ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => void saveEdit()}
+                            className="rounded border border-indigo-800 bg-indigo-950 px-2 py-0.5 text-indigo-200 hover:bg-indigo-900 disabled:opacity-50"
+                          >
+                            {saving ? 'Saving…' : 'Save'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => {
+                              setDrafts((m) => {
+                                const next = { ...m };
+                                delete next[selectedFile.path];
+                                return next;
+                              });
+                              setSaveError(null);
+                              setEditing(null);
+                            }}
+                            className="rounded border border-neutral-800 px-2 py-0.5 text-neutral-300 hover:bg-neutral-900 disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDrafts((m) => ({
+                              ...m,
+                              [selectedFile.path]: m[selectedFile.path] ?? currentNew,
+                            }));
+                            setSaveError(null);
+                            setEditing(selectedFile.path);
+                          }}
+                          className="rounded border border-neutral-800 px-2 py-0.5 text-neutral-300 hover:bg-neutral-900"
+                        >
+                          Edit
+                        </button>
+                      ))}
                   </span>
                 </div>
+                {saveError && editing === selectedFile.path && (
+                  <div className="border-b border-red-900 bg-red-950/40 px-2 py-1 text-[11px] text-red-300">
+                    {saveError}
+                  </div>
+                )}
                 <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                  {selectedFile.binary ? (
+                  {editing === selectedFile.path ? (
+                    <textarea
+                      value={draft ?? currentNew}
+                      onChange={(e) =>
+                        setDrafts((m) => ({ ...m, [selectedFile.path]: e.target.value }))
+                      }
+                      spellCheck={false}
+                      // min-h keeps the editor usable: the pane is bounded by a
+                      // max-height and sized by its content, so a short file
+                      // would otherwise collapse the box to two lines.
+                      className="min-h-[320px] flex-1 resize-none bg-neutral-950 p-2 font-mono text-[11px] leading-tight text-neutral-200 outline-none"
+                    />
+                  ) : selectedFile.binary ? (
                     <div className="p-4 text-xs text-neutral-400">
                       Binary file — diff not shown.
                     </div>

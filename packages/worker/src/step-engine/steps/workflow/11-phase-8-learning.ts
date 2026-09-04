@@ -4,7 +4,12 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { INVESTIGATIONS_DIR, KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
+import {
+  INVESTIGATIONS_DIR,
+  KB_DIR,
+  LEARNING_DRAFTS_DIR,
+  LEARNINGS_DIR,
+} from '@haive/shared/knowledge-paths';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
@@ -640,16 +645,105 @@ export function planLearningReconciliation(
         'learning update names an unknown id — inserting instead',
       );
     }
-    const id = resolveInsertId(e.id || slugify(e.title), taken);
+    // slugify the AGENT's id, not just the title fallback: it names a file
+    // (`<id>.md`) in the learnings dir and in the draft staging dir, and nothing
+    // downstream re-checks it — an id of `../../x` would write outside both.
+    const id = resolveInsertId(slugify(e.id) || slugify(e.title), taken);
     taken.add(id);
     plan.push({ op: 'insert', id, title: e.title, newBody: renderLearningBody(e), oldBody: '' });
   }
   return plan;
 }
 
+/** Staging (`LEARNING_DRAFTS_DIR`) exists because the drafts are the one half of
+ *  this gate that is NOT already a file: the agent's Feature-KB-Sync edits are
+ *  real worktree files the viewer can write straight back to, while a learning or
+ *  an investigation lives only in the parsed CLI output until apply(). Staging
+ *  turns both halves into a plain file that one editor writes to, instead of two
+ *  mechanisms.
+ *
+ *  Rewritten wholesale by prepareForm, which the step runner calls once per
+ *  drafting round (only when no form schema is persisted yet) — so an edit
+ *  survives the whole review, and a re-draft after a refine instruction correctly
+ *  replaces it.
+ *
+ *  Learnings sit in their own subdir so no learning id can collide with the
+ *  investigation's filename — `investigation` is a legal slug for a learning. */
+const LEARNING_DRAFT_SUBDIR = 'learnings';
+const INVESTIGATION_DRAFT_NAME = 'investigation.md';
+
+function learningDraftPath(worktree: string, id: string): string {
+  return path.join(worktree, LEARNING_DRAFTS_DIR, LEARNING_DRAFT_SUBDIR, `${id}.md`);
+}
+
+function investigationDraftPath(worktree: string): string {
+  return path.join(worktree, LEARNING_DRAFTS_DIR, INVESTIGATION_DRAFT_NAME);
+}
+
+/** Write the gate's drafts to the staging dir, replacing whatever the previous
+ *  drafting round left. Deletes are skipped — there is no body to edit. */
+export async function stageLearningDrafts(
+  worktree: string,
+  plan: PlannedLearningOp[],
+  investigationContent: string | null,
+): Promise<void> {
+  const dir = path.join(worktree, LEARNING_DRAFTS_DIR);
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(path.join(dir, LEARNING_DRAFT_SUBDIR), { recursive: true });
+  for (const p of plan) {
+    if (p.op === 'delete') continue;
+    await writeFile(learningDraftPath(worktree, p.id), p.newBody, 'utf8');
+  }
+  if (investigationContent !== null) {
+    await writeFile(investigationDraftPath(worktree), investigationContent, 'utf8');
+  }
+}
+
+/** Read one staged draft back. `null` means it was never staged — a step row
+ *  from before staging existed, or a prepareForm that failed — and the caller
+ *  keeps the agent's own body. An EMPTY file is NOT null: that is the reviewer
+ *  clearing the draft, which callers honor by dropping the entry. */
+async function readStagedDraft(file: string): Promise<string | null> {
+  try {
+    return await readFile(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** Fold the reviewer's staged edits into the plan: an edited body replaces the
+ *  agent's, an emptied one drops the entry, an unstaged one is left alone. */
+export async function applyStagedLearningEdits(
+  worktree: string,
+  plan: PlannedLearningOp[],
+): Promise<PlannedLearningOp[]> {
+  const out: PlannedLearningOp[] = [];
+  for (const p of plan) {
+    if (p.op === 'delete') {
+      out.push(p);
+      continue;
+    }
+    const staged = await readStagedDraft(learningDraftPath(worktree, p.id));
+    if (staged === null) {
+      out.push(p);
+      continue;
+    }
+    if (staged.trim().length === 0) continue;
+    // applyLearningOps appends the trailing newline; keep exactly one however
+    // many the editor left.
+    out.push({ ...p, newBody: staged.replace(/\n+$/, '') });
+  }
+  return out;
+}
+
 /** The planned ops as diff files for the form-gate viewer (synthesized — the new
- *  learning files are not written until apply). */
-export function learningOpsToDiffFiles(plan: PlannedLearningOp[]): CommitDiffFile[] {
+ *  learning files are not written until apply). With `worktree`, each editable op
+ *  points at its staged draft so the viewer can write the new side back; without
+ *  it the files render read-only. */
+export function learningOpsToDiffFiles(
+  plan: PlannedLearningOp[],
+  worktree?: string,
+): CommitDiffFile[] {
   return plan.map((p) => ({
     path: path.join(LEARNINGS_DIR, `${p.id}.md`),
     status: p.op === 'insert' ? 'added' : p.op === 'delete' ? 'deleted' : 'modified',
@@ -657,6 +751,7 @@ export function learningOpsToDiffFiles(plan: PlannedLearningOp[]): CommitDiffFil
     truncated: false,
     oldContent: p.oldBody,
     newContent: p.newBody,
+    ...(worktree && p.op !== 'delete' ? { editPath: learningDraftPath(worktree, p.id) } : {}),
   }));
 }
 
@@ -683,21 +778,17 @@ export async function applyLearningOps(
   return { written, deleted };
 }
 
-/** Write a bug investigation into the knowledge base (auto-RAG-indexed by the
- *  next run's pre-rag-sync). `nowIso` is passed in — this is a normal worker
- *  step so the worker clock is fine. */
-export async function writeInvestigation(
-  workspace: string,
+/** The investigation file's exact bytes. Split out of writeInvestigation so the
+ *  form gate can stage the same content for review/editing before apply writes
+ *  it — one renderer, so what the reviewer edits is what lands. */
+export function renderInvestigation(
   inv: Investigation,
   taskTitle: string,
   nowIso: string,
   feature: string | null,
   affectedClients: string[],
-): Promise<string> {
-  const dir = path.join(workspace, INVESTIGATIONS_DIR);
-  await mkdir(dir, { recursive: true });
-  const file = path.join(dir, `${slugify(inv.title)}.md`);
-  const content = [
+): string {
+  return [
     '---',
     `title: ${inv.title}`,
     'type: bug-investigation',
@@ -716,8 +807,71 @@ export async function writeInvestigation(
     '## Lesson',
     inv.lesson || '(none recorded)',
   ].join('\n');
-  await writeFile(file, content, 'utf8');
+}
+
+/** Repo-relative path the investigation for `inv` is written to. */
+function investigationRelPath(inv: Investigation): string {
+  return path.join(INVESTIGATIONS_DIR, `${slugify(inv.title)}.md`);
+}
+
+/** Drop a leading `---` frontmatter block. The staged investigation carries the
+ *  frontmatter the repo file needs; a global KB entry keeps title and facets in
+ *  columns, so the block would be duplicated prose inside its body. */
+function stripFrontmatter(md: string): string {
+  const m = /^---\n[\s\S]*?\n---\n/.exec(md);
+  return m ? md.slice(m[0].length).trimStart() : md;
+}
+
+/** Write a bug investigation into the knowledge base (auto-RAG-indexed by the
+ *  next run's pre-rag-sync). `nowIso` is passed in — this is a normal worker
+ *  step so the worker clock is fine. `content` overrides the rendered body with
+ *  the reviewer's staged edit; the FILENAME still comes from the drafted title,
+ *  so editing the heading moves nothing. */
+export async function writeInvestigation(
+  workspace: string,
+  inv: Investigation,
+  taskTitle: string,
+  nowIso: string,
+  feature: string | null,
+  affectedClients: string[],
+  content?: string,
+): Promise<string> {
+  const file = path.join(workspace, investigationRelPath(inv));
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(
+    file,
+    content ?? renderInvestigation(inv, taskTitle, nowIso, feature, affectedClients),
+    'utf8',
+  );
   return path.relative(workspace, file);
+}
+
+/** The staged investigation as a diff file for the gate's viewer. Shown against
+ *  whatever is already at that path (a re-run of the same bug overwrites), and
+ *  editable via its staged draft. The path is the LOCAL one even when the
+ *  investigation is destined for the global KB — the destination is the checkbox
+ *  below it, and the reviewer's edit feeds either one. */
+async function investigationDiffFile(
+  worktree: string,
+  inv: Investigation,
+  content: string,
+): Promise<CommitDiffFile> {
+  const rel = investigationRelPath(inv);
+  let oldContent = '';
+  try {
+    oldContent = await readFile(path.join(worktree, rel), 'utf8');
+  } catch {
+    // not there yet -> a new file
+  }
+  return {
+    path: rel,
+    status: oldContent ? 'modified' : 'added',
+    binary: false,
+    truncated: false,
+    oldContent,
+    newContent: content,
+    editPath: investigationDraftPath(worktree),
+  };
 }
 
 export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> = {
@@ -823,18 +977,37 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
   },
 
   async prepareForm(ctx, detected, llmOutput): Promise<void> {
-    // Post-llm, pre-form: materialise the knowledge-diff the form's web viewer
-    // reads. The agent's Feature KB Sync edits are on disk now (git side); the
-    // learning insert/update/delete ops are synthesized from the parsed output
-    // against the existing learnings (those files are not written until apply).
+    // Post-llm, pre-form: materialise what the form's web viewer reads. The agent's
+    // Feature KB Sync edits are on disk now (git side); the learning ops and the
+    // investigation are synthesized from the parsed output (those files are not
+    // written until apply), so they are ALSO staged under `.haive/` — that staged
+    // copy is what the viewer edits, and apply reads it back.
     // Always writes — an empty diff renders as "No changes to show". Best-effort:
-    // never block the form on a diff-build error.
+    // never block the form on a diff-build error. A failure here costs the gate its
+    // editability, not its drafts: apply falls back to the agent's own bodies.
     if (!detected.knowledgeDiffArtifactPath) return;
     try {
       const existing = await readExistingLearnings(detected.worktreePath);
       const parsed = parseLearningOutput(llmOutput ?? null) ?? [];
       const plan = planLearningReconciliation(parsed, existing);
-      await buildKnowledgeDiffArtifact(detected.worktreePath, gitRun, learningOpsToDiffFiles(plan));
+      const investigation = detected.isBugFix ? parseInvestigation(llmOutput ?? null) : null;
+      const investigationContent = investigation
+        ? renderInvestigation(
+            investigation,
+            detected.taskTitle,
+            new Date().toISOString(),
+            detected.feature,
+            detected.affectedClients,
+          )
+        : null;
+      await stageLearningDrafts(detected.worktreePath, plan, investigationContent);
+      const extras = learningOpsToDiffFiles(plan, detected.worktreePath);
+      if (investigation && investigationContent !== null) {
+        extras.push(
+          await investigationDiffFile(detected.worktreePath, investigation, investigationContent),
+        );
+      }
+      await buildKnowledgeDiffArtifact(detected.worktreePath, gitRun, extras);
     } catch (err) {
       ctx.logger.warn({ err }, 'failed to build learning knowledge diff artifact');
     }
@@ -1087,7 +1260,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         skillOps.length > 0
           ? 'Skill sync — the agent proposed skill changes for what this task built/changed/removed; review below.'
           : '',
-        'Review the drafts below. Leave the instruction box blank and submit to write them (untick anything to skip); or type an instruction to have the agent revise the drafts and show them again.',
+        'Review the drafts below. Edit any file inline in the changes view — what you leave there is what gets written, and emptying a file drops it. Leave the instruction box blank and submit to write them (untick anything to skip); or type an instruction to have the agent revise the drafts and show them again, which replaces your edits with its new draft.',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -1107,7 +1280,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
               {
                 type: 'checkbox' as const,
                 id: 'keepKbSync',
-                label: `Keep the knowledge-base sync edits (${kbSync.changes.length} file${kbSync.changes.length === 1 ? '' : 's'}); untick to revert them`,
+                label: `Keep the knowledge-base sync edits (${kbSync.changes.length} file${kbSync.changes.length === 1 ? '' : 's'}); untick to revert them, including anything you edited here`,
                 default: true,
               },
             ]
@@ -1243,7 +1416,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const source: 'llm' | 'stub' = parsed && parsed.length > 0 ? 'llm' : 'stub';
     const entries = parsed && parsed.length > 0 ? parsed : stubLearning(args.detected);
     const existingLearnings = await readExistingLearnings(worktreePath);
-    const plan = planLearningReconciliation(entries, existingLearnings, ctx.logger);
+    // The reviewer's staged edits win over the agent's drafts, and an emptied draft
+    // drops that entry — the gate's inline editor is the same decision as unticking
+    // a checkbox, just finer-grained.
+    const plan = await applyStagedLearningEdits(
+      worktreePath,
+      planLearningReconciliation(entries, existingLearnings, ctx.logger),
+    );
     let written: string[] = [];
     let deleted: string[] = [];
     if (values.writeFiles !== false) {
@@ -1259,7 +1438,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const investigation = args.detected.isBugFix
       ? parseInvestigation(args.llmOutput ?? null)
       : null;
-    if (investigation && values.writeInvestigation !== false) {
+    // An investigation the reviewer emptied at the gate is dropped, whichever
+    // destination the checkboxes name; an unstaged one keeps the agent's draft.
+    const stagedInvestigation = investigation
+      ? await readStagedDraft(investigationDraftPath(worktreePath))
+      : null;
+    const investigationCleared = stagedInvestigation !== null && stagedInvestigation.trim() === '';
+    if (investigation && values.writeInvestigation !== false && !investigationCleared) {
       if (investigation.scope === 'global' || values.promoteInvestigationGlobal) {
         // Promote as a draft to the cross-repo KB instead of writing it into this
         // repo's knowledge_base/investigations/ (which the local RAG indexes), so
@@ -1271,7 +1456,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
             userId: ctx.userId,
             taskId: ctx.taskId,
             title: investigation.title,
-            body: `# ${investigation.title}\n\n${investigation.symptoms.trim() ? `## Symptoms\n${investigation.symptoms}\n\n` : ''}## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
+            body: stagedInvestigation
+              ? stripFrontmatter(stagedInvestigation)
+              : `# ${investigation.title}\n\n${investigation.symptoms.trim() ? `## Symptoms\n${investigation.symptoms}\n\n` : ''}## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
             category: 'anti_pattern',
             facets: {},
           },
@@ -1286,6 +1473,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           new Date().toISOString(),
           args.detected.feature,
           args.detected.affectedClients,
+          stagedInvestigation ?? undefined,
         );
       }
     }

@@ -16,8 +16,11 @@ import {
   planLearningReconciliation,
   learningOpsToDiffFiles,
   applyLearningOps,
+  applyStagedLearningEdits,
+  stageLearningDrafts,
   readExistingLearnings,
 } from './11-phase-8-learning.js';
+import { LEARNING_DRAFTS_DIR } from '@haive/shared/knowledge-paths';
 
 describe('KB admission bar', () => {
   describe('hasFileLineEvidence', () => {
@@ -485,9 +488,41 @@ describe('planLearningReconciliation', () => {
     })!;
     expect(planLearningReconciliation(entries, []).map((p) => p.id)).toEqual(['same', 'same-2']);
   });
+
+  it('slugifies the id the agent supplied — it names a file on disk', () => {
+    const entries = parseLearningOutput({
+      entries: [
+        { id: '../../escaped', title: 'Escaped', body: 'x src/a.ts:1' },
+        { id: 'Mixed_Case Id', title: 'Mixed', body: 'y src/b.ts:2' },
+      ],
+    })!;
+    expect(planLearningReconciliation(entries, []).map((p) => p.id)).toEqual([
+      'escaped',
+      'mixed-case-id',
+    ]);
+  });
 });
 
 describe('learningOpsToDiffFiles', () => {
+  it('points editable ops at their staged draft, and deletes at nothing', () => {
+    const files = learningOpsToDiffFiles(
+      [
+        { op: 'insert', id: 'a', title: 'A', newBody: 'na', oldBody: '' },
+        { op: 'delete', id: 'c', title: 'C', newBody: '', oldBody: 'oc' },
+      ],
+      '/w',
+    );
+    expect(files[0]!.editPath).toBe(path.join('/w', LEARNING_DRAFTS_DIR, 'learnings', 'a.md'));
+    expect(files[1]!.editPath).toBeUndefined();
+  });
+
+  it('leaves every file read-only when no worktree is given', () => {
+    const files = learningOpsToDiffFiles([
+      { op: 'insert', id: 'a', title: 'A', newBody: 'na', oldBody: '' },
+    ]);
+    expect(files[0]!.editPath).toBeUndefined();
+  });
+
   it('maps ops to added/modified/deleted diff files', () => {
     const files = learningOpsToDiffFiles([
       { op: 'insert', id: 'a', title: 'A', newBody: 'na', oldBody: '' },
@@ -501,6 +536,66 @@ describe('learningOpsToDiffFiles', () => {
       newContent: 'na',
     });
     expect(files[2]).toMatchObject({ oldContent: 'oc', newContent: '' });
+  });
+});
+
+describe("learning draft staging (the gate's inline editor)", () => {
+  const plan = [
+    { op: 'insert' as const, id: 'a', title: 'A', newBody: '# A\n\ndrafted a', oldBody: '' },
+    { op: 'update' as const, id: 'b', title: 'B', newBody: '# B\n\ndrafted b', oldBody: 'old b' },
+    { op: 'delete' as const, id: 'c', title: 'C', newBody: '', oldBody: 'old c' },
+  ];
+  const draftFile = (ws: string, id: string): string =>
+    path.join(ws, LEARNING_DRAFTS_DIR, 'learnings', `${id}.md`);
+
+  it('stages every editable op, skips deletes, and replaces the previous round', async () => {
+    const ws = await mkdtemp(path.join(tmpdir(), 'stage-'));
+    try {
+      await stageLearningDrafts(ws, plan, '# Investigation');
+      expect(await readFile(draftFile(ws, 'a'), 'utf8')).toBe('# A\n\ndrafted a');
+      expect(await readFile(draftFile(ws, 'b'), 'utf8')).toBe('# B\n\ndrafted b');
+      await expect(readFile(draftFile(ws, 'c'), 'utf8')).rejects.toThrow();
+      expect(await readFile(path.join(ws, LEARNING_DRAFTS_DIR, 'investigation.md'), 'utf8')).toBe(
+        '# Investigation',
+      );
+
+      // A refine round re-drafts: the previous round's files must not linger.
+      await stageLearningDrafts(ws, [plan[1]!], null);
+      await expect(readFile(draftFile(ws, 'a'), 'utf8')).rejects.toThrow();
+      await expect(
+        readFile(path.join(ws, LEARNING_DRAFTS_DIR, 'investigation.md'), 'utf8'),
+      ).rejects.toThrow();
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('folds a reviewer edit over the draft, drops an emptied one, keeps an unstaged one', async () => {
+    const ws = await mkdtemp(path.join(tmpdir(), 'stage-'));
+    try {
+      await stageLearningDrafts(ws, plan, null);
+      await writeFile(draftFile(ws, 'a'), '# A\n\nEDITED BY HAND\n\n', 'utf8');
+      await writeFile(draftFile(ws, 'b'), '   \n', 'utf8');
+
+      const folded = await applyStagedLearningEdits(ws, plan);
+      // 'a' edited (trailing blank lines normalised), 'b' emptied -> dropped,
+      // 'c' is a delete and passes through untouched.
+      expect(folded.map((p) => p.id)).toEqual(['a', 'c']);
+      expect(folded[0]!.newBody).toBe('# A\n\nEDITED BY HAND');
+      expect(folded[1]!.op).toBe('delete');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the agent body when nothing was staged (a step from before staging)', async () => {
+    const ws = await mkdtemp(path.join(tmpdir(), 'stage-'));
+    try {
+      const folded = await applyStagedLearningEdits(ws, plan);
+      expect(folded).toEqual(plan);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
   });
 });
 

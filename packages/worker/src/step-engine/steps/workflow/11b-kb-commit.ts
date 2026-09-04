@@ -5,6 +5,7 @@ import type { FormSchema } from '@haive/shared';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { KB_COMMIT_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 
@@ -31,6 +32,10 @@ interface KbCommitDetect {
   /** Repo-relative KB/learning paths with pending changes (from git status). */
   dirtyFiles: string[];
   statusSummary: string;
+  /** Stable `.haive/` path the form's diff viewer fetches — the same viewer the
+   *  learning gate uses, so the files can be read AND edited here before they are
+   *  committed. null when there is no usable git repo or the build failed. */
+  knowledgeDiffArtifactPath: string | null;
 }
 
 interface KbCommitApply {
@@ -116,7 +121,13 @@ export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
     // Throws on a corrupt repo rather than reporting "(no git)" and skipping the
     // KB commit — a broken gitfile is not an absent one.
     if (!(await requireUsableGit(workspacePath))) {
-      return { hasGit: false, workspacePath, dirtyFiles: [], statusSummary: '(no git)' };
+      return {
+        hasGit: false,
+        workspacePath,
+        dirtyFiles: [],
+        statusSummary: '(no git)',
+        knowledgeDiffArtifactPath: null,
+      };
     }
     // Porcelain over the KB pathspecs surfaces both modified (` M`) and untracked
     // (`??`) files — a first-time investigation file is untracked, so `git diff`
@@ -130,11 +141,24 @@ export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
       .map((l) => l.replace(/\r$/, ''))
       .filter((l) => l.trim().length > 0);
     const dirtyFiles = lines.map((l) => l.slice(3).trim()).filter(Boolean);
+    // Over BOTH knowledge trees: unlike the learning gate, by this step the
+    // learnings are ordinary written files. Best-effort — losing the diff costs
+    // the gate its review surface, not its commit.
+    let knowledgeDiffArtifactPath: string | null = null;
+    try {
+      knowledgeDiffArtifactPath = await buildKnowledgeDiffArtifact(workspacePath, gitRun, [], {
+        pathspecs: KB_PATHSPECS,
+        artifactName: KB_COMMIT_DIFF_ARTIFACT_NAME,
+      });
+    } catch (err) {
+      ctx.logger.warn({ err }, 'failed to build kb-commit knowledge diff artifact');
+    }
     return {
       hasGit: true,
       workspacePath,
       dirtyFiles,
       statusSummary: lines.join('\n') || 'No knowledge-base changes pending.',
+      knowledgeDiffArtifactPath,
     };
   },
 
@@ -144,9 +168,14 @@ export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
       description: [
         `Workspace: ${detected.workspacePath}`,
         `Knowledge-base / learning files changed: ${detected.dirtyFiles.length}`,
+        detected.knowledgeDiffArtifactPath
+          ? 'Review the changes below — they can be edited inline before they are committed.'
+          : '',
         '',
         detected.statusSummary,
-      ].join('\n'),
+      ]
+        .filter(Boolean)
+        .join('\n'),
       fields: [
         {
           type: 'checkbox',
