@@ -43,14 +43,17 @@ all today** — nothing in `packages/web` or `packages/api` reads it. The module
 
 One task type, `deep_scan`, composed of module steps plus core steps from the catalog.
 
-**1 · `scan-scope`** — detect + form. The ten dimensions are **individually selectable** (security,
-maintainability, testability, usability, stability, performance, observability, operational
-readiness, data integrity, DX), plus scope (whole repo or subtree) and a **budget** in agent
-invocations. Detect seeds sensible defaults from the repo's onboarding tech inventory
-(`onboarding/_tech-inventory.ts`) rather than asking cold.
+**1 · `scan-scope`** — detect + form, and the only step that runs before any CLI fans out.
+**Every dimension is optional.** The eleven — security, maintainability, testability, usability,
+stability, performance, observability, operational readiness, data integrity, DX, coherence — are
+individually selectable, none is mandatory or implied, and there is no "scan everything" path that
+skips the form: an empty selection dispatches nothing rather than falling back to all eleven. Detect
+seeds a proposed set from the repo's onboarding tech inventory (`onboarding/_tech-inventory.ts`)
+rather than asking cold, but a seed is a pre-ticked box the user can clear, never a floor. Also on
+the form: scope (whole repo or subtree) and a **budget** in agent invocations.
 
 **2 · `scan-analyze`** — `agentMining` fan-out, **one agent per selected dimension over the whole
-tree** (not per component). Ten dimensions is at most ten invocations, drained 5 at a time by
+tree** (not per component). Eleven dimensions is at most eleven invocations, drained 5 at a time by
 `MAX_PARALLEL_AGENTS_PER_TASK`; per-component splitting is a later refinement for a dimension that
 times out, not v1. Each agent returns structured findings (`path`, `line`, `severity`, `dimension`,
 `issue`, `fix`) and carries `REPO_IS_DATA_LINES` from `steps/_untrusted-repo.ts`.
@@ -68,14 +71,21 @@ change; the column is `varchar(128)`), and records coverage — which dimensions
 truncated — reusing the disclosure convention from `_impl-changes.ts`.
 
 **5 · `scan-triage`** — form. The human picks which findings to fix. **This step is the entire answer
-to "502 tasks, 0 fixes"**: nothing proceeds to remediation that a person did not choose.
+to "502 tasks, 0 fixes"**: nothing proceeds to remediation that a person did not choose. A coherence
+finding asks one extra thing — **which side is authoritative** — because "these two disagree" has no
+fix until a person says which one is right. Left unanswered it stays recorded and unplanned rather
+than guessed at.
 
 **6 · `scan-plan-remediation`** — deterministic, **no LLM**. Selected findings become DAG rows:
 `task_dag_plans` (mode `'dag'`), `task_dag_levels`, `task_dag_issues` (`title` ← issue,
 `description` ← issue + fix, `filesModified` ← path, `acceptanceCriteria` ← the fix's check).
 **One issue per file**, so several findings in one file are fixed by one agent — which removes
 intra-file merge conflicts by construction rather than predicting collisions the way the archive's
-planner did. All at level 0 unless a dependency is declared.
+planner did. A coherence finding names TWO files and so breaks that rule as stated: group by the
+**connected component** of the paths a finding names, not by a single path, or two issues could each
+claim one side of the same conflict and reintroduce exactly the collision the rule exists to prevent.
+Every other dimension names one path, where connected components degenerate to one-issue-per-file —
+so this changes nothing for the other ten. All at level 0 unless a dependency is declared.
 
 **7 · `scan-remediate`** — declares the `dagExecute` hook and supplies a fix-oriented coder prompt.
 **No core change needed:** `resolveDagPhase` (`step-engine/dag-executor.ts:1505`) loads its plan by
@@ -85,6 +95,48 @@ single largest piece of reuse in the plan.
 
 **8 ·** Core steps composed from the catalog after remediation — verify, review, commit — exactly as
 a workflow task ends.
+
+### The coherence dimension
+
+Ten of the eleven ask "is this code wrong". The eleventh asks **"do two parts of this project
+contradict each other"**. A rule, a KB page, a doc, a code comment and the code itself all state
+intent, and when two of them state OPPOSITE intent every agent that reads them afterwards is
+miscalibrated — silently, and in a direction nobody chose. The shape to detect: one place says always
+write expanded prose comments, another says never write them, keep comments terse except for named
+exceptions. Neither is a defect alone; together they are, and **no change-scoped reviewer can ever see
+it**, because the two sides were not touched by one task and `SCOPE_BOUNDARY` correctly excludes the
+one that was not.
+
+Not hypothetical in Haive itself: `2fffb947` added a comment-volume rule by hand and had to carve out
+the comments other rules DEMAND, so that the rules would not contradict each other. Nothing detected
+that — a person noticed.
+
+Its reading set is wider than code: `.haive-data/knowledge_base/` and `.haive-data/learnings/`
+(`KB_DIR`/`LEARNINGS_DIR` in `shared/src/knowledge-paths.ts`), the installed agent rules and
+`AGENTS.md`/`CLAUDE.md`, `.claude/skills/` and commands, `README`/`docs/`, and code comments against
+the code they sit on. Four directions, and the prompt names all four: doc vs doc, doc vs code, comment
+vs code, and code vs code (two modules implementing one contract incompatibly). **Subtree scope
+narrows the code side only** — the rules and KB a subtree must agree with live at the repo root, so
+those stay in its reading set whatever the scope.
+
+Four things this dimension must get right, none of which the other ten need:
+
+- **A finding is a PAIR, not a location.** It cites both sides as `file:line` and quotes the
+  incompatible text from each. Without the second side it is neither refutable nor fixable, and a
+  reviewer that reports only "the comment rules are inconsistent" has reported nothing actionable.
+- **A stated carve-out is not a contradiction.** A rule that names its exceptions, a doc that says
+  "except in X", a deliberate divergence with a written reason — those COMPLEMENT. The prompt must
+  require checking both sides for such a carve-out before raising. Without that clause the dimension
+  flags every rule that has an exception list, which is most of the good ones.
+- **Refutation asks a different question.** `scan-verify`'s lens here is not "does this defect exist
+  in the code" but "do both quoted texts still say this, and does either state an exception that
+  covers the other". Same panel, same inverted 2-of-3 default, different check — and the prompt must
+  say so, or the refuters will look for a code defect and find none.
+- **Deduping needs a canonical side.** `findingFingerprint` hashes `(reviewerId, path, issue)`, so
+  the same conflict reported with its sides swapped hashes differently and a re-scan calls it new.
+  The pair is ordered lexicographically by path, the lower becomes `path`, and the other side rides
+  `review_findings.raw` — which exists for exactly this ("fields this table does not model"), so the
+  no-core-schema-change claim above still holds.
 
 ### Convergence
 
@@ -118,18 +170,25 @@ cross-cutting rule says the latter but not the former, and this module does both
 
 **Unit (in the module's own suite):**
 - Dimension selection produces exactly the expected agent fan-out, and an empty selection dispatches
-  nothing rather than defaulting to all ten.
+  nothing rather than defaulting to all eleven. No dimension survives being deselected.
 - The verifier tally: 2-of-3 dismisses (inverted from `08c`), and an unreadable voter does not.
 - `scan-plan-remediation` puts two findings in one file into ONE issue, and two files into two.
-- Findings already recorded are deduped on a re-scan; a repeat run reports only what is new.
+- Findings already recorded are deduped on a re-scan; a repeat run reports only what is new, and a
+  coherence pair reported with its two sides swapped fingerprints identically.
+- Coherence raises a pair with both sides cited, and does NOT raise when one side states a carve-out
+  naming the other.
+- A coherence finding across two files becomes ONE DAG issue owning both, and a separate finding in
+  either of those files joins that same issue rather than opening a second one.
 
 **End to end on the dev stack:**
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
-   `review_findings` with `deep-scan:` reviewer ids and the coverage record names the eight
+   `review_findings` with `deep-scan:` reviewer ids and the coverage record names the nine
    dimensions that did not run.
 2. Triage two findings in one file; confirm remediation creates one DAG issue, one worktree, and
    merges.
 3. Re-scan; confirm the already-fixed finding does not reappear and the report says what is new.
+3b. Run coherence alone over this repo's own rules, `AGENTS.md` and KB; confirm every finding cites
+   two `file:line` sides, and that the carve-out `2fffb947` added is not raised as a conflict.
 4. Install path: publish to the registry, install with a scoped token, verify `docker history` shows
    no token, and the module reaches `active` only on the loader's boot report.
 
@@ -154,8 +213,9 @@ core.
 
 **Optional, never a prerequisite.** Phase 2b is that plan's hardest piece and may be deferred, so
 `deep_scan` must run correctly single-model and merely improve when 2b exists. The scope step's
-budget knob governs it: 10 dimensions x 3 members + 10 consolidators is 40 invocations, drained 5 at
-a time by `MAX_PARALLEL_AGENTS_PER_TASK` — eight serial batches. Multi-model is opt-in per run.
+budget knob governs it: 11 dimensions x 3 members + 11 consolidators is 44 invocations, drained 5 at
+a time by `MAX_PARALLEL_AGENTS_PER_TASK` — nine serial batches. Multi-model is opt-in per run, and
+deselecting dimensions is the other lever on that number.
 
 **`scan-verify` is not made redundant by the consolidator**, and the plan should say so where a
 reader might assume otherwise. Consolidation reconciles drafts of one answer; refutation checks a
