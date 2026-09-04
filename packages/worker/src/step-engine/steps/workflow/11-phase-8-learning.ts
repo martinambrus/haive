@@ -221,7 +221,7 @@ export function renderExistingGlobalArticle(a: { title: string; body: string }):
   return [
     head,
     a.body.slice(0, GLOBAL_ARTICLE_PROMPT_CHARS),
-    `[... TRUNCATED — this is the first ${GLOBAL_ARTICLE_PROMPT_CHARS} of ${a.body.length} chars. Before you author an UPDATE to this article, call \`rag_search\` with its exact title: it returns the entry IN FULL. Merging from this excerpt would silently delete the rest.]`,
+    `[... TRUNCATED — this is the first ${GLOBAL_ARTICLE_PROMPT_CHARS} of ${a.body.length} chars. Before you author an UPDATE to this article, call \`rag_search\` with its exact title: it returns the entry IN FULL. Merging from this excerpt would silently delete the rest. If you cannot retrieve the full entry — rag_search is not wired for this run, or it does not return it — do NOT update this article at all: leave it alone, or propose a separate new one.]`,
   ].join('\n');
 }
 
@@ -1058,7 +1058,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         'KNOWLEDGE BASE SYNC — before emitting the JSON, keep the project knowledge base in sync with what this task changed:',
         '1. CLASSIFY the task: new_feature (adds capability) | feature_update (changes existing behavior) | feature_removal (removes capability) | bug_fix | refactor.',
         '2. bug_fix / refactor → SKIP KB edits (documented behavior is unchanged); set "changes": []. (A bug fix is still captured by the investigation below.)',
-        `3. new_feature / feature_update / feature_removal → find where the feature belongs (search \`rag_search\` FIRST, then \`${KB_DIR}/INDEX.md\`), then EDIT the structured \`${KB_DIR}/*.md\` files IN PLACE with your file tools: INSERT a section for a new feature, UPDATE the existing section for a change (correct now-stale text; leave no contradictions), DELETE the section for a removal. Document business purpose, key rules, tables/fields, and access control using the target file’s conventions. Keep \`INDEX.md\` in sync when you add or remove a file.`,
+        `3. new_feature / feature_update / feature_removal → LOCATE where the feature belongs (search \`rag_search\` FIRST, then \`${KB_DIR}/INDEX.md\`), then READ the target file from disk before you change it. \`rag_search\` returns a SNIPPET of that file as it was indexed at the START of this run — the index is not rewritten until after the commit gate — so editing from what it returned drops whatever the snippet left out, the same way a TRUNCATED global article does below. Then EDIT the structured \`${KB_DIR}/*.md\` files IN PLACE with your file tools: INSERT a section for a new feature, UPDATE the existing section for a change (correct now-stale text; leave no contradictions), DELETE the section for a removal. Document business purpose, key rules, tables/fields, and access control using the target file’s conventions. Keep \`INDEX.md\` in sync when you add or remove a file.`,
         '4. KB GAP DETECTION: if the run surfaced domain knowledge that was MISSING from the KB (a rule discovered from code, a constraint, an edge case), append it to the right KB file.',
         `5. Report EVERY knowledge_base file you changed in \`kbSync.changes\`. Do NOT edit \`${INVESTIGATIONS_DIR}/\` — that is recorded separately below.`,
         '',

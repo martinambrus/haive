@@ -719,6 +719,16 @@ describe('renderExistingGlobalArticle', () => {
     expect(out).toContain('x'.repeat(1500));
     expect(out).not.toContain('x'.repeat(1501));
   });
+
+  it('gives a safe fallback for when the rest cannot be fetched', () => {
+    // rag_search is the only route to the full entry and it is not wired on every
+    // run — a repo can choose `ragMode: 'none'`. Without an explicit fallback the
+    // remaining reading is "merge from the excerpt", which is the deletion this
+    // marker exists to prevent.
+    const out = renderExistingGlobalArticle({ title: 'Long rule', body: 'x'.repeat(4000) });
+
+    expect(out).toContain('do NOT update this article at all');
+  });
 });
 
 describe('renderOtherGlobalArticleTitles', () => {
