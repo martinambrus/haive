@@ -70,6 +70,12 @@ Every legacy markdown step becomes a `StepDefinition<TInput, TOutput>` with four
 
 Step lifecycle: `pending` to `running(detect)` to `waiting_form` to `running(apply)` to optional `waiting_cli` then back to `running(apply)` to `done` or `failed` or `skipped`.
 
+### Step summaries
+
+The "What the agent did" panel (`task_steps.summary`) has two producers, and the cheap one wins. `resolveCuratedSummary` (`_step-summary.ts`) lifts `findingsSummary`/`summary`/`notes` straight off the apply output for the steps that emit one — no LLM, and it mirrors its own task-ledger entry. Only when the output carries none of those keys does `maybeEnqueueStepSummary` (`step-runner.ts`) spend a CLI call, and that pass is best-effort throughout: a missing provider, a `skip` dispatch, an empty agent text or a failure all leave `summary` null and never touch the step machine.
+
+**The invocation is unlinked but attributed.** `task_step_id` stays NULL — that column is what places a row in the step terminal, the retry blocker, park folding, the step's invocation count and the `cli_invocations_one_live_per_step_idx` partial unique index, and a recap written after the step finished is none of those. `summary_for_step_id` carries the SPEND home instead, so `enrichStepsWithCliStats` folds it into the step's token/cost badge by `coalesce(task_step_id, summary_for_step_id)` while both COUNTERS stay on `task_step_id`. `sumTaskTokens` and `sumTaskProviderBreakdown` accept `task_step_id IS NOT NULL OR summary_for_step_id IS NOT NULL` — deliberately not "no filter", because a summary row written before that column existed carries neither and must stay out of both sides, which keeps a task's list total equal to the sum of its per-step badges on old tasks with no backfill. Cost resolution needed no change: `resolveInvocationCost` already runs before the `step_summary` branch returns.
+
 ## CLI adapter system
 
 `packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`, `muse`, `grok`, `openrouter`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; only the Claude-family adapters (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) override it to true.

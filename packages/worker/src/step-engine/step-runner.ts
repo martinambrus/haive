@@ -2644,7 +2644,11 @@ async function maybeEnqueueStepSummary(
       .insert(schema.cliInvocations)
       .values({
         taskId: params.taskId,
+        // Stays null: task_step_id is what puts a row in the step terminal, the retry
+        // blocker, park folding and the step's invocation count. The spend is attributed
+        // through summaryForStepId instead, so the totals can count it without any of that.
         taskStepId: null,
+        summaryForStepId: current.id,
         cliProviderId: plan.providerId,
         effort: plan.effort ?? null,
         mode: 'cli',

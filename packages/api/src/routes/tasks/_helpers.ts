@@ -1,5 +1,5 @@
 import { relative, resolve } from 'node:path';
-import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_DISPATCH_STEP_IDS,
@@ -511,7 +511,14 @@ function notionalCostUsdSql() {
  *  token sum is surfaced per step and aggregated into the task total client-side.
  *  Uses the same `supersededAt IS NULL` filter as the per-step invocation panel,
  *  so a step's token total reconciles with the invocations shown there. Single
- *  GROUP BY keeps it O(1) round-trips regardless of step count. */
+ *  GROUP BY keeps it O(1) round-trips regardless of step count.
+ *
+ *  Two different questions, two different columns: the COUNTERS ask "did this step
+ *  run a CLI" and stay on `task_step_id`, while the token/cost SUMS ask "what did
+ *  this step cost" and also fold in the step's summary pass, which is attributed by
+ *  `summary_for_step_id` (see the column's comment). Without that fold the recap's
+ *  spend appeared in no figure at all; with it inside the counters, a finished step
+ *  would sprout a terminal toggle for an invocation it never ran. */
 export async function enrichStepsWithCliStats<T extends { id: string }>(
   db: ReturnType<typeof getDb>,
   taskId: string,
@@ -521,14 +528,23 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
 > {
   if (steps.length === 0) return [];
   const tu = schema.cliInvocations.tokenUsage;
+  // A step's SPEND is its own invocations plus the summary pass that recapped it. That
+  // pass runs unlinked (task_step_id null) so it stays out of the step terminal, the
+  // retry blocker and park folding; summary_for_step_id is how its tokens find their way
+  // home. Both counters below therefore stay on task_step_id: counting the summary would
+  // give a done step a terminal toggle it has no invocation for, and read as a retry.
+  const attributedStepId = sql<
+    string | null
+  >`coalesce(${schema.cliInvocations.taskStepId}, ${schema.cliInvocations.summaryForStepId})`;
+  const ownInvocation = sql`${schema.cliInvocations.taskStepId} is not null`;
   const rows = await db
     .select({
-      taskStepId: schema.cliInvocations.taskStepId,
-      count: sql<number>`count(*)::int`,
+      stepId: attributedStepId,
+      count: sql<number>`count(*) filter (where ${ownInvocation})::int`,
       // LLM run attempts: exclude the per-step fan-outs (agent_mining review agents
       // and dag_parallel DAG coders/reviewers) -- they run N concurrent per step by
       // design and aren't retries. >1 on a non-loop step => an auto-retry happened.
-      attemptCount: sql<number>`count(*) filter (where ${schema.cliInvocations.mode} not in ('agent_mining', 'dag_parallel'))::int`,
+      attemptCount: sql<number>`count(*) filter (where ${ownInvocation} and ${schema.cliInvocations.mode} not in ('agent_mining', 'dag_parallel'))::int`,
       inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
       outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
       totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,
@@ -543,14 +559,14 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     .where(
       and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.supersededAt)),
     )
-    .groupBy(schema.cliInvocations.taskStepId);
+    .groupBy(attributedStepId);
 
   const byStep = new Map<
     string,
     { count: number; attemptCount: number; tokenUsage: CliTokenUsage | null }
   >();
   for (const row of rows) {
-    if (!row.taskStepId) continue;
+    if (!row.stepId) continue;
     const inputTokens = Number(row.inputTokens) || 0;
     const outputTokens = Number(row.outputTokens) || 0;
     const totalTokens = Number(row.totalTokens) || 0;
@@ -568,7 +584,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
           ...(costUsd > 0 ? { costUsd } : {}),
         }
       : null;
-    byStep.set(row.taskStepId, {
+    byStep.set(row.stepId, {
       count: row.count,
       attemptCount: Number(row.attemptCount) || 0,
       tokenUsage,
@@ -587,10 +603,17 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
 
 /** Sum each task's CLI token usage for the listing (GET /tasks). One GROUP BY
  *  over the whole page keeps it a single round-trip regardless of task count.
- *  Uses the same `supersededAt IS NULL` filter as the per-step stats, plus a
- *  non-null step, so a task's list total equals the sum of its per-step token
- *  badges on the detail page (which folds step totals and skips null-step rows).
- *  Tasks with no token-bearing invocation are simply absent from the map. */
+ *  Uses the same `supersededAt IS NULL` filter as the per-step stats, plus the same
+ *  attribution rule, so a task's list total equals the sum of its per-step token
+ *  badges on the detail page (which folds step totals and skips unattributed rows).
+ *  Tasks with no token-bearing invocation are simply absent from the map.
+ *
+ *  That rule is `task_step_id IS NOT NULL OR summary_for_step_id IS NOT NULL`, not
+ *  "no filter": a summary row written before `summary_for_step_id` existed carries
+ *  neither, so it stays out of BOTH sides and the two totals keep matching on old
+ *  tasks with no backfill. Dropping the filter outright would have counted those
+ *  legacy rows here while the per-step badges still could not place them, which is
+ *  precisely the mismatch this filter exists to prevent. */
 export async function sumTaskTokens(
   db: ReturnType<typeof getDb>,
   taskIds: string[],
@@ -616,7 +639,10 @@ export async function sumTaskTokens(
       and(
         inArray(schema.cliInvocations.taskId, taskIds),
         isNull(schema.cliInvocations.supersededAt),
-        isNotNull(schema.cliInvocations.taskStepId),
+        or(
+          isNotNull(schema.cliInvocations.taskStepId),
+          isNotNull(schema.cliInvocations.summaryForStepId),
+        ),
       ),
     )
     .groupBy(schema.cliInvocations.taskId);
@@ -753,7 +779,10 @@ function summarizeCostSources(sources: unknown): TaskProviderUsage['costSource']
  *  providers (always real); costUsd is whatever the shared rule counts as real, which
  *  since the pricing feature includes computed dollars for the claude-binary wrappers
  *  whose own reported total is Anthropic fiction. Ordered by token volume (the primary
- *  metric). Same superseded/non-null-step filter as the other aggregations. */
+ *  metric). Same superseded/attribution filter as the other aggregations, so a task's
+ *  summary passes show up here as their own provider row with their own cost — the
+ *  point of letting a task pick a separate, cheaper CLI for them. A summary run on a
+ *  subscription provider lands in the notional half, by the same rule as any other. */
 export async function sumTaskProviderBreakdown(
   db: ReturnType<typeof getDb>,
   taskId: string,
@@ -786,7 +815,10 @@ export async function sumTaskProviderBreakdown(
       and(
         eq(schema.cliInvocations.taskId, taskId),
         isNull(schema.cliInvocations.supersededAt),
-        isNotNull(schema.cliInvocations.taskStepId),
+        or(
+          isNotNull(schema.cliInvocations.taskStepId),
+          isNotNull(schema.cliInvocations.summaryForStepId),
+        ),
       ),
     )
     .groupBy(schema.cliProviders.name, schema.cliProviders.authMode);

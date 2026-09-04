@@ -1,0 +1,32 @@
+-- Which step's recap a summary invocation wrote, so its spend can be counted.
+--
+-- The per-step summarizer (CliExecJobPayload.purpose 'step_summary') inserts its
+-- invocation with task_step_id NULL on purpose: that column is what places a row
+-- in the step terminal, the retry blocker, park folding and the step's invocation
+-- count, and the summary is none of those — it runs after the step is already
+-- done. But every task token/cost rollup filtered on `task_step_id IS NOT NULL`,
+-- so the summary's tokens and dollars appeared in no figure anywhere.
+--
+-- Deliberately a SECOND column rather than filling in task_step_id: those two
+-- facts are different. "This invocation belongs to the step's run" drives UI and
+-- control flow; "this invocation's spend belongs to the step" drives arithmetic.
+-- Conflating them would hand a done step a phantom terminal and read as a retry.
+--
+-- NULL on every other invocation kind, and on summary rows written before this
+-- column existed — which is why the read filters accept `task_step_id IS NOT NULL
+-- OR summary_for_step_id IS NOT NULL` rather than dropping the filter: a legacy
+-- row stays out of BOTH the per-step badges and the task totals, exactly as it is
+-- today, so the two totals keep matching without a backfill.
+--
+-- ON DELETE SET NULL mirrors task_step_id: losing a step must not delete the
+-- invocation row that records what was spent.
+--
+-- Additive and idempotent. Rollback: remove `summaryForStepId` from
+-- `schema/tasks.ts`, revert the three queries in
+-- `packages/api/src/routes/tasks/_helpers.ts`, and
+--   ALTER TABLE "cli_invocations" DROP COLUMN IF EXISTS "summary_for_step_id";
+-- No data is lost — the rows keep their task_id, token_usage and cost; they just
+-- stop being attributed and fall back out of the totals.
+ALTER TABLE "cli_invocations"
+  ADD COLUMN IF NOT EXISTS "summary_for_step_id" uuid
+  REFERENCES "task_steps"("id") ON DELETE SET NULL;

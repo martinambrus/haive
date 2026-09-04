@@ -722,6 +722,16 @@ export const cliInvocations = pgTable(
       .notNull()
       .references(() => tasks.id, { onDelete: 'cascade' }),
     taskStepId: uuid('task_step_id').references(() => taskSteps.id, { onDelete: 'set null' }),
+    /** The step whose recap this invocation wrote (the best-effort per-step summarizer,
+     *  CliExecJobPayload.purpose 'step_summary'). Deliberately NOT task_step_id, which
+     *  stays NULL: that column is what puts a row in the step terminal, the retry
+     *  blocker (routes/tasks/steps.ts), park folding and the step's invocation count,
+     *  and a summary is none of those things — it runs after the step is already done.
+     *  This column carries only the SPEND back to the step it describes, so the per-step
+     *  token badge and the task totals can both count it. Null on every other kind. */
+    summaryForStepId: uuid('summary_for_step_id').references(() => taskSteps.id, {
+      onDelete: 'set null',
+    }),
     cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
       onDelete: 'set null',
     }),

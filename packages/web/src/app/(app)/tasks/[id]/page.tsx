@@ -2406,7 +2406,7 @@ function StepTokens({ tokenUsage }: { tokenUsage: TaskStep['tokenUsage'] }) {
   const { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens, costUsd } =
     tokenUsage;
   const title =
-    `CLI tokens (provider-native): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}` +
+    `CLI tokens (provider-native, incl. any summary pass): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}` +
     (cacheReadTokens ? `, cache read ${cacheReadTokens.toLocaleString()}` : '') +
     (cacheCreationTokens ? `, cache write ${cacheCreationTokens.toLocaleString()}` : '') +
     (costUsd ? `, ~$${costUsd.toFixed(2)}` : '');
