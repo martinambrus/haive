@@ -381,6 +381,20 @@ taskRoutes.post('/', async (c) => {
     if (!provider) throw new HttpError(404, 'CLI provider not found');
   }
 
+  // Ownership only, no `enabled` check — same as cliProviderId above. A provider the
+  // user disables later must not wedge the task: the worker re-checks `enabled` when it
+  // dispatches the summary and falls back to the step's CLI if it is gone.
+  if (body.summaryCliProviderId) {
+    const provider = await db.query.cliProviders.findFirst({
+      where: and(
+        eq(schema.cliProviders.id, body.summaryCliProviderId),
+        eq(schema.cliProviders.userId, userId),
+      ),
+      columns: { id: true },
+    });
+    if (!provider) throw new HttpError(404, 'Summary CLI provider not found');
+  }
+
   if (body.dbUploadId) {
     const dump = await db.query.dbUploads.findFirst({
       where: and(eq(schema.dbUploads.id, body.dbUploadId), eq(schema.dbUploads.userId, userId)),
@@ -482,6 +496,8 @@ taskRoutes.post('/', async (c) => {
       repositoryId: body.repositoryId ?? null,
       parentTaskId,
       cliProviderId: body.cliProviderId ?? null,
+      summaryCliProviderId: body.summaryCliProviderId ?? null,
+      summaryLlmEnabled: body.summaryLlmEnabled ?? true,
       dbUploadId: body.dbUploadId ?? null,
       simplifyCode: body.simplifyCode ?? false,
       adversarialQaLevel:

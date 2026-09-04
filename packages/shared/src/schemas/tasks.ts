@@ -73,6 +73,14 @@ export const createTaskRequestSchema = z
     estimatedTimeHours: z.number().positive().max(1000).optional(),
     repositoryId: z.string().uuid().optional(),
     cliProviderId: z.string().uuid().optional(),
+    /** CLI that writes the per-step "What the agent did" recap. Omitted = inherit
+     *  the step's CLI, which is what every task did before this existed. Separate
+     *  from cliProviderId because the recap is 1-3 sentences and does not need the
+     *  coding model (see tasks.summary_cli_provider_id). */
+    summaryCliProviderId: z.string().uuid().optional(),
+    /** false = skip the LLM recap entirely. Steps that emit their own summary field
+     *  still fill the panel, for free. */
+    summaryLlmEnabled: z.boolean().optional(),
     envTemplateId: z.string().uuid().optional(),
     /** Optional DB dump (uploaded via the chunked db-dumps endpoint) to import
      *  into the task's ephemeral environment before migrations run. */

@@ -2581,6 +2581,21 @@ async function maybeEnqueueStepSummary(
   try {
     const { providers, deps } = params;
     if (!providers || !deps) return;
+
+    // The task's own summary settings. A missing row reads as inherit/enabled — what
+    // this pass did before these columns existed — because the step-runner suites' fake
+    // db returns undefined here and their behavior must not change.
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, params.taskId),
+      columns: { summaryCliProviderId: true, summaryLlmEnabled: true },
+    });
+    // Off: no prompt is built and no CLI is spent. Steps that emit their own summary
+    // field never reach here, so the "What the agent did" panel still fills for free on
+    // those; what is given up is the recap on steps that would have paid for one, and
+    // with it their task-ledger entry — the same absence a failed or timed-out pass
+    // already produces today.
+    if (task?.summaryLlmEnabled === false) return;
+
     const [latest] = await db
       .select({ rawOutput: schema.cliInvocations.rawOutput })
       .from(schema.cliInvocations)
@@ -2620,17 +2635,28 @@ async function maybeEnqueueStepSummary(
     } else {
       return; // no agent text to summarize
     }
-    const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
-      await resolvePreferredCli(
-        db,
-        params.userId,
-        stepDef.metadata.id,
-        params.cliProviderId ?? null,
-        providers,
-        'default',
-        params.taskId,
-        params.ignoreSavedStepClis ?? false,
-      );
+    // An explicit summary CLI wins, but only while it is still enabled. Handing a
+    // disabled id to the dispatcher does NOT fail: resolveDispatch filters to enabled
+    // providers and merely ORDERS the preferred one first, so an id that matches nothing
+    // leaves the summary on whichever provider happens to come first — the arbitrary
+    // choice this setting exists to remove. Falling back to the step's own chain is the
+    // predictable answer, and the effort stays null so the provider's own level governs
+    // (a per-step effort preference is about the step's work, not about its recap).
+    const summaryProvider = task?.summaryCliProviderId
+      ? providers.find((p) => p.id === task.summaryCliProviderId && p.enabled)
+      : undefined;
+    const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } = summaryProvider
+      ? { cliProviderId: summaryProvider.id, effortLevel: null }
+      : await resolvePreferredCli(
+          db,
+          params.userId,
+          stepDef.metadata.id,
+          params.cliProviderId ?? null,
+          providers,
+          'default',
+          params.taskId,
+          params.ignoreSavedStepClis ?? false,
+        );
     const plan = await resolveTaskDispatch(db, params.taskId, {
       providers,
       preferredProviderId,

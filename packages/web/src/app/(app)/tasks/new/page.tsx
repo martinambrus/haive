@@ -31,6 +31,11 @@ import {
 
 const DUMP_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
 
+/** Sentinel for the summary-CLI select's "off" option. A <select> carries one string,
+ *  and the API models this as two fields (a provider uuid, or summaryLlmEnabled:false),
+ *  so the third state needs a value no uuid can collide with. */
+const SUMMARY_CLI_OFF = 'off';
+
 // Chunked upload of a DB dump (mirrors the repo archive upload). Returns the
 // dbUploadId to attach to the task; the dump is imported + deleted later by the
 // task's env-boot/import step.
@@ -117,6 +122,9 @@ export default function NewTaskPage() {
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
   const [ignoreSavedStepClis, setIgnoreSavedStepClis] = useState(false);
+  // Three states in one select: '' = inherit the step's CLI (what every task did before
+  // this existed), a uuid = use that CLI for the recaps, SUMMARY_CLI_OFF = no LLM recap.
+  const [summaryCliProviderId, setSummaryCliProviderId] = useState<string>('');
   const [isBugFix, setIsBugFix] = useState(false);
   const [feature, setFeature] = useState('');
   const [featureSuggestions, setFeatureSuggestions] = useState<string[]>([]);
@@ -364,6 +372,8 @@ export default function NewTaskPage() {
       }
       if (cliProviderId) body.cliProviderId = cliProviderId;
       if (ignoreSavedStepClis) body.ignoreSavedStepClis = true;
+      if (summaryCliProviderId === SUMMARY_CLI_OFF) body.summaryLlmEnabled = false;
+      else if (summaryCliProviderId) body.summaryCliProviderId = summaryCliProviderId;
       if (planNodeId) body.planNodeId = planNodeId;
       if (planNodeId && overrideBlocked) body.overrideBlocked = true;
       if (type === 'workflow') {
@@ -717,6 +727,31 @@ export default function NewTaskPage() {
             Ignores your saved per-step CLI choices and defaults every step to the CLI above, for
             this task only — your saved choices are left untouched. Steps you change manually during
             the task are still saved as usual.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="summaryCliProviderId">Summary CLI (optional)</Label>
+          <select
+            id="summaryCliProviderId"
+            value={summaryCliProviderId}
+            onChange={(e) => setSummaryCliProviderId(e.target.value)}
+            className="h-10 min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+          >
+            <option value="">(inherit — same CLI as the step)</option>
+            {(providers ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label} ({p.name})
+              </option>
+            ))}
+            <option value={SUMMARY_CLI_OFF}>(off — no AI summary)</option>
+          </select>
+          <p className="text-xs text-neutral-500">
+            Writes only the short &ldquo;What the agent did&rdquo; recap on each step — never any of
+            the work. Steps that already produce their own recap never call it. Left on inherit it
+            uses the step&rsquo;s own CLI, so a coding model writes three sentences; a small fast
+            model does the job for a fraction of the cost. Its tokens and cost count toward this
+            task&rsquo;s totals either way.
           </p>
         </div>
 

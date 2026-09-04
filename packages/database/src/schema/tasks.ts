@@ -120,6 +120,15 @@ export const tasks = pgTable(
     cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
       onDelete: 'set null',
     }),
+    /** CLI that writes the per-step "What the agent did" recap (New Task form).
+     *  A SECOND provider on purpose: the recap is 1-3 sentences, so inheriting the
+     *  step's coding CLI spends a coding model on it — and worse, a preference the
+     *  dispatcher cannot honor falls through to whichever provider happens to be
+     *  enabled first. NULL = inherit (the step's saved pref, then cli_provider_id),
+     *  which is exactly what every task did before this column existed. */
+    summaryCliProviderId: uuid('summary_cli_provider_id').references(() => cliProviders.id, {
+      onDelete: 'set null',
+    }),
     envTemplateId: uuid('env_template_id').references(() => envTemplates.id, {
       onDelete: 'set null',
     }),
@@ -322,6 +331,13 @@ export const tasks = pgTable(
      *  a step the user explicitly changes during the task is recorded in
      *  task_step_cli_touched and honored. Default false = today's behavior. */
     ignoreSavedStepClis: boolean('ignore_saved_step_clis').notNull().default(false),
+    /** Run the LLM step-summary pass at all (New Task form). False skips it entirely:
+     *  steps that emit their own summary field still fill the "What the agent did"
+     *  panel for free, so turning this off costs the recap only on steps that would
+     *  have paid a CLI call for one. Default true = today's behavior. Separate from
+     *  summary_cli_provider_id because "which model" and "at all" are different
+     *  questions, and the provider column is an FK that cannot carry an off value. */
+    summaryLlmEnabled: boolean('summary_llm_enabled').notNull().default(true),
     /** "Run configuration" answers applied to later steps' forms.
      *  Record<stepId, Record<fieldId, value>>. Written by 06-run-config apply();
      *  null until a task's run-config step records them. */
