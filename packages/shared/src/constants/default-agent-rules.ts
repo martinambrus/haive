@@ -120,7 +120,7 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 - Simplicity first: write the minimum code that solves the problem, nothing speculative. No features beyond what was asked, no abstractions for single-use code, no configurability that was not requested, and no error handling for impossible scenarios. If you write 200 lines and it could be 50, rewrite it.
 
-- Reuse before writing: before adding new code, search the repo and stop at the first that fits — an existing helper, util, or pattern already here (reuse it, do not re-implement), the language standard library, or an already-installed dependency. Add a new dependency only when none of these cover a real need. Mark a deliberate shortcut with a comment naming its ceiling and upgrade path (e.g. a naive O(n^2) scan, fine under ~1k rows, index it if it grows): a marked shortcut is a decision, an unmarked one is a latent bug. Reuse and minimalism never override validation at trust boundaries, error handling, or security — simplify the solution, not the safety.
+- Reuse before writing: before adding new code, search the repo and stop at the first that fits — an existing helper, util, or pattern already here (reuse it, do not re-implement), the language standard library, or an already-installed dependency — including the framework's own API (its date/time comparison and formatting, string, file, HTTP, validation, permission and query helpers). When the framework provides it, use it and never hand-roll an equivalent, unless the task or the spec explicitly names a different library. Add a new dependency only when none of these cover a real need. Mark a deliberate shortcut with a comment naming its ceiling and upgrade path (e.g. a naive O(n^2) scan, fine under ~1k rows, index it if it grows): a marked shortcut is a decision, an unmarked one is a latent bug. Reuse and minimalism never override validation at trust boundaries, error handling, or security — simplify the solution, not the safety.
 
 - Surgical changes: touch only what you must. Do not improve adjacent code, comments, or formatting; do not refactor what is not broken; match the existing style even if you would do it differently. Remove only the imports, variables, and functions your own changes made unused; do not delete pre-existing dead code unless asked, mention it instead. Keep each change the smallest unit still worth reviewing, prefer several small focused commits over one large batch, and never bundle a refactor, a bug fix, and a feature into one change.
 
@@ -154,5 +154,6 @@ export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   '341e83c8af394739148260e3ccb2f51847f40e8e39374222337fed2fafe03aa1', // VCS-agnostic blast-radius step
   '6b120eb904ccade5842b6d24ee315dfed988931df976648f7ad3e7c3293f1ac2', // merged duplicate rules, restored stripped placeholders
   '6801d5a5d5ccd083ad9a8f7da394ce2f0261f413a19ef01a12fab0b7f45922ac', // + sandbox `.git` boundary rule
-  '88e79873bae534b8947b9523077b06969816cc3791b0ee024fa79a04681a7909', // current: + fix-everywhere rule
+  '88e79873bae534b8947b9523077b06969816cc3791b0ee024fa79a04681a7909', // + fix-everywhere rule
+  'e50de8990b78eae4c6738d1c3e3c904868f70c46655db243edc30b1fe6a31f9e', // current: + prefer the framework's own API
 ]);
