@@ -31,9 +31,7 @@ import {
 
 const DUMP_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
 
-/** Sentinel for the summary-CLI select's "off" option. A <select> carries one string,
- *  and the API models this as two fields (a provider uuid, or summaryLlmEnabled:false),
- *  so the third state needs a value no uuid can collide with. */
+/** Off sentinel for the summary-CLI select; no uuid can collide with it. */
 const SUMMARY_CLI_OFF = 'off';
 
 // Chunked upload of a DB dump (mirrors the repo archive upload). Returns the
@@ -122,8 +120,7 @@ export default function NewTaskPage() {
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
   const [ignoreSavedStepClis, setIgnoreSavedStepClis] = useState(false);
-  // Three states in one select: '' = inherit the step's CLI (what every task did before
-  // this existed), a uuid = use that CLI for the recaps, SUMMARY_CLI_OFF = no LLM recap.
+  // '' = inherit the step's CLI, a uuid = use it for recaps, SUMMARY_CLI_OFF = no recap.
   const [summaryCliProviderId, setSummaryCliProviderId] = useState<string>('');
   const [isBugFix, setIsBugFix] = useState(false);
   const [feature, setFeature] = useState('');

@@ -5,14 +5,11 @@ import { advanceStep, buildAgentMiningSummaryPrompt } from '../src/step-engine/s
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
-// Coverage for the best-effort per-step summarizer's provider choice
-// (maybeEnqueueStepSummary). Nothing asserted on this path before: the LLM-phase suites
-// let the summary enqueue throw into its own try/catch, and the DB-backed smokes set
-// HAIVE_TEST_BYPASS_LLM=1, which stops any cli_invocations row being written at all — so
-// the summarizer returns early there and can never be exercised.
+// The DB-backed smokes set HAIVE_TEST_BYPASS_LLM=1, which writes no cli_invocations row,
+// so the summarizer returns early there and cannot be exercised.
 //
-// The mock DB does not evaluate WHERE clauses; `taskRow` stands in for whatever the
-// tasks.findFirst lookup returns, which is exactly the fact under test.
+// The mock DB does not evaluate WHERE clauses; `taskRow` stands in for whatever
+// tasks.findFirst returns, which is the fact under test.
 
 interface MockState {
   taskStepRow: Record<string, unknown>;
@@ -222,8 +219,7 @@ describe('per-step summarizer provider choice', () => {
   });
 
   it('reads a missing task row as inherit/enabled', async () => {
-    // The pre-existing suites' mock returns undefined here. If that ever stopped meaning
-    // "behave as before", every one of them would change behaviour silently.
+    // Five other step-runner suites return undefined here and must keep passing.
     const { enqueued } = await runToDone(undefined, [makeProvider()]);
     expect(summaries(enqueued)).toHaveLength(1);
     expect(summaries(enqueued)[0]!.cliProviderId).toBe('prov-1');
@@ -283,16 +279,12 @@ describe('fan-out summary prompt is bounded', () => {
     }));
 
   it('stays the same size whether 8 agents ran or 623', () => {
-    // The old rule (`Math.max(800, 7000 / n)`) grew linearly past ~8 agents. MEASURED on
-    // the dev install: 71 agents produced a 62,212-char prompt, 623 produced 53,720, and
-    // every prompt over ~50 KB was killed by the pass's own 60s budget having written
-    // nothing. 8 agents produced 7,999 chars and succeeded.
+    // The old rule grew the prompt linearly past ~8 agents, past what a 60s budget absorbs.
     const small = buildAgentMiningSummaryPrompt('step', {}, agents(8));
     const huge = buildAgentMiningSummaryPrompt('step', {}, agents(623));
     expect(small.length).toBeLessThan(12_000);
     expect(huge.length).toBeLessThan(12_000);
-    // The 62 KB prompt is what the cap exists to prevent; assert the actual regression
-    // bound, not merely "smaller than before".
+    // Assert the regression bound, not merely "smaller than before".
     expect(huge.length).toBeLessThan(small.length * 1.5);
   });
 

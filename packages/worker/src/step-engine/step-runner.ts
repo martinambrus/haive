@@ -2582,18 +2582,12 @@ async function maybeEnqueueStepSummary(
     const { providers, deps } = params;
     if (!providers || !deps) return;
 
-    // The task's own summary settings. A missing row reads as inherit/enabled — what
-    // this pass did before these columns existed — because the step-runner suites' fake
-    // db returns undefined here and their behavior must not change.
+    // A missing row reads as inherit/enabled, the behaviour before these columns existed.
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, params.taskId),
       columns: { summaryCliProviderId: true, summaryLlmEnabled: true },
     });
-    // Off: no prompt is built and no CLI is spent. Steps that emit their own summary
-    // field never reach here, so the "What the agent did" panel still fills for free on
-    // those; what is given up is the recap on steps that would have paid for one, and
-    // with it their task-ledger entry — the same absence a failed or timed-out pass
-    // already produces today.
+    // Off: no prompt, no CLI, and no ledger entry for this step.
     if (task?.summaryLlmEnabled === false) return;
 
     const [latest] = await db
@@ -2635,13 +2629,8 @@ async function maybeEnqueueStepSummary(
     } else {
       return; // no agent text to summarize
     }
-    // An explicit summary CLI wins, but only while it is still enabled. Handing a
-    // disabled id to the dispatcher does NOT fail: resolveDispatch filters to enabled
-    // providers and merely ORDERS the preferred one first, so an id that matches nothing
-    // leaves the summary on whichever provider happens to come first — the arbitrary
-    // choice this setting exists to remove. Falling back to the step's own chain is the
-    // predictable answer, and the effort stays null so the provider's own level governs
-    // (a per-step effort preference is about the step's work, not about its recap).
+    // Only while still enabled: resolveDispatch merely ORDERS the preferred provider first,
+    // so an id matching nothing falls through to an arbitrary one instead of failing.
     const summaryProvider = task?.summaryCliProviderId
       ? providers.find((p) => p.id === task.summaryCliProviderId && p.enabled)
       : undefined;
@@ -2670,9 +2659,7 @@ async function maybeEnqueueStepSummary(
       .insert(schema.cliInvocations)
       .values({
         taskId: params.taskId,
-        // Stays null: task_step_id is what puts a row in the step terminal, the retry
-        // blocker, park folding and the step's invocation count. The spend is attributed
-        // through summaryForStepId instead, so the totals can count it without any of that.
+        // Null: task_step_id drives terminal/retry/park/count. Only the spend is attributed.
         taskStepId: null,
         summaryForStepId: current.id,
         cliProviderId: plan.providerId,
@@ -2724,16 +2711,8 @@ function buildStepSummaryPrompt(stepTitle: string, output: unknown, rawOutput: s
   ].join('\n');
 }
 
-/** How much agent text the fan-out summary prompt may carry, and how many agents it may
- *  name. Both are HARD caps. The previous rule divided 7000 by the agent count but then
- *  floored the result at 800, which makes the prompt grow without bound past ~8 agents —
- *  its comment assumed "2-6 depending on QA level", written before plan mining fanned out
- *  to 61-623 agents on one step.
- *
- *  MEASURED on the dev install, across every step-summary invocation ever run: 71 agents
- *  produced a 62,212-character prompt, 70 produced 52,875 and 623 produced 53,720, and all
- *  three were killed by the pass's own 60s budget having written nothing; the three runs
- *  near 8,000 characters all succeeded. The correlation is the whole sample. */
+/** Hard caps. A per-agent budget with a floor grows the prompt without bound past ~8
+ *  agents, and the 60s summary budget cannot absorb a 60 KB prompt. */
 const SUMMARY_AGENT_TEXT_BUDGET = 7000;
 const SUMMARY_AGENT_LIMIT = 12;
 
@@ -2747,9 +2726,7 @@ export function buildAgentMiningSummaryPrompt(
   agents: Array<{ title: string; text: string }>,
 ): string {
   const structured = JSON.stringify(output ?? {}, null, 2).slice(0, 3000);
-  // Cap the agents NAMED as well as the text they contribute. Past a dozen, a line per
-  // agent stops being the short recap the panel is sized for, so the elision is stated in
-  // the prompt and the closing instruction changes shape rather than asking for 70 lines.
+  // Past the limit a line per agent is no longer a short recap, so the instruction changes.
   const shown = agents.slice(0, SUMMARY_AGENT_LIMIT);
   const omitted = agents.length - shown.length;
   const perAgent = Math.max(1, Math.floor(SUMMARY_AGENT_TEXT_BUDGET / Math.max(shown.length, 1)));

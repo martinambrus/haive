@@ -120,12 +120,7 @@ export const tasks = pgTable(
     cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
       onDelete: 'set null',
     }),
-    /** CLI that writes the per-step "What the agent did" recap (New Task form).
-     *  A SECOND provider on purpose: the recap is 1-3 sentences, so inheriting the
-     *  step's coding CLI spends a coding model on it — and worse, a preference the
-     *  dispatcher cannot honor falls through to whichever provider happens to be
-     *  enabled first. NULL = inherit (the step's saved pref, then cli_provider_id),
-     *  which is exactly what every task did before this column existed. */
+    /** CLI that writes the per-step recap. NULL = inherit (step pref, then cli_provider_id). */
     summaryCliProviderId: uuid('summary_cli_provider_id').references(() => cliProviders.id, {
       onDelete: 'set null',
     }),
@@ -331,12 +326,8 @@ export const tasks = pgTable(
      *  a step the user explicitly changes during the task is recorded in
      *  task_step_cli_touched and honored. Default false = today's behavior. */
     ignoreSavedStepClis: boolean('ignore_saved_step_clis').notNull().default(false),
-    /** Run the LLM step-summary pass at all (New Task form). False skips it entirely:
-     *  steps that emit their own summary field still fill the "What the agent did"
-     *  panel for free, so turning this off costs the recap only on steps that would
-     *  have paid a CLI call for one. Default true = today's behavior. Separate from
-     *  summary_cli_provider_id because "which model" and "at all" are different
-     *  questions, and the provider column is an FK that cannot carry an off value. */
+    /** False skips the LLM recap pass entirely. Separate from summary_cli_provider_id
+     *  because an FK cannot carry an off value. */
     summaryLlmEnabled: boolean('summary_llm_enabled').notNull().default(true),
     /** "Run configuration" answers applied to later steps' forms.
      *  Record<stepId, Record<fieldId, value>>. Written by 06-run-config apply();
@@ -738,13 +729,9 @@ export const cliInvocations = pgTable(
       .notNull()
       .references(() => tasks.id, { onDelete: 'cascade' }),
     taskStepId: uuid('task_step_id').references(() => taskSteps.id, { onDelete: 'set null' }),
-    /** The step whose recap this invocation wrote (the best-effort per-step summarizer,
-     *  CliExecJobPayload.purpose 'step_summary'). Deliberately NOT task_step_id, which
-     *  stays NULL: that column is what puts a row in the step terminal, the retry
-     *  blocker (routes/tasks/steps.ts), park folding and the step's invocation count,
-     *  and a summary is none of those things — it runs after the step is already done.
-     *  This column carries only the SPEND back to the step it describes, so the per-step
-     *  token badge and the task totals can both count it. Null on every other kind. */
+    /** Step whose recap this invocation wrote. Separate from task_step_id, which stays NULL:
+     *  that column drives the step terminal, retry blocker, park folding and invocation
+     *  count, and only the SPEND belongs to the step here. */
     summaryForStepId: uuid('summary_for_step_id').references(() => taskSteps.id, {
       onDelete: 'set null',
     }),

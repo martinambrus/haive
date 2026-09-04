@@ -513,12 +513,8 @@ function notionalCostUsdSql() {
  *  so a step's token total reconciles with the invocations shown there. Single
  *  GROUP BY keeps it O(1) round-trips regardless of step count.
  *
- *  Two different questions, two different columns: the COUNTERS ask "did this step
- *  run a CLI" and stay on `task_step_id`, while the token/cost SUMS ask "what did
- *  this step cost" and also fold in the step's summary pass, which is attributed by
- *  `summary_for_step_id` (see the column's comment). Without that fold the recap's
- *  spend appeared in no figure at all; with it inside the counters, a finished step
- *  would sprout a terminal toggle for an invocation it never ran. */
+ *  Counters stay on `task_step_id` ("did this step run a CLI"); the token/cost sums also
+ *  fold in the step's summary pass via `summary_for_step_id` ("what did this step cost"). */
 export async function enrichStepsWithCliStats<T extends { id: string }>(
   db: ReturnType<typeof getDb>,
   taskId: string,
@@ -528,11 +524,8 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
 > {
   if (steps.length === 0) return [];
   const tu = schema.cliInvocations.tokenUsage;
-  // A step's SPEND is its own invocations plus the summary pass that recapped it. That
-  // pass runs unlinked (task_step_id null) so it stays out of the step terminal, the
-  // retry blocker and park folding; summary_for_step_id is how its tokens find their way
-  // home. Both counters below therefore stay on task_step_id: counting the summary would
-  // give a done step a terminal toggle it has no invocation for, and read as a retry.
+  // Counting the summary row would give a finished step a terminal toggle it has no
+  // invocation for, and read as an auto-retry — so the counters below stay on task_step_id.
   const attributedStepId = sql<
     string | null
   >`coalesce(${schema.cliInvocations.taskStepId}, ${schema.cliInvocations.summaryForStepId})`;
@@ -608,12 +601,9 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
  *  badges on the detail page (which folds step totals and skips unattributed rows).
  *  Tasks with no token-bearing invocation are simply absent from the map.
  *
- *  That rule is `task_step_id IS NOT NULL OR summary_for_step_id IS NOT NULL`, not
- *  "no filter": a summary row written before `summary_for_step_id` existed carries
- *  neither, so it stays out of BOTH sides and the two totals keep matching on old
- *  tasks with no backfill. Dropping the filter outright would have counted those
- *  legacy rows here while the per-step badges still could not place them, which is
- *  precisely the mismatch this filter exists to prevent. */
+ *  The rule is `task_step_id IS NOT NULL OR summary_for_step_id IS NOT NULL` rather than no
+ *  filter: a summary row predating that column carries neither, so it stays out of BOTH
+ *  sides and the two totals keep matching on old tasks without a backfill. */
 export async function sumTaskTokens(
   db: ReturnType<typeof getDb>,
   taskIds: string[],
@@ -779,10 +769,8 @@ function summarizeCostSources(sources: unknown): TaskProviderUsage['costSource']
  *  providers (always real); costUsd is whatever the shared rule counts as real, which
  *  since the pricing feature includes computed dollars for the claude-binary wrappers
  *  whose own reported total is Anthropic fiction. Ordered by token volume (the primary
- *  metric). Same superseded/attribution filter as the other aggregations, so a task's
- *  summary passes show up here as their own provider row with their own cost — the
- *  point of letting a task pick a separate, cheaper CLI for them. A summary run on a
- *  subscription provider lands in the notional half, by the same rule as any other. */
+ *  metric). Same superseded/attribution filter as the other aggregations, so a task's summary
+ *  passes appear as their own provider row with their own cost. */
 export async function sumTaskProviderBreakdown(
   db: ReturnType<typeof getDb>,
   taskId: string,
