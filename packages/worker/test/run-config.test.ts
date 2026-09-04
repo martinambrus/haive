@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FormSchema } from '@haive/shared';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
+import { validateFormValues } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.js';
 
@@ -112,8 +113,17 @@ describe('06-run-config form', () => {
     };
     expect(field.options.map((o) => o.value)).toEqual([...ALL_REVIEW_DIMENSION_IDS]);
     expect(field.defaults).toEqual([...ALL_REVIEW_DIMENSION_IDS]);
-    // Unticking every box must be rejected, not saved as "review nothing".
-    expect(field.required).toBe(true);
+  });
+
+  // Not `required`, and that is load-bearing rather than an omission. In
+  // validateFormValues the flag rejects an ABSENT value, which is the legitimate
+  // "leave the policy alone" case every programmatic submitter uses, while an
+  // explicitly empty array counts as present and skips the check — so the flag
+  // failed the good input and guarded nothing. apply() owns the empty case instead.
+  it('does not mark the dimension list required', () => {
+    const schema = runConfigStep.form!(makeApplyCtx().ctx, detectedStub(true)) as FormSchema;
+    const field = leafFields(schema).get('reviewDimensions') as { required?: boolean };
+    expect(field.required).toBeUndefined();
   });
 
   it('pre-ticks only the repository/task selection when it is narrowed', () => {
@@ -129,6 +139,58 @@ describe('06-run-config form', () => {
     const schema = runConfigStep.form!(makeApplyCtx().ctx, detectedStub(true)) as FormSchema;
     const field = leafFields(schema).get('reviewDimensions') as { defaults: string[] };
     expect(field.defaults).toEqual([...ALL_REVIEW_DIMENSION_IDS]);
+  });
+});
+
+// The gap that let a green unit suite ship a red CI: every test above calls form()
+// and apply() directly, while the runner puts validateFormValues between them. A
+// `required: true` on the dimension list passed all of those and still failed every
+// submitter that omits the field — which is what the workflow smoke does.
+describe('06-run-config server-side validation', () => {
+  const validate = (values: Record<string, unknown>) =>
+    validateFormValues(
+      runConfigStep.form!(makeApplyCtx().ctx, detectedStub(true)) as FormSchema,
+      values,
+    );
+
+  // The exact canned payload from packages/worker/test/workflow-smoke.ts, which
+  // predates the dimension list and names no dimensions at all.
+  const SMOKE_PAYLOAD = {
+    adversarialQaLevel: 'none',
+    simplifyCode: true,
+    sprintDecision: 'use_single_agent',
+    sprintAutoResolveConflicts: false,
+    sprintReviewEnabled: false,
+    verifyRunTest: false,
+    verifyRunLint: false,
+    verifyRunTypecheck: false,
+    browserMode: 'skip',
+    browserCheckConsoleErrors: false,
+    browserCheckNetworkErrors: false,
+    testAction: 'skip',
+    testRunTests: false,
+    exposeDbPort: false,
+    maxFixRounds: '5',
+  };
+
+  it('accepts a submission that names no dimensions', () => {
+    const res = validate(SMOKE_PAYLOAD);
+    expect(res.success ? null : res.issues).toBeNull();
+  });
+
+  it('defaults an omitted dimension list to the resolved policy', () => {
+    const res = validate(SMOKE_PAYLOAD);
+    expect(res.success && res.data.reviewDimensions).toEqual([...ALL_REVIEW_DIMENSION_IDS]);
+  });
+
+  it('keeps a narrowed selection the submitter did send', () => {
+    const res = validate({ ...SMOKE_PAYLOAD, reviewDimensions: ['security', 'testability'] });
+    expect(res.success && res.data.reviewDimensions).toEqual(['security', 'testability']);
+  });
+
+  it('rejects an id the catalog does not know', () => {
+    const res = validate({ ...SMOKE_PAYLOAD, reviewDimensions: ['not-a-dimension'] });
+    expect(res.success).toBe(false);
   });
 });
 
@@ -159,6 +221,26 @@ describe('06-run-config apply', () => {
   it('falls back to every dimension when neither the form nor the detect carried one', async () => {
     const { ctx } = makeApplyCtx();
     const out = await runConfigStep.apply(ctx, applyArgs({ testAction: 'manage' }));
+    expect(out.reviewDimensions).toEqual([...ALL_REVIEW_DIMENSION_IDS]);
+  });
+
+  // "Score nothing" is not a policy anyone expresses by unticking the last box, and
+  // storing it would make every reviewer skip every dimension while still reporting
+  // a clean run.
+  it('treats an explicitly empty selection as the policy, not as "review nothing"', async () => {
+    const { ctx, sets } = makeApplyCtx();
+    const args = {
+      ...(applyArgs({ reviewDimensions: [] }) as unknown as Record<string, unknown>),
+      detected: { ...detectedStub(false), reviewDimensionIds: ['security'] },
+    } as never;
+    const out = await runConfigStep.apply(ctx, args);
+    expect(out.reviewDimensions).toEqual(['security']);
+    expect(sets[0]!.reviewDimensions).toEqual(['security']);
+  });
+
+  it('treats a selection of only unknown ids as the policy too', async () => {
+    const { ctx } = makeApplyCtx();
+    const out = await runConfigStep.apply(ctx, applyArgs({ reviewDimensions: ['nope', 'gone'] }));
     expect(out.reviewDimensions).toEqual([...ALL_REVIEW_DIMENSION_IDS]);
   });
 

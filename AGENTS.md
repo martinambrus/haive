@@ -344,10 +344,14 @@ choice. 08d's six adversaries are attack roles, not dimensions.
 
 Admin surfaces: a card on the repo tooling page (`/repos/<id>/tooling`) for the policy, and a
 collapsed accordion in `06-run-config` for the per-task override — the one accordion allowed on
-that form, whose controls are otherwise top-level by design (see `fddd12a5`). Both require at
-least one dimension: unticking the last box is a mistake, not a policy. No global
-`CONFIG_KEYS` kill-switch, deliberately — the default is already "all on", so a switch would
-gate nothing.
+that form, whose controls are otherwise top-level by design (see `fddd12a5`). Neither can store
+an empty set: the repository PATCH answers 400, and the task form resolves both an omitted
+field and a submitted-but-empty one to the policy. That multi-select is deliberately NOT
+`required` — in `validateFormValues` the flag rejects an ABSENT value, which is the legitimate
+"leave the policy alone" case every programmatic submitter uses (it broke the workflow smoke),
+while an explicitly empty array counts as present and skips the check, so the flag failed the
+good input and guarded nothing. No global `CONFIG_KEYS` kill-switch, deliberately — the default
+is already "all on", so a switch would gate nothing.
 
 ## Model pricing and spend
 

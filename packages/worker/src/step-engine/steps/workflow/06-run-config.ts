@@ -91,6 +91,30 @@ interface SpecQualityOutput {
   spec?: string;
 }
 
+/** What the form chose, falling back to the policy detect resolved.
+ *
+ *  The field is deliberately NOT `required`. In validateFormValues an ABSENT value
+ *  is the one that flag rejects, and absent is exactly the legitimate case — a
+ *  hand-written pre-answer or any programmatic submitter that does not care about
+ *  dimensions means "leave the policy alone", which is also what `defaultFor`
+ *  returns for a multi-select. Marking it required failed that case and guarded
+ *  nothing, because an explicitly EMPTY array counts as present and skips the
+ *  check entirely. (MEASURED: it broke the workflow smoke, whose canned
+ *  06-run-config payload predates this field.)
+ *
+ *  So both degenerate inputs resolve the same way: an omitted field and a
+ *  submitted-but-empty set both mean the repository policy, never "score
+ *  nothing". A stored empty set would make every reviewer skip every dimension
+ *  while still reporting a clean run — the outcome gate 2's disclosure exists to
+ *  prevent — and it is not what anyone means by unticking the last box.
+ */
+function resolveSubmittedDimensions(raw: unknown, detected: string[] | undefined): string[] {
+  const policy = detected ?? [...ALL_REVIEW_DIMENSION_IDS];
+  if (!Array.isArray(raw)) return policy;
+  const chosen = normalizeReviewDimensionIds(raw);
+  return chosen.length > 0 ? chosen : policy;
+}
+
 export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
   metadata: {
     id: '06-run-config',
@@ -276,9 +300,6 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
                   type: 'multi-select',
                   id: 'reviewDimensions',
                   label: 'Score these dimensions',
-                  // Required, so unticking every box is rejected rather than saved:
-                  // a review with no dimensions at all is a mistake, not a policy.
-                  required: true,
                   options: REVIEW_DIMENSIONS.map((d) => ({
                     value: d.id,
                     label: d.label,
@@ -444,12 +465,10 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       testRunTests: bool(values.testRunTests, true),
       exposeDbPort: bool(values.exposeDbPort, false),
       maxFixRounds: num(values.maxFixRounds, 5),
-      // Fall back to what detect resolved rather than to "all": a form that came
-      // back without the field (an old pre-answer, a client that dropped it) must
-      // not silently re-enable dimensions the repository had scoped out.
-      reviewDimensions: Array.isArray(values.reviewDimensions)
-        ? normalizeReviewDimensionIds(values.reviewDimensions)
-        : ((args.detected as RunConfigDetect).reviewDimensionIds ?? [...ALL_REVIEW_DIMENSION_IDS]),
+      reviewDimensions: resolveSubmittedDimensions(
+        values.reviewDimensions,
+        (args.detected as RunConfigDetect).reviewDimensionIds,
+      ),
     };
 
     // Map run-config answers to the downstream steps' exact field ids. The runner

@@ -110,9 +110,10 @@ describe('validateRequired', () => {
 });
 
 describe('validateRequired inside an accordion', () => {
-  // 06-run-config puts its review-dimension multi-select inside a collapsed
-  // accordion. Required-ness has to reach through the wrapper, or unticking every
-  // dimension would submit as "review nothing" from a section the user cannot see.
+  // Required-ness has to reach through a collapsed accordion, or a required field a
+  // user never expanded would submit empty. (06-run-config's dimension list is
+  // deliberately NOT required — apply() resolves an empty set to the repository
+  // policy — so this covers the wrapper, not that field.)
   const dimensionForm = (defaults: string[]): FormSchema =>
     schema({
       type: 'accordion',
