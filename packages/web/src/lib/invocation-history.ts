@@ -77,6 +77,76 @@ export function mergeInvocationPage({
   return [...byId.values()].sort(compareInvocationsDesc);
 }
 
+/**
+ * Drop held rows outside the window the user actually asked for.
+ *
+ * `mergeInvocationPage` keeps everything older than the head page's floor, which is right for a
+ * single poll and wrong over a long one: a fan-out step dispatches a wave every few minutes and
+ * each wave's rows join the held set for good, so a tab left open all night converges on the
+ * step's whole history (20 -> 31 -> ... -> 585 on the reported task). Polling must not be able
+ * to grow the window; only a "load older" click may.
+ *
+ * `keepCompleted` is that budget — the head page plus every page the user clicked for. ACTIVE
+ * rows are never trimmed: the api always returns the complete active set, their number is
+ * bounded by the agent concurrency cap, and a live terminal must never be paged away.
+ *
+ * Expects `rows` newest-first, as the merge leaves them, and preserves that order.
+ */
+export function trimInvocationWindow(
+  rows: CliInvocationSummary[],
+  keepCompleted: number,
+): CliInvocationSummary[] {
+  let completed = 0;
+  return rows.filter((row) => {
+    if (row.isActive) return true;
+    completed += 1;
+    return completed <= keepCompleted;
+  });
+}
+
+/** How many runs may keep a mounted terminal body on the default rule (live runs, plus the ones
+ *  the user watched finish). An explicit click sits outside this cap — it is the user's own
+ *  doing and is bounded by how often they can click.
+ *
+ *  MEASURED on `02-plan-coverage` (585 runs, 97 MB of stream logs): one mounted body costs
+ *  ~6 MB of heap and ~570 DOM nodes, against 11 nodes for a collapsed row. So the bodies are the
+ *  entire cost, and 24 of them is ~145 MB — while still covering two full 12-wide waves, so a
+ *  run the user watched finish stays readable until the wave after next pushes it out. */
+export const MAX_KEPT_OPEN_RUNS = 24;
+
+/**
+ * Record the runs seen ACTIVE on this poll, keeping only the most recent `cap` of them.
+ *
+ * The set this maintains is what `isInvocationExpanded` reads to keep a run the user watched
+ * finish from collapsing under them. Unbounded, it was the leak: on a fan-out step EVERY run
+ * passes through active, so the set — and with it the number of mounted xterms, live sockets and
+ * fetched stream logs — converges on the whole step. The paging in `mergeInvocationPage` bounds
+ * what a fresh mount loads; this bounds what a long-lived one accumulates.
+ *
+ * Each active id is re-inserted (delete then add) so `Set` insertion order is last-seen-active
+ * recency rather than first-seen. That is what makes a STILL-ACTIVE run un-evictable: it is
+ * re-added on every poll, so it is always among the newest entries and the eviction walks off
+ * the other end. A run only starts ageing out once it stops being reported active.
+ *
+ * Mutates in place — the caller holds it in a ref, and every call site is immediately followed
+ * by the poll's `setInvocations`, so the render that reads it always follows.
+ */
+export function rememberActiveRuns(
+  seen: Set<string>,
+  activeIds: readonly string[],
+  cap: number = MAX_KEPT_OPEN_RUNS,
+): void {
+  for (const id of activeIds) {
+    seen.delete(id);
+    seen.add(id);
+  }
+  while (seen.size > cap) {
+    const oldest = seen.values().next();
+    if (oldest.done === true) break;
+    seen.delete(oldest.value);
+  }
+}
+
 export interface InvocationHistoryPaging {
   /** Completed runs currently held. */
   loaded: number;
@@ -117,7 +187,9 @@ export type InvocationOpenOverrides = Record<string, boolean>;
  * `seenActive` is the exception that keeps that from being annoying: a run the user watched
  * go from running to finished stays open, because collapsing the terminal the moment a run
  * exits would hide exactly the output the user was waiting for. It holds ids seen active
- * during this mount only, so a reload starts collapsed again.
+ * during this mount only, so a reload starts collapsed again — and only the most recent
+ * `MAX_KEPT_OPEN_RUNS` of them (see `rememberActiveRuns`), so a step that runs wave after wave
+ * cannot turn "stays open" into every run it ever dispatched.
  *
  * An explicit click always wins, in both directions — including collapsing a LIVE run,
  * which is how a user drops an xterm they do not want.

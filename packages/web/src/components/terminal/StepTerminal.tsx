@@ -15,6 +15,8 @@ import {
   invocationHistoryPaging,
   isInvocationExpanded,
   mergeInvocationPage,
+  rememberActiveRuns,
+  trimInvocationWindow,
   type InvocationOpenOverrides,
 } from '@/lib/invocation-history';
 import {
@@ -59,11 +61,18 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
   // Explicit per-run open/closed clicks. Absent id = no opinion, and the default (live runs
   // expanded, finished ones collapsed) decides — see isInvocationExpanded.
   const [openOverrides, setOpenOverrides] = useState<InvocationOpenOverrides>({});
-  // Ids seen ACTIVE at any point during this mount, so a run the user watched finish keeps
-  // its output on screen instead of collapsing the instant it exits. A ref, not state: it is
-  // always populated by the poll BEFORE the poll that reports the run ended, so the render
-  // that needs it already has it and no extra re-render is required.
+  // The most recent MAX_KEPT_OPEN_RUNS ids seen ACTIVE during this mount, so a run the user
+  // watched finish keeps its output on screen instead of collapsing the instant it exits — but
+  // only until newer runs push it out. A ref, not state: it is always populated by the poll
+  // BEFORE the poll that reports the run ended, so the render that needs it already has it and
+  // no extra re-render is required. Bounded by rememberActiveRuns; see its comment for why an
+  // unbounded set is what put every run of a 48-wave step on screen at once.
   const seenActiveRef = useRef<Set<string>>(new Set());
+  // Completed pages the user has deliberately loaded ("load older" clicks), starting at the head
+  // page. It is the window budget handed to trimInvocationWindow, so POLLING can never grow the
+  // held set — only a click can. A ref rather than state because `reload` reads it: as state it
+  // would be a dependency, and re-creating `reload` restarts the poll interval on every click.
+  const historyPagesRef = useRef(1);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useAutoScrollTerminals();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -97,16 +106,20 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
       const data = await api.get<CliInvocationListResponse>(
         `/tasks/${taskId}/steps/${stepRowId}/cli-invocations?historyLimit=${INVOCATION_HISTORY_PAGE}`,
       );
-      for (const inv of data.invocations) {
-        if (inv.isActive) seenActiveRef.current.add(inv.id);
-      }
+      rememberActiveRuns(
+        seenActiveRef.current,
+        data.invocations.filter((inv) => inv.isActive).map((inv) => inv.id),
+      );
       setInvocations((prev) =>
-        mergeInvocationPage({
-          prev: prev ?? [],
-          page: data.invocations,
-          limit: INVOCATION_HISTORY_PAGE,
-          append: false,
-        }),
+        trimInvocationWindow(
+          mergeInvocationPage({
+            prev: prev ?? [],
+            page: data.invocations,
+            limit: INVOCATION_HISTORY_PAGE,
+            append: false,
+          }),
+          historyPagesRef.current * INVOCATION_HISTORY_PAGE,
+        ),
       );
       setHistoryTotal(data.historyTotal ?? 0);
       setTotalCount(data.totalCount ?? data.invocations.length);
@@ -127,13 +140,19 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
           `/tasks/${taskId}/steps/${stepRowId}/cli-invocations` +
             `?historyLimit=${INVOCATION_HISTORY_PAGE}&historyCursor=${cursor}`,
         );
+        // Widen the window BEFORE folding the page in, or the rows just fetched would be
+        // trimmed straight back off and the button would look inert.
+        historyPagesRef.current += 1;
         setInvocations((prev) =>
-          mergeInvocationPage({
-            prev: prev ?? [],
-            page: data.invocations,
-            limit: INVOCATION_HISTORY_PAGE,
-            append: true,
-          }),
+          trimInvocationWindow(
+            mergeInvocationPage({
+              prev: prev ?? [],
+              page: data.invocations,
+              limit: INVOCATION_HISTORY_PAGE,
+              append: true,
+            }),
+            historyPagesRef.current * INVOCATION_HISTORY_PAGE,
+          ),
         );
         // Keep the counts we have if an older api omits them — zeroing them here would hide
         // the very button that was just clicked.

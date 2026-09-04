@@ -4,7 +4,10 @@ import {
   compareInvocationsDesc,
   invocationHistoryPaging,
   isInvocationExpanded,
+  MAX_KEPT_OPEN_RUNS,
   mergeInvocationPage,
+  rememberActiveRuns,
+  trimInvocationWindow,
 } from './invocation-history';
 
 /** Minimal row: only the fields the merge and the expansion rule actually read. */
@@ -135,6 +138,85 @@ describe('mergeInvocationPage — appending an older page', () => {
   });
 });
 
+describe('trimInvocationWindow', () => {
+  const wave = (n: number, from: number, opts: { active?: boolean } = {}) =>
+    Array.from({ length: n }, (_, i) =>
+      inv(`r${from + i}`, new Date(Date.UTC(2026, 8, 1, 0, from + i)).toISOString(), opts),
+    ).sort(compareInvocationsDesc);
+
+  it('keeps only the newest budgeted completed rows', () => {
+    expect(ids(trimInvocationWindow(wave(5, 1), 3))).toEqual(['r5', 'r4', 'r3']);
+  });
+
+  it('is a no-op while the held set is inside the budget', () => {
+    const rows = wave(3, 1);
+    expect(trimInvocationWindow(rows, 20)).toEqual(rows);
+  });
+
+  it('never trims an ACTIVE run, however far down the ordering it sits', () => {
+    // A long agent still going while its faster siblings started and finished: it is OLDER than
+    // every completed row, and paging it away would drop a live terminal.
+    const rows = [...wave(5, 10), ...wave(1, 1, { active: true })].sort(compareInvocationsDesc);
+    expect(ids(trimInvocationWindow(rows, 2))).toEqual(['r14', 'r13', 'r1']);
+  });
+
+  it('bounds the window a poll can reach no matter how many waves ran', () => {
+    // The leak, in one assertion: 48 waves of 12 used to leave all 576 rows held.
+    let held: ReturnType<typeof wave> = [];
+    for (let w = 0; w < 48; w++) {
+      held = trimInvocationWindow(
+        mergeInvocationPage({ prev: held, page: wave(12, w * 12), limit: 12, append: false }),
+        20,
+      );
+    }
+    expect(held).toHaveLength(20);
+  });
+});
+
+describe('rememberActiveRuns', () => {
+  it('keeps every id while under the cap', () => {
+    const seen = new Set<string>();
+    rememberActiveRuns(seen, ['a', 'b'], 4);
+    rememberActiveRuns(seen, ['c'], 4);
+    expect([...seen]).toEqual(['a', 'b', 'c']);
+  });
+
+  it('evicts the least recently active first', () => {
+    const seen = new Set<string>();
+    rememberActiveRuns(seen, ['a', 'b', 'c'], 3);
+    rememberActiveRuns(seen, ['d'], 3);
+    expect([...seen]).toEqual(['b', 'c', 'd']);
+  });
+
+  it('never evicts a run that is STILL active', () => {
+    // 'a' is a long agent that outlives three waves of faster siblings. Re-seen on every poll,
+    // it is re-inserted as the newest entry, so the eviction walks off the other end.
+    const seen = new Set<string>();
+    rememberActiveRuns(seen, ['a'], 3);
+    for (const poll of [
+      ['a', 'b'],
+      ['a', 'c'],
+      ['a', 'd'],
+    ])
+      rememberActiveRuns(seen, poll, 3);
+    expect(seen.has('a')).toBe(true);
+    // 'b' is the one evicted: recency is per CALL, and 'a' leads each poll's list, so it lands
+    // ahead of that poll's newcomer while still outranking every earlier one.
+    expect([...seen]).toEqual(['c', 'a', 'd']);
+  });
+
+  it('holds the mounted set flat across wave after wave', () => {
+    const seen = new Set<string>();
+    for (let w = 0; w < 48; w++) {
+      rememberActiveRuns(
+        seen,
+        Array.from({ length: 12 }, (_, i) => `w${w}-${i}`),
+      );
+    }
+    expect(seen.size).toBe(MAX_KEPT_OPEN_RUNS);
+  });
+});
+
 describe('invocationHistoryPaging', () => {
   it('points the cursor at the oldest COMPLETED row held', () => {
     const rows = [
@@ -172,6 +254,17 @@ describe('isInvocationExpanded', () => {
   it('lets an explicit click win in both directions', () => {
     expect(isInvocationExpanded(active, { a1: false }, new Set(['a1']))).toBe(false);
     expect(isInvocationExpanded(done, { d1: true }, new Set())).toBe(true);
+  });
+
+  it('collapses a finished run once newer runs have pushed it out of the kept set', () => {
+    const seen = new Set<string>();
+    rememberActiveRuns(seen, ['d1'], 2);
+    expect(isInvocationExpanded(done, {}, seen)).toBe(true);
+    rememberActiveRuns(seen, ['n1', 'n2'], 2);
+    expect(isInvocationExpanded(done, {}, seen)).toBe(false);
+    // ...unless the user pinned it open, which outranks the eviction the same way it outranks
+    // every other default.
+    expect(isInvocationExpanded(done, { d1: true }, seen)).toBe(true);
   });
 
   it('mounts nothing for a page of history on a step with no live run', () => {
