@@ -10,7 +10,10 @@ import {
   upsertRegion,
 } from '../src/templates/cli-rules.js';
 import { normalizeContent, sha256Hex } from '../src/templates/manifest.js';
-import { DEFAULT_AGENT_RULES } from '../src/constants/default-agent-rules.js';
+import {
+  DEFAULT_AGENT_RULES,
+  KNOWN_DEFAULT_RULES_HASHES,
+} from '../src/constants/default-agent-rules.js';
 
 const PI_START = '<!-- haive:project-info -->';
 const PI_END = '<!-- /haive:project-info -->';
@@ -66,6 +69,12 @@ describe('resolveEffectiveRules', () => {
 
   it('keeps an explicit override as-is', () => {
     expect(resolveEffectiveRules('- my custom rule')).toBe('- my custom rule');
+  });
+
+  it("keeps the shipped default's own hash in KNOWN_DEFAULT_RULES_HASHES", () => {
+    // The test above cannot catch a missing hash: an unknown hash returns the
+    // input, which there IS the default. Editing the rules needs this to fail.
+    expect(KNOWN_DEFAULT_RULES_HASHES.has(sha256Hex(DEFAULT_AGENT_RULES))).toBe(true);
   });
 });
 

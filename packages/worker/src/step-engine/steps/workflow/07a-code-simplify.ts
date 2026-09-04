@@ -113,7 +113,9 @@ const SEARCH_LADDER = [
 // installed (auth volumes carry credentials, not plugins). Point 2 is
 // generalized: the original hardcoded its origin repo's standards (ES modules /
 // arrow-function rules / React patterns), which are wrong for arbitrary target
-// repos — the intent (apply the project's established standards) is kept.
+// repos — the intent (apply the project's established standards) is kept. Point 3
+// gains one bullet: upstream only removes obvious comments, nothing bounds what a
+// refactor adds.
 const CODE_SIMPLIFIER_DEFINITION = [
   'You are an expert code simplification specialist focused on enhancing code clarity, consistency,',
   'and maintainability while preserving exact functionality. Your expertise lies in applying',
@@ -136,6 +138,7 @@ const CODE_SIMPLIFIER_DEFINITION = [
   '   - Improving readability through clear variable and function names',
   '   - Consolidating related logic',
   '   - Removing unnecessary comments that describe obvious code',
+  '   - Keeping any comment worth writing short — one practical line, never a replacement essay',
   '   - IMPORTANT: Avoid nested ternary operators - prefer switch statements or if/else chains for',
   '     multiple conditions',
   '   - Choose clarity over brevity - explicit code is often better than overly compact code',
