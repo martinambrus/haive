@@ -14,17 +14,20 @@ import {
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
+import { ensureAppServing } from './_app-runtime.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
+import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 
-// Phase 5b — Test management (legacy phase5b-test-management.md). After browser
-// verification, keep the project's automated tests in sync with the change:
-// deterministically detect the test infrastructure (no LLM), let the user pick
-// the action (the legacy mandatory questions, folded into the one-shot form),
-// run ONE tester agent to create/update/delete tests following the project's
-// conventions, then optionally run ONLY the related tests (never the full
-// suite) — in the per-task DDEV runner when the repo uses DDEV — looping a fix
-// agent on failures (legacy cap: 5 attempts, then escalate via gate-2). No
-// detectable infrastructure → the step is skipped.
+// Phase 5b — Test management (legacy phase5b-test-management.md). Runs straight
+// after the implementation chain and BEFORE 08-phase-5-verify, so the suite verify
+// runs has already been reconciled with the change: deterministically detect the
+// test infrastructure (no LLM), let the user pick the action (the legacy mandatory
+// questions, folded into the one-shot form), run ONE tester agent to
+// create/update/delete tests following the project's conventions, then optionally
+// run ONLY the related tests (never the full suite) — in the per-task DDEV runner
+// when the repo uses DDEV — looping a fix agent on failures (legacy cap: 5
+// attempts, then fixLoop back to implementation). No detectable infrastructure →
+// the step is skipped.
 
 const exec = promisify(execFile);
 
@@ -293,15 +296,59 @@ function actionInstructions(): string[] {
   ];
 }
 
+/** The fix-loop diagnosis handed to the implementer once the tester's own passes are
+ *  spent. Carries the same three-way framing the tester agent was given, so the
+ *  implementer does not treat the failing assertion as gospel. */
+function buildTestFailureDiagnosis(out: TestManagementApply): string {
+  const touched = [...out.testsCreated, ...out.testsUpdated];
+  return [
+    `The related tests still fail after ${out.fixPasses} fix pass(es) by the test-management step.`,
+    'Decide per failure whether the TEST is wrong (fix the test), the CODE is wrong (fix the',
+    'code), or the test is FLAKY (replace arbitrary waits with proper assertions).',
+    touched.length > 0 ? `\nTests written or updated by that step:\n- ${touched.join('\n- ')}` : '',
+    out.testRun?.command ? `\nCommand: ${out.testRun.command}` : '',
+    out.testRun?.output ? `\nFailure output:\n${out.testRun.output}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 export const testManagementStep: StepDefinition<TestManagementDetect, TestManagementApply> = {
+  // Playwright/Cypress run against a SERVING app. The runtime is brought up far
+  // earlier (01a/01c, re-ensured by 07c), but the idle reaper can reclaim it during
+  // the 07→07c chain, so re-ensure rather than assume. 'if-serving' keeps a
+  // code-only repo out of the runtime pool.
+  needsRuntime: 'if-serving',
   metadata: {
     id: '08b-test-management',
     workflowType: 'workflow',
-    index: 8.7,
+    // Between 07c-ddev-reconcile (7.8) and 08-phase-5-verify (8): tests must be
+    // reconciled with the change before verify runs the full suite, else a stale
+    // assertion costs an implementation round. The `08b-` id is kept despite the
+    // move — it is the persisted task_steps.step_id and the pre_answers /
+    // step_loop_limits key.
+    index: 7.9,
     title: 'Phase 5b: Test management',
     description:
       "Keeps the project's automated tests in sync with the change: a tester agent creates/updates/removes tests per your choice, then the related tests run selectively with a fix loop.",
     requiresCli: false,
+  },
+
+  // ensureAppServing can throw; without a route a DDEV boot failure would hard-fail
+  // the task at a step a plain retry cannot clear. Same predicate as 07c/08/08a, so
+  // only agent-authored build failures loop back.
+  fixLoopOnError: isDdevAgentFixableFailure,
+
+  // Fix-loop: the tester agent's own passes (`loop`, below) are the first responder
+  // and can rewrite the test OR the code. This fires only once that budget is spent
+  // and the run is still red. `testsPassed === null` is not a failure and must not
+  // loop back — it covers "skip", no runnable test files, a framework with no
+  // file-scoped subset, and an unavailable DDEV runner.
+  fixLoop: {
+    evaluate: (out) =>
+      out.testsPassed === false
+        ? { blocking: true, diagnosis: buildTestFailureDiagnosis(out) }
+        : null,
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
@@ -399,7 +446,8 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       const values = args.formValues as { action?: string; hints?: string };
       return [
         "You are the test-management phase of an engineering workflow. Keep the project's",
-        'automated tests in sync with the change that was just implemented and verified.',
+        'automated tests in sync with the change that was just implemented. The full suite runs',
+        'after you, so what you leave behind is what it will grade.',
         agentDefinitionGuidance(
           'test-writer',
           [
@@ -440,7 +488,8 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
 
   loop: {
     // Initial tester pass + up to 5 fix attempts (legacy cap), driven by the
-    // selective test run's result. Exhausted with failures → gate-2 escalates.
+    // selective test run's result. The runner evaluates this before fixLoop and
+    // returns early while it continues, so fixLoop only sees an exhausted budget.
     maxIterations: 6,
     shouldContinue: ({ applyOutput }) => {
       const out = applyOutput as TestManagementApply;
@@ -519,6 +568,9 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         ddev: d.ddev,
         ddevPlaywrightAddon: d.ddevPlaywrightAddon,
       });
+      // Idempotent no-op when the runtime is already up; guards against the idle
+      // reaper having reclaimed it during the 07→07c chain.
+      if (cmd !== null) await ensureAppServing(ctx);
       if (cmd === null) {
         testRun = {
           ran: false,

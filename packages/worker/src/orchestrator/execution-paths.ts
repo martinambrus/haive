@@ -48,8 +48,8 @@ const SPINE: readonly string[] = [
   '07-phase-2-implement',
   '07b-phase-4-validate',
   '07c-ddev-reconcile',
-  '08-phase-5-verify',
   '08b-test-management',
+  '08-phase-5-verify',
   '10-gate-3-commit',
   '11a-gate-4-push',
   '12-worktree-cleanup',
@@ -103,6 +103,7 @@ export const PATH_STEP_SETS: Record<
 export const PATH_REQUIRED_TARGETS: Record<string, string> = {
   '07b-phase-4-validate': '07-phase-2-implement', // fixLoop
   '07c-ddev-reconcile': '07-phase-2-implement', // fixLoopOnError (image-build failures only)
+  '08b-test-management': '07-phase-2-implement', // fixLoop (still red after its own budget) + fixLoopOnError
   '08-phase-5-verify': '07-phase-2-implement', // fixLoop + fixLoopOnError (DDEV boot)
   '08c-code-review': '07-phase-2-implement', // fixLoop
   '08a-browser-verify': '07-phase-2-implement', // fixLoop + restartLoop + fixLoopOnError

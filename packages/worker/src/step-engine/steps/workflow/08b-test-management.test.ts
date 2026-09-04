@@ -3,6 +3,7 @@ import {
   parseTesterOutput,
   buildSelectiveCommand,
   filterTestFiles,
+  testManagementStep,
 } from './08b-test-management.js';
 
 describe('parseTesterOutput', () => {
@@ -117,5 +118,96 @@ describe('buildSelectiveCommand', () => {
     expect(
       buildSelectiveCommand(null, files, { ddev: false, ddevPlaywrightAddon: false }),
     ).toBeNull();
+  });
+});
+
+describe('testManagementStep.fixLoop', () => {
+  const mkApply = (over: Record<string, unknown>) => ({
+    action: 'manage',
+    testsCreated: [],
+    testsUpdated: [],
+    testsDeleted: [],
+    notes: '',
+    testRun: null,
+    testsPassed: null,
+    fixPasses: 0,
+    ...over,
+  });
+
+  it('does NOT route back when the related tests passed', () => {
+    expect(
+      testManagementStep.fixLoop!.evaluate(
+        mkApply({
+          testsPassed: true,
+          testRun: { ran: true, passed: true, command: 'npx vitest run a', output: 'ok' },
+        }) as never,
+      ),
+    ).toBeNull();
+  });
+
+  // testsPassed === null is "no verdict", not a failure: the user skipped, nothing
+  // runnable was produced, the framework has no file-scoped subset, or the DDEV
+  // runner was unavailable. None of those is a defect for the implementer to fix.
+  it('does NOT route back on any no-verdict shape', () => {
+    const noVerdict = [
+      mkApply({ action: 'skip', notes: 'test management skipped by user' }),
+      mkApply({
+        testsCreated: ['docs/x.md'],
+        testRun: {
+          ran: false,
+          passed: false,
+          command: '',
+          output: 'no runnable test files among the changes — selective run skipped',
+        },
+      }),
+      mkApply({
+        testRun: {
+          ran: false,
+          passed: false,
+          command: '',
+          output:
+            'selective run unsupported for plain test scripts (would run the full suite) — skipped',
+        },
+      }),
+      mkApply({
+        testRun: {
+          ran: false,
+          passed: false,
+          command: 'ddev exec npx vitest run a',
+          output: 'DDEV runner unavailable for the selective test run — skipped',
+        },
+      }),
+    ];
+    for (const out of noVerdict) {
+      expect(testManagementStep.fixLoop!.evaluate(out as never)).toBeNull();
+    }
+  });
+
+  it('routes back with the command, failures, touched tests and the three-way framing', () => {
+    const v = testManagementStep.fixLoop!.evaluate(
+      mkApply({
+        testsPassed: false,
+        fixPasses: 5,
+        testsCreated: ['tests/new.spec.ts'],
+        testsUpdated: ['tests/old.spec.ts'],
+        testRun: {
+          ran: true,
+          passed: false,
+          command: 'npx vitest run tests/new.spec.ts',
+          output: 'AssertionError: expected 1 to be 2',
+        },
+      }) as never,
+    );
+    expect(v).not.toBeNull();
+    expect(v!.blocking).toBe(true);
+    expect(v!.diagnosis).toContain('npx vitest run tests/new.spec.ts');
+    expect(v!.diagnosis).toContain('AssertionError: expected 1 to be 2');
+    expect(v!.diagnosis).toContain('tests/new.spec.ts');
+    expect(v!.diagnosis).toContain('tests/old.spec.ts');
+    expect(v!.diagnosis).toContain('5 fix pass');
+    // The implementer must not treat the failing assertion as gospel.
+    expect(v!.diagnosis).toMatch(/TEST is wrong/);
+    expect(v!.diagnosis).toMatch(/CODE is wrong/);
+    expect(v!.diagnosis).toMatch(/FLAKY/);
   });
 });
