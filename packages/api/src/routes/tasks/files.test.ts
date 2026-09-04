@@ -3,11 +3,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { KB_DIR, LEARNING_DRAFTS_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
-import { assertEditableKnowledgePath } from './files.js';
+import { assertEditableKnowledgeRelPath, openEditableKnowledgeFile } from './files.js';
 
 // The write route's whole security surface: it may only overwrite an existing
-// markdown file inside the knowledge trees or the draft staging dir.
-describe('assertEditableKnowledgePath', () => {
+// markdown file inside the knowledge trees or the draft staging dir, and it must
+// reach that file through ONE descriptor — this process runs as root over a tree
+// every task sandbox can write, so a path validated and then re-resolved is a
+// symlink-swap window.
+describe('knowledge-file write guard', () => {
   let root: string;
   let outside: string;
 
@@ -30,40 +33,61 @@ describe('assertEditableKnowledgePath', () => {
     await rm(outside, { recursive: true, force: true });
   });
 
-  const check = (rel: string) => assertEditableKnowledgePath(root, path.join(root, rel));
+  const openRel = async (rel: string): Promise<void> => {
+    const fh = await openEditableKnowledgeFile(root, path.join(root, rel));
+    await fh.close();
+  };
 
-  it('accepts an existing markdown file in each editable tree', async () => {
-    await expect(check(`${KB_DIR}/a.md`)).resolves.toBeUndefined();
-    await expect(check(`${LEARNINGS_DIR}/b.md`)).resolves.toBeUndefined();
-    await expect(check(`${LEARNING_DRAFTS_DIR}/learnings/c.md`)).resolves.toBeUndefined();
+  describe('path shape', () => {
+    const shape = (rel: string) => () => assertEditableKnowledgeRelPath(root, path.join(root, rel));
+
+    it('accepts markdown under each editable tree', () => {
+      expect(shape(`${KB_DIR}/a.md`)).not.toThrow();
+      expect(shape(`${LEARNINGS_DIR}/b.md`)).not.toThrow();
+      expect(shape(`${LEARNING_DRAFTS_DIR}/learnings/c.md`)).not.toThrow();
+    });
+
+    it('rejects a path outside the knowledge trees', () => {
+      expect(shape('src/index.md')).toThrow(/knowledge-base files/i);
+    });
+
+    it('rejects a non-markdown path inside a knowledge tree', () => {
+      expect(shape(`${KB_DIR}/notes.txt`)).toThrow(/markdown/i);
+    });
   });
 
-  it('rejects a file outside the knowledge trees', async () => {
-    await expect(check('src/index.md')).rejects.toThrow(/knowledge-base files/i);
-  });
+  describe('opening the file', () => {
+    it('opens an existing markdown file in each editable tree', async () => {
+      await expect(openRel(`${KB_DIR}/a.md`)).resolves.toBeUndefined();
+      await expect(openRel(`${LEARNINGS_DIR}/b.md`)).resolves.toBeUndefined();
+      await expect(openRel(`${LEARNING_DRAFTS_DIR}/learnings/c.md`)).resolves.toBeUndefined();
+    });
 
-  it('rejects a non-markdown file inside a knowledge tree', async () => {
-    await expect(check(`${KB_DIR}/notes.txt`)).rejects.toThrow(/markdown/i);
-  });
+    it('refuses to create a file that does not exist', async () => {
+      await expect(openRel(`${KB_DIR}/new.md`)).rejects.toThrow(/no longer exists/i);
+    });
 
-  it('refuses to create a file that does not exist', async () => {
-    await expect(check(`${KB_DIR}/new.md`)).rejects.toThrow(/no longer exists/i);
-  });
+    it('refuses a symlink even though its path passes every string check', async () => {
+      await symlink(path.join(outside, 'secret.md'), path.join(root, KB_DIR, 'link.md'));
+      await expect(openRel(`${KB_DIR}/link.md`)).rejects.toThrow(/symlink/i);
+    });
 
-  it('rejects a symlink that points out of the workspace', async () => {
-    await symlink(path.join(outside, 'secret.md'), path.join(root, KB_DIR, 'link.md'));
-    await expect(check(`${KB_DIR}/link.md`)).rejects.toThrow(/symlink/i);
-  });
+    it('refuses a file reached through a symlinked ancestor', async () => {
+      // O_NOFOLLOW only guards the final component; this is the case the
+      // post-open /proc/self/fd re-validation exists for.
+      await symlink(outside, path.join(root, KB_DIR, 'escape'));
+      await expect(openRel(`${KB_DIR}/escape/secret.md`)).rejects.toThrow(
+        /outside the task workspace/i,
+      );
+    });
 
-  it('rejects a file reached through a symlinked ancestor', async () => {
-    await symlink(outside, path.join(root, KB_DIR, 'escape'));
-    await expect(check(`${KB_DIR}/escape/secret.md`)).rejects.toThrow(
-      /outside the task workspace/i,
-    );
-  });
+    it('refuses a directory', async () => {
+      await mkdir(path.join(root, KB_DIR, 'dir.md'));
+      await expect(openRel(`${KB_DIR}/dir.md`)).rejects.toThrow(/not a file/i);
+    });
 
-  it('rejects a directory', async () => {
-    await mkdir(path.join(root, KB_DIR, 'dir.md'));
-    await expect(check(`${KB_DIR}/dir.md`)).rejects.toThrow(/not a file/i);
+    it('refuses a path outside the knowledge trees', async () => {
+      await expect(openRel('src/index.md')).rejects.toThrow(/knowledge-base files/i);
+    });
   });
 });

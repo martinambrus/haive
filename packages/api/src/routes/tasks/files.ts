@@ -1,17 +1,8 @@
-import { createReadStream } from 'node:fs';
+import { constants, createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
-import {
-  chmod,
-  chown,
-  lstat,
-  open,
-  readdir,
-  readFile,
-  realpath,
-  stat,
-  writeFile,
-} from 'node:fs/promises';
-import { basename, dirname, extname, join, relative } from 'node:path';
+import { open, readdir, readlink, realpath, stat } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
+import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
@@ -204,11 +195,11 @@ function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-/** 403 unless `target` is an editable knowledge file. Runs on the REPO-RELATIVE
- *  path (validateWorkspacePath has already proven it is inside the root), and
- *  then on the resolved parent, because a symlink is the one way a path that
- *  passes the string check still writes somewhere else. */
-export async function assertEditableKnowledgePath(root: string, target: string): Promise<void> {
+/** 403 unless the repo-relative path is shaped like an editable knowledge file.
+ *  Pure, and only the FIRST half of the check — it says nothing about what is
+ *  actually on disk at that path. The authoritative check runs after the open,
+ *  against the path the kernel resolved for the inode we hold. */
+export function assertEditableKnowledgeRelPath(root: string, target: string): void {
   const rel = relative(root, target);
   if (!EDITABLE_PREFIXES.some((p) => rel.startsWith(p))) {
     throw new HttpError(403, 'Only knowledge-base files can be edited here');
@@ -216,16 +207,60 @@ export async function assertEditableKnowledgePath(root: string, target: string):
   if (extname(target).toLowerCase() !== '.md') {
     throw new HttpError(403, 'Only markdown files can be edited here');
   }
-  const link = await lstat(target).catch(() => null);
-  if (!link) throw new HttpError(404, 'File no longer exists');
-  if (link.isSymbolicLink()) throw new HttpError(403, 'Path is a symlink');
-  if (!link.isFile()) throw new HttpError(400, 'Path is not a file');
-  // A symlinked ANCESTOR would leave every check above happy while the write
-  // lands outside the workspace.
-  const realParent = await realpath(dirname(target));
-  const realRoot = await realpath(root);
-  if (relative(realRoot, realParent).startsWith('..')) {
-    throw new HttpError(403, 'Path is outside the task workspace');
+}
+
+/** Open an existing knowledge file for rewriting, or throw the HttpError that
+ *  explains why not.
+ *
+ *  The validation and the write MUST land on the same inode. This process runs
+ *  as root and the repo tree is writable by every task sandbox, so a
+ *  check-then-write leaves a window in which an agent replaces the file with a
+ *  symlink and has root write through it — `lstat` proving "regular file" a
+ *  moment earlier says nothing about what `writeFile` will re-resolve. Hence one
+ *  descriptor for the whole operation:
+ *
+ *  - `O_NOFOLLOW` makes the kernel refuse a symlinked FINAL component at open
+ *    time, so there is no window to swap it.
+ *  - No `O_CREAT`: this endpoint rewrites files that exist and never plants one.
+ *  - `/proc/self/fd/<fd>` is then the kernel's own answer for the inode we now
+ *    hold, which is the only thing that also covers a swapped ANCESTOR
+ *    directory — `O_NOFOLLOW` does not, and a `realpath` of the parent is just
+ *    another check with another window after it.
+ *
+ *  Linux-only by construction (AGENTS.md: WSL2 + Docker is the supported
+ *  environment). A `/proc` read that fails is treated as a refusal, not as a
+ *  check to skip. */
+export async function openEditableKnowledgeFile(root: string, target: string): Promise<FileHandle> {
+  assertEditableKnowledgeRelPath(root, target);
+  let fh: FileHandle;
+  try {
+    fh = await open(target, constants.O_RDWR | constants.O_NOFOLLOW);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'EMLINK') throw new HttpError(403, 'Path is a symlink');
+    if (code === 'EISDIR') throw new HttpError(400, 'Path is not a file');
+    if (code === 'ENOENT' || code === 'ENOTDIR') throw new HttpError(404, 'File no longer exists');
+    throw new HttpError(400, 'File cannot be opened for editing');
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) throw new HttpError(400, 'Path is not a file');
+    const resolved = await readlink(`/proc/self/fd/${fh.fd}`).catch(() => null);
+    if (resolved === null) {
+      throw new HttpError(403, 'Cannot verify the file path');
+    }
+    const realRoot = await realpath(root);
+    const rel = relative(realRoot, resolved);
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      throw new HttpError(403, 'Path is outside the task workspace');
+    }
+    // Re-run the shape check on what the kernel actually opened: a swapped
+    // ancestor can land the same request on a different tree entirely.
+    assertEditableKnowledgeRelPath(realRoot, resolved);
+    return fh;
+  } catch (err) {
+    await fh.close().catch(() => {});
+    throw err;
   }
 }
 
@@ -265,21 +300,29 @@ fileRoutes.put('/:id/files/content', async (c) => {
   }
 
   const target = validateWorkspacePath(root, body.path);
-  await assertEditableKnowledgePath(root, target);
-
-  // Optimistic concurrency against the bytes the client actually rendered: an
-  // agent re-run or a second tab can have rewritten the file since. Reported, not
-  // resolved — a silent overwrite of either side is the wrong answer.
-  const current = await readFile(target, 'utf8');
-  if (typeof body.expectedSha === 'string' && body.expectedSha !== sha256(current)) {
-    throw new HttpError(409, 'File changed since it was loaded; reload to see the current version');
+  const fh = await openEditableKnowledgeFile(root, target);
+  try {
+    // Optimistic concurrency against the bytes the client actually rendered: an
+    // agent re-run or a second tab can have rewritten the file since. Reported, not
+    // resolved — a silent overwrite of either side is the wrong answer.
+    const current = await fh.readFile({ encoding: 'utf8' });
+    if (typeof body.expectedSha === 'string' && body.expectedSha !== sha256(current)) {
+      throw new HttpError(
+        409,
+        'File changed since it was loaded; reload to see the current version',
+      );
+    }
+    // Truncate first: a shorter body would otherwise leave the old tail behind.
+    await fh.truncate(0);
+    await fh.write(body.content, 0, 'utf8');
+    // This process runs as root while the sandbox user is uid 1000: without
+    // this the agent's next edit of its own file fails, and only inside a
+    // container. Through the descriptor, like every other step here.
+    await fh.chmod(0o644).catch(() => {});
+    await fh.chown(1000, 1000).catch(() => {});
+  } finally {
+    await fh.close().catch(() => {});
   }
-
-  await writeFile(target, body.content, 'utf8');
-  // The api runs as root while the sandbox user is uid 1000: without this the
-  // agent's next edit of its own file fails, and only inside a container.
-  await chmod(target, 0o644).catch(() => {});
-  await chown(target, 1000, 1000).catch(() => {});
 
   return c.json({
     path: target,
