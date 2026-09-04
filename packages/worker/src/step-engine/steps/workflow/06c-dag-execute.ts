@@ -48,6 +48,11 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
       ? `Spec sections to implement:\n- ${issue.specSections.join('\n- ')}`
       : '',
     issue.spec ? `\n=== Spec (the sections above live in this document) ===\n${issue.spec}` : '',
+    // Names the file indirectly: the pointer sentence inside a condensed view already
+    // carries the path, and repeating that construction here would be two copies to sync.
+    issue.specCondensed && issue.specSections.length > 0
+      ? 'Your sections are listed above. Read them IN FULL from the spec file named above before implementing — the embedded text is only the section index.'
+      : '',
     issue.acceptanceCriteria.length > 0
       ? `Acceptance criteria (for this issue only):\n- ${issue.acceptanceCriteria.join('\n- ')}`
       : '',

@@ -19,7 +19,11 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
-import { resolveSpecView, SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
+import {
+  resolveSpecView,
+  SPEC_ARTIFACT_RELPATH,
+  type SpecView,
+} from './steps/workflow/_spec-artifact.js';
 import {
   isCliPreemptionFailure,
   isFatalProviderFailure,
@@ -185,8 +189,8 @@ async function createIssueWorktree(
 
   // `.haive/` is git-excluded, so the approved-spec artifact gate 1 wrote into the
   // integration worktree is untracked and `git worktree add` does NOT carry it over.
-  // Copy it in so each coder can Read the spec its prompt points at. Best-effort: a
-  // missing copy only means the coder's spec view degrades to the embedded index.
+  // Copy it in so each agent can Read the spec its prompt points at. Best-effort: a
+  // missing copy makes `issueSpecText` hand that issue the full spec instead.
   try {
     const src = join(integration.path, SPEC_ARTIFACT_RELPATH);
     if (await pathExists(src)) {
@@ -225,12 +229,28 @@ async function buildUpstreamDebt(db: Database, planId: string, level: number): P
   ].join('\n');
 }
 
-function coderContext(issue: DagIssueRow, specView: string): DagCoderContext {
+/** The spec text ONE issue's agent gets. The level-wide condensed view points at
+ *  `.haive/spec.md` inside the issue worktree and createIssueWorktree's copy of it is
+ *  best-effort, so an issue whose copy did not land gets the FULL spec rather than a
+ *  pointer to nothing — the same lossless degrade resolveSpecView performs elsewhere. */
+export async function issueSpecText(
+  view: SpecView,
+  issue: DagIssueRow,
+): Promise<{ text: string; condensed: boolean }> {
+  if (!view.condensed) return { text: view.text, condensed: false };
+  if (issue.worktreePath && (await pathExists(join(issue.worktreePath, SPEC_ARTIFACT_RELPATH)))) {
+    return { text: view.text, condensed: true };
+  }
+  return { text: view.spec, condensed: false };
+}
+
+function coderContext(issue: DagIssueRow, specText: string, condensed: boolean): DagCoderContext {
   return {
     issueKey: issue.issueKey,
     title: issue.title,
     description: issue.description ?? '',
-    spec: specView,
+    spec: specText,
+    specCondensed: condensed,
     specSections: (issue.specSections ?? []) as string[],
     acceptanceCriteria: (issue.acceptanceCriteria ?? []) as string[],
     provides: issue.provides ?? '',
@@ -688,9 +708,20 @@ interface ReviewArgs {
   providers: CliProviderRecord[];
   deps: WorkerDeps;
   taskId: string;
+  specView: SpecView;
 }
 
-function reviewerPrompt(issue: DagIssueRow): string {
+/** The two spec lines every review-loop agent gets, in the coder's order and wording
+ *  (06c buildCoderPrompt) so the four agents cannot drift on what was asked. */
+function specLines(issue: DagIssueRow, spec: string): string[] {
+  const sections = (issue.specSections ?? []) as string[];
+  return [
+    sections.length > 0 ? `Spec sections this issue implements:\n- ${sections.join('\n- ')}` : '',
+    spec ? `\n=== Spec (the sections above live in this document) ===\n${spec}` : '',
+  ];
+}
+
+export function reviewerPrompt(issue: DagIssueRow, spec: string): string {
   const criteria = (issue.acceptanceCriteria ?? []) as string[];
   const files = (issue.filesModified ?? []) as string[];
   return [
@@ -704,6 +735,10 @@ function reviewerPrompt(issue: DagIssueRow): string {
       : '',
     'Review it as a senior engineer would before merge; verify each acceptance criterion against the code.',
     criteria.length > 0 ? `Acceptance criteria:\n- ${criteria.join('\n- ')}` : '',
+    ...specLines(issue, spec),
+    spec
+      ? 'The criteria are a summary — also check the code against the spec sections themselves.'
+      : '',
     '',
     'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
     '{ "verdict": "approve|fix_required|block", "criteria_results": [{ "criterion": "...", "passed": true, "note": "" }], "issues": [{ "severity": "high|medium|low", "file": "path", "description": "...", "suggestion": "..." }] }',
@@ -714,13 +749,14 @@ function reviewerPrompt(issue: DagIssueRow): string {
     .join('\n');
 }
 
-function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[]): string {
+export function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[], spec: string): string {
   const files = (issue.filesModified ?? []) as string[];
   return [
     `You are addressing reviewer findings for ${issue.issueKey}: ${issue.title}`,
     'Your working directory is the issue worktree. Validate each finding against the actual code and fix the real ones by editing files; ignore findings that are wrong or out of scope. Match the existing style.',
     files.length > 0 ? `Files the issue changed so far:\n- ${files.join('\n- ')}` : '',
     `Reviewer findings:\n${JSON.stringify(reviewIssues).slice(0, 4000)}`,
+    ...specLines(issue, spec),
     '',
     'When done, emit ONE JSON object inside a ```json fenced code block:',
     `{ "issue_id": "${issue.issueKey}", "outcome": "completed|completed_with_debt|failed_unrecoverable", "files_modified": [], "debt_items": [], "concerns": "" }`,
@@ -873,6 +909,7 @@ async function ingestReviewRun(
   run: typeof schema.dagAgentRuns.$inferSelect,
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<void> {
+  const spec = (await issueSpecText(ra.specView, issue)).text;
   await ra.db
     .update(schema.dagAgentRuns)
     .set({
@@ -909,7 +946,7 @@ async function ingestReviewRun(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue),
+          reviewerPrompt(issue, spec),
           ['tool_use'],
         );
         if (!ok)
@@ -957,7 +994,7 @@ async function ingestReviewRun(
       issue,
       'coder',
       newIter,
-      fixCoderPrompt(issue, verdict.issues),
+      fixCoderPrompt(issue, verdict.issues, spec),
       ['tool_use', 'file_write'],
     );
     if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
@@ -969,7 +1006,7 @@ async function ingestReviewRun(
     issue,
     'reviewer',
     issue.innerIteration,
-    reviewerPrompt(issue),
+    reviewerPrompt(issue, spec),
     ['tool_use'],
   );
   if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
@@ -989,6 +1026,7 @@ async function resolveReviewPhase(
   if (needReview.length === 0) return { status: 'ok', row: ra.current };
 
   for (const issue of needReview) {
+    const spec = (await issueSpecText(ra.specView, issue)).text;
     const runs = await ra.db
       .select()
       .from(schema.dagAgentRuns)
@@ -997,7 +1035,7 @@ async function resolveReviewPhase(
       .limit(1);
     const latest = runs[0];
     if (!latest) {
-      const ok = await spawnReviewAgent(ra, issue, 'reviewer', 0, reviewerPrompt(issue), [
+      const ok = await spawnReviewAgent(ra, issue, 'reviewer', 0, reviewerPrompt(issue, spec), [
         'tool_use',
       ]);
       if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
@@ -1021,7 +1059,7 @@ async function resolveReviewPhase(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue),
+          reviewerPrompt(issue, spec),
           ['tool_use'],
         );
         if (!ok)
@@ -1079,11 +1117,17 @@ interface EscalationArgs extends ReviewArgs {
   plan: DagPlanRow;
 }
 
-function advisorPrompt(issue: DagIssueRow): string {
+export function advisorPrompt(issue: DagIssueRow, spec: string): string {
   return [
     `Issue ${issue.issueKey} (${issue.title}) failed its review loop after ${issue.innerIteration} fix attempt(s).`,
     issue.reviewerVerdict
       ? `Latest reviewer verdict: ${JSON.stringify(issue.reviewerVerdict).slice(0, 2000)}`
+      : '',
+    ...specLines(issue, spec),
+    // drop_criteria permanently removes a criterion from the issue, so the spec sections
+    // it came from have to be read before proposing one.
+    spec
+      ? 'Read the spec sections above before proposing drop_criteria — dropping one removes it from the issue for good.'
       : '',
     'Decide how to proceed. Emit ONE JSON object inside a ```json fenced code block:',
     '{ "action": "RETRY_APPROACH|RETRY_MODIFIED|SPLIT|ACCEPT_WITH_DEBT|ESCALATE_TO_REPLAN", "reasoning": "...", "retry_context": "<RETRY_*: guidance for the next attempt>", "drop_criteria": ["<RETRY_MODIFIED: criteria to drop>"], "sub_issues": [{ "title": "...", "description": "..." }] }',
@@ -1270,9 +1314,11 @@ async function ingestAdvisor(
     { ...issue, acceptanceCriteria: criteria },
     'coder',
     newIter,
-    fixCoderPrompt(issue, [
-      { retry_context: out.retry_context ?? '', findings: issue.reviewerVerdict },
-    ]),
+    fixCoderPrompt(
+      issue,
+      [{ retry_context: out.retry_context ?? '', findings: issue.reviewerVerdict }],
+      (await issueSpecText(ea.specView, issue)).text,
+    ),
     ['tool_use', 'file_write'],
   );
   if (!ok) await setResolution(ea.db, issue, 'failed_unrecoverable');
@@ -1445,7 +1491,7 @@ async function resolveEscalationPhase(
         issue,
         'issue_advisor',
         issue.advisorInvocations,
-        advisorPrompt(issue),
+        advisorPrompt(issue, (await issueSpecText(ea.specView, issue)).text),
         ['tool_use'],
       );
       if (ok) inFlight = true;
@@ -1675,19 +1721,22 @@ export async function resolveDagPhase(
         params.ignoreSavedStepClis ?? false,
       );
       const upstreamDebt = await buildUpstreamDebt(db, plan.id, curLevel.level);
-      // Resolved once for the level: every coder on it gets the same view, and
-      // createIssueWorktree already copied the artifact the pointer names into each
-      // issue worktree.
-      const specView = (await resolveSpecView(ctx)).text;
+      // Resolved once for the level; issueSpecText then decides per issue, since the
+      // artifact the pointer names is copied into each worktree separately.
+      const specView = await resolveSpecView(ctx);
       let dispatched = 0;
       for (const issue of undispatched) {
+        const issueSpec = await issueSpecText(specView, issue);
         // This path bypasses resolveLlmPhase's augmentation chain entirely, so the ledger
         // is applied here directly. (Attachments and terseness are still missing on this
         // path — a pre-existing gap, not addressed here.)
         const prompt = await augmentPromptWithLedger(
           db,
           ctx.taskId,
-          spec.buildCoderPrompt(coderContext(issue, specView), upstreamDebt),
+          spec.buildCoderPrompt(
+            coderContext(issue, issueSpec.text, issueSpec.condensed),
+            upstreamDebt,
+          ),
         );
         const worktreeRel = issueWorktreeRel(issue);
         const planDispatch = await resolveTaskDispatch(db, params.taskId, {
@@ -1946,6 +1995,8 @@ export async function resolveDagPhase(
     // completed issue; escalation (issue-advisor -> replanner) handles failures.
     // A 'reloop' re-processes the level after a retry / split / skip.
     if (plan.reviewEnabled) {
+      // Resolved once per re-entry; issueSpecText narrows it per issue, as on the coder path.
+      const reviewSpecView = await resolveSpecView(ctx);
       const reReadLevel = async () =>
         (await db
           .select()
@@ -1967,6 +2018,7 @@ export async function resolveDagPhase(
         providers,
         deps,
         taskId: ctx.taskId,
+        specView: reviewSpecView,
       });
       if (review.status === 'waiting') {
         return { resolved: false, result: { status: 'waiting_cli', row: review.row } };
@@ -2001,6 +2053,7 @@ export async function resolveDagPhase(
         providers,
         deps,
         taskId: ctx.taskId,
+        specView: reviewSpecView,
         plan,
       });
       if (escalation.status === 'waiting') {

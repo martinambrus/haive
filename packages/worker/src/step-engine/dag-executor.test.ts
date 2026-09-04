@@ -1,7 +1,14 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   parseCoderResult,
   issuePaths,
+  issueSpecText,
+  reviewerPrompt,
+  fixCoderPrompt,
+  advisorPrompt,
   pickFatalProviderError,
   fixRequiredIsCosmetic,
   parseReviewerOutput,
@@ -9,9 +16,13 @@ import {
   parseReplanner,
 } from './dag-executor.js';
 import { dagEnvironmentHaltReason } from './dag-failure-class.js';
+import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
+import { SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
 import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
-import type { StepContext } from './step-definition.js';
+import type { DagCoderContext, StepContext } from './step-definition.js';
 import type { ReviewerOutput } from '@haive/shared';
+
+type DagIssue = Parameters<typeof issueSpecText>[1];
 
 type InvLike = Parameters<typeof parseCoderResult>[0];
 function inv(partial: Partial<InvLike>): InvLike {
@@ -237,5 +248,136 @@ describe('fixRequiredIsCosmetic', () => {
   it('false: verdict approve or block, even with passing criteria', () => {
     expect(fixRequiredIsCosmetic(rv({ verdict: 'approve', criteria_results: [pass] }))).toBe(false);
     expect(fixRequiredIsCosmetic(rv({ verdict: 'block', criteria_results: [pass] }))).toBe(false);
+  });
+});
+
+describe('issueSpecText', () => {
+  const view = { text: 'INDEX', spec: 'WHOLE SPEC', condensed: true };
+  const issue = (worktreePath: string | null) => ({ worktreePath }) as DagIssue;
+
+  async function worktreeWithSpec(present: boolean): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'ist-'));
+    if (present) {
+      const abs = path.join(dir, SPEC_ARTIFACT_RELPATH);
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, 'spec body', 'utf8');
+    }
+    return dir;
+  }
+
+  it('passes an uncondensed view straight through', async () => {
+    const dir = await worktreeWithSpec(false);
+    try {
+      const r = await issueSpecText({ ...view, condensed: false }, issue(dir));
+      expect(r).toEqual({ text: 'INDEX', condensed: false });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the index when the issue worktree holds the artifact', async () => {
+    const dir = await worktreeWithSpec(true);
+    try {
+      expect(await issueSpecText(view, issue(dir))).toEqual({ text: 'INDEX', condensed: true });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to the whole spec when the copy did not land', async () => {
+    const dir = await worktreeWithSpec(false);
+    try {
+      expect(await issueSpecText(view, issue(dir))).toEqual({
+        text: 'WHOLE SPEC',
+        condensed: false,
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to the whole spec when the issue has no worktree yet', async () => {
+    expect(await issueSpecText(view, issue(null))).toEqual({
+      text: 'WHOLE SPEC',
+      condensed: false,
+    });
+  });
+});
+
+describe('06c buildCoderPrompt spec directive', () => {
+  const build = dagExecuteStep.dagExecute!.buildCoderPrompt;
+  const ctx = (over: Partial<DagCoderContext>): DagCoderContext => ({
+    issueKey: 'ISSUE-001',
+    title: 'Add the thing',
+    description: 'desc',
+    spec: 'INDEX',
+    specCondensed: true,
+    specSections: ['## Data model'],
+    acceptanceCriteria: ['it works'],
+    provides: 'the thing',
+    sandboxWorktreePath: '/haive/workdir',
+    ...over,
+  });
+  const DIRECTIVE = 'Read them IN FULL from the spec file named above';
+
+  it('tells a coder to read its own sections when the view is condensed', () => {
+    expect(build(ctx({}), '')).toContain(DIRECTIVE);
+  });
+
+  it('stays silent when the whole spec is already embedded', () => {
+    expect(build(ctx({ specCondensed: false }), '')).not.toContain(DIRECTIVE);
+  });
+
+  it('stays silent when the planner assigned this issue no sections', () => {
+    expect(build(ctx({ specSections: [] }), '')).not.toContain(DIRECTIVE);
+  });
+});
+
+describe('review-loop prompts carry the spec', () => {
+  const issue = {
+    issueKey: 'ISSUE-001',
+    title: 'Add the thing',
+    specSections: ['## Data model'],
+    acceptanceCriteria: ['it works'],
+    filesModified: ['a.ts'],
+    innerIteration: 1,
+    reviewerVerdict: null,
+  } as unknown as DagIssue;
+
+  const built = () => [
+    reviewerPrompt(issue, 'INDEX'),
+    fixCoderPrompt(issue, [{ severity: 'high' }], 'INDEX'),
+    advisorPrompt(issue, 'INDEX'),
+  ];
+
+  it('names the sections and embeds the spec view for every role', () => {
+    for (const p of built()) {
+      expect(p).toContain('Spec sections this issue implements:');
+      expect(p).toContain('## Data model');
+      expect(p).toContain('=== Spec (the sections above live in this document) ===');
+      expect(p).toContain('INDEX');
+    }
+  });
+
+  it('tells the reviewer the criteria are only a summary', () => {
+    expect(reviewerPrompt(issue, 'INDEX')).toContain(
+      'The criteria are a summary — also check the code against the spec sections themselves.',
+    );
+  });
+
+  it('warns the advisor before it drops a criterion', () => {
+    expect(advisorPrompt(issue, 'INDEX')).toContain('before proposing drop_criteria');
+  });
+
+  it('adds nothing when the run has no spec (lightweight paths)', () => {
+    for (const p of [
+      reviewerPrompt(issue, ''),
+      fixCoderPrompt(issue, [], ''),
+      advisorPrompt(issue, ''),
+    ]) {
+      expect(p).not.toContain('=== Spec');
+      expect(p).not.toContain('drop_criteria — dropping one');
+      expect(p).not.toContain('The criteria are a summary');
+    }
   });
 });

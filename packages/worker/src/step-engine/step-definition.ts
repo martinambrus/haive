@@ -225,6 +225,9 @@ export interface DagCoderContext {
    *  'full'. Empty when the run has no spec. Distinct from `specSections`, which names
    *  WHICH sections this issue owns — the view tells the coder where to read them. */
   spec: string;
+  /** True when `spec` is the section index rather than the whole document, so the prompt
+   *  can tell the coder to go read its own sections from the on-disk artifact. */
+  specCondensed: boolean;
   specSections: string[];
   acceptanceCriteria: string[];
   provides: string;
