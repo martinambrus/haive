@@ -1478,7 +1478,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       '**Operational readiness** — Check timeouts and retries on external calls, graceful degradation, resource limits and cleanup, and config / feature-flag handling for the new behavior.',
       '**Migration and rollback safety** — Verify any DB or schema migration is present, idempotent, reversible, and forward-compatible, and that the change has a safe undo path; flag one-way doors and destructive steps.',
       '**Backward compatibility** — Check the change does not break existing callers, API consumers, persisted data, or serialized formats; trace the call sites of anything whose signature or shape changed.',
-      '**Documentation** — Confirm READMEs, inline comments, and developer docs are updated for the new behavior.',
+      '**Documentation** — Confirm READMEs and developer docs match the new behavior, and flag comments the change made WRONG. A missing comment is not a finding; asking for one produces narration git already records.',
     ],
     whenInvoked: [
       'Implementation is complete and ready for review before merge',

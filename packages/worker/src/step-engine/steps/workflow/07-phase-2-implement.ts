@@ -5,7 +5,11 @@ import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
-import { ddevConfigGuidanceLines, retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import {
+  commentPolicyLines,
+  ddevConfigGuidanceLines,
+  retrievalGuidanceLines,
+} from '../_retrieval-guidance.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { FIX_LOOP_TARGET_STEP_ID, loadFixLoopDiagnosis, loadPriorFixContext } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
@@ -326,6 +330,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         'Before implementing, search for the existing patterns the spec references, in this order:',
         ...retrievalGuidanceLines(),
         'Follow the patterns you find; avoid documented anti-patterns.',
+        ...commentPolicyLines(),
         '',
         'When finished emit ONE JSON object inside a ```json fenced code block with the shape:',
         '{ "summary": "<what changed and why>", "filesTouched": ["path/one", "path/two"], "notes": "<follow-ups or caveats>", "environmentFindings": "<facts you established about the sandbox/tooling/runtime and anything you ruled out, so later fix rounds need not redo it>" }',

@@ -175,6 +175,18 @@ export function adaptPromptForCliCapabilities(
  *  Gated on the work actually mentioning DDEV so a repo that has nothing to do with it never
  *  pays for the lines. The match is a heuristic, not a contract: a miss costs the nudge, never
  *  correctness — the runtime repair still catches it. */
+/** Models narrate: a comment per edit, restating the diff and what it replaced, which turns
+ *  the file into the changelog git already keeps. */
+export function commentPolicyLines(): string[] {
+  return [
+    '',
+    'Comments: write one only where the code cannot carry the why — a non-obvious constraint, a',
+    'workaround, hard math. One practical line, not a paragraph. Do not comment every change, do',
+    'not restate what the code plainly says, and do not record what you changed, what it replaced',
+    'or what you measured: that belongs in the commit message, not in the file.',
+  ];
+}
+
 export function ddevConfigGuidanceLines(context: string): string[] {
   if (!/\bddev\b/i.test(context)) return [];
   return [

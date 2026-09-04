@@ -2,7 +2,11 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DagCoderContext, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { ddevConfigGuidanceLines, retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import {
+  commentPolicyLines,
+  ddevConfigGuidanceLines,
+  retrievalGuidanceLines,
+} from '../_retrieval-guidance.js';
 
 // Phase 3 — DAG execution. Runs only when 2c sprint planning chose 'dag'. The
 // heavy lifting (per-level worktrees, parallel coders, barrier, merge,
@@ -30,6 +34,7 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
     `  ${issue.sandboxWorktreePath}`,
     'Implement ONLY this issue (a vertical slice: implementation + its tests together).',
     'Match the existing code style and conventions. Do not invent requirements.',
+    ...commentPolicyLines(),
     '',
     'Before implementing, search for the existing patterns this issue touches, in this order:',
     ...retrievalGuidanceLines(),
