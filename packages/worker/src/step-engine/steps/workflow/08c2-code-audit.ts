@@ -7,9 +7,11 @@ import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import {
+  assertReviewableChange,
   changedFilesBlock,
   collectImplementationFiles,
   fileCoverage,
+  NO_CHANGE_SET_FALLBACK,
   type FileCoverage,
   type ImplementationFileSet,
 } from './_impl-changes.js';
@@ -150,6 +152,9 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
     timeoutMs: AUDIT_TIMEOUT_MS,
     buildPrompt: (args) => {
       const d = args.detected as CodeAuditDetect;
+      // In buildPrompt, not detect(), so a replayed detect_output is guarded too — and
+      // still before the CLI is dispatched. See assertReviewableChange.
+      assertReviewableChange('08c2-code-audit', d.implementationFiles);
       return [
         ...AUDIT_RULES,
         '',
@@ -158,7 +163,7 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
         changedFilesBlock(
           d.implementationFiles,
           'Changed files to review (read each in full)',
-          'Determine the recently-changed files from the workspace and read each in full.',
+          NO_CHANGE_SET_FALLBACK,
         ),
         '',
         '=== Spec (what the change must deliver) ===',

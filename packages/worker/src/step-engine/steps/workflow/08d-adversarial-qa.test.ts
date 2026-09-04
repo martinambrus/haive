@@ -181,6 +181,23 @@ describe('adversarialQaStep.apply de-silence', () => {
   });
 });
 
+describe('08d change-set guard', () => {
+  it('refuses to dispatch an adversary when no changed file is known', async () => {
+    // An adversary with no attack surface named reads the whole tree for one. Wave 0 is
+    // the only guard needed: the verifier wave attacks findings this wave produced.
+    await expect(
+      adversarialQaStep.agentMining!.selectAgents({
+        detected: {
+          level: 'enterprise',
+          spec: 's',
+          implementationFiles: { files: [], total: 0, truncated: false, scanError: null },
+          appUrl: null,
+        },
+      } as never),
+    ).rejects.toThrow(/08d-adversarial-qa has no changed files to review/);
+  });
+});
+
 describe('08d mining seats', () => {
   it('seats every adversary by its own id', async () => {
     // The roster is a fixed catalog, so each adversary's id is already the stable seat.
@@ -188,7 +205,8 @@ describe('08d mining seats', () => {
       detected: {
         level: 'enterprise',
         spec: 's',
-        implementationFiles: [],
+        // Non-empty: selectAgents refuses a change set it cannot name (assertReviewableChange).
+        implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
         appUrl: null,
       },
     } as never);
@@ -205,7 +223,8 @@ describe('08d mining seats', () => {
       detected: {
         level: 'enterprise',
         spec: 's',
-        implementationFiles: [],
+        // Non-empty: selectAgents refuses a change set it cannot name (assertReviewableChange).
+        implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
         appUrl: null,
       },
     } as never);
@@ -226,7 +245,12 @@ describe('08d mining seats', () => {
     const registered = new Set(STEP_MINING_SEATS['08d-adversarial-qa']!.map((s) => s.id));
     for (const level of ['poc', 'standard'] as const) {
       const agents = await adversarialQaStep.agentMining!.selectAgents({
-        detected: { level, spec: 's', implementationFiles: [], appUrl: null },
+        detected: {
+          level,
+          spec: 's',
+          implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+          appUrl: null,
+        },
       } as never);
       for (const a of agents) expect(registered.has(a.roleKey!), a.roleKey).toBe(true);
     }

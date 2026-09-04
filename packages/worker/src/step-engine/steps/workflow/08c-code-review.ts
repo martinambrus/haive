@@ -23,9 +23,11 @@ import { isOutOfScope, SCOPE_FENCE_INSIGHTS, SCOPE_FENCE_IN_SCOPE_FLAG } from '.
 import { REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES, REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
+  assertReviewableChange,
   changedFilesBlock,
   collectImplementationFiles,
   fileCoverage,
+  NO_CHANGE_SET_FALLBACK,
   type FileCoverage,
   type ImplementationFileSet,
 } from './_impl-changes.js';
@@ -794,7 +796,7 @@ function reviewAssignment(d: CodeReviewDetect): string {
     changedFilesBlock(
       d.implementationFiles,
       'Changed files to review (read each in full)',
-      'Determine the recently-changed files from the workspace and read each in full.',
+      NO_CHANGE_SET_FALLBACK,
     ),
     d.debtBlock ? `\n${d.debtBlock}` : '',
     '',
@@ -1100,6 +1102,10 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       // doesn't enqueue real CLI jobs (mirrors 03-discovery's empty-persona path).
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const d = detected as CodeReviewDetect;
+      // Guarded here rather than in detect() so the REPLAY path is covered too: step-runner
+      // re-runs detect() only when detect_output is null, so a row stored before this shipped
+      // reaches the prompt builders directly. Still before any dispatch, so nothing is spent.
+      assertReviewableChange('08c-code-review', d.implementationFiles);
       // roleKey === agentId here: every reviewer in this wave is a fixed persona, so its
       // id is already the stable seat STEP_MINING_SEATS enumerates.
       return [

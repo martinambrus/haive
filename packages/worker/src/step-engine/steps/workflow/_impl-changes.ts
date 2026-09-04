@@ -27,6 +27,11 @@ export interface ImplementationFileSet {
    *  kept explicit because this set is persisted to `task_steps.output` and read
    *  back by the gate. */
   truncated: boolean;
+  /** Why the dirty-worktree scan contributed nothing, when it failed outright; null
+   *  when it ran. Optional because the shape is persisted and replayed: a row written
+   *  before this field existed carries neither the flag nor its meaning, and absent
+   *  must not read as "the scan ran cleanly". */
+  scanError?: string | null;
 }
 
 /** What a step recorded about its own coverage, for a gate to read back out of
@@ -71,6 +76,22 @@ export function fileCoverage(value: MaybeFileSet): FileCoverage | null {
   return { listed: set.files.length, total: set.total, truncated: set.truncated === true };
 }
 
+/** How much of a failed scan's own error text is quoted back. */
+const MAX_SCAN_ERROR_CHARS = 300;
+
+/** What the dirty-worktree scan produced, and whether it ran at all.
+ *
+ *  It used to swallow its failure and answer `[]`, which made "git status could not run"
+ *  and "nothing has changed" the same value. They are different facts and a human acts
+ *  on them differently — a poisoned or half-repaired worktree (the state
+ *  `git worktree repair` in removeWorktreeDir exists for) versus an implementation that
+ *  wrote nothing — so the empty-set guard below has to be able to tell them apart. */
+interface DirtyScan {
+  files: string[];
+  /** The `git status` failure, or null when the scan ran (a clean tree is a RESULT). */
+  error: string | null;
+}
+
 /** Currently-dirty paths in the worktree, as FILES.
  *
  *  `-uall` is load-bearing, not a tidy-up. Plain `--porcelain` collapses a wholly-untracked
@@ -88,17 +109,32 @@ export function fileCoverage(value: MaybeFileSet): FileCoverage | null {
  *
  *  Cost: a repo with a large un-gitignored untracked tree now enumerates it and can crowd
  *  `MAX_LISTED_FILES`. That cap already reports `truncated` rather than hiding the cut. */
-async function dirtyWorktreeFiles(worktreePath: string): Promise<string[]> {
+async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
   try {
     const { stdout } = await exec('git', ['status', '--porcelain', '-uall'], { cwd: worktreePath });
-    return stdout
-      .toString()
-      .split('\n')
-      .map((l) => l.slice(3).trim())
-      .filter(Boolean)
-      .map((name) => (name.includes(' -> ') ? name.split(' -> ')[1]! : name));
-  } catch {
-    return [];
+    return {
+      files: stdout
+        .toString()
+        .split('\n')
+        .map((l) => l.slice(3).trim())
+        .filter(Boolean)
+        .map((name) => (name.includes(' -> ') ? name.split(' -> ')[1]! : name)),
+      error: null,
+    };
+  } catch (err) {
+    const detail = err as { stderr?: unknown; message?: unknown };
+    const stderr = typeof detail.stderr === 'string' ? detail.stderr.trim() : '';
+    const message = typeof detail.message === 'string' ? detail.message.trim() : String(err);
+    const reason = stderr || message || 'git status failed';
+    // The reason is quoted into a task-level error message, so it is bounded — and the
+    // cut is stated, the same way the changed-file cap states its own.
+    return {
+      files: [],
+      error:
+        reason.length > MAX_SCAN_ERROR_CHARS
+          ? `${reason.slice(0, MAX_SCAN_ERROR_CHARS)} (truncated)`
+          : reason,
+    };
   }
 }
 
@@ -127,10 +163,16 @@ export async function collectImplementationFiles(
       for (const f of (row.filesModified ?? []) as string[]) files.add(f);
     }
   }
-  for (const f of await dirtyWorktreeFiles(worktreePath)) files.add(f);
+  const scan = await dirtyWorktreeFiles(worktreePath);
+  for (const f of scan.files) files.add(f);
   const all = [...files];
   const listed = all.slice(0, MAX_LISTED_FILES);
-  return { files: listed, total: all.length, truncated: listed.length < all.length };
+  return {
+    files: listed,
+    total: all.length,
+    truncated: listed.length < all.length,
+    scanError: scan.error,
+  };
 }
 
 /**
@@ -159,6 +201,58 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
     'state plainly in your output that the unlisted files were not covered — do NOT report a',
     'clean result as though it covered the whole change.',
   ].join('\n');
+}
+
+/** What a prompt says if an empty change set ever reaches it anyway.
+ *
+ *  `assertReviewableChange` fails the step before any of the four review steps render
+ *  this, so it is a backstop and not a path. It exists because the text it replaced —
+ *  "Determine the recently-changed files from the workspace and read each in full" —
+ *  asked for something the agent cannot do and answered by guessing. */
+export const NO_CHANGE_SET_FALLBACK = [
+  'No changed-file list was recorded for this change.',
+  'Do NOT try to work out what changed. git is unavailable here and the tree you can read is',
+  'the whole project, so anything you infer is a guess. Say that you were given no change set,',
+  'review nothing, and do NOT report a clean result.',
+].join('\n');
+
+/**
+ * Refuse to review a change nobody can name.
+ *
+ * An empty list used to fall through to a prompt fallback telling the agent to work the
+ * change out from the workspace. It cannot: `worktreeGitfileMask` bind-mounts an empty
+ * read-only file over the worktree's `.git` for every cli-exec invocation, so there is no
+ * `git status` and no `git diff` inside the sandbox — only a tree that reads as the whole
+ * project. What the agent actually did was guess, which is the repo-wide review the
+ * changed-file list exists to prevent, and the verdict it returned covered nothing.
+ *
+ * So the step fails instead, before a CLI is dispatched and before any tokens are spent.
+ * Loud, not silent: a skip here would reach gate 2 as a review with no findings, which is
+ * indistinguishable from an approval — the same reason `incompleteReviewIssue` exists for a
+ * reviewer killed at its budget.
+ *
+ * The two ways to get an empty set are reported as the different facts they are. A scan
+ * that could not run says so and names git's own error; a scan that ran and found nothing
+ * says the implementation changed no files. Calling the first "nothing changed" is the
+ * wrong diagnosis, and the diagnosis is what the human acts on.
+ *
+ * A replayed pre-coverage bare array is checked the same way — it is a file list, and an
+ * empty one is the same hole — but it carries no scan record, so it gets the neutral
+ * wording rather than a claim about git that nothing here observed.
+ */
+export function assertReviewableChange(stepId: string, value: MaybeFileSet): void {
+  const set = asFileSet(value);
+  const files = set?.files ?? (Array.isArray(value) ? value : []);
+  if (files.length > 0) return;
+  const cause = set?.scanError
+    ? `the worktree scan failed (git: ${set.scanError})`
+    : 'the implementation changed no files';
+  throw new Error(
+    `${stepId} has no changed files to review: ${cause}. Refusing to run — an agent given no ` +
+      `change set cannot find one (git is masked inside the sandbox) and would review the ` +
+      `whole repository instead. Check that the implementation step actually wrote to the ` +
+      `worktree, then retry.`,
+  );
 }
 
 /** Documentation file extensions. A change confined to these touches no executable

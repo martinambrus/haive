@@ -10,8 +10,14 @@ vi.mock('../onboarding/_helpers.js', () => ({
   loadPreviousStepOutput: (...args: unknown[]) => loadPreviousStepOutput(...args),
 }));
 
-const { changedFilesBlock, collectImplementationFiles, fileCoverage, isDocsOnlyChange } =
-  await import('./_impl-changes.js');
+const {
+  assertReviewableChange,
+  changedFilesBlock,
+  collectImplementationFiles,
+  fileCoverage,
+  isDocsOnlyChange,
+  NO_CHANGE_SET_FALLBACK,
+} = await import('./_impl-changes.js');
 type StepContextLike = Parameters<typeof collectImplementationFiles>[0];
 
 /** The helper only touches ctx.db when filesTouched is empty; every case here supplies
@@ -230,5 +236,118 @@ describe('collectImplementationFiles — untracked directories', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('collectImplementationFiles — scan provenance', () => {
+  it('records why the dirty-worktree scan contributed nothing', async () => {
+    // "git status could not run" and "nothing changed" used to be the same empty array.
+    // assertReviewableChange reports them as different diagnoses, so the difference has
+    // to survive collection.
+    const set = await collectImplementationFiles(ctxWith(['src/a.ts']), '/nonexistent-worktree');
+    expect(set.scanError).toBeTruthy();
+  });
+
+  it('records null when the scan ran, even on a clean tree', async () => {
+    const exec2 = promisify(execFile);
+    const dir = await mkdtemp(path.join(tmpdir(), 'impl-clean-'));
+    try {
+      await exec2('git', ['init', '-b', 'main'], { cwd: dir });
+      const set = await collectImplementationFiles(ctxWith(['src/a.ts']), dir);
+      // A clean tree is a RESULT. Reporting it as a failed scan would send a human
+      // looking at git instead of at the implementation step.
+      expect(set.scanError).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('assertReviewableChange', () => {
+  it('passes a set that names at least one file', () => {
+    expect(() =>
+      assertReviewableChange('08c-code-review', {
+        files: ['src/a.ts'],
+        total: 1,
+        truncated: false,
+      }),
+    ).not.toThrow();
+  });
+
+  it('passes a set with files even when the worktree scan failed', () => {
+    // The other sources answered, so the step has a change set to review. A failed scan
+    // is only fatal when it left nothing behind.
+    expect(() =>
+      assertReviewableChange('08c-code-review', {
+        files: ['src/a.ts'],
+        total: 1,
+        truncated: false,
+        scanError: 'fatal: not a git repository',
+      }),
+    ).not.toThrow();
+  });
+
+  it('refuses an empty set and says the implementation changed nothing', () => {
+    // The hole this closes: an empty list used to render a prompt fallback telling the
+    // agent to work the change out from the workspace. It cannot — git is masked inside
+    // the sandbox — so it guessed, and reviewed the whole repository.
+    expect(() =>
+      assertReviewableChange('08c-code-review', {
+        files: [],
+        total: 0,
+        truncated: false,
+        scanError: null,
+      }),
+    ).toThrow(
+      /08c-code-review has no changed files to review: the implementation changed no files/,
+    );
+  });
+
+  it("names git's own error when the scan is why the set is empty", () => {
+    // Two different facts, two different diagnoses: a poisoned worktree is not an
+    // implementation that wrote nothing, and the diagnosis is what the human acts on.
+    let message = '';
+    try {
+      assertReviewableChange('07b-phase-4-validate', {
+        files: [],
+        total: 0,
+        truncated: false,
+        scanError: 'fatal: not a git repository (or any parent up to mount point /)',
+      });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('the worktree scan failed');
+    expect(message).toContain('fatal: not a git repository');
+    expect(message).not.toContain('changed no files');
+  });
+
+  it('refuses an empty replayed pre-coverage array with the neutral wording', () => {
+    // A bare array is a file list too, and an empty one is the same hole. It carries no
+    // scan record, so it must not claim anything about git that nothing observed.
+    let message = '';
+    try {
+      assertReviewableChange('08d-adversarial-qa', []);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('the implementation changed no files');
+    expect(message).not.toContain('worktree scan failed');
+  });
+
+  it('refuses a missing set outright', () => {
+    expect(() => assertReviewableChange('08c2-code-audit', undefined)).toThrow(
+      /no changed files to review/,
+    );
+  });
+});
+
+describe('NO_CHANGE_SET_FALLBACK', () => {
+  it('never asks the agent to work the change out for itself', () => {
+    // The exact instruction that was there before, and the reason this constant exists.
+    expect(NO_CHANGE_SET_FALLBACK).not.toMatch(/determine the (recently-)?changed files/i);
+    expect(NO_CHANGE_SET_FALLBACK).toContain('Do NOT try to work out what changed');
+    // ...and it must not let the resulting review read as an approval.
+    expect(NO_CHANGE_SET_FALLBACK).toContain('do NOT report a clean result');
   });
 });

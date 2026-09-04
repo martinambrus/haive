@@ -11,8 +11,10 @@ import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { SCOPE_FENCE_DOC_REPORT_ONLY, SCOPE_FENCE_REPORT_ONLY } from '../_scope-fence.js';
 import {
+  assertReviewableChange,
   changedFilesBlock,
   collectImplementationFiles,
+  NO_CHANGE_SET_FALLBACK,
   isDocsOnlyChange,
   type ImplementationFileSet,
 } from './_impl-changes.js';
@@ -652,6 +654,10 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // Pass 0 — the validator.
     buildPrompt: (args) => {
       const d = args.detected as ValidateDetect;
+      // Here rather than in detect() so a replayed detect_output is guarded too, and still
+      // before dispatch. The re-validation prompt below needs no guard: it cannot be reached
+      // without this pass having run. See assertReviewableChange.
+      assertReviewableChange('07b-phase-4-validate', d.implementationFiles);
       return [
         ...validatorDefinition(d.docsOnly),
         '',
@@ -661,7 +667,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         changedFilesBlock(
           d.implementationFiles,
           'Changed files (your validation scope)',
-          'Determine the recently-implemented files from the workspace.',
+          NO_CHANGE_SET_FALLBACK,
         ),
         d.debtBlock ? `\n${d.debtBlock}` : '',
         d.honoredBlock ? `\n${d.honoredBlock}` : '',

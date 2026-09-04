@@ -25,8 +25,10 @@ import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { appAuthPromptLines, type AppLoginOutcome } from './_app-auth.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
+  assertReviewableChange,
   changedFilesBlock,
   collectImplementationFiles,
+  NO_CHANGE_SET_FALLBACK,
   fileCoverage,
   type FileCoverage,
   type ImplementationFileSet,
@@ -851,7 +853,7 @@ function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
     changedFilesBlock(
       d.implementationFiles,
       'Changed files (attack surface)',
-      'Determine the changed files from the workspace.',
+      NO_CHANGE_SET_FALLBACK,
     ),
     // The app's address and what can actually dial it are stated by the reach block the
     // dispatcher prepends to every prompt. Repeating the URL here would restate it without
@@ -976,6 +978,9 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       // No bypass stub for mining; return [] under test bypass (08c pattern).
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const d = detected as AdversarialDetect;
+      // Wave 0 only, which is the whole surface: the verifier wave attacks findings this
+      // wave produced, and there are none if this one never ran. See assertReviewableChange.
+      assertReviewableChange('08d-adversarial-qa', d.implementationFiles);
       // roleKey === agentId: the roster is a fixed catalog, so each adversary's id is
       // already the stable seat STEP_MINING_SEATS enumerates.
       return rosterForLevel(d.level).map((a) => ({

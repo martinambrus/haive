@@ -773,7 +773,13 @@ describe('scope fence', () => {
     // The fence is prompt text, so a persona that never receives it is a reviewer with the
     // old licence. Enterprise selects the full roster (peer, security + three lenses).
     const agents = await codeReviewStep.agentMining!.selectAgents({
-      detected: { spec: 's', implementationFiles: [], debtBlock: '', level: 'enterprise' },
+      detected: {
+        spec: 's',
+        // Non-empty: selectAgents refuses a change set it cannot name (assertReviewableChange).
+        implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+        debtBlock: '',
+        level: 'enterprise',
+      },
     } as never);
     expect(agents).toHaveLength(5);
     for (const a of agents) expect(a.prompt, a.agentId).toContain('SCOPE FENCE. IN SCOPE =');
@@ -1352,11 +1358,35 @@ describe('fix-loop diagnosis carries the location', () => {
   });
 });
 
+describe('08c change-set guard', () => {
+  it('refuses to dispatch a reviewer when no changed file is known', async () => {
+    // The prompt used to fall back to "determine the recently-changed files from the
+    // workspace", which the sandbox cannot answer — git is masked there — so the reviewer
+    // guessed and reviewed the whole repository. Guarded in selectAgents rather than
+    // detect() so a replayed detect_output is covered too, and before any dispatch.
+    await expect(
+      codeReviewStep.agentMining!.selectAgents({
+        detected: {
+          spec: 's',
+          implementationFiles: { files: [], total: 0, truncated: false, scanError: null },
+          debtBlock: '',
+          level: 'enterprise',
+        },
+      } as never),
+    ).rejects.toThrow(/08c-code-review has no changed files to review/);
+  });
+});
+
 describe('08c mining seats', () => {
   it('seats every wave-1 reviewer by its own agent id', async () => {
     // These are fixed personas, so the agent id already IS the stable seat.
     const agents = await codeReviewStep.agentMining!.selectAgents({
-      detected: { spec: 's', implementationFiles: [], debtBlock: '', level: 'enterprise' },
+      detected: {
+        spec: 's',
+        implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+        debtBlock: '',
+        level: 'enterprise',
+      },
     } as never);
     for (const a of agents) expect(a.roleKey, a.agentId).toBe(a.agentId);
   });
@@ -1366,7 +1396,12 @@ describe('08c mining seats', () => {
     // unconfigurable; one the registry lists but no wave emits is a dead control. Enterprise
     // is the widest roster, so it is what the registry must cover.
     const agents = await codeReviewStep.agentMining!.selectAgents({
-      detected: { spec: 's', implementationFiles: [], debtBlock: '', level: 'enterprise' },
+      detected: {
+        spec: 's',
+        implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+        debtBlock: '',
+        level: 'enterprise',
+      },
     } as never);
     const emitted = [
       ...agents.map((a) => a.roleKey!),

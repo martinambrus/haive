@@ -284,12 +284,35 @@ describe('phase4ValidateStep fixer browser guidance', () => {
   });
 });
 
+describe('phase4ValidateStep change-set guard', () => {
+  it('refuses to build the validator prompt when no changed file is known', () => {
+    // Worse here than in a read-only reviewer: this pass feeds a fix agent that EDITS,
+    // so a validator that guessed its scope rewrites code the task never touched.
+    expect(() =>
+      phase4ValidateStep.llm!.buildPrompt!({
+        detected: {
+          worktreePath: '/wt',
+          sandboxWorktreePath: '/ws',
+          spec: 'spec',
+          implementationFiles: { files: [], total: 0, truncated: false, scanError: null },
+          debtBlock: '',
+          honoredBlock: '',
+          browserTesting: false,
+          docsOnly: false,
+        },
+      } as never),
+    ).toThrow(/07b-phase-4-validate has no changed files to review/);
+  });
+});
+
 describe('phase4ValidateStep scope fence', () => {
   const detected = {
     worktreePath: '/wt',
     sandboxWorktreePath: '/ws',
     spec: 'spec',
-    implementationFiles: [],
+    // A real change set: buildPrompt refuses an empty one outright (assertReviewableChange),
+    // so an empty fixture here would assert the fence against a step that never rendered.
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
     debtBlock: '',
     honoredBlock: '',
     browserTesting: false,
@@ -327,7 +350,9 @@ describe('phase4ValidateStep documentation protocol', () => {
     worktreePath: '/wt',
     sandboxWorktreePath: '/ws',
     spec,
-    implementationFiles: [],
+    // docsOnly is passed explicitly below, so this set only has to be non-empty —
+    // buildPrompt refuses an empty one (assertReviewableChange).
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
     debtBlock: '',
     honoredBlock: '',
     browserTesting: false,
