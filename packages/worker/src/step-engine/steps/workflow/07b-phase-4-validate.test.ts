@@ -5,6 +5,7 @@ import {
   churnHotspots,
   phase4ValidateStep,
 } from './07b-phase-4-validate.js';
+import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 
 describe('parseValidatorOutput', () => {
   it('parses a report followed by the final fenced JSON', () => {
@@ -455,5 +456,99 @@ describe('phase4ValidateStep documentation protocol', () => {
       expect(prompt).toContain('(no brief recorded)');
       expect(prompt).not.toContain('(no spec recorded)');
     }
+  });
+});
+
+describe('phase4ValidateStep review-dimension scope', () => {
+  const detect = (reviewDimensionIds?: string[]) => ({
+    worktreePath: '/wt',
+    sandboxWorktreePath: '/ws',
+    spec: 'THE SPEC',
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+    debtBlock: '',
+    honoredBlock: '',
+    browserTesting: false,
+    promptDefectCapture: false,
+    docsOnly: false,
+    ...(reviewDimensionIds ? { reviewDimensionIds } : {}),
+  });
+
+  // Both validator passes branch on the same set, or a re-pass after a fix silently
+  // re-widens the review halfway through the loop.
+  const validatorPrompts = (ids?: string[]) => [
+    phase4ValidateStep.llm!.buildPrompt!({ detected: detect(ids) } as never),
+    phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: detect(ids) as never,
+      formValues: {},
+      iteration: 2,
+      previousIterations: [],
+    }),
+  ];
+
+  it('scores all 14 when nothing is scoped out', () => {
+    for (const prompt of validatorPrompts([...ALL_REVIEW_DIMENSION_IDS])) {
+      expect(prompt).toContain('1. Security - ');
+      expect(prompt).toContain('11. Accessibility - ');
+      expect(prompt).toContain('14. Privacy / Compliance - ');
+      expect(prompt).toContain('the 14-dimension table');
+    }
+  });
+
+  // A persisted detect_output from before the field existed replays without it.
+  it('scores all 14 when the detect payload predates the field', () => {
+    for (const prompt of validatorPrompts()) {
+      expect(prompt).toContain('11. Accessibility - ');
+      expect(prompt).toContain('the 14-dimension table');
+    }
+  });
+
+  it('drops an excluded dimension and renumbers the rest', () => {
+    const kept = ALL_REVIEW_DIMENSION_IDS.filter((id) => id !== 'accessibility');
+    for (const prompt of validatorPrompts([...kept])) {
+      expect(prompt).not.toContain('Accessibility - ARIA labels');
+      expect(prompt).toContain('the 13-dimension table');
+      // Internationalization was #12; with #11 gone it becomes #11.
+      expect(prompt).toContain('11. Internationalization - ');
+      expect(prompt).toContain('13. Privacy / Compliance - ');
+    }
+  });
+
+  it('names an in-scope dimension in the JSON example, never an excluded one', () => {
+    const prompt = phase4ValidateStep.llm!.buildPrompt!({
+      detected: detect(['accessibility']),
+    } as never);
+    expect(prompt).toContain('"name": "Accessibility"');
+    expect(prompt).not.toContain('"name": "Security"');
+  });
+
+  it('records what was not scored, so gate 2 can say so', async () => {
+    const kept = ALL_REVIEW_DIMENSION_IDS.filter(
+      (id) => id !== 'accessibility' && id !== 'internationalization',
+    );
+    const out = (await phase4ValidateStep.apply(
+      { logger: stubLogger } as never,
+      {
+        detected: detect([...kept]),
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: '```json\n{"verdict":"VALID","summary":"ok","issues":[],"dimensions":[]}\n```',
+      } as never,
+    )) as { excludedDimensions: string[] };
+    expect(out.excludedDimensions).toEqual(['Accessibility', 'Internationalization']);
+  });
+
+  it('records an empty exclusion list on a full-set run', async () => {
+    const out = (await phase4ValidateStep.apply(
+      { logger: stubLogger } as never,
+      {
+        detected: detect([...ALL_REVIEW_DIMENSION_IDS]),
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: '```json\n{"verdict":"VALID","summary":"ok","issues":[],"dimensions":[]}\n```',
+      } as never,
+    )) as { excludedDimensions: string[] };
+    expect(out.excludedDimensions).toEqual([]);
   });
 });

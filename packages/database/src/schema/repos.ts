@@ -152,6 +152,16 @@ export const repositories = pgTable(
      *  rollout, default off), so per-repo exists to silence one noisy repo without
      *  turning the feature off everywhere. */
     stepGuidanceEnabled: boolean('step_guidance_enabled').notNull().default(true),
+    /** Per-repo review-dimension policy: the ids (see REVIEW_DIMENSIONS in
+     *  @haive/shared/review) the reviewing steps score a change against.
+     *  NULL = no override, i.e. every dimension — which is what every row held
+     *  before the setting existed and what the reviewers did. Nullable rather
+     *  than notNull-with-a-default for that reason: `[]` (score nothing) and
+     *  "never chosen" must stay distinguishable, same as lspServers above.
+     *  A task may narrow this further via tasks.review_dimensions, but only for
+     *  the REVIEW steps — discovery (03) and the spec writer (04) run before the
+     *  run-config form and follow this repo-level value. */
+    reviewDimensions: text('review_dimensions').array(),
     /** Deterministic form login for browser testing (default: absent = disabled).
      *
      *  Holds only the SHAPE of the login — where it is and how to recognise success.

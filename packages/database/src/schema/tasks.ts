@@ -220,6 +220,13 @@ export const tasks = pgTable(
      *  quick_bugfix, whose step set has neither audit) — read by 04a / 08c2 in their
      *  shouldRun gate. Per-task switch-off; default true so it runs unless opted out. */
     broadAudit: boolean('broad_audit').notNull().default(true),
+    /** Per-task override of the repository's review-dimension policy (ids from
+     *  REVIEW_DIMENSIONS in @haive/shared/review). NULL = not chosen for this
+     *  task, so repositories.review_dimensions applies (and NULL there means
+     *  every dimension). Set on the 06-run-config form, which runs at index
+     *  6.05 — after discovery and the spec writer — so this narrows the REVIEW
+     *  steps (07b, 08c) only; the upstream steps follow the repo value. */
+    reviewDimensions: text('review_dimensions').array(),
     /** On-demand step-debugging: when true the per-task runtime is brought up with
      *  step-debugging wired (PHP/Xdebug under DDEV, JS via the VNC browser CDP, Node
      *  --inspect), so the Editor tab can attach. Chosen on the 01-debug-mode step

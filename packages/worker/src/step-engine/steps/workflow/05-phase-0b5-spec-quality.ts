@@ -5,6 +5,10 @@ import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import {
+  dimensionScopeLines,
+  resolveTaskReviewDimensions,
+} from '../../review-dimension-context.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
@@ -21,6 +25,15 @@ interface SpecQualityDetect {
    *  re-approved). The form auto-submits then, re-running the quality review with
    *  the already-chosen budget + reviewer/corrector CLIs instead of re-gating. */
   revising: boolean;
+  /** Review dimensions this repository scores changes against (ids from
+   *  REVIEW_DIMENSIONS). Repo scope, not task: this step is index 5 and
+   *  06-run-config is 6.05, so the per-task override does not exist yet.
+   *
+   *  Nothing here narrows QUALITY_DIMENSIONS above — that is the SPEC taxonomy and
+   *  a different list. What this narrows is the repo's own
+   *  `.claude/agents/spec-quality-reviewer.md`, which the reviewer is told to
+   *  follow and which names the fourteen CODE dimensions. */
+  reviewDimensionIds: string[];
 }
 
 // Budget is counted in ROUNDS; each round is 2 LLM passes (1 review + 1 correct),
@@ -446,6 +459,9 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
       specLength: spec.length,
       currentBudget,
       revising: (await loadOutstandingSpecFeedback(ctx)).length > 0,
+      reviewDimensionIds: (
+        await resolveTaskReviewDimensions(ctx.db, ctx.taskId, 'repo')
+      ).enabled.map((d) => d.id),
     };
   },
 
@@ -505,6 +521,10 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
       const values = args.formValues as { focusAreas?: string };
       return [
         ...REVIEW_RULES,
+        // Last word on scope, against the repo's own spec-quality-reviewer.md — which
+        // the clause inside REVIEW_RULES tells this agent to follow and which names
+        // all fourteen code dimensions. Empty when nothing is excluded.
+        ...dimensionScopeLines(detected.reviewDimensionIds),
         '',
         `Focus areas: ${values.focusAreas ?? '(none)'}`,
         '',

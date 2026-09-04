@@ -66,6 +66,14 @@ interface VerifyGateDetect {
     summary: string;
     openIssues: string[];
     failedDimensions: string[];
+    /** Dimensions this run did not score at all, because the repository or the task
+     *  scoped them out. Rendered beside the failures: a dimension nobody looked at
+     *  produces the same empty finding list as one that passed, and only saying so
+     *  keeps a narrowed review from reading as a clean one.
+     *
+     *  Optional because this payload is persisted — a task parked at this gate before
+     *  the field existed replays without it. */
+    excludedDimensions?: string[];
     fixesApplied: number;
     exhaustedBudget: boolean;
     /** False when 07b's churn guard stopped the loop on a non-converging file. */
@@ -292,6 +300,7 @@ interface Phase4Output {
   summary?: string;
   issues?: { severity?: string; file?: string; description?: string; fix?: string }[];
   dimensions?: { name?: string; status?: string; note?: string }[];
+  excludedDimensions?: string[];
   fixesApplied?: string[];
   report?: string;
   converged?: boolean;
@@ -457,6 +466,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         failedDimensions: (p4.dimensions ?? [])
           .filter((d) => d.status === 'FAIL')
           .map((d) => `${d.name}${d.note ? `: ${d.note}` : ''}`),
+        excludedDimensions: p4.excludedDimensions ?? [],
         fixesApplied: (p4.fixesApplied ?? []).length,
         exhaustedBudget: iterations.some((e) => e.exhaustedBudget === true),
         converged: p4.converged !== false,
@@ -805,6 +815,18 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       if (v.failedDimensions.length > 0) {
         lines.push('', '## Failed review dimensions');
         for (const d of v.failedDimensions) lines.push(`- ${d}`);
+      }
+      // `?? []` because this detect payload is PERSISTED: a task already parked at
+      // this gate replays a stored object written before the field existed, and
+      // rendering its form must not throw.
+      const excluded = v.excludedDimensions ?? [];
+      if (excluded.length > 0) {
+        lines.push(
+          '',
+          '## Not reviewed',
+          `This run did not score ${excluded.join(', ')} — they are scoped out for this`,
+          'repository or task. No finding above covers them, and their absence is not a pass.',
+        );
       }
       if (v.openIssues.length > 0) {
         lines.push('', '## Open issues');

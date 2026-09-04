@@ -14,7 +14,45 @@ import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadAgentPersonas, type AgentPersona } from './_agent-loader.js';
+import { resolveTaskReviewDimensions } from '../../review-dimension-context.js';
 import { buildAgentSelectorPrompt, parseAgentSelection } from './_agent-selector.js';
+
+/** Mining agents whose ENTIRE remit is one review dimension, so a repository that
+ *  does not review that dimension has no use for what they would find.
+ *
+ *  Deliberately a hand-written pair list and NOT a match on the persona's `field`
+ *  frontmatter, even though `field: accessibility` and `field: security` happen to
+ *  equal their dimension ids. `field` is a grouping label with its own vocabulary
+ *  (`testing`, `review`, `quality`, `api`, ...) that only coincidentally overlaps —
+ *  `testing` and `testability` already do not match — so keying on it would filter
+ *  some dimensions and silently miss others. An agent belongs here only when
+ *  dropping the dimension makes the agent pointless, never when it merely touches it.
+ */
+const DIMENSION_ONLY_AGENTS: Record<string, string> = {
+  'accessibility-specialist': 'accessibility',
+  'security-auditor': 'security',
+};
+
+/** Drop the mining agents whose one dimension this repository does not review.
+ *
+ *  Applied to the personas OFFERED to the selector rather than to its answer, so
+ *  the model never sees an agent it cannot pick — an excluded id in its output
+ *  would just be dropped by `parseAgentSelection`, wasting a slot it chose.
+ *
+ *  Repo scope, not task: this step is index 3 and the run-config form is 6.05, so
+ *  the per-task override does not exist yet.
+ *
+ *  Exported for the unit test, like `lensesForLevel` in 08c.
+ */
+export function personasForDimensions(
+  personas: AgentPersona[],
+  enabledDimensionIds: readonly string[],
+): AgentPersona[] {
+  return personas.filter((p) => {
+    const dimension = DIMENSION_ONLY_AGENTS[p.id];
+    return dimension === undefined || enabledDimensionIds.includes(dimension);
+  });
+}
 
 interface KbSnippet {
   id: string;
@@ -240,16 +278,18 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
 
   async detect(ctx: StepContext): Promise<DiscoveryDetect> {
     const meta = await loadTaskMeta(ctx.db, ctx.taskId);
-    const [kbSnippets, personas] = await Promise.all([
+    const [kbSnippets, personas, dimensions] = await Promise.all([
       collectKbSnippets(ctx.repoPath),
       loadAgentPersonas(ctx.repoPath),
+      resolveTaskReviewDimensions(ctx.db, ctx.taskId, 'repo'),
     ]);
+    const enabledDimensionIds = dimensions.enabled.map((d) => d.id);
     return {
       taskTitle: meta.title,
       taskDescription: meta.description,
       feature: meta.feature,
       kbSnippets,
-      personas,
+      personas: personasForDimensions(personas, enabledDimensionIds),
     };
   },
 

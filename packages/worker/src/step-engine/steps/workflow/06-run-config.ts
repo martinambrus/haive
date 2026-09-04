@@ -10,6 +10,12 @@ import { parseConfigRecommendation, markRecommended } from './_gate1-recommendat
 import { buildBrowserModeOptions } from './_browser-modes.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { keepForPath } from '../../../orchestrator/execution-paths.js';
+import {
+  ALL_REVIEW_DIMENSION_IDS,
+  REVIEW_DIMENSIONS,
+  normalizeReviewDimensionIds,
+} from '@haive/shared/review';
+import { resolveTaskReviewDimensions } from '../../review-dimension-context.js';
 
 // Run configuration — split out of 06-gate-1-spec-approval so the spec approve/reject
 // decision stays uncluttered (a reject revises back to 04 and never reaches this step).
@@ -46,6 +52,10 @@ interface RunConfigDetect {
   /** Current task-level expose_db_port column, the checkbox default so an API-set or
    *  prior value survives into the form. */
   taskExposeDbPort: boolean;
+  /** Review dimensions to tick in the form: the task's own choice when it has one,
+   *  otherwise the repository policy, otherwise all of them. So the accordion opens
+   *  showing what would happen if the user changed nothing. */
+  reviewDimensionIds: string[];
 }
 
 /** Front-loaded run answers for the hands-free stretch to Gate 2 (browser/MCP mode,
@@ -68,6 +78,8 @@ interface RunConfig {
   exposeDbPort: boolean;
   /** Fix-loop cap: automatic fix rounds before the loop escalates to the user. */
   maxFixRounds: number;
+  /** Review dimensions the reviewers score against for this task. */
+  reviewDimensions: string[];
 }
 
 interface PrePlanningOutput {
@@ -139,6 +151,9 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       runsAdversarialQa: keepForPath('08d-adversarial-qa', execPath),
       dbExposeAvailable: dbAvailable && ddevMode,
       taskExposeDbPort: taskRow?.exposeDbPort ?? false,
+      reviewDimensionIds: (await resolveTaskReviewDimensions(ctx.db, ctx.taskId)).enabled.map(
+        (d) => d.id,
+      ),
     };
   },
 
@@ -189,6 +204,9 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
   },
 
   form(_ctx, detected, llmOutput): FormSchema {
+    // detect_output is persisted: a task whose detect ran before this field existed
+    // replays without it, and must show every dimension ticked rather than none.
+    const reviewDimensionIds = detected.reviewDimensionIds ?? [...ALL_REVIEW_DIMENSION_IDS];
     // Best-effort LLM recommendation (null when the recommend phase was skipped,
     // failed, or returned garbage). Mark the recommended option + use it as the
     // default; otherwise keep the static defaults.
@@ -238,6 +256,39 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
             : 'Sets the code-review depth for this run (the Phase 7 adversarial agents are skipped on this path): Standard adds an operational review lens, Enterprise adds a performance lens.',
           options: qa.options,
           default: qa.default,
+        },
+        // Collapsed by default: the ticked-everything case is the one almost every
+        // run wants, and 14 checkboxes open by default would bury the controls
+        // above. Opening it shows exactly what is already in force.
+        {
+          type: 'accordion',
+          id: 'reviewDimensionsSection',
+          label: 'Review dimensions',
+          description:
+            'Which dimensions the reviewers score this change against. Narrowing them here applies to the implementation validation and code review steps only — discovery and the spec writer already ran, and follow the repository setting on its tooling page.',
+          items: [
+            {
+              title: `Dimensions scored (${reviewDimensionIds.length} of ${REVIEW_DIMENSIONS.length})`,
+              description:
+                'A dimension left unticked is not reviewed at all — Gate 2 says so, because no findings against it is not the same as passing it.',
+              fields: [
+                {
+                  type: 'multi-select',
+                  id: 'reviewDimensions',
+                  label: 'Score these dimensions',
+                  // Required, so unticking every box is rejected rather than saved:
+                  // a review with no dimensions at all is a mistake, not a policy.
+                  required: true,
+                  options: REVIEW_DIMENSIONS.map((d) => ({
+                    value: d.id,
+                    label: d.label,
+                    description: d.criteria.join(' '),
+                  })),
+                  defaults: reviewDimensionIds,
+                },
+              ],
+            },
+          ],
         },
         {
           type: 'checkbox',
@@ -393,6 +444,12 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       testRunTests: bool(values.testRunTests, true),
       exposeDbPort: bool(values.exposeDbPort, false),
       maxFixRounds: num(values.maxFixRounds, 5),
+      // Fall back to what detect resolved rather than to "all": a form that came
+      // back without the field (an old pre-answer, a client that dropped it) must
+      // not silently re-enable dimensions the repository had scoped out.
+      reviewDimensions: Array.isArray(values.reviewDimensions)
+        ? normalizeReviewDimensionIds(values.reviewDimensions)
+        : ((args.detected as RunConfigDetect).reviewDimensionIds ?? [...ALL_REVIEW_DIMENSION_IDS]),
     };
 
     // Map run-config answers to the downstream steps' exact field ids. The runner
@@ -442,6 +499,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
           runConfig.adversarialQaLevel !== 'none' ? runConfig.adversarialQaLevel : null,
         maxFixRounds: runConfig.maxFixRounds,
         exposeDbPort: runConfig.exposeDbPort,
+        reviewDimensions: runConfig.reviewDimensions,
         preAnswers,
         updatedAt: new Date(),
       })

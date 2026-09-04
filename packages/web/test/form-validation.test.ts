@@ -108,3 +108,45 @@ describe('validateRequired', () => {
     expect(validateRequired(s, { a: 'x', b: false })).toBe('B is required');
   });
 });
+
+describe('validateRequired inside an accordion', () => {
+  // 06-run-config puts its review-dimension multi-select inside a collapsed
+  // accordion. Required-ness has to reach through the wrapper, or unticking every
+  // dimension would submit as "review nothing" from a section the user cannot see.
+  const dimensionForm = (defaults: string[]): FormSchema =>
+    schema({
+      type: 'accordion',
+      id: 'reviewDimensionsSection',
+      label: 'Review dimensions',
+      items: [
+        {
+          title: 'Dimensions scored',
+          fields: [
+            {
+              type: 'multi-select',
+              id: 'reviewDimensions',
+              label: 'Score these dimensions',
+              required: true,
+              options: [
+                { value: 'security', label: 'Security' },
+                { value: 'accessibility', label: 'Accessibility' },
+              ],
+              defaults,
+            },
+          ],
+        },
+      ],
+    });
+
+  it('rejects an empty selection nested in a collapsed section', () => {
+    expect(validateRequired(dimensionForm(['security']), { reviewDimensions: [] })).toBe(
+      'Score these dimensions is required',
+    );
+  });
+
+  it('accepts a narrowed but non-empty selection', () => {
+    expect(
+      validateRequired(dimensionForm(['security']), { reviewDimensions: ['security'] }),
+    ).toBeNull();
+  });
+});

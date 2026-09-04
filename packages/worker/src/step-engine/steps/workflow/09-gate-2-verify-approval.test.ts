@@ -319,3 +319,60 @@ describe('recurrenceTag', () => {
     expect(recurrenceTag(map, 'peer-reviewer', 42)).toBe('');
   });
 });
+
+describe('gate-2 discloses what was not reviewed', () => {
+  const baseDetect = (validation: Record<string, unknown> | null) =>
+    ({
+      verify: { test: null, lint: null, typecheck: null },
+      allPassed: true,
+      validation,
+      testManagement: null,
+      browser: null,
+      codeReview: null,
+      codeAudit: null,
+      adversarial: null,
+      liveBrowser: null,
+      runtimeSmoke: null,
+    }) as never;
+
+  const validation = (excludedDimensions: string[]) => ({
+    verdict: 'VALID',
+    summary: 'looks fine',
+    openIssues: [],
+    failedDimensions: [],
+    excludedDimensions,
+    fixesApplied: 0,
+    exhaustedBudget: false,
+    converged: true,
+    churnFiles: [],
+    report: '',
+  });
+
+  const validationBody = (excluded: string[]): string => {
+    const schema = gate2VerifyApprovalStep.form!({} as never, baseDetect(validation(excluded)))!;
+    const row = (schema.statusSummary ?? []).find((r) => r.label === 'Implementation validation');
+    return row?.body ?? '';
+  };
+
+  // A dimension nobody scored yields the same empty finding list as one that passed.
+  // Saying so is the only thing that keeps a narrowed review from reading as clean.
+  it('names the dimensions this run did not score', () => {
+    const body = validationBody(['Accessibility', 'Internationalization']);
+    expect(body).toContain('## Not reviewed');
+    expect(body).toContain('Accessibility, Internationalization');
+    expect(body).toContain('their absence is not a pass');
+  });
+
+  it('says nothing when every dimension was scored', () => {
+    expect(validationBody([])).not.toContain('## Not reviewed');
+  });
+
+  // Step outputs are persisted: a task validated before this field existed has none.
+  it('says nothing when the stored 07b output predates the field', () => {
+    const v = validation([]) as Record<string, unknown>;
+    delete v.excludedDimensions;
+    const schema = gate2VerifyApprovalStep.form!({} as never, baseDetect(v))!;
+    const row = (schema.statusSummary ?? []).find((r) => r.label === 'Implementation validation');
+    expect(row?.body ?? '').not.toContain('## Not reviewed');
+  });
+});

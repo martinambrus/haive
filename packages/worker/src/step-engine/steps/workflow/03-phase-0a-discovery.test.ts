@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
-import { phase0aDiscoveryStep } from './03-phase-0a-discovery.js';
+import { personasForDimensions, phase0aDiscoveryStep } from './03-phase-0a-discovery.js';
+import type { AgentPersona } from './_agent-loader.js';
+import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 
 const ctx = { logger: logger.child({ test: '03-discovery' }) } as unknown as StepContext;
 const detected = {
@@ -81,5 +83,49 @@ describe('phase0aDiscoveryStep terminal retry policy', () => {
     expect(output.source).toBe('stub');
     expect(output.relevantKbIds).toEqual(['architecture']);
     expect(output.agentMinings[0]?.status).toBe('failed');
+  });
+});
+
+describe('03 discovery persona filtering by review dimension', () => {
+  const persona = (id: string): AgentPersona =>
+    ({
+      id,
+      title: id,
+      description: '',
+      field: null,
+      color: null,
+      allowedTools: [],
+      body: '',
+      sourcePath: `/x/${id}.md`,
+    }) as AgentPersona;
+  const all = [
+    persona('knowledge-miner'),
+    persona('accessibility-specialist'),
+    persona('security-auditor'),
+    persona('code-tracer'),
+  ];
+
+  it('offers every persona when no dimension is scoped out', () => {
+    expect(personasForDimensions(all, [...ALL_REVIEW_DIMENSION_IDS]).map((p) => p.id)).toEqual(
+      all.map((p) => p.id),
+    );
+  });
+
+  it('drops a miner whose only dimension this repository does not review', () => {
+    const kept = ALL_REVIEW_DIMENSION_IDS.filter((id) => id !== 'accessibility');
+    const ids = personasForDimensions(all, [...kept]).map((p) => p.id);
+    expect(ids).not.toContain('accessibility-specialist');
+    // Everything else survives — this filter is narrow by design.
+    expect(ids).toEqual(['knowledge-miner', 'security-auditor', 'code-tracer']);
+  });
+
+  it('leaves personas with no single owning dimension alone', () => {
+    // 'testing' is an agent field, 'testability' is a dimension; they are different
+    // vocabularies that only look alike, so nothing may key on the resemblance.
+    const ids = personasForDimensions(all, ['security']).map((p) => p.id);
+    expect(ids).toContain('knowledge-miner');
+    expect(ids).toContain('code-tracer');
+    expect(ids).toContain('security-auditor');
+    expect(ids).not.toContain('accessibility-specialist');
   });
 });

@@ -14,6 +14,12 @@ interface LspOption {
   versions: string[];
 }
 
+interface ReviewDimensionOption {
+  value: string;
+  label: string;
+  hint: string;
+}
+
 interface ToolingConfig {
   repositoryId: string;
   rtkEnabled: boolean;
@@ -40,6 +46,8 @@ interface ToolingConfig {
   stepGuidanceEnabled: boolean;
   stepGuidance: GuidanceItem[];
   lspOptions: LspOption[];
+  reviewDimensions: string[];
+  reviewDimensionOptions: ReviewDimensionOption[];
 }
 
 /** One learned guidance item currently appended to a step's prompt for this repo. */
@@ -116,6 +124,7 @@ export default function RepoToolingPage() {
   const [appAuthCredsSet, setAppAuthCredsSet] = useState(false);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState(false);
   const [stepGuidanceEnabled, setStepGuidanceEnabled] = useState(true);
+  const [reviewDimensions, setReviewDimensions] = useState<Set<string>>(new Set());
   const [guidance, setGuidance] = useState<GuidanceItem[]>([]);
   const [archiving, setArchiving] = useState<string | null>(null);
 
@@ -146,6 +155,7 @@ export default function RepoToolingPage() {
         setAppAuthCredsSet(cfg.appAuthCredentialsSet ?? false);
         setPrWorkflowEnabled(cfg.prWorkflowEnabled);
         setStepGuidanceEnabled(cfg.stepGuidanceEnabled ?? true);
+        setReviewDimensions(new Set(cfg.reviewDimensions ?? []));
         setGuidance(cfg.stepGuidance ?? []);
       } catch (err) {
         if (!cancelled) setError((err as Error).message ?? 'Failed to load tooling config');
@@ -180,6 +190,12 @@ export default function RepoToolingPage() {
 
   async function handleSave() {
     if (saving) return;
+    // Mirrors the API's own guard. Checked here too so unticking the last dimension
+    // reads as a form error rather than a failed request.
+    if (reviewDimensions.size === 0) {
+      setError('Pick at least one review dimension.');
+      return;
+    }
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -207,6 +223,7 @@ export default function RepoToolingPage() {
           .filter(Boolean),
         prWorkflowEnabled,
         stepGuidanceEnabled,
+        reviewDimensions: [...reviewDimensions],
         appAuth: {
           enabled: appAuthEnabled,
           loginUrl: appAuthLoginUrl,
@@ -574,6 +591,52 @@ export default function RepoToolingPage() {
                 Offer &quot;create a pull request&quot; at task close
               </Label>
             </div>
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-semibold text-neutral-100">Review dimensions</h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              What the reviewing steps score a change against &mdash; the spec writer, the spec
+              quality review, the implementation validation and the code review. Untick a dimension
+              this project does not have (an intranet tool with no accessibility requirement, say)
+              and no agent will be asked to mine, specify or review it. A dimension left unticked is
+              not reviewed at all: Gate 2 says so on every run, because no findings against a
+              dimension is not the same as passing it. A single task can narrow this further on its
+              run-configuration step, but never widen it for the steps that already ran.
+            </p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {(config.reviewDimensionOptions ?? []).map((opt) => {
+                const checked = reviewDimensions.has(opt.value);
+                return (
+                  <div key={opt.value} className="flex items-start gap-2">
+                    <input
+                      id={`dimension-${opt.value}`}
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500"
+                      checked={checked}
+                      onChange={(e) => {
+                        setReviewDimensions((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(opt.value);
+                          else next.delete(opt.value);
+                          return next;
+                        });
+                        markDirty();
+                      }}
+                    />
+                    <div className="min-w-0">
+                      <Label htmlFor={`dimension-${opt.value}`}>{opt.label}</Label>
+                      <p className="text-xs text-neutral-600">{opt.hint}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {reviewDimensions.size === 0 && (
+              <p className="mt-3 text-xs text-amber-400">
+                Pick at least one dimension &mdash; a review that scores nothing cannot be saved.
+              </p>
+            )}
           </Card>
 
           <Card>

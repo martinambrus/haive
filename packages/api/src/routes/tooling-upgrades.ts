@@ -2,6 +2,11 @@ import { Hono } from 'hono';
 import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { TOOL_INSTALL_METADATA, userSecretsService, type ToolName } from '@haive/shared';
+import {
+  ALL_REVIEW_DIMENSION_IDS,
+  REVIEW_DIMENSIONS,
+  normalizeReviewDimensionIds,
+} from '@haive/shared/review';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -248,6 +253,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       appAuth: true,
       prWorkflowEnabled: true,
       stepGuidanceEnabled: true,
+      reviewDimensions: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -300,6 +306,15 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     ),
     prWorkflowEnabled: repo.prWorkflowEnabled,
     stepGuidanceEnabled: repo.stepGuidanceEnabled,
+    // null (never configured) is sent as the full set: that is what the reviewers
+    // actually score, so the page shows the effective policy rather than an empty
+    // list the user would read as "nothing is reviewed".
+    reviewDimensions: repo.reviewDimensions ?? [...ALL_REVIEW_DIMENSION_IDS],
+    reviewDimensionOptions: REVIEW_DIMENSIONS.map((d) => ({
+      value: d.id,
+      label: d.label,
+      hint: d.criteria.join(' '),
+    })),
     // Guidance currently steering this repo's runs -- both its own items and the
     // stack-global ones, since a global item is just as invisible and just as
     // permanent. Rejected tombstones and archived items are NOT listed: a tombstone
@@ -432,6 +447,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     secretMaskDenyExtend?: string[];
     prWorkflowEnabled?: boolean;
     stepGuidanceEnabled?: boolean;
+    reviewDimensions?: string[];
     appAuth?: unknown;
     /** Write-only. Stored in user_secrets, never on the repositories row and never
      *  returned by the GET above. */
@@ -472,6 +488,14 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   }
   if (typeof body.prWorkflowEnabled === 'boolean') {
     updates.prWorkflowEnabled = body.prWorkflowEnabled;
+  }
+  if (Array.isArray(body.reviewDimensions)) {
+    const ids = normalizeReviewDimensionIds(body.reviewDimensions);
+    // An empty result is rejected rather than stored: it would mean "review nothing",
+    // which is never what a user means by unticking the last box, and a caller that
+    // sent only unknown ids has a bug worth surfacing.
+    if (ids.length === 0) throw new HttpError(400, 'At least one review dimension is required');
+    updates.reviewDimensions = ids;
   }
   if (typeof body.stepGuidanceEnabled === 'boolean') {
     updates.stepGuidanceEnabled = body.stepGuidanceEnabled;

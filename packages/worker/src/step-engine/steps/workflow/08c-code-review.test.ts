@@ -13,6 +13,7 @@ import {
   lensAgentId,
   codeReviewStep,
 } from './08c-code-review.js';
+import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import { buildRecurringNote } from './08c-code-review.js';
 import { recurrenceKey } from './_review-findings.js';
 import { isOutOfScope } from '../_scope-fence.js';
@@ -1462,5 +1463,59 @@ describe('buildRecurringNote', () => {
       map,
     );
     expect(note.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(2);
+  });
+});
+
+describe('08c review-dimension scope', () => {
+  const detected = (reviewDimensionIds?: string[]) => ({
+    spec: 'a spec',
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+    debtBlock: '',
+    level: 'none' as const,
+    ...(reviewDimensionIds ? { reviewDimensionIds } : {}),
+  });
+
+  const peerPrompt = async (ids?: string[]): Promise<string> => {
+    const agents = (await codeReviewStep.agentMining!.selectAgents({
+      detected: detected(ids),
+    } as never)) as { agentId: string; prompt: string }[];
+    return agents.find((a) => a.agentId === 'peer-reviewer')!.prompt;
+  };
+
+  it('adds no scope block when every dimension is in scope', async () => {
+    expect(await peerPrompt([...ALL_REVIEW_DIMENSION_IDS])).not.toContain(
+      'DIMENSION SCOPE FOR THIS RUN',
+    );
+  });
+
+  // A persisted detect_output from before the field existed replays without it, and
+  // must review everything rather than nothing.
+  it('adds no scope block when the detect payload predates the field', async () => {
+    expect(await peerPrompt()).not.toContain('DIMENSION SCOPE FOR THIS RUN');
+  });
+
+  it('overrides the repo agent definition when a dimension is scoped out', async () => {
+    const prompt = await peerPrompt(
+      ALL_REVIEW_DIMENSION_IDS.filter((id) => id !== 'accessibility') as string[],
+    );
+    // The persona and the repo's own peer-reviewer.md both still name all 14; this
+    // block is what actually narrows the run, so it has to outrank them explicitly.
+    expect(prompt).toContain('all 14 review dimensions');
+    expect(prompt).toContain('DIMENSION SCOPE FOR THIS RUN');
+    expect(prompt).toContain('overrides any repository agent definition');
+    expect(prompt).toContain('Do NOT raise findings under: Accessibility.');
+    expect(prompt).toContain('Score ONLY these dimensions: Security,');
+    // Placed AFTER the persona, or the text it overrides would be the last word.
+    expect(prompt.indexOf('DIMENSION SCOPE FOR THIS RUN')).toBeGreaterThan(
+      prompt.indexOf('You are the Peer Reviewer'),
+    );
+  });
+
+  it('leaves the security reviewer alone — it is not a 14-dimension sweep', async () => {
+    const agents = (await codeReviewStep.agentMining!.selectAgents({
+      detected: detected(['security']),
+    } as never)) as { agentId: string; prompt: string }[];
+    const security = agents.find((a) => a.agentId === 'security-code-reviewer')!;
+    expect(security.prompt).not.toContain('DIMENSION SCOPE FOR THIS RUN');
   });
 });

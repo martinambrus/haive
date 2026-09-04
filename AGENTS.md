@@ -284,6 +284,71 @@ The key is `(reviewerId, normalised path)` — deliberately NOT `fingerprint`. M
 
 `fingerprint` is `sha256(reviewerId, path, normalised issue)` — line numbers and ids stripped, path KEPT, since the same defect in two files is two findings. Rows are written PRE-merge, one per adversary that reported a finding, while every later step sees only the survivor of 08d's location merge and has no reviewer id to rebuild a key from. That is why 08d attaches the collapsed set to each surviving finding as `fingerprints[]` (same shape and reason as 08c's `RefutableFinding.fingerprints`), on the OUTPUT copy only so the merge's own objects and `raw` stay untouched.
 
+## Review dimensions
+
+`REVIEW_DIMENSIONS` (`packages/shared/src/review/dimensions.ts`) is the canonical set of 14 a
+change is scored against. Before it, the same names were hardcoded prose in five files across
+eleven sites, worded three ways (`Privacy/Compliance` / `Privacy / Compliance` / `Privacy`;
+`Internationalization` / `i18n`). The per-dimension `criteria` are lifted VERBATIM from 07b's
+Step 7 — the only copy that carried criteria rather than names — and stored as ALREADY-WRAPPED
+lines so `numberedDimensionBlock` only re-numbers and re-indents. That is what makes the
+full-set render byte-identical to the old literal, including the 3-space vs 4-space
+continuation indent for items 1-9 vs 10-14; `dimensions.test.ts` asserts the whole 32-line
+table against the original, because every install that has not touched the setting still
+renders it and a diff there is a prompt regression for everyone.
+
+NOT the same list as `QUALITY_DIMENSIONS` in `05-phase-0b5-spec-quality` (`goal_clarity` …
+`documentation_updates`), which scores the SPEC. Both have 14 entries and share nothing else.
+That constant is deliberately untouched by this feature.
+
+**Two levels, and the split is about WHEN each step runs.** `repositories.review_dimensions`
+is the policy; `tasks.review_dimensions` is a per-task override; resolution is
+task ?? repo ?? all (`resolveTaskReviewDimensions`, `step-engine/review-dimension-context.ts`,
+mirroring `guidance-context.ts`). Both columns are `text[]` NULL-means-all, following
+`lspServers` rather than the `jsonb().notNull().default([])` shape, because `[]` (score
+nothing) and "never chosen" must stay distinguishable. The override reaches only the REVIEW
+steps: discovery is index 3 and the spec writer index 4, while the run-config form is 6.05, so
+those two pass `scope: 'repo'` — reading the task value there would apply a narrowing the user
+makes later to a spec that was already written. Failure is OPEN (every dimension) at every
+reader, because failing closed would silently produce a review that scored nothing.
+
+**The on-disk agent definition outranks the inline persona.** 04, 05 and 08c each wrap their
+prompt in `agentDefinitionGuidance`, which says "if a `.claude/agents/<id>.md` exists in the
+repo, follow it; otherwise follow the protocol below" — and `technical-spec-writer`,
+`spec-quality-reviewer` and `peer-reviewer` all name the full 14 on disk. Editing only the
+inline TypeScript persona narrows NOTHING for an onboarded repo. Making the templates
+dimension-aware is not the alternative either: their bytes are hashed against `REFERENCE_CONTEXT`
+(`template-manifest.ts`) and compared at `api/routes/upgrades.ts`, so a per-repo body reads as
+drifted and is reverted on the next onboarding upgrade. So `dimensionScopeOverride` is APPENDED
+AFTER the persona in those three, where it is the most recent instruction, and returns `''`
+when nothing is excluded — a default run emits the prompt it always did. 07b needs no such
+block and is the one site filtered at the source, because it carries no agent pointer.
+
+**A skipped dimension is disclosed, never implied.** 07b records `excludedDimensions` on every
+apply return (the parse-miss one included) and gate 2 renders `## Not reviewed`, because a
+dimension nobody scored yields exactly the same empty finding list as one that passed. Same
+rule as `fixed` never being written to `review_findings`. Both that field and gate-2's copy of
+it are OPTIONAL: step outputs and gate detect payloads are PERSISTED, so a task already parked
+at gate 2 replays an object written before the field existed and must still render.
+
+**03 filters mining personas through an explicit pair list** (`DIMENSION_ONLY_AGENTS`:
+`accessibility-specialist`, `security-auditor`), never by matching the persona's `field`
+frontmatter — even though `field: accessibility` and `field: security` happen to equal their
+dimension ids. `field` is a grouping label with its own vocabulary (`testing`, `review`,
+`quality`, `api`) that only coincidentally overlaps: `testing` and `testability` already do
+not match, so keying on it would filter some dimensions and silently miss others. An agent
+belongs on that list only when dropping the dimension makes the agent pointless. The level-gated
+08c lenses (operational/performance/simplicity) are NOT filtered — they describe their own
+remit in their own words rather than naming the 14, and the QA level is a separate explicit
+choice. 08d's six adversaries are attack roles, not dimensions.
+
+Admin surfaces: a card on the repo tooling page (`/repos/<id>/tooling`) for the policy, and a
+collapsed accordion in `06-run-config` for the per-task override — the one accordion allowed on
+that form, whose controls are otherwise top-level by design (see `fddd12a5`). Both require at
+least one dimension: unticking the last box is a mistake, not a policy. No global
+`CONFIG_KEYS` kill-switch, deliberately — the default is already "all on", so a switch would
+gate nothing.
+
 ## Model pricing and spend
 
 `cli_invocations.cost` records what a run COST, decided at completion beside `token_usage` and `model_identity` and then immutable. Distinct from `token_usage.costUsd`, which keeps its old meaning (what the CLI itself reported). The split exists because the reported number is real only where the CLI prices its own backend: the claude binary applies ANTHROPIC's table to every backend, so for zai/muse/openrouter/ollama it is fiction, and codex/gemini report no cost at all. MEASURED before the feature: of ~12,800 USD reported across 12,438 invocations, 31.68 USD was the only amount the product could count as real.

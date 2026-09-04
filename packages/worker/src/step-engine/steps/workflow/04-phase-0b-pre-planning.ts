@@ -14,6 +14,11 @@ import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { loadBusinessRequirements } from './_business-requirements.js';
 import { isBugBranch } from './01-worktree-setup.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { resolveReviewDimensions } from '@haive/shared/review';
+import {
+  dimensionScopeLines,
+  resolveTaskReviewDimensions,
+} from '../../review-dimension-context.js';
 import {
   computeImpact,
   findPlanRoot,
@@ -28,6 +33,49 @@ interface KbReference {
   id: string;
   title: string;
   exists: boolean;
+}
+
+/** The operational/lifecycle sentence the spec writer is held to.
+ *
+ *  Three of the canonical dimensions in this step's own vocabulary. When all three
+ *  are in scope the original hand-wrapped lines are returned VERBATIM, so a
+ *  repository that has not narrowed anything gets the prompt it always got; the
+ *  rebuilt form is only reached once one of them is out of scope. Demanding a
+ *  section for a dimension nobody will score is how the spec ends up carrying
+ *  requirements the reviewers were told to ignore.
+ */
+function operationalDimensionLines(
+  reviewDimensionIds: readonly string[] | null | undefined,
+): string[] {
+  // Via the resolver, so a detect_output persisted before this field existed
+  // replays as every dimension rather than as none.
+  const enabled = resolveReviewDimensions(reviewDimensionIds).enabled;
+  const has = (id: string): boolean => enabled.some((d) => d.id === id);
+  const observability = has('observability');
+  const operational = has('operational-readiness');
+  const backwardCompat = has('backward-compatibility');
+  if (observability && operational && backwardCompat) {
+    return [
+      'Where the change touches them, the spec must also address the operational and lifecycle',
+      'dimensions a reviewer will check: observability (logging/metrics for the new behavior),',
+      'rollback (how to undo it), data/schema migration impact (safe and reversible), and backward',
+      'compatibility for existing callers and stored data. Omit a dimension only when it genuinely',
+      'does not apply to this change.',
+    ];
+  }
+  const clauses = [
+    observability ? 'observability (logging/metrics for the new behavior)' : '',
+    operational
+      ? 'rollback (how to undo it), data/schema migration impact (safe and reversible)'
+      : '',
+    backwardCompat ? 'backward compatibility for existing callers and stored data' : '',
+  ].filter(Boolean);
+  if (clauses.length === 0) return [];
+  return [
+    'Where the change touches them, the spec must also address the operational and lifecycle',
+    `dimensions a reviewer will check: ${clauses.join('; ')}. Omit one only when it genuinely does`,
+    'not apply to this change.',
+  ];
 }
 
 interface PrePlanningDetect {
@@ -49,6 +97,12 @@ interface PrePlanningDetect {
    *  is the normal case and must change nothing about this step. */
   planIndex: string;
   planRepositoryId: string | null;
+  /** Review dimensions this repository scores changes against (ids from
+   *  REVIEW_DIMENSIONS). Resolved at REPO scope, not task: 06-run-config runs at
+   *  index 6.05 and this step is index 4, so the per-task override does not exist
+   *  yet — reading it here would apply a narrowing the user makes later to a spec
+   *  that was already written. */
+  reviewDimensionIds: string[];
 }
 
 /** The plan canvas as a compact index for the spec prompt: titles, ids, kinds and
@@ -382,6 +436,9 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
       kbReferences,
       isBugFix: isBugBranch(meta.title, meta.description, meta.category),
       priorRejectionFeedback: await loadOutstandingSpecFeedback(ctx),
+      reviewDimensionIds: (
+        await resolveTaskReviewDimensions(ctx.db, ctx.taskId, 'repo')
+      ).enabled.map((d) => d.id),
       ...(await loadPlanIndex(ctx)),
     };
   },
@@ -454,6 +511,10 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
             'it; otherwise follow the protocol below.',
           ].join('\n'),
         ),
+        // Last word on scope, against the repo's own technical-spec-writer.md — which
+        // the clause above tells this agent to follow and which names all 14. Empty
+        // when nothing is excluded, so a default run is what it always was.
+        ...dimensionScopeLines(detected.reviewDimensionIds),
         'You are the pre-planning phase of an engineering workflow.',
         'Produce a concise draft specification for the task below.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
@@ -474,11 +535,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
             ].join('\n')
           : '',
         'The spec body must include sections: Goal, Approach, Risks, Acceptance criteria.',
-        'Where the change touches them, the spec must also address the operational and lifecycle',
-        'dimensions a reviewer will check: observability (logging/metrics for the new behavior),',
-        'rollback (how to undo it), data/schema migration impact (safe and reversible), and backward',
-        'compatibility for existing callers and stored data. Omit a dimension only when it genuinely',
-        'does not apply to this change.',
+        ...operationalDimensionLines(detected.reviewDimensionIds),
         'Ground every claim in the discovery summary — do not invent details.',
         '',
         'How to research — follow this order:',

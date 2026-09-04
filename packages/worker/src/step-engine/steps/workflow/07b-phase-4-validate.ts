@@ -22,8 +22,13 @@ import { loadTaskMeta } from './_task-meta.js';
 import { loadHonoredConstraints } from './_fix-loop.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
-import { coerceReviewSeverity } from '@haive/shared/review';
-import type { ReviewSeverity } from '@haive/shared/review';
+import {
+  coerceReviewSeverity,
+  numberedDimensionBlock,
+  resolveReviewDimensions,
+} from '@haive/shared/review';
+import type { ReviewDimension, ReviewSeverity } from '@haive/shared/review';
+import { resolveTaskReviewDimensions } from '../../review-dimension-context.js';
 import { recordReviewFindings, splitLocation } from './_review-findings.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ensureAppServing } from './_app-runtime.js';
@@ -77,6 +82,12 @@ interface ValidateDetect {
    *  protocol instead of the code one. Resolved in detect() for the same reason as
    *  promptDefectCapture above. */
   docsOnly: boolean;
+  /** Review dimensions in scope for this run (ids from REVIEW_DIMENSIONS). Resolved
+   *  in detect() from the task override falling back to the repository policy, and
+   *  carried as IDS rather than objects so a replayed detect_output stays valid
+   *  across a catalog change — buildPrompt re-resolves them against the current
+   *  catalog and simply drops any id that no longer exists. */
+  reviewDimensionIds: string[];
 }
 
 export type ValidationVerdict = 'VALID' | 'ISSUES_FOUND' | 'UNPARSEABLE';
@@ -99,6 +110,11 @@ interface ValidateApply {
   summary: string;
   issues: ValidationIssue[];
   dimensions: DimensionResult[];
+  /** Labels of the dimensions this run did NOT score, because the repository or the
+   *  task scoped them out. Recorded so gate-2 can say so: a review that skipped a
+   *  dimension produces exactly the same empty finding list as one that checked it
+   *  and found nothing, and only this field tells them apart. */
+  excludedDimensions: string[];
   /** False when the validator re-flagged the same file across CHURN_FILE_THRESHOLD
    *  validator passes (non-converging). A false value routes the run to a human
    *  decision at gate-2 instead of another fix round. */
@@ -280,99 +296,88 @@ const SEARCH_LADDER = [
 // names are kept as EXAMPLES ("e.g. ... or your framework's equivalent") so the
 // validator works on any target repo; the legacy RAG/LSP sections are replaced
 // by the house search ladder and "code-navigation tools if available".
-const CODE_VALIDATOR_DEFINITION = [
-  'You are the Implementation Validator, a specialized agent that verifies implementation',
-  'correctness before browser testing begins. You catch logic errors early.',
-  '',
-  'Core responsibilities:',
-  '1. Verify Spec Compliance - the code does what the spec says',
-  '2. Check Logic Correctness - algorithms and conditionals are right',
-  '3. Validate Edge Cases - boundary conditions are handled',
-  '4. Confirm Error Handling - failures are handled gracefully',
-  '5. Detect and REMOVE Dead Code - unused functions/code left behind by refactoring',
-  '6. Validate All Review Dimensions - verify the actual code satisfies each dimension the spec',
-  '   promised; mismatches between spec promises and code are validation failures.',
-  '',
-  'Execution protocol:',
-  '',
-  'Step 1 - Review the specification: functional requirements, edge cases, error handling.',
-  '',
-  'Step 2 - Read the implementation: each changed file completely; map code flow to requirements',
-  '(use code-navigation tools if available, else grep). The changed-file list names the lines',
-  'this change wrote beside each path — read the rest of a file for context, and judge the change',
-  'by what it wrote. A file listed with no line note has none recorded: treat all of it as',
-  'changed.',
-  '',
-  'Step 3 - Validate logic: for each requirement verify the code implements it, the logic is',
-  'correct, edge cases are handled, errors are handled. Trace execution mentally with sample data;',
-  'check boundary conditions (0, 1, max, null); verify conditional branches; check loop termination.',
-  '',
-  'Step 3.5 - Failure, replay and safeguard pass: beyond happy-path correctness, evaluate the change',
-  'against each of these four questions and record any it fails as an issue (this is where the most',
-  'expensive bugs hide — a right line that should exist and does not):',
-  QA_LENS_NUMBERED,
-  '',
-  'Step 4 - Refactoring impact check (HIGH PRIORITY, WHOLE CODEBASE, BLOCKING): if ANY function was',
-  'renamed or removed in this implementation, search the ENTIRE codebase for calls to the old name',
-  '(grep -rn / find-references). If references exist outside the modified files, UPDATE those',
-  'callers to the new name (or restore the old function if removal was premature). FAIL if any old',
-  'name is still called anywhere. Document every change made to external files.',
-  '',
-  'Step 5 - Dead code detection (SCOPED TO MODIFIED FILES ONLY - do not scan the whole codebase):',
-  'unused functions (zero references), unused variables, unreachable code after return/exit,',
-  'commented-out code, deprecated functions replaced in this change. REMOVE dead code immediately -',
-  'do not leave it "for reference"; git history exists for that.',
-  '',
-  "Step 6 - UI language validation: all new/modified user-facing strings match the project's UI",
-  'language (from project config such as .claude/project-config.yaml ui_language when present, else',
-  'infer from the existing UI strings) and are wrapped in the translation mechanism the project',
-  'uses (e.g. t() / framework equivalent). Check labels, options, error messages, descriptions.',
-  '',
-  'Step 7 - Review dimensions validation (MANDATORY): for each dimension below ask "does the code,',
-  'as written, match what the spec promised?" Score PASS / FAIL / N/A:',
-  '1. Security - spec-named inputs validated/escaped at entry; required permission/authz gates',
-  '   present; no hardcoded secrets; parameterized queries; output escaped (e.g. check_plain()/',
-  "   filter_xss() or your framework's escaping)",
-  '2. Maintainability - no hidden complexity that should be config; no new helper duplicating an',
-  '   existing function; new code in the right file/module',
-  '3. Testability - every spec-listed error branch is triggerable; functions not monolithic; no',
-  '   hidden time/random/network dependencies (or isolated behind an injectable seam)',
-  '4. Usability - user-facing strings exist and are correct; error messages user-friendly;',
-  '   confirmation prompts for destructive actions the spec names (visual checks happen later in',
-  '   browser testing)',
-  '5. Stability - dependency failures (DB, HTTP, file IO) caught and handled per spec; no empty',
-  '   catch blocks; any write/charge/external-effect that can run twice (retry, redelivery,',
-  '   double-submit) is guarded against double-writes (idempotency key, dedupe, upsert, or unique',
-  '   constraint), whether or not the spec named it idempotent',
-  '6. Performance - no new N+1 queries; new WHERE/ORDER BY columns indexed per spec; no blocking',
-  '   external HTTP on the request hot path',
-  '7. Observability - failure paths log with context; no silent catches (log OR rethrow OR typed',
-  '   error); logged context sufficient to debug from the log alone',
-  '8. Operational Readiness - migrations (e.g. hook_update_N or framework equivalent) idempotent',
-  '   and present where required; post-deploy cache clears documented; cron impact reasonable',
-  '9. Data Integrity - atomic operations wrapped in transactions; cascading deletes honored;',
-  '   server-side validation at every boundary; read-modify-write races identified',
-  '10. Developer Experience - matches existing structure and naming; comments only where',
-  '    non-obvious; no "TODO: figure out later" left in code',
-  '11. Accessibility - ARIA labels per spec; form fields labeled; keyboard navigation works; color',
-  '    not the sole carrier of information',
-  '12. Internationalization - cross-reference Step 6 findings',
-  '13. Backward Compatibility - renamed functions/hooks/services have all callers updated',
-  '    (cross-reference Step 4); schema drops/renames have a migration path; public API signatures',
-  '    unchanged or additive',
-  '14. Privacy / Compliance - spec-named PII stored/logged per spec; audit trail for sensitive',
-  '    actions; retention rules respected',
-  '',
-  'Anti-patterns (what NOT to do): do not assume code is correct because it exists; do not skip',
-  "edge-case validation; do not only check that code runs (check that it's RIGHT); do not miss",
-  'missing functionality.',
-  '',
-  ...SCOPE_FENCE_REPORT_ONLY,
-  '',
-  'You may fix what your protocol REQUIRES you to fix (stale callers in Step 4, dead-code removal',
-  'in Step 5) by editing files directly. All OTHER issues you find are reported, not fixed - a',
-  'separate fix agent applies them.',
-] as const;
+/** Step 7's dimension table, built from the dimensions in scope for this run.
+ *
+ *  The header is kept separate from the rows so an empty scope still tells the
+ *  agent what to emit: the JSON contract below always asks for a `dimensions`
+ *  array, and silently dropping the section would leave the agent to invent a
+ *  table from the persona it inherited. */
+function reviewDimensionSection(dimensions: readonly ReviewDimension[]): string[] {
+  if (dimensions.length === 0) {
+    return [
+      'Step 7 - Review dimensions validation: this project has scoped every review dimension out of',
+      'this run. Skip the dimension table and emit an empty "dimensions" array in your JSON.',
+    ];
+  }
+  return [
+    'Step 7 - Review dimensions validation (MANDATORY): for each dimension below ask "does the code,',
+    'as written, match what the spec promised?" Score PASS / FAIL / N/A:',
+    ...numberedDimensionBlock(dimensions),
+  ];
+}
+
+function codeValidatorDefinition(dimensions: readonly ReviewDimension[]): readonly string[] {
+  return [
+    'You are the Implementation Validator, a specialized agent that verifies implementation',
+    'correctness before browser testing begins. You catch logic errors early.',
+    '',
+    'Core responsibilities:',
+    '1. Verify Spec Compliance - the code does what the spec says',
+    '2. Check Logic Correctness - algorithms and conditionals are right',
+    '3. Validate Edge Cases - boundary conditions are handled',
+    '4. Confirm Error Handling - failures are handled gracefully',
+    '5. Detect and REMOVE Dead Code - unused functions/code left behind by refactoring',
+    '6. Validate All Review Dimensions - verify the actual code satisfies each dimension the spec',
+    '   promised; mismatches between spec promises and code are validation failures.',
+    '',
+    'Execution protocol:',
+    '',
+    'Step 1 - Review the specification: functional requirements, edge cases, error handling.',
+    '',
+    'Step 2 - Read the implementation: each changed file completely; map code flow to requirements',
+    '(use code-navigation tools if available, else grep). The changed-file list names the lines',
+    'this change wrote beside each path — read the rest of a file for context, and judge the change',
+    'by what it wrote. A file listed with no line note has none recorded: treat all of it as',
+    'changed.',
+    '',
+    'Step 3 - Validate logic: for each requirement verify the code implements it, the logic is',
+    'correct, edge cases are handled, errors are handled. Trace execution mentally with sample data;',
+    'check boundary conditions (0, 1, max, null); verify conditional branches; check loop termination.',
+    '',
+    'Step 3.5 - Failure, replay and safeguard pass: beyond happy-path correctness, evaluate the change',
+    'against each of these four questions and record any it fails as an issue (this is where the most',
+    'expensive bugs hide — a right line that should exist and does not):',
+    QA_LENS_NUMBERED,
+    '',
+    'Step 4 - Refactoring impact check (HIGH PRIORITY, WHOLE CODEBASE, BLOCKING): if ANY function was',
+    'renamed or removed in this implementation, search the ENTIRE codebase for calls to the old name',
+    '(grep -rn / find-references). If references exist outside the modified files, UPDATE those',
+    'callers to the new name (or restore the old function if removal was premature). FAIL if any old',
+    'name is still called anywhere. Document every change made to external files.',
+    '',
+    'Step 5 - Dead code detection (SCOPED TO MODIFIED FILES ONLY - do not scan the whole codebase):',
+    'unused functions (zero references), unused variables, unreachable code after return/exit,',
+    'commented-out code, deprecated functions replaced in this change. REMOVE dead code immediately -',
+    'do not leave it "for reference"; git history exists for that.',
+    '',
+    "Step 6 - UI language validation: all new/modified user-facing strings match the project's UI",
+    'language (from project config such as .claude/project-config.yaml ui_language when present, else',
+    'infer from the existing UI strings) and are wrapped in the translation mechanism the project',
+    'uses (e.g. t() / framework equivalent). Check labels, options, error messages, descriptions.',
+    '',
+    ...reviewDimensionSection(dimensions),
+    '',
+    'Anti-patterns (what NOT to do): do not assume code is correct because it exists; do not skip',
+    "edge-case validation; do not only check that code runs (check that it's RIGHT); do not miss",
+    'missing functionality.',
+    '',
+    ...SCOPE_FENCE_REPORT_ONLY,
+    '',
+    'You may fix what your protocol REQUIRES you to fix (stale callers in Step 4, dead-code removal',
+    'in Step 5) by editing files directly. All OTHER issues you find are reported, not fixed - a',
+    'separate fix agent applies them.',
+  ];
+}
 
 // The documentation validator, used when the change set is documentation only
 // (isDocsOnlyChange). A separate protocol rather than the code one with most rows
@@ -455,8 +460,18 @@ const DOC_VALIDATOR_DEFINITION = [
 
 /** The protocol this pass runs. Documentation-only changes get their own; everything
  *  else gets the code protocol, byte-for-byte as before this branch existed. */
-function validatorDefinition(docsOnly: boolean): readonly string[] {
-  return docsOnly ? DOC_VALIDATOR_DEFINITION : CODE_VALIDATOR_DEFINITION;
+function validatorDefinition(
+  docsOnly: boolean,
+  dimensions: readonly ReviewDimension[],
+): readonly string[] {
+  return docsOnly ? DOC_VALIDATOR_DEFINITION : codeValidatorDefinition(dimensions);
+}
+
+/** Re-resolve the stored ids against the current catalog. Both prompt builders go
+ *  through here so the validator and its re-validation pass cannot disagree about
+ *  what is in scope mid-loop. */
+function dimensionsFor(d: ValidateDetect): ReviewDimension[] {
+  return resolveReviewDimensions(d.reviewDimensionIds).enabled;
 }
 
 /** The evidence bar for the FIXER pass on a documentation-only change. The validator
@@ -486,11 +501,15 @@ function specHeading(docsOnly: boolean): string {
 // produces (refactoring impact, dead code, UI language), the documentation pass names
 // its own. The JSON shape below is identical for both — `dimensions[].name` is free
 // text, so a different dimension set needs no contract change.
-const CODE_REPORT_CONTENTS = [
-  'First write your full validation report as markdown (verdict, requirement table, issues with',
-  'file:line + suggested fix, refactoring-impact result, dead code removed, UI language findings,',
-  'the 14-dimension table with PASS/FAIL/N/A).',
-] as const;
+function codeReportContents(dimensionCount: number): string[] {
+  return [
+    'First write your full validation report as markdown (verdict, requirement table, issues with',
+    'file:line + suggested fix, refactoring-impact result, dead code removed, UI language findings,',
+    dimensionCount > 0
+      ? `the ${dimensionCount}-dimension table with PASS/FAIL/N/A).`
+      : 'and no dimension table — every dimension is out of scope for this run).',
+  ];
+}
 
 const DOC_REPORT_CONTENTS = [
   'First write your full validation report as markdown (verdict, the claim-by-claim verification',
@@ -511,14 +530,17 @@ const DOC_VERDICT_KEY = [
   'remain that a fix agent must address; list each one.',
 ] as const;
 
-function outputContract(docsOnly: boolean): string[] {
+function outputContract(docsOnly: boolean, dimensions: readonly ReviewDimension[]): string[] {
+  // The example name is drawn from the set actually in scope: naming an excluded
+  // dimension in the contract invites the agent to score it back in.
+  const exampleDimension = docsOnly ? 'Security' : (dimensions[0]?.label ?? 'Security');
   return [
-    ...(docsOnly ? DOC_REPORT_CONTENTS : CODE_REPORT_CONTENTS),
+    ...(docsOnly ? [...DOC_REPORT_CONTENTS] : codeReportContents(dimensions.length)),
     'Then emit ONE JSON object inside a ```json fenced code block as the FINAL thing in your',
     'response, with EXACTLY this shape:',
     '{ "verdict": "VALID|ISSUES_FOUND", "summary": "<one paragraph>", "issues": [{ "severity":',
     '"critical|high|medium|low", "file": "path:line", "description": "...", "fix": "<required fix>" }],',
-    '"dimensions": [{ "name": "Security", "status": "PASS|FAIL|N/A", "note": "<one line>" }] }',
+    `"dimensions": [{ "name": "${exampleDimension}", "status": "PASS|FAIL|N/A", "note": "<one line>" }] }`,
     ...(docsOnly ? DOC_VERDICT_KEY : CODE_VERDICT_KEY),
   ];
 }
@@ -634,6 +656,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       browserTesting,
       promptDefectCapture: await isStepGuidanceEnabled(ctx.db, ctx.taskId),
       docsOnly: isDocsOnlyChange(implementationFiles),
+      reviewDimensionIds: (await resolveTaskReviewDimensions(ctx.db, ctx.taskId)).enabled.map(
+        (d) => d.id,
+      ),
     };
   },
 
@@ -662,7 +687,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       // without this pass having run. See assertReviewableChange.
       assertReviewableChange('07b-phase-4-validate', d.implementationFiles);
       return [
-        ...validatorDefinition(d.docsOnly),
+        ...validatorDefinition(d.docsOnly, dimensionsFor(d)),
         '',
         '=== Your assignment ===',
         `An implementation just finished in the workspace: ${d.sandboxWorktreePath}`,
@@ -679,7 +704,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         'and do NOT run the test suite (a later step does).',
         ...SEARCH_LADDER,
         '',
-        ...outputContract(d.docsOnly),
+        ...outputContract(d.docsOnly, dimensionsFor(d)),
         '',
         specHeading(d.docsOnly),
         d.spec || '(no brief recorded)',
@@ -763,7 +788,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       // Validator re-pass after fixes.
       const fixes = accumulatedFixes(previousIterations);
       return [
-        ...validatorDefinition(d.docsOnly),
+        ...validatorDefinition(d.docsOnly, dimensionsFor(d)),
         '',
         '=== Your assignment (RE-VALIDATION) ===',
         `A fix agent just addressed your previous findings in the workspace: ${d.sandboxWorktreePath}`,
@@ -784,7 +809,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         'Do NOT run git and do NOT run the test suite.',
         ...SEARCH_LADDER,
         '',
-        ...outputContract(d.docsOnly),
+        ...outputContract(d.docsOnly, dimensionsFor(d)),
         '',
         specHeading(d.docsOnly),
         d.spec || '(no brief recorded)',
@@ -798,6 +823,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
   async apply(ctx, args): Promise<ValidateApply> {
     const previous = args.previousIterations;
     const fixesSoFar = accumulatedFixes(previous);
+    // What nobody scored. Recorded on EVERY return, including the parse-miss one:
+    // gate-2 renders it so a narrowed review is never read as a clean one, and the
+    // pass with the fewest findings is exactly the pass where that matters most.
+    const excludedDimensions = resolveReviewDimensions(
+      (args.detected as ValidateDetect).reviewDimensionIds,
+    ).excluded.map((d) => d.label);
     const validatorPasses = previous.filter(
       (p) => (p.applyOutput as ValidateApply | undefined)?.source !== 'fixer',
     ).length;
@@ -820,6 +851,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         summary: prior?.summary ?? '',
         issues: prior?.issues ?? [],
         dimensions: prior?.dimensions ?? [],
+        excludedDimensions,
         converged: prior?.converged ?? true,
         churnFiles: prior?.churnFiles ?? [],
         fixesApplied: allFixes,
@@ -888,6 +920,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         summary: parsed.summary,
         issues: parsed.issues,
         dimensions: parsed.dimensions,
+        excludedDimensions,
         converged: churnFiles.length === 0,
         churnFiles,
         fixesApplied: fixesSoFar,
@@ -909,6 +942,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       summary: 'Validator output could not be parsed; review the raw report at gate 2.',
       issues: [],
       dimensions: [],
+      excludedDimensions,
       converged: true,
       churnFiles: [],
       fixesApplied: fixesSoFar,

@@ -1,0 +1,28 @@
+-- Which review dimensions a change is scored against, so a project that has no
+-- accessibility requirement is not billed for an a11y reviewer on every task.
+-- The canonical set is REVIEW_DIMENSIONS in @haive/shared/review; these columns
+-- hold its ids.
+--
+-- Two levels, because they answer different questions. The repository column is
+-- the POLICY ("we build intranet tools, we do not review a11y") and is the only
+-- one the upstream steps can see: discovery (03) and the spec writer (04) run at
+-- indexes 3 and 4, before the run-config form at 6.05. The task column is a
+-- one-off deviation and therefore only reaches the REVIEW steps (07b, 08c).
+-- Resolution is task ?? repository ?? every dimension.
+--
+-- NULL, not a default array. `[]` means "score nothing" and NULL means "never
+-- chosen"; collapsing them would make an operator who unticked everything
+-- indistinguishable from a repository nobody has configured. NULL is also the
+-- honest value for every existing row — it resolves to all 14, which is exactly
+-- what those repositories and tasks were already reviewed against, so this
+-- migration changes no behaviour anywhere.
+--
+-- Additive and idempotent. No backfill: see above, NULL already means today.
+--
+-- Rollback: remove `reviewDimensions` from `schema/repos.ts` and `schema/tasks.ts` and
+--   ALTER TABLE "repositories" DROP COLUMN IF EXISTS "review_dimensions";
+--   ALTER TABLE "tasks" DROP COLUMN IF EXISTS "review_dimensions";
+-- Every reader falls back to the full set when the value is absent, so the
+-- reviewers return to scoring all 14 and nothing else changes.
+ALTER TABLE "repositories" ADD COLUMN IF NOT EXISTS "review_dimensions" text[];
+ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "review_dimensions" text[];

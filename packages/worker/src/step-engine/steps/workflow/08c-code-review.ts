@@ -44,6 +44,10 @@ import {
 } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 import {
+  dimensionScopeLines,
+  resolveTaskReviewDimensions,
+} from '../../review-dimension-context.js';
+import {
   findingFingerprint,
   hasFileLineEvidence,
   loadFindingRecurrence,
@@ -79,6 +83,10 @@ interface CodeReviewDetect {
    *  invited to name an INSTRUCTION defect behind the findings it raised. Resolved in
    *  detect() and carried on the payload because the prompt builders are pure. */
   promptDefectCapture: boolean;
+  /** Review dimensions in scope (ids from REVIEW_DIMENSIONS), task override falling
+   *  back to the repository policy. Carried as ids for the same reason 07b does:
+   *  a replayed detect_output survives a catalog change. */
+  reviewDimensionIds: string[];
 }
 
 interface PeerFinding {
@@ -662,6 +670,11 @@ const SEVERITY_GUIDANCE = [
   'not for emphasis. When a finding is real but the code would still work, it is medium or low.',
 ].join('\n');
 
+// The full 14 stay named here verbatim. Narrowing is applied by the scope-override
+// block buildPeerPrompt appends AFTER this persona, never by editing this list: the
+// clause above it tells the reviewer that the repo's own
+// `.claude/agents/peer-reviewer.md` outranks this text, and that file names all 14
+// too. Trimming only the copy a repo has already been told to ignore narrows nothing.
 const PEER_PERSONA = [
   'You are the Peer Reviewer. Catch bugs and improve quality before merge while keeping feedback',
   'constructive — name what is wrong with a concrete fix, name what was done well, and NEVER',
@@ -814,6 +827,12 @@ function reviewAssignment(d: CodeReviewDetect): string {
     .join('\n');
 }
 
+/** The scope override plus the blank line that separates it from the persona. */
+function peerScopeLines(d: CodeReviewDetect): string[] {
+  const lines = dimensionScopeLines(d.reviewDimensionIds);
+  return lines.length > 0 ? ['', ...lines] : [];
+}
+
 function buildPeerPrompt(d: CodeReviewDetect): string {
   return [
     agentDefinitionGuidance(
@@ -824,6 +843,10 @@ function buildPeerPrompt(d: CodeReviewDetect): string {
       ].join('\n'),
     ),
     ...PEER_PERSONA,
+    // Last word on scope. Spread rather than filtered in, because the '' entries
+    // around it are deliberate blank lines: a default run (nothing excluded) must
+    // emit the prompt it always did, separators included.
+    ...peerScopeLines(d),
     '',
     ...REPO_IS_DATA_LINES,
     '',
@@ -1081,6 +1104,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       debtBlock,
       level,
       promptDefectCapture: await isStepGuidanceEnabled(ctx.db, ctx.taskId),
+      reviewDimensionIds: (await resolveTaskReviewDimensions(ctx.db, ctx.taskId)).enabled.map(
+        (d) => d.id,
+      ),
     };
   },
 
