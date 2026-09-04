@@ -17,7 +17,18 @@ services:
       - "11434:11434"
 
   db-migrate:
-    image: node:26-alpine
+    # GLIBC, not alpine, and the only service where the choice is load-bearing: this is the
+    # one container with no node_modules volume override (see the CI note below), so its
+    # `pnpm install` lands in the bind-mounted HOST tree and the store it writes is the store
+    # the host reads. pnpm resolves native optional deps for the libc it is running on, so an
+    # alpine install filled that shared store with musl builds — MEASURED: only
+    # `@rolldown+binding-linux-x64-musl@1.2.4` was present, against a host on GLIBC 2.39, so
+    # every host `pnpm test` died in rolldown with "Cannot find native binding" and a cause of
+    # `Cannot find module '@rolldown/binding-wasm32-wasi'` — the fallback nobody installed
+    # either. The error names npm's optional-dependency bug, which is a red herring here: the
+    # dep resolved correctly, for the wrong libc. bookworm-slim matches the supported host
+    # (WSL2 + Ubuntu) and is already what docker/*/Dockerfile use.
+    image: node:26-bookworm-slim
     container_name: haive-db-migrate
     depends_on:
       postgres:
@@ -35,10 +46,19 @@ services:
       # the one service with no node_modules volume override, so it installs directly
       # into the bind-mounted host tree and is the only one exposed to that purge.
       CI: "true"
+    # The chown is the second half of the same shared-tree problem: this container has no
+    # USER, so everything its install writes onto the bind mount lands root-owned, and the
+    # developer is uid 1000 — leaving `node_modules/.pnpm` root:root 755 and a host
+    # `pnpm install` unable to repair the store it just read. Handing the tree back is the
+    # whole fix, exactly as scripts/build-libs.sh already does for packages/*/dist. Owner is
+    # read from /app as the container sees it, so no UID/GID is plumbed in from the host, and
+    # a mount that cannot represent ownership makes it a harmless no-op rather than a failure.
+    # `$$` is compose's escape for a literal `$`.
     command: >
       sh -c "npm install -g corepack@latest &&
              corepack enable &&
              pnpm install --frozen-lockfile=false &&
+             ( chown -R $$(stat -c '%u:%g' /app) /app/node_modules 2>/dev/null || true ) &&
              pnpm --filter @haive/database push --force"
     networks:
       - haive-network

@@ -274,8 +274,16 @@ and web keep serving across it. If a host build ever fails with TS5033/EACCES un
 `pnpm install` is the one to prefer running through `pnpm docker rebuild`. api, worker and
 web each mask `node_modules` with a named volume, so a host install cannot reach them — but
 `db-migrate` is the single service with no such override and installs as root straight into
-the bind-mounted host tree, and nothing chowns `node_modules` back. A host install is not
-destructive, it just races that one container.
+the bind-mounted host tree. A host install is not destructive, it just races that one
+container. Two things follow from that shared tree, and BOTH are load-bearing in
+`docker-compose.dev.yml`: db-migrate runs on `node:26-bookworm-slim` rather than alpine,
+because pnpm resolves native optional deps for the libc it runs on and an alpine install
+filled the host's store with musl builds (host `pnpm test` then died in rolldown with
+"Cannot find native binding", whose named cause — a missing wasm fallback — is a red
+herring: the dep resolved fine, for the wrong libc); and its command chowns
+`/app/node_modules` back to the repo owner, the same dance `scripts/build-libs.sh` does for
+`packages/*/dist`, since otherwise the tree it writes is root-owned and the host cannot
+re-install to repair the store it just read.
 
 For source-only changes to the api, worker, or web app, rely on the bind-mounted source and
 the service's dev watcher first; confirm the loaded source and the logs before deciding a
