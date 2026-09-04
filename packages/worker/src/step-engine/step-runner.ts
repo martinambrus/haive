@@ -2724,22 +2724,38 @@ function buildStepSummaryPrompt(stepTitle: string, output: unknown, rawOutput: s
   ].join('\n');
 }
 
+/** How much agent text the fan-out summary prompt may carry, and how many agents it may
+ *  name. Both are HARD caps. The previous rule divided 7000 by the agent count but then
+ *  floored the result at 800, which makes the prompt grow without bound past ~8 agents —
+ *  its comment assumed "2-6 depending on QA level", written before plan mining fanned out
+ *  to 61-623 agents on one step.
+ *
+ *  MEASURED on the dev install, across every step-summary invocation ever run: 71 agents
+ *  produced a 62,212-character prompt, 70 produced 52,875 and 623 produced 53,720, and all
+ *  three were killed by the pass's own 60s budget having written nothing; the three runs
+ *  near 8,000 characters all succeeded. The correlation is the whole sample. */
+const SUMMARY_AGENT_TEXT_BUDGET = 7000;
+const SUMMARY_AGENT_LIMIT = 12;
+
 /** Multi-agent variant of buildStepSummaryPrompt. agentMining steps (code review,
  *  discovery, adversarial QA, skill generation) run several agents in parallel, each
  *  writing its own task_step_agent_minings row. Summarize what EACH agent did so the
  *  "What the agent did" panel reflects the whole fan-out, not a single terminal. */
-function buildAgentMiningSummaryPrompt(
+export function buildAgentMiningSummaryPrompt(
   stepTitle: string,
   output: unknown,
   agents: Array<{ title: string; text: string }>,
 ): string {
   const structured = JSON.stringify(output ?? {}, null, 2).slice(0, 3000);
-  // Budget the raw text across agents so the prompt stays bounded regardless of how
-  // many agents ran (2-6 depending on QA level).
-  const perAgent = Math.max(800, Math.floor(7000 / Math.max(agents.length, 1)));
-  const blocks = agents
-    .map((a) => [`### ${a.title}`, a.text.slice(0, perAgent)].join('\n'))
-    .join('\n\n');
+  // Cap the agents NAMED as well as the text they contribute. Past a dozen, a line per
+  // agent stops being the short recap the panel is sized for, so the elision is stated in
+  // the prompt and the closing instruction changes shape rather than asking for 70 lines.
+  const shown = agents.slice(0, SUMMARY_AGENT_LIMIT);
+  const omitted = agents.length - shown.length;
+  const perAgent = Math.max(1, Math.floor(SUMMARY_AGENT_TEXT_BUDGET / Math.max(shown.length, 1)));
+  const blocks =
+    shown.map((a) => [`### ${a.title}`, a.text.slice(0, perAgent)].join('\n')).join('\n\n') +
+    (omitted > 0 ? `\n\n… and ${omitted} more agents, not shown.` : '');
   return [
     `Several automated agents ran in parallel during a workflow step titled "${stepTitle}".`,
     'Each agent and its final message:',
@@ -2752,10 +2768,15 @@ function buildAgentMiningSummaryPrompt(
     structured,
     '```',
     '',
-    'Summarize what each agent did: one short line per agent in the form ' +
-      '"Agent Name — what it found or concluded", leading each line with the agent name ' +
-      'exactly as given above. End with a final line stating the overall outcome (e.g. the ' +
-      'blocking verdict). Write only the summary: no preamble, no extra headings, no JSON.',
+    omitted > 0
+      ? `Those are ${shown.length} of ${agents.length} agents. Summarize the whole fan-out in ` +
+        'at most 5 lines: what the agents were doing and what they found, then a final line ' +
+        'stating the overall outcome (e.g. the blocking verdict). Do NOT write one line per ' +
+        'agent. Write only the summary: no preamble, no extra headings, no JSON.'
+      : 'Summarize what each agent did: one short line per agent in the form ' +
+        '"Agent Name — what it found or concluded", leading each line with the agent name ' +
+        'exactly as given above. End with a final line stating the overall outcome (e.g. the ' +
+        'blocking verdict). Write only the summary: no preamble, no extra headings, no JSON.',
   ].join('\n');
 }
 

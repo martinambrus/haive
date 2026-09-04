@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
-import { advanceStep } from '../src/step-engine/step-runner.js';
+import { advanceStep, buildAgentMiningSummaryPrompt } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
@@ -271,5 +271,42 @@ describe('per-step summarizer provider choice', () => {
     );
     expect(summaries(enqueued)).toHaveLength(0);
     expect(state.inserts.filter((i) => i.row.agentTitle === 'Step summary')).toHaveLength(0);
+  });
+});
+
+describe('fan-out summary prompt is bounded', () => {
+  const agents = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      title: `Agent ${i}`,
+      // Far longer than any per-agent budget, so the cap is what decides the size.
+      text: 'x'.repeat(20_000),
+    }));
+
+  it('stays the same size whether 8 agents ran or 623', () => {
+    // The old rule (`Math.max(800, 7000 / n)`) grew linearly past ~8 agents. MEASURED on
+    // the dev install: 71 agents produced a 62,212-char prompt, 623 produced 53,720, and
+    // every prompt over ~50 KB was killed by the pass's own 60s budget having written
+    // nothing. 8 agents produced 7,999 chars and succeeded.
+    const small = buildAgentMiningSummaryPrompt('step', {}, agents(8));
+    const huge = buildAgentMiningSummaryPrompt('step', {}, agents(623));
+    expect(small.length).toBeLessThan(12_000);
+    expect(huge.length).toBeLessThan(12_000);
+    // The 62 KB prompt is what the cap exists to prevent; assert the actual regression
+    // bound, not merely "smaller than before".
+    expect(huge.length).toBeLessThan(small.length * 1.5);
+  });
+
+  it('names the agents it dropped rather than silently truncating', () => {
+    const prompt = buildAgentMiningSummaryPrompt('step', {}, agents(70));
+    expect(prompt).toContain('and 58 more agents, not shown.');
+    // Past the limit, one line per agent is not the recap the panel is sized for.
+    expect(prompt).toContain('Do NOT write one line per agent');
+    expect(prompt).not.toContain('one short line per agent in the form');
+  });
+
+  it('keeps the per-agent breakdown when the fan-out is small', () => {
+    const prompt = buildAgentMiningSummaryPrompt('step', {}, agents(4));
+    expect(prompt).not.toContain('more agents, not shown');
+    expect(prompt).toContain('one short line per agent in the form');
   });
 });
