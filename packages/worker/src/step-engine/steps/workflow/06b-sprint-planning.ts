@@ -13,6 +13,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveSpecView } from './_spec-artifact.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { buildAnchors, overlapRefinedEstimate } from './_estimate.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
 // Phase 2c — Sprint planning (the DAG decision). An agent reads the spec
 // approved at gate 1 and decides mode 'single' (one implementation agent, the
@@ -131,7 +132,8 @@ const PLANNER_RULES = [
   'together), completable by one agent in one session, scoped to specific spec sections. Use',
   '`depends_on` for ordering and `level` for the dependency wave (0 = no dependencies). Set',
   '`max_parallel` to the widest level size (no hard cap — the runner bounds live parallelism).',
-  'Search the repo with your tools to size issues and list the files each will touch.',
+  'Search the repo to size issues and list the files each will touch, in this order:',
+  ...retrievalGuidanceLines(),
   '',
   'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
   '{',

@@ -14,6 +14,7 @@ import {
   SUPERSEDE_CANDIDATE_LIMIT,
 } from '../_global-kb-similarity.js';
 import { globalKbTopicKey } from '../_global-kb-promote.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { syncGlobalKbEntry } from '../../../queues/global-kb-sync-queue.js';
 
 // Repo-anchored global-KB authoring (plan serialized-crunching-aurora). The task
@@ -126,6 +127,9 @@ function buildEnrichPrompt(detected: KbAuthorDetect): string {
     '',
     '## Existing house rules (for de-duplication)',
     existing,
+    '',
+    '## How to find the code — follow this order',
+    ...retrievalGuidanceLines(),
     '',
     '## Your task',
     '1. READ the relevant module / library / code in THIS repository that the notes refer to.',

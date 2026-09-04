@@ -139,7 +139,8 @@ async function loadLearningSkillSync(
 /** Build one skill's generation prompt. Reuses the shared JSON contract blocks so the
  *  emitted shape is identical to onboarding generation; the framing differs by kind —
  *  an update corrects a named existing skill (id pinned, current SKILL.md shown), a new
- *  one is created for a capability the task added. Grep-first, in-scope only. */
+ *  one is created for a capability the task added. rag_search to aim, grep to confirm,
+ *  in-scope only. */
 function buildSkillSyncPrompt(opts: {
   target: SkillSyncTarget;
   framework: string | null;
@@ -229,11 +230,12 @@ function buildSkillSyncPrompt(opts: {
     '',
     '1. Use the knowledge base above and the change description to fix the exact terminology and the',
     '   module / service / class / route / hook / field names this capability uses.',
+    '2. `rag_search` those terms FIRST. It returns ranked snippets tagged with their SOURCE PATHS, which is what tells you where to aim step 3 — a blind grep for a common term returns the whole tree.',
     opts.scopeExclude.length > 0
-      ? '2. GREP the in-scope directories for those terms (never the out-of-scope dirs listed under "Mining scope") to LOCATE the few files that implement this capability. Lead with Grep/Glob — do NOT read files one by one just to discover what is where.'
-      : '2. GREP the repository for those terms to LOCATE the few files that implement this capability. Lead with Grep/Glob — do NOT read files one by one just to discover what is where.',
-    '3. Read ONLY the located files and their DIRECT dependencies. Stop as soon as you understand THIS capability — do not open unrelated files or walk the whole tree.',
-    '4. Emit the corrected/created skill as JSON (a `skills` array of length 1). Do NOT return an empty array — the skill is required.',
+      ? '3. GREP the in-scope directories for those terms (never the out-of-scope dirs listed under "Mining scope") to CONFIRM what rag_search pointed at and catch what the index missed. The index is rebuilt after the commit gate, so it does not contain this task\'s own edits — for a file this task changed, the disk is the only truth.'
+      : "3. GREP the repository for those terms to CONFIRM what rag_search pointed at and catch what the index missed. The index is rebuilt after the commit gate, so it does not contain this task's own edits — for a file this task changed, the disk is the only truth.",
+    '4. Read ONLY the located files and their DIRECT dependencies. Stop as soon as you understand THIS capability — do not open unrelated files or walk the whole tree.',
+    '5. Emit the corrected/created skill as JSON (a `skills` array of length 1). Do NOT return an empty array — the skill is required.',
     '',
     ...buildSkillContractBlocks(SYNC_MAX_SUB, SYNC_BODY_LEN),
   ]

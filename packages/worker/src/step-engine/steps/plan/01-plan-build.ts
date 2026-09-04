@@ -30,6 +30,7 @@ import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-pr
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import type { PlanInputsApply } from './00-plan-inputs.js';
 
 /**
@@ -346,7 +347,8 @@ function sourceGuidance(d: PlanBuildDetect): string {
       : `This repository has no knowledge base yet.`;
   return [
     kb,
-    'Use `rag_search` to look up how the code is actually organised before naming a component.',
+    'Look up how the code is actually organised before naming a component, in this order:',
+    ...retrievalGuidanceLines(),
     'The plan records what the project is MEANT to be, so a component belongs in it even when',
     'the code for it does not exist yet — but every component that DOES exist should be named',
     'the way the codebase names it, not the way you would have named it.',
@@ -432,6 +434,13 @@ export function buildExpandPrompt(
     'where two things are related. Never point one at its own parent or ancestor, and never',
     'close a loop; neither can be satisfied and both strand every node on them permanently.',
     '',
+    // Gated on from_repo: a greenfield plan has no code to search, and this is also the
+    // prompt 02-plan-coverage reuses for its convergence waves.
+    d.mode === 'from_repo'
+      ? ['How to find the code you name — follow this order:', ...retrievalGuidanceLines()].join(
+          '\n',
+        )
+      : '',
     d.mode === 'from_repo'
       ? [
           'Where a node you name is ALREADY implemented, add `codeLinks` for the files you actually',
