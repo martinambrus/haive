@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { configService } from '@haive/shared';
 import {
-  hasAnyMcpServer,
   MCP_SURFACE_MARKER,
   mcpSurfacePrompt,
   resolveMcpSurface,
@@ -190,12 +189,42 @@ describe('mcpSurfacePrompt', () => {
   });
 
   it('treats an entirely shadowed user set as no user servers at all', () => {
-    const shadowedOnly = surfaceOf({
-      rag: { enabled: false, apiUrl: '', token: '' },
-      userServers: { filesystem: {}, git: {} },
-    });
-    expect(hasAnyMcpServer(shadowedOnly)).toBe(false);
-    expect(withMcpSurface('Classify this.', shadowedOnly)).toBe('Classify this.');
+    const prompt = mcpSurfacePrompt(
+      surfaceOf({
+        rag: { enabled: false, apiUrl: '', token: '' },
+        userServers: { filesystem: {}, git: {} },
+      }),
+    );
+    expect(prompt).not.toContain('Project-configured servers');
+    expect(prompt).not.toContain('MCP tools wired into this run');
+  });
+
+  it('states the rag absence and voids any rag instruction, prompt or agent file', () => {
+    const prompt = mcpSurfacePrompt(surfaceOf({ rag: { enabled: false, apiUrl: '', token: '' } }));
+    expect(prompt).toContain('No `rag_search` (haive-rag) tool is wired into this run');
+    expect(prompt).toContain('Disregard any instruction to search RAG');
+    expect(prompt).toContain('agent');
+    expect(prompt).toContain('grep / ripgrep');
+  });
+
+  it('omits the rag absence paragraph when rag is wired', () => {
+    expect(mcpSurfacePrompt(surfaceOf())).not.toContain('No `rag_search`');
+  });
+
+  // The index is written by 02-pre-rag-sync at run start and 11c-rag-reindex after the
+  // commit gate, so it never holds the task's own edits — and a DAG coder's siblings work
+  // in worktrees the index has never seen at all.
+  it('tells a rag-wired agent what the index cannot contain', () => {
+    const prompt = mcpSurfacePrompt(surfaceOf());
+    expect(prompt).toContain('does NOT contain edits made during this run');
+    expect(prompt).toContain('read the disk');
+  });
+
+  it('states both absences for an adapter that gets no MCP config at all', () => {
+    const prompt = mcpSurfacePrompt(null);
+    expect(prompt).toContain('No `rag_search` (haive-rag) tool is wired into this run');
+    expect(prompt).toContain('No browser and no container tooling are wired into this run');
+    expect(prompt).not.toContain('MCP tools wired into this run');
   });
 });
 
@@ -208,14 +237,16 @@ describe('withMcpSurface', () => {
     expect(once).toMatch(/<haive_mcp_surface>[\s\S]*Review this\.$/);
   });
 
-  it('advertises nothing for an adapter that gets no MCP config at all', () => {
-    expect(withMcpSurface('Review this.', null)).toBe('Review this.');
+  it('states the absence for an adapter that gets no MCP config at all', () => {
+    const prompt = withMcpSurface('Review this.', null);
+    expect(prompt).toContain(MCP_SURFACE_MARKER);
+    expect(prompt).toContain('No `rag_search` (haive-rag) tool is wired into this run');
+    expect(prompt.endsWith('Review this.')).toBe(true);
   });
 
-  it('stays silent when the surface is empty — no list to give, no limit worth stating', () => {
+  it('speaks when the surface is empty — that is the prompt whose body still names rag', () => {
     const bare = surfaceOf({ rag: { enabled: false, apiUrl: '', token: '' } });
-    expect(hasAnyMcpServer(bare)).toBe(false);
-    expect(withMcpSurface('Classify this.', bare)).toBe('Classify this.');
+    expect(withMcpSurface('Classify this.', bare)).toContain('No `rag_search`');
   });
 
   it('speaks as soon as one server is wired, even a user-provided one', () => {
@@ -223,7 +254,6 @@ describe('withMcpSurface', () => {
       rag: { enabled: false, apiUrl: '', token: '' },
       userServers: { 'acme-tickets': {} },
     });
-    expect(hasAnyMcpServer(surface)).toBe(true);
     expect(withMcpSurface('Classify this.', surface)).toContain(MCP_SURFACE_MARKER);
   });
 });

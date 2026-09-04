@@ -5,10 +5,28 @@ import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import type { CliProviderRecord, SubAgentSpec } from '../src/cli-adapters/types.js';
 import {
   agentDefinitionGuidance,
+  buildRetrievalGuidance,
   retrievalGuidanceLines,
 } from '../src/step-engine/steps/_retrieval-guidance.js';
 import { WORKTREE_GIT_BOUNDARY_MARKER } from '../src/repo/worktree-git-boundary.js';
-import type { McpSurface } from '../src/sandbox/mcp-surface.js';
+import { mcpSurfacePrompt, type McpSurface } from '../src/sandbox/mcp-surface.js';
+
+function surface(ragEnabled: boolean): McpSurface {
+  return {
+    ragOnly: false,
+    rag: { enabled: ragEnabled, apiUrl: 'http://api:3001', token: 't' },
+    chromeDevtools: { enabled: false, version: null },
+    ddevControl: { enabled: false, apiUrl: '', token: '' },
+    userServers: {},
+  };
+}
+
+/** What every prompt now carries ahead of its own text. Composed here rather than pasted
+ *  so the byte-exact assertions below keep testing the dispatcher's own transforms and
+ *  not the wording of the surface block. A test that means to exercise the LSP axis must
+ *  pass a rag-enabled surface, or it exercises the rag axis by omission. */
+const NO_MCP = `${mcpSurfacePrompt(null)}\n\n`;
+const RAG_ON = `${mcpSurfacePrompt(surface(true))}\n\n`;
 
 type ProviderOverrides = Partial<CliProviderRecord> & Pick<CliProviderRecord, 'id' | 'name'>;
 
@@ -156,7 +174,7 @@ describe('resolveDispatch', () => {
     expect(plan.mode).toBe('cli');
     if (plan.invocation?.kind === 'cli') {
       expect(plan.invocation.spec.command).toBe('/usr/local/bin/claude');
-      expect(plan.invocation.spec.args).toContain('status?');
+      expect(plan.invocation.spec.args).toContain(`${NO_MCP}status?`);
       expect(plan.invocation.spec.cwd).toBe('/repo');
     }
   });
@@ -169,8 +187,6 @@ describe('resolveDispatch', () => {
       guidance,
       'MIDDLE: the task itself may legitimately discuss LSP architecture.',
       guidance,
-      'Then GROUND every lead with LSP + grep against the CURRENT files on disk (on hits too, not as a fallback): the index can be stale, so a rag_search snippet is a lead to confirm, never the source of truth.',
-      'Validate (rag_search, then ground with LSP + grep).',
       'Sweep renamed calls (grep -rn / find-references).',
       agentDefinitionGuidance(
         'spec-quality-reviewer',
@@ -184,17 +200,22 @@ describe('resolveDispatch', () => {
     const plan = resolveDispatch({
       providers: [provider],
       input: { kind: 'prompt', prompt, capabilities: [] },
+      mcpSurface: surface(true),
       invokeOpts: {},
     });
     const effective = plan.effectivePrompt!;
-    expect(effective.startsWith('PREFIX: keep this byte-for-byte.')).toBe(true);
+    expect(effective.startsWith(`${RAG_ON}PREFIX: keep this byte-for-byte.`)).toBe(true);
     expect(effective.endsWith('SUFFIX: keep this too.')).toBe(true);
     expect(effective).toContain('the task itself may legitimately discuss LSP architecture');
     expect(effective).not.toContain('LSP + grep');
     expect(effective).not.toContain('find-references');
     expect(effective).not.toContain('.claude/agents/spec-quality-reviewer.md');
     expect(effective).not.toContain('HAIVE_AGENT_DEFINITION');
-    expect(effective.match(/grep \+ direct file reads/g)).toHaveLength(6);
+    // Asserted against the builder rather than an occurrence count: a magic number here
+    // rots the next time either axis changes, and rots silently.
+    expect(effective).toContain(
+      buildRetrievalGuidance({ supportsLsp: false, ragWired: true }).join('\n'),
+    );
     expect(effective).toContain('Follow the embedded protocol below.');
     if (plan.invocation?.kind === 'cli') {
       expect(plan.invocation.spec.args.at(-1)).toBe(effective);
@@ -217,11 +238,47 @@ describe('resolveDispatch', () => {
       providers: [provider],
       lspConfigured: true,
       input: { kind: 'prompt', prompt, capabilities: [] },
+      mcpSurface: surface(true),
       invokeOpts: {},
     });
     expect(plan.effectivePrompt).toBe(
-      ['before', retrievalGuidanceLines().join('\n'), agentClause, 'after'].join('\n'),
+      RAG_ON + ['before', retrievalGuidanceLines().join('\n'), agentClause, 'after'].join('\n'),
     );
+  });
+
+  it('drops the rag arm — and the agent-file pointer stays — when no rag server is wired', () => {
+    const provider = makeProvider({ id: 'prov-claude', name: 'claude-code' });
+    const plan = resolveDispatch({
+      providers: [provider],
+      lspConfigured: true,
+      input: { kind: 'prompt', prompt: retrievalGuidanceLines().join('\n'), capabilities: [] },
+      mcpSurface: surface(false),
+      invokeOpts: {},
+    });
+    const effective = plan.effectivePrompt!;
+    expect(effective).toContain(
+      buildRetrievalGuidance({ supportsLsp: true, ragWired: false }).join('\n'),
+    );
+    expect(effective).toContain('LOCATE with LSP + grep');
+    // The only `rag_search` left is the surface block saying the tool is absent.
+    expect(effective).not.toContain('DISCOVER with `rag_search`');
+    expect(effective).toContain('No `rag_search` (haive-rag) tool is wired into this run');
+  });
+
+  it('composes both axes — codex on a repo with no index gets the grep-only protocol', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'prov-codex', name: 'codex' })],
+      input: { kind: 'prompt', prompt: retrievalGuidanceLines().join('\n'), capabilities: [] },
+      mcpSurface: surface(false),
+      invokeOpts: {},
+    });
+    const effective = plan.effectivePrompt!;
+    expect(effective).toContain(
+      buildRetrievalGuidance({ supportsLsp: false, ragWired: false }).join('\n'),
+    );
+    expect(effective).toContain('LOCATE with grep / ripgrep');
+    expect(effective).not.toContain('DISCOVER with `rag_search`');
+    expect(effective).not.toContain('LSP');
   });
 
   it('adapts every emulated subagent and synthesis prompt for Codex', () => {
@@ -241,6 +298,7 @@ describe('resolveDispatch', () => {
         },
         capabilities: ['subagents'],
       },
+      mcpSurface: surface(true),
       invokeOpts: {},
     });
     expect(plan.invocation?.kind).toBe('subagent');
@@ -296,6 +354,7 @@ describe('resolveDispatch', () => {
       providers: [provider],
       lspConfigured: false,
       input: { kind: 'prompt', prompt, capabilities: [] },
+      mcpSurface: surface(true),
       invokeOpts: {},
     });
     expect(plan.effectivePrompt).toContain('grep + direct file reads');
@@ -327,7 +386,7 @@ describe('resolveDispatch', () => {
       input: { kind: 'prompt', prompt: 'Inspect the repository.', capabilities: [] },
       invokeOpts: {},
     });
-    expect(plan.effectivePrompt).toBe('Inspect the repository.');
+    expect(plan.effectivePrompt).toBe(`${NO_MCP}Inspect the repository.`);
   });
 
   it('adds the boundary to every worktree-bound subagent and synthesis prompt', () => {
@@ -390,7 +449,7 @@ describe('resolveDispatch', () => {
       input: { kind: 'prompt', prompt: 'Repo-root task.', capabilities: [] },
       invokeOpts: {},
     });
-    expect(repoRootPlan.effectivePrompt).toBe('Repo-root task.');
+    expect(repoRootPlan.effectivePrompt).toBe(`${NO_MCP}Repo-root task.`);
   });
 });
 
@@ -398,16 +457,6 @@ describe('global KB digest', () => {
   const digest = [
     { title: 'DDEV post-start hooks cannot inject settings', category: 'tech_pattern' },
   ];
-
-  function surface(ragEnabled: boolean): McpSurface {
-    return {
-      ragOnly: false,
-      rag: { enabled: ragEnabled, apiUrl: 'http://api:3001', token: 't' },
-      chromeDevtools: { enabled: false, version: null },
-      ddevControl: { enabled: false, apiUrl: '', token: '' },
-      userServers: {},
-    };
-  }
 
   it('advertises the titles when the rag server is wired', () => {
     const plan = resolveDispatch({

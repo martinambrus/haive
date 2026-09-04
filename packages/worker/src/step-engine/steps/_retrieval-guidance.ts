@@ -13,10 +13,17 @@ import { KB_DIR } from '@haive/shared/knowledge-paths';
  *     current file on disk is the source of truth. This is deliberately NOT a
  *     fallback: grounding happens even when rag_search hits.
  *
- *  Centralized here so the ~6 builders that carry this block cannot drift apart.
+ *  Centralized here so the builders that carry this block cannot drift apart.
  *  Returns an array of prompt lines; callers splice it in place of their old
  *  numbered fallback-chain (e.g. after a "How to research" / "Before implementing"
- *  lead-in). Line 1 starts the numbering at 1 so it drops into an existing list. */
+ *  lead-in). Line 1 starts the numbering at 1 so it drops into an existing list.
+ *
+ *  Rendered against TWO axes, both resolved at dispatch (see `RetrievalAxes`). Builders
+ *  always emit the (LSP, rag) arm below and `adaptRetrievalProtocol` rewrites it to the
+ *  cell the provider and surface actually earn. NO variant may contain an empty line:
+ *  six splice sites join with `.filter(Boolean)` and nine without, so a blank element
+ *  would render the same block two ways and the exact-string rewrite would find only
+ *  one of them. `_retrieval-guidance.test.ts` asserts that. */
 const RETRIEVAL_GUIDANCE_WITH_LSP = [
   '1. DISCOVER with `rag_search` (the haive-rag tool): hybrid semantic + lexical search over this',
   "   repo's indexed code + knowledge base + the global cross-project KB (house standards,",
@@ -51,19 +58,57 @@ const RETRIEVAL_GUIDANCE_WITHOUT_LSP = [
   '   not a reason to stop searching.',
 ] as const;
 
-// A small number of legacy prompt builders predate the shared block above.
-// Keep these exact replacements centralized with it so an unsupported CLI sees
-// the same direct-file grounding protocol without losing the surrounding prompt.
-const LEGACY_LSP_PROMPT_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
+// The rag-off arms. `rag_search` is not merely unhelpful when the repo has no index
+// (`ragMode: 'none'`) or the CLI hosts no MCP servers (amp) — naming it sends the agent
+// at a tool that does not answer. Text search becomes the discovery step rather than the
+// grounding step, so this is a reordering, not the old fallback chain returning.
+function retrievalGuidanceWithoutRag(supportsLsp: boolean): string[] {
+  return [
+    `1. LOCATE with ${supportsLsp ? 'LSP + grep' : 'grep / ripgrep'}: no semantic index is wired for this run, so text`,
+    '   search IS the discovery step. Start from the symbols / components / conventions the task',
+    supportsLsp
+      ? '   names, use LSP for go-to-definition / find-references / hover types, and widen from the hits.'
+      : '   names and widen from the hits.',
+    '2. GROUND every lead against the CURRENT code on disk — open the files the search returned;',
+    '   never work from a name alone.',
+    `3. Read \`${KB_DIR}/\` directly for the project's documented conventions. It is a set of files`,
+    '   in this repo, so grep reaches it.',
+  ];
+}
+
+/** Every rendering of the protocol, indexed by `variantIndex`. The canonical
+ *  (LSP, rag) form at index 0 is what every prompt builder emits; dispatch rewrites it
+ *  to the cell the resolved provider and surface actually earn. */
+function retrievalVariants(): [string[], string[], string[], string[]] {
+  return [
+    [...RETRIEVAL_GUIDANCE_WITH_LSP],
+    retrievalGuidanceWithoutRag(true),
+    [...RETRIEVAL_GUIDANCE_WITHOUT_LSP],
+    retrievalGuidanceWithoutRag(false),
+  ];
+}
+
+function variantIndex({ supportsLsp, ragWired }: RetrievalAxes): 0 | 1 | 2 | 3 {
+  return ((supportsLsp ? 0 : 2) + (ragWired ? 0 : 1)) as 0 | 1 | 2 | 3;
+}
+
+// One table, one pass, four cells per entry — NOT two chained replacements. The legacy
+// strings that named both LSP and rag_search have been retired into the shared block
+// (04-phase-0b-pre-planning, 05-phase-0b5-spec-quality), which is what makes a single
+// axis enough here: chaining an LSP pass and a rag pass would have had each rewrite the
+// other's key out from under it, and the second pass would then silently match nothing.
+const PROMPT_VARIANT_TABLE: ReadonlyArray<
+  readonly [source: string, variants: readonly [string, string, string, string]]
+> = [
   [
-    'Then GROUND every lead with LSP + grep against the CURRENT files on disk (on hits too, not as a fallback): the index can be stale, so a rag_search snippet is a lead to confirm, never the source of truth.',
-    'Then GROUND every lead with grep + direct file reads against the CURRENT files on disk (on hits too, not as a fallback): the index can be stale, so a rag_search snippet is a lead to confirm, never the source of truth.',
+    '(grep -rn / find-references).',
+    [
+      '(grep -rn / find-references).',
+      '(grep -rn / find-references).',
+      '(grep / ripgrep across the whole repository).',
+      '(grep / ripgrep across the whole repository).',
+    ],
   ],
-  [
-    'rag_search, then ground with LSP + grep).',
-    'rag_search, then ground with grep + direct file reads).',
-  ],
-  ['(grep -rn / find-references).', '(grep / ripgrep across the whole repository).'],
 ];
 
 const AGENT_GUIDANCE_START = '[[HAIVE_AGENT_DEFINITION:';
@@ -71,8 +116,19 @@ const AGENT_GUIDANCE_END = '[[HAIVE_AGENT_DEFINITION_END]]';
 const AGENT_GUIDANCE_PATTERN =
   /\[\[HAIVE_AGENT_DEFINITION:([a-z0-9-]+)\]\]\n([\s\S]*?)\n\[\[HAIVE_AGENT_DEFINITION_END\]\]/g;
 
-export interface PromptCliCapabilities {
+/** The two axes the protocol renders against. Both are resolved at DISPATCH: the LSP one
+ *  from the adapter plus a ready bridge, the rag one from the adapter's MCP support plus
+ *  the task's resolved surface. */
+export interface RetrievalAxes {
   supportsLsp: boolean;
+  ragWired: boolean;
+}
+
+/** Everything dispatch resolves before adapting a prompt. `supportsLsp`,
+ *  `projectAgentsDir` and `agentFileFormat` are provider properties; `ragWired` is a
+ *  provider AND task property, since a CLI that hosts MCP servers still gets no rag on a
+ *  repo that skipped the index. */
+export interface PromptCliCapabilities extends RetrievalAxes {
   projectAgentsDir: string | null;
   agentFileFormat: 'markdown' | 'toml' | null;
 }
@@ -96,26 +152,30 @@ export function retrievalGuidanceLines(): string[] {
 
 /** Variant chosen at RENDER time, for callers that already know the target's LSP
  * capability because they write a file rather than dispatch a prompt (the agent
- * file writers). Prompt builders keep using retrievalGuidanceLines() plus the
- * dispatch-time swap, which cannot know the provider yet. Both paths read the
- * same two constants so the protocol cannot drift between prompts and agents. */
+ * file writers). Those files outlive any one task and cannot know a future run's rag
+ * mode, so they render the rag-on arm; the surface block contradicts them at dispatch
+ * when the tool is absent. Prompt builders keep using retrievalGuidanceLines() plus the
+ * dispatch-time swap, which cannot know the provider yet. Both paths read the same
+ * variants so the protocol cannot drift between prompts and agents. */
 export function retrievalGuidanceLinesFor(supportsLsp: boolean): string[] {
-  return [...(supportsLsp ? RETRIEVAL_GUIDANCE_WITH_LSP : RETRIEVAL_GUIDANCE_WITHOUT_LSP)];
+  return buildRetrievalGuidance({ supportsLsp, ragWired: true });
 }
 
-/** Replace only capability-sensitive grounding text when the resolved CLI
- * cannot expose LSP. Everything else remains byte-for-byte unchanged. */
-export function adaptRetrievalGuidanceForLspCapability(
-  prompt: string,
-  supportsLsp: boolean,
-): string {
-  if (supportsLsp) return prompt;
+export function buildRetrievalGuidance(axes: RetrievalAxes): string[] {
+  return retrievalVariants()[variantIndex(axes)];
+}
+
+/** Rewrite every Haive-owned retrieval fragment for the resolved provider and surface.
+ * Everything else remains byte-for-byte unchanged. */
+export function adaptRetrievalProtocol(prompt: string, axes: RetrievalAxes): string {
+  const index = variantIndex(axes);
+  if (index === 0) return prompt;
   let adapted = prompt.replaceAll(
-    RETRIEVAL_GUIDANCE_WITH_LSP.join('\n'),
-    RETRIEVAL_GUIDANCE_WITHOUT_LSP.join('\n'),
+    retrievalVariants()[0].join('\n'),
+    retrievalVariants()[index].join('\n'),
   );
-  for (const [withLsp, withoutLsp] of LEGACY_LSP_PROMPT_REPLACEMENTS) {
-    adapted = adapted.replaceAll(withLsp, withoutLsp);
+  for (const [source, variants] of PROMPT_VARIANT_TABLE) {
+    adapted = adapted.replaceAll(source, variants[index]);
   }
   return adapted;
 }
@@ -127,7 +187,7 @@ export function adaptPromptForCliCapabilities(
   prompt: string,
   capabilities: PromptCliCapabilities,
 ): string {
-  const grounding = adaptRetrievalGuidanceForLspCapability(prompt, capabilities.supportsLsp);
+  const grounding = adaptRetrievalProtocol(prompt, capabilities);
   return grounding.replace(AGENT_GUIDANCE_PATTERN, (_whole, agentId: string, guidance: string) => {
     if (
       !capabilities.supportsLsp ||

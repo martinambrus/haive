@@ -233,9 +233,15 @@ function buildCliSidePlan(
   needsSubagents: boolean,
 ): DispatchPlan | null {
   const providerMetadata = getCliProviderMetadata(provider.name);
+  // Invariant across every invocation this plan builds, and read by TWO consumers below:
+  // the retrieval protocol's rag arm and the global KB digest. One const so they cannot
+  // disagree — a prompt that says "discover with rag_search" while the digest is withheld
+  // describes a surface neither half is looking at.
+  const ragWired = adapter.supportsMcp && req.mcpSurface?.rag.enabled === true;
   const adaptPrompt = (prompt: string): string => {
     const capabilityAdapted = adaptPromptForCliCapabilities(prompt, {
       supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
+      ragWired,
       projectAgentsDir: providerMetadata.projectAgentsDir,
       agentFileFormat: providerMetadata.agentFileFormat,
     });
@@ -245,9 +251,10 @@ function buildCliSidePlan(
     const gitBounded = withWorktreeGitBoundary(capabilityAdapted, req.worktreeGitBoundary === true);
     const ddevBounded = withDdevGeneratedBoundary(gitBounded, req.worktreeGitBoundary === true);
     // What the agent CAN reach, stated rather than left to be inferred — the same
-    // surface object cli-exec materializes into the sandbox's MCP config. Suppressed
-    // for an adapter that gets no MCP config at all (amp), since there would be
-    // nothing behind the claim.
+    // surface object cli-exec materializes into the sandbox's MCP config. `null` for an
+    // adapter that gets no MCP config at all (amp), which now renders the absences
+    // rather than nothing: a prompt body that names `rag_search` needs contradicting
+    // most exactly where no surface was resolved.
     const mcpBounded = withMcpSurface(
       ddevBounded,
       adapter.supportsMcp ? (req.mcpSurface ?? null) : null,
@@ -265,7 +272,6 @@ function buildCliSidePlan(
     // advertises a door it does not have. Applied at the same choke point as the
     // boundaries above, which is what puts it in front of a model like muse that
     // never picks the tool on its own.
-    const ragWired = adapter.supportsMcp && req.mcpSurface?.rag.enabled === true;
     const digested = ragWired
       ? withGlobalKbDigest(reachBounded, req.globalKbDigest ?? [])
       : reachBounded;

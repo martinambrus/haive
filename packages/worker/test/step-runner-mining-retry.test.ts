@@ -956,7 +956,7 @@ describe('advanceStep agentMining retry for a wave-dispatched step', () => {
     expect(enqueued).toHaveLength(1);
     // The prompt rides on the invocation row the dispatch writes, not the job.
     const invocation = state.inserts.find((i) => i.table === 'cli_invocations');
-    expect(invocation?.row.prompt).toBe('expand node abc');
+    expect(invocation?.row.prompt).toContain('expand node abc');
   });
 
   it('does nothing for an agent with no prior run to repeat', async () => {
@@ -990,6 +990,6 @@ describe('advanceStep agentMining retry for a wave-dispatched step', () => {
     await run(makeMockDb(state), noRetryMiningStep([]), enqueued);
     expect(enqueued).toHaveLength(1);
     const invocation = state.inserts.find((i) => i.table === 'cli_invocations');
-    expect(invocation?.row.prompt).toBe('review');
+    expect(invocation?.row.prompt).toContain('review');
   });
 });

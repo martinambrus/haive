@@ -13,7 +13,7 @@ import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { loadBusinessRequirements } from './_business-requirements.js';
 import { isBugBranch } from './01-worktree-setup.js';
-import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
+import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import {
   computeImpact,
   findPlanRoot,
@@ -481,14 +481,14 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         'does not apply to this change.',
         'Ground every claim in the discovery summary — do not invent details.',
         '',
-        'Knowledge retrieval — use the `rag_search` MCP tool; it returns ranked, TYPED snippets:',
-        '- KB articles + indexed code: the project’s documented behavior and the real implementation.',
+        'How to research — follow this order:',
+        ...retrievalGuidanceLines(),
+        'Two knowledge kinds are worth naming, both reachable through that same search:',
         `- LEARNINGS (paths under \`${LEARNINGS_DIR}/\`): durable lessons from PRIOR runs. Search them to`,
         '  avoid repeating past mistakes on similar work and fold the relevant ones into the Risks section.',
         detected.isBugFix
           ? `- RUN-BOOKS (\`${INVESTIGATIONS_DIR}/\`): past bug investigations (symptom → root cause → fix). This task is a BUG FIX — search them FIRST for this class of bug; quote the prior symptom/root cause and ground the Approach in what resolved it before.`
           : `- RUN-BOOKS (\`${INVESTIGATIONS_DIR}/\`): past bug investigations. Lower priority for this NEW-FEATURE task, but still worth checking when extending a historically-buggy area.`,
-        'Then GROUND every lead with LSP + grep against the CURRENT files on disk (on hits too, not as a fallback): the index can be stale, so a rag_search snippet is a lead to confirm, never the source of truth.',
         '',
         'Presentation conventions for the spec body (the Haive web renderer detects and upgrades these):',
         '1. REQUIRED final section `## Comprehension Quiz` with 3-5 questions that test understanding',

@@ -8,6 +8,7 @@ import {
   logger,
 } from '@haive/shared';
 import { signRagToken } from '@haive/shared/rag';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
 
 const log = logger.child({ module: 'mcp-surface' });
 
@@ -248,15 +249,6 @@ function reachableUserServerNames(surface: McpSurface): string[] {
   return Object.keys(surface.userServers).filter((name) => !shadowed.has(name));
 }
 
-export function hasAnyMcpServer(surface: McpSurface): boolean {
-  return (
-    surface.rag.enabled ||
-    surface.chromeDevtools.enabled ||
-    surface.ddevControl.enabled ||
-    reachableUserServerNames(surface).length > 0
-  );
-}
-
 /** Tab discipline for the browser server. Every invocation of a task attaches to the SAME
  *  headed Chromium on the runner (resolvers.ts probes the runner once per invocation and
  *  passes the same `--browser-url` to all of them), and chrome-devtools-mcp selects
@@ -307,36 +299,62 @@ const BROWSER_TAB_DISCIPLINE = [
  *
  *  The `ddev-control` line states the exec limit explicitly. Without it an agent
  *  plans around a `ddev exec` that does not exist and reports the shortfall as an
- *  unverified risk. */
-export function mcpSurfacePrompt(surface: McpSurface): string {
-  const lines: string[] = [MCP_SURFACE_MARKER, 'MCP tools wired into this run:'];
+ *  unverified risk.
+ *
+ *  `null` is the amp case — an adapter that receives no MCP config at all. It renders
+ *  the same way an all-disabled surface does, because from the agent's side those are
+ *  the same fact.
+ *
+ *  The rag ABSENCE is stated for the same reason the browser/container absence already
+ *  was, and it carries more weight: ~15 prompt builders name `rag_search` in their own
+ *  text, and only the canonical retrieval block is rewritten per-provider. Everything
+ *  else would otherwise send an agent at a tool that was never wired — `ragMode: 'none'`
+ *  is a first-class onboarding choice, not a fault. One negative sentence here reaches
+ *  every one of those mentions without matching any of their wording. */
+export function mcpSurfacePrompt(surface: McpSurface | null): string {
+  const lines: string[] = [MCP_SURFACE_MARKER];
+  const wired: string[] = [];
 
-  if (surface.rag.enabled) {
-    lines.push(
+  if (surface?.rag.enabled) {
+    wired.push(
       "- `rag_search` (haive-rag): hybrid semantic + lexical search over this repo's indexed code,",
       '  its knowledge base, and the global cross-project KB.',
+      '  The index does NOT contain edits made during this run — not yours, and not a sibling',
+      "  agent's in another worktree. For any file this task has already touched, read the disk.",
     );
   }
-  if (surface.chromeDevtools.enabled) {
-    lines.push(
+  if (surface?.chromeDevtools.enabled) {
+    wired.push(
       "- `chrome-devtools`: drives the running app's browser — navigate, snapshot, evaluate scripts,",
       '  read console and network. Use it to VERIFY runtime behavior rather than reasoning about it.',
       ...BROWSER_TAB_DISCIPLINE,
     );
   }
-  if (surface.ddevControl.enabled) {
-    lines.push(
+  if (surface?.ddevControl.enabled) {
+    wired.push(
       "- `ddev-control`: `ddev_status`, `ddev_logs`, `ddev_restart` for THIS task's DDEV environment.",
       '  Status, logs and restart ONLY — it cannot run arbitrary commands, so there is no `ddev exec`',
       '  and no way to run tests, a linter or a syntax check inside the container from here.',
     );
   }
-  const userNames = reachableUserServerNames(surface);
+  const userNames = surface ? reachableUserServerNames(surface) : [];
   if (userNames.length > 0) {
-    lines.push(`- Project-configured servers: ${userNames.map((n) => `\`${n}\``).join(', ')}.`);
+    wired.push(`- Project-configured servers: ${userNames.map((n) => `\`${n}\``).join(', ')}.`);
   }
 
-  if (!surface.chromeDevtools.enabled && !surface.ddevControl.enabled) {
+  if (wired.length > 0) lines.push('MCP tools wired into this run:', ...wired);
+
+  if (!surface?.rag.enabled) {
+    lines.push(
+      '',
+      'No `rag_search` (haive-rag) tool is wired into this run: this repository has no RAG index',
+      'configured, or the selected CLI cannot host MCP servers. That is deliberate, not a',
+      'misconfiguration. Disregard any instruction to search RAG — in this prompt, or in an agent',
+      'definition file you read from disk — and discover with grep / ripgrep instead, reading',
+      `\`${KB_DIR}/\` directly for documented conventions.`,
+    );
+  }
+  if (!surface?.chromeDevtools.enabled && !surface?.ddevControl.enabled) {
     lines.push(
       '',
       'No browser and no container tooling are wired into this run. That is deliberate, not a',
@@ -351,14 +369,13 @@ export function mcpSurfacePrompt(surface: McpSurface): string {
 }
 
 /** Prepend the contract once. The marker makes this safe when nested prompt
- * builders or retry paths apply the same surface more than once. `null` means the
- * resolved CLI gets no MCP config at all (amp) — nothing to advertise.
+ * builders or retry paths apply the same surface more than once.
  *
- * A surface with no servers at all also gets nothing. The block exists to describe a
- * toolset; with an empty one there is no list to give and no runtime limit worth
- * spending prompt on, so every such dispatch would carry a paragraph about tools that
- * were never on the table. */
+ * An empty surface (and amp's `null`) is no longer suppressed. It used to be, on the
+ * reasoning that a block with no list to give was pure prompt cost — but that is exactly
+ * the dispatch whose prompt body still names `rag_search`, so silence there is what let
+ * an agent chase a tool it never had. */
 export function withMcpSurface(prompt: string, surface: McpSurface | null): string {
-  if (!surface || !hasAnyMcpServer(surface) || prompt.includes(MCP_SURFACE_MARKER)) return prompt;
+  if (prompt.includes(MCP_SURFACE_MARKER)) return prompt;
   return `${mcpSurfacePrompt(surface)}\n\n${prompt}`;
 }

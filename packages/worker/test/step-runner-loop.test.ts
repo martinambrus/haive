@@ -399,7 +399,7 @@ describe('advanceStep loop hook', () => {
     expect(iterations[0]!.exhaustedBudget).toBeUndefined();
     // The new invocation's prompt comes from buildIterationPrompt.
     const inserted = state.inserts.find((i) => i.table === 'cli_invocations');
-    expect(inserted!.row.prompt).toMatch(/^iter=1 prev=1/);
+    expect(inserted!.row.prompt).toContain('iter=1 prev=1');
   });
 
   it('marks last entry exhaustedBudget=true and finishes when budget caps the loop', async () => {
