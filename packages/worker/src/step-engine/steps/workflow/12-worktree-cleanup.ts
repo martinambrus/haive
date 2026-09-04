@@ -129,6 +129,10 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     requiredCapabilities: ['tool_use', 'file_write'],
     // Only the merge_remove action performs a merge; keep / remove_only skip the phase.
     selectedMerge: (formValues) => formValues.action === 'merge_remove',
+    // This is the one mergeResolve step that merges a branch the TASK authored, so it is
+    // the only one whose history may be collapsed. The form's squashMerge checkbox is the
+    // per-task opt-out on top of this.
+    squashable: true,
     buildFixPrompt: ({ featureBranch, guidance }) =>
       buildMergeFixPrompt(featureBranch, undefined, guidance),
     buildClarificationForm: ({ baseBranch, featureBranch, uncertainty }) => ({
@@ -334,6 +338,14 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       },
       {
         type: 'checkbox',
+        id: 'squashMerge',
+        label: `Squash ${branch} into a single commit on ${base}`,
+        description: `${base} gets ONE commit for this task instead of every commit the task made along the way (one per DAG issue, plus a merge commit each, plus a commit per fix round). The changes are identical either way; only the history differs. Untick to keep the full history on ${base}.`,
+        default: true,
+        visibleWhen: { field: 'action', equals: 'merge_remove' },
+      },
+      {
+        type: 'checkbox',
         id: 'deleteBranch',
         label: `Delete the ${branch} branch after merging (safe — only if fully merged)`,
         default: true,
@@ -508,6 +520,10 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // Read its terminal outcome to decide whether the worktree may be removed.
     let merged = false;
     let mergeTarget: string | null = null;
+    // Set when the merge was collapsed into one commit. That commit IS the merge result,
+    // so it proves containment for the branch deletes below — which `git branch -d`
+    // cannot see, the original commits no longer being reachable from the base tip.
+    let squashCommitSha: string | null = null;
     if (action === 'merge_remove') {
       const row = await ctx.db.query.taskSteps.findFirst({
         where: eq(schema.taskSteps.id, ctx.taskStepId),
@@ -516,6 +532,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       const st = row?.mergeResolveState ?? null;
       merged = st?.merged ?? false;
       mergeTarget = st?.baseBranch || null;
+      squashCommitSha = st?.squashCommitSha ?? null;
       if (!merged) {
         // The merge did not run (e.g. the parent checkout is off the base branch).
         // Keep the worktree so the user can integrate manually.
@@ -569,33 +586,26 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       );
     }
 
-    // Safe branch delete ONLY after a successful merge (git branch -d refuses an
-    // unmerged branch). remove_only never deletes — the branch stays recoverable.
-    let branchDeleted = false;
-    if (action === 'merge_remove' && values.deleteBranch && d.branchName) {
-      const del = await gitRun(ctx.repoPath, ['branch', '-d', d.branchName]);
-      if (del.code === 0) branchDeleted = true;
-      else
-        ctx.logger.warn(
-          { branch: d.branchName, stderr: del.stderr },
-          'safe branch delete failed; left in place',
-        );
-    }
-
     // DAG runs fork one branch per issue off the integration branch, and those survived
     // the cleanup that deleted the integration branch itself — five dead refs per DAG task
     // (MEASURED on task de2b313d: all 5 still present, all `--merged HEAD`).
     //
-    // `git branch -d` is the whole safety mechanism here: it REFUSES a branch whose work
-    // is not already reachable, so an issue that ended failed_unrecoverable keeps its
-    // branch and its work stays recoverable. Never -D.
+    // Reachability is the whole safety mechanism here: an issue that ended
+    // failed_unrecoverable must keep its branch so its work stays recoverable. `git branch
+    // -d` asks that question against HEAD, which a SQUASHED merge answers "no" for every
+    // branch — the original commits are no longer reachable from the base tip — so it
+    // would refuse the lot and leave exactly the dead refs above. Ask the identical
+    // question against the FEATURE branch instead, which still exists at this point;
+    // hence sweeping the issue branches BEFORE deleting it. Never a blanket -D.
     let issueBranchesDeleted = 0;
-    if (branchDeleted && d.branchName) {
+    if (action === 'merge_remove' && merged && values.deleteBranch && d.branchName) {
       const issuePrefix = `${d.branchName}--`;
       const listed = await gitRun(ctx.repoPath, [
         'branch',
         '--list',
         '--format=%(refname:short)',
+        '--merged',
+        d.branchName,
         `${issuePrefix}*`,
       ]);
       const issueBranches =
@@ -606,7 +616,9 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
               .filter(Boolean)
           : [];
       for (const branch of issueBranches) {
-        const del = await gitRun(ctx.repoPath, ['branch', '-d', branch]);
+        // -D only for branches the --merged filter just proved contained; -d would refuse
+        // them on the squash path even though their work is in the feature branch.
+        const del = await gitRun(ctx.repoPath, ['branch', squashCommitSha ? '-D' : '-d', branch]);
         if (del.code === 0) issueBranchesDeleted += 1;
         else
           ctx.logger.warn(
@@ -616,8 +628,32 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       }
     }
 
+    // Safe branch delete ONLY after a successful merge (git branch -d refuses an
+    // unmerged branch). remove_only never deletes — the branch stays recoverable.
+    // After a squash the same -d refuses this branch too, so delete it by force there:
+    // containment is proven by construction, the squash commit BEING the merge result.
+    let branchDeleted = false;
+    if (action === 'merge_remove' && values.deleteBranch && d.branchName) {
+      const del = await gitRun(ctx.repoPath, [
+        'branch',
+        squashCommitSha ? '-D' : '-d',
+        d.branchName,
+      ]);
+      if (del.code === 0) branchDeleted = true;
+      else
+        ctx.logger.warn(
+          { branch: d.branchName, stderr: del.stderr },
+          'safe branch delete failed; left in place',
+        );
+    }
+
     const parts: string[] = [];
-    if (merged) parts.push(`merged ${d.branchName} into ${mergeTarget}`);
+    if (merged)
+      parts.push(
+        squashCommitSha
+          ? `merged ${d.branchName} into ${mergeTarget} as one squashed commit ${squashCommitSha.slice(0, 7)}`
+          : `merged ${d.branchName} into ${mergeTarget}`,
+      );
     parts.push(`removed worktree ${d.worktreePath}`);
     if (branchDeleted) parts.push(`deleted branch ${d.branchName}`);
     if (issueBranchesDeleted > 0)

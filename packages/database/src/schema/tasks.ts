@@ -548,7 +548,7 @@ export interface MergeResolveState {
    *  cross-branch: parent moved off base, so the merge runs in a transient worktree
    *  checked out on base (under .haive/worktrees) and is persisted/pushed from there. */
   mode: 'same-branch' | 'cross-branch';
-  phase: 'pending' | 'resolving' | 'awaiting-guidance' | 'pushing' | 'done';
+  phase: 'pending' | 'resolving' | 'awaiting-guidance' | 'squashing' | 'pushing' | 'done';
   /** The branch the merge lands on (= recorded base, or parent HEAD fallback). */
   baseBranch: string;
   /** The branch being merged in (the worktree's feature branch). */
@@ -567,6 +567,21 @@ export interface MergeResolveState {
   pendingQuestion: { uncertainty: string; askedAt: string } | null;
   /** Whether the cleanup form requested a push of the base branch after merging. */
   pushAfterMerge: boolean;
+  /** Whether the merge should be collapsed into ONE commit on the base branch (the
+   *  cleanup form's squash checkbox, which is ticked by default). Read from the form
+   *  once at init and carried here, like pushAfterMerge, so every re-entry agrees.
+   *  Absent on rows written before this existed → treated as false, since those merges
+   *  already landed as a merge commit. */
+  squashAfterMerge?: boolean;
+  /** The base branch's tip BEFORE any merge round, captured at init. The reset target
+   *  for the squash, and the documented undo point (`git reset --hard <sha>`). */
+  baseShaBefore?: string;
+  /** Sha of the squash commit once it landed. Doubles as the idempotence guard (a set
+   *  value means the collapse is done) and as the PROOF, for 12-worktree-cleanup's
+   *  branch deletion, that the feature branch's work is contained in the base branch —
+   *  `git branch -d` cannot see that, because the original commits are no longer
+   *  reachable from the base tip. */
+  squashCommitSha?: string | null;
   /** Terminal outcome (set when phase==='done'): whether a merge commit landed. */
   merged: boolean;
   /** When merged is false: why the merge did not run (e.g. cross-branch skip in the

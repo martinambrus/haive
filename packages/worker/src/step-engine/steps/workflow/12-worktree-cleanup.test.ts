@@ -118,6 +118,8 @@ function makeDb(
     invocation?: { id: string; endedAt: Date | null; rawOutput?: string };
     /** Row findWorktreePathClaimant sees: another live task holding the same worktree. */
     worktreeSharer?: { id: string; title: string; status: string };
+    /** Rows buildSquashCommitMessage lists in the squash commit's body. */
+    dagIssues?: { issueKey: string; title: string }[];
   } = {},
 ) {
   let mergeState: MergeResolveState | null = null;
@@ -157,6 +159,14 @@ function makeDb(
         then: (resolve: (v: unknown) => void) => resolve(undefined),
       }),
     }),
+    // buildSquashCommitMessage's DAG-issue lookup (select -> from -> where -> orderBy).
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          orderBy: async () => opts.dagIssues ?? [],
+        }),
+      }),
+    }),
   };
   return { db, getState: () => mergeState };
 }
@@ -168,6 +178,7 @@ function mkCtx(parent: string, db: unknown): StepContext {
     repoPath: parent,
     sandboxWorkdir: parent,
     userId: 'u1',
+    taskId: 't1',
     taskStepId: 'step1',
     db,
     logger,
@@ -209,8 +220,9 @@ async function mergeThenApply(
   detected: Det,
   formValues: Record<string, unknown>,
   paramsOver: Record<string, unknown> = {},
+  dbOpts: Parameters<typeof makeDb>[0] = {},
 ) {
-  const h = makeDb();
+  const h = makeDb(dbOpts);
   const ctx = mkCtx(parent, h.db);
   const merge = await resolveMergePhase(
     h.db as never,
@@ -601,6 +613,16 @@ describe('12 worktree cleanup form', () => {
     expect(schema.fields.some((f) => f.id === 'deleteBranch')).toBe(true);
   });
 
+  it('offers the squash checkbox ticked by default, scoped to merge_remove', () => {
+    const schema = worktreeCleanupStep.form!(stubCtx(''), det('/ws/.haive/worktrees/feature-x'));
+    const squash = schema.fields.find((f) => f.id === 'squashMerge') as {
+      default?: boolean;
+      visibleWhen?: { field: string; equals: unknown };
+    };
+    expect(squash.default).toBe(true);
+    expect(squash.visibleWhen).toEqual({ field: 'action', equals: 'merge_remove' });
+  });
+
   it('passes straight through (auto-submit, no fields) when there is no worktree', () => {
     const schema = worktreeCleanupStep.form!(
       stubCtx(''),
@@ -731,5 +753,108 @@ describe('12 merge clarification', () => {
       { eventType: MERGE_CLARIFICATION_ASKED_EVENT, payload: { uncertainty: '?' } },
     ]);
     expect(await loadOutstandingMergeGuidance(reAsked, 't1')).toBe('');
+  });
+});
+
+describe('12 squash merge (real git)', () => {
+  const issues = [
+    { issueKey: 'ISS-1', title: 'feature work' },
+    { issueKey: 'ISS-2', title: 'more work' },
+  ];
+  /** Second commit on the feature branch, so a collapse is observable. */
+  async function secondFeatureCommit(wt: string): Promise<void> {
+    await writeFile(path.join(wt, 'more.txt'), 'more\n', 'utf8');
+    await git(wt, ['add', '-A']);
+    await git(wt, ['commit', '-m', 'ISS-2: more work']);
+  }
+
+  it('collapses the merge into ONE commit on base, carrying the whole changeset', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await secondFeatureCommit(wt);
+      const before = (await git(parent, ['rev-parse', 'main'])).trim();
+      // No squashMerge key at all — the default (ticked) must opt in.
+      const { applyOut, state } = await mergeThenApply(
+        parent,
+        det(wt),
+        { action: 'merge_remove' },
+        {},
+        { dagIssues: issues },
+      );
+      expect(state?.merged).toBe(true);
+      expect(state?.squashCommitSha).toBeTruthy();
+      expect(state?.baseShaBefore).toBe(before);
+      // Exactly one new commit, parented on the pre-merge base tip.
+      expect((await git(parent, ['rev-list', '--count', `${before}..main`])).trim()).toBe('1');
+      expect((await git(parent, ['rev-parse', 'main^'])).trim()).toBe(before);
+      // ...and it carries every file the merge would have brought in.
+      expect(await gitCode(parent, ['show', 'main:feature.txt'])).toBe(0);
+      expect(await gitCode(parent, ['show', 'main:more.txt'])).toBe(0);
+      const body = await git(parent, ['log', '-1', '--format=%B', 'main']);
+      expect(body).toContain('- ISS-1: feature work');
+      expect(body).toContain('- ISS-2: more work');
+      expect(body).toContain('Task: t1');
+      expect(applyOut?.message).toContain('squashed commit');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the merge commit and the full history when the box is unticked', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await secondFeatureCommit(wt);
+      const before = (await git(parent, ['rev-parse', 'main'])).trim();
+      const { state } = await mergeThenApply(parent, det(wt), {
+        action: 'merge_remove',
+        squashMerge: false,
+      });
+      expect(state?.merged).toBe(true);
+      expect(state?.squashCommitSha).toBeFalsy();
+      // Both feature commits plus the merge commit.
+      expect((await git(parent, ['rev-list', '--count', `${before}..main`])).trim()).toBe('3');
+      expect((await git(parent, ['log', '-1', '--format=%s', 'main'])).trim()).toBe(
+        'Merge feature/x',
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('still deletes merged DAG issue branches, and still keeps an unmerged one', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      // One issue branch folded into the feature branch, one left behind (the shape a
+      // failed_unrecoverable issue leaves): only the first may be deleted.
+      await git(wt, ['checkout', '-b', 'feature/x--iss-1']);
+      await writeFile(path.join(wt, 'iss1.txt'), '1\n', 'utf8');
+      await git(wt, ['add', '-A']);
+      await git(wt, ['commit', '-m', 'ISS-1: work']);
+      await git(wt, ['checkout', 'feature/x']);
+      await git(wt, ['merge', '--no-ff', '--no-edit', 'feature/x--iss-1']);
+      await git(wt, ['checkout', '-b', 'feature/x--iss-2']);
+      await writeFile(path.join(wt, 'iss2.txt'), '2\n', 'utf8');
+      await git(wt, ['add', '-A']);
+      await git(wt, ['commit', '-m', 'ISS-2: abandoned']);
+      await git(wt, ['checkout', 'feature/x']);
+
+      const { applyOut, state } = await mergeThenApply(parent, det(wt), {
+        action: 'merge_remove',
+        deleteBranch: true,
+      });
+      expect(state?.squashCommitSha).toBeTruthy();
+      expect(applyOut?.branchDeleted).toBe(true);
+      expect(applyOut?.message).toContain('1 merged DAG issue branch');
+      expect(await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x'])).not.toBe(0);
+      expect(
+        await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x--iss-1']),
+      ).not.toBe(0);
+      // Unmerged work is never force-deleted, squash or no squash.
+      expect(await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x--iss-2'])).toBe(
+        0,
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 });

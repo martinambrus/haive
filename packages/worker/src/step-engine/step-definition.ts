@@ -277,6 +277,15 @@ export interface MergeResolveSpec {
   /** True when the submitted form values selected the merge path (so the phase
    *  runs). A non-merge action makes resolveMergePhase a no-op pass-through. */
   selectedMerge(formValues: FormValues): boolean;
+  /** Whether this step's merge MAY be collapsed into one commit on the base branch
+   *  (the resolver still honours the form's opt-out checkbox on top of this).
+   *
+   *  Load-bearing, not defensive: only 12-worktree-cleanup merges a feature branch the
+   *  task itself authored. 00a-sync-base and onboarding/13-onboarding-push share this
+   *  resolver to integrate `origin/<base>`, and collapsing THAT rewrites upstream
+   *  history into a local commit, after which the push is rejected. They omit the flag,
+   *  so an absent form field can never opt them in. */
+  squashable?: boolean;
   /** Sandbox timeout per fix-agent invocation. Defaults to 30 minutes. */
   timeoutMs?: number;
 }

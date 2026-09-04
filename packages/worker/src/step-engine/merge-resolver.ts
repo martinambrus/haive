@@ -10,7 +10,8 @@ import {
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
-import { completeMergeHostSide, mergeCommitted } from './git-merge.js';
+import { completeMergeHostSide, mergeCommitted, squashMergeCommit } from './git-merge.js';
+import { buildSquashCommitMessage } from './squash-message.js';
 import { pathExists } from './steps/onboarding/_helpers.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
@@ -280,10 +281,69 @@ async function finishMerge(
   params: AdvanceStepParams,
   state: MergeResolveState,
 ): Promise<MergeResolved> {
-  if (state.pushAfterMerge && !state.pushed && (state.mergeStage ?? 'feature') === 'feature') {
-    return prePushSync(db, stepDef, current, ctx, params, state);
+  const squashed = await squashFeatureMerge(db, current, ctx, state);
+  if (
+    squashed.pushAfterMerge &&
+    !squashed.pushed &&
+    (squashed.mergeStage ?? 'feature') === 'feature'
+  ) {
+    return prePushSync(db, stepDef, current, ctx, params, squashed);
   }
-  return reachDone(db, current, ctx, state);
+  return reachDone(db, current, ctx, squashed);
+}
+
+/** Collapse the landed feature merge into ONE commit on the base branch when the form
+ *  asked for it (the squash checkbox, ticked by default). Called from finishMerge, which
+ *  every merge round funnels through — the clean merge AND both conflict-resolution
+ *  paths — which is why completeMergeHostSide needs no squash awareness of its own.
+ *
+ *  Scoped to the FEATURE round: prePushSync re-enters this resolver with mergeStage
+ *  'base-sync' to merge origin/<base> into base, and collapsing THAT would rewrite
+ *  upstream commits into a local one and get the push rejected.
+ *
+ *  Persists phase 'squashing' BEFORE touching git, the way reachDone persists 'pushing'.
+ *  Without it a crash between the reset and the commit would re-enter at 'pending',
+ *  where the re-run `git merge` fails on the dirty tree and is misread as a conflict. */
+async function squashFeatureMerge(
+  db: Database,
+  current: TaskStepRow,
+  ctx: StepContext,
+  state: MergeResolveState,
+): Promise<MergeResolveState> {
+  if (!state.squashAfterMerge) return state;
+  if ((state.mergeStage ?? 'feature') !== 'feature') return state;
+  if (state.squashCommitSha) return state; // already collapsed
+  // A row written before baseShaBefore existed has no reset target. Leaving the merge
+  // commit in place is the safe outcome: the work is integrated either way.
+  if (!state.baseShaBefore) return state;
+
+  const squashing: MergeResolveState = { ...state, phase: 'squashing' };
+  await saveMergeState(db, current.id, squashing);
+
+  const userEnv = await resolveGitEnv(db, { userId: ctx.userId, taskId: ctx.taskId });
+  const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
+  const message = await buildSquashCommitMessage(db, ctx.taskId, state.featureBranch);
+  const squashCommitSha = await squashMergeCommit(
+    squashing.mergeDir,
+    state.baseShaBefore,
+    message,
+    commitEnv,
+  );
+
+  const next: MergeResolveState = { ...squashing, squashCommitSha };
+  await saveMergeState(db, current.id, next);
+  ctx.logger.info(
+    {
+      featureBranch: state.featureBranch,
+      baseBranch: state.baseBranch,
+      baseShaBefore: state.baseShaBefore,
+      squashCommitSha,
+    },
+    squashCommitSha
+      ? 'feature merge squashed into a single commit on the base branch'
+      : 'squash requested but the merge left nothing to collapse',
+  );
+  return next;
 }
 
 /** Best-effort authenticated `git fetch origin <base>` (same credential the push uses).
@@ -518,6 +578,12 @@ export async function resolveMergePhase(
       conflictRetries: 0,
       pendingQuestion: null,
       pushAfterMerge: formValues.pushBase === true,
+      // Squash is ticked by default, so an ABSENT value opts in (the `setUpstream !==
+      // false` reading, not `pushBase === true`): a task whose form_schema was persisted
+      // before the checkbox existed carries no key, and the collapsed tree is identical
+      // either way. `spec.squashable` is what keeps this off the steps that merge
+      // origin's own commits.
+      squashAfterMerge: spec.squashable === true && formValues.squashMerge !== false,
       merged: false,
       skipReason: null,
       pushed: false,
@@ -547,11 +613,15 @@ export async function resolveMergePhase(
         mergeDir: wt.worktreePath,
         sandboxMergeDir: wt.sandboxWorktreePath,
       };
-      await saveMergeState(db, current.id, state);
     } else {
       state = { ...base0, phase: 'pending' };
-      await saveMergeState(db, current.id, state);
     }
+    // The base tip before ANY merge round: the squash resets back to it, and it is the
+    // documented undo point. Captured after mergeDir is settled so the cross-branch
+    // worktree (checked out on base) is the thing measured.
+    const baseHead = await gitRun(state.mergeDir, ['rev-parse', 'HEAD']);
+    if (baseHead.code === 0) state = { ...state, baseShaBefore: baseHead.stdout.trim() };
+    await saveMergeState(db, current.id, state);
   }
 
   // --- pending: attempt the merge; clean -> done, conflict -> resolving (live) ---
@@ -696,6 +766,13 @@ export async function resolveMergePhase(
       statusMessage: `Resolving merge conflict (${state.featureBranch} → ${state.baseBranch}) with AI…`,
     });
     return { resolved: false, result: { status: 'waiting_cli', row } };
+  }
+
+  // Crash-recovery: a squash persisted as in-flight re-runs idempotently — the helper
+  // finishes a half-done reset (HEAD moved, changes staged) and re-collapses a completed
+  // one to an identical tree.
+  if (state.phase === 'squashing') {
+    return finishMerge(db, stepDef, current, ctx, params, state);
   }
 
   // Crash-recovery: a push persisted as in-flight ('pushing') re-runs idempotently

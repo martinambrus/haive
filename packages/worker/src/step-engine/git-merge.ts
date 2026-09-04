@@ -68,3 +68,50 @@ export async function completeMergeHostSide(
   if (commit.code !== 0) return false;
   return mergeCommitted(worktreePath);
 }
+
+/** Collapse a merge that has ALREADY landed in `worktreePath` into a single commit on
+ *  the current branch: `reset --soft` back to the pre-merge tip, then one commit of the
+ *  merged index. The tree is unchanged — only the history is.
+ *
+ *  Deliberately NOT `git merge --squash`, which never writes MERGE_HEAD: the whole
+ *  conflict loop is built on that file (completeMergeHostSide requires it, and
+ *  `git merge --abort` fails without it), so squashing at merge time would break
+ *  conflict resolution and leave a conflicted index behind. Merging normally and
+ *  collapsing afterwards leaves every one of those paths untouched.
+ *
+ *  Returns the new commit's sha, or null when there was nothing to collapse. Safe to
+ *  re-enter after a crash: a half-done attempt (HEAD already reset, changes staged)
+ *  finishes with the commit, and a completed one collapses to an identical tree again.
+ *
+ *  Never touches a LIVE merge — the conflict loop owns that until its own commit lands. */
+export async function squashMergeCommit(
+  worktreePath: string,
+  baseShaBefore: string,
+  message: string,
+  gitEnv: Record<string, string>,
+): Promise<string | null> {
+  const open = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+  if (open.code === 0) return null;
+  const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
+  if (head.code !== 0) return null;
+
+  if (head.stdout.trim() !== baseShaBefore) {
+    const reset = await gitRun(worktreePath, ['reset', '--soft', baseShaBefore]);
+    if (reset.code !== 0) {
+      throw new Error(
+        `git reset --soft ${baseShaBefore} failed: ${reset.stderr || reset.stdout}`.trim(),
+      );
+    }
+  }
+  // Nothing staged: the merge was a no-op ("Already up to date"), so there is no
+  // history to collapse. `git diff --cached --quiet` exits non-zero when it differs.
+  const staged = await gitRun(worktreePath, ['diff', '--cached', '--quiet']);
+  if (staged.code === 0) return null;
+
+  const commit = await gitRun(worktreePath, ['commit', '-m', message], gitEnv);
+  if (commit.code !== 0) {
+    throw new Error(`git commit (squash) failed: ${commit.stderr || commit.stdout}`.trim());
+  }
+  const sha = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
+  return sha.code === 0 ? sha.stdout.trim() : null;
+}

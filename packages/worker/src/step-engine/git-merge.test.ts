@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect } from 'vitest';
-import { buildMergeFixPrompt, completeMergeHostSide, mergeCommitted } from './git-merge.js';
+import {
+  buildMergeFixPrompt,
+  completeMergeHostSide,
+  mergeCommitted,
+  squashMergeCommit,
+} from './git-merge.js';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -91,6 +96,94 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
       // Leave the markers in place → completion must refuse.
       expect(await completeMergeHostSide(dir, COMMIT_ENV)).toBe(false);
       expect(await mergeCommitted(dir)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** A repo on `main` with a `feature/x` that adds two commits and does NOT conflict. */
+async function setupCleanFeature(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gs-'));
+  await git(dir, ['init', '-b', 'main']);
+  await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeFile(path.join(dir, 'one.txt'), 'one\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'ISS-1: one']);
+  await writeFile(path.join(dir, 'two.txt'), 'two\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'ISS-2: two']);
+  await git(dir, ['checkout', 'main']);
+  return dir;
+}
+
+const count = async (dir: string, ref: string): Promise<number> =>
+  Number((await git(dir, ['rev-list', '--count', ref])).trim());
+
+describe('squashMergeCommit (real git)', () => {
+  it('collapses a landed merge into one commit with an identical tree', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      expect(await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x'])).toBe(0);
+      // The un-squashed shape: 2 feature commits + the merge commit on top of main's 1.
+      expect(await count(dir, 'main')).toBe(4);
+      const mergedTree = (await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim();
+
+      const sha = await squashMergeCommit(dir, before, 'feat: squashed', COMMIT_ENV);
+      expect(sha).toBeTruthy();
+      expect(await count(dir, 'main')).toBe(2); // init + the single squash commit
+      expect((await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(mergedTree);
+      expect((await git(dir, ['rev-parse', 'HEAD^'])).trim()).toBe(before);
+      expect((await git(dir, ['log', '-1', '--format=%s'])).trim()).toBe('feat: squashed');
+      // Nothing left staged or dirty.
+      expect((await git(dir, ['status', '--porcelain'])).trim()).toBe('');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('is a no-op when the merge changed nothing (already up to date)', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const after = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      // A second merge of the same branch is "Already up to date" — nothing to collapse.
+      expect(await squashMergeCommit(dir, after, 'feat: nothing', COMMIT_ENV)).toBeNull();
+      expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(after);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to touch a LIVE merge (MERGE_HEAD present)', async () => {
+    const dir = await setupConflict();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      expect(await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x'])).not.toBe(0);
+      expect(await squashMergeCommit(dir, before, 'feat: nope', COMMIT_ENV)).toBeNull();
+      // The conflict loop still owns it: MERGE_HEAD and the markers survive.
+      expect(await gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      expect(await readFile(path.join(dir, 'base.txt'), 'utf8')).toContain('<<<<<<<');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('finishes a crash-interrupted squash (HEAD reset, changes still staged)', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      // Simulate a crash between the reset and the commit.
+      await git(dir, ['reset', '--soft', before]);
+      const sha = await squashMergeCommit(dir, before, 'feat: resumed', COMMIT_ENV);
+      expect(sha).toBeTruthy();
+      expect(await count(dir, 'main')).toBe(2);
+      expect((await git(dir, ['log', '-1', '--format=%s'])).trim()).toBe('feat: resumed');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
