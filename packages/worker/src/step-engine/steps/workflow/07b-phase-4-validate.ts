@@ -298,7 +298,10 @@ const CODE_VALIDATOR_DEFINITION = [
   'Step 1 - Review the specification: functional requirements, edge cases, error handling.',
   '',
   'Step 2 - Read the implementation: each changed file completely; map code flow to requirements',
-  '(use code-navigation tools if available, else grep).',
+  '(use code-navigation tools if available, else grep). The changed-file list names the lines',
+  'this change wrote beside each path — read the rest of a file for context, and judge the change',
+  'by what it wrote. A file listed with no line note has none recorded: treat all of it as',
+  'changed.',
   '',
   'Step 3 - Validate logic: for each requirement verify the code implements it, the logic is',
   'correct, edge cases are handled, errors are handled. Trace execution mentally with sample data;',
@@ -767,6 +770,13 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         'Your current working directory has the workspace mounted; work on the files there.',
         fixes.length > 0 ? `Fixes the fix agent reported:\n- ${fixes.join('\n- ')}` : '',
         changedFilesBlock(d.implementationFiles, 'Changed files (your validation scope)', ''),
+        // The notes were measured before the fix agent ran, so its edits have shifted them.
+        // They still say which PART of a file this change is, which is what they are for —
+        // but an exact line number from them is no longer exact, and a reviewer told
+        // otherwise would report a defect at the wrong location.
+        'The line notes above were recorded BEFORE the fix agent edited these files, so treat',
+        'them as approximate now: they still show which part of each file this change is, but',
+        'take exact line numbers from the file in front of you, not from the list.',
         d.debtBlock ? `\n${d.debtBlock}` : '',
         d.honoredBlock ? `\n${d.honoredBlock}` : '',
         '',

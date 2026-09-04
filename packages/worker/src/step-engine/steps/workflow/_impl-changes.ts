@@ -32,7 +32,20 @@ export interface ImplementationFileSet {
    *  before this field existed carries neither the flag nor its meaning, and absent
    *  must not read as "the scan ran cleanly". */
   scanError?: string | null;
+  /** Which lines of each file this change actually wrote. Keyed by the same paths as
+   *  `files`; a path with NO entry has none recorded, which is not the same as "the whole
+   *  file changed" — the renderer and the scope fence both say so explicitly, and both
+   *  resolve the unrecorded case to the wider (pre-existing) scope. */
+  changedLines?: ChangedLineNotes;
 }
+
+/** Per-file note on the changed-file list: which lines this change wrote.
+ *
+ *  Values are display strings ('lines 12-18, 45', 'new file', 'deleted'). Nothing branches
+ *  on them — they exist to tell a reviewer which part of a file it is looking at, which is
+ *  the one thing a list of paths cannot say. Kept as strings rather than a structured shape
+ *  because the set is persisted to `task_steps.output`, where a human reads it back. */
+export type ChangedLineNotes = Record<string, string>;
 
 /** What a step recorded about its own coverage, for a gate to read back out of
  *  `task_steps.output`. Separate from ImplementationFileSet because the gate needs
@@ -88,6 +101,9 @@ const MAX_SCAN_ERROR_CHARS = 300;
  *  wrote nothing — so the empty-set guard below has to be able to tell them apart. */
 interface DirtyScan {
   files: string[];
+  /** Paths git reports as untracked (`??`). They appear in no diff at all — there is no
+   *  old side to diff against — so the line notes have to learn "new file" from here. */
+  untracked: string[];
   /** The `git status` failure, or null when the scan ran (a clean tree is a RESULT). */
   error: string | null;
 }
@@ -112,15 +128,18 @@ interface DirtyScan {
 async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
   try {
     const { stdout } = await exec('git', ['status', '--porcelain', '-uall'], { cwd: worktreePath });
-    return {
-      files: stdout
-        .toString()
-        .split('\n')
-        .map((l) => l.slice(3).trim())
-        .filter(Boolean)
-        .map((name) => (name.includes(' -> ') ? name.split(' -> ')[1]! : name)),
-      error: null,
-    };
+    const files: string[] = [];
+    const untracked: string[] = [];
+    for (const line of stdout.toString().split('\n')) {
+      const name = line.slice(3).trim();
+      if (!name) continue;
+      // A rename record is `R  new -> old` in the non-`-z` format; the destination is the
+      // path that exists on disk, which is the one a reviewer can open.
+      const resolved = name.includes(' -> ') ? name.split(' -> ')[1]! : name;
+      files.push(resolved);
+      if (line.startsWith('??')) untracked.push(resolved);
+    }
+    return { files, untracked, error: null };
   } catch (err) {
     const detail = err as { stderr?: unknown; message?: unknown };
     const stderr = typeof detail.stderr === 'string' ? detail.stderr.trim() : '';
@@ -130,11 +149,160 @@ async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
     // cut is stated, the same way the changed-file cap states its own.
     return {
       files: [],
+      untracked: [],
       error:
         reason.length > MAX_SCAN_ERROR_CHARS
           ? `${reason.slice(0, MAX_SCAN_ERROR_CHARS)} (truncated)`
           : reason,
     };
+  }
+}
+
+/** How many line ranges are listed for one file before the rest are reported as a count.
+ *  A prompt-size cap, and — like MAX_LISTED_FILES — one that states what it cut. */
+const MAX_RANGES_PER_FILE = 20;
+
+/** Ceiling on the raw `git diff` output read for line ranges. `--unified=0` still prints
+ *  every changed line, so a very large change is megabytes; execFile's 1 MB default would
+ *  reject it and cost the notes entirely. Exceeding this is not fatal — no notes are
+ *  recorded and the fence falls back to whole-file scope. */
+const MAX_DIFF_BUFFER_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Which lines each file's diff wrote, from `git diff --unified=0` output.
+ *
+ * Line numbers are taken from the `+` side of each hunk header, so they address the file
+ * AS THE AGENT WILL READ IT rather than some pre-change numbering. A `+c,0` hunk is a pure
+ * deletion and has no new-side span; it is recorded as the single line `c` (where the
+ * removal sits) and the legend says a bare number can mean that.
+ *
+ * The path is read from the `+++ b/<path>` line rather than the `diff --git a/… b/…` header,
+ * which is ambiguous for a path containing a space. A path git chose to QUOTE (control
+ * characters, an embedded quote) is not unquoted here: it then matches no file in the set,
+ * so the file is simply left unannotated — the same "not recorded" state that resolves to
+ * whole-file scope. Failing to the wider scope is the only safe direction.
+ */
+export function parseChangedLineRanges(diff: string): ChangedLineNotes {
+  const notes: ChangedLineNotes = {};
+  let path: string | null = null;
+  let deleted = false;
+  let ranges: string[] = [];
+  let dropped = 0;
+
+  const flush = (): void => {
+    if (path) {
+      if (deleted) notes[path] = 'deleted';
+      else if (ranges.length > 0) {
+        notes[path] =
+          `lines ${ranges.join(', ')}` + (dropped > 0 ? ` (+${dropped} more ranges)` : '');
+      } else {
+        // A diff entry with no hunks: a mode change, or a rename with no edits. Saying so
+        // beats leaving it indistinguishable from a file nothing measured.
+        notes[path] = 'no line changes (mode or rename only)';
+      }
+    }
+    path = null;
+    deleted = false;
+    ranges = [];
+    dropped = 0;
+  };
+
+  const strip = (side: string, prefix: string): string =>
+    side.startsWith(prefix) ? side.slice(prefix.length) : side;
+
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      flush();
+      continue;
+    }
+    // `---` always precedes `+++`, so the old side is recorded first and used only when the
+    // new side turns out to be /dev/null — a deleted file names its path nowhere else.
+    if (line.startsWith('--- ')) {
+      const source = line.slice(4).trim();
+      if (source !== '/dev/null') path = strip(source, 'a/');
+      continue;
+    }
+    if (line.startsWith('+++ ')) {
+      const target = line.slice(4).trim();
+      if (target === '/dev/null') deleted = true;
+      else path = strip(target, 'b/');
+      continue;
+    }
+    if (!line.startsWith('@@')) continue;
+    const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!m) continue;
+    const start = Number.parseInt(m[1]!, 10);
+    const count = m[2] === undefined ? 1 : Number.parseInt(m[2], 10);
+    if (!Number.isFinite(start)) continue;
+    if (ranges.length >= MAX_RANGES_PER_FILE) {
+      dropped += 1;
+      continue;
+    }
+    ranges.push(count <= 1 ? String(start) : `${start}-${start + count - 1}`);
+  }
+  flush();
+  return notes;
+}
+
+/**
+ * The ref this task's change should be measured against.
+ *
+ * The merge-base, NOT `HEAD`: the two execution paths commit differently and only the fork
+ * point covers both. Single-agent work is still uncommitted at review time, so `git diff
+ * HEAD` is the change — and there merge-base(HEAD, base) IS HEAD, so nothing moves. DAG
+ * execution commits every issue (dag-executor.ts) and merges them in, so at review time the
+ * tree is CLEAN and `git diff HEAD` is empty; diffing the fork point recovers the whole
+ * change. `git diff <ref>` compares the WORKING TREE to that ref, so one call covers
+ * committed and uncommitted work together.
+ *
+ * Falls back to HEAD when the base branch is unknown or gone, and to null when even HEAD
+ * does not resolve. Every failure ends in fewer notes, never wrong ones.
+ */
+async function resolveDiffBase(
+  worktreePath: string,
+  baseBranch: string | null,
+): Promise<string | null> {
+  if (baseBranch) {
+    try {
+      const { stdout } = await exec('git', ['merge-base', 'HEAD', baseBranch], {
+        cwd: worktreePath,
+      });
+      const sha = stdout.toString().trim();
+      if (sha) return sha;
+    } catch {
+      // base branch renamed, deleted, or unrelated history — fall through to HEAD
+    }
+  }
+  try {
+    await exec('git', ['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath });
+    return 'HEAD';
+  } catch {
+    return null;
+  }
+}
+
+/** The per-file line notes for this worktree, or an empty map when the diff cannot be
+ *  read. Empty is a legitimate answer and never an error: the renderer states that an
+ *  unannotated file has no recorded range, and the scope fence treats it as wholly in
+ *  scope, which is exactly the behaviour that existed before notes did. */
+async function changedLineNotes(
+  worktreePath: string,
+  baseBranch: string | null,
+): Promise<ChangedLineNotes> {
+  const base = await resolveDiffBase(worktreePath, baseBranch);
+  if (!base) return {};
+  try {
+    const { stdout } = await exec(
+      'git',
+      // quotePath=false keeps a non-ASCII path literal so it still matches the file set.
+      // --no-renames keeps every path on its own diff entry, so a renamed file is annotated
+      // under the name it now has on disk.
+      ['-c', 'core.quotePath=false', 'diff', '--unified=0', '--no-color', '--no-renames', base],
+      { cwd: worktreePath, maxBuffer: MAX_DIFF_BUFFER_BYTES },
+    );
+    return parseChangedLineRanges(stdout.toString());
+  } catch {
+    return {};
   }
 }
 
@@ -167,11 +335,28 @@ export async function collectImplementationFiles(
   for (const f of scan.files) files.add(f);
   const all = [...files];
   const listed = all.slice(0, MAX_LISTED_FILES);
+
+  // Which lines of each file the change wrote. Measured against the task's fork point, so
+  // it covers committed (DAG) and uncommitted (single-agent) work alike — see
+  // resolveDiffBase. An untracked file is in no diff at all, so it is named here.
+  const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+  const baseBranch = (worktree?.output as { baseBranch?: string } | null)?.baseBranch ?? null;
+  const measured = await changedLineNotes(worktreePath, baseBranch);
+  for (const p of scan.untracked) measured[p] ??= 'new file';
+  // Only the files the prompt will actually list, so the persisted set carries no notes for
+  // files nobody was given.
+  const changedLines: ChangedLineNotes = {};
+  for (const f of listed) {
+    const note = measured[f];
+    if (note) changedLines[f] = note;
+  }
+
   return {
     files: listed,
     total: all.length,
     truncated: listed.length < all.length,
     scanError: scan.error,
+    changedLines,
   };
 }
 
@@ -190,17 +375,38 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
   // which is byte-for-byte what it produced before this shipped.
   const files = set?.files ?? (Array.isArray(value) ? value : []);
   if (files.length === 0) return fallback;
-  const list = `${header}:\n- ${files.join('\n- ')}`;
-  if (!set?.truncated) return list;
-  const missing = set.total - files.length;
-  return [
-    list,
-    '',
-    `COVERAGE: the list above is ${set.files.length} of ${set.total} changed files. The other`,
-    `${missing} were NOT given to you and you cannot see them. Work from what is listed, and`,
-    'state plainly in your output that the unlisted files were not covered — do NOT report a',
-    'clean result as though it covered the whole change.',
+
+  // The line note is what a list of paths alone cannot say: which part of a 5,000-line file
+  // this change is. Without it a reviewer reads the whole file and cannot tell new code from
+  // code that was already there, which is how pre-existing defects became blocking findings
+  // against a three-line edit.
+  const notes = set?.changedLines ?? {};
+  const list = [
+    `${header}:`,
+    ...files.map((f) => (notes[f] ? `- ${f} — ${notes[f]}` : `- ${f}`)),
   ].join('\n');
+
+  const parts = [list];
+  if (Object.keys(notes).length > 0) {
+    parts.push(
+      '',
+      'LINES: the note after a file is the part of it THIS change wrote, numbered as in the file',
+      'you will read. A bare number can also mark where lines were deleted. Read the whole file',
+      'for context — but a file listed with NO note has none recorded, so treat all of it as',
+      'changed rather than assuming any of it is untouched.',
+    );
+  }
+  if (set?.truncated) {
+    const missing = set.total - files.length;
+    parts.push(
+      '',
+      `COVERAGE: the list above is ${set.files.length} of ${set.total} changed files. The other`,
+      `${missing} were NOT given to you and you cannot see them. Work from what is listed, and`,
+      'state plainly in your output that the unlisted files were not covered — do NOT report a',
+      'clean result as though it covered the whole change.',
+    );
+  }
+  return parts.join('\n');
 }
 
 /** What a prompt says if an empty change set ever reaches it anyway.

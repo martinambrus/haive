@@ -1337,7 +1337,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Collect the change',
-        body: 'Read the exact change — the changed-file list from your task prompt, or `git diff` where git is available — plus the full content of each changed file, not just the hunks. Do not review files you did not read.',
+        body: 'Read the exact change — the changed-file list from your task prompt, or `git diff` where git is available — plus the full content of each changed file, not just the hunks. The task list names the lines this change wrote beside each path, so read the whole file for context and judge the change by what it wrote; a file listed with no line note has none recorded, so treat all of it as changed. Do not review files you did not read.',
       },
       {
         title: 'Consult conventions',

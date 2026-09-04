@@ -22,13 +22,29 @@
  *  Blast radius is IN scope — this is the same rule 08c2's auditor already applies —
  *  so a stale caller or a broken consumer of a changed contract is never fenced out.
  *  The last line is deliberate and points the SAME way as `isOutOfScope`: doubt
- *  resolves to in-scope, so the fence can only ever be too narrow, never too wide. */
+ *  resolves to in-scope, so the fence can only ever be too narrow, never too wide.
+ *
+ *  The unit is LINES, not files. It was files, because a list of paths was all a reviewer
+ *  had — which made a pre-existing defect anywhere in a 5,000-line file a legitimate
+ *  blocking finding against a three-line edit, and a reviewer reading that file could not
+ *  have told the difference anyway. `changedFilesBlock` now annotates each path with the
+ *  lines the change actually wrote, so the boundary can say what it always meant. The
+ *  enclosing function or block stays in scope with them: an edit's effect is not confined
+ *  to the edited line, and a defect the edit created three lines below it is this change's.
+ *
+ *  Unmeasured stays WIDE. A file whose note is missing (an agent-reported path git never
+ *  saw, a diff that could not be read) is wholly in scope — the same behaviour as before
+ *  notes existed. Narrowing on a measurement nobody made is how a real defect gets waved
+ *  through, and it is the one direction this fence must never fail in. */
 const SCOPE_BOUNDARY = [
-  'SCOPE FENCE. IN SCOPE = the files this change touched, PLUS any code whose contract this',
-  'change alters — a caller of a signature that changed, a consumer of a schema, format or',
-  'return value that changed, and any path this change makes newly reachable. A problem in',
-  'code this change did not touch and does not newly expose is OUT OF SCOPE, however real it',
-  'is. If you are unsure whether this change caused it, treat it as IN scope.',
+  'SCOPE FENCE. IN SCOPE = the lines this change wrote — listed per file in the changed-files',
+  'block — together with the function or block each changed line sits in, PLUS any code whose',
+  'contract this change alters: a caller of a signature that changed, a consumer of a schema,',
+  'format or return value that changed, and any path this change makes newly reachable. A',
+  'problem in code this change did not write and does not newly expose is OUT OF SCOPE,',
+  'however real it is — including code inside a file this change touched but outside the lines',
+  'it wrote. Where a file carries no line note its lines were not recorded, and the WHOLE file',
+  'is in scope. If you are unsure whether this change caused it, treat it as IN scope.',
 ] as const;
 
 /** Disposition A — a reviewer with a `findings` list and a `## INSIGHTS` sink.

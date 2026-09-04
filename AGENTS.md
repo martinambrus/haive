@@ -170,6 +170,53 @@ deploy path a config-only change would otherwise not have.
 
 The mirror (`worker/src/plan/mirror.ts`) writes `.haive-data/plan.json` + `plan.md` from every plan-step apply and from `12-post-onboarding`; `persistDetection` imports it on clone. `CONFIG_KEYS.PLAN_CANVAS_ENABLED` (admin toggle) off refuses new plan tasks and makes the onboarding step self-skip; existing plans stay readable and editable — hiding a plan someone made reads as data loss. Web: drill-down grid, not a graph engine (`components/plan/`); `plan-status.ts` is the single status→colour source; counts are server-computed. Live-Postgres coverage: `pnpm --filter @haive/worker smoke:plan-canvas` (61 checks).
 
+## Review scope
+
+Every reviewing step (07a, 07b, 08a, 08b, 08c, 08c2, 08d) is scoped by ONE collector,
+`collectImplementationFiles` (`_impl-changes.ts`). It unions 07's agent-reported
+`filesTouched`, the DAG issues' `filesModified`, and the dirty worktree, caps the list at 100
+and REPORTS the cap (`changedFilesBlock`'s COVERAGE notice orders the agent to state what it
+was not given) — a silent cap once had a reviewer approve 100 of 150 files as though it had
+seen all of them. The list is not a convenience: `worktreeGitfileMask` bind-mounts an empty
+file over the worktree's `.git` for every cli-exec invocation, so inside the sandbox there is
+no `git status` and no `git diff`, and everything an agent knows about the change has to
+arrive in its prompt.
+
+Each path carries the LINES this change wrote (`lines 12-18, 45`, `new file`, `deleted`,
+`no line changes (mode or rename only)`). Measured against the MERGE-BASE with the task's base
+branch, not HEAD, because the two execution paths commit differently and only the fork point
+covers both: single-agent work is still uncommitted at review time (the first commit is
+`10-gate-3-commit`), while `dag-executor` commits every issue and merges it in, so a DAG task's
+tree is CLEAN by 07b and `git diff HEAD` reports nothing. `git diff <ref>` compares the WORKING
+TREE to that ref, so one call covers committed and uncommitted work together. Line numbers come
+from the hunk headers' `+` side, which is the file as the agent will read it.
+
+ABSENT is not "unchanged". A path git never saw (an agent-reported file, a diff that could not
+be read) carries no note, and both the prompt legend and the scope fence say so explicitly:
+the whole file is in scope. Narrowing on a measurement nobody made is the one direction this
+must never fail in.
+
+`SCOPE_BOUNDARY` (`_scope-fence.ts`, shared with the on-disk agent templates so the inline
+persona and the file that OVERRIDES it cannot drift) is therefore keyed on lines, not files:
+in scope = the lines the change wrote, the function or block each sits in — an edit's effect is
+not confined to the edited line — plus blast radius (callers of a changed signature, consumers
+of a changed schema, paths the change makes newly reachable). It used to be "the files this
+change touched", which made a pre-existing defect anywhere in a 5,000-line file a blocking
+finding against a three-line edit; MEASURED across 102 runs of one task, ~450 blocking findings
+sat on legacy code the task never touched, each costing a capped fix round whose fixer then
+REWROTE that legacy code (one worktree: 71 dirty files against a plan of 23). Out-of-scope
+findings are never dropped, only re-dispositioned — `## INSIGHTS` for the peer/lens reviewers,
+`in_scope: "no"` for security, the markdown report for 07b.
+
+An EMPTY change set fails the step (`assertReviewableChange`), at the prompt-build boundary
+rather than in detect() so a replayed `detect_output` is guarded too, and always before
+dispatch. It used to render a fallback telling the agent to work the change out from the
+workspace — which it cannot, so it guessed, and the verdict it returned covered nothing. A skip
+would be worse than a failure: at gate 2 a review with no findings is indistinguishable from an
+approval. The two ways to get an empty set are reported as different diagnoses, since
+`dirtyWorktreeFiles` no longer swallows its own error — a failed scan names git's message, a
+scan that ran and found nothing says the implementation wrote no files.
+
 ## Review findings and waivers
 
 `review_findings` is the durable record of what every reviewing step raised — 07b's validator, 08c/08c2, 08d's adversaries. Findings otherwise live only in `task_steps.output`, which a manual retry nulls, so nothing could say whether a reviewer change helped. It is WRITE-ONLY on purpose: `recordReviewFindings` (`_review-findings.ts`) is the only insert and nothing in worker or api SELECTs the table. No behaviour gates on it, which is why every write there is best-effort and never throws — telemetry must not fail the review that produced it.

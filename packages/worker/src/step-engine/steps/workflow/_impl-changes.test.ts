@@ -17,6 +17,7 @@ const {
   fileCoverage,
   isDocsOnlyChange,
   NO_CHANGE_SET_FALLBACK,
+  parseChangedLineRanges,
 } = await import('./_impl-changes.js');
 type StepContextLike = Parameters<typeof collectImplementationFiles>[0];
 
@@ -349,5 +350,246 @@ describe('NO_CHANGE_SET_FALLBACK', () => {
     expect(NO_CHANGE_SET_FALLBACK).toContain('Do NOT try to work out what changed');
     // ...and it must not let the resulting review read as an approval.
     expect(NO_CHANGE_SET_FALLBACK).toContain('do NOT report a clean result');
+  });
+});
+
+describe('parseChangedLineRanges', () => {
+  const diff = (...lines: string[]) => lines.join('\n');
+
+  it('reads the NEW-side span of each hunk, which is how the agent will read the file', () => {
+    // The + side, not the - side: the reviewer opens the file as it is now, so pre-change
+    // numbering would point at the wrong lines.
+    const notes = parseChangedLineRanges(
+      diff(
+        'diff --git a/src/a.ts b/src/a.ts',
+        '--- a/src/a.ts',
+        '+++ b/src/a.ts',
+        '@@ -10,2 +12,5 @@',
+        '+one',
+        '@@ -40,0 +45,1 @@',
+        '+two',
+      ),
+    );
+    expect(notes['src/a.ts']).toBe('lines 12-16, 45');
+  });
+
+  it('treats an omitted hunk count as one line', () => {
+    // `@@ -1 +1 @@` is git's shorthand for a single-line hunk.
+    const notes = parseChangedLineRanges(
+      diff('diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1 +7 @@', '+x'),
+    );
+    expect(notes['x']).toBe('lines 7');
+  });
+
+  it('records a pure deletion as the line it happened at', () => {
+    // A `+c,0` hunk has no new-side span at all. The line is where the removal sits, and
+    // the prompt legend says a bare number can mean this.
+    const notes = parseChangedLineRanges(
+      diff('diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -20,3 +19,0 @@', '-gone'),
+    );
+    expect(notes['x']).toBe('lines 19');
+  });
+
+  it('names a deleted file from its old side, which is the only side it has', () => {
+    // git emits `--- a/x` BEFORE `+++ /dev/null`, so the old path has to be carried
+    // forward rather than looked for after the fact.
+    const notes = parseChangedLineRanges(
+      diff(
+        'diff --git a/gone.ts b/gone.ts',
+        'deleted file mode 100644',
+        '--- a/gone.ts',
+        '+++ /dev/null',
+        '@@ -1,3 +0,0 @@',
+        '-a',
+      ),
+    );
+    expect(notes['gone.ts']).toBe('deleted');
+  });
+
+  it('keeps each file separate across a multi-file diff', () => {
+    const notes = parseChangedLineRanges(
+      diff(
+        'diff --git a/one.ts b/one.ts',
+        '--- a/one.ts',
+        '+++ b/one.ts',
+        '@@ -1,1 +1,2 @@',
+        '+a',
+        'diff --git a/two.ts b/two.ts',
+        '--- a/two.ts',
+        '+++ b/two.ts',
+        '@@ -9,0 +30,3 @@',
+        '+b',
+      ),
+    );
+    expect(notes).toEqual({ 'one.ts': 'lines 1-2', 'two.ts': 'lines 30-32' });
+  });
+
+  it('states the cut when a file has more ranges than the cap', () => {
+    // A cap that hides how much it removed is the failure MAX_LISTED_FILES already exists
+    // to avoid; this one reports it the same way.
+    const hunks = Array.from({ length: 25 }, (_, i) => `@@ -1,0 +${i * 10 + 1},1 @@`);
+    const notes = parseChangedLineRanges(
+      diff('diff --git a/big.ts b/big.ts', '--- a/big.ts', '+++ b/big.ts', ...hunks),
+    );
+    expect(notes['big.ts']).toContain('(+5 more ranges)');
+    expect(notes['big.ts']!.startsWith('lines 1, 11, 21')).toBe(true);
+  });
+
+  it('says so when a diff entry has no hunks at all', () => {
+    // A mode change or a pure rename. Distinct from a file nothing measured, which carries
+    // no note and is treated as wholly in scope.
+    const notes = parseChangedLineRanges(
+      diff('diff --git a/x b/x', 'old mode 100644', 'new mode 100755', '--- a/x', '+++ b/x'),
+    );
+    expect(notes['x']).toBe('no line changes (mode or rename only)');
+  });
+
+  it('returns nothing for output it cannot read', () => {
+    expect(parseChangedLineRanges('')).toEqual({});
+    expect(parseChangedLineRanges('fatal: bad revision')).toEqual({});
+  });
+});
+
+describe('changedFilesBlock — line notes', () => {
+  const set = (files: string[], changedLines: Record<string, string>) => ({
+    files,
+    total: files.length,
+    truncated: false,
+    changedLines,
+  });
+
+  it('annotates each path with the lines the change wrote', () => {
+    const block = changedFilesBlock(
+      set(['src/a.ts', 'src/b.ts'], { 'src/a.ts': 'lines 12-18', 'src/b.ts': 'new file' }),
+      'Changed files',
+      'fallback',
+    );
+    expect(block).toContain('- src/a.ts — lines 12-18');
+    expect(block).toContain('- src/b.ts — new file');
+  });
+
+  it('leaves an unmeasured path bare and says what that means', () => {
+    // The load-bearing half: absent must read as "not recorded", never as "unchanged".
+    // A reviewer that read it the other way would skip a file nobody measured.
+    const block = changedFilesBlock(
+      set(['measured.ts', 'unmeasured.ts'], { 'measured.ts': 'lines 3' }),
+      'Changed files',
+      'fallback',
+    );
+    expect(block).toContain('- unmeasured.ts\n');
+    expect(block).not.toContain('- unmeasured.ts —');
+    expect(block).toContain('has none recorded, so treat all of it as');
+  });
+
+  it('omits the legend entirely when nothing was measured', () => {
+    const block = changedFilesBlock(set(['a.ts'], {}), 'Changed files', 'fallback');
+    expect(block).toBe('Changed files:\n- a.ts');
+  });
+
+  it('carries the coverage notice alongside the legend when the list was also capped', () => {
+    const block = changedFilesBlock(
+      {
+        files: names(100),
+        total: 150,
+        truncated: true,
+        changedLines: { 'src/file-0.ts': 'lines 4' },
+      },
+      'Changed files',
+      'fallback',
+    );
+    expect(block).toContain('LINES:');
+    expect(block).toContain('COVERAGE: the list above is 100 of 150 changed files');
+  });
+
+  it('renders a replayed row that predates line notes exactly as it did before', () => {
+    expect(changedFilesBlock(['a.ts'], 'Changed files', 'fallback')).toBe('Changed files:\n- a.ts');
+  });
+});
+
+describe('collectImplementationFiles — line notes against a real repo', () => {
+  const exec = promisify(execFile);
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@haive.local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@haive.local',
+  };
+  const git = (dir: string, args: string[]) => exec('git', args, { cwd: dir, env: GIT_ENV });
+
+  /** ctx answering both step lookups the collector makes, and a DAG issue list — the only
+   *  file source left once the work is committed and the tree is clean. */
+  function ctxFor(baseBranch: string | null, dagFiles: string[] = []): StepContextLike {
+    loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
+      id === '01-worktree-setup' ? { output: { baseBranch } } : { output: { filesTouched: [] } },
+    );
+    return {
+      taskId: 't1',
+      db: {
+        select: () => ({
+          from: () => ({ where: () => Promise.resolve([{ filesModified: dagFiles }]) }),
+        }),
+      },
+    } as unknown as StepContextLike;
+  }
+
+  /** A repo with one committed file, on a `task` branch forked from `main`. */
+  async function setupRepo(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'impl-lines-'));
+    await git(dir, ['init', '-b', 'main']);
+    await writeFile(path.join(dir, 'app.ts'), 'a\nb\nc\nd\ne\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'base']);
+    await git(dir, ['checkout', '-b', 'task']);
+    return dir;
+  }
+
+  it('annotates uncommitted work — the single-agent path', async () => {
+    const dir = await setupRepo();
+    try {
+      await writeFile(path.join(dir, 'app.ts'), 'a\nb\nCHANGED\nd\ne\n', 'utf8');
+      await writeFile(path.join(dir, 'brand-new.ts'), 'fresh\n', 'utf8');
+      const out = await collectImplementationFiles(ctxFor('main'), dir);
+      expect(out.changedLines?.['app.ts']).toBe('lines 3');
+      // An untracked file appears in no diff at all, so the note has to come from status.
+      expect(out.changedLines?.['brand-new.ts']).toBe('new file');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('annotates COMMITTED work — the DAG path, where git diff HEAD is empty', async () => {
+    // dag-executor commits every issue and merges it in, so by review time the tree is
+    // clean and HEAD already contains the change. Diffing HEAD would report nothing; the
+    // fork point is what recovers it.
+    const dir = await setupRepo();
+    try {
+      await writeFile(path.join(dir, 'app.ts'), 'a\nb\nCHANGED\nd\ne\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+      const clean = await git(dir, ['status', '--porcelain']);
+      expect(clean.stdout.trim()).toBe('');
+
+      const out = await collectImplementationFiles(ctxFor('main', ['app.ts']), dir);
+      expect(out.files).toContain('app.ts');
+      expect(out.changedLines?.['app.ts']).toBe('lines 3');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('records no note rather than a wrong one when the base branch is gone', async () => {
+    // Falls back to HEAD, which on a committed change measures nothing. No note means the
+    // whole file stays in scope — the behaviour that existed before notes did.
+    const dir = await setupRepo();
+    try {
+      await writeFile(path.join(dir, 'app.ts'), 'a\nb\nCHANGED\nd\ne\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'committed']);
+      const out = await collectImplementationFiles(ctxFor('no-such-branch', ['app.ts']), dir);
+      expect(out.changedLines?.['app.ts']).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
