@@ -13,6 +13,7 @@ import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
 import { mergeSpan } from '@/lib/merge-task-span';
 import { usePageTitle } from '@/lib/use-page-title';
+import { rememberTaskOrigin } from '@/lib/task-origin';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -50,7 +51,20 @@ const TYPE_LABELS: Record<string, string> = {
 // module-level helper.
 const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
   return (
-    <Link href={`/tasks/${task.id}`} className="block">
+    <Link
+      href={`/tasks/${task.id}`}
+      // Read off the location rather than taken as a prop: the filters live in the
+      // URL, and a prop would defeat the memo above on every filter change. Also
+      // what stops a task opened from the plan earlier claiming the plan again
+      // when it is next opened from this list.
+      onClick={() =>
+        rememberTaskOrigin(`/tasks/${task.id}`, {
+          href: `${window.location.pathname}${window.location.search}`,
+          label: 'Back to tasks',
+        })
+      }
+      className="block"
+    >
       <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">

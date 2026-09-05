@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Lock, Unlock } from 'lucide-react';
 import { usePageTitle } from '@/lib/use-page-title';
+import { taskOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import {
   api,
   API_BASE_URL,
@@ -92,6 +93,10 @@ async function chunkedUploadDbDump(opts: {
 export default function NewTaskPage() {
   usePageTitle('New task');
   const router = useRouter();
+  // Where this form was opened from — a plan node, the repositories list. The
+  // form is a waypoint, not a destination: Cancel returns there, and the task it
+  // creates inherits the same origin so the whole chain leads back to one place.
+  const origin = taskOrigin('/tasks/new');
   const searchParams = useSearchParams();
   const queryRepoId = searchParams.get('repositoryId');
   // run_app: a deterministic "run this repository" task (no implementation pipeline).
@@ -412,6 +417,7 @@ export default function NewTaskPage() {
           setAttachmentUploading(false);
         }
       }
+      if (origin) rememberTaskOrigin(`/tasks/${data.task.id}`, origin);
       router.push(`/tasks/${data.task.id}`);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to create task');
@@ -453,7 +459,7 @@ export default function NewTaskPage() {
               {resetting ? 'Resetting...' : 'Re-run onboarding'}
             </Button>
           )}
-          <Link href="/tasks">
+          <Link href={origin?.href ?? '/tasks'}>
             <Button variant="secondary" size="sm">
               Cancel
             </Button>

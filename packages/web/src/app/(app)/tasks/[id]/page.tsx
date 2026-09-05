@@ -93,6 +93,7 @@ import {
   scrollToNewestActiveTerminal,
 } from '@/lib/terminal-autoscroll';
 import { usePageTitle } from '@/lib/use-page-title';
+import { taskOrigin, taskTitleOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 
 /** Pick the live-browser surface for a step: the URL info box when the user chose
@@ -1355,11 +1356,16 @@ export default function TaskDetailPage() {
   // task is on screen is not a load failure: swapping the page for a red box
   // would tear down the step cards and their live terminals over a hiccup that
   // the next 2s tick usually undoes. That case renders a banner below instead.
+  // Where this task was opened from, when the tab remembers it: a plan node, a
+  // filtered list, another task. Null in a new tab or after a reload — see
+  // lib/task-origin — which is why every fallback below is the plain list.
+  const origin = taskOrigin(`/tasks/${id}`);
+
   if (error && !task) {
     return (
       <div className="flex flex-col gap-4">
-        <Link href="/tasks" className="text-sm text-indigo-400 underline">
-          Back to tasks
+        <Link href={origin?.href ?? '/tasks'} className="text-sm text-indigo-400 underline">
+          {origin?.label ?? 'Back to tasks'}
         </Link>
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
           {error}
@@ -1371,8 +1377,8 @@ export default function TaskDetailPage() {
   if (!task) {
     return (
       <div className="flex flex-col gap-4">
-        <Link href="/tasks" className="text-sm text-indigo-400 underline">
-          Back to tasks
+        <Link href={origin?.href ?? '/tasks'} className="text-sm text-indigo-400 underline">
+          {origin?.label ?? 'Back to tasks'}
         </Link>
         <div className="text-sm text-neutral-500">Loading...</div>
       </div>
@@ -1383,8 +1389,8 @@ export default function TaskDetailPage() {
   // metadata.mode === 'rollback') return to the repositories list rather than
   // the tasks list.
   const isUpgradeTask = task.type === 'onboarding_upgrade';
-  const backHref = isUpgradeTask ? '/repos' : '/tasks';
-  const backLabel = isUpgradeTask ? 'Back to repositories' : 'Back to tasks';
+  const backHref = origin?.href ?? (isUpgradeTask ? '/repos' : '/tasks');
+  const backLabel = origin?.label ?? (isUpgradeTask ? 'Back to repositories' : 'Back to tasks');
   const canCancel = !['completed', 'cancelled'].includes(task.status);
   // A CLI step is actively executing. The Stop buttons (top-right + the running
   // step row) target it: stop the CLI, keep the environment, task stays open.
@@ -1594,7 +1600,13 @@ export default function TaskDetailPage() {
           {parentTask && (
             <p className="mt-1 text-sm text-neutral-400">
               Parent task:{' '}
-              <Link href={`/tasks/${parentTask.id}`} className="text-indigo-400 underline">
+              <Link
+                href={`/tasks/${parentTask.id}`}
+                onClick={() =>
+                  rememberTaskOrigin(`/tasks/${parentTask.id}`, taskTitleOrigin(id, task.title))
+                }
+                className="text-indigo-400 underline"
+              >
                 {parentTask.title}
               </Link>
             </p>
@@ -1605,7 +1617,13 @@ export default function TaskDetailPage() {
               <ul className="mt-0.5 flex flex-col gap-1">
                 {childTasks.map((ct) => (
                   <li key={ct.id} className="flex items-center gap-2">
-                    <Link href={`/tasks/${ct.id}`} className="text-indigo-400 underline">
+                    <Link
+                      href={`/tasks/${ct.id}`}
+                      onClick={() =>
+                        rememberTaskOrigin(`/tasks/${ct.id}`, taskTitleOrigin(id, task.title))
+                      }
+                      className="text-indigo-400 underline"
+                    >
                       {ct.title}
                     </Link>
                     <Badge variant={taskStatusVariant(ct.status)}>{ct.status}</Badge>

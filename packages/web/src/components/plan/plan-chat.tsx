@@ -20,6 +20,7 @@ import {
 } from '@/lib/api-client';
 import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { groupPlanConversations, liveConversation, type PlanChatGroup } from './plan-chat-groups';
 import { firstUnreadMessageId, opCount, startedLabel, stamp } from './plan-chat-turn';
 
@@ -429,7 +430,13 @@ export function PlanChat({
       {liveTaskId && (
         <p className="text-[11px] text-neutral-500">
           The conversation runs as a task —{' '}
-          <Link href={`/tasks/${liveTaskId}`} className="text-indigo-300 underline">
+          <Link
+            href={`/tasks/${liveTaskId}`}
+            onClick={() =>
+              rememberTaskOrigin(`/tasks/${liveTaskId}`, planOrigin(repositoryId, nodeId))
+            }
+            className="text-indigo-300 underline"
+          >
             open it
           </Link>{' '}
           to watch what the agent is doing.

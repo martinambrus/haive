@@ -14,6 +14,7 @@ import {
 } from '@/lib/api-client';
 import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 
 const POLL_MS = 2000;
 
@@ -197,7 +198,11 @@ export function PlanMergePanel({
       <p className="text-[11px] text-neutral-500">
         Your checkout has not moved — the merge is in a scratch worktree until you confirm. The
         conversation runs as a task,{' '}
-        <Link href={`/tasks/${merge.taskId}`} className="text-indigo-300 underline">
+        <Link
+          href={`/tasks/${merge.taskId}`}
+          onClick={() => rememberTaskOrigin(`/tasks/${merge.taskId}`, planOrigin(repositoryId))}
+          className="text-indigo-300 underline"
+        >
           open it
         </Link>{' '}
         to watch the agent work.

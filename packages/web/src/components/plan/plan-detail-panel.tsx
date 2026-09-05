@@ -20,6 +20,7 @@ import {
   type PlanTreeNode,
 } from '@/lib/api-client';
 import { Badge, Button, FormError } from '@/components/ui';
+import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { CodePreviewDialog } from '@/components/code-preview-dialog';
 import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -577,8 +578,11 @@ export function PlanDetailPanel({
                   {node.blockedBy.length === 1 ? '' : 's'} first
                 </Button>
               ) : (
+                /* The form carries the origin on to the task it creates, so the
+                   whole plan → form → task chain leads back to this node. */
                 <Link
                   href={`/tasks/new?repositoryId=${repositoryId}&planNodeId=${nodeId}&title=${encodeURIComponent(node.title)}`}
+                  onClick={() => rememberTaskOrigin('/tasks/new', planOrigin(repositoryId, nodeId))}
                 >
                   <Button size="sm">Create a task from this</Button>
                 </Link>
@@ -596,7 +600,10 @@ export function PlanDetailPanel({
                     const ok = await write(async () => {
                       ({ taskId } = await startPlanAdvisory(repositoryId, nodeId, {}));
                     });
-                    if (ok && taskId) router.push(`/tasks/${taskId}`);
+                    if (ok && taskId) {
+                      rememberTaskOrigin(`/tasks/${taskId}`, planOrigin(repositoryId, nodeId));
+                      router.push(`/tasks/${taskId}`);
+                    }
                   })();
                 }}
               >
@@ -668,6 +675,9 @@ export function PlanDetailPanel({
                 <Link
                   key={t.taskId}
                   href={`/tasks/${t.taskId}`}
+                  onClick={() =>
+                    rememberTaskOrigin(`/tasks/${t.taskId}`, planOrigin(repositoryId, nodeId))
+                  }
                   className="block truncate text-xs text-indigo-300 underline"
                 >
                   {t.title} — {t.status}

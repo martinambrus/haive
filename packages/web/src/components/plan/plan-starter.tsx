@@ -1,8 +1,10 @@
 'use client';
 
 import { useRef, useState } from 'react';
+import Link from 'next/link';
 import { Paperclip, X } from 'lucide-react';
 import { buildPlan, startTask, uploadTaskAttachment } from '@/lib/api-client';
+import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import {
   Button,
   Card,
@@ -294,14 +296,19 @@ export function PlanStarter({
             </Button>
             {/* The draft a partial upload left behind. An escape hatch, not the
                 main route: pressing Retry above is the shorter path, and this is
-                for someone who would rather finish on the task page. */}
+                for someone who would rather finish on the task page. A client-side
+                Link rather than a plain anchor: a full document load would drop the
+                remembered origin and land the task on "Back to tasks". */}
             {draftTaskId && (
-              <a
+              <Link
                 href={`/tasks/${draftTaskId}`}
+                onClick={() =>
+                  rememberTaskOrigin(`/tasks/${draftTaskId}`, planOrigin(repositoryId))
+                }
                 className="text-xs text-indigo-300 underline hover:text-indigo-200"
               >
                 Open the draft task instead
-              </a>
+              </Link>
             )}
             {progress && <span className="text-xs text-indigo-300">{progress}</span>}
           </div>

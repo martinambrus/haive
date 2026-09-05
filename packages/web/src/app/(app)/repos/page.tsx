@@ -10,8 +10,15 @@ import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 import { ToolingUpgradeBanner } from '@/components/tooling-upgrade-banner';
 import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 import { usePageTitle } from '@/lib/use-page-title';
+import { rememberTaskOrigin } from '@/lib/task-origin';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
 import { stripManagedKnowledgeGlobs } from '@haive/shared/knowledge-paths';
+
+/** Every route into the new-task form from this page comes back here, and the
+ *  task the form creates inherits it. Shared by the three buttons on a repo card. */
+function rememberReposOrigin(): void {
+  rememberTaskOrigin('/tasks/new', { href: '/repos', label: 'Back to repositories' });
+}
 
 function statusVariant(status: Repository['status']) {
   if (status === 'ready') return 'success' as const;
@@ -387,17 +394,20 @@ function RepoCard(props: RepoCardProps) {
         </div>
         <div className="flex gap-2">
           {notOnboarded && (
-            <Link href={`/tasks/new?repositoryId=${repo.id}`}>
+            <Link href={`/tasks/new?repositoryId=${repo.id}`} onClick={rememberReposOrigin}>
               <Button size="sm">Onboard</Button>
             </Link>
           )}
           {repo.status === 'ready' && !notOnboarded && (
-            <Link href={`/tasks/new?repositoryId=${repo.id}`}>
+            <Link href={`/tasks/new?repositoryId=${repo.id}`} onClick={rememberReposOrigin}>
               <Button size="sm">Create task</Button>
             </Link>
           )}
           {repo.status === 'ready' && !notOnboarded && (
-            <Link href={`/tasks/new?repositoryId=${repo.id}&mode=run_app`}>
+            <Link
+              href={`/tasks/new?repositoryId=${repo.id}&mode=run_app`}
+              onClick={rememberReposOrigin}
+            >
               <Button variant="secondary" size="sm">
                 Run app
               </Button>

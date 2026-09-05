@@ -46,6 +46,7 @@ import { getPlanNode } from '@/lib/api-client';
 import { Button, FormError, Input } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { usePageTitle } from '@/lib/use-page-title';
+import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { PlanCardGrid } from '@/components/plan/plan-card-grid';
 import { PlanDetailPanel, type PlanPanelTab } from '@/components/plan/plan-detail-panel';
 import { PlanTree } from '@/components/plan/plan-tree';
@@ -80,9 +81,13 @@ export default function PlanPage() {
   // Read through the browser rather than useSearchParams(): that hook opts the
   // route out of static rendering unless it sits under a Suspense boundary, and
   // this needs neither router state nor a re-render to answer.
-  const initialNodeRef = useRef<string | null>(
-    typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('node'),
-  );
+  //
+  // Filled in the mount effect below, NOT by this initialiser: on a client-side
+  // navigation into the plan (the task page's "Back to plan") the location still
+  // reads as the page being left while this component first renders, so the node
+  // came back null and the mirror effect then stripped `?node=` from the URL the
+  // link had just set. Effects run after the commit, where the URL is the new one.
+  const initialNodeRef = useRef<string | null>(null);
 
   const [repoName, setRepoName] = useState('');
   const [nodeCount, setNodeCount] = useState(0);
@@ -475,6 +480,7 @@ export default function PlanPage() {
 
   useEffect(() => {
     let cancelled = false;
+    initialNodeRef.current = new URLSearchParams(window.location.search).get('node');
     void loadRoot()
       .then(async (root) => {
         if (cancelled) return;
@@ -653,6 +659,7 @@ export default function PlanPage() {
                     setSequencing(true);
                     try {
                       const { taskId } = await startPlanSequence(repositoryId);
+                      rememberTaskOrigin(`/tasks/${taskId}`, planOrigin(repositoryId, selectedId));
                       router.push(`/tasks/${taskId}`);
                     } catch (e) {
                       setError(e instanceof Error ? e.message : 'Could not start the ordering run');
@@ -910,7 +917,10 @@ export default function PlanPage() {
         <PlanStarter
           repositoryId={repositoryId}
           onboarded={onboarded}
-          onNavigate={(href) => router.push(href)}
+          onNavigate={(href) => {
+            rememberTaskOrigin(href, planOrigin(repositoryId, selectedId));
+            router.push(href);
+          }}
           onCreateRoot={async (title) => {
             setError(null);
             try {

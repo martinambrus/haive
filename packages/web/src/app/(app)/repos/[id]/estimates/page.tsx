@@ -10,6 +10,7 @@ import {
 } from '@/lib/api-client';
 import { Card } from '@/components/ui';
 import { usePageTitle } from '@/lib/use-page-title';
+import { rememberTaskOrigin } from '@/lib/task-origin';
 
 function fmtHours(h: number | null): string {
   if (h == null) return '—';
@@ -138,6 +139,12 @@ export default function EstimatesPage() {
                         <td className="py-1.5 pr-3">
                           <Link
                             href={`/tasks/${r.taskId}`}
+                            onClick={() =>
+                              rememberTaskOrigin(`/tasks/${r.taskId}`, {
+                                href: `/repos/${repositoryId}/estimates`,
+                                label: 'Back to estimates',
+                              })
+                            }
                             className="text-indigo-300 hover:underline"
                           >
                             {r.title}
