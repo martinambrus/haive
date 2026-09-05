@@ -53,22 +53,8 @@ export async function ensureRagSchema(
       )
     `);
 
-    // Indexes
-    await conn.pg.unsafe(`CREATE INDEX IF NOT EXISTS idx_rag_task_id ON ${RAG_TABLE} (task_id)`);
-    await conn.pg.unsafe(
-      `CREATE INDEX IF NOT EXISTS idx_rag_repository_id ON ${RAG_TABLE} (repository_id)`,
-    );
-    await conn.pg.unsafe(
-      `CREATE INDEX IF NOT EXISTS idx_rag_source_section ON ${RAG_TABLE} (source_path, section_id, chunk_index)`,
-    );
-    await conn.pg.unsafe(
-      `CREATE INDEX IF NOT EXISTS idx_rag_source_type ON ${RAG_TABLE} (source_type)`,
-    );
-    await conn.pg.unsafe(
-      `CREATE INDEX IF NOT EXISTS idx_rag_content_tsv ON ${RAG_TABLE} USING GIN (content_tsv)`,
-    );
-
-    // HNSW index with halfvec cast (supports >2000 dims)
+    // HNSW index with halfvec cast (supports >2000 dims). The only index that is
+    // specific to this variant — everything else is created for both, below.
     try {
       await conn.pg.unsafe(
         `CREATE INDEX IF NOT EXISTS idx_rag_vector_hnsw ON ${RAG_TABLE} USING hnsw ((vector::halfvec(${dims})) halfvec_cosine_ops)`,
@@ -76,8 +62,6 @@ export async function ensureRagSchema(
     } catch (err) {
       log.warn({ err }, 'HNSW index creation failed; vector search will use sequential scan');
     }
-
-    await dedupeAndEnforceRepoUniqueness(conn);
   } else {
     await conn.pg`
       CREATE TABLE IF NOT EXISTS ${conn.pg(RAG_TABLE)} (
@@ -95,18 +79,30 @@ export async function ensureRagSchema(
         created_at TIMESTAMP DEFAULT NOW()
       )
     `;
-    await conn.pg.unsafe(`CREATE INDEX IF NOT EXISTS idx_rag_task_id ON ${RAG_TABLE} (task_id)`);
-    await conn.pg.unsafe(
-      `CREATE INDEX IF NOT EXISTS idx_rag_repository_id ON ${RAG_TABLE} (repository_id)`,
-    );
-    await conn.pg.unsafe(
-      `CREATE INDEX IF NOT EXISTS idx_rag_source_section ON ${RAG_TABLE} (source_path, section_id, chunk_index)`,
-    );
-    await conn.pg.unsafe(
-      `CREATE INDEX IF NOT EXISTS idx_rag_source_type ON ${RAG_TABLE} (source_type)`,
-    );
-    await dedupeAndEnforceRepoUniqueness(conn);
   }
+
+  // Lookup/scope indexes and the GIN that backs the lexical half — for BOTH
+  // variants. These used to be duplicated inside each branch, and the two copies
+  // drifted: the jsonb branch never created `idx_rag_content_tsv`, even though a
+  // store with no vector column is exactly the one `ragHybridSearch` forces onto
+  // lexical-only ranking, so its every query sequential-scanned the table it was
+  // supposed to search by index. Declared once here so the two cannot disagree
+  // again, mirroring `ensureGlobalKbSchema`.
+  await conn.pg.unsafe(`CREATE INDEX IF NOT EXISTS idx_rag_task_id ON ${RAG_TABLE} (task_id)`);
+  await conn.pg.unsafe(
+    `CREATE INDEX IF NOT EXISTS idx_rag_repository_id ON ${RAG_TABLE} (repository_id)`,
+  );
+  await conn.pg.unsafe(
+    `CREATE INDEX IF NOT EXISTS idx_rag_source_section ON ${RAG_TABLE} (source_path, section_id, chunk_index)`,
+  );
+  await conn.pg.unsafe(
+    `CREATE INDEX IF NOT EXISTS idx_rag_source_type ON ${RAG_TABLE} (source_type)`,
+  );
+  await conn.pg.unsafe(
+    `CREATE INDEX IF NOT EXISTS idx_rag_content_tsv ON ${RAG_TABLE} USING GIN (content_tsv)`,
+  );
+
+  await dedupeAndEnforceRepoUniqueness(conn);
 
   // tsvector auto-update trigger. Three parts, and the last two are why code
   // identifiers are findable at all: Postgres' text-search PARSER splits
