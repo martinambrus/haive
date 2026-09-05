@@ -264,6 +264,7 @@ type UpdatePatch = Partial<{
   iterationCount: number;
   statusMessage: string | null;
   summary: string | null;
+  warningMessage: string | null;
   errorMessage: string | null;
   errorHint: TaskStepRow['errorHint'];
   degradedNote: string | null;
@@ -387,6 +388,18 @@ function computeDegradedNote(
     'The AI output could not be fully parsed, so this step used a deterministic fallback' +
     `${detail}. The result may be incomplete — consider a more capable model.`
   );
+}
+
+/** Why an auto-retry fired, for the step card.
+ *
+ *  `attemptCount` proves a step re-ran and is all the card has, so its copy had to guess at
+ *  the reason — and named "unparseable model JSON", which is only one of the three ways to
+ *  get here and not the commonest: a byte-valid JSON body rejected by a shape rule, a run cut
+ *  at the output-token cap, and a pre-form re-roll all raise the same counter. Only these
+ *  sites know which. `maxAttempts` is null where the budget is not an attempt count (a loop
+ *  step's truncation retries), so the phrasing drops the total rather than inventing one. */
+function retryWarning(attempt: number, maxAttempts: number | null, reason: string): string {
+  return `Attempt ${attempt}${maxAttempts === null ? '' : ` of ${maxAttempts}`} was rejected: ${reason}`;
 }
 
 /** Mid-run steering is on by default for every Claude-family cli step; the global
@@ -556,6 +569,13 @@ async function resolveLlmPhase(
             { stepId: stepDef.metadata.id, message, loop: !!stepDef.loop },
             'cli output truncated; retrying with a fresh (smaller) invocation',
           );
+          await updateRow(db, current.id, {
+            warningMessage: retryWarning(
+              await countLlmAttempts(db, current.id),
+              stepDef.loop ? null : (llmRetry?.maxAttempts ?? null),
+              message,
+            ),
+          });
           await markLatestInvocationConsumed(db, current.id);
           // resolveLlmPhase returns LlmResolved; a fresh dispatch parks in
           // waiting_cli (resolved:false) — propagate it as-is. If it somehow
@@ -1750,6 +1770,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               { stepId: meta.id, attempts, maxAttempts: preFormRetry.maxAttempts },
               'preForm output unusable — re-rolling before form',
             );
+            // shouldRetryPreForm is a per-step predicate with no message of its own, so this
+            // is the one retry whose reason really is generic. Still beats the card's guess.
+            await updateRow(db, current.id, {
+              warningMessage: retryWarning(
+                attempts,
+                preFormRetry.maxAttempts,
+                'the run produced nothing this step could use',
+              ),
+            });
             await markLatestInvocationConsumed(db, current.id);
             const reroll = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
             if (!reroll.resolved) return reroll.result;
@@ -2195,15 +2224,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         if (retry && !stepDef.loop && (retry.retryOn?.(applyErr) ?? true)) {
           const attempt = await countLlmAttempts(db, current.id);
           if (attempt < retry.maxAttempts) {
+            const reason = applyErr instanceof Error ? applyErr.message : String(applyErr);
             ctx.logger.warn(
-              {
-                stepId: meta.id,
-                attempt,
-                maxAttempts: retry.maxAttempts,
-                err: applyErr instanceof Error ? applyErr.message : String(applyErr),
-              },
+              { stepId: meta.id, attempt, maxAttempts: retry.maxAttempts, err: reason },
               'llm apply failed; retrying with a fresh invocation',
             );
+            await updateRow(db, current.id, {
+              warningMessage: retryWarning(attempt, retry.maxAttempts, reason),
+            });
             await markLatestInvocationConsumed(db, current.id);
             const retryLlm = await resolveLlmPhase(
               db,

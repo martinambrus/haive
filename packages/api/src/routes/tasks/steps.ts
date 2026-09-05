@@ -152,12 +152,21 @@ async function resetRowsForRerun(
         // The recap describes the run being discarded. Left behind it reads as the new
         // run's recap the moment the step goes green again.
         summary: null,
+        // Same for the degraded note, which describes the OUTPUT being cleared above. Its
+        // only writer is the done finalize, so it self-clears on a re-run that succeeds and
+        // lingers on one that does not — captioning a failed step with the fallback the
+        // PREVIOUS run took. Cleared wherever output is.
+        degradedNote: null,
         // Loop state must reset too. A stale iterationCount/iterations makes a re-run loop
         // step (e.g. spec quality) resume at the old count — past its budget — and carry the
         // prior passes forward instead of starting a clean loop.
         iterations: [],
         iterationCount: 0,
         statusMessage: null,
+        // Describes attempts this reset is superseding above, and attemptCount (which gates
+        // the "re-ran automatically" card) goes back to 0 with them — so the note has to go
+        // too, or it explains runs the card no longer admits to.
+        warningMessage: null,
         errorMessage: null,
         errorHint: null,
         startedAt: null,

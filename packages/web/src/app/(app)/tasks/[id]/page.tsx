@@ -3539,9 +3539,12 @@ function StepCardImpl({
 
       {step.attemptCount > 1 && step.iterationCount === 0 && (
         <div className="rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
+          {/* Count only. attemptCount carries no reason, and the guessed example this used to
+              name ("unparseable model JSON") was wrong whenever a valid JSON body was rejected
+              by a shape rule — the common case. The reason arrives as warningMessage above. */}
           {step.attemptCount - 1 === 1
-            ? 'The first attempt produced output that could not be used (e.g. unparseable model JSON), so this step re-ran automatically. The latest run is shown below.'
-            : `${step.attemptCount - 1} earlier attempts produced output that could not be used (e.g. unparseable model JSON), so this step re-ran automatically. The latest run is shown below.`}
+            ? 'The first attempt produced output this step could not use, so it re-ran automatically. The latest run is shown below.'
+            : `${step.attemptCount - 1} earlier attempts produced output this step could not use, so it re-ran automatically. The latest run is shown below.`}
         </div>
       )}
 

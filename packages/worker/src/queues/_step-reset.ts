@@ -105,9 +105,18 @@ export async function resetStepAndDownstream(
           // The recap describes the run being discarded; left behind it reads as the new
           // run's recap the moment the step goes green again.
           summary: null,
+          // Same for the degraded note, which describes the OUTPUT being cleared above. Its
+          // only writer is the done finalize, so it self-clears on a re-run that succeeds and
+          // lingers on one that does not — captioning a failed step with the fallback the
+          // PREVIOUS run took. Cleared wherever output is.
+          degradedNote: null,
           iterations: [],
           iterationCount: 0,
           statusMessage: null,
+          // Describes attempts superseded above, and attemptCount (which gates the "re-ran
+          // automatically" card) goes back to 0 with them — so the note has to go too, or it
+          // explains runs the card no longer admits to. Keep in sync with the API retry site.
+          warningMessage: null,
           errorMessage: null,
           errorHint: null,
           startedAt: null,
