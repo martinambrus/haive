@@ -2,7 +2,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { ONBOARDING_TOOLING_SCHEMA_VERSION } from '@haive/shared';
+import {
+  ONBOARDING_TOOLING_SCHEMA_VERSION,
+  IN_STACK_OLLAMA_URL,
+  DEFAULT_EXTERNAL_OLLAMA_URL,
+} from '@haive/shared';
 import type { DetectResult, FormSchema, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
@@ -263,8 +267,8 @@ export const toolingInfrastructureStep: StepDefinition<
           type: 'text',
           id: 'ollamaUrl',
           label: 'External Ollama API URL (only used when external mode is selected)',
-          default: 'http://host.docker.internal:11434',
-          placeholder: 'http://host.docker.internal:11434',
+          default: DEFAULT_EXTERNAL_OLLAMA_URL,
+          placeholder: DEFAULT_EXTERNAL_OLLAMA_URL,
         },
         {
           type: 'text',
@@ -338,7 +342,7 @@ export const toolingInfrastructureStep: StepDefinition<
     // would only invite the model to use tools it cannot access.
     if (!cliSupportsLsp) tooling.lspLanguages = [];
     if (tooling.ollamaMode === 'internal') {
-      tooling.ollamaUrl = 'http://ollama:11434';
+      tooling.ollamaUrl = IN_STACK_OLLAMA_URL;
     }
 
     // Materialise `.claude/mcp_settings.json` here, before any later

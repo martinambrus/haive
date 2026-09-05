@@ -21,6 +21,7 @@ import {
   escalatedTimeoutMs,
   extractFormDefaults,
   isOllamaCloudModel,
+  IN_STACK_OLLAMA_URL,
   logger,
   parseTimeoutLadder,
   validateFormValues,
@@ -278,7 +279,11 @@ type LlmResolved =
   | { resolved: true; llmOutput: unknown; llmInvocationId: string | null; current: TaskStepRow }
   | { resolved: false; result: AdvanceStepResult };
 
-const IN_STACK_OLLAMA_HOSTS = new Set(['ollama', 'haive-ollama', 'localhost', '127.0.0.1']);
+// Deliberately WIDER than the shared IN_STACK_OLLAMA_HOSTS, which must not be used
+// here: that set answers "is this the bundled daemon the worker can pull models into",
+// this one answers "is this a weak LOCAL model to keep away from scaffolding steps",
+// and a user's own localhost is the second but not the first.
+const LOCAL_OLLAMA_HOSTS = new Set(['ollama', 'haive-ollama', 'localhost', '127.0.0.1']);
 
 /** True when the resolved provider is an in-stack (local) Ollama model. Cloud
  *  models (tag suffix -cloud/:cloud) run on ollama.com via the local daemon as a
@@ -292,9 +297,9 @@ function isLocalOllama(provider: CliProviderRecord | null): boolean {
   // base-URL check alone defaults to the in-stack host and misclassifies every
   // cloud model as local. Key on the stable tag suffix instead.
   if (isOllamaCloudModel(provider.model ?? '')) return false;
-  const baseUrl = provider.envVars?.ANTHROPIC_BASE_URL ?? 'http://ollama:11434';
+  const baseUrl = provider.envVars?.ANTHROPIC_BASE_URL ?? IN_STACK_OLLAMA_URL;
   try {
-    return IN_STACK_OLLAMA_HOSTS.has(new URL(baseUrl).hostname);
+    return LOCAL_OLLAMA_HOSTS.has(new URL(baseUrl).hostname);
   } catch {
     return true; // unset/malformed → the adapter default is the in-stack daemon
   }

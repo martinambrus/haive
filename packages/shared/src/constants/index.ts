@@ -16,6 +16,33 @@ export function getHaiveVersion(): string {
   return APP_VERSION;
 }
 
+/** The bundled Ollama daemon (compose service `ollama`), as reached from inside the
+ *  stack — by the worker over haive-network, by a cli-exec sandbox over haive-models,
+ *  and by the api for embeddings. THE default for every "where is Ollama" decision:
+ *  the CLI adapter's base URL, the onboarding 'internal' tooling mode, the global KB
+ *  embedding endpoint and the model-download button all resolve here when nothing is
+ *  configured, and they were four separate literals before this.
+ *
+ *  Never `localhost`: inside a sandbox that names the sandbox itself, which is how a
+ *  provider once tested green and then failed every step with ECONNREFUSED. */
+export const IN_STACK_OLLAMA_URL = 'http://ollama:11434';
+
+/** The hostnames that ARE that daemon. Paired with IN_STACK_OLLAMA_URL — a caller
+ *  asking "is this URL the bundled daemon?" must agree with the URL we hand out when
+ *  nothing is set, which is why the two live together (asserted in ollama-hosts.test.ts).
+ *
+ *  Deliberately NOT the set in step-runner's `isLocalOllama`, which adds localhost and
+ *  127.0.0.1. That one asks "is this a weak LOCAL model to keep away from scaffolding
+ *  steps", where a user's own host still counts; this one asks "is this the daemon the
+ *  worker can pull models into and reach over the models network", where localhost is
+ *  emphatically not. Same-looking sets, opposite answers for the same input. */
+export const IN_STACK_OLLAMA_HOSTS: ReadonlySet<string> = new Set(['ollama', 'haive-ollama']);
+
+/** What "external Ollama server" pre-fills with: an Ollama on the developer's own
+ *  machine, reached from a container. A default for a field the user is expected to
+ *  edit, not a fallback anything silently relies on. */
+export const DEFAULT_EXTERNAL_OLLAMA_URL = 'http://host.docker.internal:11434';
+
 export const QUEUE_NAMES = {
   TASK: 'haive-task',
   CLI_EXEC: 'haive-cli-exec',

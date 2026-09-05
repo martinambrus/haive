@@ -1,12 +1,8 @@
-import { isOllamaCloudModel } from '@haive/shared';
+import { isOllamaCloudModel, IN_STACK_OLLAMA_URL } from '@haive/shared';
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
-import {
-  OLLAMA_CLOUD_URL,
-  OLLAMA_DEFAULT_BASE_URL,
-  resolveOllamaBaseUrl,
-} from './ollama-thinking-proxy.js';
+import { OLLAMA_CLOUD_URL, resolveOllamaBaseUrl } from './ollama-thinking-proxy.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
@@ -170,9 +166,7 @@ export class OllamaAdapter extends BaseCliAdapter {
   ): Record<string, string> {
     const env = super.buildShellEnv(provider, secrets, extraEnv);
     const defaultBaseUrl =
-      provider.model && isOllamaCloudModel(provider.model)
-        ? OLLAMA_CLOUD_URL
-        : OLLAMA_DEFAULT_BASE_URL;
+      provider.model && isOllamaCloudModel(provider.model) ? OLLAMA_CLOUD_URL : IN_STACK_OLLAMA_URL;
     env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? defaultBaseUrl;
     const token =
       env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? env.OLLAMA_API_KEY ?? 'ollama';

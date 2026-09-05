@@ -1,4 +1,4 @@
-import { isOllamaCloudModel } from '@haive/shared';
+import { isOllamaCloudModel, IN_STACK_OLLAMA_URL } from '@haive/shared';
 
 /** Address of the in-stack `ollama-thinking-proxy` sidecar (docker-compose
  *  service of the same name). When a provider's "Disable model thinking" toggle is
@@ -15,10 +15,6 @@ export const OLLAMA_THINKING_PROXY_HOST =
 export const OLLAMA_THINKING_PROXY_URL =
   process.env.OLLAMA_THINKING_PROXY_URL ||
   `http://${OLLAMA_THINKING_PROXY_HOST}:${process.env.OLLAMA_THINKING_PROXY_PORT || 8788}`;
-
-/** In-stack daemon default; a remote/cloud provider overrides it via
- *  provider.envVars.ANTHROPIC_BASE_URL (a remote host, or https://ollama.com). */
-export const OLLAMA_DEFAULT_BASE_URL = 'http://ollama:11434';
 
 /** Ollama Cloud, which serves an Anthropic-compatible /v1/messages API. Cloud models
  *  (isOllamaCloudModel) route here by default — they never run on the local daemon. */
@@ -38,7 +34,7 @@ export function resolveOllamaBaseUrl(
   opts: { model: string; disableThinking: boolean },
 ): string {
   if (env.ANTHROPIC_BASE_URL != null) return env.ANTHROPIC_BASE_URL;
-  if (!isOllamaCloudModel(opts.model)) return OLLAMA_DEFAULT_BASE_URL;
+  if (!isOllamaCloudModel(opts.model)) return IN_STACK_OLLAMA_URL;
   // "Disable model thinking" on a cloud model routes through the sidecar, which
   // injects thinking:{type:"disabled"} and forwards to ollama.com.
   return opts.disableThinking ? OLLAMA_THINKING_PROXY_URL : OLLAMA_CLOUD_URL;

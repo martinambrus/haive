@@ -25,6 +25,7 @@ import {
 } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { IN_STACK_OLLAMA_URL, DEFAULT_EXTERNAL_OLLAMA_URL } from '@haive/shared/constants';
 
 function parseList(s: string): string[] {
   return s
@@ -60,16 +61,12 @@ interface GlobalKbConfig {
   connectionStringSet: boolean;
 }
 
-/** Ollama endpoints, mirroring onboarding step 04: internal = the bundled haive
- *  compose service; external default = an Ollama running on the host. */
-const INTERNAL_OLLAMA_URL = 'http://ollama:11434';
-const DEFAULT_EXTERNAL_OLLAMA_URL = 'http://host.docker.internal:11434';
 const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
 
 /** A saved ollamaUrl maps back to a mode: the bundled URL (or empty) is internal,
  *  anything else is an external server the user pointed at. */
 function deriveOllamaMode(url: string): 'internal' | 'external' {
-  return url && url !== INTERNAL_OLLAMA_URL ? 'external' : 'internal';
+  return url && url !== IN_STACK_OLLAMA_URL ? 'external' : 'internal';
 }
 
 const CATEGORIES: GlobalKbEntry['category'][] = [
@@ -287,7 +284,7 @@ export default function GlobalKbPage() {
   // (mirrors onboarding 04's apply) for both save and the Ollama test.
   const effectiveOllamaUrl =
     cfg.ollamaMode === 'internal'
-      ? INTERNAL_OLLAMA_URL
+      ? IN_STACK_OLLAMA_URL
       : cfg.ollamaUrl.trim() || DEFAULT_EXTERNAL_OLLAMA_URL;
   const connOk = cfg.enabled && dbTest.ok === true && ollamaTest.ok === true;
   // Null until the first-load check resolves; keeps the collapsed header from
@@ -751,7 +748,7 @@ export default function GlobalKbPage() {
                     id="cfg-ollama"
                     value={cfg.ollamaUrl}
                     onChange={(e) => setCfg({ ...cfg, ollamaUrl: e.target.value })}
-                    placeholder="http://host.docker.internal:11434"
+                    placeholder={DEFAULT_EXTERNAL_OLLAMA_URL}
                   />
                 </div>
               )}
@@ -794,7 +791,7 @@ export default function GlobalKbPage() {
             </div>
             {cfg.ollamaMode === 'internal' && (
               <p className="text-xs text-neutral-500">
-                Internal mode uses {INTERNAL_OLLAMA_URL} automatically.
+                Internal mode uses {IN_STACK_OLLAMA_URL} automatically.
               </p>
             )}
             <div className="flex items-center gap-3">

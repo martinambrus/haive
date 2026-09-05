@@ -2,7 +2,11 @@
 
 import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { DEFAULT_AGENT_RULES } from '@haive/shared/constants';
+import {
+  DEFAULT_AGENT_RULES,
+  IN_STACK_OLLAMA_URL,
+  IN_STACK_OLLAMA_HOSTS,
+} from '@haive/shared/constants';
 import {
   api,
   CLI_DEFAULT_EGRESS_DOMAINS,
@@ -289,11 +293,11 @@ export function CliProviderForm({
       ? (() => {
           const raw =
             (parseEnvVars(state.envVarsText).ANTHROPIC_BASE_URL ?? '').trim() ||
-            'http://ollama:11434';
+            IN_STACK_OLLAMA_URL;
           try {
-            return ['ollama', 'haive-ollama'].includes(new URL(raw).hostname) ? raw : null;
+            return IN_STACK_OLLAMA_HOSTS.has(new URL(raw).hostname) ? raw : null;
           } catch {
-            return 'http://ollama:11434';
+            return IN_STACK_OLLAMA_URL;
           }
         })()
       : null;

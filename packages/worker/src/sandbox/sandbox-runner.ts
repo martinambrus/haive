@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, chown, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { logger, type CliNetworkPolicy } from '@haive/shared';
+import { logger, IN_STACK_OLLAMA_HOSTS, type CliNetworkPolicy } from '@haive/shared';
 import {
   defaultDockerRunner,
   type DockerRunner,
@@ -37,11 +37,6 @@ const DEFAULT_WORKDIR = SANDBOX_WORKDIR;
 // can't balloon memory.
 const CAPTURE_TAIL_LIMIT = 32_768;
 
-// In-stack Ollama daemon hostnames. When a CLI's ANTHROPIC_BASE_URL targets one
-// of these, the sandbox joins the models network to reach the daemon directly,
-// and the host is excluded from the egress proxy (NO_PROXY).
-const IN_STACK_MODEL_HOSTS = new Set(['ollama', 'haive-ollama']);
-
 /** The in-stack Ollama host a spec targets via ANTHROPIC_BASE_URL, or null when
  *  it targets an external/cloud endpoint (or none). Drives the models-network
  *  attach + NO_PROXY bypass so a local Ollama model is reachable directly rather
@@ -51,7 +46,7 @@ function inStackModelsHost(env: Record<string, string> | undefined): string | nu
   if (!base) return null;
   try {
     const host = new URL(base).hostname;
-    return IN_STACK_MODEL_HOSTS.has(host) ? host : null;
+    return IN_STACK_OLLAMA_HOSTS.has(host) ? host : null;
   } catch {
     return null;
   }

@@ -1,14 +1,15 @@
 import { and, eq, ne, notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger, isOllamaCloudModel, type OllamaProvisionResult } from '@haive/shared';
+import {
+  logger,
+  isOllamaCloudModel,
+  IN_STACK_OLLAMA_URL,
+  IN_STACK_OLLAMA_HOSTS,
+  type OllamaProvisionResult,
+} from '@haive/shared';
 
 const log = logger.child({ module: 'ollama-provision' });
 
-// The worker reaches the in-stack Ollama daemon over haive-network at this URL
-// (the same daemon sandboxes reach over haive-models). Matches the OllamaAdapter
-// default and the onboarding 'internal' tooling URL.
-const IN_STACK_OLLAMA_URL = 'http://ollama:11434';
-const IN_STACK_HOSTS = new Set(['ollama', 'haive-ollama']);
 // Pulls/builds can be many GB; give them room. Best-effort, so a stuck job just
 // times out and is retried on the next boot.
 const PROVISION_TIMEOUT_MS = 30 * 60_000;
@@ -20,7 +21,7 @@ const PROVISION_TIMEOUT_MS = 30 * 60_000;
 function isInStackBaseUrl(baseUrl: string | undefined): boolean {
   const url = baseUrl ?? IN_STACK_OLLAMA_URL;
   try {
-    return IN_STACK_HOSTS.has(new URL(url).hostname);
+    return IN_STACK_OLLAMA_HOSTS.has(new URL(url).hostname);
   } catch {
     return false;
   }

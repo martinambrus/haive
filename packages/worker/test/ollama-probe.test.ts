@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { probeOllamaEndpoint } from '../src/cli-adapters/ollama-probe.js';
+import { IN_STACK_OLLAMA_URL } from '@haive/shared';
 import {
   OLLAMA_CLOUD_URL,
-  OLLAMA_DEFAULT_BASE_URL,
   OLLAMA_THINKING_PROXY_URL,
   resolveOllamaBaseUrl,
 } from '../src/cli-adapters/ollama-thinking-proxy.js';
@@ -83,7 +83,7 @@ describe('probeOllamaEndpoint', () => {
 describe('resolveOllamaBaseUrl', () => {
   it('sends a local model to the in-stack daemon', () => {
     expect(resolveOllamaBaseUrl({}, { model: 'qwen3:1.7b', disableThinking: false })).toBe(
-      OLLAMA_DEFAULT_BASE_URL,
+      IN_STACK_OLLAMA_URL,
     );
   });
 
