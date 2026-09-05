@@ -60,6 +60,28 @@ export interface PlanMirrorJobResult {
   branch: string | null;
   /** PULL only. What the incoming snapshot did to the local plan. */
   pulled?: PlanPullOutcome;
+  /** Set when the remote could not be integrated automatically. Reported as a
+   *  RESULT rather than thrown, because a job error crosses `waitUntilFinished`
+   *  as a bare message string and the paths would not survive it — and the paths
+   *  are the whole point: they are what the resolution conversation is opened
+   *  against. `pushed` is false whenever this is set. */
+  conflict?: PlanMergeConflict;
+}
+
+/** A merge the mirror could not finish on its own. */
+export interface PlanMergeConflict {
+  /** Unmerged paths a person has to decide. `.haive-data/plan.{json,md}` never
+   *  appear: the database reconcile is the real merge for those two, so they are
+   *  resolved to the incoming side before this is built. */
+  paths: string[];
+  /** True when the two sides share no commit — a blank repository pushed at a
+   *  forge-initialised one. Worth saying out loud, because every file present on
+   *  both sides collides and the list can be long for a reason that is not a
+   *  disagreement about content. */
+  unrelated: boolean;
+  /** Mirror files resolved automatically, so the report can say so rather than
+   *  leaving the user wondering why plan.json is not listed. */
+  autoResolved: string[];
 }
 
 /**

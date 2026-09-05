@@ -560,7 +560,8 @@ export type WorkflowType =
   | 'plan_build'
   | 'plan_chat'
   | 'advisory'
-  | 'plan_sequence';
+  | 'plan_sequence'
+  | 'plan_merge';
 
 /** Execution path chosen at the 00-triage step (workflow tasks). Mirrors
  *  ExecutionPath in @haive/shared; redefined here so the browser bundle never
@@ -1421,6 +1422,33 @@ export interface PlanSnapshotSaveResult {
   branch: string | null;
   /** Pull only. */
   pulled?: PlanPullOutcome;
+  /** Set when the remote could not be integrated automatically. `pushed` is false
+   *  whenever this is present; the checkout has not moved. */
+  conflict?: PlanMergeConflict;
+}
+
+export interface PlanMergeConflict {
+  /** Paths a person has to decide. The plan mirror's own two files never appear —
+   *  the database reconcile is the real merge for those. */
+  paths: string[];
+  /** True when the two sides share no commit, which is why so much collides. */
+  unrelated: boolean;
+  autoResolved: string[];
+}
+
+export interface PlanMergeMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  body: string;
+  createdAt: string;
+}
+
+export interface PlanMergeState {
+  taskId: string;
+  status: TaskStatus;
+  cliProviderId: string | null;
+  createdAt: string;
+  messages: PlanMergeMessage[];
 }
 
 /** What a pulled snapshot did to the local plan. `keptLocal` is the one to read:
@@ -1745,6 +1773,35 @@ export function startPlanChat(
   body: { message: string; cliProviderId?: string },
 ): Promise<{ taskId: string }> {
   return api.post<{ taskId: string }>(`${planBase(repositoryId)}/nodes/${nodeId}/chat`, body);
+}
+
+/** The step every plan_merge task cycles on — one card, a self-targeting revise
+ *  loop, so submitting by step id is unambiguous. */
+export const PLAN_MERGE_STEP_ID = '01-plan-merge';
+
+export function startPlanMerge(
+  repositoryId: string,
+  body: { cliProviderId?: string } = {},
+): Promise<{ taskId: string }> {
+  return api.post<{ taskId: string }>(`${planBase(repositoryId)}/merge`, body);
+}
+
+/** The open merge conversation, or `{ merge: null }`. Polled by the plan page, so
+ *  it answers with state rather than a 404. */
+export function getPlanMerge(repositoryId: string): Promise<{ merge: PlanMergeState | null }> {
+  return api.get<{ merge: PlanMergeState | null }>(`${planBase(repositoryId)}/merge`);
+}
+
+export function discardPlanMerge(repositoryId: string): Promise<{ ok: boolean }> {
+  return api.delete<{ ok: boolean }>(`${planBase(repositoryId)}/merge`);
+}
+
+/** Answer the merge form: confirm lands and pushes, revise runs another pass. */
+export function submitPlanMergeTurn(
+  taskId: string,
+  values: { decision: 'confirm' | 'revise'; message?: string },
+): Promise<unknown> {
+  return api.post(`/tasks/${taskId}/steps/${PLAN_MERGE_STEP_ID}/submit`, { values });
 }
 
 export function startPlanAdvisory(

@@ -25,6 +25,7 @@ import {
   getPlanTree,
   getPlanSnapshot,
   pullPlanSnapshot,
+  api,
   savePlanSnapshot,
   searchPlan,
   startPlanSequence,
@@ -33,6 +34,11 @@ import {
   type PlanTreeNode,
   type PlanDefects,
   type PlanPullOutcome,
+  type PlanMergeConflict,
+  type PlanMergeState,
+  type CliProvider,
+  getPlanMerge,
+  startPlanMerge,
   type PlanSnapshotHealth,
   type UiPrefs,
 } from '@/lib/api-client';
@@ -45,6 +51,7 @@ import { PlanDetailPanel, type PlanPanelTab } from '@/components/plan/plan-detai
 import { PlanTree } from '@/components/plan/plan-tree';
 import { PlanDeleteDialog } from '@/components/plan/plan-delete-dialog';
 import { PlanStarter } from '@/components/plan/plan-starter';
+import { PlanMergePanel } from '@/components/plan/plan-merge-panel';
 import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 
 /**
@@ -110,6 +117,11 @@ export default function PlanPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const [merge, setMerge] = useState<PlanMergeState | null>(null);
+  const [conflict, setConflict] = useState<PlanMergeConflict | null>(null);
+  const [startingMerge, setStartingMerge] = useState(false);
+  const [mergeProviders, setMergeProviders] = useState<CliProvider[]>([]);
+  const [mergeProviderId, setMergeProviderId] = useState('');
   const [snapshot, setSnapshot] = useState<PlanSnapshotHealth | null>(null);
   const [newTitle, setNewTitle] = useState('');
   // The breadcrumb's add-a-child input. Closed by default: it is an action,
@@ -244,6 +256,61 @@ export default function PlanPage() {
   // deliberately raises no toast to announce it. The chat panel only polls the
   // node it is open on, so without this a badge for any other node waited for a
   // manual refresh. One aggregate query, and only while the tab is visible.
+  // Whether a merge conversation is open. Polled on the snapshot's cadence because
+  // it gates the same two buttons and is the banner's only source.
+  const refreshMerge = useCallback(async (): Promise<void> => {
+    try {
+      const res = await getPlanMerge(repositoryId);
+      setMerge(res.merge);
+    } catch {
+      /* a merge state that will not load must not break the page */
+    }
+  }, [repositoryId]);
+
+  // Loaded only once there is a conflict to resolve, since that is the only thing on
+  // this page that picks a CLI. Preselected from the repo's last-used, exactly as the
+  // plan chat's picker does — but OFFERED, because the fallback is whatever ran last
+  // and that is not necessarily a model that can resolve a merge. MEASURED: left to
+  // the fallback it chose a 1.7b fixture-capture model, which answered by asking which
+  // path to inspect.
+  useEffect(() => {
+    if (!conflict) return;
+    let cancelled = false;
+    void Promise.all([
+      api.get<{ providers: CliProvider[] }>('/cli-providers'),
+      api
+        .get<{ cliProviderId: string | null }>(
+          `/tasks/last-cli?repositoryId=${encodeURIComponent(repositoryId)}`,
+        )
+        .catch(() => ({ cliProviderId: null })),
+    ])
+      .then(([res, last]) => {
+        if (cancelled) return;
+        const enabled = res.providers.filter((p) => p.enabled);
+        setMergeProviders(enabled);
+        setMergeProviderId((current) => {
+          if (current) return current;
+          const lastId = last.cliProviderId;
+          if (lastId && enabled.some((p) => p.id === lastId)) return lastId;
+          return enabled[0]?.id ?? '';
+        });
+      })
+      .catch(() => {
+        /* the picker is optional — without it the server picks the provider */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conflict, repositoryId]);
+
+  useEffect(() => {
+    void refreshMerge();
+    const timer = setInterval(() => {
+      if (!document.hidden) void refreshMerge();
+    }, SNAPSHOT_POLL_MS);
+    return () => clearInterval(timer);
+  }, [refreshMerge]);
+
   useEffect(() => {
     let cancelled = false;
     const load = (): void => {
@@ -306,8 +373,18 @@ export default function PlanPage() {
     setError(null);
     setSaveReport(null);
     setPullReport(null);
+    setConflict(null);
     try {
       const result = await savePlanSnapshot(repositoryId, { push });
+      // A conflict is neither success nor failure: nothing was pushed, nothing was
+      // lost, and the next move is a conversation rather than a retry. It arrives as
+      // a RESULT because a job error crosses the queue as a bare string and the paths
+      // would not survive it.
+      if (result.conflict) {
+        setConflict(result.conflict);
+        setSnapshot(await getPlanSnapshot(repositoryId));
+        return;
+      }
       // Say which of the three things happened. The commit is already skipped
       // when the staged files are unchanged, so a second Save is a no-op — but
       // silence looked identical to a second commit, which is exactly the doubt
@@ -361,6 +438,11 @@ export default function PlanPage() {
     setSaveReport(null);
     try {
       const result = await pullPlanSnapshot(repositoryId);
+      if (result.conflict) {
+        setConflict(result.conflict);
+        setSnapshot(await getPlanSnapshot(repositoryId));
+        return;
+      }
       setPullReport(result.pulled ?? null);
       setSnapshot(await getPlanSnapshot(repositoryId));
       await refresh();
@@ -598,12 +680,20 @@ export default function PlanPage() {
                   one affordance that fixes that takes their place instead. */}
               {snapshot?.hasOrigin ? (
                 <>
+                  {/* Both are gated on an open merge conversation: it owns the
+                      scratch worktree and is the thing that will land the remote,
+                      so either one underneath it would race the checkout it is
+                      about to fast-forward. */}
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={snapshotBusy}
+                    disabled={snapshotBusy || merge !== null}
                     onClick={() => void saveSnapshot(true)}
-                    title={`Refresh, commit and push the portable plan snapshot to ${snapshot.originUrl ?? 'origin'}`}
+                    title={
+                      merge
+                        ? 'Finish or discard the open merge conversation first'
+                        : `Refresh, commit and push the portable plan snapshot to ${snapshot.originUrl ?? 'origin'}`
+                    }
                   >
                     <CloudUpload className="mr-1 h-3.5 w-3.5" />
                     Save &amp; push
@@ -611,9 +701,13 @@ export default function PlanPage() {
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={snapshotBusy}
+                    disabled={snapshotBusy || merge !== null}
                     onClick={() => void pullSnapshot()}
-                    title="Fast-forward this checkout from origin and merge the committed plan into this one"
+                    title={
+                      merge
+                        ? 'Finish or discard the open merge conversation first'
+                        : 'Bring the latest commits in from origin and merge the committed plan into this one'
+                    }
                   >
                     <CloudDownload className="mr-1 h-3.5 w-3.5" />
                     Pull
@@ -643,6 +737,83 @@ export default function PlanPage() {
 
       <FormError message={error} />
       <FormError message={snapshot?.lastError ? `Plan snapshot: ${snapshot.lastError}` : null} />
+
+      <PlanMergePanel
+        repositoryId={repositoryId}
+        merge={merge}
+        onChanged={() => void refreshMerge()}
+        onSettled={() => {
+          setConflict(null);
+          void refreshMerge();
+          void refresh();
+          void getPlanSnapshot(repositoryId)
+            .then(setSnapshot)
+            .catch(() => {});
+        }}
+      />
+
+      {conflict && !merge && (
+        <div className="flex flex-col gap-2 rounded border border-amber-900 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
+          <p>
+            The remote has work this checkout does not, and{' '}
+            {conflict.paths.length === 1 ? 'one file' : `${conflict.paths.length} files`} could not
+            be merged automatically. Nothing was pushed and your checkout has not moved.
+          </p>
+          {conflict.unrelated && (
+            <p className="text-amber-300/80">
+              These two histories share no commit — the repository was created here and the remote
+              was created separately — so every file present on both sides collides, even ones
+              nobody edited.
+            </p>
+          )}
+          <ul className="ml-4 list-disc font-mono text-[11px]">
+            {conflict.paths.map((p) => (
+              <li key={p}>{p}</li>
+            ))}
+          </ul>
+          {conflict.autoResolved.length > 0 && (
+            <p className="text-neutral-400">
+              The plan snapshot itself ({conflict.autoResolved.join(', ')}) was merged automatically
+              — the plan is reconciled in the database, so those files are rewritten from it either
+              way.
+            </p>
+          )}
+          <div className="flex items-center gap-2">
+            {mergeProviders.length > 0 && (
+              <select
+                aria-label="CLI that resolves this merge"
+                title="CLI that resolves this merge"
+                value={mergeProviderId}
+                disabled={startingMerge}
+                onChange={(e) => setMergeProviderId(e.target.value)}
+                className="h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 disabled:opacity-50"
+              >
+                {mergeProviders.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            <Button
+              size="sm"
+              disabled={startingMerge}
+              onClick={() => {
+                setStartingMerge(true);
+                void startPlanMerge(
+                  repositoryId,
+                  mergeProviderId ? { cliProviderId: mergeProviderId } : {},
+                )
+                  .then(() => refreshMerge())
+                  .catch((e) => setError(e instanceof Error ? e.message : 'Could not start'))
+                  .finally(() => setStartingMerge(false));
+              }}
+            >
+              {startingMerge ? 'Starting…' : 'Resolve with an agent'}
+            </Button>
+          </div>
+        </div>
+      )}
 
       {saveReport && (
         <p className="rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-300">

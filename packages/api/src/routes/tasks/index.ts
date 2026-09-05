@@ -1,5 +1,17 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, not, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  not,
+  notInArray,
+  or,
+  sql,
+} from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   buildEstimationAccuracy,
@@ -155,7 +167,10 @@ taskRoutes.get('/', async (c) => {
       );
     }
   }
-  if (!includeChats) conds.push(ne(schema.tasks.type, 'plan_chat'));
+  // plan_merge joins plan_chat for the same reason: it is a conversation answered on
+  // the plan page, and its attention signal is the banner there, not a toast that
+  // would open the task page instead.
+  if (!includeChats) conds.push(notInArray(schema.tasks.type, ['plan_chat', 'plan_merge']));
   if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);
   const where = and(...conds);
 

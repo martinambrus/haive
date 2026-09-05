@@ -5,25 +5,30 @@ import {
   PLAN_MIRROR_JOB_NAMES,
   QUEUE_NAMES,
   logger,
+  type PlanMergeConflict,
   type PlanMirrorJobPayload,
   type PlanMirrorJobResult,
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
-import {
-  buildCredentialHelper,
-  detectOrigin,
-  gitRun,
-  pushBranch,
-  scrubSecret,
-} from '../repo/git-push.js';
+import { detectOrigin, gitRun, pushBranch } from '../repo/git-push.js';
 import {
   flushPlanMirrorForRepository,
   recordPlanMirrorError,
   reconcilePlanMirror,
 } from '../plan/mirror.js';
 import { commitPlanSnapshotFiles } from '../plan/snapshot-git.js';
+import {
+  abortMerge,
+  commitMerge,
+  divergence,
+  ensurePlanMergeWorktree,
+  fetchOrigin,
+  landPlanMerge,
+  mergeOriginInto,
+  removePlanMergeWorktree,
+} from '../plan/merge.js';
 
 const SWEEP_EVERY_MS = 10_000;
 const SWEEP_JOB_ID = 'plan-mirror-dirty-sweep';
@@ -52,7 +57,10 @@ async function requireOwnedRepository(repositoryId: string, userId?: string) {
 async function resultFor(
   repositoryId: string,
   files: string[],
-  extra: Pick<PlanMirrorJobResult, 'committed' | 'commitSha' | 'pushed' | 'branch' | 'pulled'>,
+  extra: Pick<
+    PlanMirrorJobResult,
+    'committed' | 'commitSha' | 'pushed' | 'branch' | 'pulled' | 'conflict'
+  >,
 ): Promise<PlanMirrorJobResult> {
   const state = await getDb().query.planMirrorState.findFirst({
     where: eq(schema.planMirrorState.repositoryId, repositoryId),
@@ -101,6 +109,66 @@ async function flushCurrentPlanMirror(
   throw new Error('the plan changed repeatedly while its snapshot was being saved; try again');
 }
 
+/**
+ * Bring `origin/<branch>` into the checkout, or report why it cannot be done here.
+ *
+ * One path for both directions. Save used never to fetch at all and Pull was
+ * `--ff-only`, so a remote with any commit of its own stopped both — including the
+ * ordinary case of a GitHub repository created with a README, which shares no
+ * history with a blank Haive one at all.
+ *
+ * The merge happens in a scratch worktree and the branch only ever FAST-FORWARDS
+ * onto the result, so a failure at any point leaves the checkout exactly where it
+ * was. On a conflict this aborts and removes the worktree rather than leaving a live
+ * merge behind: the resolution conversation is a task, it builds its own worktree,
+ * and two owners for one mid-merge tree is how a half-resolved state outlives the
+ * thing that made it.
+ */
+async function integrateOrigin(args: {
+  repoPath: string;
+  branch: string;
+  userId: string;
+  credentialId?: string | null;
+  identity: Record<string, string>;
+}): Promise<{ landed: boolean; previousCommit: string | null; conflict?: PlanMergeConflict }> {
+  const db = getDb();
+  const head = await gitRun(args.repoPath, ['rev-parse', 'HEAD']);
+  const previousCommit = head.code === 0 ? head.stdout.trim() : null;
+
+  await fetchOrigin({
+    repoPath: args.repoPath,
+    branch: args.branch,
+    db,
+    userId: args.userId,
+    ...(args.credentialId ? { credentialId: args.credentialId } : {}),
+  });
+  const gap = await divergence(args.repoPath, args.branch);
+  if (gap.behind === 0) return { landed: false, previousCommit };
+
+  const worktree = await ensurePlanMergeWorktree(args.repoPath);
+  try {
+    const attempt = await mergeOriginInto(worktree, args.branch, gap.unrelated, args.identity);
+    if (!attempt.clean) {
+      await abortMerge(worktree);
+      return {
+        landed: false,
+        previousCommit,
+        conflict: {
+          paths: attempt.conflicts,
+          unrelated: attempt.unrelated,
+          autoResolved: attempt.autoResolved,
+        },
+      };
+    }
+    const sha = await commitMerge(worktree, `Merge origin/${args.branch}`, args.identity);
+    if (!sha) throw new Error('the merge produced no commit to fast-forward onto');
+    await landPlanMerge(args.repoPath, sha);
+    return { landed: true, previousCommit };
+  } finally {
+    await removePlanMergeWorktree(args.repoPath);
+  }
+}
+
 async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
   if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
   const repo = await requireOwnedRepository(payload.repositoryId, payload.userId);
@@ -132,6 +200,39 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     let pushed = false;
     if (payload.push) {
       if (!branch) throw new Error('cannot push a plan snapshot from a detached HEAD');
+      if (!(await detectOrigin(repoPath))) {
+        throw new Error('this repository has no origin remote to push to');
+      }
+      // Integrate BEFORE pushing rather than pushing and reading the rejection: a
+      // push that fails prints a hint git is free to reword, and branching on that
+      // text would break silently on a git upgrade. Ahead/behind counts say the same
+      // thing structurally.
+      const integrated = await integrateOrigin({
+        repoPath,
+        branch,
+        userId: payload.userId,
+        credentialId: repo.credentialsSecretId,
+        identity,
+      });
+      if (integrated.conflict) {
+        // Nothing was pushed and nothing was lost — the plan commit above stands and
+        // the checkout never moved. The caller offers the resolution conversation.
+        return resultFor(repo.id, files, {
+          committed,
+          commitSha,
+          pushed: false,
+          branch,
+          conflict: integrated.conflict,
+        });
+      }
+      if (integrated.landed) {
+        // The merge brought in the other side's plan; fold it into the database and
+        // rewrite the files, exactly as a pull does, so what is pushed is the union
+        // rather than only this side.
+        await reconcilePlanMirror(getDb(), repo.id, repoPath);
+        await flushPlanMirrorForRepository(getDb(), repo.id);
+        await commitPlanSnapshotFiles({ repoPath, message, identity });
+      }
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
       await pushBranch({
         cwd: repoPath,
@@ -215,28 +316,31 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
       throw new Error('this checkout has uncommitted changes; commit or discard them first');
     }
 
-    const head = await gitRun(repoPath, ['rev-parse', 'HEAD']);
-    const previousCommit = head.code === 0 ? head.stdout.trim() : null;
-
-    const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
-    const argv: string[] = [];
-    let secret: string | null = null;
-    if (repo.credentialsSecretId) {
-      const helper = await buildCredentialHelper(db, repo.credentialsSecretId, payload.userId);
-      secret = helper.secret;
-      Object.assign(env, helper.env);
-      argv.push(...helper.argv);
-    }
-    const fetched = await gitRun(repoPath, [...argv, 'fetch', 'origin', branch], env);
-    if (fetched.code !== 0) {
-      throw new Error(`git fetch failed: ${scrubSecret(fetched.stderr || fetched.stdout, secret)}`);
-    }
-    const merged = await gitRun(repoPath, ['merge', '--ff-only', `origin/${branch}`]);
-    if (merged.code !== 0) {
-      throw new Error(
-        `this branch has diverged from origin/${branch}, so it cannot be fast-forwarded. ` +
-          'Reconcile the two checkouts in Git first.',
-      );
+    const resolvedIdentity = await resolveGitEnv(db, {
+      userId: payload.userId,
+      repositoryId: repo.id,
+    });
+    const identity =
+      Object.keys(resolvedIdentity).length > 0 ? resolvedIdentity : FALLBACK_GIT_IDENTITY;
+    // A real merge, not --ff-only. Refusing a diverged branch was defensible while
+    // nothing could resolve one; it also meant a plan could never reach a repository
+    // that had a README before Haive did.
+    const integrated = await integrateOrigin({
+      repoPath,
+      branch,
+      userId: payload.userId,
+      credentialId: repo.credentialsSecretId,
+      identity,
+    });
+    const previousCommit = integrated.previousCommit;
+    if (integrated.conflict) {
+      return resultFor(repo.id, [], {
+        committed: false,
+        commitSha: previousCommit,
+        pushed: false,
+        branch,
+        conflict: integrated.conflict,
+      });
     }
     const after = await gitRun(repoPath, ['rev-parse', 'HEAD']);
     const currentCommit = after.code === 0 ? after.stdout.trim() : null;

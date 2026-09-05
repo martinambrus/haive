@@ -164,6 +164,13 @@ export type ClarifyStepRequest = z.infer<typeof clarifyStepRequestSchema>;
 export const MERGE_CLARIFICATION_ASKED_EVENT = 'merge_resolution.clarification_asked';
 export const MERGE_CLARIFICATION_ANSWERED_EVENT = 'merge_resolution.clarification_answered';
 
+/** One turn of a plan-merge conversation. In `task_events` rather than a table of its
+ *  own because the conversation belongs to ONE task and dies with it — unlike
+ *  `plan_node_messages`, which exists because a node accumulates conversations across
+ *  many tasks. Shared so the worker step (which writes turns) and the plan route
+ *  (which reads the transcript) key on the same string. */
+export const PLAN_MERGE_MESSAGE_EVENT = 'plan_merge.message';
+
 /** `pause` holds a task so its CLI subscription budget goes to the other tasks: the run
  *  in flight finishes, then the orchestrator stops handing it work. `resume` clears it.
  *  Neither is terminal and neither touches the environment — unlike `cancel`, and unlike

@@ -403,6 +403,13 @@ export const planSequenceRequestSchema = z.object({
 });
 export type PlanSequenceRequest = z.infer<typeof planSequenceRequestSchema>;
 
+/** Starting a merge conversation. Only the CLI is chooseable — what to merge is
+ *  whatever the checkout is behind by, and the conflicting paths come from git. */
+export const planMergeStartRequestSchema = z.object({
+  cliProviderId: z.string().uuid().optional(),
+});
+export type PlanMergeStartRequest = z.infer<typeof planMergeStartRequestSchema>;
+
 export const planChatRequestSchema = z.object({
   message: z.string().trim().min(1).max(20_000),
   cliProviderId: z.string().uuid().optional(),

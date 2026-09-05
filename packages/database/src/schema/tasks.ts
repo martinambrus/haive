@@ -72,10 +72,17 @@ export const workflowTypeEnum = pgEnum('workflow_type', [
   //     numbering means something. Its own type rather than a step of plan_build
   //     alone because plan_build runs its steps once: a plan built before the
   //     step existed, or one edited by hand since, can be reached no other way.
+  //   plan_merge: resolve a conflicted pull of the plan snapshot, as a conversation
+  //     on the plan page. Its own type for the same reason plan_chat is one — the
+  //     merge worktree and the conflicting paths are context the generic create-task
+  //     form cannot supply — and a task at all because the LLM conflict loop needs a
+  //     task row: cli_invocations.task_id is NOT NULL and nothing resumes a step that
+  //     has none.
   'plan_build',
   'plan_chat',
   'advisory',
   'plan_sequence',
+  'plan_merge',
 ]);
 export const taskStatusEnum = pgEnum('task_status', [
   'created',

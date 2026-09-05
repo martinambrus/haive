@@ -4,13 +4,15 @@ import { planBuildStep } from './01-plan-build.js';
 import { planCoverageStep } from './02-plan-coverage.js';
 import { planSequenceStep, standalonePlanSequenceStep } from './03-plan-sequence.js';
 import { planChatStep } from './01-plan-chat.js';
+import { planMergeStep } from './01-plan-merge.js';
 import { advisoryResearchStep } from './01-advisory-research.js';
 import { advisoryDecisionStep } from './02-advisory-decision.js';
 
-/** Four workflow types share this directory because they share the patch
+/** Five workflow types share this directory because they share the patch
  *  contract and the mirror: plan_build (decompose), plan_sequence (put an
- *  existing plan in build order), plan_chat (converse), and advisory (research a
- *  blocker, then let a HUMAN close it). */
+ *  existing plan in build order), plan_chat (converse), advisory (research a
+ *  blocker, then let a HUMAN close it), and plan_merge (resolve a conflicted
+ *  pull of the snapshot, as a conversation the user confirms). */
 export function registerPlanSteps(registry: StepRegistry): void {
   // Deterministic, and first: it verifies the attached files and writes the
   // readable form of the ones the builder's agents could not open themselves.
@@ -25,6 +27,9 @@ export function registerPlanSteps(registry: StepRegistry): void {
   registry.register(planSequenceStep);
   registry.register(standalonePlanSequenceStep);
   registry.register(planChatStep);
+  // Only reached when save/pull could not integrate the remote on their own —
+  // a conflict outside the mirror's own two files.
+  registry.register(planMergeStep);
   registry.register(advisoryResearchStep);
   registry.register(advisoryDecisionStep);
 }

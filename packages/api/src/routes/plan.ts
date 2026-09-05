@@ -8,12 +8,15 @@ import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   HAIVE_DATA_FILES,
+  PLAN_MERGE_MESSAGE_EVENT,
+  TASK_JOB_NAMES,
   configService,
   createPlanEdgeRequestSchema,
   createPlanNodeRequestSchema,
   planAdvisoryRequestSchema,
   planBuildRequestSchema,
   planChatRequestSchema,
+  planMergeStartRequestSchema,
   planSequenceRequestSchema,
   planSnapshotSaveRequestSchema,
   logger,
@@ -45,6 +48,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { spawnPlanTask } from '../lib/spawn-plan-task.js';
 import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
+import { getTaskQueue } from '../queues.js';
 
 const exec = promisify(execFile);
 
@@ -219,10 +223,38 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
   });
 });
 
+/** Task states that mean a merge conversation is still the user's to finish. */
+const OPEN_MERGE_STATES = ['created', 'queued', 'running', 'paused', 'waiting_user'] as const;
+
+async function findOpenPlanMerge(repositoryId: string) {
+  return getDb().query.tasks.findFirst({
+    where: and(
+      eq(schema.tasks.repositoryId, repositoryId),
+      eq(schema.tasks.type, 'plan_merge'),
+      inArray(schema.tasks.status, [...OPEN_MERGE_STATES]),
+    ),
+    columns: { id: true, status: true, cliProviderId: true, createdAt: true },
+  });
+}
+
+async function refuseWhileMergeOpen(repositoryId: string): Promise<void> {
+  const open = await findOpenPlanMerge(repositoryId);
+  if (open) {
+    throw new HttpError(
+      409,
+      'A merge conversation is open for this repository — finish or discard it first',
+      'plan_merge_open',
+    );
+  }
+}
+
 planRoutes.post('/:id/plan/snapshot/save', async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = planSnapshotSaveRequestSchema.parse(await c.req.json().catch(() => ({})));
+  // A merge conversation owns the scratch worktree and is the thing that will land
+  // the remote; saving underneath it would race its checkout.
+  await refuseWhileMergeOpen(repositoryId);
   try {
     return c.json(
       await savePlanMirror({
@@ -250,6 +282,7 @@ planRoutes.post('/:id/plan/snapshot/save', async (c) => {
 planRoutes.post('/:id/plan/snapshot/pull', async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
+  await refuseWhileMergeOpen(repositoryId);
   try {
     return c.json(await pullPlanMirror({ repositoryId, userId }));
   } catch (err) {
@@ -891,6 +924,91 @@ planRoutes.post('/:id/plan/sequence', async (c) => {
     cliProviderId,
   });
   return c.json({ taskId }, 201);
+});
+
+/**
+ * Resolve a conflicted pull, as a conversation.
+ *
+ * Only reached when save/pull could not integrate the remote themselves — they merge
+ * whatever they can, and auto-resolve the mirror's own two files, so what is left
+ * here is a genuine two-sided decision.
+ */
+planRoutes.post('/:id/plan/merge', async (c) => {
+  const { userId, repositoryId, repo } = await requireOwnedRepo(c);
+  await requirePlanCanvasEnabled();
+  const body = planMergeStartRequestSchema.parse(await c.req.json().catch(() => ({})));
+  const existing = await findOpenPlanMerge(repositoryId);
+  // One live merge worktree per repository. A second conversation would build its
+  // own on top of the first one's and neither could land.
+  if (existing) {
+    throw new HttpError(
+      409,
+      'A merge conversation is already open for this repository',
+      'plan_merge_open',
+    );
+  }
+  const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
+  const taskId = await spawnPlanTask({
+    userId,
+    repositoryId,
+    type: 'plan_merge',
+    title: `Resolve plan merge: ${repo.name}`,
+    metadata: {},
+    cliProviderId,
+  });
+  return c.json({ taskId }, 201);
+});
+
+/** The open merge conversation, if there is one — the banner and the panel both
+ *  read this. Returns `{ merge: null }` rather than 404 so the plan page can poll it
+ *  as a plain state read. */
+planRoutes.get('/:id/plan/merge', async (c) => {
+  const { repositoryId } = await requireOwnedRepo(c);
+  const task = await findOpenPlanMerge(repositoryId);
+  if (!task) return c.json({ merge: null });
+  const rows = await getDb()
+    .select({ payload: schema.taskEvents.payload, createdAt: schema.taskEvents.createdAt })
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, task.id),
+        eq(schema.taskEvents.eventType, PLAN_MERGE_MESSAGE_EVENT),
+      ),
+    )
+    .orderBy(asc(schema.taskEvents.createdAt));
+  return c.json({
+    merge: {
+      taskId: task.id,
+      status: task.status,
+      cliProviderId: task.cliProviderId,
+      createdAt: task.createdAt,
+      messages: rows.map((r, i) => {
+        const p = (r.payload ?? {}) as { role?: string; body?: string };
+        return {
+          id: `${task.id}:${i}`,
+          role: p.role === 'user' ? 'user' : 'assistant',
+          body: p.body ?? '',
+          createdAt: r.createdAt,
+        };
+      }),
+    },
+  });
+});
+
+/** Abandon it. Cancels the task and removes the scratch worktree — the checkout has
+ *  not moved, so there is nothing else to undo. */
+planRoutes.delete('/:id/plan/merge', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  const task = await findOpenPlanMerge(repositoryId);
+  if (!task) return c.json({ ok: true, cancelled: false });
+  await getTaskQueue().add(
+    TASK_JOB_NAMES.CANCEL,
+    { taskId: task.id, userId },
+    {
+      removeOnComplete: true,
+    },
+  );
+  return c.json({ ok: true, cancelled: true, taskId: task.id });
 });
 
 planRoutes.post('/:id/plan/nodes/:nodeId/chat', async (c) => {
