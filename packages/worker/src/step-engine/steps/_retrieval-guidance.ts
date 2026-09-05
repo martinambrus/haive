@@ -23,7 +23,21 @@ import { KB_DIR } from '@haive/shared/knowledge-paths';
  *  cell the provider and surface actually earn. NO variant may contain an empty line:
  *  six splice sites join with `.filter(Boolean)` and nine without, so a blank element
  *  would render the same block two ways and the exact-string rewrite would find only
- *  one of them. `_retrieval-guidance.test.ts` asserts that. */
+ *  one of them. `_retrieval-guidance.test.ts` asserts that.
+ *
+ *  The DEFERRED-tool note is phrased as a condition ("may be"), not resolved at dispatch on a
+ *  third axis. It is true of the claude BINARY rather than of a provider — claude-code, zai,
+ *  ollama, muse and openrouter all run it — and a fourth cell per axis would double the table
+ *  the exact-string rewrite walks. MEASURED on claude-code 2.1.261 across four sandbox probes:
+ *  the eager tool set is a fixed 11 and `deferred = listed - 11` whatever the MCP config, so
+ *  `rag_search` is deferred even as the ONLY server. On one real plan-build fan-out that cost
+ *  the tool 7 of 13 agents, which each then ran 7-19 shell greps instead. `ENABLE_TOOL_SEARCH=0`
+ *  removes the hop and was rejected: MEASURED ~15k extra prompt tokens per agent with rag as the
+ *  only server (32.0k against 16.5k), and it is an undocumented vendor env.
+ *
+ *  The text-search line names no tool for the same reason: a Grep tool exists on some CLIs and
+ *  not others (claude-code 2.1.261 announces neither Grep nor Glob), and the block must not send
+ *  an agent at a tool its run does not have — nor push one that HAS the tool into the shell. */
 const RETRIEVAL_GUIDANCE_WITH_LSP = [
   '1. DISCOVER with `rag_search` (the haive-rag tool): hybrid semantic + lexical search over this',
   "   repo's indexed code + knowledge base + the global cross-project KB (house standards,",
@@ -31,10 +45,14 @@ const RETRIEVAL_GUIDANCE_WITH_LSP = [
   '   involved — it surfaces WHERE things live and HOW we conventionally do them, tagged',
   '   [local] (this repo) / [global] (house standard) with source paths. Prefer it over blind',
   '   grepping to get oriented.',
+  '   `rag_search` may be a DEFERRED tool here — its NAME is announced but its schema is not',
+  '   loaded. If so, spend the one `ToolSearch` (`select:mcp__haive-rag__rag_search`) and use it;',
+  '   that hop is not a reason to fall back to text search.',
   '2. GROUND every lead with LSP + grep TOGETHER — on hits as well as misses, NOT as a fallback.',
   '   The index can be stale, so before you rely on or edit anything, confirm the CURRENT code on',
   '   disk: LSP (when available) for go-to-definition / find-references / hover types, and grep /',
   '   ripgrep for exact usage sweeps. A rag_search snippet is a lead, never the source of truth.',
+  '   Text search means a Grep tool where the run has one, else `grep` / `rg` through the shell.',
   '3. On a rag_search miss, go straight to LSP + grep (and read the relevant',
   `   \`${KB_DIR}/\` files directly if rag is unavailable). A miss is an index gap,`,
   '   not a reason to stop searching.',
@@ -49,10 +67,14 @@ const RETRIEVAL_GUIDANCE_WITHOUT_LSP = [
   '   involved — it surfaces WHERE things live and HOW we conventionally do them, tagged',
   '   [local] (this repo) / [global] (house standard) with source paths. Prefer it over blind',
   '   grepping to get oriented.',
+  '   `rag_search` may be a DEFERRED tool here — its NAME is announced but its schema is not',
+  '   loaded. If so, spend the one `ToolSearch` (`select:mcp__haive-rag__rag_search`) and use it;',
+  '   that hop is not a reason to fall back to text search.',
   '2. GROUND every lead with grep + direct file reads TOGETHER — on hits as well as misses, NOT as a fallback.',
   '   The index can be stale, so before you rely on or edit anything, confirm the CURRENT code on',
   '   disk: use grep / ripgrep for exact usage sweeps and read the relevant files. A rag_search',
   '   snippet is a lead, never the source of truth.',
+  '   Text search means a Grep tool where the run has one, else `grep` / `rg` through the shell.',
   '3. On a rag_search miss, go straight to grep + direct file reads (and read the relevant',
   `   \`${KB_DIR}/\` files directly if rag is unavailable). A miss is an index gap,`,
   '   not a reason to stop searching.',
@@ -69,6 +91,7 @@ function retrievalGuidanceWithoutRag(supportsLsp: boolean): string[] {
     supportsLsp
       ? '   names, use LSP for go-to-definition / find-references / hover types, and widen from the hits.'
       : '   names and widen from the hits.',
+    '   Text search means a Grep tool where the run has one, else `grep` / `rg` through the shell.',
     '2. GROUND every lead against the CURRENT code on disk — open the files the search returned;',
     '   never work from a name alone.',
     `3. Read \`${KB_DIR}/\` directly for the project's documented conventions. It is a set of files`,
