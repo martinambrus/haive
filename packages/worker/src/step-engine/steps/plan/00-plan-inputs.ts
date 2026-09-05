@@ -2,6 +2,7 @@ import { chmod, chown, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { ensureArchivesExpanded } from '../../../attachments/expand-archives.js';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
@@ -42,6 +43,12 @@ const NODE_UID = 1000;
 const NODE_GID = 1000;
 export const PLAN_INPUTS_INDEX = '_PLAN_INPUTS.md';
 
+/** Documents given an extracted text sidecar. Each one is a subprocess
+ *  (`pdftotext`, `unzip`), which is fine for the handful this step was built for
+ *  and is not fine for an attached folder of 300 PDFs. Past the cap the original
+ *  is still mounted and the index says plainly that no text was pulled from it. */
+const PLAN_INPUT_EXTRACTION_LIMIT = 50;
+
 interface PlanInputRow {
   filename: string;
   kind: PlanInputKind;
@@ -49,6 +56,11 @@ interface PlanInputRow {
   description: string | null;
   /** Sidecar basename, when this kind is only readable through one. */
   sidecar: string | null;
+  /** Set when this document WOULD have been extracted but the step had already
+   *  spent its extraction budget. Distinct from `hasText: false`, which is a
+   *  finding about the document: this one means nobody looked, and a vision
+   *  requirement must not be inferred from it. */
+  extractionSkipped?: boolean;
   /** Whether this input has ANY readable text — the original for a text kind, a
    *  non-empty sidecar for a binary document, and never for an image.
    *
@@ -75,6 +87,11 @@ export interface PlanInputsDetect {
   }[];
   /** Rows whose file is not on disk. Non-empty fails the step. */
   missing: string[];
+  /** Archives that expanded to less than they hold, or not at all. Reported to
+   *  the user; never fatal, because the archive itself is still mounted.
+   *  Optional: a step parked before this field existed replays a detect payload
+   *  that has no such key. */
+  archiveNotes?: { filename: string; note: string }[];
 }
 
 export interface PlanInputsApply {
@@ -93,6 +110,9 @@ export interface PlanInputsApply {
   visualOnly: string[];
   /** Sandbox path of the index, or null when there were no attachments. */
   indexPath: string | null;
+  /** Archives that could not be fully expanded, carried through so the step's
+   *  output records it and the index can say so. */
+  archiveNotes: { filename: string; note: string }[];
 }
 
 /** Best-effort: the api chowns what it writes for the same reason, and a failure
@@ -102,7 +122,11 @@ async function harmonizeOwnership(filePath: string): Promise<void> {
   await chown(filePath, NODE_UID, NODE_GID).catch(() => {});
 }
 
-function renderIndex(taskId: string, rows: PlanInputRow[]): string {
+function renderIndex(
+  taskId: string,
+  rows: PlanInputRow[],
+  archiveNotes: { filename: string; note: string }[],
+): string {
   const dir = `${SANDBOX_WORKDIR}/.haive/task-uploads/${taskId}`;
   const lines = [
     '# Plan inputs',
@@ -114,10 +138,11 @@ function renderIndex(taskId: string, rows: PlanInputRow[]): string {
     '| --- | --- | --- |',
   ];
   for (const row of rows) {
-    const read =
-      // No text came out of it, so the file itself is the only copy of what it
-      // says. Told plainly, because "open it if you like" reads as optional.
-      needsExtraction(row.kind) && !row.hasText
+    const read = row.extractionSkipped
+      ? `\`${row.filename}\` — not converted to text (limit reached); OPEN THE FILE ITSELF`
+      : // No text came out of it, so the file itself is the only copy of what it
+        // says. Told plainly, because "open it if you like" reads as optional.
+        needsExtraction(row.kind) && !row.hasText
         ? `\`${row.filename}\` — no text could be read from it; OPEN THE FILE ITSELF`
         : row.sidecar && row.kind === 'pdf'
           ? `\`${row.filename}\` directly if you can read PDFs, otherwise \`${row.sidecar}\``
@@ -137,7 +162,17 @@ function renderIndex(taskId: string, rows: PlanInputRow[]): string {
       }`,
     );
   }
-  const visual = rows.filter((r) => r.kind === 'image' || (needsExtraction(r.kind) && !r.hasText));
+  if (archiveNotes.length > 0) {
+    lines.push(
+      '',
+      'Some attached archives were not fully expanded. What they contain is NOT in the',
+      'list above; treat the plan as missing whatever they hold and say so.',
+      ...archiveNotes.map((n) => `- \`${n.filename}\` — ${n.note}`),
+    );
+  }
+  const visual = rows.filter(
+    (r) => r.kind === 'image' || (needsExtraction(r.kind) && !r.hasText && !r.extractionSkipped),
+  );
   if (visual.length > 0) {
     lines.push(
       '',
@@ -178,6 +213,15 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
       .limit(1);
 
     const meta = (task?.metadata ?? {}) as { planBuildMode?: string };
+    // Before the rows are read, not after: an archive the user attached has to
+    // already be the tree it contains, or every file inside it is invisible to
+    // the classification, the sidecars and the coverage scan below.
+    const expansion = await ensureArchivesExpanded(ctx.db, ctx.taskId);
+    if (expansion.filesAdded > 0) {
+      await ctx.emitProgress(
+        `Expanded ${expansion.expanded} archive(s) into ${expansion.filesAdded} file(s).`,
+      );
+    }
     const rows = await ctx.db
       .select({
         filename: schema.taskAttachments.filename,
@@ -210,6 +254,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
           : null,
       attachments: rows,
       missing,
+      archiveNotes: expansion.notes,
     };
   },
 
@@ -235,6 +280,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
     }
 
     const inputs: PlanInputRow[] = [];
+    const archiveNotes = d.archiveNotes ?? [];
     const unreadable: string[] = [];
     let extracted = 0;
     const uploadsDir = d.uploadsDir;
@@ -253,7 +299,10 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
         note: null,
       };
 
-      if (needsExtraction(kind)) {
+      if (needsExtraction(kind) && extracted >= PLAN_INPUT_EXTRACTION_LIMIT) {
+        row.extractionSkipped = true;
+        row.note = `not extracted: this plan already has ${PLAN_INPUT_EXTRACTION_LIMIT} extracted documents`;
+      } else if (needsExtraction(kind)) {
         await ctx.emitProgress(`Extracting text from ${attachment.filename}...`);
         const result = await extractPlanInput(kind, attachment.storedPath);
         if (result.error) {
@@ -300,7 +349,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
     let indexPath: string | null = null;
     if (inputs.length > 0 && uploadsDir) {
       const dest = path.join(uploadsDir, PLAN_INPUTS_INDEX);
-      await writeFile(dest, renderIndex(ctx.taskId, inputs), 'utf8');
+      await writeFile(dest, renderIndex(ctx.taskId, inputs, archiveNotes), 'utf8');
       await harmonizeOwnership(dest);
       indexPath = `${SANDBOX_WORKDIR}/.haive/task-uploads/${ctx.taskId}/${PLAN_INPUTS_INDEX}`;
     }
@@ -315,9 +364,13 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
       // failed or the document genuinely carries no text. Both leave the file
       // readable only by looking at it.
       visualOnly: inputs
-        .filter((i) => needsExtraction(i.kind) && !i.hasText)
+        // `extractionSkipped` is excluded on purpose. Visual-only is a HARD
+        // vision requirement on the dispatch, and it must rest on a measurement:
+        // "the extractor found no text" is one, "the extractor never ran" is not.
+        .filter((i) => needsExtraction(i.kind) && !i.hasText && !i.extractionSkipped)
         .map((i) => i.filename),
       indexPath,
+      archiveNotes,
     };
   },
 };

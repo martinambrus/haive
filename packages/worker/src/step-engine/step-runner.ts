@@ -68,6 +68,7 @@ import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
+import { ensureArchivesExpanded } from '../attachments/expand-archives.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
 import { augmentPromptWithLedger, capSummaryForLedger, recordLedgerEntry } from './task-ledger.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
@@ -666,6 +667,11 @@ async function resolveLlmPhase(
           truncationRetries,
         })
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
+  // An uploaded archive becomes the tree it contains before anything describes
+  // the attachments — otherwise the notice below names a `.zip` no agent can
+  // open. Idempotent, never throws, and one indexed query when there is no
+  // archive, which is the usual case.
+  await ensureArchivesExpanded(db, params.taskId);
   // Make every CLI adapter aware of user-attached task files (the prompt flows
   // through the dispatcher unchanged). No-op when the task has no attachments.
   prompt = await augmentPromptWithAttachments(db, params.taskId, prompt);

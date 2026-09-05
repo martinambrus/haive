@@ -90,6 +90,9 @@ interface CoverageDetect {
   /** The preceding automatic pass reached its model-work safety budget. A new
    *  pass needs one explicit user approval; ordinary waves do not. */
   automaticLimitReached: boolean;
+  /** Uncovered sections found before the display cap. Optional: a step parked
+   *  before this field existed replays a detect payload without it. */
+  sectionsTotal?: number;
 }
 
 interface CoverageApply {
@@ -118,6 +121,12 @@ type MiningRowWithInvocation = MiningRow & {
  *  is a runaway guard, not a cadence at which the user must keep clicking. */
 const CONTINUATION_AGENTS_PER_WAVE = 12;
 export const AUTO_CONVERGENCE_AGENTS_PER_PASS = 240;
+
+/** Uncovered document sections shown at once. Each one carries its body into the
+ *  persisted detect payload and becomes a checkbox a person has to read, so an
+ *  attached folder of specifications must not turn the gate into a thousand of
+ *  them. The cap is stated in the gate copy and the rest surface on a re-run. */
+const COVERAGE_SECTION_LIMIT = 60;
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const CONTINUATION_AGENT_RE = new RegExp(`^plan-continue-b(\\d+)-(${UUID_SOURCE})-p(\\d+)$`, 'i');
 
@@ -448,6 +457,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
   // The source documents, when this build had any. A from_repo build has no
   // written authority to check against, so the section half simply does not run.
   let sections: CoverageCandidate[] = [];
+  let sectionsTotal = 0;
   const sectionBodies: Record<string, string> = {};
   const { sections: parsedSections, hasVisualInputs } = await loadInputSections(ctx);
   const docNames = [...new Set(parsedSections.map((s) => s.source))];
@@ -462,6 +472,13 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
       parsedSections,
       skeletons.map((node, index) => `${texts[index] ?? ''} ${byId.get(node.id) ?? ''}`),
     ).filter((candidate) => !handledSections.has(sectionAgentId(sectionKey(candidate))));
+    // Every candidate carries its body into `detect_output` and becomes a
+    // checkbox on the gate form, so an attached FOLDER of specifications used to
+    // put thousands of both in front of one person. Capped and disclosed rather
+    // than dropped: a re-run filters out the ones already handled, so the
+    // remainder is the next round's list.
+    sectionsTotal = sections.length;
+    sections = sections.slice(0, COVERAGE_SECTION_LIMIT);
     for (const candidate of sections) {
       sectionBodies[sectionKey(candidate)] =
         parsedSections.find(
@@ -481,6 +498,7 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     planMarkdown: await renderPlanMarkdown(ctx.db, repositoryId, { titlesOnly: true }),
     nodeCount: skeletons.length,
     docNames,
+    sectionsTotal,
     hasVisualInputs,
     buildDetect,
     buildFormValues,
@@ -706,7 +724,11 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
           ? `${detected.structural.length} node(s) whose decomposition was lost or thinned.`
           : '',
         detected.sections.length > 0 && detected.docNames.length > 0
-          ? `${detected.sections.length} section(s) of ${detected.docNames.join(', ')} that no node appears to cover.`
+          ? `${detected.sections.length} section(s) of ${detected.docNames.join(', ')} that no node appears to cover.${
+              (detected.sectionsTotal ?? 0) > detected.sections.length
+                ? ` That is the first ${detected.sections.length} of ${detected.sectionsTotal} uncovered sections found — handle these and re-run this step to see the rest.`
+                : ''
+            }`
           : '',
         // Said explicitly because a clean term scan otherwise reads as "the
         // wireframe was covered". It cannot see one: the scan reads text, and an

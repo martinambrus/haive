@@ -31,4 +31,34 @@ describe('augmentPromptWithAttachments', () => {
     // The original prompt stays at the tail so the notice is pure prefix context.
     expect(out.endsWith('ORIGINAL')).toBe(true);
   });
+
+  it('collapses a large folder to a counted line and states the elision', async () => {
+    const rows = [
+      { filename: 'brief.md', description: null },
+      ...Array.from({ length: 120 }, (_, i) => ({
+        filename: `docs/section-${i}/page.md`,
+        description: null,
+      })),
+      ...Array.from({ length: 5 }, (_, i) => ({ filename: `shots/s${i}.png`, description: null })),
+    ];
+    const out = await augmentPromptWithAttachments(mockDb(rows), 'task-1', 'ORIGINAL');
+
+    expect(out).toContain('- brief.md');
+    expect(out).toContain('- docs/ — 120 file(s)');
+    expect(out).toContain('- shots/ — 5 file(s)');
+    expect(out).not.toContain('docs/section-3/page.md');
+    // The cap is disclosed, not silent: a short list nobody explained reads as
+    // the whole set.
+    expect(out).toContain('COVERAGE: the list above names 1 of 126 attached files');
+  });
+
+  it('leaves a list under the limit exactly as it was', async () => {
+    const rows = Array.from({ length: 40 }, (_, i) => ({
+      filename: `docs/f${i}.md`,
+      description: null,
+    }));
+    const out = await augmentPromptWithAttachments(mockDb(rows), 'task-1', 'ORIGINAL');
+    expect(out).toContain('- docs/f39.md');
+    expect(out).not.toContain('COVERAGE:');
+  });
 });
