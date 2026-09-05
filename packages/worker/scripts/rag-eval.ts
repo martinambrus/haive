@@ -78,8 +78,8 @@ async function main(): Promise<void> {
   hits.forEach((h, i) => {
     const mark = expected && h.sourcePath.includes(expected) ? '   <== EXPECTED' : '';
     console.log(
-      `${String(i + 1).padStart(2)}. rrf=${h.rrf.toFixed(4)} dense=${h.denseSim.toFixed(3)} ` +
-        `ts=${h.tsNorm.toFixed(3)} hybrid=${h.hybrid.toFixed(3)}  ` +
+      `${String(i + 1).padStart(2)}. [${h.sourceType}] rrf=${h.rrf.toFixed(4)} ` +
+        `dense=${h.denseSim.toFixed(3)} ts=${h.tsNorm.toFixed(3)} hybrid=${h.hybrid.toFixed(3)}  ` +
         `${h.sourcePath} #${h.sectionId}${mark}`,
     );
   });

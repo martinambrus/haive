@@ -7,6 +7,7 @@ import {
   RUNBOOK_BOOST_BUGFIX,
   RUNBOOK_BOOST_FEATURE,
   embedQuery,
+  applyKnowledgeReserve,
   embedQueryOrNull,
   ragHybridSearch,
   resolveRagConnection,
@@ -139,7 +140,15 @@ export function mergeHits(
   const lSorted = [...local].sort(byRrf);
   const globalCap = Math.floor(topK / 2);
   const selGlobal = gSorted.slice(0, globalCap);
-  const selLocal = lSorted.slice(0, Math.max(0, topK - selGlobal.length));
+  // Trimming the local page to make room for the global KB must honour the same
+  // knowledge quota the search itself applied, or the reserve dies here: a promoted
+  // knowledge hit carries the low `rrf` that got it cut in the first place, so a
+  // plain rrf slice drops it FIRST. Identical to a plain slice for a code-only page.
+  const selLocal = applyKnowledgeReserve(lSorted, {
+    topK: Math.max(0, topK - selGlobal.length),
+    knowledgeReserve: DEFAULT_RAG_SEARCH_CONFIG.knowledgeReserve,
+    knowledgeReserveRatio: DEFAULT_RAG_SEARCH_CONFIG.knowledgeReserveRatio,
+  });
   // Slots local did not fill go back to global (the reverse is already handled by
   // sizing selLocal off selGlobal.length). Without this a repo whose local index
   // is not built yet got half a page of global KB hits: the reserve was a floor

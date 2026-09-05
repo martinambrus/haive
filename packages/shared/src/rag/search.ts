@@ -1,4 +1,4 @@
-import { type RagConnection, RAG_TABLE } from './connection.js';
+import { type RagConnection, KNOWLEDGE_SOURCE_TYPES, RAG_TABLE } from './connection.js';
 import { vectorLiteral } from './embed.js';
 
 /** Tunable knobs for hybrid retrieval. Defaults are conservative and chosen so
@@ -39,6 +39,23 @@ export interface RagSearchConfig {
    *  the branch a jsonb-only store already takes, so there is no second ranking
    *  implementation to keep in step. */
   lexicalOnly: boolean;
+  /** Result slots held for knowledge chunks (`KNOWLEDGE_SOURCE_TYPES`) so a
+   *  code-heavy corpus cannot crowd the KB out of the page entirely. A QUOTA, not
+   *  a boost: MEASURED on a 9156-code / 41-KB repo, the KB chunk that answered the
+   *  query sat at dense rank 41 behind 40 code chunks, and 11 of 18 logged queries
+   *  returned no KB at all. An RRF multiplier cannot close a rank-41 gap reliably
+   *  without over-promoting the queries where KB already surfaces. Floor, not
+   *  ceiling — a page that already holds this many knowledge hits is untouched.
+   *  0 disables the reserve and restores the previous ranking exactly. */
+  knowledgeReserve: number;
+  /** A reserved slot is filled only when the candidate's dense similarity is at
+   *  least this fraction of the best CODE hit's. MEASURED across 18 real queries,
+   *  best-KB/best-code ranged 0.630-1.043, and the two below 0.75 were the pure
+   *  symbol lookups (`CProduct class d_product.inc ...`, `PDF certificate
+   *  generation mPDF pdf_generation.class.inc`) where the KB genuinely has less to
+   *  say. So the reserve stands down on exactly those, and needs no absolute
+   *  threshold that would have to be re-tuned per corpus. */
+  knowledgeReserveRatio: number;
 }
 
 export const DEFAULT_RAG_SEARCH_CONFIG: RagSearchConfig = {
@@ -51,6 +68,8 @@ export const DEFAULT_RAG_SEARCH_CONFIG: RagSearchConfig = {
   lexWeight: 0.3,
   runbookBoost: 1.0,
   lexicalOnly: false,
+  knowledgeReserve: 2,
+  knowledgeReserveRatio: 0.75,
 };
 
 /** Per-task-type run-book RRF multipliers applied by the /rag/search route.
@@ -79,6 +98,91 @@ export interface RagSearchHit {
   /** Which store the hit came from. Set by the /rag/search route when merging
    *  per-repo (local) and global KB results; undefined for a single-store call. */
   scope?: 'local' | 'global';
+}
+
+/** Options `applyKnowledgeReserve` reads. A subset of `RagSearchConfig` so the
+ *  api can re-apply the reserve when it trims the local page, without holding a
+ *  whole search config. */
+export interface KnowledgeReserveOptions {
+  topK: number;
+  knowledgeReserve: number;
+  knowledgeReserveRatio: number;
+}
+
+const KNOWLEDGE_TYPE_SET: ReadonlySet<string> = new Set(KNOWLEDGE_SOURCE_TYPES);
+
+export function isKnowledgeHit(hit: RagSearchHit): boolean {
+  return KNOWLEDGE_TYPE_SET.has(hit.sourceType);
+}
+
+/** Hold up to `knowledgeReserve` of a page's slots for knowledge chunks, so a
+ *  corpus with two orders of magnitude more code than KB cannot fill every slot
+ *  with code. Pure, and the ONLY place the quota is expressed — used both when a
+ *  search builds its page and when `mergeHits` trims that page to make room for
+ *  the global KB, since a reserve that survives only the first is not a reserve.
+ *
+ *  Ranking is untouched: promoted hits keep the `rrf` they earned (usually low,
+ *  which is why they were being cut) and are appended AFTER the rrf-ranked rows
+ *  rather than being given a fabricated score. `rrf` is shown to agents and
+ *  logged, so it must keep meaning what it says.
+ *
+ *  Three ways the reserve stands down, all deliberate:
+ *  - no code hits, so there is nothing crowding anything out and no denominator
+ *    for the ratio (this is the global-KB store, where every row is `kb`);
+ *  - the best knowledge candidate is too far below the best code hit
+ *    (`knowledgeReserveRatio`) — the query was a symbol lookup the KB cannot
+ *    answer;
+ *  - the page already holds that many knowledge hits.
+ *  Slots the reserve does not fill go back to code, mirroring the global reserve
+ *  in `mergeHits`. */
+export function applyKnowledgeReserve(
+  hits: RagSearchHit[],
+  opts: KnowledgeReserveOptions,
+): RagSearchHit[] {
+  const { topK, knowledgeReserve, knowledgeReserveRatio } = opts;
+  if (topK <= 0) return [];
+  const byRrf = [...hits].sort((a, b) => b.rrf - a.rrf);
+  if (knowledgeReserve <= 0) return byRrf.slice(0, topK);
+
+  // A small page must not be handed over to the reserve: topK reaches this route
+  // as low as 4, where a flat 2 would be half of it.
+  const reserve = Math.min(knowledgeReserve, Math.floor(topK / 3));
+  if (reserve <= 0) return byRrf.slice(0, topK);
+
+  // Only rows the page would otherwise CUT are promoted. A page that already ranks
+  // its knowledge hits keeps them exactly where the fusion put them — the reserve
+  // is a floor on presence, never a re-ordering.
+  const base = byRrf.slice(0, topK);
+  const codeSims = base.filter((h) => !isKnowledgeHit(h)).map((h) => h.denseSim);
+  if (codeSims.length === 0) return base;
+  const slots = reserve - base.filter(isKnowledgeHit).length;
+  if (slots <= 0) return base;
+
+  const held = new Set(base.map(hitKey));
+  const floor = Math.max(...codeSims) * knowledgeReserveRatio;
+  const promoted = byRrf
+    .filter((h) => isKnowledgeHit(h) && !held.has(hitKey(h)) && h.denseSim >= floor)
+    .sort((a, b) => b.denseSim - a.denseSim)
+    .slice(0, slots);
+  if (promoted.length === 0) return base;
+
+  // Make room by dropping the weakest CODE rows, never a knowledge hit the page
+  // already earned on rank.
+  let toDrop = promoted.length;
+  const kept: RagSearchHit[] = [];
+  for (let i = base.length - 1; i >= 0; i -= 1) {
+    const hit = base[i]!;
+    if (toDrop > 0 && !isKnowledgeHit(hit)) {
+      toDrop -= 1;
+      continue;
+    }
+    kept.unshift(hit);
+  }
+  return [...kept, ...promoted];
+}
+
+function hitKey(hit: RagSearchHit): string {
+  return `${hit.sourcePath} ${hit.sectionId} ${hit.chunkIndex}`;
 }
 
 /** Optional metadata filter for the GLOBAL KB store: restricts candidates to a
@@ -341,7 +445,30 @@ export async function ragHybridSearch(
     )) as unknown as RawRow[];
   }
 
-  return rows.map((r) => ({
+  const hits = rows.map(toHit);
+
+  // The reserve needs a dense similarity to rank and gate on, and every row on the
+  // lexical-only branch reports 0 — a jsonb store with no vector column, a repo whose
+  // owner accepted `rag_embed_lexical_only` after embeddings failed, or a single query
+  // that could not be embedded. Nothing to reserve from, so leave the page alone.
+  if (!usePgvector || cfg.knowledgeReserve <= 0) return hits;
+  // Skipped outright when the page holds no code, which is the global KB store (every
+  // row there is `kb`): no crowding to correct, and no second query to pay for.
+  if (!hits.some((h) => !isKnowledgeHit(h))) return hits;
+
+  const candidates = await fetchKnowledgeCandidates(conn, {
+    qv: vectorLiteral(queryVec),
+    dims,
+    limit: cfg.knowledgeReserve,
+    denseFloor: cfg.denseFloor,
+    filter,
+    repositoryId,
+  });
+  return applyKnowledgeReserve([...hits, ...candidates.map(toHit)], cfg);
+}
+
+function toHit(r: RawRow): RagSearchHit {
+  return {
     sourcePath: r.source_path,
     sectionId: r.section_id,
     chunkIndex: typeof r.chunk_index === 'number' ? r.chunk_index : Number(r.chunk_index),
@@ -351,5 +478,63 @@ export async function ragHybridSearch(
     tsNorm: num(r.ts_norm),
     hybrid: num(r.hybrid),
     rrf: num(r.rrf),
-  }));
+  };
+}
+
+/** The best knowledge chunks for a query, ranked by dense similarity alone —
+ *  candidates for `applyKnowledgeReserve`, not results.
+ *
+ *  A SECOND query rather than another CTE unioned into the main one, because a row
+ *  reached only through such a union carries no `d_rank` and no `l_rank`, so it scores
+ *  `rrf = 0` and the main statement's own `ORDER BY rrf DESC LIMIT` discards it before
+ *  any caller sees it — the reserve would have had nothing to draw on. Keeping it
+ *  separate also leaves the ranking SQL byte-for-byte unchanged.
+ *
+ *  `source_type = ANY(...)` on the knowledge types is served by `idx_rag_source_type`:
+ *  MEASURED on a 9197-row index, 1.6 ms against 8.6 ms for a `<> 'code'` sequential
+ *  scan. `denseFloor` (never `codeDenseFloor`) applies, so a promoted row has still
+ *  cleared the same relevance gate the main query would have held it to. */
+async function fetchKnowledgeCandidates(
+  conn: RagConnection,
+  opts: {
+    qv: string;
+    dims: number;
+    limit: number;
+    denseFloor: number;
+    filter?: RagFacetFilter;
+    repositoryId?: string;
+  },
+): Promise<RawRow[]> {
+  const { qv, dims, limit, denseFloor, filter, repositoryId } = opts;
+  // Base params are $1..$4; facet params (if any) start at $5; repository_id last.
+  const fc = filter ? buildFacetClause(filter, 5) : null;
+  const repoParam = 5 + (fc?.params.length ?? 0);
+  const conds = [
+    `source_type = ANY($2::text[])`,
+    ...(fc ? [fc.core] : []),
+    ...(repositoryId ? [`repository_id = $${repoParam}`] : []),
+  ];
+  const params: (string | number)[] = [
+    qv,
+    pgTextArrayLiteral([...KNOWLEDGE_SOURCE_TYPES]),
+    limit,
+    denseFloor,
+    ...(fc?.params ?? []),
+    ...(repositoryId ? [repositoryId] : []),
+  ];
+
+  return (await conn.pg.unsafe(
+    `
+      WITH q AS (SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh)
+      SELECT source_path, section_id, chunk_index, source_type, content,
+             1 - (vector <=> (SELECT qv FROM q)) AS dense_sim,
+             0 AS ts_norm, 0 AS hybrid, 0 AS rrf
+      FROM ${RAG_TABLE}
+      WHERE ${conds.join('\n        AND ')}
+        AND (1 - (vector <=> (SELECT qv FROM q))) >= $4::double precision
+      ORDER BY (vector::halfvec(${dims})) <=> (SELECT qvh FROM q)
+      LIMIT $3
+      `,
+    params,
+  )) as unknown as RawRow[];
 }

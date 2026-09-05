@@ -7,6 +7,14 @@ const log = logger.child({ module: 'rag-connection' });
 
 export const RAG_TABLE = 'ai_rag_embeddings';
 
+/** The `source_type` values that carry PROJECT KNOWLEDGE, as opposed to code.
+ *  Named positively rather than as "not code" because a fifth value exists that
+ *  is neither: `task` rows (`workflow/_task-embedding.ts`) hold one embedding per
+ *  task, keyed by task UUID rather than a file, for the effort estimator alone.
+ *  They have no counter in `logRagQuery`, so one surfacing in an agent's results
+ *  would be an invisible hit. */
+export const KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning'] as const;
+
 export type RagMode = 'internal' | 'external' | 'ddev' | 'none';
 
 export interface RagToolingPrefs {
