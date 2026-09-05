@@ -265,6 +265,11 @@ ragRoutes.post('/search', async (c) => {
 
   const db = getDb();
   const { prefs, projectName, facets, repositoryId } = await resolveTaskRagContext(db, taskId);
+  // Read once and pass to BOTH stores, so the switch cannot be half-applied.
+  const identifierSearch = await configService.getBoolean(
+    CONFIG_KEYS.RAG_IDENTIFIER_SEARCH_ENABLED,
+    true,
+  );
 
   // --- Local (per-repo) search: unchanged behaviour. ragMode 'none' contributes
   // no local hits; a local failure is still a hard 500 (no facet filter here, so
@@ -306,7 +311,7 @@ ragRoutes.post('/search', async (c) => {
           conn,
           vec,
           query,
-          { runbookBoost, lexicalOnly, ...(topK ? { topK } : {}) },
+          { runbookBoost, lexicalOnly, identifierSearch, ...(topK ? { topK } : {}) },
           undefined,
           localRepoId,
         );
@@ -343,10 +348,13 @@ ragRoutes.post('/search', async (c) => {
           model: settings.embedModel,
           dimensions: settings.embeddingDimensions,
         });
-        const raw = await ragHybridSearch(conn, gvec, query, topK ? { topK } : {}, {
-          namespace: settings.namespace,
-          facets,
-        });
+        const raw = await ragHybridSearch(
+          conn,
+          gvec,
+          query,
+          { identifierSearch, ...(topK ? { topK } : {}) },
+          { namespace: settings.namespace, facets },
+        );
         const scoped = dedupeGlobalByEntry(raw.map((h) => ({ ...h, scope: 'global' as const })));
         // Bodies for the entries that survived dedup, fetched on the SAME
         // connection this block already holds (withGlobalKb opens and closes one

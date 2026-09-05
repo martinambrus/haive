@@ -1,7 +1,13 @@
 import { sql } from 'drizzle-orm';
 import { type Database } from '@haive/database';
 import { logger } from '@haive/shared';
-import { RAG_TABLE, ragDatabaseName, type RagConnection } from '@haive/shared/rag';
+import {
+  IDENTIFIER_TSV_SENTINEL,
+  RAG_TABLE,
+  identifierTsvSql,
+  ragDatabaseName,
+  type RagConnection,
+} from '@haive/shared/rag';
 
 // Connection resolution + types moved to @haive/shared/rag so the API query
 // path can reuse them without importing the worker. Re-exported here so
@@ -102,11 +108,23 @@ export async function ensureRagSchema(
     await dedupeAndEnforceRepoUniqueness(conn);
   }
 
-  // tsvector auto-update trigger
+  // tsvector auto-update trigger. Three parts, and the last two are why code
+  // identifiers are findable at all: Postgres' text-search PARSER splits
+  // snake_case before any dictionary runs, so `to_tsvector` alone stores
+  // `pdf_generator` as `pdf` + `generat` and the lexical half can only ever match
+  // common English words. `array_to_tsvector` bypasses the parser and stores the
+  // whole identifier; the sentinel marks the row as built by THIS body so
+  // backfillIdentifierTsv can find the rows that still need it.
+  //
+  // CREATE OR REPLACE, and ensureRagSchema runs at the start of every workflow
+  // task (02-pre-rag-sync), so a change here upgrades every reachable store on
+  // its own — no version marker, no migration.
   await conn.pg.unsafe(`
     CREATE OR REPLACE FUNCTION update_content_tsv() RETURNS trigger AS $$
     BEGIN
-      NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''));
+      NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''))
+        || ${identifierTsvSql("COALESCE(NEW.content, '')")}
+        || array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}']);
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql
@@ -124,7 +142,57 @@ export async function ensureRagSchema(
     `);
   }
 
+  await backfillIdentifierTsv(conn);
+
   return { usedPgvector, tableName: RAG_TABLE };
+}
+
+/** Rows written before the trigger emitted identifier lexemes keep the old
+ *  tsvector forever unless something rewrites them, and nothing does: the
+ *  incremental differ skips a chunk whose `chunk_hash` is unchanged
+ *  (`workflow/_rag-index.ts`), and a change to how `content_tsv` is DERIVED
+ *  leaves `content` — and therefore the hash — identical. So the trigger alone
+ *  would upgrade new rows only, and every already-indexed repo would keep a
+ *  half-and-half index whose misses are silent.
+ *
+ *  Same shape as dedupeAndEnforceRepoUniqueness below: it piggybacks the per-run
+ *  schema sweep rather than getting its own entry point, warns rather than
+ *  throws, and keeps no "applied" record. Convergence is structural instead —
+ *  `SET content = content` fires the BEFORE UPDATE trigger, which stamps the
+ *  sentinel, and a stamped row never matches the predicate again, so a
+ *  fully-upgraded store makes this a no-op.
+ *
+ *  Capped per invocation because this runs inside a step that gates every
+ *  workflow task: a large store finishes over the next few syncs instead of
+ *  making one task wait for the whole rewrite. */
+const IDENTIFIER_BACKFILL_BATCH = 2_000;
+const IDENTIFIER_BACKFILL_MAX_ROWS = 40_000;
+
+async function backfillIdentifierTsv(conn: RagConnection): Promise<void> {
+  try {
+    let total = 0;
+    while (total < IDENTIFIER_BACKFILL_MAX_ROWS) {
+      const result = await conn.pg.unsafe(
+        `UPDATE ${RAG_TABLE} SET content = content
+           WHERE id IN (
+             SELECT id FROM ${RAG_TABLE}
+             WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)
+             LIMIT $2
+           )`,
+        [IDENTIFIER_TSV_SENTINEL, IDENTIFIER_BACKFILL_BATCH],
+      );
+      const rows = result.count ?? 0;
+      total += rows;
+      if (rows < IDENTIFIER_BACKFILL_BATCH) break;
+    }
+    if (total > 0) {
+      log.info({ rows: total }, 'backfilled identifier lexemes into content_tsv');
+    }
+  } catch (err) {
+    // Never fails the caller: a stale lexical index is a degraded search, while a
+    // throw here would break onboarding and every workflow task on the repo.
+    log.warn({ err }, 'identifier tsv backfill failed; lexical identifier search may be stale');
+  }
 }
 
 /** One-time migration: collapse duplicate chunk rows keyed by

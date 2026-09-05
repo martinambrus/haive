@@ -1,5 +1,6 @@
 import { type RagConnection, KNOWLEDGE_SOURCE_TYPES, RAG_TABLE } from './connection.js';
 import { vectorLiteral } from './embed.js';
+import { extractIdentifiers, identifierTsQuery } from './identifiers.js';
 
 /** Tunable knobs for hybrid retrieval. Defaults are conservative and chosen so
  *  a dense-strong / lexical-zero code hit still clears the gate — the exact
@@ -56,6 +57,25 @@ export interface RagSearchConfig {
    *  say. So the reserve stands down on exactly those, and needs no absolute
    *  threshold that would have to be re-tuned per corpus. */
   knowledgeReserveRatio: number;
+  /** Add a third RRF ranker that matches CODE IDENTIFIERS as whole lexemes.
+   *  Postgres' parser splits snake_case, so the `english` half stores
+   *  `pdf_generator` as `pdf` + `generat` and can only match common words — which
+   *  is why the lexical half was inert (MEASURED: 17 of 18 real queries matched
+   *  zero rows) and why turning it on naively surfaced junk. Off restores the
+   *  previous ranking exactly, even against a store that already carries the
+   *  identifier lexemes: they are simply never queried. */
+  identifierSearch: boolean;
+  /** How many identifier matches may enter the fused candidate set. Deliberately
+   *  far below `candidatePool`: an identifier ranker drawing 50 candidates injects
+   *  dozens of RRF terms and rewrites the page, and MEASURED that displaced
+   *  `notification_bell.tpl.php` (dense 0.725) from a query that literally says
+   *  "notification bell". Bounding the INJECTION is what fixes that, not lowering
+   *  the ranker's weight — MEASURED at half weight the motivating case
+   *  (`pdf_generator`, 3 chunks in 9197) stops surfacing at all, while a cap of 3
+   *  at full weight keeps it and cuts displaced top-3 code hits from 3 of 18 to 2.
+   *  So an exact identifier match is worth a couple of slots, not the right to
+   *  rewrite the ranking — the same bargain `knowledgeReserve` strikes. */
+  identifierCandidates: number;
 }
 
 export const DEFAULT_RAG_SEARCH_CONFIG: RagSearchConfig = {
@@ -70,6 +90,8 @@ export const DEFAULT_RAG_SEARCH_CONFIG: RagSearchConfig = {
   lexicalOnly: false,
   knowledgeReserve: 2,
   knowledgeReserveRatio: 0.75,
+  identifierSearch: true,
+  identifierCandidates: 3,
 };
 
 /** Per-task-type run-book RRF multipliers applied by the /rag/search route.
@@ -268,6 +290,63 @@ function buildFacetClause(
   return { core: parts.join('\n          AND '), params };
 }
 
+/** Inverse document frequency for each query identifier, in the SAME order, and
+ *  0 for one the store has never seen.
+ *
+ *  The identifier ranker needs IDF for two independent reasons, and neither is a
+ *  preference. First, `array_to_tsvector` stores POSITIONLESS lexemes and
+ *  MEASURED `ts_rank_cd` returns exactly 0 for them, so the usual ranker cannot
+ *  order identifier matches at all. Second, identifiers differ in selectivity by
+ *  orders of magnitude — on one repo `mpdf` appears in 22.8% of chunks while
+ *  `pdf_generator` is in 0.03% — and an unweighted OR let the common one bury
+ *  the rare one, which is exactly the lookup the ranker exists to serve.
+ *  `ln(N/df)` separates those two by 5.4x and needs no tuned threshold.
+ *
+ *  Scoped by the same facet/repository predicates as the search itself, so df is
+ *  relative to the corpus actually being searched rather than the whole store. */
+async function identifierIdfs(
+  conn: RagConnection,
+  terms: string[],
+  facetFilter: RagFacetFilter | undefined,
+  repositoryId: string | undefined,
+): Promise<number[]> {
+  // Own numbering: $1 is the term array, facet params follow, repository_id last.
+  const fc = facetFilter ? buildFacetClause(facetFilter, 2) : null;
+  const repoParam = 2 + (fc?.params.length ?? 0);
+  const conds = [
+    ...(fc ? [fc.core] : []),
+    ...(repositoryId ? [`repository_id = $${repoParam}`] : []),
+  ];
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const scoped = conds.length ? `${conds.join(' AND ')} AND ` : '';
+  try {
+    const rows = (await conn.pg.unsafe(
+      `
+      WITH n AS (SELECT count(*)::float8 AS total FROM ${RAG_TABLE} ${where})
+      SELECT t.term,
+             (SELECT count(*)::float8 FROM ${RAG_TABLE} e
+               WHERE ${scoped}e.content_tsv @@ ('''' || t.term || '''')::tsquery) AS df,
+             (SELECT total FROM n) AS total
+        FROM unnest($1::text[]) AS t(term)
+      `,
+      [terms, ...(fc?.params ?? []), ...(repositoryId ? [repositoryId] : [])],
+    )) as unknown as Array<{ term: string; df: number | string; total: number | string }>;
+    const byTerm = new Map(rows.map((r) => [r.term, { df: num(r.df), total: num(r.total) }]));
+    return terms.map((t) => {
+      const stat = byTerm.get(t);
+      // df 0 means the store has never seen the identifier — contribute nothing
+      // rather than an infinite weight.
+      if (!stat || stat.df <= 0 || stat.total <= 0) return 0;
+      return Math.log(stat.total / stat.df);
+    });
+  } catch {
+    // A store predating the identifier lexemes answers this fine (every df is 0),
+    // so a throw here is a real fault — degrade to no identifier ranker rather
+    // than failing a search that would otherwise work.
+    return terms.map(() => 0);
+  }
+}
+
 /** Hybrid dense + lexical retrieval over a project RAG database.
  *
  *  Ranking uses Reciprocal Rank Fusion of the dense (pgvector cosine) and
@@ -315,6 +394,21 @@ export async function ragHybridSearch(
     const conds = [fc?.core, repoCond].filter(Boolean) as string[];
     const denseWhere = conds.length ? `WHERE ${conds.join('\n          AND ')}` : '';
     const lexExtra = conds.map((c) => `\n          AND ${c}`).join('');
+    // The identifier ranker is a THIRD input to the fusion, appended after every
+    // existing param so none of the numbering above shifts. When the query holds
+    // no identifiers its CTE is omitted entirely and the statement is
+    // byte-identical to the one that shipped before it existed — which is the
+    // whole risk story for queries that never mention code.
+    const identTerms =
+      cfg.identifierSearch && cfg.identifierCandidates > 0 ? extractIdentifiers(queryText) : [];
+    const identQuery = identifierTsQuery(identTerms);
+    const identIdfs = identQuery
+      ? await identifierIdfs(conn, identTerms, filter, repositoryId)
+      : [];
+    const useIdent = identQuery !== null && identIdfs.some((v: number) => v > 0);
+    const identTermsParam = (repositoryId ? repoParam : boostParam) + 1;
+    const identIdfsParam = identTermsParam + 1;
+    const identQueryParam = identIdfsParam + 1;
     // pgvector's HNSW index (idx_rag_vector_hnsw) is built on the `vector::halfvec(dims)`
     // cast, so the dense candidate CTE must ORDER BY the SAME cast to use it — an
     // uncast `vector <=>` falls back to a full sequential scan. The outer `dense`
@@ -359,10 +453,29 @@ export async function ragHybridSearch(
         ORDER BY ts DESC
         LIMIT $3
       ),
+      ${
+        useIdent
+          ? `ident AS (
+        SELECT id, row_number() OVER (ORDER BY idf_score DESC, id) AS i_rank
+        FROM (
+          SELECT e.id,
+                 (SELECT COALESCE(sum(u.idf), 0)
+                    FROM unnest($${identTermsParam}::text[], $${identIdfsParam}::float8[]) AS u(term, idf)
+                   WHERE e.content_tsv @@ ('''' || u.term || '''')::tsquery) AS idf_score
+          FROM ${RAG_TABLE} e
+          WHERE e.content_tsv @@ $${identQueryParam}::tsquery${lexExtra}
+        ) s
+        WHERE idf_score > 0
+        ORDER BY idf_score DESC
+        LIMIT ${Math.max(0, cfg.identifierCandidates)}
+      ),`
+          : ''
+      }
       cand AS (
         SELECT id FROM dense
         UNION
         SELECT id FROM lex
+        ${useIdent ? 'UNION\n        SELECT id FROM ident' : ''}
       )
       SELECT
         e.source_path, e.section_id, e.chunk_index, e.source_type, e.content,
@@ -376,16 +489,19 @@ export async function ragHybridSearch(
           (
             CASE WHEN d.d_rank IS NOT NULL THEN 1.0 / ($4 + d.d_rank) ELSE 0 END
             + CASE WHEN l.l_rank IS NOT NULL THEN 1.0 / ($4 + l.l_rank) ELSE 0 END
+            ${useIdent ? `+ CASE WHEN i.i_rank IS NOT NULL THEN 1.0 / ($4 + i.i_rank) ELSE 0 END` : ''}
           ) * (CASE WHEN e.source_type = 'runbook' THEN $${boostParam}::double precision ELSE 1 END)
         ) AS rrf
       FROM cand c
       JOIN ${RAG_TABLE} e ON e.id = c.id
       LEFT JOIN dense d ON d.id = c.id
       LEFT JOIN lex l ON l.id = c.id
+      ${useIdent ? 'LEFT JOIN ident i ON i.id = c.id' : ''}
       WHERE COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q)))
               >= (CASE WHEN e.source_type = 'code' THEN $9::double precision
                        ELSE $5::double precision END)
          OR COALESCE(l.ts, 0) > 0
+         ${useIdent ? 'OR i.i_rank IS NOT NULL' : ''}
       ORDER BY rrf DESC
       LIMIT $8
       `;
@@ -402,6 +518,7 @@ export async function ragHybridSearch(
       ...(fc?.params ?? []),
       cfg.runbookBoost,
       ...(repositoryId ? [repositoryId] : []),
+      ...(useIdent ? [identTerms, identIdfs, identQuery as string] : []),
     ];
     rows = (await conn.pg.unsafe(sqlText, params)) as unknown as RawRow[];
   } else {

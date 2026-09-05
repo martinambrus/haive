@@ -298,6 +298,12 @@ export const CONFIG_KEYS = {
   // marked degraded. Off: the pre-fix per-batch hash fallback, byte for byte.
   RAG_EMBED_STRICT_ENABLED: 'config:rag:embedStrictEnabled',
 
+  // Kill switch for the identifier ranker — the third RRF input that matches code
+  // identifiers as WHOLE lexemes. Off restores the previous ranking exactly, even
+  // against a store that already carries the identifier lexemes, because they are
+  // then simply never queried; no data has to be undone.
+  RAG_IDENTIFIER_SEARCH_ENABLED: 'config:rag:identifierSearchEnabled',
+
   // Global terseness level for agent OUTPUT prose, applied as a directive appended to
   // each CLI step's main prompt (lite | full | ultra; default full). Only the model's
   // prose is affected — the directive carves out JSON/code/diffs/specs so structured
@@ -584,6 +590,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.RAG_EMBED_WARMUP_TIMEOUT_MS]: '300000',
   [CONFIG_KEYS.RAG_EMBED_BATCH_SIZE]: '8',
   [CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED]: 'true',
+  [CONFIG_KEYS.RAG_IDENTIFIER_SEARCH_ENABLED]: 'true',
   [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
   [CONFIG_KEYS.SPEC_VIEW_MODE]: 'toc',
   // Pricing: sync ON by default (a fresh install should price itself without setup);
