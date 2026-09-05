@@ -182,7 +182,7 @@ export function applyKnowledgeReserve(
 }
 
 function hitKey(hit: RagSearchHit): string {
-  return `${hit.sourcePath} ${hit.sectionId} ${hit.chunkIndex}`;
+  return [hit.sourcePath, hit.sectionId, hit.chunkIndex].join('\u0000');
 }
 
 /** Optional metadata filter for the GLOBAL KB store: restricts candidates to a
