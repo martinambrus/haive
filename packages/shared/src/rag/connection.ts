@@ -96,11 +96,6 @@ function resolveExternal(connectionString: string, embeddingDimensions: number):
   };
 }
 
-function resolveDdev(connectionString: string | null, embeddingDimensions: number): RagConnection {
-  const connStr = connectionString ?? 'postgres://db:db@host.docker.internal:5432/db';
-  return resolveExternal(connStr, embeddingDimensions);
-}
-
 export async function resolveRagConnection(
   prefs: RagToolingPrefs,
   haiveDb: Database,
@@ -115,7 +110,18 @@ export async function resolveRagConnection(
       }
       return resolveExternal(prefs.ragConnectionString, prefs.embeddingDimensions);
     case 'ddev':
-      return resolveDdev(prefs.ragConnectionString, prefs.embeddingDimensions);
+      // No fallback DSN. This used to guess `db:db@host.docker.internal:5432/db`
+      // — DDEV's in-container credentials — which cannot reach a DDEV database
+      // from here: DDEV binds it to a RANDOM loopback-only host port. On any
+      // install that publishes 5432 the guess instead reached haive's own
+      // postgres and failed with `password authentication failed for user "db"`
+      // at 10-rag-populate, hours into onboarding.
+      if (!prefs.ragConnectionString) {
+        throw new Error(
+          "ddev ragMode requires ragConnectionString — DDEV publishes its database on a random loopback port, so there is no address to guess (`ddev describe` prints it). Use RAG mode 'internal' to store embeddings in haive's own postgres instead.",
+        );
+      }
+      return resolveExternal(prefs.ragConnectionString, prefs.embeddingDimensions);
     case 'none':
       return null;
     default:

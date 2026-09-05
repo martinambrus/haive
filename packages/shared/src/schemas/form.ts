@@ -33,6 +33,10 @@ const baseField = z.object({
       // compares with ===, which is correct for both.
       equals: z.union([z.string(), z.boolean()]).optional(),
       notEquals: z.union([z.string(), z.boolean()]).optional(),
+      // Set form of `equals`, for a field that belongs to SEVERAL choices of one
+      // select — the RAG connection string is meaningful for `ddev` and
+      // `external` and for neither of the other two.
+      in: z.array(z.string()).optional(),
     })
     .optional(),
 });
@@ -377,7 +381,12 @@ export type FormSubmission = z.infer<typeof formSubmissionSchema>;
  *  Works for accordion-nested fields too, since `values` is the whole form's map. */
 export function isFieldVisible(
   field: {
-    visibleWhen?: { field: string; equals?: string | boolean; notEquals?: string | boolean };
+    visibleWhen?: {
+      field: string;
+      equals?: string | boolean;
+      notEquals?: string | boolean;
+      in?: string[];
+    };
   },
   values: Record<string, unknown>,
 ): boolean {
@@ -386,5 +395,6 @@ export function isFieldVisible(
   const current = values[vw.field];
   if (vw.equals !== undefined) return current === vw.equals;
   if (vw.notEquals !== undefined) return current !== vw.notEquals;
+  if (vw.in !== undefined) return typeof current === 'string' && vw.in.includes(current);
   return true;
 }

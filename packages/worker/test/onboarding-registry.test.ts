@@ -197,6 +197,26 @@ describe('onboarding registry', () => {
     expect((ragNoDdev as { default?: string }).default).toBe('internal');
   });
 
+  it('asks for a rag connection string only for the modes that need one', () => {
+    const ctx = {} as never;
+    const schema = toolingInfrastructureStep.form!(ctx, {
+      primaryLanguage: 'php',
+      framework: 'drupal',
+      containerType: 'ddev',
+      databaseType: 'postgres',
+      hasPhpExtendedExtensions: false,
+    });
+    const conn = schema!.fields.find((f) => f.id === 'ragConnectionString');
+    // `ddev` and `external` both store embeddings outside haive and have no
+    // guessable address; `internal` and `none` must not be asked at all, which is
+    // what keeps the field off the default path (and out of the smoke's submission).
+    expect((conn as { required?: boolean }).required).toBe(true);
+    expect((conn as { visibleWhen?: { field: string; in?: string[] } }).visibleWhen).toEqual({
+      field: 'ragMode',
+      in: ['ddev', 'external'],
+    });
+  });
+
   it('tooling infrastructure includes Ollama and embedding fields', () => {
     const ctx = {} as never;
     const schema = toolingInfrastructureStep.form!(ctx, {

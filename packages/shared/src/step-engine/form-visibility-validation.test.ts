@@ -70,12 +70,41 @@ describe('validateFormValues honors visibleWhen', () => {
     expect(validateFormValues(schema, { mode: 'skip' }).success).toBe(true);
     expect(validateFormValues(schema, { mode: 'run' }).success).toBe(false);
   });
+
+  it('honors `in` gating across several choices of one select', () => {
+    // 04-tooling-infrastructure's shape: one connection string that two of the four
+    // RAG modes need and the other two must not be asked for.
+    const schema: FormSchema = {
+      title: 't',
+      fields: [
+        {
+          type: 'text',
+          id: 'ragConnectionString',
+          label: 'Connection string',
+          required: true,
+          visibleWhen: { field: 'ragMode', in: ['ddev', 'external'] },
+        },
+        { type: 'text', id: 'ragMode', label: 'Mode' },
+      ],
+    };
+    expect(validateFormValues(schema, { ragMode: 'internal' }).success).toBe(true);
+    expect(validateFormValues(schema, { ragMode: 'none' }).success).toBe(true);
+    expect(validateFormValues(schema, { ragMode: 'ddev' }).success).toBe(false);
+    expect(validateFormValues(schema, { ragMode: 'external' }).success).toBe(false);
+    expect(
+      validateFormValues(schema, { ragMode: 'ddev', ragConnectionString: 'postgres://h/d' })
+        .success,
+    ).toBe(true);
+  });
 });
 
 describe('isFieldVisible', () => {
-  const f = (vw?: { field: string; equals?: string | boolean; notEquals?: string | boolean }) => ({
-    visibleWhen: vw,
-  });
+  const f = (vw?: {
+    field: string;
+    equals?: string | boolean;
+    notEquals?: string | boolean;
+    in?: string[];
+  }) => ({ visibleWhen: vw });
 
   it('shows a field with no predicate', () => {
     expect(isFieldVisible(f(), {})).toBe(true);
@@ -88,5 +117,15 @@ describe('isFieldVisible', () => {
 
   it('treats an absent parent value as not matching an equals predicate', () => {
     expect(isFieldVisible(f({ field: 'p', equals: true }), {})).toBe(false);
+  });
+
+  it('matches any member of an `in` set, and nothing else', () => {
+    const vw = { field: 'p', in: ['ddev', 'external'] };
+    expect(isFieldVisible(f(vw), { p: 'ddev' })).toBe(true);
+    expect(isFieldVisible(f(vw), { p: 'external' })).toBe(true);
+    expect(isFieldVisible(f(vw), { p: 'internal' })).toBe(false);
+    // Absent, and non-string values, must not match — `in` is string-only.
+    expect(isFieldVisible(f(vw), {})).toBe(false);
+    expect(isFieldVisible(f({ field: 'p', in: ['true'] }), { p: true })).toBe(false);
   });
 });

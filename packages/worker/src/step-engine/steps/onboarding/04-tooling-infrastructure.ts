@@ -255,8 +255,12 @@ export const toolingInfrastructureStep: StepDefinition<
         {
           type: 'text',
           id: 'ragConnectionString',
-          label: 'PostgreSQL connection string (for external or DDEV mode)',
+          label: 'PostgreSQL connection string',
+          description:
+            'Required for the two modes that store embeddings outside haive. For DDEV, run `ddev describe` — its database is published on a random loopback port, so the address cannot be guessed.',
           placeholder: 'postgres://user:password@host:5432/database',
+          required: true,
+          visibleWhen: { field: 'ragMode', in: ['ddev', 'external'] },
         },
         {
           type: 'select',

@@ -1,4 +1,5 @@
 import type { FormField, FormSchema } from '@haive/shared';
+import { isFieldVisible } from './form-visibility';
 
 export type FormValues = Record<string, unknown>;
 
@@ -8,6 +9,13 @@ export function validateRequired(schema: FormSchema, values: FormValues): string
 
 function checkFields(fields: readonly FormField[], values: FormValues): string | null {
   for (const field of fields) {
+    // A field the renderer hides is one the user cannot fill, so holding its
+    // `required` flag against them rejects a submission they have no way to
+    // complete — the error even names a field that is not on screen. Server-side
+    // `validateFormValues` has skipped hidden fields since the gate-4-push bug;
+    // this side was missed, which left the same shape failing in the browser
+    // instead (11a-gate-4-push's `remoteUrl`, required behind an unticked `push`).
+    if (!isFieldVisible(field, values)) continue;
     if (field.type === 'accordion') {
       for (const item of field.items) {
         const issue = checkFields(item.fields, values);

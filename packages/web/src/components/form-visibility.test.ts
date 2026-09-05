@@ -29,4 +29,12 @@ describe('isFieldVisible', () => {
     expect(isFieldVisible(f, { commit: false })).toBe(false);
     expect(isFieldVisible(f, {})).toBe(false); // undefined !== true → hidden until ticked
   });
+
+  it('in: shown for any member of the set (RAG connection string)', () => {
+    const f = field({ field: 'ragMode', in: ['ddev', 'external'] });
+    expect(isFieldVisible(f, { ragMode: 'ddev' })).toBe(true);
+    expect(isFieldVisible(f, { ragMode: 'external' })).toBe(true);
+    expect(isFieldVisible(f, { ragMode: 'internal' })).toBe(false);
+    expect(isFieldVisible(f, {})).toBe(false);
+  });
 });
