@@ -2,7 +2,11 @@ import { isOllamaCloudModel } from '@haive/shared';
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
-import { OLLAMA_THINKING_PROXY_URL } from './ollama-thinking-proxy.js';
+import {
+  OLLAMA_CLOUD_URL,
+  OLLAMA_DEFAULT_BASE_URL,
+  resolveOllamaBaseUrl,
+} from './ollama-thinking-proxy.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
@@ -49,13 +53,6 @@ const OLLAMA_EFFORT_SCALE: EffortScale = {
   values: ['low', 'medium', 'high', 'max'],
   max: 'high',
 };
-
-// In-stack daemon default; remote/cloud providers override via
-// provider.envVars.ANTHROPIC_BASE_URL (a remote host, or https://ollama.com).
-const OLLAMA_DEFAULT_BASE_URL = 'http://ollama:11434';
-// Ollama Cloud endpoint (serves an Anthropic-compatible /v1/messages API).
-// Cloud models (isOllamaCloudModel, @haive/shared) route here by default.
-const OLLAMA_CLOUD_URL = 'https://ollama.com';
 
 // LSP plugin install via the claude binary's plugin marketplace — identical to
 // the claude-code/zai adapters (same backend-agnostic `plugin` subcommands).
@@ -121,21 +118,10 @@ export class OllamaAdapter extends BaseCliAdapter {
     if (!model) {
       throw new Error('ollama provider requires a model (set the provider model field)');
     }
-    // Cloud models run on Ollama Cloud; route there by default. Other models
-    // use the in-stack daemon. An explicit ANTHROPIC_BASE_URL always wins.
-    // When "Disable model thinking" is on for a cloud model, route through the
-    // thinking-disable proxy instead (it injects thinking:{type:"disabled"} and
-    // forwards to ollama.com) so reasoning models that hide their answer in the
-    // thinking channel return visible text. Only when we'd otherwise default to
-    // ollama.com — a user-set base URL still wins.
-    const useThinkingProxy =
-      provider.disableThinking && isOllamaCloudModel(model) && !env.ANTHROPIC_BASE_URL;
-    const defaultBaseUrl = useThinkingProxy
-      ? OLLAMA_THINKING_PROXY_URL
-      : isOllamaCloudModel(model)
-        ? OLLAMA_CLOUD_URL
-        : OLLAMA_DEFAULT_BASE_URL;
-    env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? defaultBaseUrl;
+    env.ANTHROPIC_BASE_URL = resolveOllamaBaseUrl(env, {
+      model,
+      disableThinking: provider.disableThinking,
+    });
     // Token precedence: an explicit Anthropic token, else the Ollama API key
     // (cloud), else the literal 'ollama' a local daemon accepts. A key stored as
     // a SECRET named ANTHROPIC_AUTH_TOKEN overrides this after the post-build

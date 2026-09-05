@@ -31,6 +31,15 @@ vi.mock('../src/cli-adapters/openrouter-compat.js', () => ({
   probeOpenRouterModelCompat: compat,
 }));
 
+// Same reason as the compat mock above: this suite is about the MISSING-KEY rule, and
+// the Ollama endpoint probe would otherwise make a real request to the in-stack daemon,
+// whose hostname does not resolve outside the compose network. Its own classification
+// is covered directly in ollama-probe.test.ts.
+const ollamaProbe = vi.fn(() => Promise.resolve({ ok: true }));
+vi.mock('../src/cli-adapters/ollama-probe.js', () => ({
+  probeOllamaEndpoint: ollamaProbe,
+}));
+
 const { probeCliPath } = await import('../src/queues/cli-exec/images.js');
 const { cliAdapterRegistry } = await import('../src/cli-adapters/registry.js');
 
@@ -138,5 +147,22 @@ describe('probeCliPath: wrapper CLI with no API key', () => {
     );
 
     expect(result.ok).toBe(true);
+  });
+
+  it('fails an ollama provider with no model, without spending a request', async () => {
+    // The adapter throws on a blank model, so the run dies either way — but a step
+    // SUMMARY swallows that throw, which is how a provider saved with an empty Model
+    // field passed its Test and then quietly wrote no recap for any step.
+    ollamaProbe.mockClear();
+    const result = await probeCliPath(
+      db,
+      cliAdapterRegistry.get('ollama'),
+      makeProvider({ name: 'ollama', model: null }),
+      {},
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('No model is set');
+    expect(ollamaProbe).not.toHaveBeenCalled();
   });
 });

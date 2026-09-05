@@ -17,6 +17,8 @@ import {
 } from '../../cli-adapters/auth-probe.js';
 import { probeOpenRouterModelCompat } from '../../cli-adapters/openrouter-compat.js';
 import { resolveOpenRouterBaseUrl } from '../../cli-adapters/openrouter-proxy.js';
+import { probeOllamaEndpoint } from '../../cli-adapters/ollama-probe.js';
+import { resolveOllamaBaseUrl } from '../../cli-adapters/ollama-thinking-proxy.js';
 import { log } from './_shared.js';
 import { createSandboxSpawner } from './exec-core.js';
 import { handleBuildSandboxImageJob } from './handlers.js';
@@ -258,6 +260,19 @@ export async function probeCliPath(
           durationMs: Date.now() - startedAt,
         };
       }
+
+      // Ollama: nothing above this line looks at the endpoint or the model, so every
+      // Ollama provider tested green regardless of how it was configured. See
+      // ollama-probe.ts for what that cost.
+      const ollamaError = await resolveOllamaProbeError(provider, secrets);
+      if (ollamaError) {
+        return {
+          ok: false,
+          detail: versionDetail,
+          error: ollamaError,
+          durationMs: Date.now() - startedAt,
+        };
+      }
       return { ok: true, detail: versionDetail, durationMs: Date.now() - startedAt };
     }
 
@@ -393,6 +408,58 @@ async function resolveOpenRouterCompatWarning(
     `The model "${model}" rejects the request Claude Code sends, so it cannot run a ` +
     `task step.${because}${custom}`
   );
+}
+
+/** The Test-connection failure for an Ollama provider that cannot actually serve a
+ *  request, or null when one round-trip succeeded.
+ *
+ *  Two checks, cheapest first. The model field is required by the adapter itself
+ *  (buildCliInvocation throws without it) and its absence is readable locally, so it
+ *  never costs a request. Everything else needs the endpoint's own answer: the base
+ *  URL, the token and the model tag are only ever right or wrong TOGETHER, and the
+ *  claude binary reports all three failures the same way at run time.
+ *
+ *  Probes THROUGH resolveOllamaBaseUrl — the URL the run will use, thinking-proxy
+ *  included — for the same reason the OpenRouter probe does: testing a different
+ *  endpoint than the run reports on something nobody executes.
+ *
+ *  The token falls back to the literal 'ollama' exactly as the adapter does, so a
+ *  local-daemon provider with no key configured probes the way it will run. */
+async function resolveOllamaProbeError(
+  provider: CliProviderRecord,
+  secrets: Record<string, string>,
+): Promise<string | null> {
+  if (provider.name !== 'ollama') return null;
+  const model = provider.model?.trim();
+  if (!model) {
+    return (
+      'No model is set for this provider. Ollama has no default, so every task step ' +
+      'fails with "ollama provider requires a model" — and a step summary fails silently. ' +
+      'Set the Model field to a local name (qwen3-coder:30b) or a cloud one ' +
+      '(qwen3-coder:480b-cloud).'
+    );
+  }
+  const env = { ...(provider.envVars ?? {}), ...secrets };
+  const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? env.OLLAMA_API_KEY ?? 'ollama';
+  const baseUrl = resolveOllamaBaseUrl(env, {
+    model,
+    disableThinking: provider.disableThinking,
+  });
+  const result = await probeOllamaEndpoint({ baseUrl, token, model });
+  if (result.ok) return null;
+  const because = result.detail ? ` It answered: "${result.detail}".` : '';
+  // A hand-set base URL is the single likeliest cause, and the one the error text
+  // cannot explain on its own: `localhost` names the SANDBOX from inside a run, not
+  // this machine, so a daemon on the host is unreachable there however well it
+  // responds here.
+  const hint = env.ANTHROPIC_BASE_URL
+    ? ` This provider sets ANTHROPIC_BASE_URL to ${env.ANTHROPIC_BASE_URL} by hand. Clearing ` +
+      `it lets Haive route the model itself — the in-stack daemon at ` +
+      `http://ollama:11434 for a local model, https://ollama.com for a -cloud one. Note ` +
+      `that localhost inside a sandbox is the sandbox, never this host.`
+    : ` Check that the model tag exists and, for a -cloud model, that the ` +
+      `ANTHROPIC_AUTH_TOKEN secret holds a valid ollama.com key.`;
+  return `Ollama could not serve a request for "${model}" at ${baseUrl}.${because}${hint}`;
 }
 
 function resolveProviderExecutable(adapter: BaseCliAdapter, provider: CliProviderRecord): string {
