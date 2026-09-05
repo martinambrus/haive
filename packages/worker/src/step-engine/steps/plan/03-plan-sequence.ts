@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { PLAN_PATCH_MAX_OPS, type FormSchema, type FormValues } from '@haive/shared';
 import {
@@ -132,6 +132,16 @@ function bareNodeRef(ref: string): string {
   return UUID_RE.test(bare) ? bare : lower;
 }
 
+/** The one step, under the id each workflow registers it as. Declared here rather
+ *  than inline in `metadata` because the repo-wide asked-set below has to name
+ *  BOTH — a literal there would silently read nothing for whichever id it is not,
+ *  which is the same trap `loadSequenceRows` avoids by keying on the step row. */
+const SEQUENCE_STEP_ID = {
+  plan_build: '03-plan-sequence',
+  plan_sequence: '00-plan-sequence',
+} as const;
+const SEQUENCE_STEP_IDS = Object.values(SEQUENCE_STEP_ID);
+
 export function sequenceAgentId(parentId: string, wave: number): string {
   return `plan-seq-${parentId}-p${wave}`;
 }
@@ -177,6 +187,57 @@ function askedState(rows: MiningRow[]): { asked: Set<string>; agents: number; wa
     wave = Math.max(wave, Number(m[2]));
   }
   return { asked, agents: asked.size, wave };
+}
+
+/** One row of the repo-wide asked-set: which parent, from which pass, how it ended. */
+export type AskedRow = { agentId: string; status: string; taskStepId: string };
+
+/**
+ * Every parent any pass ON THIS REPOSITORY has already ordered.
+ *
+ * The BUDGET is per pass; the FRONTIER is not. A pass stops at
+ * `SEQUENCE_AGENTS_PER_PASS` with groups still pending, and the asked-set used to
+ * live only on the current step's mining rows — so the next task rebuilt `targets`
+ * in plan order and started again from the top. MEASURED on a 7,983-node plan: of
+ * the 400 groups a second pass would ask, 390 had already been ordered by the
+ * first, and the 476 at the tail were unreachable however often the button was
+ * pressed. The frontier cannot shrink its own way out of that either — a run
+ * leaves `targets` only once its edges pin a TOTAL order, which an agent's links
+ * rarely do (13 of 889 over a full pass).
+ *
+ * A row from ANOTHER pass counts only once it has ANSWERED: an agent that failed
+ * there left its group unordered, and never asking again would strand exactly the
+ * groups that most need a second try. Rows of the CURRENT step count whatever
+ * their status, because a pending or running one is a group already out with an
+ * agent and must not be dispatched twice by the next wave of the same pass.
+ */
+export function askedParents(rows: AskedRow[], currentStepId: string): Set<string> {
+  const asked = new Set<string>();
+  for (const row of rows) {
+    if (row.taskStepId !== currentStepId && row.status !== 'done') continue;
+    const m = SEQUENCE_AGENT_RE.exec(row.agentId);
+    if (m) asked.add(m[1]!.toLowerCase());
+  }
+  return asked;
+}
+
+async function loadAskedParents(ctx: StepContext, repositoryId: string): Promise<Set<string>> {
+  const rows = await ctx.db
+    .select({
+      agentId: schema.taskStepAgentMinings.agentId,
+      status: schema.taskStepAgentMinings.status,
+      taskStepId: schema.taskStepAgentMinings.taskStepId,
+    })
+    .from(schema.taskStepAgentMinings)
+    .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId))
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        inArray(schema.taskSteps.stepId, SEQUENCE_STEP_IDS),
+      ),
+    );
+  return askedParents(rows, ctx.taskStepId);
 }
 
 /** Group children by parent, preserving the loader's `ordinal` order. */
@@ -288,10 +349,11 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
     };
   }
 
-  const [nodes, edges, rows] = await Promise.all([
+  const [nodes, edges, rows, askedRepo] = await Promise.all([
     loadPlanSkeletons(ctx.db, repositoryId),
     loadPlanEdges(ctx.db, repositoryId),
     loadSequenceRows(ctx),
+    loadAskedParents(ctx, repositoryId),
   ]);
   const derived = computePlanSequence(nodes, edges);
   const { targets, decidedRuns, contradictoryRuns } = computeTargets(nodes, edges);
@@ -300,7 +362,7 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
     repositoryId,
     nodeCount: nodes.length,
     decidedRuns,
-    targets: targets.filter((t) => !state.asked.has(t.parentId.toLowerCase())),
+    targets: targets.filter((t) => !askedRepo.has(t.parentId.toLowerCase())),
     contradictoryRuns,
     cycles: derived.cycles.length,
     ancestorDeps: derived.ancestorDeps.length,
@@ -668,7 +730,7 @@ export function createPlanSequenceStep(opts: {
 }): StepDefinition<PlanSequenceDetect, PlanSequenceApply> {
   return {
     metadata: {
-      id: opts.workflowType === 'plan_build' ? '03-plan-sequence' : '00-plan-sequence',
+      id: SEQUENCE_STEP_ID[opts.workflowType],
       workflowType: opts.workflowType,
       index: opts.index,
       title: opts.title,
@@ -725,7 +787,14 @@ export function createPlanSequenceStep(opts: {
           loadPlanEdges(ctx.db, d.repositoryId!),
         ]);
         result.reordered += await applyDeterministicOrder(ctx, d.repositoryId!, nodes, edges);
-        result.remaining = computeTargets(nodes, edges).targets.length;
+        // Groups still to ASK, matching what `detect` reports and what the next pass
+        // would pick up — not every group the edges leave open. Those differ once the
+        // asked-set spans passes, and the undecided count would say a finished plan
+        // still had 876 groups to go.
+        const asked = await loadAskedParents(ctx, d.repositoryId!);
+        result.remaining = computeTargets(nodes, edges).targets.filter(
+          (t) => !asked.has(t.parentId.toLowerCase()),
+        ).length;
         if (result.reordered === 0) return;
         try {
           await writePlanMirror(ctx.db, d.repositoryId!, ctx.repoPath);
@@ -791,8 +860,9 @@ export function createPlanSequenceStep(opts: {
       // is never asked twice even though apply passes are independent calls.
       const rows = await loadSequenceRows(ctx);
       const state = askedState(rows);
+      const askedRepo = await loadAskedParents(ctx, d.repositoryId);
       const { targets } = computeTargets(nodes, edges);
-      const pending = targets.filter((t) => !state.asked.has(t.parentId.toLowerCase()));
+      const pending = targets.filter((t) => !askedRepo.has(t.parentId.toLowerCase()));
       result.remaining = pending.length;
       result.decision = 'sequenced';
 
