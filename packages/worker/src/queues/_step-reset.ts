@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import { schema, resetDagCurrentLevelForRetry, type Database } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import { isFatalProviderFailure } from './cli-exec/failure-class.js';
@@ -59,12 +59,19 @@ export async function resetStepAndDownstream(
   let newEpoch = 0;
   await db.transaction(async (tx) => {
     const now = new Date();
+    // Both halves of the step's spend: its own invocations AND the recap pass, whose
+    // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
+    // recap's failure row live, and the step card keeps showing an error about a run that
+    // has been replaced. Keep in sync with the API retry site.
     await tx
       .update(schema.cliInvocations)
       .set({ supersededAt: now })
       .where(
         and(
-          inArray(schema.cliInvocations.taskStepId, allStepIds),
+          or(
+            inArray(schema.cliInvocations.taskStepId, allStepIds),
+            inArray(schema.cliInvocations.summaryForStepId, allStepIds),
+          ),
           isNull(schema.cliInvocations.supersededAt),
         ),
       );
@@ -95,6 +102,9 @@ export async function resetStepAndDownstream(
           formSchema: null,
           formValues: null,
           output: null,
+          // The recap describes the run being discarded; left behind it reads as the new
+          // run's recap the moment the step goes green again.
+          summary: null,
           iterations: [],
           iterationCount: 0,
           statusMessage: null,

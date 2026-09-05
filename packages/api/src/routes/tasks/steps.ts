@@ -1,6 +1,20 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  ne,
+  or,
+  sql,
+} from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import { schema, resetDagCurrentLevelForRetry, type Database } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
@@ -101,12 +115,19 @@ async function resetRowsForRerun(
 ): Promise<void> {
   if (rows.length === 0) return;
   const ids = rows.map((r) => r.id);
+  // Both halves of the step's spend: its own invocations AND the recap pass, whose
+  // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
+  // recap's failure row live, and the step card keeps showing an error about a run that
+  // has been replaced.
   await tx
     .update(schema.cliInvocations)
     .set({ supersededAt: now })
     .where(
       and(
-        inArray(schema.cliInvocations.taskStepId, ids),
+        or(
+          inArray(schema.cliInvocations.taskStepId, ids),
+          inArray(schema.cliInvocations.summaryForStepId, ids),
+        ),
         isNull(schema.cliInvocations.supersededAt),
       ),
     );
@@ -128,6 +149,9 @@ async function resetRowsForRerun(
         formSchema: null,
         formValues: null,
         output: null,
+        // The recap describes the run being discarded. Left behind it reads as the new
+        // run's recap the moment the step goes green again.
+        summary: null,
         // Loop state must reset too. A stale iterationCount/iterations makes a re-run loop
         // step (e.g. spec quality) resume at the old count — past its budget — and carry the
         // prior passes forward instead of starting a clean loop.
