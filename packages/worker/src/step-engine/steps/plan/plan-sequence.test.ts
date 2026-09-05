@@ -1,13 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
+import { SEQUENCE_AGENTS_PER_PASS } from '@haive/shared/plan';
 import {
-  SEQUENCE_AGENTS_PER_PASS,
   agentOrdinals,
-  askedParents,
   collectDisagreements,
   sequenceForm,
   sequencePassComplete,
-  type AskedRow,
   type MiningRow,
   type PlanSequenceDetect,
 } from './03-plan-sequence.js';
@@ -278,56 +276,5 @@ describe('sequenceForm', () => {
 
   it('asks nothing when the pass ended with nothing to review', () => {
     expect(sequenceForm(detected({ agentsUsed: SEQUENCE_AGENTS_PER_PASS }))).toBeNull();
-  });
-});
-
-describe('askedParents', () => {
-  const THIS_STEP = 'step-now';
-  const row = (over: Partial<AskedRow> = {}): AskedRow => ({
-    agentId: `plan-seq-${A}-p1`,
-    status: 'done',
-    taskStepId: THIS_STEP,
-    ...over,
-  });
-
-  it('carries a finished group across passes, so the next one starts past it', () => {
-    // The whole point: without this a second task rebuilt the frontier in plan
-    // order and re-asked the same 390 of 400 groups the first had already done.
-    const asked = askedParents([row({ taskStepId: 'step-earlier' })], THIS_STEP);
-    expect(asked.has(A)).toBe(true);
-  });
-
-  it("ignores an earlier pass's agent that never answered", () => {
-    // It left the group unordered; never asking again would strand exactly the
-    // groups that most need a second try.
-    for (const status of ['failed', 'pending', 'running'] as const) {
-      const asked = askedParents([row({ taskStepId: 'step-earlier', status })], THIS_STEP);
-      expect(asked.size).toBe(0);
-    }
-  });
-
-  it('counts an in-flight agent of the CURRENT pass, whatever its status', () => {
-    // A group already out with an agent must not be dispatched twice by the next
-    // wave of the same pass.
-    for (const status of ['pending', 'running', 'failed'] as const) {
-      expect(askedParents([row({ status })], THIS_STEP).has(A)).toBe(true);
-    }
-  });
-
-  it('matches the parent id case-insensitively', () => {
-    const asked = askedParents([row({ agentId: `plan-seq-${A.toUpperCase()}-p3` })], THIS_STEP);
-    expect(asked.has(A)).toBe(true);
-  });
-
-  it('ignores an agent id that is not a sequence agent', () => {
-    expect(askedParents([row({ agentId: 'plan-expand-x-p1' })], THIS_STEP).size).toBe(0);
-  });
-
-  it('dedupes a parent asked by more than one pass', () => {
-    const asked = askedParents(
-      [row({ taskStepId: 'step-earlier' }), row({ agentId: `plan-seq-${A}-p2` })],
-      THIS_STEP,
-    );
-    expect(asked.size).toBe(1);
   });
 });

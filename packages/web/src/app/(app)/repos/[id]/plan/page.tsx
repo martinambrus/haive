@@ -33,6 +33,7 @@ import {
   type PlanSearchMatch,
   type PlanTreeNode,
   type PlanDefects,
+  type PlanOrderingProgress,
   type PlanPullOutcome,
   type PlanMergeConflict,
   type PlanMergeState,
@@ -95,6 +96,7 @@ export default function PlanPage() {
   // any node — a cycle has two ends and neither is the place to report it — so
   // it is surfaced once here rather than on every node it touches.
   const [defects, setDefects] = useState<PlanDefects | null>(null);
+  const [ordering, setOrdering] = useState<PlanOrderingProgress | null>(null);
   const [defectsOpen, setDefectsOpen] = useState(false);
   const [sequencing, setSequencing] = useState(false);
   const [pullReport, setPullReport] = useState<PlanPullOutcome | null>(null);
@@ -368,6 +370,7 @@ export default function PlanPage() {
     setRepoName(overview.repositoryName);
     setNodeCount(overview.nodeCount);
     setDefects(overview.defects ?? null);
+    setOrdering(overview.ordering ?? null);
     setRootId(overview.root?.id ?? null);
     setTree(treeRes.nodes);
     return overview.root?.id ?? null;
@@ -592,6 +595,21 @@ export default function PlanPage() {
   const crumbs = focus?.ancestry ?? [];
   const defectCount = (defects?.cycles.length ?? 0) + (defects?.ancestorDeps.length ?? 0);
 
+  // What the Order button says. The count is GROUPS of siblings, not nodes: that is
+  // what one agent is asked about and what the per-pass budget counts, so it is the
+  // number that predicts how many more passes are needed. The node figure rides the
+  // tooltip because "how much of my plan is unordered" is the other, equally fair,
+  // reading of the same question.
+  const orderingRemaining = ordering?.groupsRemaining ?? 0;
+  const orderingTitle = ordering?.activeTaskId
+    ? 'An ordering pass is already running — wait for it to finish'
+    : orderingRemaining === 0
+      ? 'Order every group of sibling nodes so the plan can be followed by number'
+      : `${orderingRemaining} group(s) of sibling nodes still need a reader to decide their order (${ordering?.nodesRemaining ?? 0} nodes). ` +
+        (ordering && ordering.passesRemaining > 1
+          ? `One pass covers ${ordering.perPass}; ${ordering.passesRemaining} more passes to finish.`
+          : 'One more pass covers them all.');
+
   const snapshotLabel = !snapshot
     ? 'Checking snapshot…'
     : snapshot.lastError
@@ -652,7 +670,7 @@ export default function PlanPage() {
               <Button
                 size="sm"
                 variant="secondary"
-                disabled={sequencing}
+                disabled={sequencing || ordering?.activeTaskId != null}
                 onClick={() => {
                   void (async () => {
                     setError(null);
@@ -667,10 +685,18 @@ export default function PlanPage() {
                     }
                   })();
                 }}
-                title="Order every group of sibling nodes so the plan can be followed by number"
+                title={orderingTitle}
               >
                 <ListOrdered className="mr-1 h-3.5 w-3.5" />
                 {sequencing ? 'Starting…' : 'Order the plan'}
+                {/* Hidden at zero: a badge reading 0 is noise, and the button is
+                    still worth offering because a plan can be re-ordered after
+                    edits even when nothing is outstanding. */}
+                {orderingRemaining > 0 && (
+                  <span className="ml-1.5 rounded-full bg-amber-900/60 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">
+                    {orderingRemaining}
+                  </span>
+                )}
               </Button>
               <Button
                 size="sm"

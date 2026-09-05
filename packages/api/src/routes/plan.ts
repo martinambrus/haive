@@ -32,10 +32,13 @@ import {
   computePlanSequence,
   describePlanDefects,
   findPlanRoot,
+  askedParents,
+  computeSequenceProgress,
   loadPlanEdges,
   loadPlanNode,
   loadPlanNodes,
   loadPlanSkeletons,
+  type SequenceProgress,
   loadPlanTouchedTasks,
   renderImpactMermaid,
   toEdgeViews,
@@ -113,6 +116,64 @@ async function gitRead(cwd: string, args: string[]): Promise<{ ok: boolean; stdo
 
 /** Root plus its immediate children. The entry point the canvas loads first;
  *  descending fetches one level at a time, so nothing preloads the whole tree. */
+/** Task states that mean a task is still the user's to finish — not terminal, and
+ *  not something a second run should start alongside. Shared by the merge
+ *  conversation and the ordering pass, which both refuse to double up. */
+const OPEN_TASK_STATES = ['created', 'queued', 'running', 'paused', 'waiting_user'] as const;
+
+/** Both ids the one sequencing step is registered under — plan_build's and the
+ *  standalone plan_sequence workflow's. Naming only one would silently count a
+ *  repository's passes as never having happened. */
+const SEQUENCE_STEP_IDS = ['03-plan-sequence', '00-plan-sequence'] as const;
+
+/** A step id no row can carry. See `loadSequenceProgress`. */
+const NO_CURRENT_STEP = '';
+
+/**
+ * How much of the plan still needs a reader to decide its build order.
+ *
+ * The asked-set spans every sequencing pass this repository has run, so the number
+ * shrinks as passes complete rather than restating the same total. `askedParents`
+ * is given a step id that matches nothing on purpose: from outside any pass, only a
+ * row that ANSWERED counts as asked, so a group whose agent failed is correctly
+ * still outstanding.
+ */
+async function loadSequenceProgress(
+  repositoryId: string,
+  nodes: Parameters<typeof computeSequenceProgress>[0],
+  edges: Parameters<typeof computeSequenceProgress>[1],
+): Promise<SequenceProgress & { activeTaskId: string | null }> {
+  // An ordering pass already running is why the button must be gated: a second one
+  // would see the first's rows as not-yet-answered and re-ask the very same groups.
+  const active = await getDb().query.tasks.findFirst({
+    where: and(
+      eq(schema.tasks.repositoryId, repositoryId),
+      eq(schema.tasks.type, 'plan_sequence'),
+      inArray(schema.tasks.status, [...OPEN_TASK_STATES]),
+    ),
+    columns: { id: true },
+  });
+  const rows = await getDb()
+    .select({
+      agentId: schema.taskStepAgentMinings.agentId,
+      status: schema.taskStepAgentMinings.status,
+      taskStepId: schema.taskStepAgentMinings.taskStepId,
+    })
+    .from(schema.taskStepAgentMinings)
+    .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId))
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        inArray(schema.taskSteps.stepId, [...SEQUENCE_STEP_IDS]),
+      ),
+    );
+  return {
+    ...computeSequenceProgress(nodes, edges, askedParents(rows, NO_CURRENT_STEP)),
+    activeTaskId: active?.id ?? null,
+  };
+}
+
 planRoutes.get('/:id/plan', async (c) => {
   const { repositoryId, repo } = await requireOwnedRepo(c);
   const db = getDb();
@@ -133,6 +194,7 @@ planRoutes.get('/:id/plan', async (c) => {
   }
   const derived = computePlanSequence(skeletons, edges, touched);
   const children = skeletons.filter((n) => n.parentId === root.id);
+  const ordering = await loadSequenceProgress(repositoryId, skeletons, edges);
   const bodies = new Map([
     [root.id, (await loadPlanNode(db, repositoryId, root.id))?.body ?? null],
   ]);
@@ -147,6 +209,11 @@ planRoutes.get('/:id/plan', async (c) => {
     // dependency cycles and 11 dependencies on an own ancestor — all
     // permanently unsatisfiable, and none of them visible anywhere before this.
     defects: describePlanDefects(skeletons, edges, derived),
+    // Rides the overview for the same reason `defects` does: it is a property of
+    // the PLAN, not of any node, and this route already loads the skeletons and
+    // edges it needs. Not polled — an ordering pass runs for hours and the page
+    // re-reads this when the user comes back to it.
+    ordering,
   });
 });
 
@@ -223,15 +290,12 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
   });
 });
 
-/** Task states that mean a merge conversation is still the user's to finish. */
-const OPEN_MERGE_STATES = ['created', 'queued', 'running', 'paused', 'waiting_user'] as const;
-
 async function findOpenPlanMerge(repositoryId: string) {
   return getDb().query.tasks.findFirst({
     where: and(
       eq(schema.tasks.repositoryId, repositoryId),
       eq(schema.tasks.type, 'plan_merge'),
-      inArray(schema.tasks.status, [...OPEN_MERGE_STATES]),
+      inArray(schema.tasks.status, [...OPEN_TASK_STATES]),
     ),
     columns: { id: true, status: true, cliProviderId: true, createdAt: true },
   });

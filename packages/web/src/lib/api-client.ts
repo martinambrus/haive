@@ -1401,6 +1401,22 @@ export interface PlanOverview {
   children: PlanNode[];
   nodeCount: number;
   defects: PlanDefects;
+  /** How much of the plan still needs a reader to decide its build order. Absent
+   *  on a response from an older API, so every consumer must tolerate undefined. */
+  ordering?: PlanOrderingProgress;
+}
+
+export interface PlanOrderingProgress {
+  /** Sibling runs still needing a reader — the unit of work AND of the per-pass
+   *  budget, which is why the badge counts these rather than nodes. */
+  groupsRemaining: number;
+  /** Nodes inside those runs: how much plan is still unordered. */
+  nodesRemaining: number;
+  passesRemaining: number;
+  perPass: number;
+  /** An ordering pass already running. A second one would re-ask the same groups,
+   *  because a row only counts as asked once it has answered. */
+  activeTaskId: string | null;
 }
 
 export interface PlanSnapshotHealth {

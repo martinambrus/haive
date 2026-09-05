@@ -3,7 +3,12 @@ import { schema } from '@haive/database';
 import { PLAN_PATCH_MAX_OPS, type FormSchema, type FormValues } from '@haive/shared';
 import {
   PLAN_NODE_REF_PREFIX,
+  SEQUENCE_AGENTS_PER_PASS,
   applyPlanPatch,
+  askedParents,
+  sequenceAgentId,
+  sequenceAgentParent,
+  sequenceAgentWave,
   computePlanSequence,
   loadPlanEdges,
   loadPlanSkeletons,
@@ -107,9 +112,7 @@ export interface PlanSequenceApply {
 /** Matches 02-plan-coverage's cadence: modest waves, with a per-pass ceiling
  *  that is a runaway guard rather than a number the user has to click through. */
 const SEQUENCE_AGENTS_PER_WAVE = 12;
-export const SEQUENCE_AGENTS_PER_PASS = 400;
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-const SEQUENCE_AGENT_RE = new RegExp(`^plan-seq-(${UUID_SOURCE})-p(\\d+)$`, 'i');
 const UUID_RE = new RegExp(`^${UUID_SOURCE}$`, 'i');
 
 /** The node id behind a ref, as `applyPlanPatch` resolves it.
@@ -142,14 +145,10 @@ const SEQUENCE_STEP_ID = {
 } as const;
 const SEQUENCE_STEP_IDS = Object.values(SEQUENCE_STEP_ID);
 
-export function sequenceAgentId(parentId: string, wave: number): string {
-  return `plan-seq-${parentId}-p${wave}`;
-}
-
 /** The parent a reply is about, so `applyAgentPatch` can offer it as `self` and
  *  the agent never transcribes a uuid. */
 function sequenceSelfNodeId(agentId: string): string | null {
-  return SEQUENCE_AGENT_RE.exec(agentId)?.[1] ?? null;
+  return sequenceAgentParent(agentId);
 }
 
 export type MiningRow = {
@@ -181,44 +180,12 @@ function askedState(rows: MiningRow[]): { asked: Set<string>; agents: number; wa
   const asked = new Set<string>();
   let wave = 0;
   for (const row of rows) {
-    const m = SEQUENCE_AGENT_RE.exec(row.agentId);
-    if (!m) continue;
-    asked.add(m[1]!.toLowerCase());
-    wave = Math.max(wave, Number(m[2]));
+    const parent = sequenceAgentParent(row.agentId);
+    if (!parent) continue;
+    asked.add(parent.toLowerCase());
+    wave = Math.max(wave, sequenceAgentWave(row.agentId));
   }
   return { asked, agents: asked.size, wave };
-}
-
-/** One row of the repo-wide asked-set: which parent, from which pass, how it ended. */
-export type AskedRow = { agentId: string; status: string; taskStepId: string };
-
-/**
- * Every parent any pass ON THIS REPOSITORY has already ordered.
- *
- * The BUDGET is per pass; the FRONTIER is not. A pass stops at
- * `SEQUENCE_AGENTS_PER_PASS` with groups still pending, and the asked-set used to
- * live only on the current step's mining rows — so the next task rebuilt `targets`
- * in plan order and started again from the top. MEASURED on a 7,983-node plan: of
- * the 400 groups a second pass would ask, 390 had already been ordered by the
- * first, and the 476 at the tail were unreachable however often the button was
- * pressed. The frontier cannot shrink its own way out of that either — a run
- * leaves `targets` only once its edges pin a TOTAL order, which an agent's links
- * rarely do (13 of 889 over a full pass).
- *
- * A row from ANOTHER pass counts only once it has ANSWERED: an agent that failed
- * there left its group unordered, and never asking again would strand exactly the
- * groups that most need a second try. Rows of the CURRENT step count whatever
- * their status, because a pending or running one is a group already out with an
- * agent and must not be dispatched twice by the next wave of the same pass.
- */
-export function askedParents(rows: AskedRow[], currentStepId: string): Set<string> {
-  const asked = new Set<string>();
-  for (const row of rows) {
-    if (row.taskStepId !== currentStepId && row.status !== 'done') continue;
-    const m = SEQUENCE_AGENT_RE.exec(row.agentId);
-    if (m) asked.add(m[1]!.toLowerCase());
-  }
-  return asked;
 }
 
 async function loadAskedParents(ctx: StepContext, repositoryId: string): Promise<Set<string>> {

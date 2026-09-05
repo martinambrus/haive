@@ -1,6 +1,7 @@
 export * from './errors.js';
 export * from './paths.js';
 export * from './sequence.js';
+export * from './sequence-progress.js';
 export * from './read.js';
 export * from './render.js';
 export * from './apply-patch.js';
