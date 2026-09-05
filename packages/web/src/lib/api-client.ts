@@ -162,6 +162,13 @@ export interface TaskAttachment {
   createdAt: string;
 }
 
+/** The name an upload travels under: the path INSIDE the picked folder when the
+ *  file came from a folder picker, its own name otherwise. The server keeps that
+ *  structure, so `docs/api/spec.md` stays where the user put it. */
+export function attachmentUploadName(file: File): string {
+  return file.webkitRelativePath || file.name;
+}
+
 /** Upload one file as a task attachment. Posts the raw file body (streamed
  *  server-side, cap-enforced) with metadata in the query string, bypassing the
  *  JSON `request` wrapper. */
@@ -170,7 +177,7 @@ export async function uploadTaskAttachment(
   file: File,
   description?: string,
 ): Promise<TaskAttachment> {
-  const params = new URLSearchParams({ filename: file.name });
+  const params = new URLSearchParams({ filename: attachmentUploadName(file) });
   if (description) params.set('description', description);
   const res = await fetch(`${API_BASE}/tasks/${taskId}/attachments?${params.toString()}`, {
     method: 'POST',
@@ -193,6 +200,11 @@ export async function listTaskAttachments(taskId: string): Promise<TaskAttachmen
 
 export async function deleteTaskAttachment(taskId: string, attachmentId: string): Promise<void> {
   await api.delete(`/tasks/${taskId}/attachments/${attachmentId}`);
+}
+
+/** Remove every attachment under an uploaded folder, and the folder itself. */
+export async function deleteTaskAttachmentFolder(taskId: string, prefix: string): Promise<void> {
+  await api.delete(`/tasks/${taskId}/attachments?prefix=${encodeURIComponent(prefix)}`);
 }
 
 /** One completed task's AI-estimate-vs-actual-effort accuracy (estimation dashboard). */

@@ -10,6 +10,7 @@ import {
   api,
   API_BASE_URL,
   getPlanNode,
+  attachmentUploadName,
   uploadTaskAttachment,
   type CliProvider,
   type PlanBlocker,
@@ -148,6 +149,21 @@ export default function NewTaskPage() {
   const [dumpUploading, setDumpUploading] = useState(false);
   const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
+
+  /** The file and folder pickers ADD to one list. Replacing it would mean picking
+   *  a folder silently discards the files picked a moment earlier. */
+  function addAttachments(picked: FileList | null) {
+    if (!picked || picked.length === 0) return;
+    setAttachmentFiles((prev) => [
+      ...prev,
+      ...Array.from(picked).filter(
+        (f) =>
+          !prev.some(
+            (p) => attachmentUploadName(p) === attachmentUploadName(f) && p.size === f.size,
+          ),
+      ),
+    ]);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -789,17 +805,35 @@ export default function NewTaskPage() {
               id="attachments"
               type="file"
               multiple
-              onChange={(e) => setAttachmentFiles(Array.from(e.target.files ?? []))}
+              onChange={(e) => addAttachments(e.target.files)}
+              className="block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-neutral-800 file:px-3 file:py-1.5 file:text-sm file:text-neutral-100 hover:file:bg-neutral-700"
+            />
+            <Label htmlFor="attachment-folder">Or a whole folder</Label>
+            <input
+              id="attachment-folder"
+              type="file"
+              multiple
+              webkitdirectory=""
+              directory=""
+              onChange={(e) => addAttachments(e.target.files)}
               className="block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-neutral-800 file:px-3 file:py-1.5 file:text-sm file:text-neutral-100 hover:file:bg-neutral-700"
             />
             <p className="text-xs text-neutral-500">
               Reference files (docs, screenshots, sample data) the AI agent can read while it works.
-              Stored with the task; you can add or remove more later on the task page.
+              A folder keeps its structure. Stored with the task; you can add or remove more later
+              on the task page.
             </p>
             {attachmentFiles.length > 0 && (
               <p className="text-xs text-neutral-400">
                 {attachmentFiles.length} file(s) selected
                 {attachmentUploading ? ' — uploading…' : ''}
+                <button
+                  type="button"
+                  onClick={() => setAttachmentFiles([])}
+                  className="ml-2 text-neutral-500 underline hover:text-neutral-300"
+                >
+                  clear
+                </button>
               </p>
             )}
           </div>

@@ -2,8 +2,8 @@
 
 import { useRef, useState } from 'react';
 import Link from 'next/link';
-import { Paperclip, X } from 'lucide-react';
-import { buildPlan, startTask, uploadTaskAttachment } from '@/lib/api-client';
+import { FolderUp, Paperclip, X } from 'lucide-react';
+import { attachmentUploadName, buildPlan, startTask, uploadTaskAttachment } from '@/lib/api-client';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import {
   Button,
@@ -72,14 +72,22 @@ export function PlanStarter({
    *  two half-built plans and no way to tell which is which. */
   const [draftTaskId, setDraftTaskId] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const folderInput = useRef<HTMLInputElement | null>(null);
 
   function addFiles(picked: FileList | null) {
     if (!picked || picked.length === 0) return;
     setFiles((prev) => [
       ...prev,
       ...Array.from(picked)
-        // Same name and size twice is a double-pick, not two documents.
-        .filter((f) => !prev.some((p) => p.file.name === f.name && p.file.size === f.size))
+        // Same PATH and size twice is a double-pick, not two documents. The path,
+        // not the name: two folders' `README.md` are two documents.
+        .filter(
+          (f) =>
+            !prev.some(
+              (p) =>
+                attachmentUploadName(p.file) === attachmentUploadName(f) && p.file.size === f.size,
+            ),
+        )
         .map((file) => ({ file, description: '', state: 'pending' as const, error: null })),
     ]);
   }
@@ -115,7 +123,9 @@ export function PlanStarter({
       for (const [index, entry] of files.entries()) {
         if (entry.state === 'done') continue;
         patch(index, { state: 'uploading', error: null });
-        setProgress(`Uploading ${entry.file.name} (${index + 1} of ${files.length})…`);
+        setProgress(
+          `Uploading ${attachmentUploadName(entry.file)} (${index + 1} of ${files.length})…`,
+        );
         try {
           await uploadTaskAttachment(taskId, entry.file, entry.description);
           patch(index, { state: 'done' });
@@ -227,6 +237,21 @@ export function PlanStarter({
                 e.target.value = '';
               }}
             />
+            {/* A SECOND input, not a mode on the first: a picker is either a file
+                picker or a folder picker, and the two questions are different
+                enough that a toggle would just hide one of them. */}
+            <input
+              ref={folderInput}
+              type="file"
+              multiple
+              webkitdirectory=""
+              directory=""
+              className="hidden"
+              onChange={(e) => {
+                addFiles(e.target.files);
+                e.target.value = '';
+              }}
+            />
             <Button
               size="sm"
               variant="secondary"
@@ -236,10 +261,19 @@ export function PlanStarter({
               <Paperclip className="mr-1 h-3.5 w-3.5" />
               Attach files
             </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => folderInput.current?.click()}
+            >
+              <FolderUp className="mr-1 h-3.5 w-3.5" />
+              Attach folder
+            </Button>
             <span className="text-xs text-neutral-500">
               A written plan, requirements (.docx), a spreadsheet, a PDF, wireframes. Word, Excel
               and PDF are converted to text the agent can read; images need a model that can see
-              them.
+              them. A folder keeps its structure, and a .zip is expanded into its own.
             </span>
           </div>
 
@@ -247,10 +281,12 @@ export function PlanStarter({
             <ul className="flex flex-col gap-1.5">
               {files.map((entry, index) => (
                 <li
-                  key={`${entry.file.name}:${entry.file.size}`}
+                  key={`${attachmentUploadName(entry.file)}:${entry.file.size}`}
                   className="flex flex-wrap items-center gap-2 rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5"
                 >
-                  <span className="text-xs text-neutral-200">{entry.file.name}</span>
+                  <span className="text-xs text-neutral-200">
+                    {attachmentUploadName(entry.file)}
+                  </span>
                   <span className="text-[11px] text-neutral-500">
                     {formatBytes(entry.file.size)}
                   </span>
@@ -275,7 +311,7 @@ export function PlanStarter({
                   <button
                     type="button"
                     disabled={busy}
-                    aria-label={`Remove ${entry.file.name}`}
+                    aria-label={`Remove ${attachmentUploadName(entry.file)}`}
                     onClick={() => setFiles((prev) => prev.filter((_, i) => i !== index))}
                     className="text-neutral-500 hover:text-neutral-200 disabled:opacity-40"
                   >
