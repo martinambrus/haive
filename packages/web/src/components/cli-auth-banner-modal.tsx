@@ -373,6 +373,20 @@ export function CliAuthBannerModal({
     onClose();
   }, [onClose]);
 
+  // Escape closes, like every other modal. Same path as the header's Close button,
+  // and stopPropagation for the same reason the shared Dialog gives: this closes
+  // synchronously on a discrete event, so a page-level handler behind the modal
+  // would otherwise act on the same keypress.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      handleClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [handleClose]);
+
   /** Re-run ONLY the connection test, for a sign-in that saved its credentials and then lost
    *  its verification. Same probe the provider page's "Test connection" runs, so the result the
    *  user sees here is the one stored against the provider. */

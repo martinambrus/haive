@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { Hono } from 'hono';
 import { userSecretsService } from '@haive/shared';
 import { requireAuth } from '../middleware/auth.js';
+import { resolveGithubClientId } from './github-oauth.js';
 import type { AppEnv } from '../context.js';
 
 const GITHUB_CLIENT_ID_KEY = 'github_client_id';
@@ -16,8 +17,11 @@ integrationsRoutes.use('*', requireAuth);
 
 integrationsRoutes.get('/github', async (c) => {
   const userId = c.get('userId');
-  const value = await userSecretsService.get(userId, GITHUB_CLIENT_ID_KEY);
-  return c.json({ configured: value !== null && value.length > 0 });
+  // Through the same resolver the device flow uses, env var included. Asking only
+  // the user secret made this answer `false` on an install configured by
+  // GITHUB_OAUTH_CLIENT_ID, so the UI hid a sign-in button that would have worked.
+  const clientId = await resolveGithubClientId(userId);
+  return c.json({ configured: clientId !== null });
 });
 
 integrationsRoutes.put('/github', async (c) => {

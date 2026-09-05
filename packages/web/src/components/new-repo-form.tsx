@@ -13,30 +13,15 @@ import {
   CardDescription,
   FormError,
 } from '@/components/ui';
+import {
+  GithubOauthConnect,
+  findGithubOauthCredential,
+  type RepoCredentialSummary as CredentialRow,
+} from './repos/github-oauth-connect';
 import { CredentialModal } from './credential-modal';
 import { FilesystemBrowser } from './filesystem-browser';
 
 type Source = 'local_path' | 'git_https' | 'github_oauth' | 'upload' | 'blank';
-
-interface CredentialRow {
-  id: string;
-  label: string;
-  host: string;
-}
-
-type OauthPhase = 'idle' | 'awaiting_user' | 'polling' | 'error';
-
-interface DeviceCodeStart {
-  deviceCode: string;
-  userCode: string;
-  verificationUri: string;
-  expiresIn: number;
-  interval: number;
-}
-
-type PollResponse =
-  | { status: 'pending'; error: string }
-  | { status: 'ok'; credential: { id: string; label: string; host: string } };
 
 interface GithubRepo {
   fullName: string;
@@ -140,12 +125,8 @@ export function NewRepoForm() {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [oauthPhase, setOauthPhase] = useState<OauthPhase>('idle');
-  const [oauthUserCode, setOauthUserCode] = useState('');
-  const [oauthVerificationUri, setOauthVerificationUri] = useState('');
   const [oauthLabel, setOauthLabel] = useState<string | null>(null);
   const [credModalOpen, setCredModalOpen] = useState(false);
-  const [githubConfigured, setGithubConfigured] = useState<boolean | null>(null);
   const [repos, setRepos] = useState<GithubRepo[] | null>(null);
   const [reposLoading, setReposLoading] = useState(false);
   const [reposError, setReposError] = useState<string | null>(null);
@@ -154,7 +135,6 @@ export function NewRepoForm() {
   const [repoListOpen, setRepoListOpen] = useState(false);
   const [manualUrl, setManualUrl] = useState(false);
   const [branchTouched, setBranchTouched] = useState(false);
-  const oauthCancelRef = useRef<(() => void) | null>(null);
   const repoListBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -165,30 +145,13 @@ export function NewRepoForm() {
   }, []);
 
   useEffect(() => {
-    return () => {
-      oauthCancelRef.current?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (source === 'github_oauth') {
-      api
-        .get<{ configured: boolean }>('/integrations/github')
-        .then((data) => setGithubConfigured(data.configured))
-        .catch(() => setGithubConfigured(false));
-    }
-  }, [source]);
-
-  useEffect(() => {
-    if (source !== 'github_oauth' || oauthPhase !== 'idle' || oauthLabel !== null) return;
-    const existing = credentials.find(
-      (c) => c.host === 'github.com' && c.label.startsWith('GitHub OAuth '),
-    );
+    if (source !== 'github_oauth' || oauthLabel !== null) return;
+    const existing = findGithubOauthCredential(credentials);
     if (existing) {
       setOauthLabel(existing.label);
       setCredentialsId(existing.id);
     }
-  }, [source, credentials, oauthPhase, oauthLabel]);
+  }, [source, credentials, oauthLabel]);
 
   useEffect(() => {
     setRepos(null);
@@ -218,70 +181,6 @@ export function NewRepoForm() {
       cancelled = true;
     };
   }, [source, credentialsId, manualUrl]);
-
-  function resetOauthState() {
-    oauthCancelRef.current?.();
-    oauthCancelRef.current = null;
-    setOauthPhase('idle');
-    setOauthUserCode('');
-    setOauthVerificationUri('');
-    setOauthLabel(null);
-  }
-
-  async function startGithubOauth() {
-    resetOauthState();
-    setError(null);
-    try {
-      const start = await api.post<DeviceCodeStart>('/github-oauth/device-code', {});
-      setOauthUserCode(start.userCode);
-      setOauthVerificationUri(start.verificationUri);
-      setOauthPhase('awaiting_user');
-
-      let cancelled = false;
-      oauthCancelRef.current = () => {
-        cancelled = true;
-      };
-      const intervalMs = Math.max(start.interval, 5) * 1000;
-      const deadline = Date.now() + start.expiresIn * 1000;
-
-      setOauthPhase('polling');
-      const tick = async () => {
-        while (!cancelled && Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, intervalMs));
-          if (cancelled) return;
-          try {
-            const res = await api.post<PollResponse>('/github-oauth/poll', {
-              deviceCode: start.deviceCode,
-            });
-            if (res.status === 'ok') {
-              setCredentials((prev) => [res.credential, ...prev]);
-              setCredentialsId(res.credential.id);
-              setOauthLabel(res.credential.label);
-              setOauthPhase('idle');
-              setOauthUserCode('');
-              setOauthVerificationUri('');
-              oauthCancelRef.current = null;
-              return;
-            }
-          } catch (err) {
-            setError((err as ApiError).message ?? 'GitHub OAuth failed');
-            setOauthPhase('error');
-            oauthCancelRef.current = null;
-            return;
-          }
-        }
-        if (!cancelled) {
-          setError('Device code expired. Start over.');
-          setOauthPhase('error');
-          oauthCancelRef.current = null;
-        }
-      };
-      void tick();
-    } catch (err) {
-      setError((err as ApiError).message ?? 'Failed to start GitHub OAuth');
-      setOauthPhase('error');
-    }
-  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -366,9 +265,9 @@ export function NewRepoForm() {
               setLocalPath(null);
               setWritable(false);
               setRemoteUrl('');
-              resetOauthState();
+              // The sign-in panel unmounts with the source switch and cancels its
+              // own poll, so there is no flow state left here to reset.
               setCredentialsId('');
-              setGithubConfigured(null);
               setManualUrl(false);
               setBranchTouched(false);
               setBranch('');
@@ -531,58 +430,15 @@ export function NewRepoForm() {
             {source === 'github_oauth' ? (
               <div className="flex flex-col gap-1.5">
                 <Label>GitHub sign-in</Label>
-                {githubConfigured === false ? (
-                  <div className="rounded-md border border-amber-900 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
-                    GitHub OAuth is not configured. Set it up in{' '}
-                    <a href="/settings/integrations" className="underline">
-                      Settings &gt; Integrations
-                    </a>
-                    .
-                  </div>
-                ) : oauthLabel ? (
-                  <div className="rounded-md border border-emerald-900 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-200">
-                    Signed in — credential stored as <span className="font-mono">{oauthLabel}</span>
-                  </div>
-                ) : (
-                  <>
-                    {oauthPhase === 'idle' || oauthPhase === 'error' ? (
-                      <Button
-                        type="button"
-                        onClick={() => void startGithubOauth()}
-                        disabled={githubConfigured === null}
-                      >
-                        {githubConfigured === null ? 'Checking...' : 'Sign in with GitHub'}
-                      </Button>
-                    ) : null}
-                    {(oauthPhase === 'awaiting_user' || oauthPhase === 'polling') && (
-                      <div className="flex flex-col gap-2 rounded-md border border-indigo-900 bg-indigo-950/30 px-3 py-3 text-xs text-indigo-200">
-                        <div>
-                          Visit{' '}
-                          <a
-                            href={oauthVerificationUri}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="underline"
-                          >
-                            {oauthVerificationUri}
-                          </a>{' '}
-                          and enter this code:
-                        </div>
-                        <div className="font-mono text-lg tracking-widest text-indigo-100">
-                          {oauthUserCode}
-                        </div>
-                        <div className="text-neutral-400">Waiting for GitHub to confirm...</div>
-                        <button
-                          type="button"
-                          className="self-start text-neutral-400 underline"
-                          onClick={() => resetOauthState()}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    )}
-                  </>
-                )}
+                <GithubOauthConnect
+                  connectedLabel={oauthLabel}
+                  onError={setError}
+                  onConnected={(cred) => {
+                    setCredentials((prev) => [cred, ...prev]);
+                    setCredentialsId(cred.id);
+                    setOauthLabel(cred.label);
+                  }}
+                />
               </div>
             ) : (
               <div className="flex flex-col gap-1.5">

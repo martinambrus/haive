@@ -118,7 +118,7 @@ export function isPendingError(tokenRes: AccessTokenResponse): tokenRes is Acces
   return 'error' in tokenRes && PENDING_ERRORS.has(tokenRes.error);
 }
 
-async function resolveClientId(userId: string): Promise<string | null> {
+export async function resolveGithubClientId(userId: string): Promise<string | null> {
   const fromEnv = process.env.GITHUB_OAUTH_CLIENT_ID?.trim();
   if (fromEnv) return fromEnv;
   try {
@@ -134,7 +134,7 @@ githubOauthRoutes.use('*', requireAuth);
 
 githubOauthRoutes.post('/device-code', async (c) => {
   const userId = c.get('userId');
-  const clientId = await resolveClientId(userId);
+  const clientId = await resolveGithubClientId(userId);
   if (!clientId) {
     throw new HttpError(503, 'GitHub OAuth is not configured on this server');
   }
@@ -151,7 +151,7 @@ githubOauthRoutes.post('/device-code', async (c) => {
 githubOauthRoutes.post('/poll', async (c) => {
   const userId = c.get('userId');
   const body = pollSchema.parse(await c.req.json());
-  const clientId = await resolveClientId(userId);
+  const clientId = await resolveGithubClientId(userId);
   if (!clientId) {
     throw new HttpError(503, 'GitHub OAuth is not configured on this server');
   }

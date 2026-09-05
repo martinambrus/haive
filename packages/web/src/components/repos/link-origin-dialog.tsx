@@ -3,12 +3,12 @@
 import { useEffect, useState } from 'react';
 import { api, linkRepositoryRemote } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
-
-interface CredentialRow {
-  id: string;
-  label: string;
-  host: string;
-}
+import { Dialog } from '@/components/dialog';
+import {
+  GithubOauthConnect,
+  findGithubOauthCredential,
+  type RepoCredentialSummary as CredentialRow,
+} from './github-oauth-connect';
 
 /**
  * Point a repository with no origin at one.
@@ -38,6 +38,7 @@ export function LinkOriginDialog({
   const [url, setUrl] = useState(currentUrl ?? '');
   const [credentialsId, setCredentialsId] = useState('');
   const [credentials, setCredentials] = useState<CredentialRow[] | null>(null);
+  const [oauthLabel, setOauthLabel] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,7 +47,16 @@ export function LinkOriginDialog({
     void api
       .get<{ credentials: CredentialRow[] }>('/repo-credentials')
       .then((r) => {
-        if (!cancelled) setCredentials(r.credentials);
+        if (cancelled) return;
+        setCredentials(r.credentials);
+        // A flow run earlier (here or on the create-repository form) already left
+        // a credential; preselect it rather than making the user find it, and say
+        // so instead of offering a sign-in that would mint a second row.
+        const existing = findGithubOauthCredential(r.credentials);
+        if (existing) {
+          setOauthLabel(existing.label);
+          setCredentialsId((current) => current || existing.id);
+        }
       })
       // A credential list that will not load must not block linking a PUBLIC
       // remote, which is the case that needs none.
@@ -81,8 +91,16 @@ export function LinkOriginDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="flex w-full max-w-lg flex-col gap-3 rounded-md border border-neutral-800 bg-neutral-950 p-5">
+    // The shared Dialog rather than a hand-rolled overlay, so Escape closes this
+    // the way it closes every other modal — it owns the key handling, the portal
+    // and the backdrop.
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+    >
+      <div className="flex w-full flex-col gap-3 rounded-md border border-neutral-800 bg-neutral-950 p-5">
         <h2 className="text-base font-semibold text-neutral-100">
           {currentUrl ? 'Change the origin remote' : 'Link this repository to an origin'}
         </h2>
@@ -125,6 +143,20 @@ export function LinkOriginDialog({
             or <code>git@host:path</code> remote authenticates with a key outside Haive, so leave
             this as None.
           </p>
+          {/* A blank repository has no credential yet, and the device flow used to
+              live only on the create-repository form — so the dropdown above was
+              empty with nowhere to go. Signing in here mints the row and selects
+              it, which is the whole reason this dialog could not link a private
+              GitHub remote. */}
+          <GithubOauthConnect
+            connectedLabel={oauthLabel}
+            onError={setError}
+            onConnected={(cred) => {
+              setCredentials((prev) => [cred, ...(prev ?? [])]);
+              setCredentialsId(cred.id);
+              setOauthLabel(cred.label);
+            }}
+          />
         </div>
 
         <FormError message={error} />
@@ -138,6 +170,6 @@ export function LinkOriginDialog({
           </Button>
         </div>
       </div>
-    </div>
+    </Dialog>
   );
 }
