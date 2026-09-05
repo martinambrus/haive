@@ -653,13 +653,22 @@ export default function PlanPage() {
   // invisible anywhere else in this UI.
   const nextNode = nextUp?.node ?? null;
   const readyCount = nextUp?.readyCount ?? 0;
+  // The build-order number rides the LABEL, not the segment beside it: that
+  // segment counts how many nodes are startable, which reads as a number in the
+  // plan and was taken for one (23 startable, while the node it starts is #1).
   const nextLabel = !nextNode
     ? 'Nothing to start'
-    : nextNode.kind === 'research'
-      ? 'Research next'
-      : nextNode.kind === 'external'
-        ? 'Next is yours to clear'
-        : 'Start next';
+    : `${
+        nextNode.kind === 'research'
+          ? 'Research next'
+          : nextNode.kind === 'external'
+            ? 'Next is yours to clear'
+            : 'Start next'
+      } (${sequenceLabel(nextNode.sequence)})`;
+  // `readyFilter` only describes something while a filter is actually showing:
+  // the clear control and both descend paths null `matches` without touching the
+  // flag, so the toggle reads the pair rather than the flag alone.
+  const readyFilterActive = readyFilter && matches !== null;
   const nextTitle = nextNode
     ? `${sequenceLabel(nextNode.sequence)} ${nextNode.title}` +
       (nextNode.kind === 'research'
@@ -788,9 +797,26 @@ export default function PlanPage() {
                 {readyCount > 0 && (
                   <Button
                     size="sm"
-                    className="rounded-l-none border-l border-indigo-300/40 px-2 font-mono tabular-nums"
-                    title={`Show all ${readyCount} node${readyCount === 1 ? '' : 's'} that can be started now`}
-                    onClick={() => void showReadySet()}
+                    aria-pressed={readyFilterActive}
+                    className={`rounded-l-none border-l border-indigo-300/40 px-2 font-mono tabular-nums${
+                      readyFilterActive ? ' bg-indigo-700 hover:bg-indigo-600' : ''
+                    }`}
+                    title={
+                      readyFilterActive
+                        ? 'Showing only what can be started — click to list the whole plan again'
+                        : `Show all ${readyCount} node${readyCount === 1 ? '' : 's'} that can be started now`
+                    }
+                    onClick={() => {
+                      // A toggle, because the only way back was the Clear control
+                      // beside the search box, which is not where this filter was
+                      // turned on — so the way out read as "reload the page".
+                      if (readyFilterActive) {
+                        setMatches(null);
+                        setReadyFilter(false);
+                        return;
+                      }
+                      void showReadySet();
+                    }}
                   >
                     {readyCount}
                   </Button>
