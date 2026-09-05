@@ -162,6 +162,21 @@ export const repositories = pgTable(
      *  the REVIEW steps — discovery (03) and the spec writer (04) run before the
      *  run-config form and follow this repo-level value. */
     reviewDimensions: text('review_dimensions').array(),
+    /** When an embedding call failed against a RAG index that already holds real
+     *  vectors. NULL = healthy. This is the STRUCTURAL column every reader gates
+     *  on — `ragEmbedDegradedReason` beside it is display copy that outlives the
+     *  state it describes (see the message-column rule in AGENTS.md), so a banner
+     *  keyed on the text alone would render a phantom failure after a repair.
+     *  Set by the ingest steps via `_rag-embed-health.ts`, cleared by a retry. */
+    ragEmbedDegradedAt: timestamp('rag_embed_degraded_at'),
+    /** Why it degraded, in the words shown to the user. Nothing branches on it. */
+    ragEmbedDegradedReason: text('rag_embed_degraded_reason'),
+    /** The user's accepted verdict: run this repo's RAG on lexical search alone.
+     *  Hash vectors are not a neutral fallback — they are noise in the dense half
+     *  of the RRF fusion and can outrank a genuine lexical hit — so "accept the
+     *  degradation" forces `ragHybridSearch`'s existing lexical-only branch rather
+     *  than embedding a query into a space the stored rows do not share. */
+    ragEmbedLexicalOnly: boolean('rag_embed_lexical_only').notNull().default(false),
     /** Deterministic form login for browser testing (default: absent = disabled).
      *
      *  Holds only the SHAPE of the login — where it is and how to recognise success.

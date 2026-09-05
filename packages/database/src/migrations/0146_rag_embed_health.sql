@@ -1,0 +1,41 @@
+-- A failed embed must never poison a RAG index.
+--
+-- Every ingest loop caught ANY embed error — a timeout included — and substituted
+-- `hashEmbed()`, a deterministic SHA-256 vector with no semantic content, logging
+-- only a warn. The index then held real vectors and noise vectors in one table,
+-- indistinguishable at query time. MEASURED on an 8-core CPU-only host with
+-- qwen3-embedding:4b: a batch of 8 real code chunks takes 50-69s against the old
+-- hard 60s budget, so on a CPU host that fallback was the DEFAULT outcome, not an
+-- edge case.
+--
+-- These three columns are the per-repo memory of that failure, so the condition
+-- survives the step row a manual retry would null out.
+--
+-- `rag_embed_degraded_at` is the STRUCTURAL column every reader gates on.
+-- `rag_embed_degraded_reason` beside it is display copy, and outlives the state it
+-- describes exactly like `task_steps.status_message` does (see the message-column
+-- rule in AGENTS.md) — a banner keyed on the text alone renders a phantom failure
+-- after a repair. Nothing branches on the reason.
+--
+-- `rag_embed_lexical_only` is the user's accepted verdict, and it is deliberately
+-- NOT "keep writing hash vectors". Hash vectors are worse than no vectors: they are
+-- noise in the dense half of the RRF fusion and can outrank a genuine lexical hit.
+-- The flag instead forces `ragHybridSearch`'s existing lexical-only branch — the one
+-- reached today when a store has no vector column — so an accepted repo gets honest
+-- full-text search rather than full-text plus noise. notNull with a default because
+-- "never chosen" and false mean the same thing here, unlike `review_dimensions`.
+--
+-- No DDL is issued against the per-project or external RAG stores. `rag_mode`
+-- 'external' and 'ddev' point at schemas the user owns; recovery from a degraded
+-- period re-embeds through the existing `full` populate mode instead.
+--
+-- Additive and idempotent. Rollback: revert `schema/repos.ts` and
+--   ALTER TABLE "repositories" DROP COLUMN IF EXISTS "rag_embed_degraded_at";
+--   ALTER TABLE "repositories" DROP COLUMN IF EXISTS "rag_embed_degraded_reason";
+--   ALTER TABLE "repositories" DROP COLUMN IF EXISTS "rag_embed_lexical_only";
+-- Nothing is lost: the columns only record a condition the code re-derives on the
+-- next ingest run, and no stored vector is read or written by this migration.
+ALTER TABLE "repositories" ADD COLUMN IF NOT EXISTS "rag_embed_degraded_at" timestamp;
+ALTER TABLE "repositories" ADD COLUMN IF NOT EXISTS "rag_embed_degraded_reason" text;
+ALTER TABLE "repositories"
+  ADD COLUMN IF NOT EXISTS "rag_embed_lexical_only" boolean NOT NULL DEFAULT false;

@@ -277,6 +277,27 @@ export const CONFIG_KEYS = {
   // the digest can be turned off without disabling global KB retrieval.
   GLOBAL_KB_DIGEST_ENABLED: 'config:globalKb:digestEnabled',
 
+  // RAG embedding budgets. Two timeouts, not one, because the same ollamaEmbed
+  // call serves bulk ingestion and the interactive rag_search query embed: a
+  // budget generous enough for a batch of 8 code chunks would let a stalled
+  // search block an agent for minutes. MEASURED on an 8-core CPU-only host with
+  // qwen3-embedding:4b — a batch of 8 real code chunks takes 50-69s (10.5s on
+  // GPU), a single short query 0.44s. The old shared 60s budget therefore sat
+  // right on the ingest cliff, and a batch that crossed it fell back to hash
+  // vectors. A batch that needs more than EMBED_TIMEOUT is not slow, it is the
+  // diagnosis; enforced rather than raised further.
+  RAG_EMBED_TIMEOUT_MS: 'config:rag:embedTimeoutMs',
+  RAG_QUERY_EMBED_TIMEOUT_MS: 'config:rag:queryEmbedTimeoutMs',
+  RAG_EMBED_WARMUP_TIMEOUT_MS: 'config:rag:embedWarmupTimeoutMs',
+  // Lowering the batch size is the better fix for a slow host than raising the
+  // timeout: it shortens each request instead of tolerating a longer one.
+  RAG_EMBED_BATCH_SIZE: 'config:rag:embedBatchSize',
+  // Kill switch for strict embedding. On (default): an embed failure never
+  // writes hash vectors into an index that already holds real ones — the step
+  // skips the chunk (or fails, for the dedicated populate step) and the repo is
+  // marked degraded. Off: the pre-fix per-batch hash fallback, byte for byte.
+  RAG_EMBED_STRICT_ENABLED: 'config:rag:embedStrictEnabled',
+
   // Global terseness level for agent OUTPUT prose, applied as a directive appended to
   // each CLI step's main prompt (lite | full | ultra; default full). Only the model's
   // prose is affected — the directive carves out JSON/code/diffs/specs so structured
@@ -555,6 +576,14 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.GLOBAL_KB_NAMESPACE]: 'default',
   [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',
   [CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED]: 'true',
+  // 4 min for an ingest batch: past the measured 69s CPU worst case with room for
+  // a slower host, and low enough that hitting it still means something is wrong.
+  // 20s for a query embed is 45x the measured 0.44s CPU cost of one.
+  [CONFIG_KEYS.RAG_EMBED_TIMEOUT_MS]: '240000',
+  [CONFIG_KEYS.RAG_QUERY_EMBED_TIMEOUT_MS]: '20000',
+  [CONFIG_KEYS.RAG_EMBED_WARMUP_TIMEOUT_MS]: '300000',
+  [CONFIG_KEYS.RAG_EMBED_BATCH_SIZE]: '8',
+  [CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED]: 'true',
   [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
   [CONFIG_KEYS.SPEC_VIEW_MODE]: 'toc',
   // Pricing: sync ON by default (a fresh install should price itself without setup);

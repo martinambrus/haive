@@ -25,15 +25,18 @@ import {
   MAX_FILE_BYTES,
   type RagChunk,
 } from './_rag-chunkers.js';
-import {
-  probeOllama,
-  ollamaEmbed,
-  warmOllamaModel,
-  hashEmbed,
-  vectorLiteral,
-  EMBED_BATCH_SIZE,
-} from './_rag-embed.js';
+import { probeOllama, warmOllamaModel, vectorLiteral } from './_rag-embed.js';
 import { detectEmbedDevice, embedDeviceWarning, type EmbedDevice } from '../_embed-device.js';
+import {
+  clearRagEmbedDegraded,
+  composeRagWarning,
+  embedBatch,
+  loadRagEmbedHealth,
+  ragEmbedWarning,
+  recordRagEmbedDegraded,
+  resolveEmbedBatchSize,
+  RagEmbedFailureError,
+} from '../_rag-embed-health.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -393,24 +396,44 @@ async function embedAndStore(opts: {
   }
 
   let embedded = 0;
-  for (let batchStart = 0; batchStart < toEmbed.length; batchStart += EMBED_BATCH_SIZE) {
+  const batchSize = await resolveEmbedBatchSize();
+  for (let batchStart = 0; batchStart < toEmbed.length; batchStart += batchSize) {
     opts.ctx.throwIfCancelled();
-    const batch = toEmbed.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
+    const batch = toEmbed.slice(batchStart, batchStart + batchSize);
     const texts = batch.map((c) => c.content);
-    let embeddings: number[][];
-    if (opts.useOllama) {
-      try {
-        embeddings = await ollamaEmbed(opts.ollamaUrl!, opts.embeddingModel!, texts);
-      } catch (err) {
-        opts.ctx.logger.warn(
-          { err, file: opts.filePath, batchStart },
-          'Ollama failed; hash fallback',
-        );
-        embeddings = texts.map((t) => hashEmbed(t, opts.embeddingDimensions));
-      }
-    } else {
-      embeddings = texts.map((t) => hashEmbed(t, opts.embeddingDimensions));
+    const outcome = await embedBatch({
+      ollamaUrl: opts.ollamaUrl,
+      model: opts.embeddingModel,
+      dimensions: opts.embeddingDimensions,
+      useOllama: opts.useOllama,
+      texts,
+    });
+    if (outcome.kind === 'failed') {
+      // Fail the step rather than storing hash vectors beside real ones. This step
+      // exists to produce a usable index, so a partial one it reports as done is
+      // worse than a failure the user can see and retry.
+      opts.ctx.logger.error(
+        { file: opts.filePath, batchStart, reason: outcome.reason },
+        'embed failed during rag populate (strict mode)',
+      );
+      // Record on the repo BEFORE throwing: the thrown message becomes the step's
+      // error_message, which a manual retry nulls, while the repo row is what keeps
+      // the banner and the tooling-page actions available afterwards. The warning
+      // carries the guidance the bare error cannot.
+      await recordRagEmbedDegraded(opts.ctx.db, opts.repositoryId, outcome.reason, opts.ctx.logger);
+      await opts.ctx.db
+        .update(schema.taskSteps)
+        .set({
+          warningMessage: ragEmbedWarning({
+            degradedAt: new Date(),
+            degradedReason: outcome.reason,
+            lexicalOnly: false,
+          }),
+        })
+        .where(eq(schema.taskSteps.id, opts.ctx.taskStepId));
+      throw new RagEmbedFailureError(outcome.reason);
     }
+    const embeddings = outcome.embeddings;
     for (let i = 0; i < batch.length; i += 1) {
       const chunk = batch[i]!;
       await insertChunk(
@@ -718,12 +741,19 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           );
         }
       }
-      // Surface a CPU fallback as a standalone amber banner on the step (set once;
-      // a per-file progress line would otherwise bury it). Clears to null on a
-      // healthy/unknown run so a stale warning from a prior pass does not linger.
+      // Surface a CPU fallback and any carried-over embed degradation as a standalone
+      // amber banner on the step (set once; a per-file progress line would otherwise
+      // bury it). Clears to null on a healthy/unknown run so a stale warning from a
+      // prior pass does not linger.
+      const health = await loadRagEmbedHealth(ctx.db, repositoryId ?? null);
       await ctx.db
         .update(schema.taskSteps)
-        .set({ warningMessage: embedDeviceWarning(embedDevice) })
+        .set({
+          warningMessage: composeRagWarning(
+            embedDeviceWarning(embedDevice),
+            ragEmbedWarning(health),
+          ),
+        })
         .where(eq(schema.taskSteps.id, ctx.taskStepId));
 
       let kbChunkCount = 0;
@@ -887,6 +917,11 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         },
         'rag populate apply complete',
       );
+      // A completed run with real embeddings is the only evidence that clears the
+      // degradation — a hash-mode run proves nothing about whether embeddings work.
+      if (useOllama && health.degradedAt) {
+        await clearRagEmbedDegraded(ctx.db, repositoryId ?? null, ctx.logger);
+      }
       return {
         kbChunkCount,
         codeChunkCount,

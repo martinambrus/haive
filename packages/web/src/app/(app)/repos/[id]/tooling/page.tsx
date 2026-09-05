@@ -48,6 +48,11 @@ interface ToolingConfig {
   lspOptions: LspOption[];
   reviewDimensions: string[];
   reviewDimensionOptions: ReviewDimensionOption[];
+  /** ISO timestamp of the first embed failure, or null when healthy. The
+   *  STRUCTURAL flag — gate on this, never on the reason string beside it. */
+  ragEmbedDegradedAt: string | null;
+  ragEmbedDegradedReason: string | null;
+  ragEmbedLexicalOnly: boolean;
 }
 
 /** One learned guidance item currently appended to a step's prompt for this repo. */
@@ -127,6 +132,34 @@ export default function RepoToolingPage() {
   const [reviewDimensions, setReviewDimensions] = useState<Set<string>>(new Set());
   const [guidance, setGuidance] = useState<GuidanceItem[]>([]);
   const [archiving, setArchiving] = useState<string | null>(null);
+  const [ragEmbedBusy, setRagEmbedBusy] = useState<string | null>(null);
+  const [ragEmbedNote, setRagEmbedNote] = useState<string | null>(null);
+
+  /** RAG embed-health actions are verbs with side effects, not form fields, so they
+   *  PATCH on their own rather than riding the page's Save button. */
+  async function runRagEmbedAction(action: 'retry' | 'accept_lexical_only' | 'rebuild_index') {
+    setRagEmbedBusy(action);
+    setRagEmbedNote(null);
+    try {
+      const res = await api.patch<{ reembedQueued?: boolean }>(
+        `/repositories/${repositoryId}/tooling`,
+        { ragEmbedAction: action },
+      );
+      const cfg = await api.get<ToolingConfig>(`/repositories/${repositoryId}/tooling-config`);
+      setConfig(cfg);
+      setRagEmbedNote(
+        res.reembedQueued
+          ? 'Every chunk is marked for re-embedding; the next RAG sync on this repository rebuilds the index. Existing rows stay searchable until they are replaced.'
+          : action === 'accept_lexical_only'
+            ? 'Search on this repository now ranks by full text alone.'
+            : 'Embeddings will be attempted again on the next RAG sync.',
+      );
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update RAG embedding state');
+    } finally {
+      setRagEmbedBusy(null);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -422,6 +455,63 @@ export default function RepoToolingPage() {
               </p>
             </div>
           </Card>
+
+          {config && (config.ragEmbedDegradedAt || config.ragEmbedLexicalOnly) && (
+            <Card>
+              <h2 className="text-lg font-semibold text-neutral-100">RAG embeddings</h2>
+              {config.ragEmbedLexicalOnly ? (
+                <p className="mt-1 text-xs text-neutral-500">
+                  This repository is set to <strong>lexical-only</strong> search: chunks are indexed
+                  without model embeddings and results rank by full-text relevance alone. Semantic
+                  matches are unavailable. Re-enabling embeddings re-indexes every chunk, because
+                  the stored vectors cannot be reused.
+                </p>
+              ) : (
+                <p className="mt-1 text-xs text-neutral-500">
+                  Embeddings failed on {new Date(config.ragEmbedDegradedAt!).toLocaleString()} —{' '}
+                  {config.ragEmbedDegradedReason ?? 'reason unrecorded'}. Affected chunks were left
+                  unindexed rather than stored with meaningless vectors, so they are not searchable
+                  yet. If the cause was a slow host, raise the ingest timeout or lower the batch
+                  size under Admin → RAG embedding budgets before retrying.
+                </p>
+              )}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={ragEmbedBusy !== null}
+                  onClick={() => void runRagEmbedAction('retry')}
+                >
+                  {ragEmbedBusy === 'retry'
+                    ? 'Working...'
+                    : config.ragEmbedLexicalOnly
+                      ? 'Re-enable embeddings'
+                      : 'Retry embeddings'}
+                </Button>
+                {!config.ragEmbedLexicalOnly && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={ragEmbedBusy !== null}
+                    onClick={() => void runRagEmbedAction('accept_lexical_only')}
+                  >
+                    {ragEmbedBusy === 'accept_lexical_only'
+                      ? 'Working...'
+                      : 'Accept lexical-only search'}
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={ragEmbedBusy !== null}
+                  onClick={() => void runRagEmbedAction('rebuild_index')}
+                >
+                  {ragEmbedBusy === 'rebuild_index' ? 'Working...' : 'Rebuild index'}
+                </Button>
+              </div>
+              {ragEmbedNote && <p className="mt-2 text-xs text-emerald-400">{ragEmbedNote}</p>}
+            </Card>
+          )}
 
           <Card>
             <h2 className="text-lg font-semibold text-neutral-100">App login (browser testing)</h2>

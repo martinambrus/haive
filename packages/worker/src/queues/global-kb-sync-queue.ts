@@ -7,7 +7,12 @@ import {
   logger,
   type GlobalKbSyncJobPayload,
 } from '@haive/shared';
-import { hashEmbed, ollamaEmbed, vectorLiteral } from '@haive/shared/rag';
+import { vectorLiteral } from '@haive/shared/rag';
+import {
+  embedBatch,
+  resolveEmbedBatchSize,
+  RagEmbedFailureError,
+} from '../step-engine/steps/_rag-embed-health.js';
 import {
   globalKbEntries,
   resolveGlobalKbSettings,
@@ -92,16 +97,26 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
       if (chunks.length > 0) {
         const texts = chunks.map((c) => c.content);
         const useOllama = !!(ctx.conn.ollamaUrl && ctx.conn.embedModel);
-        let embeddings: number[][];
-        if (useOllama) {
-          try {
-            embeddings = await ollamaEmbed(ctx.conn.ollamaUrl!, ctx.conn.embedModel!, texts);
-          } catch (err) {
-            log.warn({ err, entryId }, 'Ollama embed failed; hash fallback');
-            embeddings = texts.map((t) => hashEmbed(t, ctx.conn.embeddingDimensions));
+        // Batched, unlike before: one entry can carry up to MAX_CHUNKS_PER_FILE (80)
+        // chunks, and sending all of them in a single /api/embed made this the most
+        // timeout-prone embed call in the codebase.
+        const batchSize = await resolveEmbedBatchSize();
+        const embeddings: number[][] = [];
+        for (let start = 0; start < texts.length; start += batchSize) {
+          const outcome = await embedBatch({
+            ollamaUrl: ctx.conn.ollamaUrl,
+            model: ctx.conn.embedModel,
+            dimensions: ctx.conn.embeddingDimensions,
+            useOllama,
+            texts: texts.slice(start, start + batchSize),
+          });
+          if (outcome.kind === 'failed') {
+            // Throw BEFORE the delete+insert transaction below, so the entry keeps
+            // the chunks it already had rather than losing them for hash noise.
+            log.error({ entryId, start, reason: outcome.reason }, 'global KB embed failed');
+            throw new RagEmbedFailureError(outcome.reason);
           }
-        } else {
-          embeddings = texts.map((t) => hashEmbed(t, ctx.conn.embeddingDimensions));
+          embeddings.push(...outcome.embeddings);
         }
 
         const usedPgvector = await hasVectorColumn(ctx);

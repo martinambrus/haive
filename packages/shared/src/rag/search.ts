@@ -32,6 +32,13 @@ export interface RagSearchConfig {
    *  (new-feature tasks), 1 = neutral / no run-books present. Other source types
    *  are untouched. Tunable with scripts/rag-eval.ts once run-books accumulate. */
   runbookBoost: number;
+  /** Rank by full-text relevance ALONE, ignoring any stored vectors. Set for a
+   *  repository whose owner accepted lexical-only RAG after embeddings failed:
+   *  its rows carry hash vectors, which are not weak embeddings but noise, and a
+   *  noisy dense half of the RRF fusion can outrank a genuine lexical hit. Reuses
+   *  the branch a jsonb-only store already takes, so there is no second ranking
+   *  implementation to keep in step. */
+  lexicalOnly: boolean;
 }
 
 export const DEFAULT_RAG_SEARCH_CONFIG: RagSearchConfig = {
@@ -43,6 +50,7 @@ export const DEFAULT_RAG_SEARCH_CONFIG: RagSearchConfig = {
   denseWeight: 0.7,
   lexWeight: 0.3,
   runbookBoost: 1.0,
+  lexicalOnly: false,
 };
 
 /** Per-task-type run-book RRF multipliers applied by the /rag/search route.
@@ -183,7 +191,7 @@ export async function ragHybridSearch(
   repositoryId?: string,
 ): Promise<RagSearchHit[]> {
   const cfg = { ...DEFAULT_RAG_SEARCH_CONFIG, ...config };
-  const usePgvector = await hasVectorColumn(conn);
+  const usePgvector = (await hasVectorColumn(conn)) && !cfg.lexicalOnly;
   const dims = conn.embeddingDimensions;
 
   let rows: RawRow[];
@@ -293,7 +301,8 @@ export async function ragHybridSearch(
     ];
     rows = (await conn.pg.unsafe(sqlText, params)) as unknown as RawRow[];
   } else {
-    // jsonb-fallback store has no vector column: lexical-only ranking.
+    // No usable dense half — either a jsonb-fallback store with no vector column,
+    // or `lexicalOnly` for a repo whose vectors cannot be trusted. Lexical ranking.
     // Base params are $1..$3; facet params (if any) start at $4; the run-book
     // boost follows the facets; the optional repository_id filter is last.
     const fc = filter ? buildFacetClause(filter, 4) : null;

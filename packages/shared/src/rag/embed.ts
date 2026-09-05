@@ -1,10 +1,19 @@
 import { createHash } from 'node:crypto';
+import { configService, CONFIG_KEYS } from '../config/config.service.js';
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-export const OLLAMA_TIMEOUT_MS = 60_000;
+/** Fallback budgets, used verbatim when ConfigService is unavailable (see
+ *  `resolveEmbedBudget`). Kept in step with the CONFIG_KEYS.RAG_EMBED_* entries
+ *  in DEFAULTS — config.service.ts cannot import this module without a cycle, so
+ *  the two literals are paired by comment rather than by reference. */
+export const OLLAMA_TIMEOUT_MS = 240_000;
+/** The interactive half. A query embed is one short input — MEASURED 0.44s on a
+ *  CPU-only 8-core host — so it must never inherit the ingest budget: an agent
+ *  waiting on rag_search is waiting on a tool call, not on a background job. */
+export const OLLAMA_QUERY_TIMEOUT_MS = 20_000;
 export const EMBED_BATCH_SIZE = 8;
 /** Sent on every embed so Ollama keeps the model resident between batches (and
  *  after warmup) instead of unloading it (default 5m) and reloading cold. */
@@ -13,6 +22,53 @@ export const OLLAMA_KEEP_ALIVE = '30m';
  *  embedding model on CPU can take far longer to LOAD than a normal embed's
  *  timeout, so the load must be given room to finish once. */
 export const OLLAMA_WARMUP_TIMEOUT_MS = 300_000;
+
+export interface EmbedBudget {
+  /** Per-batch budget for bulk ingestion. */
+  embedTimeoutMs: number;
+  /** Per-call budget for an interactive query embed. */
+  queryTimeoutMs: number;
+  warmupTimeoutMs: number;
+  batchSize: number;
+  /** False = the pre-fix per-batch hash fallback. */
+  strict: boolean;
+}
+
+/** Admin-tunable embedding budgets. Resolved per call — ConfigService caches
+ *  locally for 30s, so this is cheap and a change takes effect on the next
+ *  invocation rather than at the next worker boot.
+ *
+ *  Falls back to the constants above when ConfigService is not initialized:
+ *  `packages/worker/scripts/rag-eval.ts` imports this module standalone, and a
+ *  throw there would break a diagnostic script over a setting it does not use. */
+export async function resolveEmbedBudget(): Promise<EmbedBudget> {
+  try {
+    const [embedTimeoutMs, queryTimeoutMs, warmupTimeoutMs, batchSize, strict] = await Promise.all([
+      configService.getNumber(CONFIG_KEYS.RAG_EMBED_TIMEOUT_MS, OLLAMA_TIMEOUT_MS),
+      configService.getNumber(CONFIG_KEYS.RAG_QUERY_EMBED_TIMEOUT_MS, OLLAMA_QUERY_TIMEOUT_MS),
+      configService.getNumber(CONFIG_KEYS.RAG_EMBED_WARMUP_TIMEOUT_MS, OLLAMA_WARMUP_TIMEOUT_MS),
+      configService.getNumber(CONFIG_KEYS.RAG_EMBED_BATCH_SIZE, EMBED_BATCH_SIZE),
+      configService.getBoolean(CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED, true),
+    ]);
+    // A zero or negative budget is a mis-set knob, not a request for an instant
+    // abort — every embed would fail and (with strict off) hash-poison the index.
+    return {
+      embedTimeoutMs: embedTimeoutMs > 0 ? embedTimeoutMs : OLLAMA_TIMEOUT_MS,
+      queryTimeoutMs: queryTimeoutMs > 0 ? queryTimeoutMs : OLLAMA_QUERY_TIMEOUT_MS,
+      warmupTimeoutMs: warmupTimeoutMs > 0 ? warmupTimeoutMs : OLLAMA_WARMUP_TIMEOUT_MS,
+      batchSize: batchSize > 0 ? batchSize : EMBED_BATCH_SIZE,
+      strict,
+    };
+  } catch {
+    return {
+      embedTimeoutMs: OLLAMA_TIMEOUT_MS,
+      queryTimeoutMs: OLLAMA_QUERY_TIMEOUT_MS,
+      warmupTimeoutMs: OLLAMA_WARMUP_TIMEOUT_MS,
+      batchSize: EMBED_BATCH_SIZE,
+      strict: true,
+    };
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /* Ollama connectivity                                                 */
@@ -29,16 +85,21 @@ export async function probeOllama(url: string): Promise<boolean> {
   }
 }
 
+/** `timeoutMs` omitted = the configured INGEST budget. Interactive callers must
+ *  pass the query budget explicitly (`embedQuery` does); inheriting the ingest
+ *  one would let a stalled search hold an agent's tool call for minutes. */
 export async function ollamaEmbed(
   url: string,
   model: string,
   inputs: string[],
+  opts: { timeoutMs?: number } = {},
 ): Promise<number[][]> {
+  const timeoutMs = opts.timeoutMs ?? (await resolveEmbedBudget()).embedTimeoutMs;
   const resp = await fetch(`${url}/api/embed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, input: inputs, keep_alive: OLLAMA_KEEP_ALIVE }),
-    signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
@@ -59,14 +120,15 @@ export async function ollamaEmbed(
 export async function warmOllamaModel(
   url: string,
   model: string,
-  timeoutMs: number = OLLAMA_WARMUP_TIMEOUT_MS,
+  timeoutMs?: number,
 ): Promise<boolean> {
   try {
+    const budget = timeoutMs ?? (await resolveEmbedBudget()).warmupTimeoutMs;
     const resp = await fetch(`${url}/api/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, input: 'warmup', keep_alive: OLLAMA_KEEP_ALIVE }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(budget),
     });
     return resp.ok;
   } catch {
@@ -213,14 +275,28 @@ export async function embedQuery(
   text: string,
   opts: { ollamaUrl: string | null; model: string | null; dimensions: number },
 ): Promise<number[]> {
-  const { ollamaUrl, model, dimensions } = opts;
+  return (await embedQueryOrNull(text, opts)) ?? hashEmbed(text, opts.dimensions);
+}
+
+/** Embed a query, or return null when there is no usable vector — no endpoint
+ *  configured, or the embed failed. Callers that can fall back to LEXICAL-ONLY
+ *  search should prefer this over `embedQuery`: a hash vector is not a degraded
+ *  embedding but noise, and feeding one into the dense half of the RRF fusion can
+ *  push a genuine lexical hit down the ranking. `embedQuery` keeps the hash
+ *  fallback for callers that must have a vector of the right width. */
+export async function embedQueryOrNull(
+  text: string,
+  opts: { ollamaUrl: string | null; model: string | null; dimensions: number },
+): Promise<number[] | null> {
+  const { ollamaUrl, model } = opts;
   if (ollamaUrl && model) {
     try {
-      const [vec] = await ollamaEmbed(ollamaUrl, model, [text]);
+      const { queryTimeoutMs } = await resolveEmbedBudget();
+      const [vec] = await ollamaEmbed(ollamaUrl, model, [text], { timeoutMs: queryTimeoutMs });
       if (vec && vec.length > 0) return vec;
     } catch {
-      // fall through to hash embedding
+      // fall through
     }
   }
-  return hashEmbed(text, dimensions);
+  return null;
 }

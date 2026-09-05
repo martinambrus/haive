@@ -1,7 +1,16 @@
 import { Hono } from 'hono';
 import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { TOOL_INSTALL_METADATA, userSecretsService, type ToolName } from '@haive/shared';
+import {
+  ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+  ONBOARDING_TOOLING_SCHEMA_VERSION,
+  TOOL_INSTALL_METADATA,
+  userSecretsService,
+  type OnboardingEnvironmentMirror,
+  type OnboardingToolingMirror,
+  type ToolName,
+} from '@haive/shared';
+import { RAG_TABLE, resolveRagConnection, type RagMode } from '@haive/shared/rag';
 import {
   ALL_REVIEW_DIMENSION_IDS,
   REVIEW_DIMENSIONS,
@@ -232,6 +241,71 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
   return c.json({ repositoryId, applied, rebuildOnNextTask: applied.length > 0 });
 });
 
+/** Force every chunk of a repository's RAG index to be re-embedded on the next
+ *  sync, WITHOUT deleting anything: nulling `chunk_hash` makes the incremental
+ *  differ (`_rag-index.ts`) see every chunk as changed, so the rows stay
+ *  searchable in the meantime and are replaced one batch at a time.
+ *
+ *  Needed in exactly two cases, both of which leave hash vectors on disk that a
+ *  content-hash comparison would otherwise keep forever: a repository leaving
+ *  lexical-only mode, and one indexed before strict embedding existed (those carry
+ *  no degradation record, so this is their only route back).
+ *
+ *  Resolves the RAG target from the repo's own onboarding mirrors rather than a
+ *  task's step outputs, since this runs from a settings page with no task in hand.
+ *  Returns false when the repo has no usable RAG config — nothing to re-embed. */
+async function forceRagReembed(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+): Promise<boolean> {
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, repositoryId),
+    columns: { onboardingTooling: true, onboardingEnvironment: true },
+  });
+  const toolingMirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
+  const envMirror = repo?.onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
+  if (
+    toolingMirror?.schemaVersion !== ONBOARDING_TOOLING_SCHEMA_VERSION ||
+    !toolingMirror.tooling
+  ) {
+    return false;
+  }
+  const t = toolingMirror.tooling as {
+    ragMode?: string;
+    ragConnectionString?: string | null;
+    ollamaUrl?: string | null;
+    embeddingModel?: string | null;
+    embeddingDimensions?: number;
+  };
+  if (!t.ragMode || t.ragMode === 'none') return false;
+  const projectName =
+    envMirror?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION
+      ? ((envMirror.envDetectData as { project?: { name?: string } } | undefined)?.project?.name ??
+        'default')
+      : 'default';
+
+  const conn = await resolveRagConnection(
+    {
+      ragMode: t.ragMode as RagMode,
+      ragConnectionString: t.ragConnectionString || null,
+      ollamaUrl: t.ollamaUrl || null,
+      embeddingModel: t.embeddingModel || null,
+      embeddingDimensions: typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
+    },
+    db,
+    projectName,
+  );
+  if (!conn) return false;
+  try {
+    await conn.pg.unsafe(`UPDATE ${RAG_TABLE} SET chunk_hash = NULL WHERE repository_id = $1`, [
+      repositoryId,
+    ]);
+    return true;
+  } finally {
+    await conn.close();
+  }
+}
+
 /** Current per-repo tooling config + available versions, for the management page. */
 toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
   const userId = c.get('userId');
@@ -254,6 +328,9 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       prWorkflowEnabled: true,
       stepGuidanceEnabled: true,
       reviewDimensions: true,
+      ragEmbedDegradedAt: true,
+      ragEmbedDegradedReason: true,
+      ragEmbedLexicalOnly: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -306,6 +383,11 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     ),
     prWorkflowEnabled: repo.prWorkflowEnabled,
     stepGuidanceEnabled: repo.stepGuidanceEnabled,
+    // RAG embedding health. `ragEmbedDegradedAt` is the structural flag the page
+    // gates on; the reason beside it is display copy that outlives the state.
+    ragEmbedDegradedAt: repo.ragEmbedDegradedAt?.toISOString() ?? null,
+    ragEmbedDegradedReason: repo.ragEmbedDegradedReason,
+    ragEmbedLexicalOnly: repo.ragEmbedLexicalOnly,
     // null (never configured) is sent as the full set: that is what the reviewers
     // actually score, so the page shows the effective policy rather than an empty
     // list the user would read as "nothing is reviewed".
@@ -448,6 +530,10 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     prWorkflowEnabled?: boolean;
     stepGuidanceEnabled?: boolean;
     reviewDimensions?: string[];
+    /** RAG embed-health action. Not a settable field — each one is a decision with
+     *  a side effect, so it is expressed as a verb rather than as three booleans a
+     *  caller could combine into a meaningless state. */
+    ragEmbedAction?: 'retry' | 'accept_lexical_only' | 'rebuild_index';
     appAuth?: unknown;
     /** Write-only. Stored in user_secrets, never on the repositories row and never
      *  returned by the GET above. */
@@ -517,6 +603,32 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     else await userSecretsService.delete(userId, key);
   }
 
+  // RAG embed-health actions. A re-embed is forced only where hash vectors can
+  // actually be on disk: leaving lexical-only mode, or an explicit rebuild. A repo
+  // that merely failed under strict mode has no hash rows — those chunks were left
+  // unindexed — so its next incremental sync picks them up as ordinary inserts and
+  // re-embedding the whole repository would be wasted work.
+  let reembedQueued = false;
+  if (body.ragEmbedAction) {
+    const current = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, repositoryId),
+      columns: { ragEmbedLexicalOnly: true },
+    });
+    if (!current) throw new HttpError(404, 'Repository not found');
+    if (body.ragEmbedAction === 'accept_lexical_only') {
+      updates.ragEmbedLexicalOnly = true;
+      updates.ragEmbedDegradedAt = null;
+      updates.ragEmbedDegradedReason = null;
+    } else {
+      updates.ragEmbedLexicalOnly = false;
+      updates.ragEmbedDegradedAt = null;
+      updates.ragEmbedDegradedReason = null;
+      if (body.ragEmbedAction === 'rebuild_index' || current.ragEmbedLexicalOnly) {
+        reembedQueued = await forceRagReembed(db, repositoryId);
+      }
+    }
+  }
+
   await db.update(schema.repositories).set(updates).where(eq(schema.repositories.id, repositoryId));
-  return c.json({ repositoryId, ok: true });
+  return c.json({ repositoryId, ok: true, reembedQueued });
 });

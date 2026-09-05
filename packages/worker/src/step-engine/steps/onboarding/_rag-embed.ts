@@ -3,7 +3,9 @@
 // imports keep resolving unchanged.
 export {
   OLLAMA_TIMEOUT_MS,
+  OLLAMA_QUERY_TIMEOUT_MS,
   EMBED_BATCH_SIZE,
+  resolveEmbedBudget,
   probeOllama,
   ollamaEmbed,
   warmOllamaModel,
@@ -11,3 +13,4 @@ export {
   vectorLiteral,
   embedQuery,
 } from '@haive/shared/rag';
+export type { EmbedBudget } from '@haive/shared/rag';

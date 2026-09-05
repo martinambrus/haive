@@ -35,6 +35,11 @@ interface RagReindexApply {
   updated: number;
   skipped: number;
   deleted: number;
+  /** Chunks left unindexed because their embed failed. Optional: step outputs are
+   *  persisted and replayed, so a task parked before this field existed must still
+   *  render. */
+  embedSkippedChunks?: number;
+  embedFailureReason?: string | null;
 }
 
 /** Resolve the worktree the learning phase wrote into (mirrors 11-phase-8-learning

@@ -44,6 +44,14 @@ type RuntimeLimitsSettings = {
 
 /** What those settings actually produce on this host, resolved server-side so the card can
  *  state the capacity instead of making the operator divide budget by weight. */
+type RagEmbeddingSettings = {
+  embedTimeoutMs: number;
+  queryTimeoutMs: number;
+  warmupTimeoutMs: number;
+  batchSize: number;
+  strictEnabled: boolean;
+};
+
 type RuntimeCapacity = {
   budgetMb: number;
   ddevWeightMb: number;
@@ -109,6 +117,14 @@ export default function AdminPage() {
   const [savingSteering, setSavingSteering] = useState(false);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState<boolean | null>(null);
   const [savingPrWorkflow, setSavingPrWorkflow] = useState(false);
+  const [ragEmbedding, setRagEmbedding] = useState<RagEmbeddingSettings | null>(null);
+  const [ragEmbedInputs, setRagEmbedInputs] = useState({
+    embedTimeoutMs: '',
+    queryTimeoutMs: '',
+    warmupTimeoutMs: '',
+    batchSize: '',
+  });
+  const [savingRagEmbedding, setSavingRagEmbedding] = useState(false);
   const [softTimeoutEnabled, setSoftTimeoutEnabled] = useState<boolean | null>(null);
   const [softTimeoutPercentInput, setSoftTimeoutPercentInput] = useState('');
   const [savingSoftTimeout, setSavingSoftTimeout] = useState(false);
@@ -229,6 +245,7 @@ export default function AdminPage() {
         streamLogRetentionData,
         chromeMcpTimeoutData,
         globalPauseData,
+        ragEmbeddingData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -266,6 +283,7 @@ export default function AdminPage() {
         api.get<{ retentionDays: number }>('/admin/config/cli-stream-log-retention'),
         api.get<{ timeoutMs: number }>('/admin/config/chrome-mcp-timeout'),
         api.get<{ paused: boolean }>('/admin/config/global-pause'),
+        api.get<RagEmbeddingSettings>('/admin/config/rag-embedding'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -275,6 +293,13 @@ export default function AdminPage() {
       setPrWorkflowEnabled(prWorkflowData.enabled);
       setSoftTimeoutEnabled(softTimeoutData.enabled);
       setSoftTimeoutPercentInput(String(softTimeoutData.percent));
+      setRagEmbedding(ragEmbeddingData);
+      setRagEmbedInputs({
+        embedTimeoutMs: String(ragEmbeddingData.embedTimeoutMs),
+        queryTimeoutMs: String(ragEmbeddingData.queryTimeoutMs),
+        warmupTimeoutMs: String(ragEmbeddingData.warmupTimeoutMs),
+        batchSize: String(ragEmbeddingData.batchSize),
+      });
       setTimeoutBaseInput(String(timeoutLadderData.baseMinutes));
       setTimeoutLadderInput(timeoutLadderData.ladder);
       setTimeoutRungs(timeoutLadderData.rungs);
@@ -543,6 +568,49 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update PR workflow');
     } finally {
       setSavingPrWorkflow(false);
+    }
+  }
+
+  // Strict flag and the four numbers share one endpoint, so the toggle re-sends the
+  // current inputs and Save re-sends the current flag (same shape as saveSoftTimeout).
+  async function saveRagEmbedding(strictEnabled: boolean, inputs: typeof ragEmbedInputs) {
+    const parsed = {
+      embedTimeoutMs: Number.parseInt(inputs.embedTimeoutMs, 10),
+      queryTimeoutMs: Number.parseInt(inputs.queryTimeoutMs, 10),
+      warmupTimeoutMs: Number.parseInt(inputs.warmupTimeoutMs, 10),
+      batchSize: Number.parseInt(inputs.batchSize, 10),
+    };
+    const bounds: Array<[keyof typeof parsed, string, number, number]> = [
+      ['embedTimeoutMs', 'Ingest batch timeout', 5_000, 1_800_000],
+      ['queryTimeoutMs', 'Query embed timeout', 1_000, 300_000],
+      ['warmupTimeoutMs', 'Model warm-up timeout', 5_000, 1_800_000],
+      ['batchSize', 'Batch size', 1, 64],
+    ];
+    for (const [key, label, min, max] of bounds) {
+      const value = parsed[key];
+      if (!Number.isFinite(value) || value < min || value > max) {
+        setError(`${label} must be between ${min} and ${max}.`);
+        return;
+      }
+    }
+    setSavingRagEmbedding(true);
+    try {
+      const result = await api.put<RagEmbeddingSettings>('/admin/config/rag-embedding', {
+        ...parsed,
+        strictEnabled,
+      });
+      setRagEmbedding(result);
+      setRagEmbedInputs({
+        embedTimeoutMs: String(result.embedTimeoutMs),
+        queryTimeoutMs: String(result.queryTimeoutMs),
+        warmupTimeoutMs: String(result.warmupTimeoutMs),
+        batchSize: String(result.batchSize),
+      });
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update RAG embedding budgets');
+    } finally {
+      setSavingRagEmbedding(false);
     }
   }
 
@@ -1455,6 +1523,66 @@ export default function AdminPage() {
             {prWorkflowEnabled ? 'Enabled' : 'Disabled'}
             {savingPrWorkflow && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
+        </Card>
+      )}
+
+      {ragEmbedding !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>RAG embedding budgets</CardTitle>
+            <CardDescription>
+              Ingestion and interactive search share one embedding call but not one budget: measured
+              on a CPU-only 8-core host, a batch of 8 code chunks takes 50-69s while a single search
+              query takes 0.44s. Strict mode is what stops a failed batch from writing meaningless
+              hash vectors into an index that already holds real ones — with it off, a slow host
+              silently degrades search instead of reporting it. Lowering the batch size is usually a
+              better fix for a slow host than raising the timeout. Read per invocation, so a change
+              applies to the next embed.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={ragEmbedding.strictEnabled}
+              disabled={savingRagEmbedding}
+              onChange={(e) => void saveRagEmbedding(e.target.checked, ragEmbedInputs)}
+              className="h-4 w-4"
+            />
+            {ragEmbedding.strictEnabled ? 'Strict — never hash-fallback' : 'Off — hash fallback'}
+            {savingRagEmbedding && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            {(
+              [
+                ['embedTimeoutMs', 'Ingest batch (ms)', 5_000, 1_800_000],
+                ['queryTimeoutMs', 'Query embed (ms)', 1_000, 300_000],
+                ['warmupTimeoutMs', 'Model warm-up (ms)', 5_000, 1_800_000],
+                ['batchSize', 'Batch size', 1, 64],
+              ] as Array<[keyof typeof ragEmbedInputs, string, number, number]>
+            ).map(([key, label, min, max]) => (
+              <label key={key} className="flex flex-col gap-1 text-xs text-neutral-400">
+                {label}
+                <input
+                  type="number"
+                  min={min}
+                  max={max}
+                  value={ragEmbedInputs[key]}
+                  onChange={(e) =>
+                    setRagEmbedInputs((prev) => ({ ...prev, [key]: e.target.value }))
+                  }
+                  className="w-32 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+                />
+              </label>
+            ))}
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingRagEmbedding}
+              onClick={() => void saveRagEmbedding(ragEmbedding.strictEnabled, ragEmbedInputs)}
+            >
+              {savingRagEmbedding ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
         </Card>
       )}
 

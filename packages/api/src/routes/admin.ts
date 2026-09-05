@@ -960,6 +960,46 @@ adminRoutes.put('/config/plan-canvas', async (c) => {
   return c.json({ enabled });
 });
 
+const ragEmbeddingSchema = z.object({
+  embedTimeoutMs: z.number().int().min(5_000).max(1_800_000),
+  queryTimeoutMs: z.number().int().min(1_000).max(300_000),
+  warmupTimeoutMs: z.number().int().min(5_000).max(1_800_000),
+  batchSize: z.number().int().min(1).max(64),
+  strictEnabled: z.boolean(),
+});
+
+// RAG embedding budgets. Two timeouts because one ollamaEmbed serves both bulk
+// ingestion and the interactive rag_search query embed — MEASURED on a CPU-only
+// 8-core host, a batch of 8 code chunks takes 50-69s while one query takes 0.44s,
+// so a single shared budget is either too tight for ingest or far too loose for a
+// tool call. Read per invocation (within the ~30s config cache), so a change takes
+// effect on the next embed rather than at the next worker boot. strictEnabled OFF
+// restores the pre-fix behaviour where a failed batch silently wrote hash vectors.
+adminRoutes.get('/config/rag-embedding', async (c) => {
+  const [embedTimeoutMs, queryTimeoutMs, warmupTimeoutMs, batchSize, strictEnabled] =
+    await Promise.all([
+      configService.getNumber(CONFIG_KEYS.RAG_EMBED_TIMEOUT_MS, 240_000),
+      configService.getNumber(CONFIG_KEYS.RAG_QUERY_EMBED_TIMEOUT_MS, 20_000),
+      configService.getNumber(CONFIG_KEYS.RAG_EMBED_WARMUP_TIMEOUT_MS, 300_000),
+      configService.getNumber(CONFIG_KEYS.RAG_EMBED_BATCH_SIZE, 8),
+      configService.getBoolean(CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED, true),
+    ]);
+  return c.json({ embedTimeoutMs, queryTimeoutMs, warmupTimeoutMs, batchSize, strictEnabled });
+});
+
+adminRoutes.put('/config/rag-embedding', async (c) => {
+  const body = ragEmbeddingSchema.parse(await c.req.json());
+  await Promise.all([
+    configService.set(CONFIG_KEYS.RAG_EMBED_TIMEOUT_MS, String(body.embedTimeoutMs)),
+    configService.set(CONFIG_KEYS.RAG_QUERY_EMBED_TIMEOUT_MS, String(body.queryTimeoutMs)),
+    configService.set(CONFIG_KEYS.RAG_EMBED_WARMUP_TIMEOUT_MS, String(body.warmupTimeoutMs)),
+    configService.set(CONFIG_KEYS.RAG_EMBED_BATCH_SIZE, String(body.batchSize)),
+    configService.set(CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED, body.strictEnabled ? 'true' : 'false'),
+  ]);
+  log.info(body, 'rag embedding budgets updated');
+  return c.json(body);
+});
+
 const ideEnabledSchema = z.object({ enabled: z.boolean() });
 
 // Global in-task IDE (Editor tab) kill-switch. The api/worker read this within the

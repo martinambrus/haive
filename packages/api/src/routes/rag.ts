@@ -7,6 +7,7 @@ import {
   RUNBOOK_BOOST_BUGFIX,
   RUNBOOK_BOOST_FEATURE,
   embedQuery,
+  embedQueryOrNull,
   ragHybridSearch,
   resolveRagConnection,
   verifyRagToken,
@@ -265,11 +266,28 @@ ragRoutes.post('/search', async (c) => {
     try {
       conn = await resolveRagConnection(prefs, db, projectName);
       if (conn) {
-        const vec = await embedQuery(query, {
-          ollamaUrl: prefs.ollamaUrl,
-          model: prefs.embeddingModel,
-          dimensions: prefs.embeddingDimensions,
-        });
+        // Two ways to end up ranking on full text alone, and both must skip the
+        // dense half rather than feed it a hash vector: the repo's owner accepted
+        // lexical-only after embeddings failed (its stored vectors are hashes), or
+        // this one query could not be embedded. A hash vector is noise, not a weak
+        // embedding — it can push a genuine lexical hit down the fused ranking.
+        const repoLexicalOnly = repositoryId
+          ? ((
+              await db.query.repositories.findFirst({
+                where: eq(schema.repositories.id, repositoryId),
+                columns: { ragEmbedLexicalOnly: true },
+              })
+            )?.ragEmbedLexicalOnly ?? false)
+          : false;
+        const queryVec = repoLexicalOnly
+          ? null
+          : await embedQueryOrNull(query, {
+              ollamaUrl: prefs.ollamaUrl,
+              model: prefs.embeddingModel,
+              dimensions: prefs.embeddingDimensions,
+            });
+        const lexicalOnly = queryVec === null;
+        const vec = queryVec ?? [];
         const runbookBoost = await resolveRunbookBoost(db, taskId);
         // Scope per-repo (internal mode) so a project-name-keyed RAG database
         // shared by co-tenant repos never returns another repo's chunks. External/
@@ -279,7 +297,7 @@ ragRoutes.post('/search', async (c) => {
           conn,
           vec,
           query,
-          { runbookBoost, ...(topK ? { topK } : {}) },
+          { runbookBoost, lexicalOnly, ...(topK ? { topK } : {}) },
           undefined,
           localRepoId,
         );

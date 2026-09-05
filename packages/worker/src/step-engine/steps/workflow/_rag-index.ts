@@ -32,14 +32,17 @@ import {
   MAX_FILE_BYTES,
   type RagChunk,
 } from '../onboarding/_rag-chunkers.js';
-import {
-  ollamaEmbed,
-  warmOllamaModel,
-  hashEmbed,
-  vectorLiteral,
-  EMBED_BATCH_SIZE,
-} from '../onboarding/_rag-embed.js';
+import { warmOllamaModel, vectorLiteral } from '../onboarding/_rag-embed.js';
 import { detectEmbedDevice, embedDeviceWarning, type EmbedDevice } from '../_embed-device.js';
+import {
+  clearRagEmbedDegraded,
+  composeRagWarning,
+  embedBatch,
+  loadRagEmbedHealth,
+  ragEmbedWarning,
+  recordRagEmbedDegraded,
+  resolveEmbedBatchSize,
+} from '../_rag-embed-health.js';
 import { indexTaskEmbedding, TASK_EMBED_SOURCE_TYPE } from './_task-embedding.js';
 
 /* ------------------------------------------------------------------ */
@@ -91,6 +94,12 @@ export interface RagSyncResult {
   /** Whether embeddings ran on the GPU or silently fell back to CPU. 'unknown'
    *  when Ollama wasn't used or the host has no GPU (nothing to warn about). */
   embeddingDevice: EmbedDevice;
+  /** Chunks left UNINDEXED because their embed failed under strict mode. Absent
+   *  from the index rather than stored with a meaningless vector — a missing row
+   *  is honest, a hash row silently outranks real hits. */
+  embedSkippedChunks: number;
+  /** Why the embeds failed, for the step banner. Null when nothing failed. */
+  embedFailureReason: string | null;
 }
 
 export interface RagSyncResolved {
@@ -240,6 +249,8 @@ const EMPTY_RESULT = (reason: string): RagSyncResult => ({
   skipped: 0,
   deleted: 0,
   embeddingDevice: 'unknown',
+  embedSkippedChunks: 0,
+  embedFailureReason: null,
 });
 
 /** Incremental, content-hash-deduped RAG index of `opts.repoPath`'s KB + code.
@@ -259,6 +270,25 @@ export async function runRagIndexSync(
     await ctx.emitProgress('Ensuring RAG schema...');
     const { usedPgvector } = await ensureRagSchema(conn);
     const useOllama = ollamaReachable && !!prefs.ollamaUrl && !!prefs.embeddingModel;
+
+    // Resolve repository_id first — required for dedup (without it we'd re-embed
+    // the same content on every task) and for the per-repo embed-health record, and
+    // bailing here saves a pointless model warm. Bail with a logged warning rather
+    // than silently filling the table.
+    const taskRow = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { repositoryId: true, title: true, description: true },
+    });
+    const repositoryId = taskRow?.repositoryId ?? null;
+    if (!repositoryId) {
+      ctx.logger.warn(
+        { taskId: ctx.taskId },
+        'rag sync skipped: task has no repository_id, dedup not safe',
+      );
+      return EMPTY_RESULT('task has no repository_id');
+    }
+    const health = await loadRagEmbedHealth(ctx.db, repositoryId);
+
     let embedDevice: EmbedDevice = 'unknown';
     if (useOllama) {
       // Warm the embedding model once so a cold (slow-to-load) model does not
@@ -275,34 +305,24 @@ export async function runRagIndexSync(
         embedDevice = await detectEmbedDevice(ctx.logger, prefs.ollamaUrl!, prefs.embeddingModel!);
       }
     }
-    // Surface a CPU fallback as a standalone amber banner on the step (set once;
-    // a per-file progress line would otherwise bury it). Clears to null on a
-    // healthy/unknown run so a stale warning from a prior pass does not linger.
+    // Surface a CPU fallback and any carried-over embed degradation as a standalone
+    // amber banner on the step (set once; a per-file progress line would otherwise
+    // bury it). Clears to null on a healthy/unknown run so a stale warning from a
+    // prior pass does not linger. Re-written after the loop with this run's result.
     await ctx.db
       .update(schema.taskSteps)
-      .set({ warningMessage: embedDeviceWarning(embedDevice) })
+      .set({
+        warningMessage: composeRagWarning(embedDeviceWarning(embedDevice), ragEmbedWarning(health)),
+      })
       .where(eq(schema.taskSteps.id, ctx.taskStepId));
-
-    // Resolve repository_id — required for dedup. Without it we'd be re-embedding
-    // the same content on every task. Bail with a logged warning rather than
-    // silently filling the table.
-    const taskRow = await ctx.db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, ctx.taskId),
-      columns: { repositoryId: true, title: true, description: true },
-    });
-    const repositoryId = taskRow?.repositoryId ?? null;
-    if (!repositoryId) {
-      ctx.logger.warn(
-        { taskId: ctx.taskId },
-        'rag sync skipped: task has no repository_id, dedup not safe',
-      );
-      return EMPTY_RESULT('task has no repository_id');
-    }
 
     let inserted = 0;
     let updated = 0;
     let skipped = 0;
     let deleted = 0;
+    let embedSkippedChunks = 0;
+    let embedFailureReason: string | null = null;
+    const embedBatchSize = await resolveEmbedBatchSize();
 
     const kbFiles = await collectKbFiles(repoPath);
     const codeFiles = await collectCodeFiles(repoPath, codeCollect);
@@ -454,22 +474,33 @@ export async function runRagIndexSync(
       }
 
       // Embed and insert new/updated chunks in batches
-      for (let batchStart = 0; batchStart < toEmbed.length; batchStart += EMBED_BATCH_SIZE) {
+      for (let batchStart = 0; batchStart < toEmbed.length; batchStart += embedBatchSize) {
         ctx.throwIfCancelled();
-        const batch = toEmbed.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
+        const batch = toEmbed.slice(batchStart, batchStart + embedBatchSize);
         const texts = batch.map((e) => e.chunk.content);
-        let embeddings: number[][];
 
-        if (useOllama) {
-          try {
-            embeddings = await ollamaEmbed(prefs.ollamaUrl!, prefs.embeddingModel!, texts);
-          } catch (err) {
-            ctx.logger.warn({ err, relPath, batchStart }, 'Ollama failed; hash fallback');
-            embeddings = texts.map((t) => hashEmbed(t, prefs.embeddingDimensions));
-          }
-        } else {
-          embeddings = texts.map((t) => hashEmbed(t, prefs.embeddingDimensions));
+        const outcome = await embedBatch({
+          ollamaUrl: prefs.ollamaUrl,
+          model: prefs.embeddingModel,
+          dimensions: prefs.embeddingDimensions,
+          useOllama,
+          texts,
+        });
+        if (outcome.kind === 'failed') {
+          // Leave these chunks UNINDEXED. An insert simply does not happen; an
+          // update leaves the previous row in place, which is stale but still
+          // points at the right file — both beat a hash vector, which cannot be
+          // told apart from a real one later and outranks genuine lexical hits.
+          // The run continues: a broken index must not block every task on the repo.
+          embedSkippedChunks += batch.length;
+          embedFailureReason ??= outcome.reason;
+          ctx.logger.warn(
+            { relPath, batchStart, chunks: batch.length, reason: outcome.reason },
+            'embed failed; chunks left unindexed (strict mode)',
+          );
+          continue;
         }
+        const embeddings = outcome.embeddings;
 
         for (let i = 0; i < batch.length; i += 1) {
           const { chunk, action } = batch[i]!;
@@ -556,10 +587,40 @@ export async function runRagIndexSync(
       }
     }
 
+    // Remember (or forget) the embed failure on the REPO, so the condition outlives
+    // this step row — a manual retry nulls task_steps.output — and every later RAG
+    // step can say so. Only an actual model run can clear it: a hash-mode sync
+    // proves nothing about whether embeddings work.
+    if (embedFailureReason) {
+      await recordRagEmbedDegraded(ctx.db, repositoryId, embedFailureReason, ctx.logger);
+    } else if (useOllama && health.degradedAt) {
+      await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
+    }
+    await ctx.db
+      .update(schema.taskSteps)
+      .set({
+        warningMessage: composeRagWarning(
+          embedDeviceWarning(embedDevice),
+          ragEmbedWarning(
+            {
+              degradedAt: embedFailureReason ? (health.degradedAt ?? new Date()) : null,
+              degradedReason: embedFailureReason ?? health.degradedReason,
+              lexicalOnly: health.lexicalOnly,
+            },
+            { skippedChunks: embedSkippedChunks },
+          ),
+        ),
+      })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+
+    const skippedNote = embedSkippedChunks > 0 ? `, ${embedSkippedChunks} unindexed` : '';
     await ctx.emitProgress(
-      `RAG sync complete: ${inserted} inserted, ${updated} updated, ${skipped} unchanged, ${deleted} deleted.`,
+      `RAG sync complete: ${inserted} inserted, ${updated} updated, ${skipped} unchanged, ${deleted} deleted${skippedNote}.`,
     );
-    ctx.logger.info({ inserted, updated, skipped, deleted }, 'rag sync complete');
+    ctx.logger.info(
+      { inserted, updated, skipped, deleted, embedSkippedChunks },
+      'rag sync complete',
+    );
     return {
       performed: true,
       reason: 'sync completed',
@@ -568,6 +629,8 @@ export async function runRagIndexSync(
       skipped,
       deleted,
       embeddingDevice: embedDevice,
+      embedSkippedChunks,
+      embedFailureReason,
     };
   } finally {
     await conn.close();
