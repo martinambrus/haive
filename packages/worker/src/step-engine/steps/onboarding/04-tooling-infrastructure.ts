@@ -221,7 +221,14 @@ export const toolingInfrastructureStep: StepDefinition<
       { value: 'external', label: 'Use a separate PostgreSQL database' },
       { value: 'none', label: 'Skip RAG infrastructure' },
     );
-    const ragDefault = detected.containerType === 'ddev' ? 'ddev' : 'internal';
+    // Always haive-internal, even on a DDEV repo where `ddev` is offered above.
+    // Defaulting to `ddev` made the whole form accept-the-defaults wrong: `ddev`
+    // mode with no connection string falls back to a hardcoded
+    // `db:db@host.docker.internal:5432/db`, which on any install publishing 5432
+    // reaches haive's OWN postgres (no role `db`) and never the DDEV database,
+    // whose port is loopback-bound and random. Picking `ddev` stays a deliberate
+    // choice that supplies its own connection string.
+    const ragDefault = 'internal';
 
     // Show each LSP server's version as a badge on its checkbox (absent for the
     // unpinnable servers). Selecting installs that version at latest; pinning a

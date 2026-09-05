@@ -166,7 +166,7 @@ describe('onboarding registry', () => {
     ).toEqual(['php-extended', 'typescript', 'python', 'go', 'rust', 'java']);
   });
 
-  it('tooling infrastructure includes DDEV rag option only when DDEV detected', () => {
+  it('offers the DDEV rag option only when DDEV detected, but never defaults to it', () => {
     const ctx = {} as never;
     const withDdev = toolingInfrastructureStep.form!(ctx, {
       primaryLanguage: 'php',
@@ -179,6 +179,10 @@ describe('onboarding registry', () => {
     expect(ragWithDdev?.type).toBe('select');
     const ddevOpts = (ragWithDdev as { options: { value: string }[] }).options;
     expect(ddevOpts.map((o) => o.value)).toContain('ddev');
+    // Offered, never pre-selected: accepting the defaults on a DDEV repo used to
+    // pick `ddev`, whose blank-connection-string fallback targets haive's own
+    // postgres rather than the DDEV database.
+    expect((ragWithDdev as { default?: string }).default).toBe('internal');
 
     const noDdev = toolingInfrastructureStep.form!(ctx, {
       primaryLanguage: 'javascript',
@@ -190,6 +194,7 @@ describe('onboarding registry', () => {
     const ragNoDdev = noDdev!.fields.find((f) => f.id === 'ragMode');
     const noDdevOpts = (ragNoDdev as { options: { value: string }[] }).options;
     expect(noDdevOpts.map((o) => o.value)).not.toContain('ddev');
+    expect((ragNoDdev as { default?: string }).default).toBe('internal');
   });
 
   it('tooling infrastructure includes Ollama and embedding fields', () => {
