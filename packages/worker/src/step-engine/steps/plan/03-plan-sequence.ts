@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { PLAN_PATCH_MAX_OPS, type FormSchema, type FormValues } from '@haive/shared';
 import {
+  PLAN_NODE_REF_PREFIX,
   applyPlanPatch,
   computePlanSequence,
   loadPlanEdges,
@@ -109,6 +110,27 @@ const SEQUENCE_AGENTS_PER_WAVE = 12;
 export const SEQUENCE_AGENTS_PER_PASS = 400;
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const SEQUENCE_AGENT_RE = new RegExp(`^plan-seq-(${UUID_SOURCE})-p(\\d+)$`, 'i');
+const UUID_RE = new RegExp(`^${UUID_SOURCE}$`, 'i');
+
+/** The node id behind a ref, as `applyPlanPatch` resolves it.
+ *
+ *  `renderPlanMarkdown` prints every id as `node:<uuid>` and the patch contract
+ *  tells the agent to COPY ids rather than retype them, so an agent obeying both
+ *  replies with the prefix — MEASURED on one 400-agent pass, 250 of 400 replies
+ *  carried it. The applier strips it (`normalizeOpRefs`), so those agents' ORDER
+ *  was written correctly; only this lookup kept the ref verbatim, and
+ *  `collectDisagreements` asks it for a bare node id, so a majority of the
+ *  orderings could contradict nothing and the second opinion silently covered
+ *  the minority that happened to retype the uuid.
+ *
+ *  Stripped only when the remainder is uuid-shaped, exactly as the applier does,
+ *  so a temp id an agent happens to call `node:api` still names a new node. */
+function bareNodeRef(ref: string): string {
+  const lower = ref.toLowerCase();
+  if (!lower.startsWith(PLAN_NODE_REF_PREFIX)) return lower;
+  const bare = lower.slice(PLAN_NODE_REF_PREFIX.length);
+  return UUID_RE.test(bare) ? bare : lower;
+}
 
 export function sequenceAgentId(parentId: string, wave: number): string {
   return `plan-seq-${parentId}-p${wave}`;
@@ -295,6 +317,24 @@ function dispatchCount(targetCount: number, agentsUsed: number): number {
   );
 }
 
+/** Is the pass over — will no further agent go out?
+ *
+ *  Two readers have to answer this the same way: apply(), deciding whether to
+ *  reopen the form for the end-of-pass review, and form(), deciding whether to
+ *  build that form. When they disagree the step asks the runner for a form the
+ *  form then refuses to produce, and the runner fails the step with "requested
+ *  another form, but refreshed detection produced no form". MEASURED: that
+ *  killed a plan_build on a 7,983-node plan whose 889 sibling runs spent the
+ *  400-agent budget with groups still pending, so the old form-side test
+ *  (`targets.length === 0`) was never going to become true.
+ *
+ *  The budget being spent ends the pass exactly as running out of groups does —
+ *  what is left over is reported as `remaining` and picked up by re-running the
+ *  step. */
+export function sequencePassComplete(pendingTargets: number, agentsUsed: number): boolean {
+  return pendingTargets === 0 || agentsUsed >= SEQUENCE_AGENTS_PER_PASS;
+}
+
 function buildSequencePrompt(
   target: SequenceTarget,
   children: PlanNodeSkeleton[],
@@ -474,7 +514,7 @@ export function agentOrdinals(rows: MiningRow[]): Map<string, number> {
       const op = raw as { op?: string; nodeRef?: unknown; ordinal?: unknown };
       if (op.op !== 'upsert') continue;
       if (typeof op.nodeRef !== 'string' || typeof op.ordinal !== 'number') continue;
-      out.set(op.nodeRef.toLowerCase(), op.ordinal);
+      out.set(bareNodeRef(op.nodeRef), op.ordinal);
     }
   }
   return out;
@@ -562,7 +602,7 @@ function disagreementForm(detected: PlanSequenceDetect): FormSchema {
   };
 }
 
-function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
+export function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
   if (!detected.repositoryId || detected.nodeCount === 0) return null;
   // Only the FIRST pass asks about the budget. Once a wave has gone out the user
   // has already agreed to it, and re-parking every twelve agents would turn an
@@ -570,7 +610,8 @@ function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
   if (detected.agentsUsed > 0) {
     // ...but the END of the pass asks once more, because by then there is
     // something to show that did not exist when the budget was agreed.
-    return detected.targets.length === 0 && detected.disagreements.length > 0
+    return sequencePassComplete(detected.targets.length, detected.agentsUsed) &&
+      detected.disagreements.length > 0
       ? disagreementForm(detected)
       : null;
   }
@@ -778,8 +819,14 @@ export function createPlanSequenceStep(opts: {
       // Pass finished. `detected` was computed BEFORE this apply folded the last
       // wave, so it cannot see that wave's disagreements — re-park so detect runs
       // again over everything and the form has the complete set.
+      //
+      // Gated on the same predicate the form uses, from the values detect will
+      // recompute: reopening on anything the form cannot see (a wave that
+      // dispatched nothing, which leaves groups pending and the budget unspent)
+      // asks for a form that will not exist and fails the step instead. Those
+      // disagreements are not lost — they surface when the step is re-run.
       const disagreements = collectDisagreements(nodes, edges, agentOrdinals(rows));
-      if (disagreements.length > 0) {
+      if (disagreements.length > 0 && sequencePassComplete(pending.length, state.agents)) {
         result.disagreements = disagreements.length;
         throw new ReopenStepFormError(
           `${disagreements.length} recorded dependency(ies) contradict the order chosen without them`,

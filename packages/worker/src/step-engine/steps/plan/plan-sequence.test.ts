@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
-import { agentOrdinals, collectDisagreements, type MiningRow } from './03-plan-sequence.js';
+import {
+  SEQUENCE_AGENTS_PER_PASS,
+  agentOrdinals,
+  collectDisagreements,
+  sequenceForm,
+  sequencePassComplete,
+  type MiningRow,
+  type PlanSequenceDetect,
+} from './03-plan-sequence.js';
 
 const PARENT = '11111111-1111-4111-8111-111111111111';
 const OTHER_PARENT = '22222222-2222-4222-8222-222222222222';
@@ -89,6 +97,23 @@ describe('agentOrdinals', () => {
     expect(agentOrdinals([reply({ [A.toUpperCase()]: 2 })]).get(A)).toBe(2);
   });
 
+  it('strips the `node:` prefix the renderer prints and the contract tells agents to copy', () => {
+    // The common reply shape, not an edge case: on one 400-agent pass 250 of the
+    // 400 replies carried the prefix, and every one of their orderings was
+    // invisible to collectDisagreements until this stripped it.
+    expect(agentOrdinals([reply({ [`node:${A}`]: 0, [`NODE:${B}`]: 1 })])).toEqual(
+      new Map([
+        [A, 0],
+        [B, 1],
+      ]),
+    );
+  });
+
+  it('leaves a temp id that merely looks prefixed alone', () => {
+    // `node:api` is not a uuid, so it names a node the agent is inventing.
+    expect(agentOrdinals([reply({ 'node:api': 0 })])).toEqual(new Map([['node:api', 0]]));
+  });
+
   it('survives a reply that is not a patch at all', () => {
     expect(agentOrdinals([reply({}, { output: 'I could not do this' })]).size).toBe(0);
   });
@@ -158,9 +183,98 @@ describe('collectDisagreements', () => {
     ).toEqual([]);
   });
 
+  it('flags a contradiction stated with prefixed refs', () => {
+    const found = collectDisagreements(
+      NODES,
+      [edge(A, B)],
+      agentOrdinals([reply({ [`node:${A}`]: 0, [`node:${B}`]: 1 })]),
+    );
+    expect(found).toHaveLength(1);
+  });
+
   it('carries the recorded reason through, so a reviewer sees the claim', () => {
     const e = { ...edge(A, B), note: 'Alpha is invoked by Beta' };
     const found = collectDisagreements(NODES, [e], agentOrdinals([reply({ [A]: 0, [B]: 1 })]));
     expect(found[0]?.note).toBe('Alpha is invoked by Beta');
+  });
+});
+
+describe('sequencePassComplete', () => {
+  it('is over when every group has been asked', () => {
+    expect(sequencePassComplete(0, 12)).toBe(true);
+  });
+
+  it('is over when the budget is spent, even with groups still pending', () => {
+    // The failure this exists for: 889 sibling runs against a 400-agent budget,
+    // so `targets.length` never reaches 0 and the end-of-pass review was
+    // unreachable while apply() asked for it anyway.
+    expect(sequencePassComplete(489, SEQUENCE_AGENTS_PER_PASS)).toBe(true);
+  });
+
+  it('is not over while both groups and budget remain', () => {
+    expect(sequencePassComplete(5, 12)).toBe(false);
+  });
+});
+
+describe('sequenceForm', () => {
+  function detected(over: Partial<PlanSequenceDetect> = {}): PlanSequenceDetect {
+    return {
+      repositoryId: '33333333-3333-4333-8333-333333333333',
+      nodeCount: 7983,
+      decidedRuns: 87,
+      targets: [],
+      contradictoryRuns: 0,
+      cycles: 0,
+      ancestorDeps: 0,
+      agentsUsed: 0,
+      wave: 0,
+      disagreements: [],
+      ...over,
+    };
+  }
+
+  const DISAGREEMENT = {
+    edgeId: 'edge-aaaa-bbbb',
+    fromNodeId: A,
+    fromTitle: 'Alpha',
+    toNodeId: B,
+    toTitle: 'Beta',
+    note: null,
+  };
+
+  const target = { parentId: PARENT, parentTitle: 'Parent', childCount: 3 };
+
+  it('asks about the budget on the first pass', () => {
+    const form = sequenceForm(detected({ targets: [target] }));
+    expect(form?.fields[0]?.id).toBe('decision');
+  });
+
+  it('reviews disagreements once the budget is spent with groups still pending', () => {
+    // apply() reopens the form here; before this it returned null and the runner
+    // failed the step with "requested another form, but refreshed detection
+    // produced no form".
+    const form = sequenceForm(
+      detected({
+        targets: Array.from({ length: 489 }, () => target),
+        agentsUsed: SEQUENCE_AGENTS_PER_PASS,
+        disagreements: [DISAGREEMENT],
+      }),
+    );
+    expect(form?.fields[0]?.id).toBe('removeEdges');
+  });
+
+  it('reviews disagreements when every group has been asked', () => {
+    const form = sequenceForm(detected({ agentsUsed: 12, disagreements: [DISAGREEMENT] }));
+    expect(form?.fields[0]?.id).toBe('removeEdges');
+  });
+
+  it('stays out of the way mid-pass', () => {
+    expect(
+      sequenceForm(detected({ targets: [target], agentsUsed: 12, disagreements: [DISAGREEMENT] })),
+    ).toBeNull();
+  });
+
+  it('asks nothing when the pass ended with nothing to review', () => {
+    expect(sequenceForm(detected({ agentsUsed: SEQUENCE_AGENTS_PER_PASS }))).toBeNull();
   });
 });
