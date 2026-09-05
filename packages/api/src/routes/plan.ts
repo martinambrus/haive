@@ -29,6 +29,7 @@ import {
   ancestryOf,
   applyPlanPatch,
   computeImpact,
+  computePlanReady,
   computePlanSequence,
   describePlanDefects,
   findPlanRoot,
@@ -174,6 +175,38 @@ async function loadSequenceProgress(
   };
 }
 
+/**
+ * Nodes with a task that is still the user's to finish.
+ *
+ * Readiness cannot be read off `plan_nodes.status` alone: nothing writes
+ * `in_progress` when a task starts — `completePlanNodesForTask` is the only
+ * status writer and it runs at completion — so a node with a task running still
+ * says `todo`. A finished, failed or cancelled task deliberately does NOT count:
+ * completion greens the node (which excludes it anyway), and an abandoned task
+ * leaves work that should be offered again.
+ */
+async function loadOpenTaskNodeIds(repositoryId: string): Promise<Set<string>> {
+  const rows = await getDb()
+    .select({ nodeId: schema.planNodeTasks.nodeId })
+    .from(schema.planNodeTasks)
+    .innerJoin(schema.planNodes, eq(schema.planNodes.id, schema.planNodeTasks.nodeId))
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.planNodeTasks.taskId))
+    .where(
+      and(
+        eq(schema.planNodes.repositoryId, repositoryId),
+        inArray(schema.tasks.status, [...OPEN_TASK_STATES]),
+      ),
+    );
+  return new Set(rows.map((r) => r.nodeId));
+}
+
+/** How many ready nodes the list endpoint will render. A plan whose nodes
+ *  declare no dependencies has a ready set the size of its taskable leaves
+ *  (7,079 on the dev install), and that is a filtered VIEW of a canvas, not a
+ *  payload worth shipping whole. The count on the button is unclamped; only the
+ *  list is, and it says when it clamped. */
+const PLAN_READY_LIST_LIMIT = 200;
+
 planRoutes.get('/:id/plan', async (c) => {
   const { repositoryId, repo } = await requireOwnedRepo(c);
   const db = getDb();
@@ -195,6 +228,12 @@ planRoutes.get('/:id/plan', async (c) => {
   const derived = computePlanSequence(skeletons, edges, touched);
   const children = skeletons.filter((n) => n.parentId === root.id);
   const ordering = await loadSequenceProgress(repositoryId, skeletons, edges);
+  const { readyIds, nextId } = computePlanReady(
+    skeletons,
+    derived,
+    await loadOpenTaskNodeIds(repositoryId),
+  );
+  const next = nextId ? (skeletons.find((n) => n.id === nextId) ?? null) : null;
   const bodies = new Map([
     [root.id, (await loadPlanNode(db, repositoryId, root.id))?.body ?? null],
   ]);
@@ -214,6 +253,21 @@ planRoutes.get('/:id/plan', async (c) => {
     // edges it needs. Not polled — an ordering pass runs for hours and the page
     // re-reads this when the user comes back to it.
     ordering,
+    // Same argument again: "what do I start next" is a question about the plan.
+    // The pick is served here and the SET behind it from `/plan/ready`, because
+    // the count is what the page always needs and the list is what it needs only
+    // when someone asks to see it.
+    nextUp: {
+      node: next
+        ? {
+            id: next.id,
+            title: next.title,
+            kind: next.kind,
+            sequence: derived.sequenceById.get(next.id) ?? 0,
+          }
+        : null,
+      readyCount: readyIds.length,
+    },
   });
 });
 
@@ -485,6 +539,45 @@ planRoutes.get('/:id/plan/search', async (c) => {
   });
 });
 
+/**
+ * Every node that could be started right now, lowest build number first.
+ *
+ * Served in the EXACT shape `/plan/search` returns, breadcrumb included, because
+ * it is the same job — a filtered view of the canvas — and the page already
+ * renders that shape in both the grid and the tree. A different shape would have
+ * bought a second rendering path for no difference the user can see.
+ *
+ * No `requirePlanCanvasEnabled()`, matching the overview: turning the canvas off
+ * stops new plan work, it does not hide a plan someone already made.
+ */
+planRoutes.get('/:id/plan/ready', async (c) => {
+  const { repositoryId } = await requireOwnedRepo(c);
+  const db = getDb();
+  const [skeletons, edges, touched, openTaskNodeIds] = await Promise.all([
+    loadPlanSkeletons(db, repositoryId),
+    loadPlanEdges(db, repositoryId),
+    loadPlanTouchedTasks(db, repositoryId),
+    loadOpenTaskNodeIds(repositoryId),
+  ]);
+  const derived = computePlanSequence(skeletons, edges, touched);
+  const { readyIds } = computePlanReady(skeletons, derived, openTaskNodeIds);
+
+  const byId = new Map(skeletons.map((n) => [n.id, n]));
+  const shown = readyIds.slice(0, PLAN_READY_LIST_LIMIT).flatMap((id) => {
+    const node = byId.get(id);
+    return node ? [node] : [];
+  });
+  return c.json({
+    matches: toNodeViews(shown, derived).map((n) => ({
+      ...n,
+      body: null,
+      ancestry: ancestryOf(skeletons, n.id).map((a) => ({ id: a.id, title: a.title })),
+    })),
+    total: readyIds.length,
+    capped: readyIds.length > PLAN_READY_LIST_LIMIT,
+  });
+});
+
 /** One node in full: body, children, edges, code links, linked tasks, breadcrumb. */
 planRoutes.get('/:id/plan/nodes/:nodeId', async (c) => {
   const { repositoryId } = await requireOwnedRepo(c);
@@ -519,9 +612,22 @@ planRoutes.get('/:id/plan/nodes/:nodeId', async (c) => {
     .where(eq(schema.planNodeTasks.nodeId, nodeId))
     .orderBy(asc(schema.tasks.createdAt));
 
+  // Containers above this node that are themselves waiting. `blockedBy` is
+  // direct-only by design, so without this a leaf under a blocked component
+  // renders as ready and gives no hint why the plan is not offering it. Reported
+  // rather than enforced: the create-task gate stays direct-only, so this is the
+  // explanation, not a refusal.
+  const ancestorBlockers = ancestryOf(skeletons, nodeId)
+    .filter((a) => a.id !== nodeId && derived.blockedById.has(a.id))
+    .map((a) => ({
+      ancestor: { nodeId: a.id, sequence: derived.sequenceById.get(a.id) ?? 0, title: a.title },
+      blockers: derived.blockedById.get(a.id) ?? [],
+    }));
+
   return c.json({
     node: toNodeViews([node], derived, new Map([[node.id, node.body]]))[0],
     ancestry: ancestryOf(skeletons, nodeId).map((a) => ({ id: a.id, title: a.title })),
+    ancestorBlockers,
     children: toNodeViews(children, derived),
     edges: toEdgeViews(edges.filter((e) => e.fromNodeId === nodeId || e.toNodeId === nodeId)).map(
       (e) => ({

@@ -253,6 +253,25 @@ deploy path a config-only change would otherwise not have.
 
 **plan_chat** is one conversation on one card: a self-targeting `reviseLoop` re-parks the form every turn and the user ends it by submitting nothing. The transcript lives in `plan_node_messages` precisely because that revise resets the step row each cycle. The agent is handed the WHOLE plan (via `renderPlanMarkdown`, the same render committed as `.haive-data/plan.md` — one function so what the agent reads and what is committed cannot drift), so a request made while looking at one node can correctly patch another. **advisory** researches a non-code blocker and then STOPS: `02-advisory-decision` parks on a form and only the USER closes it — an agent concluding an unsigned contract is fine would turn a real blocker into a green tick.
 
+**"Start next" is STRICTER than the gate that refuses a task, deliberately.** `computePlanReady`
+(`shared/plan/ready.ts`) picks the lowest-numbered node that is startable now: `todo`, no unmet
+`depends_on` of its own, **no ANCESTOR with one**, no open task on it, and a unit of work
+(`taskable` for component/decision; a leaf for research/external, which carry `taskable` only
+sometimes — MEASURED 10 of 16 and 4 of 12). The ancestor half is the point, and it is the half
+`blockedById` deliberately omits: MEASURED, 1,286 of 7,079 taskable nodes in one plan carry no
+prerequisite of their own and 23 also have a clean ancestor chain, and on another plan the
+lowest-numbered node the DIRECT rule calls ready (#28) sits under two containers that are
+themselves waiting, while the strict rule picks #65. Do NOT reconcile the two readings: a rule
+strict enough to CHOOSE must not REFUSE, because choosing badly wastes a click while refusing
+badly turns one wrong-direction edge (15 of 16 unsatisfiable deps were exactly that) into a
+locked subtree. `POST /tasks` stays direct-only; the node panel's `ancestorBlockers` banner is
+what explains the skip, and says out loud that it does not stop you. Cycles need no test of
+their own — their members never lose their blockers, so rules 2 and 3 already exclude them and
+everything beneath them. `nextUp` rides the plan overview (a property of the PLAN, like
+`ordering` and `defects`); the SET behind the count is `GET /plan/ready`, served in the exact
+shape `/plan/search` returns so the page filters it with the machinery it already has, capped
+at 200 and REPORTING the cap.
+
 **Impact answers "if I change this, what else must change?"** (`shared/plan/impact.ts`): an explicit BFS with a visited set, because the edge graph has cycles by construction and a recursive CTE without dedup would not terminate while one with dedup could not say where it stopped. Both caps are REPORTED, never applied silently. The mermaid source encodes nodes as a `pnode<32 hex>` token; the browser recovers the uuid from THAT, unanchored — mermaid prefixes rendered ids with its own render id, so a `^flowchart-` anchor binds zero handlers and fails silently. **Code links** have one writer (the applier; the builder only links files it actually opened, with `evidence`) and rot is flagged, not guessed away: `11c-rag-reindex` marks links stale for the paths in `tasks.changedPaths`, and only re-assertion by an agent clears the flag — the difference between an impact view that is wrong and one that is merely old.
 
 **Spec-writer integration:** when the repo has a plan, 04-phase-0b is handed a compact component index and must emit an `## Affected components` section naming `node:<uuid>` ids. Its apply parses those IDS — never the agent's prose, because name-matching picks the wrong node the first time two read alike — resolves them through the edge graph, and gate 1 renders the set with a mermaid diagram, stating the traversal cap when one was hit.

@@ -444,6 +444,47 @@ export function PlanDetailPanel({
         </p>
       )}
 
+      {node.blockedBy.length === 0 && (detail.ancestorBlockers?.length ?? 0) > 0 && (
+        // Only when the node has NO blockers of its own: that is the stronger
+        // and more actionable statement, and printing both puts two lists of
+        // things-in-the-way on one card.
+        //
+        // This is why "Start next" skipped a node that looks ready. It does NOT
+        // stop task creation — the gate is on a node's own prerequisites, so one
+        // wrong-direction edge can never lock a whole subtree — which is exactly
+        // why the panel has to say it out loud rather than leave a disabled
+        // control to imply it.
+        <p className="rounded border border-neutral-800 bg-neutral-900/60 px-2 py-1 text-[11px] text-neutral-300">
+          {BLOCKED_GLYPH} Nothing blocks this node itself, but{' '}
+          {(detail.ancestorBlockers ?? []).map((a, i) => (
+            <span key={a.ancestor.nodeId}>
+              {i > 0 && ', and '}
+              <button
+                type="button"
+                onClick={() => onNavigate(a.ancestor.nodeId)}
+                className="text-indigo-300 underline"
+              >
+                {sequenceLabel(a.ancestor.sequence)} {a.ancestor.title}
+              </button>{' '}
+              above it is waiting on{' '}
+              {a.blockers.map((b, j) => (
+                <span key={b.nodeId}>
+                  {j > 0 && ', '}
+                  <button
+                    type="button"
+                    onClick={() => onNavigate(b.nodeId)}
+                    className="text-indigo-300 underline"
+                  >
+                    {sequenceLabel(b.sequence)} {b.title}
+                  </button>
+                </span>
+              ))}
+            </span>
+          ))}
+          . You can still start this, but the plan says what contains it is not ready.
+        </p>
+      )}
+
       {node.driftedTasks > 0 && (
         // Amber, and deliberately NOT the same treatment as blocking: those are
         // unrelated states a node can be in at once. Blocking says "you cannot

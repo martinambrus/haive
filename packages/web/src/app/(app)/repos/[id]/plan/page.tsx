@@ -10,6 +10,7 @@ import {
   ListOrdered,
   Link2,
   ListTree,
+  Play,
   Plus,
   Save,
   Trash2,
@@ -22,17 +23,20 @@ import {
   getUiPrefs,
   putUiPrefs,
   getPlanOverview,
+  getPlanReady,
   getPlanTree,
   getPlanSnapshot,
   pullPlanSnapshot,
   api,
   savePlanSnapshot,
   searchPlan,
+  startPlanAdvisory,
   startPlanSequence,
   type PlanNodeDetail,
   type PlanSearchMatch,
   type PlanTreeNode,
   type PlanDefects,
+  type PlanNextUp,
   type PlanOrderingProgress,
   type PlanPullOutcome,
   type PlanMergeConflict,
@@ -48,6 +52,7 @@ import { Button, FormError, Input } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { usePageTitle } from '@/lib/use-page-title';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
+import { sequenceLabel } from '@/components/plan/plan-status';
 import { PlanCardGrid } from '@/components/plan/plan-card-grid';
 import { PlanDetailPanel, type PlanPanelTab } from '@/components/plan/plan-detail-panel';
 import { PlanTree } from '@/components/plan/plan-tree';
@@ -97,6 +102,10 @@ export default function PlanPage() {
   // it is surfaced once here rather than on every node it touches.
   const [defects, setDefects] = useState<PlanDefects | null>(null);
   const [ordering, setOrdering] = useState<PlanOrderingProgress | null>(null);
+  // What to start next. From the overview rather than its own poll — it changes
+  // when a task is created or finishes, both of which leave this page.
+  const [nextUp, setNextUp] = useState<PlanNextUp | null>(null);
+  const [startingNext, setStartingNext] = useState(false);
   const [defectsOpen, setDefectsOpen] = useState(false);
   const [sequencing, setSequencing] = useState(false);
   const [pullReport, setPullReport] = useState<PlanPullOutcome | null>(null);
@@ -136,6 +145,15 @@ export default function PlanPage() {
   const [addingChild, setAddingChild] = useState(false);
   const [query, setQuery] = useState('');
   const [matches, setMatches] = useState<PlanSearchMatch[] | null>(null);
+  // Whether the filter in `matches` came from the ready set rather than the
+  // search box. Only the two writers of `matches` set it, so it can never
+  // describe a filter that is not showing — and the grid, the tree and the
+  // clear control need no change, only the line that counts what they show.
+  const [readyFilter, setReadyFilter] = useState(false);
+  // The ready set's own total, kept beside the rows it describes rather than
+  // read off `nextUp` — the list endpoint clamps, and only its answer knows by
+  // how much.
+  const [readyTotal, setReadyTotal] = useState(0);
 
   // Which of the two views the user reads the plan in, and how wide the left
   // pane is. Both are PER-USER preferences, persisted server-side (not per
@@ -371,6 +389,7 @@ export default function PlanPage() {
     setNodeCount(overview.nodeCount);
     setDefects(overview.defects ?? null);
     setOrdering(overview.ordering ?? null);
+    setNextUp(overview.nextUp ?? null);
     setRootId(overview.root?.id ?? null);
     setTree(treeRes.nodes);
     return overview.root?.id ?? null;
@@ -549,8 +568,25 @@ export default function PlanPage() {
     }
     try {
       setMatches((await searchPlan(repositoryId, q)).matches);
+      setReadyFilter(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Search failed');
+    }
+  }
+
+  /** Show the whole ready set as a filter, using the machinery a search already
+   *  uses. The search box is cleared with it: leaving a query behind while the
+   *  grid lists something else makes the box a lie about what is on screen. */
+  async function showReadySet(): Promise<void> {
+    setError(null);
+    try {
+      const res = await getPlanReady(repositoryId);
+      setQuery('');
+      setMatches(res.matches);
+      setReadyTotal(res.total);
+      setReadyFilter(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load the ready set');
     }
   }
 
@@ -610,6 +646,32 @@ export default function PlanPage() {
           ? `One pass covers ${ordering.perPass}; ${ordering.passesRemaining} more passes to finish.`
           : 'One more pass covers them all.');
 
+  // What the Start button says. The pick is the lowest-numbered node that is
+  // startable RIGHT NOW — its own prerequisites met, no container above it still
+  // waiting, and no task already open on it. The count beside it is the width of
+  // that frontier, which is the whole reason the dependency edges exist and is
+  // invisible anywhere else in this UI.
+  const nextNode = nextUp?.node ?? null;
+  const readyCount = nextUp?.readyCount ?? 0;
+  const nextLabel = !nextNode
+    ? 'Nothing to start'
+    : nextNode.kind === 'research'
+      ? 'Research next'
+      : nextNode.kind === 'external'
+        ? 'Next is yours to clear'
+        : 'Start next';
+  const nextTitle = nextNode
+    ? `${sequenceLabel(nextNode.sequence)} ${nextNode.title}` +
+      (nextNode.kind === 'research'
+        ? ' — needs investigating first, so this starts an advisory run'
+        : nextNode.kind === 'external'
+          ? ' — a blocker outside the codebase; opens it, nothing to run'
+          : ' — opens the new-task form for this node')
+    : // Three causes, one sentence: this button knows only that the ready set is
+      // empty, and naming a cause it has not established would be a guess.
+      'Nothing is startable: everything left is finished, already has a task open, or is ' +
+      'waiting on work that is not done yet.';
+
   const snapshotLabel = !snapshot
     ? 'Checking snapshot…'
     : snapshot.lastError
@@ -667,6 +729,73 @@ export default function PlanPage() {
           )}
           {nodeCount > 0 && (
             <>
+              {/* First in the group and the only one left at the default
+                  `primary` variant: every other control here passes
+                  `variant="secondary"`, so this one stands out by construction
+                  rather than by a colour chosen for it. */}
+              <div className="inline-flex">
+                <Button
+                  size="sm"
+                  className={readyCount > 0 ? 'rounded-r-none' : undefined}
+                  disabled={!nextNode || startingNext}
+                  title={nextTitle}
+                  onClick={() => {
+                    if (!nextNode) return;
+                    // An external node is somebody's phone call, not a run:
+                    // open it and let the person read what it is waiting for.
+                    if (nextNode.kind === 'external') {
+                      void descend(nextNode.id);
+                      return;
+                    }
+                    if (nextNode.kind === 'research') {
+                      void (async () => {
+                        setError(null);
+                        setStartingNext(true);
+                        try {
+                          const { taskId } = await startPlanAdvisory(repositoryId, nextNode.id, {});
+                          rememberTaskOrigin(
+                            `/tasks/${taskId}`,
+                            planOrigin(repositoryId, nextNode.id),
+                          );
+                          router.push(`/tasks/${taskId}`);
+                        } catch (e) {
+                          setError(
+                            e instanceof Error ? e.message : 'Could not start the advisory run',
+                          );
+                          setStartingNext(false);
+                        }
+                      })();
+                      return;
+                    }
+                    // The same chain the panel's "Create a task from this" uses,
+                    // so the form carries the CLI, QA level and limits a
+                    // one-click spawn would have picked silently.
+                    rememberTaskOrigin('/tasks/new', planOrigin(repositoryId, nextNode.id));
+                    router.push(
+                      `/tasks/new?repositoryId=${repositoryId}&planNodeId=${nextNode.id}` +
+                        `&title=${encodeURIComponent(nextNode.title)}`,
+                    );
+                  }}
+                >
+                  <Play className="mr-1 h-3.5 w-3.5" />
+                  {startingNext ? 'Starting…' : nextLabel}
+                </Button>
+                {/* A joined segment rather than a chip inside the button: the
+                    count is a second action (show me all of them), and a button
+                    inside a button is not a thing. Hidden at zero, like the
+                    ordering badge — but there is nothing to show at zero either,
+                    so this one disappears with its own action. */}
+                {readyCount > 0 && (
+                  <Button
+                    size="sm"
+                    className="rounded-l-none border-l border-indigo-300/40 px-2 font-mono tabular-nums"
+                    title={`Show all ${readyCount} node${readyCount === 1 ? '' : 's'} that can be started now`}
+                    onClick={() => void showReadySet()}
+                  >
+                    {readyCount}
+                  </Button>
+                )}
+              </div>
               <Button
                 size="sm"
                 variant="secondary"
@@ -1027,7 +1156,20 @@ export default function PlanPage() {
 
             {matches && (
               <p className="text-xs text-neutral-500">
-                {matches.length} match{matches.length === 1 ? '' : 'es'} anywhere in the plan
+                {readyFilter ? (
+                  <>
+                    {/* Says what the list IS, not how many rows it has: a
+                        clamped list that only counted itself would read as the
+                        whole ready set. */}
+                    {matches.length === readyTotal
+                      ? `${readyTotal} node${readyTotal === 1 ? '' : 's'} ready to start, in build order`
+                      : `${readyTotal} nodes ready to start — showing the first ${matches.length}, in build order`}
+                  </>
+                ) : (
+                  <>
+                    {matches.length} match{matches.length === 1 ? '' : 'es'} anywhere in the plan
+                  </>
+                )}
               </p>
             )}
 

@@ -1404,6 +1404,18 @@ export interface PlanOverview {
   /** How much of the plan still needs a reader to decide its build order. Absent
    *  on a response from an older API, so every consumer must tolerate undefined. */
   ordering?: PlanOrderingProgress;
+  /** What to start next, and how many could be started alongside it. Absent on a
+   *  response from an older API, exactly as `ordering` is. */
+  nextUp?: PlanNextUp;
+}
+
+export interface PlanNextUp {
+  /** The lowest-numbered startable node, or null when nothing is startable —
+   *  either the plan is finished or everything left is waiting on something. */
+  node: { id: string; title: string; kind: PlanNodeKind; sequence: number } | null;
+  /** How many nodes are startable in total. Unclamped, unlike the list served by
+   *  `getPlanReady`. */
+  readyCount: number;
 }
 
 export interface PlanOrderingProgress {
@@ -1519,6 +1531,16 @@ export interface PlanNodeDetail {
   edges: PlanEdge[];
   codeLinks: PlanCodeLink[];
   tasks: PlanNodeTask[];
+  /** Containers above this node that are themselves waiting. `node.blockedBy` is
+   *  direct-only, so this is the only thing that explains why a node with no
+   *  blockers of its own is not being offered as next. Absent on a response from
+   *  an older API. */
+  ancestorBlockers?: PlanAncestorBlocker[];
+}
+
+export interface PlanAncestorBlocker {
+  ancestor: PlanBlocker;
+  blockers: PlanBlocker[];
 }
 
 export interface PlanSearchMatch extends PlanNode {
@@ -1615,6 +1637,16 @@ export function searchPlan(
 ): Promise<{ matches: PlanSearchMatch[] }> {
   return api.get<{ matches: PlanSearchMatch[] }>(
     `${planBase(repositoryId)}/search?q=${encodeURIComponent(q)}`,
+  );
+}
+
+/** Every startable node, in build order and in the same shape a search returns,
+ *  so the page filters on it with the machinery it already has. */
+export function getPlanReady(
+  repositoryId: string,
+): Promise<{ matches: PlanSearchMatch[]; total: number; capped: boolean }> {
+  return api.get<{ matches: PlanSearchMatch[]; total: number; capped: boolean }>(
+    `${planBase(repositoryId)}/ready`,
   );
 }
 
