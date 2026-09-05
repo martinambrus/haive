@@ -20,6 +20,24 @@ export const GLOBAL_KB_DB_NAME = 'haive_kb_global';
 const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
 const DEFAULT_EMBED_DIMENSIONS = 2560;
 
+/** The bundled compose daemon — where an unset URL points, for the same reason the
+ *  model above has a default: "internal mode" is what a fresh install IS, and the
+ *  key is only written once someone opens the settings page and saves.
+ *
+ *  Without it the meaning of an unset key was decided per consumer, and they
+ *  disagreed. The settings page collapsed blank to this URL client-side and reported
+ *  a green Ollama test; the onboarding status panel posted the blank straight into
+ *  POST /global-kb/test-ollama, whose schema requires min(1), and rendered the
+ *  resulting 400 "invalid test request" in a row labelled "Ollama / model" — so the
+ *  same daemon and the same model read as working on one screen and broken on the
+ *  other. Worse than the display split: with the KB enabled and no URL,
+ *  _global-kb-similarity returns null on every call, so embedding silently did
+ *  nothing while the settings page said it was fine.
+ *
+ *  Blank is not the off switch — GLOBAL_KB_ENABLED is — so defaulting here makes an
+ *  enabled KB do what being enabled already promises. */
+const DEFAULT_OLLAMA_URL = 'http://ollama:11434';
+
 /** Default window before a superseded (archived) entry is hard-deleted by the
  *  retention sweep. 0 = keep archived entries forever. */
 const DEFAULT_ARCHIVE_RETENTION_DAYS = 30;
@@ -35,6 +53,9 @@ export interface GlobalKbSettings {
   namespace: string;
   /** External connection string (secret). Required when `mode='external'`. */
   connectionString: string | null;
+  /** Both carry a default (see the constants above), so resolveGlobalKbSettings —
+   *  the only producer — never returns null for either. The nullable type is kept
+   *  because consumers declare their own copies of this shape and guard on it. */
   ollamaUrl: string | null;
   embedModel: string | null;
   embeddingDimensions: number;
@@ -87,7 +108,7 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
     mode: mode === 'external' ? 'external' : 'internal',
     namespace: namespace || 'default',
     connectionString: connectionString || null,
-    ollamaUrl: ollamaUrl || null,
+    ollamaUrl: ollamaUrl || DEFAULT_OLLAMA_URL,
     embedModel: embedModel || DEFAULT_EMBED_MODEL,
     embeddingDimensions,
     archiveRetentionDays,
