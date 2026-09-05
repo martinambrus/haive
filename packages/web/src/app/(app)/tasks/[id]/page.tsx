@@ -3807,7 +3807,9 @@ function StepCardImpl({
           {showRagStats ? 'Hide' : 'Show'} RAG stats
         </button>
       )}
-      {ranAgent && showRagStats && <RagStatsPanel taskId={taskId} stepId={step.stepId} />}
+      {ranAgent && showRagStats && (
+        <RagStatsPanel taskId={taskId} stepId={step.stepId} live={!step.endedAt} />
+      )}
 
       {step.cliInvocationCount > 0 && (
         <StepTerminal
@@ -3898,26 +3900,53 @@ const StepCard = memo(StepCardImpl, stepCardPropsEqual);
 // Lazy-loaded RAG retrieval stats for the discovery step: the rag_search calls
 // made during the step, with the KB-vs-code hit split + top scores. `code`
 // being non-zero is the signal that code (not just KB) is actually retrieved.
-function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
+const RAG_STATS_POLL_MS = 10_000;
+
+function RagStatsPanel({
+  taskId,
+  stepId,
+  live,
+}: {
+  taskId: string;
+  stepId: string;
+  live: boolean;
+}) {
   const [queries, setQueries] = useState<RagQueryEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .get<{ queries: RagQueryEntry[] }>(`/tasks/${taskId}/steps/${stepId}/rag-queries`)
-      .then((d) => {
-        if (!cancelled) setQueries(d.queries);
-      })
-      .catch((e) => {
-        if (!cancelled) setError((e as Error).message ?? 'Failed to load RAG stats');
-      });
+    const load = () =>
+      api
+        .get<{ queries: RagQueryEntry[] }>(`/tasks/${taskId}/steps/${stepId}/rag-queries`)
+        .then((d) => {
+          if (cancelled) return;
+          setQueries(d.queries);
+          setError(null);
+        })
+        .catch((e) => {
+          if (!cancelled) setError((e as Error).message ?? 'Failed to load RAG stats');
+        });
+    void load();
+    // Only a running step can gain queries: the endpoint bounds its window at
+    // `endedAt ?? now`, so once the step has ended its result set is frozen and a
+    // poll could never return anything new. `live` flips to false when the step
+    // finishes, which clears the interval on the spot.
+    if (!live) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const t = setInterval(() => void load(), RAG_STATS_POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(t);
     };
-  }, [taskId, stepId]);
+  }, [taskId, stepId, live]);
 
-  if (error) return <p className="text-xs text-red-400">{error}</p>;
+  // A failed POLL must not blank a panel that is already showing data — the error
+  // only replaces the panel when there is nothing to fall back to.
+  if (error && !queries) return <p className="text-xs text-red-400">{error}</p>;
   if (!queries) return <p className="text-xs text-neutral-500">Loading RAG stats…</p>;
   if (queries.length === 0)
     return <p className="text-xs text-neutral-500">No RAG queries recorded for this step.</p>;
