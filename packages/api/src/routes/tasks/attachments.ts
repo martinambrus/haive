@@ -1,15 +1,21 @@
 import { createReadStream, createWriteStream } from 'node:fs';
-import { access, chmod, chown, mkdir, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { access, chmod, chown, mkdir, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  ATTACHMENTS_MANIFEST_NAME,
+  attachmentUploadsRoot,
+  AttachmentPathError,
   CONFIG_KEYS,
   configService,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   isReadOnlyLocalRepo,
+  renderAttachmentsManifest,
+  sanitizeAttachmentPath,
+  splitAttachmentPath,
   uploadTaskAttachmentQuerySchema,
 } from '@haive/shared';
 import { getDb } from '../../db.js';
@@ -30,14 +36,13 @@ export const attachmentRoutes = new Hono<AppEnv>();
 
 const NODE_UID = 1000;
 const NODE_GID = 1000;
-const MANIFEST_NAME = '_ATTACHMENTS.md';
 /** Names the uploads dir owns. An upload allowed to take one of these is
  *  overwritten the next time that file is generated — the user's document
  *  silently replaced by our index, with their attachment row still pointing at
  *  it. `_PLAN_INPUTS.md` is written by the worker's 00-plan-inputs step; it is
  *  listed here rather than imported because the api must not depend on the
  *  worker, and a name the api hands out is a name the api has to reserve. */
-const RESERVED_NAMES = new Set([MANIFEST_NAME, '_PLAN_INPUTS.md']);
+const RESERVED_NAMES = new Set([ATTACHMENTS_MANIFEST_NAME, '_PLAN_INPUTS.md']);
 
 /** Resolve the task's on-disk uploads dir, enforcing ownership + a writable
  *  volume-backed repo. Throws 404/409 with an actionable message otherwise. */
@@ -100,18 +105,16 @@ function toClient(row: typeof schema.taskAttachments.$inferSelect) {
   };
 }
 
-/** Reduce an uploaded filename to a safe basename: no path separators, no control
- *  chars, no leading dots (blocks `..` and dotfiles). Path traversal is therefore
- *  impossible. */
-export function sanitizeAttachmentFilename(raw: string): string {
-  const base = raw.split(/[\\/]/).pop() ?? '';
-  const cleaned = base
-    // Allowlist printable filename chars; everything else (control chars, path
-    // separators, quotes, unicode) becomes '_'. No path traversal survives.
-    .replace(/[^\w .()\-]/g, '_')
-    .replace(/^\.+/, '')
-    .trim();
-  return (cleaned || 'file').slice(0, 200);
+/** The sanitised relative path, or a 400. Path rules live in `@haive/shared` so
+ *  the worker's archive expansion applies exactly the same ones — a name one of
+ *  them refuses and the other accepts is a file only one can find. */
+function safeAttachmentPath(raw: string): string {
+  try {
+    return sanitizeAttachmentPath(raw);
+  } catch (err) {
+    if (err instanceof AttachmentPathError) throw new HttpError(400, err.message);
+    throw err;
+  }
 }
 
 async function pathExists(p: string): Promise<boolean> {
@@ -123,19 +126,66 @@ async function pathExists(p: string): Promise<boolean> {
   }
 }
 
-/** De-dupe a basename within `dir` by appending ` (n)` before the extension. */
-async function uniqueFilename(dir: string, name: string): Promise<string> {
-  if (!(await pathExists(join(dir, name))) && !RESERVED_NAMES.has(name)) return name;
-  const dot = name.lastIndexOf('.');
-  const stem = dot > 0 ? name.slice(0, dot) : name;
-  const ext = dot > 0 ? name.slice(dot) : '';
+/** `candidate` resolved under `root`, or null. Cheap insurance on the paths that
+ *  drive an `rm`: the sanitiser already forbids traversal, and a delete is the
+ *  one operation where being wrong about that is unrecoverable. */
+function resolveInside(root: string, relative: string): string | null {
+  const base = resolve(root);
+  const candidate = resolve(base, relative);
+  return candidate === base || candidate.startsWith(base + sep) ? candidate : null;
+}
+
+/** Make every level of `relDir` under the uploads root traversable + owned by the
+ *  sandbox user. A folder upload creates directories the api never touched. */
+async function ensureDirTree(root: string, relDir: string): Promise<void> {
+  if (relDir === '') return;
+  let cursor = root;
+  for (const segment of relDir.split('/')) {
+    cursor = join(cursor, segment);
+    await mkdir(cursor, { recursive: true });
+    await chmod(cursor, 0o755).catch(() => {});
+    await chown(cursor, NODE_UID, NODE_GID).catch(() => {});
+  }
+}
+
+/** De-dupe within the file's OWN directory by appending ` (n)` before the
+ *  extension, and create that directory. Per-directory because two folders'
+ *  `README.md` are two documents, not a collision. Reserved names bite only at
+ *  the root, which is where the generated indexes live. */
+async function uniquePath(dir: string, relPath: string): Promise<string> {
+  const { dir: relDir, base } = splitAttachmentPath(relPath);
+  await ensureDirTree(dir, relDir);
+  const parent = relDir === '' ? dir : join(dir, relDir);
+  const reserved = (name: string): boolean => relDir === '' && RESERVED_NAMES.has(name);
+  const rel = (name: string): string => (relDir === '' ? name : `${relDir}/${name}`);
+
+  if (!(await pathExists(join(parent, base))) && !reserved(base)) return rel(base);
+  const dot = base.lastIndexOf('.');
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : '';
   let n = 1;
-  let candidate = name;
+  let candidate = base;
   do {
     n += 1;
     candidate = `${stem} (${n})${ext}`;
-  } while ((await pathExists(join(dir, candidate))) || RESERVED_NAMES.has(candidate));
-  return candidate;
+  } while ((await pathExists(join(parent, candidate))) || reserved(candidate));
+  return rel(candidate);
+}
+
+/** Remove the directories a deleted file left empty, stopping at the uploads root
+ *  or at the first directory something else still lives in. */
+async function pruneEmptyDirs(root: string, relDir: string): Promise<void> {
+  let cursor = relDir;
+  while (cursor !== '' && cursor !== '.') {
+    const abs = resolveInside(root, cursor);
+    if (!abs) return;
+    try {
+      await rmdir(abs);
+    } catch {
+      return; // not empty, or already gone
+    }
+    cursor = splitAttachmentPath(cursor).dir;
+  }
 }
 
 /** Stream the request body to `destPath`, aborting + unlinking once the byte count
@@ -179,20 +229,13 @@ async function regenerateManifest(dir: string, taskId: string): Promise<void> {
     where: eq(schema.taskAttachments.taskId, taskId),
     orderBy: asc(schema.taskAttachments.createdAt),
   });
-  const manifestPath = join(dir, MANIFEST_NAME);
-  if (rows.length === 0) {
+  const manifestPath = join(dir, ATTACHMENTS_MANIFEST_NAME);
+  const body = renderAttachmentsManifest(rows);
+  if (body === null) {
     await rm(manifestPath, { force: true }).catch(() => {});
     return;
   }
-  const lines = [
-    '# Attached files',
-    '',
-    'User-attached reference files for this task. Read any you need.',
-    '',
-    ...rows.map((r) => `- \`${r.filename}\`${r.description ? ` — ${r.description}` : ''}`),
-    '',
-  ];
-  await writeFile(manifestPath, lines.join('\n'), 'utf8');
+  await writeFile(manifestPath, body, 'utf8');
   await chmod(manifestPath, 0o644).catch(() => {});
   await chown(manifestPath, NODE_UID, NODE_GID).catch(() => {});
 }
@@ -274,7 +317,7 @@ export async function writeTaskAttachment(args: {
   await mkdir(dir, { recursive: true });
   await harmonizeDirOwnership(dir);
 
-  const safeName = await uniqueFilename(dir, sanitizeAttachmentFilename(args.filename));
+  const safeName = await uniquePath(dir, safeAttachmentPath(args.filename));
   const destPath = join(dir, safeName);
   await writeFile(destPath, args.content);
   const { size } = await stat(destPath);
@@ -312,7 +355,7 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
   await mkdir(dir, { recursive: true });
   await harmonizeDirOwnership(dir);
 
-  const safeName = await uniqueFilename(dir, sanitizeAttachmentFilename(query.filename));
+  const safeName = await uniquePath(dir, safeAttachmentPath(query.filename));
   const destPath = join(dir, safeName);
   const size = await streamToFileWithCap(body, destPath, maxBytes);
 
@@ -355,7 +398,9 @@ attachmentRoutes.get('/:id/attachments/:attachmentId/raw', async (c) => {
   const onDisk = await stat(row.storedPath).catch(() => null);
   if (!onDisk) throw new HttpError(404, 'Attachment file is missing on disk');
 
-  const safeHeaderName = row.filename.replace(/["\r\n]/g, '_');
+  // The BASENAME: `filename` may be a relative path now, and a header carrying
+  // `docs/api/spec.md` names a directory the downloader does not have.
+  const safeHeaderName = splitAttachmentPath(row.filename).base.replace(/["\r\n]/g, '_');
   c.header('Content-Type', row.contentType ?? 'application/octet-stream');
   c.header('Content-Disposition', `attachment; filename="${safeHeaderName}"`);
   c.header('Content-Length', String(onDisk.size));
@@ -370,9 +415,69 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   await requireOwnedTask(taskId, userId);
   const row = await findAttachment(taskId, userId, attachmentId);
 
-  await rm(row.storedPath, { force: true }).catch(() => {});
   const db = getDb();
+  const root = attachmentUploadsRoot(row);
+
+  // Files this row produced by being expanded. Their ROWS cascade on the delete
+  // below, but the FK cannot reach the disk — and an orphaned tree stays
+  // bind-mounted into the sandbox, so an agent would keep reading files the user
+  // believes they removed. Every child lives under one directory (the expansion
+  // dir), which is what gets removed, sidecars and all.
+  const children = await db.query.taskAttachments.findMany({
+    where: eq(schema.taskAttachments.expandedFromId, attachmentId),
+    columns: { filename: true },
+    limit: 1,
+  });
+  const expansionDir = children[0]
+    ? (splitAttachmentPath(children[0].filename).dir.split('/')[0] ?? '')
+    : '';
+  if (expansionDir !== '') {
+    const dirPath = resolveInside(root, expansionDir);
+    if (dirPath) await rm(dirPath, { recursive: true, force: true }).catch(() => {});
+  }
+
+  await rm(row.storedPath, { force: true }).catch(() => {});
   await db.delete(schema.taskAttachments).where(eq(schema.taskAttachments.id, attachmentId));
-  await regenerateManifest(dirname(row.storedPath), taskId);
+  await pruneEmptyDirs(root, splitAttachmentPath(row.filename).dir);
+  await regenerateManifest(root, taskId);
   return c.json({ ok: true });
+});
+
+/** Remove a whole uploaded folder. A 400-file tree cannot be taken apart a row at
+ *  a time from the UI, and the directory itself has to go with the rows. */
+attachmentRoutes.delete('/:id/attachments', async (c) => {
+  const userId = c.get('userId');
+  const taskId = c.req.param('id');
+  await requireOwnedTask(taskId, userId);
+  const raw = c.req.query('prefix');
+  if (!raw) throw new HttpError(400, 'prefix query parameter is required');
+  const prefix = safeAttachmentPath(raw);
+
+  const db = getDb();
+  const rows = await db.query.taskAttachments.findMany({
+    where: and(
+      eq(schema.taskAttachments.taskId, taskId),
+      eq(schema.taskAttachments.userId, userId),
+    ),
+  });
+  // Filtered here rather than with a SQL LIKE: `_` is a LIKE wildcard AND a legal
+  // filename character, so `docs_v2/a.md` would match a `docs/v2` prefix.
+  const marked = rows.filter((r) => r.filename.startsWith(`${prefix}/`));
+  if (marked.length === 0) throw new HttpError(404, `No attachments under "${prefix}/"`);
+
+  const root = attachmentUploadsRoot(marked[0]!);
+  const dirPath = resolveInside(root, prefix);
+  if (!dirPath) throw new HttpError(400, 'prefix does not resolve inside the uploads directory');
+  // Recursive on purpose: the tree also holds the worker's extracted sidecars,
+  // which carry no row of their own and are meaningless once the originals go.
+  await rm(dirPath, { recursive: true, force: true }).catch(() => {});
+  await db.delete(schema.taskAttachments).where(
+    inArray(
+      schema.taskAttachments.id,
+      marked.map((r) => r.id),
+    ),
+  );
+  await pruneEmptyDirs(root, splitAttachmentPath(prefix).dir);
+  await regenerateManifest(root, taskId);
+  return c.json({ ok: true, removed: marked.length });
 });
