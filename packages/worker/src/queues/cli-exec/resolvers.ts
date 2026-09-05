@@ -233,7 +233,17 @@ export async function resolveMcpExtraFiles(
     // only because `.git` is a real directory there; a git MCP aimed at it would hand agents a
     // working git behind the commit gate that 10-gate-3-commit and completeMergeHostSide rely
     // on -- exactly what the mask exists to prevent, reached through a different door.
-    includeGit: !hasWorktree,
+    //
+    // Nor on a rag-only invocation, where git WOULD work (those run at the root) and is still
+    // dead weight: `ragOnly` is the step declaring read-only analysis that "should reach nothing
+    // but rag_search", and a report-only agent has nothing to commit. It is not free — every
+    // announced tool is one the CLI carries, and MEASURED on claude-code 2.1.261 the 11 tools it
+    // loads eagerly are fixed, so the 11 this server adds land in the DEFERRED set an agent has
+    // to spend a `ToolSearch` call to reach past. MEASURED on one plan-build fan-out: 13 agents,
+    // zero `mcp__git__*` calls and zero `mcp__filesystem__*` calls, against 6 `rag_search`.
+    // `filesystem` is deliberately left alone — its tools duplicate file reads the CLIs have
+    // natively, but "GROUND on disk" is the one thing every one of these agents must still do.
+    includeGit: !hasWorktree && !ragOnly,
     includeChromeDevtools: surface.chromeDevtools.enabled,
     chromeDevtoolsBrowserUrl,
     chromeDevtoolsMcpVersion: surface.chromeDevtools.version,
