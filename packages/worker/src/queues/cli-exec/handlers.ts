@@ -721,6 +721,26 @@ export async function handleSignOutJob(
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
     const name = authVolumeFor(provider, idx);
     if (!(await runner.volumeExists(name))) continue;
+    // Exactly the hazard `cleanupTaskAuthVolumes` guards, on the volume class that
+    // outlives every task: a worker killed between `docker create` and `docker start`
+    // leaves a Created auth helper mounting this volume, and `docker volume rm --force`
+    // then fails forever. A task volume gets swept because it is removed at task end;
+    // a per-user one is only ever removed HERE, so without this the strays accumulate
+    // and sign-out is the one operation that can never succeed. MEASURED on the dev
+    // install: two helpers stranded on `haive_cli_auth_<user>_codex_0`. Stopped users
+    // only — a running login or probe container is deliberately spared.
+    const containerCleanup = await runner.removeStoppedContainersUsingVolume?.(name);
+    if (containerCleanup && !containerCleanup.ok) {
+      log.warn(
+        { volume: name, stderr: containerCleanup.stderr },
+        'stopped auth helper container cleanup failed',
+      );
+    } else if (containerCleanup && containerCleanup.removed.length > 0) {
+      log.info(
+        { volume: name, containers: containerCleanup.removed.length },
+        'removed stopped auth helper containers',
+      );
+    }
     const result = await runner.volumeRemove(name);
     if (result.ok) removed.push(name);
     else failed.push({ name, stderr: result.stderr });

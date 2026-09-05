@@ -77,15 +77,36 @@ function makeDb(row: ReturnType<typeof makeProviderRow> | null, calls: DbCalls):
 interface MockRunner extends DockerRunner {
   existing: Set<string>;
   removed: string[];
+  /** Volume names the container sweep was asked about, in call order. */
+  swept: string[];
+  /** Interleaved log of sweep/remove calls, so a test can assert the ORDER. */
+  order: string[];
 }
 
-function makeRunner(opts: { existing?: string[]; removeFails?: string[] } = {}): MockRunner {
+function makeRunner(
+  opts: { existing?: string[]; removeFails?: string[]; sweep?: boolean; sweepFails?: boolean } = {},
+): MockRunner {
   const existing = new Set<string>(opts.existing ?? []);
   const removed: string[] = [];
+  const swept: string[] = [];
+  const order: string[] = [];
   const failSet = new Set<string>(opts.removeFails ?? []);
   return {
     existing,
     removed,
+    swept,
+    order,
+    ...(opts.sweep
+      ? {
+          async removeStoppedContainersUsingVolume(name: string) {
+            swept.push(name);
+            order.push(`sweep:${name}`);
+            return opts.sweepFails
+              ? { ok: false, removed: [], stderr: 'docker ps failed' }
+              : { ok: true, removed: ['helper-1'], stderr: '' };
+          },
+        }
+      : {}),
     async build() {
       throw new Error('not used');
     },
@@ -105,6 +126,7 @@ function makeRunner(opts: { existing?: string[]; removeFails?: string[] } = {}):
       return existing.has(name);
     },
     async volumeRemove(name: string): Promise<DockerVolumeOpResult> {
+      order.push(`remove:${name}`);
       if (failSet.has(name)) return { ok: false, stderr: 'in use' };
       existing.delete(name);
       removed.push(name);
@@ -148,6 +170,44 @@ describe('handleSignOutJob', () => {
     expect(result.removed).toEqual([expectedVolName]);
     expect(calls.updateSet?.authStatus).toBe('unknown');
     expect(calls.updateSet?.authMessage).toBeNull();
+  });
+
+  it('reaps stopped auth helpers pinning the volume, before removing it', async () => {
+    // A per-user auth volume is only ever removed here, so a helper stranded by a
+    // worker killed between `docker create` and `docker start` would otherwise pin it
+    // forever and make sign-out the one operation that can never succeed.
+    const userId = 'aaaa-bbbb-cccc-ee';
+    const volName = `haive_cli_auth_${'aaaabbbbccccee'.replace(/-/g, '').slice(0, 12)}_gemini_1`;
+    const calls: DbCalls = { updateSet: null };
+    const db = makeDb(makeProviderRow({ userId, isolateAuth: false }), calls);
+    const runner = makeRunner({ existing: [volName], sweep: true });
+    const result = await handleSignOutJob(db, { providerId: 'prov-default', userId }, runner);
+    expect(result.ok).toBe(true);
+    expect(runner.swept).toEqual([volName]);
+    // Order is the whole point: sweeping after the removal fixes nothing.
+    expect(runner.order).toEqual([`sweep:${volName}`, `remove:${volName}`]);
+  });
+
+  it('never sweeps a volume it is not going to remove', async () => {
+    const userId = 'aaaa-bbbb-cccc-ee';
+    const calls: DbCalls = { updateSet: null };
+    const db = makeDb(makeProviderRow({ userId, isolateAuth: false }), calls);
+    const runner = makeRunner({ existing: [], sweep: true });
+    await handleSignOutJob(db, { providerId: 'prov-default', userId }, runner);
+    expect(runner.swept).toEqual([]);
+  });
+
+  it('still removes the volume when the container sweep fails', async () => {
+    // The sweep is a best-effort unblock. A docker ps that errors must not turn a
+    // sign-out into a no-op — the removal may well succeed anyway.
+    const userId = 'aaaa-bbbb-cccc-ee';
+    const volName = `haive_cli_auth_${'aaaabbbbccccee'.replace(/-/g, '').slice(0, 12)}_gemini_1`;
+    const calls: DbCalls = { updateSet: null };
+    const db = makeDb(makeProviderRow({ userId, isolateAuth: false }), calls);
+    const runner = makeRunner({ existing: [volName], sweep: true, sweepFails: true });
+    const result = await handleSignOutJob(db, { providerId: 'prov-default', userId }, runner);
+    expect(result.ok).toBe(true);
+    expect(result.removed).toEqual([volName]);
   });
 
   it('isolated provider removes ONLY per-provider volume, not user-shared', async () => {
