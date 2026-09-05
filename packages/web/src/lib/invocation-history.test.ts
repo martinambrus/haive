@@ -14,12 +14,12 @@ import {
 function inv(
   id: string,
   createdAt: string,
-  opts: { active?: boolean; runNumber?: number } = {},
+  opts: { active?: boolean; runNumber?: number; exitCode?: number | null } = {},
 ): CliInvocationSummary {
   return {
     id,
     mode: 'cli',
-    exitCode: opts.active ? null : 0,
+    exitCode: opts.exitCode !== undefined ? opts.exitCode : opts.active ? null : 0,
     durationMs: null,
     timeoutMs: null,
     startedAt: createdAt,
@@ -265,6 +265,24 @@ describe('isInvocationExpanded', () => {
     // ...unless the user pinned it open, which outranks the eviction the same way it outranks
     // every other default.
     expect(isInvocationExpanded(done, { d1: true }, seen)).toBe(true);
+  });
+
+  it('auto-closes a run the user watched succeed, once the preference is on', () => {
+    expect(isInvocationExpanded(done, {}, new Set(['d1']), true)).toBe(false);
+  });
+
+  it('keeps a failed run open under auto-close', () => {
+    // A non-zero exit AND a null one (killed, or never started) are both failures here —
+    // the same split the panel's green/red badge makes.
+    const failed = inv('f1', '2026-09-01T01:00:00Z', { exitCode: 1 });
+    const killed = inv('k1', '2026-09-01T01:00:00Z', { exitCode: null });
+    expect(isInvocationExpanded(failed, {}, new Set(['f1']), true)).toBe(true);
+    expect(isInvocationExpanded(killed, {}, new Set(['k1']), true)).toBe(true);
+  });
+
+  it('never auto-closes a live run or one the user opened by hand', () => {
+    expect(isInvocationExpanded(active, {}, new Set(), true)).toBe(true);
+    expect(isInvocationExpanded(done, { d1: true }, new Set(), true)).toBe(true);
   });
 
   it('mounts nothing for a page of history on a step with no live run', () => {

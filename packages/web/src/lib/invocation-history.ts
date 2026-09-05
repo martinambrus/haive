@@ -193,13 +193,23 @@ export type InvocationOpenOverrides = Record<string, boolean>;
  *
  * An explicit click always wins, in both directions — including collapsing a LIVE run,
  * which is how a user drops an xterm they do not want.
+ *
+ * `autoCloseSuccessful` (the user's opt-in preference, default off) drops the `seenActive`
+ * exception for a run that exited 0, so a fan-out step stops accumulating finished xterms
+ * under the user as each wave lands. It never touches an explicit click, and never a
+ * running, queued or FAILED run — a failure is exactly the output still worth reading.
  */
 export function isInvocationExpanded(
   invocation: CliInvocationSummary,
   overrides: InvocationOpenOverrides,
   seenActive: ReadonlySet<string>,
+  autoCloseSuccessful = false,
 ): boolean {
   const override = overrides[invocation.id];
   if (override !== undefined) return override;
-  return invocation.isActive || seenActive.has(invocation.id);
+  if (invocation.isActive) return true;
+  // exitCode === 0 is the same test the panel's green/red badge uses, so "successful" means
+  // one thing across the UI: a null exit (killed, never started) reads as failed and stays.
+  if (autoCloseSuccessful && invocation.exitCode === 0) return false;
+  return seenActive.has(invocation.id);
 }

@@ -25,6 +25,7 @@ import {
   shouldFollowActiveTerminals,
   useAutoScrollTerminals,
 } from '@/lib/terminal-autoscroll';
+import { useAutoCloseSuccessfulTerminals } from '@/lib/terminal-autoclose';
 import { formatDuration, formatTimeoutBudget } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
 import { invocationBanner } from '@/lib/step-banners';
@@ -75,6 +76,7 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
   const historyPagesRef = useRef(1);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useAutoScrollTerminals();
+  const [autoCloseSuccessful, setAutoCloseSuccessful] = useAutoCloseSuccessfulTerminals();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const prevActiveRef = useRef<ActiveTerminalIds | null>(null);
 
@@ -288,23 +290,45 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
                 total={count}
                 statusMessage={statusMessage}
                 label={count > 1 && inv.runNumber ? `Run ${inv.runNumber}` : null}
-                expanded={isInvocationExpanded(inv, openOverrides, seenActiveRef.current)}
+                expanded={isInvocationExpanded(
+                  inv,
+                  openOverrides,
+                  seenActiveRef.current,
+                  autoCloseSuccessful,
+                )}
                 onToggle={toggleInvocation}
               />
             ))}
           {invocations !== null && invocations.length > 0 && (
-            <label
+            // data-cli-autoscroll sits on the ROW, not one label: it is the auto-scroll's
+            // last-resort target, and framing the whole row keeps both toggles on screen.
+            <div
               data-cli-autoscroll
-              className="flex items-center gap-1.5 self-end text-[11px] text-neutral-500"
+              className="flex flex-wrap items-center justify-end gap-2 self-end text-[11px] text-neutral-500"
             >
-              <input
-                type="checkbox"
-                checked={autoScroll}
-                onChange={(e) => setAutoScroll(e.target.checked)}
-                className="h-3 w-3 rounded border-neutral-700 bg-neutral-900"
-              />
-              Auto-scroll to the newest run
-            </label>
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={autoScroll}
+                  onChange={(e) => setAutoScroll(e.target.checked)}
+                  className="h-3 w-3 rounded border-neutral-700 bg-neutral-900"
+                />
+                Auto-scroll to the newest run
+              </label>
+              <span className="h-3 w-px bg-neutral-700" aria-hidden />
+              <label
+                className="flex items-center gap-1.5"
+                title="Collapse each run's terminal as soon as it exits 0. Running, queued and failed runs stay open, and a run you opened yourself stays open."
+              >
+                <input
+                  type="checkbox"
+                  checked={autoCloseSuccessful}
+                  onChange={(e) => setAutoCloseSuccessful(e.target.checked)}
+                  className="h-3 w-3 rounded border-neutral-700 bg-neutral-900"
+                />
+                Auto-close successful runs
+              </label>
+            </div>
           )}
         </div>
       )}
