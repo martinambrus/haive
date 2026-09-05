@@ -854,6 +854,11 @@ export interface TaskStep {
    *  collapsible "What the agent did" panel. Null on deterministic-only steps
    *  or before the async summarizer fills it. */
   summary: string | null;
+  /** Set when the step's LATEST recap pass ended in failure — the reason `summary` is
+   *  still null on a step that ran an agent. Server-decided (exit code + end time), so the
+   *  panel gates on this object's presence and renders `message` as its words. Null both
+   *  when the recap succeeded and when none was ever asked for. */
+  summaryError: { message: string; providerLabel: string | null } | null;
   errorMessage: string | null;
   errorHint: StepErrorHint | null;
   /** Non-fatal advisory: the step's LLM output could not be parsed and it fell back

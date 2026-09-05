@@ -70,6 +70,12 @@ function makeMockDb(state: MockState): Database {
           onConflictDoUpdate: async (_opts: unknown) => {
             state.inserts.push({ table: tableName, row: v });
           },
+          // Awaiting the builder itself (an insert that wants no rows back) has to record
+          // too, or a write made that way is invisible to every assertion here.
+          then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) => {
+            state.inserts.push({ table: tableName, row: v });
+            return Promise.resolve(undefined).then(onOk, onErr);
+          },
         }),
       };
     },
@@ -258,6 +264,31 @@ describe('per-step summarizer provider choice', () => {
     const summary = summaries(enqueued);
     expect(summary).toHaveLength(1);
     expect(summary[0]!.cliProviderId).toBe('prov-1');
+  });
+
+  it('records the failure when the summary CLI cannot even be dispatched', async () => {
+    // A recap that dies before its invocation row exists used to leave nothing but a worker
+    // log line: the step reads as a clean success and the panel does not render, which is
+    // indistinguishable from a step that asked for no recap. Real case — an ollama provider
+    // saved with its model field blank, which the adapter refuses to build a command for.
+    const { enqueued, state } = await runToDone(
+      { summaryCliProviderId: 'prov-ollama', summaryLlmEnabled: true },
+      [
+        makeProvider(),
+        makeProvider({ id: 'prov-ollama', label: 'Ollama', name: 'ollama', authMode: 'api_key' }),
+      ],
+    );
+    // The step itself still finished; only the recap is lost.
+    expect(summaries(enqueued)).toHaveLength(0);
+    const failure = state.inserts.find(
+      (i) => i.table === 'cli_invocations' && i.row.agentTitle === 'Step summary',
+    );
+    expect(failure).toBeDefined();
+    expect(failure!.row.summaryForStepId).toBe('ts-1');
+    expect(failure!.row.taskStepId).toBeNull();
+    expect(failure!.row.exitCode).toBe(-1);
+    expect(failure!.row.endedAt).toBeInstanceOf(Date);
+    expect(String(failure!.row.errorMessage)).toContain('requires a model');
   });
 
   it('enqueues nothing when the task turned the LLM summary off', async () => {

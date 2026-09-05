@@ -505,6 +505,50 @@ function notionalCostUsdSql() {
   ), 0)::double precision`;
 }
 
+/** Why the "What the agent did" panel is empty when it should not be.
+ *
+ *  The recap pass is best-effort end to end: a failed one leaves `task_steps.summary` NULL and
+ *  never touches the step machine, so the step reads as a clean success and the panel simply
+ *  does not render. Absence alone cannot tell "this step asked for no recap" from "the
+ *  summarizer errored", and the second case is a misconfigured CLI the user has to be told
+ *  about — a summary provider pointed at an unreachable endpoint fails every step of the task
+ *  in silence.
+ *
+ *  Decided here rather than in the browser for the same reason `modelIdentityBanner` is decided
+ *  at capture: this is where the evidence (exit code, end time, error text) is. The web gates
+ *  on the PRESENCE of this object and uses `message` only as the words inside the panel. */
+export interface StepSummaryFailure {
+  message: string;
+  /** Which CLI was asked to write the recap — `tasks.summary_cli_provider_id` when set, else
+   *  the step's own chain. Named because the fix is usually to change that provider. */
+  providerLabel: string | null;
+}
+
+/** Shape of the aggregated latest recap invocation. Dates arrive as strings via json_build_object. */
+interface LatestSummaryRun {
+  endedAt: string | null;
+  exitCode: number | null;
+  errorMessage: string | null;
+  providerLabel: string | null;
+}
+
+/** The same failure test `supersedeBlockingInvocation` uses: a non-zero exit, a NULL exit
+ *  (killed / orphaned), or any error text on a run that ended without a result. A run still in
+ *  flight (`endedAt` null) is not a failure — the recap may yet arrive. */
+function resolveSummaryFailure(run: LatestSummaryRun | null): StepSummaryFailure | null {
+  if (!run || run.endedAt == null) return null;
+  const errorText = run.errorMessage?.trim() ?? '';
+  const failed = run.exitCode == null || run.exitCode !== 0 || errorText.length > 0;
+  if (!failed) return null;
+  const message =
+    errorText.length > 0
+      ? errorText
+      : run.exitCode == null
+        ? 'The summary run was killed before it reported a result.'
+        : `The summary CLI exited with code ${run.exitCode}.`;
+  return { message, providerLabel: run.providerLabel };
+}
+
 /** Annotate each step with the count of non-superseded CLI invocations attached
  *  to it AND the summed token usage across those invocations. The count drives
  *  the inline-terminal toggle (hidden on steps that never spawned a CLI); the
@@ -520,7 +564,12 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
   taskId: string,
   steps: T[],
 ): Promise<
-  (T & { cliInvocationCount: number; attemptCount: number; tokenUsage: CliTokenUsage | null })[]
+  (T & {
+    cliInvocationCount: number;
+    attemptCount: number;
+    tokenUsage: CliTokenUsage | null;
+    summaryError: StepSummaryFailure | null;
+  })[]
 > {
   if (steps.length === 0) return [];
   const tu = schema.cliInvocations.tokenUsage;
@@ -530,6 +579,9 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     string | null
   >`coalesce(${schema.cliInvocations.taskStepId}, ${schema.cliInvocations.summaryForStepId})`;
   const ownInvocation = sql`${schema.cliInvocations.taskStepId} is not null`;
+  // The step's own recap pass. task_step_id IS NULL is what separates it from the step's
+  // real invocations, which share this group via the coalesce above.
+  const summaryInvocation = sql`${schema.cliInvocations.taskStepId} is null and ${schema.cliInvocations.summaryForStepId} is not null`;
   const rows = await db
     .select({
       stepId: attributedStepId,
@@ -546,6 +598,16 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       // Real dollars, decided by the shared rule (snapshot when the cost pass ran,
       // legacy metered + api_key filter otherwise).
       costUsd: realCostUsdSql(),
+      // The LATEST recap pass, whatever its outcome — not the latest FAILED one. A newer
+      // pass that ran is the answer about the current state of the panel even when it
+      // exited 0 and wrote nothing, and reporting an older round's error there would
+      // describe a run that has since been replaced.
+      latestSummaryRun: sql<LatestSummaryRun | null>`(array_agg(json_build_object(
+        'endedAt', ${schema.cliInvocations.endedAt},
+        'exitCode', ${schema.cliInvocations.exitCode},
+        'errorMessage', ${schema.cliInvocations.errorMessage},
+        'providerLabel', ${schema.cliProviders.label}
+      ) order by ${schema.cliInvocations.createdAt} desc) filter (where ${summaryInvocation}))[1]`,
     })
     .from(schema.cliInvocations)
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
@@ -556,7 +618,12 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
 
   const byStep = new Map<
     string,
-    { count: number; attemptCount: number; tokenUsage: CliTokenUsage | null }
+    {
+      count: number;
+      attemptCount: number;
+      tokenUsage: CliTokenUsage | null;
+      summaryError: StepSummaryFailure | null;
+    }
   >();
   for (const row of rows) {
     if (!row.stepId) continue;
@@ -581,6 +648,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       count: row.count,
       attemptCount: Number(row.attemptCount) || 0,
       tokenUsage,
+      summaryError: resolveSummaryFailure(row.latestSummaryRun),
     });
   }
   return steps.map((s) => {
@@ -590,6 +658,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       cliInvocationCount: stat?.count ?? 0,
       attemptCount: stat?.attemptCount ?? 0,
       tokenUsage: stat?.tokenUsage ?? null,
+      summaryError: stat?.summaryError ?? null,
     };
   });
 }

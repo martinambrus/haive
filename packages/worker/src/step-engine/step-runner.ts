@@ -2692,6 +2692,45 @@ async function maybeEnqueueStepSummary(
     logger.info({ stepId: stepDef.metadata.id, invocationId: invRow.id }, 'step summary enqueued');
   } catch (err) {
     logger.warn({ err, stepId: stepDef.metadata.id }, 'step summary enqueue failed (best-effort)');
+    await recordSummaryEnqueueFailure(db, params.taskId, current.id, err, logger);
+  }
+}
+
+/** A recap that dies BEFORE its invocation row exists leaves nothing behind at all — the
+ *  step reads as a clean success and the panel simply does not render, which is the same
+ *  picture as a step that asked for no recap. Observed on a provider whose model field was
+ *  blanked: `buildCliInvocation` threw out of `resolveTaskDispatch`, the catch above logged
+ *  it, and the only trace was a worker log line.
+ *
+ *  So write the row the dispatch never got to write, in the shape `handleCliExecJob`'s own
+ *  catch uses for a run that produced nothing (exit -1, ended, no start). It carries the
+ *  reason to the step card through the surface the completed-then-failed case already uses.
+ *  Provider and prompt are null/empty because dispatch is what decides them and it did not
+ *  get that far. Best-effort inside a best-effort pass: a failure here is logged and dropped,
+ *  never rethrown into the step machine. */
+async function recordSummaryEnqueueFailure(
+  db: Database,
+  taskId: string,
+  taskStepId: string,
+  err: unknown,
+  logger: StepContext['logger'],
+): Promise<void> {
+  try {
+    const now = new Date();
+    await db.insert(schema.cliInvocations).values({
+      taskId,
+      taskStepId: null,
+      summaryForStepId: taskStepId,
+      cliProviderId: null,
+      mode: 'cli',
+      prompt: '',
+      agentTitle: 'Step summary',
+      exitCode: -1,
+      errorMessage: err instanceof Error ? err.message : String(err),
+      endedAt: now,
+    });
+  } catch (writeErr) {
+    logger.warn({ err: writeErr, taskStepId }, 'could not record step summary enqueue failure');
   }
 }
 

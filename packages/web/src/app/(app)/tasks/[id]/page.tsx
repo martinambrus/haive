@@ -3718,7 +3718,7 @@ function StepCardImpl({
           <InfoSections sections={schema?.infoSections} persistPrefix={uiPrefix} />
         </>
       )}
-      {(step.summary ?? '').trim().length > 0 && (
+      {(step.summary ?? '').trim().length > 0 ? (
         <PersistedDetails
           persistKey={`${uiPrefix}:summary`}
           className="rounded-md border border-neutral-800 bg-neutral-950/60"
@@ -3729,6 +3729,39 @@ function StepCardImpl({
             <MarkdownView body={step.summary ?? ''} enhanced />
           </div>
         </PersistedDetails>
+      ) : (
+        /* The recap pass failed. Open by default and on its own persist key: a stored
+           collapse from the success panel must not hide the one state the user has to
+           act on, and the step itself looks fine, so nothing else on the card says so. */
+        step.summaryError && (
+          <PersistedDetails
+            persistKey={`${uiPrefix}:summary-error`}
+            defaultOpen
+            className="rounded-md border border-red-900/60 bg-red-950/30"
+            summaryClassName="cursor-pointer select-none px-3 py-2 text-sm text-red-300 marker:text-red-500 hover:bg-red-950/50"
+            summary={<span className="font-medium">What the agent did — recap failed</span>}
+          >
+            <div className="flex flex-col gap-2 border-t border-red-900/60 px-3 py-2">
+              <p className="text-xs text-red-200">
+                The step itself is unaffected — only the short recap
+                {step.summaryError.providerLabel ? (
+                  <>
+                    {' '}
+                    failed, on{' '}
+                    <span className="font-medium">{step.summaryError.providerLabel}</span>
+                  </>
+                ) : (
+                  ' failed'
+                )}
+                . Pick a different CLI under &ldquo;Summary CLI&rdquo; on the task, or turn the
+                recap off there.
+              </p>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-red-950/50 p-2 font-mono text-[11px] text-red-200">
+                {step.summaryError.message}
+              </pre>
+            </div>
+          </PersistedDetails>
+        )
       )}
 
       {step.status !== 'waiting_form' && (step.detectOutput !== null || step.output !== null) && (
