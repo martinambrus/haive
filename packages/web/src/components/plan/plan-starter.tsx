@@ -21,8 +21,14 @@ import {
  * Ordered by which one most people need, not by which shipped first. A repo with
  * a knowledge base can be mined; everything else — a blank repo, a project that
  * does not exist yet, a plan somebody already wrote down — goes through the
- * brief-and-files flow, which is why that one is primary and Markdown import is
- * a case of it (attach one `.md`) rather than its own control.
+ * brief-and-files flow, and Markdown import is a case of it (attach one `.md`)
+ * rather than its own control.
+ *
+ * All three are primary buttons: ORDER carries the ranking, the variant does
+ * not. Each is the only route for the situation it serves, so styling two of
+ * them as secondary read as "these are the lesser options" when what was meant
+ * was "these apply to fewer repos". The knowledge-base one is the exception
+ * that proves it — secondary while its precondition is merely unconfirmed.
  *
  * The interesting part is the ORDER of the create. Every other create-then-upload
  * flow in the app enqueues first and uploads afterwards, which is safe there
@@ -355,9 +361,13 @@ export function PlanStarter({
           <div className="flex flex-col gap-1.5 border-t border-neutral-800 pt-3">
             <p className="text-xs font-medium text-neutral-400">Or build from this repository</p>
             <div>
+              {/* Primary only when the KB is KNOWN to exist. `null` means the
+                  check has not answered; the offer still renders (fail-open),
+                  but emphasising a route that may have nothing to mine is a
+                  different promise from showing it. */}
               <Button
                 size="sm"
-                variant="secondary"
+                variant={onboarded === true ? 'primary' : 'secondary'}
                 disabled={busy}
                 onClick={() => void buildFromRepo()}
               >
@@ -374,12 +384,7 @@ export function PlanStarter({
             placeholder="Or name the project to start by hand"
             className="w-72"
           />
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={busy || !rootTitle.trim()}
-            onClick={() => void createRoot()}
-          >
+          <Button size="sm" disabled={busy || !rootTitle.trim()} onClick={() => void createRoot()}>
             Create
           </Button>
         </div>
