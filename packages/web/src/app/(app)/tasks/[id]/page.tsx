@@ -30,7 +30,7 @@ import {
 } from '@/lib/api-client';
 import { Badge, Button, Card, Input } from '@/components/ui';
 import { CliPickerGrid } from '@/components/cli-picker-grid';
-import { ArrowLeft, CircleDot, Route, FolderGit2 } from 'lucide-react';
+import { ArrowLeft, CircleDot, Pencil, Route, FolderGit2 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
@@ -1508,11 +1508,11 @@ export default function TaskDetailPage() {
         </div>
       )}
       <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
+        <div className="flex min-w-0 flex-col gap-1">
           <Link href={backHref} className="text-xs text-indigo-400 underline">
             {backLabel}
           </Link>
-          <div ref={titleRowRef} className="flex items-center gap-2">
+          <div ref={titleRowRef} className="flex flex-wrap items-center gap-2">
             {renaming ? (
               <>
                 <Input
@@ -1540,45 +1540,90 @@ export default function TaskDetailPage() {
               </>
             ) : (
               <>
-                <TaskVote taskId={task.id} score={task.voteScore ?? 0} />
-                <h1 className="text-2xl font-bold text-neutral-50">{task.title}</h1>
-                {/* Paused, or queued behind a capacity cap: the task row still says `running`
-                    in both cases, so show the real state instead (same precedence as the
-                    tasks listing — paused wins, and the server suppresses slotWait while it
-                    is set, so the two can never both be true). */}
-                {task.pausedAt ? (
-                  <Badge variant="warning">paused</Badge>
-                ) : task.slotWait ? (
-                  <SlotWaitBadge slotWait={task.slotWait} />
-                ) : (
-                  <Badge variant={taskStatusVariant(task.status)}>{task.status}</Badge>
-                )}
-                <Badge>{task.type}</Badge>
-                {task.executionPath && (
-                  <Badge variant={executionPathVariant(task.executionPath)}>
-                    {EXECUTION_PATH_LABELS[task.executionPath]}
-                  </Badge>
-                )}
-                {task.repository && <Badge variant="info">repo: {task.repository.name}</Badge>}
-                {/* Which model ANSWERED, not which one is configured — captured by the
+                <TaskVote taskId={task.id} score={task.voteScore ?? 0} className="shrink-0" />
+                {/* Same affordance as the plan detail panel's node title: a pencil in front
+                    of the name rather than a labelled button after it, so the two title
+                    editors read the same way. Bare button, not <Button> — a chrome-less icon
+                    beside a heading is what the plan panel established. */}
+                <button
+                  type="button"
+                  title="Rename"
+                  onClick={startRename}
+                  className="shrink-0 text-neutral-500 hover:text-neutral-200"
+                >
+                  <Pencil className="h-4 w-4" />
+                  <span className="sr-only">Rename</span>
+                </button>
+                {/* The one elastic item in this row. Every sibling is a fixed-size label, so
+                    they carry shrink-0 and the title absorbs the whole squeeze — otherwise
+                    flex shrinks the badges too and a rounded-full pill renders its text over
+                    two lines. `title` keeps the full string reachable on hover, and the
+                    sticky strip above shows it as well.
+
+                    The floor is what stops that trade going the other way: with shrink-0
+                    siblings and a min-width of 0, MEASURED at a 1280px viewport this title
+                    was squeezed to 1px — the badges fit and the title was simply gone. The
+                    row wraps instead, so a viewport too narrow for both pushes badges onto a
+                    second line rather than erasing what the page is about. */}
+                <h1
+                  className="min-w-[18rem] flex-1 truncate text-2xl font-bold text-neutral-50"
+                  title={task.title}
+                >
+                  {task.title}
+                </h1>
+                {/* One flex ITEM, not seven. Wrapping is all-or-nothing that way: the group
+                    either sits to the right of the title or drops to its own line intact,
+                    instead of splitting mid-run with two badges stranded below the rest.
+                    shrink-0 is what makes that decision all-or-nothing; max-w-full is what
+                    stops it becoming a horizontal overflow once the group is alone on its
+                    line and still too wide, and flex-wrap then lets the badges stack inside
+                    it. So the group never squashes a pill, and a future sixth badge wraps
+                    within the cluster rather than off the page. */}
+                <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
+                  {/* Paused, or queued behind a capacity cap: the task row still says
+                      `running` in both cases, so show the real state instead (same precedence
+                      as the tasks listing — paused wins, and the server suppresses slotWait
+                      while it is set, so the two can never both be true). */}
+                  {task.pausedAt ? (
+                    <Badge variant="warning" className="shrink-0">
+                      paused
+                    </Badge>
+                  ) : task.slotWait ? (
+                    <SlotWaitBadge slotWait={task.slotWait} className="shrink-0" />
+                  ) : (
+                    <Badge variant={taskStatusVariant(task.status)} className="shrink-0">
+                      {task.status}
+                    </Badge>
+                  )}
+                  <Badge className="shrink-0">{task.type}</Badge>
+                  {task.executionPath && (
+                    <Badge variant={executionPathVariant(task.executionPath)} className="shrink-0">
+                      {EXECUTION_PATH_LABELS[task.executionPath]}
+                    </Badge>
+                  )}
+                  {task.repository && (
+                    <Badge variant="info" className="shrink-0">
+                      repo: {task.repository.name}
+                    </Badge>
+                  )}
+                  {/* Which model ANSWERED, not which one is configured — captured by the
                     00-model-health canary from the CLI's own stream. Shown only when a CLI
                     actually reported one; codex and amp report none, and an empty badge
                     would read as "no model" rather than "this CLI does not say". */}
-                {task.modelIdentity?.served && (
-                  <Badge
-                    variant={task.modelIdentity.match === 'differs' ? 'warning' : 'info'}
-                    title={
-                      task.modelIdentity.match === 'differs'
-                        ? `Configured ${task.modelIdentity.requested ?? 'unknown'}, but ${task.modelIdentity.served} answered.`
-                        : `Requested ${task.modelIdentity.requested ?? 'unknown'} · reported by ${task.modelIdentity.source ?? 'unknown'}`
-                    }
-                  >
-                    model: {task.modelIdentity.served}
-                  </Badge>
-                )}
-                <Button size="sm" variant="secondary" onClick={startRename}>
-                  Rename
-                </Button>
+                  {task.modelIdentity?.served && (
+                    <Badge
+                      variant={task.modelIdentity.match === 'differs' ? 'warning' : 'info'}
+                      className="shrink-0"
+                      title={
+                        task.modelIdentity.match === 'differs'
+                          ? `Configured ${task.modelIdentity.requested ?? 'unknown'}, but ${task.modelIdentity.served} answered.`
+                          : `Requested ${task.modelIdentity.requested ?? 'unknown'} · reported by ${task.modelIdentity.source ?? 'unknown'}`
+                      }
+                    >
+                      model: {task.modelIdentity.served}
+                    </Badge>
+                  )}
+                </div>
               </>
             )}
           </div>

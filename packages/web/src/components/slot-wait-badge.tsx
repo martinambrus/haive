@@ -19,13 +19,14 @@ const STALE_HINT =
  * was indistinguishable from "waiting in line" on the tasks listing. The wait duration
  * re-renders on the caller's poll, so it ticks without a timer of its own.
  */
-export function SlotWaitBadge({ slotWait }: { slotWait: SlotWait }) {
+export function SlotWaitBadge({ slotWait, className }: { slotWait: SlotWait; className?: string }) {
   const sinceMs = slotWait.since ? new Date(slotWait.since).getTime() : null;
   const waitedMs = sinceMs === null || Number.isNaN(sinceMs) ? null : Date.now() - sinceMs;
   const waited = waitedMs !== null && waitedMs > 0 ? ` · ${formatDuration(waitedMs)}` : '';
   return (
     <Badge
       variant={slotWait.stale ? 'error' : 'warning'}
+      className={className}
       title={
         slotWait.stale
           ? `${slotWait.message ?? 'Queued for a slot'}\n\n${STALE_HINT}`
