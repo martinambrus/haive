@@ -1467,7 +1467,20 @@ export default function TaskDetailPage() {
               {formatVoteScore(task.voteScore ?? 0)}
             </span>
           )}
-          <p className="min-w-0 truncate text-sm font-semibold text-indigo-300">{task.title}</p>
+          {/* Capped, because the title is the only elastic item on the row and without a
+              ceiling it takes its full natural width — MEASURED at 1920px a 62-character
+              title occupied 565px, which left the badge run ending 12px short of the usage
+              meters and squeezed the step badge to 295px of its 244. The cap is inert wherever
+              the row is already tight (identical layout at 1280px), so it costs nothing there;
+              where there IS room it hands the slack to the two ml-auto chips, which is what
+              finally puts air on both sides of the meters. Full string stays on hover and in
+              the page header one scroll up. */}
+          <p
+            className="min-w-0 max-w-[20rem] truncate text-sm font-semibold text-indigo-300"
+            title={task.title}
+          >
+            {task.title}
+          </p>
           {/* The strip carries no status badge, so a held task would otherwise look like it
               is working once the page is scrolled past the header. */}
           {task.pausedAt && (
