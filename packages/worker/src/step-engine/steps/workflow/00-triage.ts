@@ -26,6 +26,26 @@ interface TriageDetect {
   /** Deterministic baseline used as the recommendation when the LLM can't run. */
   heuristicPath: ExecutionPath;
   heuristicReason: string;
+  /** Repository this task runs against, so the note below can link to its plan.
+   *  Null for a task with no repository, where there is no plan to link to. */
+  repositoryId: string | null;
+  /** True when a plan chat is what proposed this task. Suppresses the note
+   *  entirely: without it the chat says "run these as one task", triage says
+   *  "these should be plan nodes", and the user bounces between the two — on
+   *  exactly the tasks both heuristics agree are large. */
+  fromPlanChat: boolean;
+}
+
+/** The triage agent's optional aside: this looks less like one task than like
+ *  several pieces of a project, which the plan canvas is for.
+ *
+ *  Optional at every layer. The heuristic baseline emits NOTHING rather than
+ *  `should_plan: false` — it classifies on keywords and description length and
+ *  has no basis for the judgement, and a fabricated negative reads as a check
+ *  that was made and passed. */
+export interface PlanCandidate {
+  reason: string;
+  parts: string[];
 }
 
 interface TriageApply {
@@ -64,6 +84,19 @@ const TRIAGE_RULES = [
   '',
   'Emit ONE JSON object inside a ```json fenced code block, and nothing else:',
   '{ "recommended": "quick_bugfix" | "plan_tasklist" | "full_workflow", "rationale": "<one or two sentences>", "confidence": "low" | "medium" | "high" }',
+  '',
+  'OPTIONALLY add a "plan_candidate" key when this reads less like one task than like',
+  'several separate pieces of the project that different people could take independently —',
+  'not merely a big task, but distinct capabilities that will each outlive this piece of',
+  'work. The project keeps a PLAN (a durable tree of what it is meant to be), and those',
+  'belong there as nodes rather than inside one task description.',
+  '',
+  '{ "plan_candidate": { "reason": "<one sentence: why these are separate>", "parts": ["<each piece, briefly>"] } }',
+  '',
+  'This never blocks anything — the user is shown it as a note beside their own choice and',
+  'may ignore it. OMIT the key entirely when the task is one coherent piece of work, which',
+  'is the common case. Do not add it merely because the task is large: a large task with one',
+  'goal is what "full_workflow" is for.',
 ] as const;
 
 /** Deterministic baseline recommendation from the task title/description + the
@@ -104,7 +137,7 @@ export function heuristicTriage(
  *  parsed object) into a valid recommendation, or null when unusable. */
 export function parseTriageOutput(
   raw: unknown,
-): { recommended: ExecutionPath; rationale: string } | null {
+): { recommended: ExecutionPath; rationale: string; planCandidate: PlanCandidate | null } | null {
   if (raw === null || raw === undefined) return null;
   let obj: unknown = raw;
   if (typeof raw === 'string') {
@@ -118,26 +151,52 @@ export function parseTriageOutput(
   return {
     recommended: rec as ExecutionPath,
     rationale: typeof o.rationale === 'string' ? o.rationale : '',
+    planCandidate: parsePlanCandidate(o.plan_candidate),
   };
+}
+
+/** The aside, when the agent made one and it says something. A candidate with no
+ *  parts is not a suggestion the user can act on, so it is treated as absent
+ *  rather than rendered as an empty list. */
+export function parsePlanCandidate(raw: unknown): PlanCandidate | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const parts = Array.isArray(o.parts)
+    ? o.parts.filter((p): p is string => typeof p === 'string' && p.trim() !== '').slice(0, 12)
+    : [];
+  const reason = typeof o.reason === 'string' ? o.reason.trim() : '';
+  if (parts.length < 2 || !reason) return null;
+  return { reason, parts };
 }
 
 /** Resolve the effective recommendation: the LLM's when usable, else the heuristic. */
 export function resolveTriage(
   llmOutput: unknown,
   detected: TriageDetect,
-): { recommended: ExecutionPath; rationale: string; source: 'llm' | 'heuristic' } {
+): {
+  recommended: ExecutionPath;
+  rationale: string;
+  source: 'llm' | 'heuristic';
+  planCandidate: PlanCandidate | null;
+} {
   const parsed = parseTriageOutput(llmOutput);
   if (parsed) {
     return {
       recommended: parsed.recommended,
       rationale: parsed.rationale || detected.heuristicReason,
       source: 'llm',
+      // Suppressed for a task a plan chat proposed: it was decomposed there
+      // already, and telling the user to go back and decompose it is a loop.
+      planCandidate: detected.fromPlanChat ? null : parsed.planCandidate,
     };
   }
   return {
     recommended: detected.heuristicPath,
     rationale: detected.heuristicReason,
     source: 'heuristic',
+    // The heuristic classifies on keywords and length; it cannot tell separate
+    // capabilities from one big one, so it says nothing rather than "no".
+    planCandidate: null,
   };
 }
 
@@ -166,13 +225,20 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
   async detect(ctx: StepContext): Promise<TriageDetect> {
     const row = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { title: true, description: true, metadata: true },
+      columns: { title: true, description: true, metadata: true, repositoryId: true },
     });
     const title = row?.title ?? '';
     const description = row?.description ?? '';
-    const category = (row?.metadata as { category?: string } | null)?.category ?? null;
-    const h = heuristicTriage(title, description, category);
-    return { title, description, heuristicPath: h.path, heuristicReason: h.reason };
+    const meta = (row?.metadata ?? {}) as { category?: string; fromPlanChat?: boolean };
+    const h = heuristicTriage(title, description, meta.category ?? null);
+    return {
+      title,
+      description,
+      heuristicPath: h.path,
+      heuristicReason: h.reason,
+      repositoryId: row?.repositoryId ?? null,
+      fromPlanChat: meta.fromPlanChat === true,
+    };
   },
 
   llm: {
@@ -226,6 +292,40 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
       title: 'Choose execution path',
       description:
         'A quick assessment recommends a path. Pick the one you want — you can choose a lighter or heavier path than recommended.',
+      // A note, deliberately NOT a fourth radio option: the radio group means
+      // "execution path", and "put this in the plan instead" is not one of them.
+      // Mixing the two would make one control answer two questions. Open by
+      // default because a note nobody expands is a note nobody reads, and this
+      // one is only ever emitted when the agent thought it mattered.
+      ...(r.planCandidate
+        ? {
+            infoSections: [
+              {
+                title: 'This looks like several separate pieces',
+                preview: `${r.planCandidate.parts.length} parts`,
+                body: [
+                  r.planCandidate.reason,
+                  '',
+                  ...r.planCandidate.parts.map((part) => `- ${part}`),
+                  '',
+                  'Each of these outlives this piece of work, so they may belong in the project',
+                  "plan as nodes rather than inside one task's description. Adding them there lets",
+                  'you run them independently and keeps a record of what is left.',
+                  '',
+                  detected.repositoryId
+                    ? `Open the plan: /repos/${detected.repositoryId}/plan`
+                    : '',
+                  '',
+                  'You can also ignore this entirely and carry on with the task as it stands —',
+                  'nothing here blocks it, and the path you pick below is what runs.',
+                ]
+                  .filter((line, i, all) => line !== '' || all[i - 1] !== '')
+                  .join('\n'),
+                defaultOpen: true,
+              },
+            ],
+          }
+        : {}),
       fields: [
         {
           type: 'radio',

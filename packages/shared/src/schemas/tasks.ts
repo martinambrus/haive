@@ -139,6 +139,12 @@ export const createTaskRequestSchema = z
      *  every named node on completion, `touched` records the task as affecting
      *  them and greens nothing. Omitted resolves per `resolvePlanNodeLinks`. */
     planNodeRole: planNodeTaskRoleSchema.optional(),
+    /** This task came from a plan chat's own proposal. Stored in
+     *  tasks.metadata.fromPlanChat and read by 00-triage, which then withholds
+     *  its "this looks like several pieces" note — the work was decomposed in
+     *  the plan already, and sending the user back to decompose it again is a
+     *  loop between two suggestions that both fire on large work. */
+    fromPlanChat: z.boolean().optional(),
     /** Start work on a plan node whose prerequisites are not met yet.
      *
      *  Blocking is derived from `depends_on` edges, and a plan can contain

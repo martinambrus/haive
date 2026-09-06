@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   heuristicTriage,
+  parsePlanCandidate,
   parseTriageOutput,
   resolveBroadAudit,
   resolveTriage,
@@ -67,6 +68,8 @@ describe('resolveTriage', () => {
     description: 'd',
     heuristicPath: 'plan_tasklist' as const,
     heuristicReason: 'because',
+    repositoryId: null,
+    fromPlanChat: false,
   };
 
   it('uses the LLM recommendation when valid', () => {
@@ -150,5 +153,86 @@ describe('resolveBroadAudit', () => {
     expect(resolveBroadAudit('plan_tasklist', undefined)).toBe(true);
     expect(resolveBroadAudit('plan_tasklist', false)).toBe(false);
     expect(resolveBroadAudit('full_workflow', true)).toBe(true);
+  });
+});
+
+describe('parsePlanCandidate', () => {
+  const good = { reason: 'three separate capabilities', parts: ['comms', 'ux', 'workflow'] };
+
+  it('accepts a candidate with a reason and two or more parts', () => {
+    expect(parsePlanCandidate(good)).toEqual(good);
+  });
+
+  it('rejects one with a single part — that is one task, not several', () => {
+    expect(parsePlanCandidate({ reason: 'r', parts: ['just this'] })).toBeNull();
+  });
+
+  it('rejects one with no reason to give the user', () => {
+    expect(parsePlanCandidate({ parts: ['a', 'b'] })).toBeNull();
+    expect(parsePlanCandidate({ reason: '   ', parts: ['a', 'b'] })).toBeNull();
+  });
+
+  it('drops blank parts rather than rendering empty bullets', () => {
+    expect(parsePlanCandidate({ reason: 'r', parts: ['a', '', '  ', 'b'] })?.parts).toEqual([
+      'a',
+      'b',
+    ]);
+  });
+
+  it('treats anything that is not a candidate as absent', () => {
+    expect(parsePlanCandidate(undefined)).toBeNull();
+    expect(parsePlanCandidate(null)).toBeNull();
+    expect(parsePlanCandidate('should be a plan')).toBeNull();
+    expect(parsePlanCandidate({ reason: 'r', parts: 'a, b' })).toBeNull();
+  });
+});
+
+describe('the plan-candidate note', () => {
+  const base = {
+    title: 't',
+    description: 'd',
+    heuristicPath: 'plan_tasklist' as const,
+    heuristicReason: 'because',
+    repositoryId: 'repo-1',
+    fromPlanChat: false,
+  };
+  const withCandidate = JSON.stringify({
+    recommended: 'full_workflow',
+    rationale: 'big',
+    plan_candidate: { reason: 'three separate capabilities', parts: ['comms', 'ux', 'workflow'] },
+  });
+
+  it('carries the candidate through when the agent emitted one', () => {
+    expect(resolveTriage(withCandidate, base).planCandidate?.parts).toHaveLength(3);
+  });
+
+  it('is SUPPRESSED for a task a plan chat proposed — else the two bounce forever', () => {
+    expect(resolveTriage(withCandidate, { ...base, fromPlanChat: true }).planCandidate).toBeNull();
+  });
+
+  it('is absent, not false, on the heuristic fallback', () => {
+    // The heuristic classifies on keywords and length. It cannot tell separate
+    // capabilities from one large one, and a fabricated "no" reads as a check
+    // that was made and passed.
+    expect(resolveTriage(null, base).planCandidate).toBeNull();
+    expect(resolveTriage('unparseable', base).source).toBe('heuristic');
+  });
+
+  it('renders as an info section beside the radios, never as a fourth option', () => {
+    const form = triageStep.form!({} as never, base, withCandidate)!;
+    const paths = form.fields.find((f) => f.id === 'path');
+    expect(paths && 'options' in paths ? paths.options : []).toHaveLength(3);
+    expect(form.infoSections?.[0]?.title).toContain('several separate pieces');
+    expect(form.infoSections?.[0]?.body).toContain('/repos/repo-1/plan');
+    expect(form.infoSections?.[0]?.body).toContain('ignore this entirely');
+  });
+
+  it('renders no info section at all when the agent offered nothing', () => {
+    const form = triageStep.form!(
+      {} as never,
+      base,
+      JSON.stringify({ recommended: 'quick_bugfix', rationale: 'small' }),
+    )!;
+    expect(form.infoSections).toBeUndefined();
   });
 });

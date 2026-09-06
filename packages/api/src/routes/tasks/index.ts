@@ -535,6 +535,7 @@ taskRoutes.post('/', async (c) => {
 
   const metadata: Record<string, unknown> = {};
   if (body.isBugFix) metadata.category = 'bugfix';
+  if (body.fromPlanChat) metadata.fromPlanChat = true;
   if (body.feature) metadata.feature = body.feature;
   if (body.affectedClients?.length) metadata.affectedClients = body.affectedClients;
 
