@@ -257,6 +257,12 @@ export class TerminalSessionManager {
       return {};
     });
 
+    // Task shells start in the git worktree (see the exec below); resolved here
+    // as well so the container seed can mark that dir trusted before the first
+    // attach renders claude's folder-trust dialog.
+    const ptyWorkingDir =
+      scope === 'task' ? await resolveTaskSandboxWorkdir(this.db, scopeId) : SANDBOX_WORKDIR;
+
     const ensureKey = terminalSessionKey(req.userId, scope, scopeId, providerId);
     let ensurePromise = this.ensureInFlight.get(ensureKey);
     if (!ensurePromise) {
@@ -270,6 +276,7 @@ export class TerminalSessionManager {
         repoMount,
         mcpServers,
         providerEnv,
+        trustedWorkdirs: [SANDBOX_WORKDIR, ptyWorkingDir],
       }).finally(() => {
         this.ensureInFlight.delete(ensureKey);
       });
@@ -318,8 +325,6 @@ export class TerminalSessionManager {
     // mounted (so the worktree's `.git` file resolves and git works), only the cwd
     // is the worktree. Falls back to the repo root when there's no worktree (skipped
     // 01-worktree-setup). Repo-scope shells stay at the repo root.
-    const ptyWorkingDir =
-      scope === 'task' ? await resolveTaskSandboxWorkdir(this.db, scopeId) : SANDBOX_WORKDIR;
     const ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
       Cmd: tmuxCommand,
       AttachStdin: true,

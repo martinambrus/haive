@@ -117,6 +117,10 @@ export interface EnsureShellContainerOpts {
   /** MCP servers configured for this user/task. Written into the container
    *  at /haive/mcp.json before the first attach so claude/zai pick it up. */
   mcpServers: McpServerSpec[];
+  /** Directories the interactive shell can start in (repo root + task
+   *  worktree). Seeded as trusted for claude-family CLIs so a fresh container
+   *  doesn't re-ask the folder-trust question every reconnect. */
+  trustedWorkdirs?: string[];
   /** Extra env vars (provider envVars + decrypted secrets + git identity)
    *  baked into the container at create time so interactive `claude` /
    *  `codex` invocations in the shell see the same env the orchestrator
@@ -143,8 +147,18 @@ export interface EnsureShellContainerResult {
 export async function ensureShellContainer(
   opts: EnsureShellContainerOpts,
 ): Promise<EnsureShellContainerResult> {
-  const { db, docker, userId, scope, scopeId, providerId, repoMount, mcpServers, providerEnv } =
-    opts;
+  const {
+    db,
+    docker,
+    userId,
+    scope,
+    scopeId,
+    providerId,
+    repoMount,
+    mcpServers,
+    providerEnv,
+    trustedWorkdirs,
+  } = opts;
 
   const provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, providerId),
@@ -334,6 +348,13 @@ export async function ensureShellContainer(
     });
   }
 
+  await seedClaudeInteractiveState(docker, containerName, provider.name, [
+    ...(repoMount ? [repoMount.target] : []),
+    ...(trustedWorkdirs ?? []),
+  ]).catch((err) => {
+    log.warn({ err, containerName }, 'claude first-run seed failed — terminal may ask to log in');
+  });
+
   // Best-effort MCP injection: if it fails, the user can still use the
   // shell — only CLI commands that need MCP would be affected.
   await writeMcpConfigInto(docker, containerName, provider.name, mcpServers).catch((err) => {
@@ -436,6 +457,58 @@ async function chownWorkdir(docker: Docker, containerName: string, target: strin
   if (info.ExitCode !== 0) {
     throw new Error(`chown exited ${info.ExitCode}`);
   }
+}
+
+/**
+ * Seed the claude-family first-run state so an interactive shell starts logged in.
+ *
+ * The container already carries working credentials (CLAUDE_CODE_OAUTH_TOKEN /
+ * the mounted auth volume) and `claude -p` runs fine on them — but INTERACTIVE
+ * claude keys its first-run flow on `~/.claude.json` alone. With no
+ * `hasCompletedOnboarding` it renders the theme picker and then "Select login
+ * method" with an OAuth URL, i.e. it asks a logged-in user to log in again.
+ * MEASURED in a live shell container: seeding the flag alone takes the same
+ * binary straight past both screens.
+ *
+ * The sandbox-core image bakes that seed (sandbox-image/Dockerfile), so this is
+ * a no-op there. A COMPOSED image built on a repo's env-template inherits the
+ * template's own base instead — its /home/node is created fresh by the
+ * composer's useradd layer — so on every env-replicated repo the file is
+ * absent and the Terminal tab asks for a login every time the container is
+ * respawned (2 min after the last disconnect).
+ *
+ * Trust is seeded for the dirs the shell can start in for the same reason: the
+ * dialog is per-cwd, lives in the same container-local file, and Haive already
+ * runs the same CLI unattended against that exact tree.
+ *
+ * A MERGE, never a write: the stock base ships the file and the CLI keeps real
+ * state in it. Only ever fills in what is missing.
+ */
+async function seedClaudeInteractiveState(
+  docker: Docker,
+  containerName: string,
+  cliName: CliProviderRecord['name'],
+  workdirs: string[],
+): Promise<void> {
+  if (getCliProviderMetadata(cliName).defaultExecutable !== 'claude') return;
+  const targetPath = `${SANDBOX_USER_HOME}/.claude.json`;
+  const dirs = [...new Set(workdirs.filter((d) => d.length > 0))];
+  const script = [
+    'const fs = require("fs");',
+    `const p = ${JSON.stringify(targetPath)};`,
+    `const dirs = ${JSON.stringify(dirs)};`,
+    'let cur = {};',
+    'try { cur = JSON.parse(fs.readFileSync(p, "utf8")) || {}; } catch (err) { cur = {}; }',
+    'cur.hasCompletedOnboarding = true;',
+    'if (!cur.theme) cur.theme = "dark";',
+    'cur.projects = cur.projects || {};',
+    'for (const d of dirs) {',
+    '  cur.projects[d] = { ...(cur.projects[d] || {}), hasTrustDialogAccepted: true };',
+    '}',
+    'fs.writeFileSync(p, JSON.stringify(cur, null, 2));',
+  ].join('\n');
+  const code = await execDrain(docker, containerName, ['node', '-e', script]);
+  if (code !== 0) throw new Error(`claude first-run seed exited ${code}`);
 }
 
 /**
