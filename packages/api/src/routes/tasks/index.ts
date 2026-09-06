@@ -581,6 +581,12 @@ taskRoutes.post('/', async (c) => {
       cliProviderId: body.cliProviderId ?? null,
       summaryCliProviderId: body.summaryCliProviderId ?? null,
       summaryLlmEnabled: body.summaryLlmEnabled ?? true,
+      // Presence, not value: naming the field states a choice, and an explicit null
+      // ("none" / "inherit") is exactly the choice the FK column cannot express. The
+      // New Task form always names all three; every other task spawner names none.
+      cliChoiceRecorded: body.cliProviderId !== undefined,
+      summaryCliChoiceRecorded:
+        body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined,
       dbUploadId: body.dbUploadId ?? null,
       simplifyCode: body.simplifyCode ?? false,
       adversarialQaLevel:
@@ -667,27 +673,66 @@ taskRoutes.get('/feature-suggestions', async (c) => {
   return c.json({ suggestions: rows.map((r) => r.feature) });
 });
 
-// Preselect the New Task form's CLI dropdown from this repo's history: the
-// cli_provider_id of the most-recent task on THIS repo that picked one. That
-// column is effectively the step-0 CLI (resolvePreferredCli falls back to
-// tasks.cli_provider_id), i.e. "the CLI used on this repo last". User-scoped
-// like its siblings. Static path — must stay ABOVE '/:id' so it is not
-// captured as a task id.
+// Preselect the New Task form's CLI dropdowns from this repo's history. Two
+// different questions, so three answers:
+//
+//   cliProviderId — the provider this repo last actually RAN on (most recent
+//     non-null cli_provider_id). The plan chat and the merge-conflict picker
+//     render it as "the CLI that will run", so it must keep matching
+//     resolveProvider's own fallback in routes/plan.ts. Unchanged.
+//   cliChoice / summaryChoice — what the user last CHOSE in each dropdown.
+//     Not the same thing: "(none)" and the summary dropdown's "(inherit)" are
+//     choices a NULL FK cannot express, which is why neither used to survive to
+//     the next task. cli_choice_recorded / summary_cli_choice_recorded carry that
+//     bit. Ordering flag-first while the legacy predicate stays in the WHERE is
+//     what lets rows written before those columns existed answer exactly as they
+//     do today, so the columns need no backfill.
+//
+// User-scoped like its siblings. Static path — must stay ABOVE '/:id' so it is
+// not captured as a task id.
 taskRoutes.get('/last-cli', async (c) => {
   const userId = c.get('userId');
   const repositoryId = c.req.query('repositoryId')?.trim();
-  if (!repositoryId) return c.json({ cliProviderId: null });
+  if (!repositoryId) return c.json({ cliProviderId: null, cliChoice: null, summaryChoice: null });
   const db = getDb();
-  const row = await db.query.tasks.findFirst({
-    where: and(
-      eq(schema.tasks.userId, userId),
-      eq(schema.tasks.repositoryId, repositoryId),
-      isNotNull(schema.tasks.cliProviderId),
-    ),
-    orderBy: [desc(schema.tasks.createdAt)],
-    columns: { cliProviderId: true },
+  const scope = and(eq(schema.tasks.userId, userId), eq(schema.tasks.repositoryId, repositoryId));
+  const [lastRun, cliChoice, summaryChoice] = await Promise.all([
+    db.query.tasks.findFirst({
+      where: and(scope, isNotNull(schema.tasks.cliProviderId)),
+      orderBy: [desc(schema.tasks.createdAt)],
+      columns: { cliProviderId: true },
+    }),
+    db.query.tasks.findFirst({
+      where: and(
+        scope,
+        or(eq(schema.tasks.cliChoiceRecorded, true), isNotNull(schema.tasks.cliProviderId)),
+      ),
+      orderBy: [desc(schema.tasks.cliChoiceRecorded), desc(schema.tasks.createdAt)],
+      columns: { cliProviderId: true },
+    }),
+    db.query.tasks.findFirst({
+      where: and(
+        scope,
+        or(
+          eq(schema.tasks.summaryCliChoiceRecorded, true),
+          isNotNull(schema.tasks.summaryCliProviderId),
+          eq(schema.tasks.summaryLlmEnabled, false),
+        ),
+      ),
+      orderBy: [desc(schema.tasks.summaryCliChoiceRecorded), desc(schema.tasks.createdAt)],
+      columns: { summaryCliProviderId: true, summaryLlmEnabled: true },
+    }),
+  ]);
+  return c.json({
+    cliProviderId: lastRun?.cliProviderId ?? null,
+    cliChoice: cliChoice ? { providerId: cliChoice.cliProviderId } : null,
+    summaryChoice: summaryChoice
+      ? {
+          providerId: summaryChoice.summaryCliProviderId,
+          llmEnabled: summaryChoice.summaryLlmEnabled,
+        }
+      : null,
   });
-  return c.json({ cliProviderId: row?.cliProviderId ?? null });
 });
 
 // Per-repo estimation-accuracy dashboard (task-time estimation v2.4). Completed workflow

@@ -6,6 +6,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Lock, Unlock } from 'lucide-react';
 import { usePageTitle } from '@/lib/use-page-title';
 import { taskOrigin, rememberTaskOrigin } from '@/lib/task-origin';
+import {
+  resolveCliChoiceValue,
+  resolveSummaryChoiceValue,
+  SUMMARY_CLI_OFF,
+  type LastCliChoice,
+  type LastSummaryCliChoice,
+} from '@/lib/last-cli-choice';
 import type { PlanNodeTaskRole, PlanTaskProposal } from '@haive/shared';
 import { describePlanNodesForTask } from '@haive/shared/plan-describe';
 import { taskProposal } from '@/components/plan/plan-chat-turn';
@@ -36,9 +43,6 @@ import {
 } from '@/components/ui';
 
 const DUMP_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
-
-/** Off sentinel for the summary-CLI select; no uuid can collide with it. */
-const SUMMARY_CLI_OFF = 'off';
 
 // Chunked upload of a DB dump (mirrors the repo archive upload). Returns the
 // dbUploadId to attach to the task; the dump is imported + deleted later by the
@@ -335,21 +339,25 @@ export default function NewTaskPage() {
     };
   }, [planNodeIds, repositoryId, loadChatProposal]);
 
-  // QOL: preselect the CLI dropdown from this repo's last-used CLI (the
-  // cli_provider_id of the most-recent task on this repo). Only sets when that
-  // provider still exists in the loaded list, so an empty/stale result never
-  // wipes a manual pick. Waits for `providers` so the membership check is valid.
+  // QOL: preselect both CLI dropdowns from what this repo's last task CHOSE.
+  // Includes the choices a NULL fk cannot express — "(none)" on the main dropdown
+  // and "(inherit)"/"(off)" on the summary one — which is what the server's
+  // cli_choice_recorded / summary_cli_choice_recorded flags are for. A repo with no
+  // recorded choice resolves to the default, so switching repositories never carries
+  // the previous one's pick over. Waits for `providers` so a provider deleted since
+  // that task falls back instead of selecting a dead option.
   useEffect(() => {
     if (!repositoryId || !providers) return;
     let cancelled = false;
     void api
-      .get<{ cliProviderId: string | null }>(
+      .get<{ cliChoice: LastCliChoice; summaryChoice: LastSummaryCliChoice }>(
         `/tasks/last-cli?repositoryId=${encodeURIComponent(repositoryId)}`,
       )
       .then((res) => {
         if (cancelled) return;
-        const id = res.cliProviderId;
-        if (id && providers.some((p) => p.id === id)) setCliProviderId(id);
+        const ids = providers.map((p) => p.id);
+        setCliProviderId(resolveCliChoiceValue(res.cliChoice, ids));
+        setSummaryCliProviderId(resolveSummaryChoiceValue(res.summaryChoice, ids));
       })
       .catch(() => {
         /* non-fatal: leave the current selection */
@@ -485,10 +493,16 @@ export default function NewTaskPage() {
       if (estimatedTime.trim() && Number.isFinite(estHours) && estHours > 0) {
         body.estimatedTimeHours = estHours;
       }
-      if (cliProviderId) body.cliProviderId = cliProviderId;
+      // Always sent, empty included: naming the field is how the server learns the
+      // choice was stated rather than defaulted, which is what makes it stick for the
+      // next task on this repo (tasks.cli_choice_recorded).
+      body.cliProviderId = cliProviderId || null;
       if (ignoreSavedStepClis) body.ignoreSavedStepClis = true;
-      if (summaryCliProviderId === SUMMARY_CLI_OFF) body.summaryLlmEnabled = false;
-      else if (summaryCliProviderId) body.summaryCliProviderId = summaryCliProviderId;
+      body.summaryLlmEnabled = summaryCliProviderId !== SUMMARY_CLI_OFF;
+      body.summaryCliProviderId =
+        summaryCliProviderId && summaryCliProviderId !== SUMMARY_CLI_OFF
+          ? summaryCliProviderId
+          : null;
       if (planNodeIds.length > 0) {
         body.planNodeIds = planNodeIds;
         body.planNodeRole = planNodeRole;

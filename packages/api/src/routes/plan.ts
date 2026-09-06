@@ -1011,10 +1011,12 @@ planRoutes.delete('/:id/plan/edges/:edgeId', async (c) => {
 /* ------------------------------------------------------------------ */
 
 /** Validate the caller's chosen provider, or fall back to the one this repo last
- *  ran — the same default the new-task form applies via `/tasks/last-cli`, so a
- *  plan task started from a button lands on the provider the user already picked
- *  for this repo instead of an arbitrary enabled one. Null is a legitimate
- *  answer: the dispatcher resolves a provider per step anyway. */
+ *  RAN on, so a plan task started from a button lands on the provider the user
+ *  already used for this repo instead of an arbitrary enabled one. That is the
+ *  `cliProviderId` field of `/tasks/last-cli` — deliberately not its `cliChoice`,
+ *  which is what the new-task form remembers and can legitimately be "none": a
+ *  plan task started from a button has no dropdown to show that in. Null is a
+ *  legitimate answer: the dispatcher resolves a provider per step anyway. */
 async function resolveProvider(
   userId: string,
   repositoryId: string,

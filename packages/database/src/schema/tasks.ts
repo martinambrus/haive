@@ -343,6 +343,13 @@ export const tasks = pgTable(
     /** False skips the LLM recap pass entirely. Separate from summary_cli_provider_id
      *  because an FK cannot carry an off value. */
     summaryLlmEnabled: boolean('summary_llm_enabled').notNull().default(true),
+    /** The New Task form STATED this choice rather than leaving the default. The FK
+     *  columns keep carrying the value; a NULL there cannot say whether the user
+     *  picked "none"/"inherit" or never picked at all, which is why neither stuck as
+     *  the repo's remembered choice. Set only where a create request names the field,
+     *  so the plan / kb_author / upgrade-rollback spawners record nothing. */
+    cliChoiceRecorded: boolean('cli_choice_recorded').notNull().default(false),
+    summaryCliChoiceRecorded: boolean('summary_cli_choice_recorded').notNull().default(false),
     /** "Run configuration" answers applied to later steps' forms.
      *  Record<stepId, Record<fieldId, value>>. Written by 06-run-config apply();
      *  null until a task's run-config step records them. */

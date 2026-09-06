@@ -73,12 +73,17 @@ export const createTaskRequestSchema = z
      *  effort (work + user-active) in the task UI. All task types. */
     estimatedTimeHours: z.number().positive().max(1000).optional(),
     repositoryId: z.string().uuid().optional(),
-    cliProviderId: z.string().uuid().optional(),
+    /** Explicit `null` means "no CLI, deterministic steps only" and is a STATED
+     *  choice; omitting the field states nothing. The create handler stores the
+     *  same value either way and records the difference in tasks.cli_choice_recorded,
+     *  which is what makes the New Task form's dropdown remember "(none)". */
+    cliProviderId: z.string().uuid().nullable().optional(),
     /** CLI that writes the per-step "What the agent did" recap. Omitted = inherit
      *  the step's CLI, which is what every task did before this existed. Separate
      *  from cliProviderId because the recap is 1-3 sentences and does not need the
-     *  coding model (see tasks.summary_cli_provider_id). */
-    summaryCliProviderId: z.string().uuid().optional(),
+     *  coding model (see tasks.summary_cli_provider_id). Explicit `null` is inherit
+     *  STATED, per cliProviderId above. */
+    summaryCliProviderId: z.string().uuid().nullable().optional(),
     /** false = skip the LLM recap entirely. Steps that emit their own summary field
      *  still fill the panel, for free. */
     summaryLlmEnabled: z.boolean().optional(),
