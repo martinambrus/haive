@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { stepLoopLimitsSchema, createTaskRequestSchema } from '../src/schemas/tasks.js';
+import {
+  stepLoopLimitsSchema,
+  createTaskRequestSchema,
+  resolvePlanNodeLinks,
+} from '../src/schemas/tasks.js';
+import { PLAN_TASK_MAX_NODES } from '../src/schemas/plan.js';
 
 describe('stepLoopLimitsSchema', () => {
   it('accepts a map of stepId → integer in [1, 50]', () => {
@@ -134,6 +139,61 @@ describe('createTaskRequestSchema with feature and affectedClients', () => {
     const result = createTaskRequestSchema.safeParse({
       ...baseWorkflow,
       affectedClients: Array.from({ length: 51 }, (_, i) => `c${i}`),
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('resolvePlanNodeLinks', () => {
+  const A = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+
+  it('returns null when the request names no node', () => {
+    expect(resolvePlanNodeLinks({})).toBeNull();
+    expect(resolvePlanNodeLinks({ planNodeIds: [] })).toBeNull();
+  });
+
+  it('defaults ONE node to implements — unchanged from before multi-node existed', () => {
+    expect(resolvePlanNodeLinks({ planNodeId: A })).toEqual({ nodeIds: [A], role: 'implements' });
+    expect(resolvePlanNodeLinks({ planNodeIds: [A] })).toEqual({
+      nodeIds: [A],
+      role: 'implements',
+    });
+  });
+
+  it('defaults TWO OR MORE to touched, so nothing is greened by a slice', () => {
+    expect(resolvePlanNodeLinks({ planNodeIds: [A, B] })).toEqual({
+      nodeIds: [A, B],
+      role: 'touched',
+    });
+  });
+
+  it('lets an explicit role win in both directions', () => {
+    expect(resolvePlanNodeLinks({ planNodeIds: [A, B], planNodeRole: 'implements' })?.role).toBe(
+      'implements',
+    );
+    expect(resolvePlanNodeLinks({ planNodeId: A, planNodeRole: 'touched' })?.role).toBe('touched');
+  });
+
+  it('folds the deprecated alias in without duplicating it', () => {
+    // A bookmarked plan-panel URL carries planNodeId; the caller may also have
+    // built the array. One node, not two, and the count is what picks the role.
+    expect(resolvePlanNodeLinks({ planNodeId: A, planNodeIds: [A] })).toEqual({
+      nodeIds: [A],
+      role: 'implements',
+    });
+    expect(resolvePlanNodeLinks({ planNodeId: B, planNodeIds: [A] })).toEqual({
+      nodeIds: [A, B],
+      role: 'touched',
+    });
+  });
+
+  it('rejects an over-cap array at the schema, rather than truncating it', () => {
+    const result = createTaskRequestSchema.safeParse({
+      type: 'workflow',
+      title: 'spans too much',
+      description: 'a real description',
+      planNodeIds: Array.from({ length: PLAN_TASK_MAX_NODES + 1 }, () => A),
     });
     expect(result.success).toBe(false);
   });

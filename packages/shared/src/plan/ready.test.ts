@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computePlanReady, type PlanReadyNode } from './ready.js';
+import { blockersOutsideSet, computePlanReady, type PlanReadyNode } from './ready.js';
 import { computePlanSequence, type PlanSequenceEdge, type PlanSequenceNode } from './sequence.js';
 import type { PlanNodeKind, PlanNodeStatus } from '../schemas/plan.js';
 
@@ -202,5 +202,96 @@ describe('computePlanReady', () => {
     const derived = computePlanSequence(t.nodes, []);
     expect(derived.sequenceById.get(deep.id)).toBeLessThan(derived.sequenceById.get(shallow.id)!);
     expect(ready(t.nodes).titles).toEqual(['deep', 'shallow']);
+  });
+});
+
+describe('blockersOutsideSet', () => {
+  /** Blockers keyed by title, so a test reads as the sentence it is asserting. */
+  function outside(
+    nodes: Fixture[],
+    edges: PlanSequenceEdge[],
+    set: Fixture[],
+  ): Record<string, string[]> {
+    const titleById = new Map(nodes.map((n) => [n.id, n.title]));
+    const derived = computePlanSequence(nodes, edges);
+    return Object.fromEntries(
+      blockersOutsideSet(
+        derived,
+        set.map((n) => n.id),
+      ).map((b) => [titleById.get(b.nodeId)!, b.blockers.map((x) => x.title)]),
+    );
+  }
+
+  it('exempts a prerequisite the same task also delivers', () => {
+    // The whole point: one task builds comms first, then the two things waiting
+    // on it. Refusing that would refuse the task for containing its own
+    // prerequisite.
+    const t = tree();
+    const root = t.add(null, 'root', { taskable: false });
+    const comms = t.add(root, 'comms');
+    const ux = t.add(root, 'ux');
+    const workflow = t.add(root, 'workflow');
+    const edges = [dep(ux, comms), dep(workflow, comms)];
+
+    expect(outside(t.nodes, edges, [comms, ux, workflow])).toEqual({});
+  });
+
+  it('still reports a prerequisite outside the set', () => {
+    const t = tree();
+    const root = t.add(null, 'root', { taskable: false });
+    const comms = t.add(root, 'comms');
+    const ux = t.add(root, 'ux');
+
+    // Only `ux` is in the set, so its prerequisite is somebody else's problem
+    // and remains a real blocker.
+    expect(outside(t.nodes, [dep(ux, comms)], [ux])).toEqual({ ux: ['comms'] });
+  });
+
+  it('reports each blocked member separately', () => {
+    const t = tree();
+    const root = t.add(null, 'root', { taskable: false });
+    const contract = t.add(root, 'contract');
+    const a = t.add(root, 'a');
+    const b = t.add(root, 'b');
+
+    expect(outside(t.nodes, [dep(a, contract), dep(b, contract)], [a, b])).toEqual({
+      a: ['contract'],
+      b: ['contract'],
+    });
+  });
+
+  it('treats a satisfied prerequisite as no blocker at all', () => {
+    const t = tree();
+    const root = t.add(null, 'root', { taskable: false });
+    const done = t.add(root, 'done-already', { status: 'done' });
+    const next = t.add(root, 'next');
+
+    expect(outside(t.nodes, [dep(next, done)], [next])).toEqual({});
+  });
+
+  it('does NOT walk ancestors — refusing is narrower than choosing', () => {
+    // `computePlanReady` skips this leaf (its container is waiting); the create
+    // gate must not, or one wrong-direction edge locks a whole subtree.
+    const t = tree();
+    const root = t.add(null, 'root', { taskable: false });
+    const foundation = t.add(root, 'foundation');
+    const feature = t.add(root, 'feature', { taskable: false });
+    const leaf = t.add(feature, 'leaf');
+    const edges = [dep(feature, foundation)];
+
+    expect(ready(t.nodes, edges).titles).not.toContain('leaf');
+    expect(outside(t.nodes, edges, [leaf])).toEqual({});
+  });
+
+  it('keeps a cycle member blocked when only part of it is in the set', () => {
+    const t = tree();
+    const root = t.add(null, 'root', { taskable: false });
+    const a = t.add(root, 'a');
+    const b = t.add(root, 'b');
+
+    expect(outside(t.nodes, [dep(a, b), dep(b, a)], [a])).toEqual({ a: ['b'] });
+    // Both in the set: the task builds them together and the cycle stops being
+    // a reason to refuse. It is still a bad edge, which is 03-plan-sequence's job.
+    expect(outside(t.nodes, [dep(a, b), dep(b, a)], [a, b])).toEqual({});
   });
 });

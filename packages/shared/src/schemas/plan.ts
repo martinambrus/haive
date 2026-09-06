@@ -29,6 +29,16 @@ export type PlanEdgeKind = z.infer<typeof planEdgeKindSchema>;
 export const planNodeOriginSchema = z.enum(['user', 'llm', 'import']);
 export type PlanNodeOrigin = z.infer<typeof planNodeOriginSchema>;
 
+/** Why a task is attached to a node, mirroring `plan_node_tasks.role`.
+ *
+ *  `implements` is the task's completion greening the node; `touched` is a task
+ *  that changed something the node covers without finishing it. The distinction
+ *  is load-bearing rather than descriptive — `completePlanNodesForTask` greens
+ *  only the first — and it is what lets ONE task serve several nodes: adding a
+ *  checkbox to five forms delivers a slice of five nodes and finishes none. */
+export const planNodeTaskRoleSchema = z.enum(['implements', 'touched']);
+export type PlanNodeTaskRole = z.infer<typeof planNodeTaskRoleSchema>;
+
 /* ------------------------------------------------------------------ */
 /* Repository mirror                                                   */
 /* ------------------------------------------------------------------ */
@@ -195,11 +205,52 @@ export type PlanPatchOp = z.infer<typeof planPatchOpSchema>;
  *  array is an unbounded transaction. */
 export const PLAN_PATCH_MAX_OPS = 500;
 
+/** Cap on plan nodes one task may be linked to.
+ *
+ *  Not a storage limit — `plan_node_tasks` is a join table and takes any number.
+ *  Each linked node becomes a section the spec writer must carry, a constraint
+ *  the DAG planner must respect and a row a person reads on the create form, and
+ *  past a couple of dozen none of those three stays reviewable. A request over
+ *  the cap is refused rather than truncated: half a node set is a task whose
+ *  scope nobody stated. */
+export const PLAN_TASK_MAX_NODES = 25;
+
+/**
+ * An offer to run the nodes this patch just wrote as ONE task.
+ *
+ * The plan records serial work as `depends_on` edges and always has; this is the
+ * agent noticing that the shape it wrote — a prerequisite plus several things
+ * waiting on it — is what `06b-sprint-planning` builds a DAG for, and saying so.
+ * An OFFER, never a refusal: a chat that declined to write the nodes would throw
+ * away the decomposition it just computed and make the one subsystem built for
+ * serial work unreachable for the case it exists for.
+ *
+ * `nodeRefs` are patch-local refs, resolved to real uuids through
+ * `ApplyPlanPatchResult.refs` AFTER the patch applies — a node created in the
+ * same reply has no uuid until then.
+ */
+export const planTaskProposalSchema = z.object({
+  nodeRefs: z.array(planNodeRefSchema).min(1).max(PLAN_TASK_MAX_NODES),
+  title: z.string().trim().min(1).max(512),
+  description: z.string().trim().max(20_000),
+  role: planNodeTaskRoleSchema,
+  /** Why one task beats starting these by hand. Shown to the user beside the
+   *  button, so it is the argument, not a restatement of the titles. */
+  reason: z.string().trim().max(2_000),
+});
+export type PlanTaskProposal = z.infer<typeof planTaskProposalSchema>;
+
 export const planPatchSchema = z.object({
   ops: z.array(planPatchOpSchema).max(PLAN_PATCH_MAX_OPS),
   /** Optional one-line summary of what the patch does, shown in the chat
    *  transcript beside the ops. Prose only; nothing branches on it. */
   summary: z.string().max(2_000).optional(),
+  /** Set by a plan chat that wrote a multi-node change. Stored in the assistant
+   *  turn's `patch_json` so the button survives a reload — which is why it is
+   *  typed here rather than left as loose JSON: the messages route serves that
+   *  column AS `PlanPatch`, and an untyped field would be dropped at that
+   *  boundary and the proposal would silently vanish. */
+  taskProposal: planTaskProposalSchema.optional(),
 });
 export type PlanPatch = z.infer<typeof planPatchSchema>;
 

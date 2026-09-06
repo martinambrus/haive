@@ -1,4 +1,4 @@
-import type { PlanNodeKind, PlanNodeStatus } from '../schemas/plan.js';
+import type { PlanBlocker, PlanNodeKind, PlanNodeStatus } from '../schemas/plan.js';
 import type { PlanSequenceResult } from './sequence.js';
 
 /**
@@ -45,6 +45,45 @@ export interface PlanReadyResult {
   readyIds: string[];
   /** The first of them, or null when nothing is startable. */
   nextId: string | null;
+}
+
+/** A node in a task's set, and what still stands in its way from OUTSIDE the set. */
+export interface SetBlocker {
+  nodeId: string;
+  blockers: PlanBlocker[];
+}
+
+/**
+ * "This one task delivers all of these — what does it still have to wait for?"
+ *
+ * The direct reading (`blockedById`) answers the wrong question for a set. If A
+ * must land before B and one task delivers BOTH, then A is not something that
+ * task waits for — it is the first thing that task builds, and
+ * `06b-sprint-planning` puts it in an earlier DAG level for exactly that reason.
+ * Refusing the task because B waits on A would refuse it for containing its own
+ * prerequisite, which is the shape the feature exists to support.
+ *
+ * So a prerequisite INSIDE the set is satisfied by the task; only prerequisites
+ * outside it are real. Nodes with nothing left outstanding are omitted, so an
+ * empty result means "nothing outside this set is in the way".
+ *
+ * Deliberately narrower than `computePlanReady`: that walks ancestors too,
+ * because CHOOSING what to start next should skip a node whose container is
+ * waiting. This is the REFUSING side, where over-strictness turns one
+ * wrong-direction edge into a locked subtree — the same split `ready.ts`'s
+ * header describes, applied to a set.
+ */
+export function blockersOutsideSet(
+  derived: PlanSequenceResult,
+  nodeIds: readonly string[],
+): SetBlocker[] {
+  const inSet = new Set(nodeIds);
+  const out: SetBlocker[] = [];
+  for (const nodeId of inSet) {
+    const blockers = (derived.blockedById.get(nodeId) ?? []).filter((b) => !inSet.has(b.nodeId));
+    if (blockers.length > 0) out.push({ nodeId, blockers });
+  }
+  return out;
 }
 
 /** Strict ancestors of a node, from its materialised path.

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PLAN_TASK_MAX_NODES, planNodeTaskRoleSchema, type PlanNodeTaskRole } from './plan.js';
 
 export const workflowTypeSchema = z.enum([
   'onboarding',
@@ -122,8 +123,22 @@ export const createTaskRequestSchema = z
     /** Plan-canvas node this task implements. Recorded in `plan_node_tasks`, so a
      *  node can seed several attempts and each one is traceable; when the task
      *  completes the node goes green. Set by the plan UI's "create a task from
-     *  this leaf" button. */
+     *  this leaf" button.
+     *
+     *  SUPERSEDED by `planNodeIds`, and kept because the plan panel and the
+     *  "Start next" button both build bookmarkable URLs carrying this name.
+     *  `resolvePlanNodeLinks` folds it into the array; never read it directly. */
     planNodeId: z.string().uuid().optional(),
+    /** Plan-canvas nodes this task serves. One task routinely spans several — a
+     *  change that propagates across every form, a decomposition the plan chat
+     *  wrote as a prerequisite plus the things waiting on it — and the set is
+     *  what later reaches the spec writer and the DAG planner as an ordering
+     *  constraint. */
+    planNodeIds: z.array(z.string().uuid()).max(PLAN_TASK_MAX_NODES).optional(),
+    /** What the links mean. See `planNodeTaskRoleSchema`: `implements` greens
+     *  every named node on completion, `touched` records the task as affecting
+     *  them and greens nothing. Omitted resolves per `resolvePlanNodeLinks`. */
+    planNodeRole: planNodeTaskRoleSchema.optional(),
     /** Start work on a plan node whose prerequisites are not met yet.
      *
      *  Blocking is derived from `depends_on` edges, and a plan can contain
@@ -143,6 +158,48 @@ export const createTaskRequestSchema = z
   );
 
 export type CreateTaskRequest = z.infer<typeof createTaskRequestSchema>;
+
+/** The plan-node links a create-task request asks for, after the alias and the
+ *  role default are resolved. Null when the request names no node at all. */
+export interface ResolvedPlanNodeLinks {
+  nodeIds: string[];
+  role: PlanNodeTaskRole;
+}
+
+/**
+ * Fold `planNodeId` / `planNodeIds` / `planNodeRole` into one answer.
+ *
+ * A function rather than a zod `transform` because `CreateTaskRequest` is the
+ * type callers BUILD the body from as well as the type the route parses into; a
+ * transform would make those two different shapes and quietly delete the alias
+ * from the builder's view.
+ *
+ * The role default is the whole safety property of multi-node linking. ONE node
+ * defaults to `implements`, which is byte-identical to every task created before
+ * this existed. TWO OR MORE default to `touched`, because a task spanning
+ * several nodes is overwhelmingly a slice of each — adding a checkbox to five
+ * forms finishes none of the five — and greening on that reading would make the
+ * plan claim work nobody did. An explicit role always wins: the caller has said
+ * which it is.
+ */
+export function resolvePlanNodeLinks(body: {
+  planNodeId?: string;
+  planNodeIds?: string[];
+  planNodeRole?: PlanNodeTaskRole;
+}): ResolvedPlanNodeLinks | null {
+  // Order-preserving dedupe: the array first, then the alias when it names
+  // something the array did not. A request may legitimately send both — the
+  // plan panel's bookmarkable URL carries the alias, and the caller may have
+  // added to it.
+  const nodeIds = [
+    ...new Set([...(body.planNodeIds ?? []), ...(body.planNodeId ? [body.planNodeId] : [])]),
+  ];
+  if (nodeIds.length === 0) return null;
+  return {
+    nodeIds,
+    role: body.planNodeRole ?? (nodeIds.length === 1 ? 'implements' : 'touched'),
+  };
+}
 
 export const submitStepRequestSchema = z.object({
   values: z.record(z.string(), z.unknown()),
