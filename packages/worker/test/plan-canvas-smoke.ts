@@ -1075,6 +1075,88 @@ async function main(): Promise<void> {
     { repositoryId: freshRepoB!.id, origin: 'user' },
   );
 
+  /* --- 12.4b ONE task, SEVERAL nodes --------------------------------------- */
+
+  // `completePlanNodesForTask` has always looped over its links and grouped them
+  // by repository; it simply never received more than one, because the create
+  // endpoint could only write one. Now that it can, the property that matters is
+  // that N implements links green N nodes in a SINGLE patch — and that the role
+  // still decides, so a task spanning a set as `touched` greens none of it.
+  const spanRoot = (await loadPlanNodes(db, freshRepoB!.id)).find((n) => n.parentId === null)!;
+  const spanPatch = await applyPlanPatch(
+    db,
+    {
+      ops: ['Registration form', 'Order form', 'Contact form'].map((title, i) => ({
+        op: 'upsert' as const,
+        nodeRef: `tmp-span-${i}`,
+        parentRef: spanRoot.id,
+        title,
+      })),
+    },
+    { repositoryId: freshRepoB!.id, origin: 'user' },
+  );
+  const spanNodeIds = spanPatch.created;
+
+  const [spanTask] = await db
+    .insert(schema.tasks)
+    .values({
+      userId,
+      type: 'workflow',
+      title: 'plan-smoke multi-node fixture',
+      repositoryId: freshRepoB!.id,
+      status: 'running',
+    })
+    .returning();
+  await db
+    .insert(schema.planNodeTasks)
+    .values(
+      spanNodeIds.map((nodeId) => ({ nodeId, taskId: spanTask!.id, role: 'touched' as const })),
+    );
+
+  await completePlanNodesForTask(db, spanTask!.id);
+  const afterTouchedSpan = await loadPlanNodes(db, freshRepoB!.id);
+  check(
+    'a task spanning several nodes as touched greens none of them',
+    spanNodeIds.every((id) => afterTouchedSpan.find((n) => n.id === id)?.status === 'todo'),
+    spanNodeIds.map((id) => afterTouchedSpan.find((n) => n.id === id)?.status),
+  );
+
+  // Same set, promoted to implements: this is the "yes, this task completes all
+  // of these" answer the create form offers.
+  await db
+    .update(schema.planNodeTasks)
+    .set({ role: 'implements' })
+    .where(eq(schema.planNodeTasks.taskId, spanTask!.id));
+  const spanVersionsBefore = new Map(
+    afterTouchedSpan.filter((n) => spanNodeIds.includes(n.id)).map((n) => [n.id, n.version]),
+  );
+
+  await completePlanNodesForTask(db, spanTask!.id);
+  const afterImplementsSpan = await loadPlanNodes(db, freshRepoB!.id);
+  check(
+    'completion greens every node the task implements',
+    spanNodeIds.every((id) => afterImplementsSpan.find((n) => n.id === id)?.status === 'done'),
+    spanNodeIds.map((id) => afterImplementsSpan.find((n) => n.id === id)?.status),
+  );
+  check(
+    'the whole set is greened in ONE patch (each version advances exactly once)',
+    spanNodeIds.every(
+      (id) =>
+        afterImplementsSpan.find((n) => n.id === id)!.version === spanVersionsBefore.get(id)! + 1,
+    ),
+    spanNodeIds.map((id) => ({
+      before: spanVersionsBefore.get(id),
+      after: afterImplementsSpan.find((n) => n.id === id)?.version,
+    })),
+  );
+
+  await db.delete(schema.tasks).where(eq(schema.tasks.id, spanTask!.id));
+  await applyPlanPatch(
+    db,
+    { ops: spanNodeIds.map((nodeRef) => ({ op: 'delete' as const, nodeRef })) },
+    { repositoryId: freshRepoB!.id, origin: 'user' },
+  );
+
   /* --- 12.5 reconciling a PULLED snapshot onto a plan that exists ---------- */
 
   // What a `git pull` does to a plan that is already here. `importPlanMirror`

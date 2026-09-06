@@ -22,6 +22,8 @@ import {
   isDisplayCurrency,
   createTaskRequestSchema,
   deriveSlotWait,
+  PLAN_TASK_MAX_NODES,
+  resolvePlanNodeLinks,
   expandTaskStatusFilter,
   logger,
   PAUSED_FILTER_TOKEN,
@@ -36,8 +38,13 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { clampVoteScore } from '@haive/shared/fair-priority';
-import { computePlanSequence, loadPlanEdges, loadPlanSkeletons } from '@haive/shared/plan';
-import { markPlanNodeTaskable } from '../../lib/mark-plan-node-taskable.js';
+import {
+  blockersOutsideSet,
+  computePlanSequence,
+  loadPlanEdges,
+  loadPlanSkeletons,
+} from '@haive/shared/plan';
+import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
 import { enqueuePlanMirrorRefresh } from '../../lib/plan-mirror.js';
 import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
@@ -453,24 +460,37 @@ taskRoutes.post('/', async (c) => {
   }
 
   // A plan node can only seed a task in ITS OWN repository — the link is what
-  // later flips the node green, and a cross-repo link would green the wrong plan.
+  // later flips a node green, and a cross-repo link would green the wrong plan.
   // taskable/version ride the same read: creating a task from a node is the
   // definitional "this is a unit of work" signal, and the flag write below
   // needs the version for the optimistic-concurrency check.
-  let planNode: { id: string; taskable: boolean; version: number } | null = null;
-  if (body.planNodeId) {
+  const planLinks = resolvePlanNodeLinks(body);
+  let planNodes: { id: string; taskable: boolean; version: number }[] = [];
+  if (planLinks) {
     if (!body.repositoryId) {
-      throw new HttpError(400, 'planNodeId requires a repositoryId');
+      throw new HttpError(400, 'planNodeId / planNodeIds requires a repositoryId');
     }
-    const node = await db.query.planNodes.findFirst({
+    if (planLinks.nodeIds.length > PLAN_TASK_MAX_NODES) {
+      throw new HttpError(
+        400,
+        `A task can serve at most ${PLAN_TASK_MAX_NODES} plan nodes; this names ${planLinks.nodeIds.length}.`,
+      );
+    }
+    planNodes = await db.query.planNodes.findMany({
       where: and(
-        eq(schema.planNodes.id, body.planNodeId),
+        inArray(schema.planNodes.id, planLinks.nodeIds),
         eq(schema.planNodes.repositoryId, body.repositoryId),
       ),
       columns: { id: true, taskable: true, version: true },
     });
-    if (!node) throw new HttpError(404, 'Plan node not found in this repository');
-    planNode = node;
+    if (planNodes.length !== planLinks.nodeIds.length) {
+      const found = new Set(planNodes.map((n) => n.id));
+      const missing = planLinks.nodeIds.filter((id) => !found.has(id));
+      throw new HttpError(
+        404,
+        `Plan node${missing.length === 1 ? '' : 's'} not found in this repository: ${missing.join(', ')}`,
+      );
+    }
 
     // Enforced HERE, not only in the plan UI: the canvas is one caller of this
     // endpoint and a link can be typed by hand. The whole repository's nodes and
@@ -478,18 +498,35 @@ taskRoutes.post('/', async (c) => {
     // the edges — a prerequisite whose own row says `done` is not settled while
     // a child of it is outstanding — and this runs only when a plan node was
     // named.
-    if (!body.overrideBlocked) {
+    //
+    // `implements` ONLY. A `touched` link says this task delivers a SLICE of the
+    // node, which is not the same claim as starting it, and refusing on that
+    // reading would turn one wrong-direction edge into a subtree nobody can work
+    // near. The blockers are still reported to the caller, which is the same
+    // bargain the node panel's `ancestorBlockers` banner strikes: say what is in
+    // the way, do not stand in it.
+    if (planLinks.role === 'implements' && !body.overrideBlocked) {
       const [skeletons, edges] = await Promise.all([
         loadPlanSkeletons(db, body.repositoryId),
         loadPlanEdges(db, body.repositoryId),
       ]);
-      const blockers = computePlanSequence(skeletons, edges).blockedById.get(node.id) ?? [];
-      if (blockers.length > 0) {
+      // A prerequisite this same task also delivers is not something it waits
+      // for — it is the first thing it builds, and the DAG planner puts it in an
+      // earlier level for exactly that reason.
+      const blocked = blockersOutsideSet(computePlanSequence(skeletons, edges), planLinks.nodeIds);
+      if (blocked.length > 0) {
+        const titleById = new Map(skeletons.map((s) => [s.id, s.title]));
+        const detail = blocked
+          .map(
+            (b) =>
+              `"${titleById.get(b.nodeId) ?? b.nodeId}" is waiting on ${b.blockers
+                .map((x) => `#${x.sequence} "${x.title}"`)
+                .join(', ')}`,
+          )
+          .join('; ');
         throw new HttpError(
           409,
-          `This plan node is waiting on ${blockers
-            .map((b) => `#${b.sequence} "${b.title}"`)
-            .join(', ')}. Finish those first, drop the dependency, or start it anyway.`,
+          `${detail}. Finish those first, drop the dependency, or start it anyway.`,
           'plan_node_blocked',
         );
       }
@@ -534,14 +571,21 @@ taskRoutes.post('/', async (c) => {
   const task = inserted[0];
   if (!task) throw new HttpError(500, 'Failed to create task');
 
-  if (body.planNodeId && planNode) {
+  if (planLinks && planNodes.length > 0) {
     await db
       .insert(schema.planNodeTasks)
-      .values({ nodeId: body.planNodeId, taskId: task.id })
+      .values(planNodes.map((n) => ({ nodeId: n.id, taskId: task.id, role: planLinks.role })))
       .onConflictDoNothing();
 
-    if (await markPlanNodeTaskable(db, planNode, body.repositoryId!)) {
-      await enqueuePlanMirrorRefresh(body.repositoryId!, userId);
+    // `implements` ONLY. Taskable means "one task could implement this", which is
+    // the opposite of what a slice-link says — marking a 5,000-line container
+    // taskable because something touched part of it would offer it as a unit of
+    // work forever after. One patch rather than one per node: each is its own
+    // transaction and its own mirror bump.
+    if (planLinks.role === 'implements') {
+      if (await markPlanNodesTaskable(db, planNodes, body.repositoryId!)) {
+        await enqueuePlanMirrorRefresh(body.repositoryId!, userId);
+      }
     }
   }
 

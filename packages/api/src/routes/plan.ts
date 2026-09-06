@@ -184,6 +184,14 @@ async function loadSequenceProgress(
  * says `todo`. A finished, failed or cancelled task deliberately does NOT count:
  * completion greens the node (which excludes it anyway), and an abandoned task
  * leaves work that should be offered again.
+ *
+ * EVERY role counts, not only `implements`. A `touched` link means a live task is
+ * changing code this node covers — from the spec writer's affected-components
+ * pass, or from a task created across several nodes — and offering that node as
+ * the next thing to pick up sends two people into the same files. The link is
+ * not a claim the node is being finished; it is evidence work is in flight there,
+ * which is exactly what "what should I start now" has to route around. So a task
+ * spanning twelve nodes withholds twelve of them for its duration, deliberately.
  */
 async function loadOpenTaskNodeIds(repositoryId: string): Promise<Set<string>> {
   const rows = await getDb()
