@@ -10,6 +10,7 @@ import '@xterm/xterm/css/xterm.css';
 import { apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
 import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
+import { useTerminalCopy } from '@/lib/use-terminal-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
@@ -47,6 +48,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
   const [state, setState] = useState<ConnectionState>('connecting');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [containerLabel, setContainerLabel] = useState<string | null>(null);
+  const { attach: attachCopy, copy, hasSelection, copied } = useTerminalCopy();
 
   useEffect(() => {
     if (disabled) return;
@@ -98,6 +100,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
     });
     term.open(mountRef.current);
     const detachWheel = attachWheelScroll(term);
+    const detachCopy = attachCopy(term);
     let disposed = false;
     let fitRaf1 = 0;
     let fitRaf2 = 0;
@@ -226,6 +229,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
       resizeObserver.disconnect();
       inputDisposable.dispose();
       detachWheel();
+      detachCopy();
       try {
         ws.close(1000, 'unmount');
       } catch {
@@ -233,7 +237,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
       }
       term.dispose();
     };
-  }, [scope, scopeId, cliProviderId, disabled]);
+  }, [scope, scopeId, cliProviderId, disabled, attachCopy]);
 
   if (disabled) {
     if (disabledReason === 'preparing') {
@@ -285,8 +289,22 @@ export function InteractiveShell(props: InteractiveShellProps) {
           )}
           {errorMsg && <span className="text-red-400">{errorMsg}</span>}
         </div>
-        <div className="text-[10px] text-neutral-500">
-          Container kept alive 2 min after last disconnect.
+        <div className="flex items-center gap-3">
+          <span className="text-[10px] text-neutral-500">
+            Shift+drag to select (the shell&apos;s own mouse mode takes a plain drag).
+          </span>
+          <button
+            type="button"
+            onClick={copy}
+            disabled={!hasSelection}
+            title="Copy the selected text. Hold Shift while dragging to select."
+            className="rounded border border-neutral-700 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+          <span className="text-[10px] text-neutral-500">
+            Container kept alive 2 min after last disconnect.
+          </span>
         </div>
       </div>
       <div

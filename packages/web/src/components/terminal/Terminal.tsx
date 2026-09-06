@@ -14,6 +14,7 @@ import {
 } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
 import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
+import { useTerminalCopy } from '@/lib/use-terminal-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
@@ -36,6 +37,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
   const [rawLog, setRawLog] = useState<TerminalSessionDetail | null>(null);
   const [rawLogError, setRawLogError] = useState<string | null>(null);
   const [rawLogLoading, setRawLogLoading] = useState(false);
+  const { attach: attachCopy, copy, hasSelection, copied } = useTerminalCopy();
 
   const loadRawLog = async () => {
     setRawLogLoading(true);
@@ -123,6 +125,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
     });
     term.open(mountRef.current);
     const detachWheel = attachWheelScroll(term);
+    const detachCopy = attachCopy(term);
     let disposed = false;
     let fitRaf1 = 0;
     let fitRaf2 = 0;
@@ -263,6 +266,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
       resizeObserver.disconnect();
       inputDisposable.dispose();
       detachWheel();
+      detachCopy();
       try {
         ws.close(1000, 'unmount');
       } catch {
@@ -270,7 +274,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
       }
       term.dispose();
     };
-  }, [containerId, onExit]);
+  }, [containerId, onExit, attachCopy]);
 
   return (
     <div className={`flex flex-col gap-2 ${fill ? 'h-full min-h-0' : ''}`}>
@@ -280,6 +284,15 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
           {errorMsg && <span className="text-red-400">{errorMsg}</span>}
         </div>
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={copy}
+            disabled={!hasSelection}
+            title="Copy the selected text. Hold Shift while dragging to select."
+            className="rounded border border-neutral-700 px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
           <button
             type="button"
             onClick={toggleRawLog}
