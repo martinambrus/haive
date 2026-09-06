@@ -692,7 +692,7 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                     </div>
                   ) : selectedFile.truncated ? (
                     <div className="p-4 text-xs text-neutral-400">
-                      File too large to diff here. Use the Source tab to view it.
+                      File too large to diff here. Use the Editor tab to view it.
                     </div>
                   ) : inlineRows.length === 0 ? (
                     <div className="p-4 text-xs text-neutral-500">No content changes.</div>

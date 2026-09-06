@@ -143,7 +143,7 @@ fileRoutes.get('/:id/files/content', async (c) => {
 });
 
 // Raw file bytes — backs inline image preview and the per-file download
-// fallback in the Source tab. Streams the whole file (no 512 KB cap) with a
+// fallback in the Editor tab. Streams the whole file (no 512 KB cap) with a
 // best-effort Content-Type; non-image types are octet-stream so the browser
 // downloads rather than renders them inline.
 fileRoutes.get('/:id/files/raw', async (c) => {
