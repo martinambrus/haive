@@ -527,7 +527,7 @@ async function repairVersionConstraint(
  *  instead, via isDdevBuildInputFailure. Best-effort throughout: an unreadable or unwritable
  *  tree is not a new failure mode, it falls back to the error the caller was about to throw. */
 async function repairAptVersionPins(
-  taskId: string,
+  runner: string,
   repoSubpath: string,
   ddevOutput: string,
   onProgress?: (line: string) => void,
@@ -550,7 +550,7 @@ async function repairAptVersionPins(
         await writeFile(file, after, 'utf8');
         repaired = true;
         log.warn(
-          { taskId, file, packages },
+          { runner, file, packages },
           'dropped apt version pins the package repo no longer offers',
         );
         onProgress?.(
@@ -558,7 +558,7 @@ async function repairAptVersionPins(
             `which the package repo no longer offers — removed the pin and retrying`,
         );
       } catch (err) {
-        log.warn({ taskId, file, err }, 'could not drop the apt version pin');
+        log.warn({ runner, file, err }, 'could not drop the apt version pin');
       }
     }
   }
@@ -858,7 +858,7 @@ export async function ddevDbAccess(taskId: string, engine: string): Promise<Task
 
 /** Run a ddev subcommand inside the runner as the non-root `ddev` user, in the
  *  project dir. Returns combined output + an exit code (0 on success). */
-export async function ddevExec(
+async function ddevExecOnce(
   handle: DdevRunnerHandle,
   ddevArgs: string,
   opts: { timeoutMs?: number; onLine?: (line: string) => void } = {},
@@ -882,6 +882,43 @@ export async function ddevExec(
     const e = err as { stdout?: string; stderr?: string; code?: number };
     return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-8000) };
   }
+}
+
+/** `runnerHandleForTask` and `startDdevRunner` both build `projectDir` this way, so the repo
+ *  subpath a repair needs is recoverable from any handle. */
+const RUNNER_PROJECT_PREFIX = '/repos/';
+
+/**
+ * Run a ddev subcommand, and if it died on an apt version pin the package repo has rolled
+ * off, drop the pin and run it once more.
+ *
+ * Wrapped around EVERY subcommand rather than around the `start` call sites, because the
+ * build is not the start command's to trigger. Task 75d8cbab's retry proves it: `ddev
+ * describe` answered, so ensureDdevStarted took the `reuse` path and started nothing, and the
+ * image build then ran inside `ddev import-db` — where the failure was thrown raw, with no
+ * classifier and no repair anywhere on the path. Any subcommand that reconciles the project
+ * can rebuild its images, so the repair has to key on the FAILURE, not on the verb.
+ *
+ * Costs nothing on the normal path: a zero exit returns immediately, and a non-zero one only
+ * pays a regex that matches nothing. Cannot loop — the retry calls the raw exec, and the
+ * repair is idempotent anyway (the second read finds no pin and returns null).
+ */
+export async function ddevExec(
+  handle: DdevRunnerHandle,
+  ddevArgs: string,
+  opts: { timeoutMs?: number; onLine?: (line: string) => void } = {},
+): Promise<{ exitCode: number; output: string }> {
+  const result = await ddevExecOnce(handle, ddevArgs, opts);
+  if (result.exitCode === 0 || !isDdevAptPinFailure(result.output)) return result;
+  if (!handle.projectDir.startsWith(RUNNER_PROJECT_PREFIX)) return result;
+  const repoSubpath = handle.projectDir.slice(RUNNER_PROJECT_PREFIX.length);
+  const repaired = await repairAptVersionPins(
+    handle.container,
+    repoSubpath,
+    result.output,
+    opts.onLine,
+  );
+  return repaired ? ddevExecOnce(handle, ddevArgs, opts) : result;
 }
 
 /** How much of DDEV's own output a bring-up failure quotes. The TAIL: ddev's verdict lands
@@ -1547,13 +1584,6 @@ async function ensureDdevStartedInner(
       // transiently. The images are built now, so one retry usually clears it.
       log.warn({ taskId, output: start.output.slice(-800) }, 'ddev start failed; retrying once');
       start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
-    }
-    // Last resort, after the transient retry has already failed: a version pin the package
-    // repo has rolled off cannot clear on a retry, and 01c has no fix loop to route it to.
-    if (start.exitCode !== 0 && isDdevAptPinFailure(start.output)) {
-      if (await repairAptVersionPins(taskId, repoSubpath, start.output, opts.onProgress)) {
-        start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
-      }
     }
     if (start.exitCode !== 0) {
       throw new Error(await ddevFailureMessage(handle, 'ddev start failed', start.output));

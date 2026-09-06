@@ -453,6 +453,24 @@ describe('parseUnresolvableAptPins', () => {
     expect(isDdevBuildInputFailure(APT_PIN_FAILURE)).toBe(true);
     expect(isDdevAgentFixableFailure(APT_PIN_FAILURE)).toBe(true);
   });
+
+  // The retry of that same task reached the identical build through `ddev import-db`, not
+  // `ddev start`: `ddev describe` answered, so ensureDdevStarted reused the project and
+  // started nothing. Different prefix, different truncation point — the pin still has to be
+  // found, which is why the repair hangs off the failure rather than off the subcommand.
+  it('finds the pin when a non-start subcommand triggered the build', () => {
+    const importDb =
+      'ddev import-db failed: hmod 755 /run/php /var/run/nginx /var/run/supervisor\n' +
+      '#21 CANCELED\n' +
+      '------\n' +
+      ' > [db 8/9] RUN apt-get update && apt-get install -y postgresql-17-pgvector=0.8.1* ' +
+      '&& rm -rf /var/lib/apt/lists/*:\n' +
+      "2.541 E: Version '0.8.1*' for 'postgresql-17-pgvector' was not found\n" +
+      '------\n';
+    expect(parseUnresolvableAptPins(importDb)).toEqual([
+      { package: 'postgresql-17-pgvector', version: '0.8.1*' },
+    ]);
+  });
 });
 
 describe('unpinAptPackages', () => {
