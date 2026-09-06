@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  actionInstructions,
   parseTesterOutput,
   buildSelectiveCommand,
   filterTestFiles,
@@ -35,6 +36,34 @@ describe('parseTesterOutput', () => {
       notes: '',
     });
     expect(parseTesterOutput(null).testsCreated).toEqual([]);
+  });
+});
+
+describe('actionInstructions', () => {
+  const text = actionInstructions().join('\n');
+
+  it('asks for the coverage audit the blast-radius block exists to enable', () => {
+    // The gap this step could not see before: a form test that asserts everything
+    // except the checkbox the change added still PASSES, so the full suite that runs
+    // after this step reports nothing.
+    expect(text).toContain('AUDIT the tests covering the components');
+    expect(text).toContain('still asserts the WHOLE of what its component does now');
+  });
+
+  it('says a missing assertion is the fix, not a rewrite', () => {
+    // Widening a test-writer's remit is how a small change grows a large diff.
+    expect(text).toContain('not by rewriting a test that is still correct');
+  });
+
+  it('does not let an empty list be read as "this component has no tests"', () => {
+    // Links accrue one task at a time through 11f, so most components carry none
+    // for a long while.
+    expect(text).toContain('has none RECORDED in the plan');
+  });
+
+  it('keeps the numbering contiguous', () => {
+    const numbered = actionInstructions().filter((l) => /^\d+\./.test(l));
+    expect(numbered.map((l) => l.split('.')[0])).toEqual(['1', '2', '3', '4', '5', '6']);
   });
 });
 

@@ -279,8 +279,8 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       round: ctx.round,
       // This agent holds the WHOLE worktree, so a consumer whose contract the
       // change breaks is legitimately its to fix — which is what the scope fence
-      // already says. `isolated: false` selects that wording.
-      planImpact: planImpactBlock(await loadPlanImpactContext(ctx), { isolated: false }),
+      // already says. `role: 'implementer'` selects that wording.
+      planImpact: planImpactBlock(await loadPlanImpactContext(ctx), { role: 'implementer' }),
       browserTesting,
     };
   },

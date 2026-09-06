@@ -1757,10 +1757,10 @@ export async function resolveDagPhase(
       // artifact the pointer names is copied into each worktree separately.
       const specView = await resolveSpecView(ctx);
       // Once per dispatch pass, not per issue: the blast radius is a property of
-      // the task. `isolated: true` — a coder owns ONE worktree merged at the level
+      // the task. `role: 'dag-coder'` — a coder owns ONE worktree merged at the level
       // barrier, so editing a file another issue owns is a merge conflict, and the
       // block tells it to report rather than edit.
-      const planImpact = planImpactBlock(await loadPlanImpactContext(ctx), { isolated: true });
+      const planImpact = planImpactBlock(await loadPlanImpactContext(ctx), { role: 'dag-coder' });
       let dispatched = 0;
       for (const issue of undispatched) {
         const issueSpec = await issueSpecText(specView, issue);

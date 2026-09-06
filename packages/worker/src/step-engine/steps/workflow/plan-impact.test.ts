@@ -24,6 +24,8 @@ function ctx(over: Partial<PlanImpactContext> = {}): PlanImpactContext {
         via: 'affects',
         links: [{ repoPath: 'd_inspection.inc', symbol: 'load_pdf_data', stale: false }],
         linksOmitted: 0,
+        tests: [],
+        testsOmitted: 0,
       },
     ],
     nodesOmitted: 0,
@@ -34,8 +36,9 @@ function ctx(over: Partial<PlanImpactContext> = {}): PlanImpactContext {
   };
 }
 
-const solo = { isolated: false };
-const dag = { isolated: true };
+const solo = { role: 'implementer' } as const;
+const dag = { role: 'dag-coder' } as const;
+const tester = { role: 'tester' } as const;
 
 describe('planImpactBlock', () => {
   it('is EMPTY with no context, so the prompt is what it always was', () => {
@@ -97,6 +100,71 @@ describe('planImpactBlock', () => {
     expect(out).toContain('no files recorded for this component');
   });
 
+  it('marks a test link so a reader scanning for coverage can pick it out', () => {
+    const out = planImpactBlock(
+      ctx({
+        consumers: [
+          {
+            ...ctx().consumers[0]!,
+            tests: [{ repoPath: 'tests/pdf.spec.ts', symbol: null, stale: false }],
+          },
+        ],
+      }),
+      tester,
+    );
+    expect(out).toContain('test: tests/pdf.spec.ts');
+    // The implementation link is still there, unmarked.
+    expect(out).toContain('    d_inspection.inc — load_pdf_data');
+  });
+
+  it('caps the two buckets separately, so implementation files cannot hide the tests', () => {
+    const out = planImpactBlock(
+      ctx({
+        consumers: [
+          {
+            ...ctx().consumers[0]!,
+            linksOmitted: 3,
+            tests: [{ repoPath: 'tests/pdf.spec.ts', symbol: null, stale: false }],
+            testsOmitted: 2,
+          },
+        ],
+      }),
+      tester,
+    );
+    expect(out).toContain('and 3 more files not listed here');
+    expect(out).toContain('and 2 more test files not listed here');
+  });
+
+  it('still says "no files recorded" only when NEITHER bucket has anything', () => {
+    const withOnlyTests = planImpactBlock(
+      ctx({
+        consumers: [
+          {
+            ...ctx().consumers[0]!,
+            links: [],
+            tests: [{ repoPath: 'tests/pdf.spec.ts', symbol: null, stale: false }],
+          },
+        ],
+      }),
+      tester,
+    );
+    expect(withOnlyTests).not.toContain('no files recorded');
+    const withNeither = planImpactBlock(
+      ctx({ consumers: [{ ...ctx().consumers[0]!, links: [], tests: [] }] }),
+      tester,
+    );
+    expect(withNeither).toContain('no files recorded for this component');
+  });
+
+  it('tells the tester to audit coverage, and that an empty list is not proof', () => {
+    const out = planImpactBlock(ctx(), tester);
+    expect(out).toContain('still assert the whole of what it does NOW');
+    // The half that stops a tester duplicating a suite it never opened: links accrue
+    // one task at a time, so most components carry none for a long while.
+    expect(out).toContain('has none RECORDED in the plan, which is not the same as having none');
+    expect(out).not.toContain('Do NOT edit');
+  });
+
   it('states every cap rather than truncating in silence', () => {
     const out = planImpactBlock(
       ctx({
@@ -146,6 +214,11 @@ describe('planImpactBlock', () => {
       expect(out).toContain('They are NOT your');
       expect(out).toMatch(/most changes leave them alone/);
     }
+    // The tester says it in its own words — it is not changing these components at
+    // all — but the property is the same one.
+    const asTester = planImpactBlock(ctx(), tester);
+    expect(asTester).toContain('They are NOT new scope');
+    expect(asTester).toContain('do not treat these components as work to do');
   });
 
   it('keeps the per-node link cap as the constant the loader slices with', () => {

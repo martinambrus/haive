@@ -13,6 +13,7 @@ import { recordLedgerEntry } from '../../task-ledger.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
+import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import {
   changedFilesBlock,
   collectImplementationFiles,
@@ -83,6 +84,11 @@ interface BrowserVerifyDetect {
   /** Spec + changed files for the MCP tester / manual-checklist prompts. */
   spec: string;
   implementationFiles: ImplementationFileSet;
+  /** What the project plan says stands on the components this change touches, and
+   *  the tests recorded against them, pre-rendered. Empty on a repo with no plan,
+   *  a spec that named no component, or a disabled canvas — the prompt is then
+   *  what it always was. */
+  planImpact: string;
   /** Learned-guidance capture is on for this task: the MCP tester is invited to name an
    *  INSTRUCTION defect behind the failures it found. Resolved in detect() and carried
    *  on the payload because the prompt builders are pure. Only the TESTER carries it —
@@ -639,6 +645,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         ...baseDetect,
         spec: '',
         implementationFiles: { files: [], total: 0, truncated: false },
+        planImpact: '',
         liveBrowser: null,
       };
     }
@@ -652,7 +659,11 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       ctx,
       rt.workspace ?? ctx.workspacePath,
     );
-    const detectedForBringUp = { ...baseDetect, spec, implementationFiles };
+    // This agent drives the app and reports; the block tells it which neighbouring
+    // flows the plan says stand on what changed, so a regression there is looked
+    // for rather than stumbled on.
+    const planImpact = planImpactBlock(await loadPlanImpactContext(ctx), { role: 'tester' });
+    const detectedForBringUp = { ...baseDetect, spec, implementationFiles, planImpact };
 
     // Bring up the live headed browser for the gate (idempotent; mirrors 09-gate-2).
     // Best-effort — a failure leaves the gate usable, just without the live panel.
@@ -1407,6 +1418,7 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
       ].join('\n'),
     ),
     changedFilesBlock(d.implementationFiles, 'Changed files (focus your testing here)', ''),
+    ...(d.planImpact ? ['', d.planImpact] : []),
     '',
     'Test the spec acceptance criteria end-to-end from the user perspective. MCP clicks are REAL',
     'tests — if an interaction fails, it is a bug.',

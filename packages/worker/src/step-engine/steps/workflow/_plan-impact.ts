@@ -33,8 +33,13 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
  *  and becomes scenery. Over the cap the count is STATED, never silently cut. */
 export const PLAN_IMPACT_MAX_NODES = 12;
 
-/** Files per component. A node with forty links is a container someone linked a
- *  whole directory to; the first few plus a count is the useful form. */
+/** Files per component, applied to EACH role separately. A node with forty links
+ *  is a container someone linked a whole directory to; the first few plus a count
+ *  is the useful form.
+ *
+ *  Per role rather than per node because the two buckets are read by different
+ *  agents: one shared cap would let six implementation files hide every test on
+ *  the one component the test step most needs them for. */
 export const PLAN_IMPACT_MAX_LINKS_PER_NODE = 6;
 
 export interface PlanImpactLink {
@@ -52,9 +57,14 @@ export interface PlanImpactConsumer {
   depth: number;
   /** The edge kind that implicated it, or null for a spec-named component. */
   via: string | null;
+  /** Files that IMPLEMENT the component. */
   links: PlanImpactLink[];
   /** Links this component has beyond the per-node cap. */
   linksOmitted: number;
+  /** Files that TEST it. Kept apart rather than tagged inside `links` so the cap
+   *  applies to each bucket — see PLAN_IMPACT_MAX_LINKS_PER_NODE. */
+  tests: PlanImpactLink[];
+  testsOmitted: number;
 }
 
 export interface PlanImpactContext {
@@ -118,19 +128,26 @@ export async function loadPlanImpactContext(ctx: StepContext): Promise<PlanImpac
       else byNode.set(link.nodeId, [link]);
     }
 
+    const capped = (rows: PlanCodeLinkRecord[]): PlanImpactLink[] =>
+      rows.slice(0, PLAN_IMPACT_MAX_LINKS_PER_NODE).map((l) => ({
+        repoPath: l.repoPath,
+        symbol: l.symbol,
+        stale: l.stale,
+      }));
+
     return {
       consumers: listed.map((entry) => {
         const all = byNode.get(entry.id) ?? [];
+        const impl = all.filter((l) => l.role !== 'covers');
+        const tests = all.filter((l) => l.role === 'covers');
         return {
           title: entry.title,
           depth: entry.depth,
           via: entry.via,
-          links: all.slice(0, PLAN_IMPACT_MAX_LINKS_PER_NODE).map((l) => ({
-            repoPath: l.repoPath,
-            symbol: l.symbol,
-            stale: l.stale,
-          })),
-          linksOmitted: Math.max(0, all.length - PLAN_IMPACT_MAX_LINKS_PER_NODE),
+          links: capped(impl),
+          linksOmitted: Math.max(0, impl.length - PLAN_IMPACT_MAX_LINKS_PER_NODE),
+          tests: capped(tests),
+          testsOmitted: Math.max(0, tests.length - PLAN_IMPACT_MAX_LINKS_PER_NODE),
         };
       }),
       nodesOmitted: Math.max(0, picked.entries.length - listed.length),
@@ -221,16 +238,54 @@ const VIA_PHRASE: Record<string, string> = {
 
 export interface PlanImpactBlockOptions {
   /**
-   * True for a DAG coder, which owns ONE issue in ONE worktree that is merged at a
-   * level barrier. Editing a file another issue owns produces a merge conflict, and
-   * the coder is told elsewhere that git is unavailable to it — so for those the
-   * block is strictly read-only and routes a needed change into `concerns`.
+   * Who is reading it. The list is the same for all three; what they are supposed
+   * to DO about it is not, and that sentence is the whole safety property.
    *
-   * False for the single implementation agent, which holds the whole worktree and
-   * whose scope fence already puts a consumer of a changed contract in scope.
+   * - `implementer`: the single implementation agent. It holds the whole worktree,
+   *   so a consumer whose contract the change breaks is legitimately its to fix —
+   *   which is what the scope fence already says.
+   * - `dag-coder`: owns ONE issue in ONE worktree merged at a level barrier.
+   *   Editing a file another issue owns produces a merge conflict, and git is
+   *   unavailable to it, so the block is strictly read-only and routes a needed
+   *   change into `concerns`.
+   * - `tester`: writes and audits tests. Changes no application code, and reads the
+   *   list to find coverage that has fallen behind rather than components to touch.
    */
-  isolated: boolean;
+  role: 'implementer' | 'dag-coder' | 'tester';
 }
+
+/** The opening two sentences, per reader. The first two are the exact wording that
+ *  shipped before the tester arm existed, so 07 and the DAG coders read a
+ *  byte-identical block. */
+const INTRO: Record<PlanImpactBlockOptions['role'], string[]> = {
+  implementer: [
+    'The plan records these components around the part you are changing. They are NOT your',
+    'scope and most changes leave them alone — they are here so a contract you move does not',
+    'break them silently.',
+  ],
+  'dag-coder': [
+    'The plan records these components around the part you are changing. They are NOT your',
+    'scope and most changes leave them alone — they are here so a contract you move does not',
+    'break them silently.',
+  ],
+  tester: [
+    'The plan records these components around the part that was changed, and any tests recorded',
+    'against them. They are NOT new scope — they are here so a test that quietly stopped covering',
+    'its component does not keep passing unnoticed.',
+  ],
+};
+
+const CLOSING: Record<PlanImpactBlockOptions['role'], string> = {
+  implementer:
+    'If your change alters a contract one of these relies on, fixing it is part of THIS change — that is already in scope. If it does not, leave it alone.',
+  'dag-coder':
+    'Do NOT edit these files — they belong to other issues in this run and editing them causes a merge conflict at the level barrier. Read them if your change alters something they rely on, and if one genuinely needs a change, say so in `concerns` instead of making it.',
+  // The second sentence is not optional. Links accrue one task at a time, so most
+  // components carry none for a long while, and a tester reading an empty list as
+  // "this has no tests" writes a duplicate of a suite it never opened.
+  tester:
+    'For each component above, check the tests listed against it still assert the whole of what it does NOW — a test that passes while no longer covering the behaviour is exactly the gap this list exists to catch. A component with no tests listed has none RECORDED in the plan, which is not the same as having none: search before you conclude anything. Do not refactor tests that are still correct, and do not treat these components as work to do.',
+};
 
 /**
  * The block, as an agent reads it. Pure — everything it needs is in `context`.
@@ -249,9 +304,7 @@ export function planImpactBlock(
 
   const lines: string[] = [
     '=== What else stands on this (from the project plan) ===',
-    'The plan records these components around the part you are changing. They are NOT your',
-    'scope and most changes leave them alone — they are here so a contract you move does not',
-    'break them silently.',
+    ...INTRO[opts.role],
     '',
   ];
 
@@ -263,15 +316,20 @@ export function planImpactBlock(
           : 'named by the spec'
         : `${VIA_PHRASE[c.via ?? ''] ?? c.via ?? 'linked'}, ${c.depth} hop${c.depth === 1 ? '' : 's'} away`;
     lines.push(`- ${c.title} — ${provenance}`);
-    for (const link of c.links) {
+    const renderLink = (link: PlanImpactLink, prefix: string): void => {
       const where = link.symbol ? `${link.repoPath} — ${link.symbol}` : link.repoPath;
       lines.push(
         link.stale
-          ? `    ${where}  [STALE: a task changed this path since the link was confirmed; verify it still applies]`
-          : `    ${where}`,
+          ? `    ${prefix}${where}  [STALE: a task changed this path since the link was confirmed; verify it still applies]`
+          : `    ${prefix}${where}`,
       );
-    }
-    if (c.links.length === 0) {
+    };
+    for (const link of c.links) renderLink(link, '');
+    // Tests are marked rather than listed under their own heading: one flat list per
+    // component keeps a component's files together, and the marker is what a reader
+    // scanning for coverage picks out.
+    for (const link of c.tests) renderLink(link, 'test: ');
+    if (c.links.length === 0 && c.tests.length === 0) {
       lines.push(
         '    (no files recorded for this component — search for it if your change reaches it)',
       );
@@ -279,6 +337,11 @@ export function planImpactBlock(
     if (c.linksOmitted > 0) {
       lines.push(
         `    …and ${c.linksOmitted} more file${c.linksOmitted === 1 ? '' : 's'} not listed here`,
+      );
+    }
+    if (c.testsOmitted > 0) {
+      lines.push(
+        `    …and ${c.testsOmitted} more test file${c.testsOmitted === 1 ? '' : 's'} not listed here`,
       );
     }
   }
@@ -307,12 +370,7 @@ export function planImpactBlock(
   }
   if (notes.length > 0) lines.push('', ...notes.map((n) => `NOTE: ${n}`));
 
-  lines.push(
-    '',
-    opts.isolated
-      ? 'Do NOT edit these files — they belong to other issues in this run and editing them causes a merge conflict at the level barrier. Read them if your change alters something they rely on, and if one genuinely needs a change, say so in `concerns` instead of making it.'
-      : 'If your change alters a contract one of these relies on, fixing it is part of THIS change — that is already in scope. If it does not, leave it alone.',
-  );
+  lines.push('', CLOSING[opts.role]);
 
   return lines.join('\n');
 }

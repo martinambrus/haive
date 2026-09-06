@@ -13,6 +13,7 @@ import {
   collectImplementationFiles,
   type ImplementationFileSet,
 } from './_impl-changes.js';
+import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
@@ -52,6 +53,11 @@ interface TestManagementDetect {
   repoSubpath: string | null;
   spec: string;
   implementationFiles: ImplementationFileSet;
+  /** What the project plan says stands on the components this change touches, and
+   *  the tests recorded against them, pre-rendered. Empty on a repo with no plan,
+   *  a spec that named no component, or a disabled canvas — the prompt is then
+   *  what it always was. */
+  planImpact: string;
 }
 
 interface TestRunResult {
@@ -274,7 +280,7 @@ const SEARCH_LADDER = [
   ...retrievalGuidanceLines(),
 ] as const;
 
-function actionInstructions(): string[] {
+export function actionInstructions(): string[] {
   // One combined test-management action: find affected tests and UPDATE, CREATE and DELETE as
   // needed for this change. Legacy pre-answers (update/create_new/remove) all map here.
   return [
@@ -292,7 +298,12 @@ function actionInstructions(): string[] {
     '4. DELETE tests for functionality this change removed: if an ENTIRE file tests only removed',
     '   behavior, delete the file; if a file has SOME such tests, remove just those blocks plus',
     '   any helpers/imports only they used.',
-    '5. If a category does not apply, skip it — do not invent work; report zero changes honestly.',
+    '5. AUDIT the tests covering the components in the blast-radius block above (when one is',
+    '   present): open each and check it still asserts the WHOLE of what its component does now.',
+    '   A test that passes while no longer covering the behaviour is a gap — close it by adding',
+    '   the missing assertion, not by rewriting a test that is still correct. A component listed',
+    '   with no tests has none RECORDED in the plan, which is not the same as having none.',
+    '6. If a category does not apply, skip it — do not invent work; report zero changes honestly.',
   ];
 }
 
@@ -388,6 +399,9 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       repoSubpath: ws?.repoSubpath ?? null,
       spec,
       implementationFiles: await collectImplementationFiles(ctx, workspace),
+      // This agent writes tests, not application code, and reads the list to find
+      // coverage that has fallen behind rather than components to touch.
+      planImpact: planImpactBlock(await loadPlanImpactContext(ctx), { role: 'tester' }),
     };
   },
 
@@ -460,6 +474,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         'Your current working directory has the workspace mounted; work on the files there.',
         `Test infrastructure: ${d.frameworks.join(', ')}${d.testDirs.length > 0 ? ` (directories: ${d.testDirs.join(', ')})` : ''}`,
         changedFilesBlock(d.implementationFiles, 'Files changed by the implementation', ''),
+        ...(d.planImpact ? ['', d.planImpact] : []),
         values.hints ? `User hints for locating related tests: ${values.hints}` : '',
         '',
         ...actionInstructions(),
