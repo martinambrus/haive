@@ -44,16 +44,46 @@ all today** — nothing in `packages/web` or `packages/api` reads it. The module
 One task type, `deep_scan`, composed of module steps plus core steps from the catalog.
 
 **1 · `scan-scope`** — detect + form, and the only step that runs before any CLI fans out.
-**Every dimension is optional.** The eleven — security, maintainability, testability, usability,
-stability, performance, observability, operational readiness, data integrity, DX, coherence — are
-individually selectable, none is mandatory or implied, and there is no "scan everything" path that
-skips the form: an empty selection dispatches nothing rather than falling back to all eleven. Detect
-seeds a proposed set from the repo's onboarding tech inventory (`onboarding/_tech-inventory.ts`)
-rather than asking cold, but a seed is a pre-ticked box the user can clear, never a floor. Also on
-the form: scope (whole repo or subtree) and a **budget** in agent invocations.
+**Every dimension is optional.** The set is `REVIEW_DIMENSIONS` (`shared/src/review/dimensions.ts`)
+— the same fourteen every reviewing step already scores a change against — plus **coherence**, which
+the module owns. Fifteen in total, individually selectable, none mandatory or implied, and there is
+no "scan everything" path that skips the form: an empty selection dispatches nothing rather than
+falling back to all fifteen.
+
+**Import that constant; do not re-list the names.** This plan was written before it existed
+(`3741548b` 13:58, `99c176df` 15:15, both 2026-09-04) and its prose list had already drifted: it
+omitted **accessibility, internationalization, backward compatibility and privacy / compliance**,
+and wrote `developer-experience` as "DX" — a third spelling of the one name the constant was created
+to settle, which is the exact failure it ended (the same fourteen were hardcoded prose in five files
+and eleven sites, worded three ways). A module that restates the list reintroduces that drift, and a
+fifteenth core dimension would then silently not be scanned. `resolveReviewDimensions` also already
+does what the form needs — canonical ordering, unknown-id tolerance, NULL-means-all.
+
+**Coherence stays module-owned and is NOT added to the core constant.** No change-scoped reviewer
+can score it (that is the dimension's whole argument, below), so putting it in core would list it on
+`06-run-config` and in the repo policy where nothing would ever review it — and 07b's `## Not
+reviewed` disclosure would then be wrong, since it reports a dimension as unscored only when it was
+deliberately excluded.
+
+**Two of the four missed dimensions carry change-scoped criteria and must be restated** for a
+whole-tree read, or the agent is handed a prompt pointing at steps `deep_scan` does not have:
+`internationalization` is literally "cross-reference Step 6 findings", and `backward-compatibility`
+is "renamed functions/hooks/services have all callers updated (cross-reference Step 4)". Whole-tree
+those become, respectively, user-facing strings going through the project's translation layer with
+no hardcoded locale/currency/date assumptions, and a public surface that is versioned or additive
+with a migration path behind every deprecation and schema change. The other twelve read correctly
+as-is. Keep the constant's `id` and `label` either way — they are what `review_findings.raw`
+carries as `dimension` and what the dashboard filters on.
+
+Detect seeds a proposed set from the repo's own dimension POLICY (`repositories.review_dimensions`,
+NULL = all fourteen) intersected with the onboarding tech inventory (`onboarding/_tech-inventory.ts`)
+rather than asking cold — a repo that has already scoped accessibility out of its reviews must not
+get it pre-ticked here. `coherence` is not in that policy and seeds on. A seed is a pre-ticked box
+the user can clear, never a floor. Also on the form: scope (whole repo or subtree) and a **budget**
+in agent invocations.
 
 **2 · `scan-analyze`** — `agentMining` fan-out, **one agent per selected dimension over the whole
-tree** (not per component). Eleven dimensions is at most eleven invocations, drained 5 at a time by
+tree** (not per component). Fifteen dimensions is at most fifteen invocations, drained 5 at a time by
 `MAX_PARALLEL_AGENTS_PER_TASK`; per-component splitting is a later refinement for a dimension that
 times out, not v1. Each agent returns structured findings (`path`, `line`, `severity`, `dimension`,
 `issue`, `fix`) and carries `REPO_IS_DATA_LINES` from `steps/_untrusted-repo.ts`.
@@ -85,7 +115,7 @@ planner did. A coherence finding names TWO files and so breaks that rule as stat
 **connected component** of the paths a finding names, not by a single path, or two issues could each
 claim one side of the same conflict and reintroduce exactly the collision the rule exists to prevent.
 Every other dimension names one path, where connected components degenerate to one-issue-per-file —
-so this changes nothing for the other ten. All at level 0 unless a dependency is declared.
+so this changes nothing for the other fourteen. All at level 0 unless a dependency is declared.
 
 **7 · `scan-remediate`** — declares the `dagExecute` hook and supplies a fix-oriented coder prompt.
 **No core change needed:** `resolveDagPhase` (`step-engine/dag-executor.ts:1505`) loads its plan by
@@ -98,7 +128,7 @@ a workflow task ends.
 
 ### The coherence dimension
 
-Ten of the eleven ask "is this code wrong". The eleventh asks **"do two parts of this project
+Fourteen of the fifteen ask "is this code wrong". The fifteenth asks **"do two parts of this project
 contradict each other"**. A rule, a KB page, a doc, a code comment and the code itself all state
 intent, and when two of them state OPPOSITE intent every agent that reads them afterwards is
 miscalibrated — silently, and in a direction nobody chose. The shape to detect: one place says always
@@ -119,7 +149,7 @@ vs code, and code vs code (two modules implementing one contract incompatibly). 
 narrows the code side only** — the rules and KB a subtree must agree with live at the repo root, so
 those stay in its reading set whatever the scope.
 
-Four things this dimension must get right, none of which the other ten need:
+Four things this dimension must get right, none of which the other fourteen need:
 
 - **A finding is a PAIR, not a location.** It cites both sides as `file:line` and quotes the
   incompatible text from each. Without the second side it is neither refutable nor fixable, and a
@@ -159,6 +189,9 @@ cross-cutting rule says the latter but not the former, and this module does both
 
 ## Critical files (reference, not modification)
 
+- Dimension taxonomy to IMPORT (the one exception: this is used, not just read):
+  `packages/shared/src/review/dimensions.ts`, and the repo/task policy in
+  `step-engine/review-dimension-context.ts`
 - Fan-out + refuter panel to copy: `steps/workflow/08c-code-review.ts`
 - Whole-tree step precedent: `steps/onboarding/07_7-secret-sweep.ts`
 - Findings persistence + fingerprint: `steps/workflow/_review-findings.ts`
@@ -170,7 +203,9 @@ cross-cutting rule says the latter but not the former, and this module does both
 
 **Unit (in the module's own suite):**
 - Dimension selection produces exactly the expected agent fan-out, and an empty selection dispatches
-  nothing rather than defaulting to all eleven. No dimension survives being deselected.
+  nothing rather than defaulting to all fifteen. No dimension survives being deselected.
+- The fan-out set equals `REVIEW_DIMENSIONS` plus `coherence` — asserted against the imported
+  constant, not a literal, so a dimension added to core fails this test until the module handles it.
 - The verifier tally: 2-of-3 dismisses (inverted from `08c`), and an unreadable voter does not.
 - `scan-plan-remediation` puts two findings in one file into ONE issue, and two files into two.
 - Findings already recorded are deduped on a re-scan; a repeat run reports only what is new, and a
@@ -182,7 +217,7 @@ cross-cutting rule says the latter but not the former, and this module does both
 
 **End to end on the dev stack:**
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
-   `review_findings` with `deep-scan:` reviewer ids and the coverage record names the nine
+   `review_findings` with `deep-scan:` reviewer ids and the coverage record names the thirteen
    dimensions that did not run.
 2. Triage two findings in one file; confirm remediation creates one DAG issue, one worktree, and
    merges.
@@ -213,8 +248,8 @@ core.
 
 **Optional, never a prerequisite.** Phase 2b is that plan's hardest piece and may be deferred, so
 `deep_scan` must run correctly single-model and merely improve when 2b exists. The scope step's
-budget knob governs it: 11 dimensions x 3 members + 11 consolidators is 44 invocations, drained 5 at
-a time by `MAX_PARALLEL_AGENTS_PER_TASK` — nine serial batches. Multi-model is opt-in per run, and
+budget knob governs it: 15 dimensions x 3 members + 15 consolidators is 60 invocations, drained 5 at
+a time by `MAX_PARALLEL_AGENTS_PER_TASK` — twelve serial batches. Multi-model is opt-in per run, and
 deselecting dimensions is the other lever on that number.
 
 **`scan-verify` is not made redundant by the consolidator**, and the plan should say so where a
