@@ -5,6 +5,7 @@ import {
   isDdevVersionConstraintFailure,
   parseProcNetRouteGateway,
   parseDdevPrimaryUrl,
+  parseDdevProjectStatus,
   renderXdebugIni,
   ddevDbInternalPort,
   ddevRegistryMirrorUrl,
@@ -17,40 +18,36 @@ import {
 // on this result; the docker-shelling itself is left untested by design (no docker
 // mocking in this package — mirrors how 07c extracts + tests `classifyDrift`).
 describe('decideDdevRecovery', () => {
-  it('serving project (describe ok + primary_url) -> reuse, regardless of dockerd probe', () => {
-    expect(decideDdevRecovery({ describeOk: true, hasPrimaryUrl: true, dockerdUp: true })).toBe(
-      'reuse',
-    );
-    expect(decideDdevRecovery({ describeOk: true, hasPrimaryUrl: true, dockerdUp: false })).toBe(
-      'reuse',
-    );
+  it('serving project (describe ok + running) -> reuse, regardless of dockerd probe', () => {
+    expect(decideDdevRecovery({ describeOk: true, serving: true, dockerdUp: true })).toBe('reuse');
+    expect(decideDdevRecovery({ describeOk: true, serving: true, dockerdUp: false })).toBe('reuse');
   });
 
-  it('describe returned but no primary_url, nested dockerd alive -> warm-start', () => {
-    expect(decideDdevRecovery({ describeOk: true, hasPrimaryUrl: false, dockerdUp: true })).toBe(
+  it('describe returned but the project is not running, nested dockerd alive -> warm-start', () => {
+    expect(decideDdevRecovery({ describeOk: true, serving: false, dockerdUp: true })).toBe(
       'warm-start',
     );
   });
 
   it('project down (describe failed) but runner + dockerd alive -> warm-start', () => {
-    expect(decideDdevRecovery({ describeOk: false, hasPrimaryUrl: false, dockerdUp: true })).toBe(
+    expect(decideDdevRecovery({ describeOk: false, serving: false, dockerdUp: true })).toBe(
       'warm-start',
     );
   });
 
   it('runner / nested dockerd gone -> cold-boot', () => {
-    expect(decideDdevRecovery({ describeOk: false, hasPrimaryUrl: false, dockerdUp: false })).toBe(
+    expect(decideDdevRecovery({ describeOk: false, serving: false, dockerdUp: false })).toBe(
       'cold-boot',
     );
   });
 
-  it('reuse requires BOTH describeOk and primary_url: stale primary_url without a live describe falls to the dockerd probe', () => {
+  it('reuse requires BOTH describeOk and serving: a stale serving read without a live describe falls to the dockerd probe', () => {
     // describe failed but its (stale) output still contained the primary_url
     // token — not trusted: with no live dockerd this must rebuild, not reuse.
-    expect(decideDdevRecovery({ describeOk: false, hasPrimaryUrl: true, dockerdUp: false })).toBe(
+    expect(decideDdevRecovery({ describeOk: false, serving: true, dockerdUp: false })).toBe(
       'cold-boot',
     );
-    expect(decideDdevRecovery({ describeOk: false, hasPrimaryUrl: true, dockerdUp: true })).toBe(
+    expect(decideDdevRecovery({ describeOk: false, serving: true, dockerdUp: true })).toBe(
       'warm-start',
     );
   });
@@ -281,5 +278,57 @@ describe('budgetContainerLogs', () => {
     const out = budgetContainerLogs(capture('a'.repeat(100), 'b'.repeat(100)), 1);
     expect(out).not.toContain('aaaa');
     expect(out).not.toContain('bbbb');
+  });
+});
+
+// A STOPPED project describes cleanly and still reports its primary_url, which is why the
+// reuse test could not be `output.includes('primary_url')`. Task 75d8cbab: 01c reused a
+// project with no containers, and the pg_restore pipeline that followed had both of its ddev
+// processes start it at once. Shape is verbatim from `ddev describe -j` on v1.25.3 — one
+// newline-delimited log object whose `raw` carries both fields.
+const DESCRIBE_LINE = (status: string): string =>
+  JSON.stringify({
+    level: 'info',
+    msg: 'describe',
+    raw: { name: 'elmont-rs', primary_url: 'https://elmont-rs.ddev.site', status },
+    time: '2026-09-06T10:53:00Z',
+  });
+
+describe('parseDdevProjectStatus', () => {
+  it('reads the status off the same object that carries primary_url', () => {
+    expect(parseDdevProjectStatus(DESCRIBE_LINE('running'))).toBe('running');
+    expect(parseDdevProjectStatus(DESCRIBE_LINE('stopped'))).toBe('stopped');
+  });
+
+  // The describe payload carries per-service `status` keys too, so a text match would read
+  // whichever one happened to come first. MEASURED on the live runner: one service reported
+  // "stopped" while the project itself was "running".
+  it('ignores a service status that is not the project status', () => {
+    const withServices =
+      '{"level":"info","msg":"service","raw":{"status":"stopped"}}\n' + DESCRIBE_LINE('running');
+    expect(parseDdevProjectStatus(withServices)).toBe('running');
+  });
+
+  it('survives the stray log lines that precede the payload', () => {
+    const noisy =
+      '{"level":"info","msg":"PHP Warning: Module already loaded"}\n' + DESCRIBE_LINE('running');
+    expect(parseDdevProjectStatus(noisy)).toBe('running');
+    expect(parseDdevPrimaryUrl(noisy)).toBe('https://elmont-rs.ddev.site');
+  });
+
+  it('returns null when no describe payload is present', () => {
+    expect(parseDdevProjectStatus('not json at all')).toBeNull();
+  });
+
+  // The regression itself: this output used to be read as "serving" and skip the start.
+  it('does not report a stopped project as running', () => {
+    expect(parseDdevProjectStatus(DESCRIBE_LINE('stopped'))).not.toBe('running');
+    expect(
+      decideDdevRecovery({
+        describeOk: true,
+        serving: parseDdevProjectStatus(DESCRIBE_LINE('stopped')) === 'running',
+        dockerdUp: true,
+      }),
+    ).toBe('warm-start');
   });
 });

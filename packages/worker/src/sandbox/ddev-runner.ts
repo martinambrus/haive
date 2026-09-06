@@ -889,36 +889,42 @@ async function ddevExecOnce(
 const RUNNER_PROJECT_PREFIX = '/repos/';
 
 /**
- * Run a ddev subcommand, and if it died on an apt version pin the package repo has rolled
- * off, drop the pin and run it once more.
+ * Run a ddev command, and if it died on an apt version pin the package repo has rolled off,
+ * drop the pin and run it once more.
  *
- * Wrapped around EVERY subcommand rather than around the `start` call sites, because the
- * build is not the start command's to trigger. Task 75d8cbab's retry proves it: `ddev
- * describe` answered, so ensureDdevStarted took the `reuse` path and started nothing, and the
- * image build then ran inside `ddev import-db` — where the failure was thrown raw, with no
- * classifier and no repair anywhere on the path. Any subcommand that reconciles the project
- * can rebuild its images, so the repair has to key on the FAILURE, not on the verb.
+ * Keyed on the FAILURE rather than on the verb, because the image build is not the start
+ * command's to trigger: task 75d8cbab's retry rebuilt inside `ddev import-db`, since `ddev
+ * describe` answered and ensureDdevStarted started nothing. Any command that reconciles the
+ * project can rebuild its images.
+ *
+ * Applied at the two places a ddev command is actually spawned. `ddevExec` is not the single
+ * funnel it looks like — {@link ddevImportDb} composes its own shell (a pg_restore pipeline)
+ * and goes straight to runnerShellStreaming, which is exactly the call site that failed.
  *
  * Costs nothing on the normal path: a zero exit returns immediately, and a non-zero one only
- * pays a regex that matches nothing. Cannot loop — the retry calls the raw exec, and the
- * repair is idempotent anyway (the second read finds no pin and returns null).
+ * pays a regex that matches nothing. Cannot loop — `run` is the raw spawn, and the repair is
+ * idempotent anyway (the second read finds no pin and returns null).
  */
-export async function ddevExec(
+async function withAptPinRepair(
+  handle: DdevRunnerHandle,
+  run: () => Promise<{ exitCode: number; output: string }>,
+  onLine?: (line: string) => void,
+): Promise<{ exitCode: number; output: string }> {
+  const result = await run();
+  if (result.exitCode === 0 || !isDdevAptPinFailure(result.output)) return result;
+  if (!handle.projectDir.startsWith(RUNNER_PROJECT_PREFIX)) return result;
+  const repoSubpath = handle.projectDir.slice(RUNNER_PROJECT_PREFIX.length);
+  const repaired = await repairAptVersionPins(handle.container, repoSubpath, result.output, onLine);
+  return repaired ? run() : result;
+}
+
+/** Run a ddev subcommand in the runner, repairing a rolled-off apt pin if one kills it. */
+export function ddevExec(
   handle: DdevRunnerHandle,
   ddevArgs: string,
   opts: { timeoutMs?: number; onLine?: (line: string) => void } = {},
 ): Promise<{ exitCode: number; output: string }> {
-  const result = await ddevExecOnce(handle, ddevArgs, opts);
-  if (result.exitCode === 0 || !isDdevAptPinFailure(result.output)) return result;
-  if (!handle.projectDir.startsWith(RUNNER_PROJECT_PREFIX)) return result;
-  const repoSubpath = handle.projectDir.slice(RUNNER_PROJECT_PREFIX.length);
-  const repaired = await repairAptVersionPins(
-    handle.container,
-    repoSubpath,
-    result.output,
-    opts.onLine,
-  );
-  return repaired ? ddevExecOnce(handle, ddevArgs, opts) : result;
+  return withAptPinRepair(handle, () => ddevExecOnce(handle, ddevArgs, opts), opts.onLine);
 }
 
 /** How much of DDEV's own output a bring-up failure quotes. The TAIL: ddev's verdict lands
@@ -1210,11 +1216,11 @@ export function ddevImportDb(
   } = {},
 ): Promise<{ exitCode: number; output: string }> {
   const format = opts.format ?? { pgRestore: false, gzipped: false };
-  return runnerShellStreaming(
+  const cmd = buildDdevImportCommand(handle.projectDir, dumpRunnerPath, format);
+  return withAptPinRepair(
     handle,
-    buildDdevImportCommand(handle.projectDir, dumpRunnerPath, format),
+    () => runnerShellStreaming(handle, cmd, opts.onLine, opts.timeoutMs ?? 1_800_000),
     opts.onLine,
-    opts.timeoutMs ?? 1_800_000,
   );
 }
 
@@ -1235,6 +1241,31 @@ export function parseDdevPrimaryUrl(output: string): string | null {
     try {
       const parsed = JSON.parse(trimmed) as { raw?: { primary_url?: string } };
       if (parsed.raw?.primary_url) return parsed.raw.primary_url;
+    } catch {
+      // Not a complete JSON object on this line (log noise / truncation) — skip it.
+    }
+  }
+  return null;
+}
+
+/** DDEV's `raw.status` value for a project that is serving. VOLATILE in the usual sense — it
+ *  is DDEV's vocabulary, not ours — but a miss only routes us to `warm-start`, which restarts
+ *  a project that was already fine. That is the cheap direction, and the reason the test is a
+ *  positive match on `running` rather than a list of the ways a project can be down. */
+const DDEV_STATUS_RUNNING = 'running';
+
+/** `raw.status` from `ddev describe -j` — the project's own verdict on whether it is serving
+ *  (`running`, `stopped`, `paused`, …). Same line-by-line scan and same reason as
+ *  {@link parseDdevPrimaryUrl}: the payload can be preceded by stray log objects, and the
+ *  describe output carries OTHER `status` keys (per-service rows), so the value has to be
+ *  read off the same object that carries `primary_url` rather than matched in the text. */
+export function parseDdevProjectStatus(output: string): string | null {
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as { raw?: { status?: string; primary_url?: string } };
+      if (parsed.raw?.primary_url && parsed.raw.status) return parsed.raw.status;
     } catch {
       // Not a complete JSON object on this line (log noise / truncation) — skip it.
     }
@@ -1403,10 +1434,12 @@ export type DdevRecovery = 'reuse' | 'warm-start' | 'cold-boot';
  *    re-pulls base images into a fresh nested store. */
 export function decideDdevRecovery(s: {
   describeOk: boolean;
-  hasPrimaryUrl: boolean;
+  /** `ddev describe` reported the project RUNNING — not merely that it could be described.
+   *  See the call site for why the weaker reading was wrong. */
+  serving: boolean;
   dockerdUp: boolean;
 }): DdevRecovery {
-  if (s.describeOk && s.hasPrimaryUrl) return 'reuse';
+  if (s.describeOk && s.serving) return 'reuse';
   return s.dockerdUp ? 'warm-start' : 'cold-boot';
 }
 
@@ -1499,12 +1532,21 @@ async function ensureDdevStartedInner(
   const existing = runnerHandleForTask(taskId, repoSubpath);
   const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
   const describeOk = describe.exitCode === 0;
-  const hasPrimaryUrl = describe.output.includes('primary_url');
+  // A STOPPED project still describes cleanly and still reports its primary_url, so the
+  // presence of that URL never meant the project was serving — it only meant DDEV could read
+  // the config. Task 75d8cbab is what that cost: 01c reused a project with no containers at
+  // all, and the `ddev exec … | ddev import-db` pipeline that followed then had BOTH of its
+  // sides bring the project up at once (containers created 10:50:35.634, restarts=0, and the
+  // loser reported `Conflict. The container name "/ddev-elmont-rs-web" is already in use`).
+  // pipefail turned that into a failed step, which is the good outcome — the bad one is the
+  // truncated import it exists to catch. Wrong in this direction costs a restart; wrong in
+  // the other costs a half-loaded database nothing downstream can detect.
+  const serving = describeOk && parseDdevProjectStatus(describe.output) === DDEV_STATUS_RUNNING;
   // Only probe the nested dockerd when describe didn't already prove the project
   // is up (the cheap path short-circuits the extra docker exec).
-  const dockerdUp = describeOk && hasPrimaryUrl ? true : await runnerDockerdUp(existing.container);
+  const dockerdUp = serving ? true : await runnerDockerdUp(existing.container);
 
-  switch (decideDdevRecovery({ describeOk, hasPrimaryUrl, dockerdUp })) {
+  switch (decideDdevRecovery({ describeOk, serving, dockerdUp })) {
     case 'reuse':
       return existing; // already serving — don't re-boot (preserves an imported DB)
     case 'warm-start': {
