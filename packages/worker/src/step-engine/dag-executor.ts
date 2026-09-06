@@ -274,6 +274,17 @@ function issueWorktreeRel(issue: DagIssueRow): string | undefined {
   return issue.branchName ? `${WORKTREE_SUBDIR}/${worktreeDirName(issue.branchName)}` : undefined;
 }
 
+/** Terminal header for one 06c invocation. Every agent this step spawns is one of N
+ *  concurrent runs on the SAME task_steps row, so the mode badge ('DAG PARALLEL') names
+ *  the fan-out and cannot say which issue a terminal is working — the issue key has to
+ *  ride the invocation. Clamped: cli_invocations.agent_title is varchar(256) and
+ *  task_dag_issues.title is varchar(512). */
+function issueAgentTitle(issue: DagIssueRow, role: string): string {
+  const head = `${issue.issueKey} · ${role}`;
+  const what = issue.title.replace(/\s+/g, ' ').trim().slice(0, 120);
+  return what ? `${head} — ${what}` : head;
+}
+
 function safeJsonParse(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -572,6 +583,7 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
         cliProviderId: plan.providerId,
         effort: plan.effort ?? null,
         mode: 'cli',
+        agentTitle: issueAgentTitle(issue, 'Merge fix'),
         prompt: plan.effectivePrompt ?? prompt,
       })
       .returning({ id: schema.cliInvocations.id });
@@ -799,6 +811,15 @@ export function fixRequiredIsCosmetic(v: ReviewerOutput): boolean {
   );
 }
 
+/** Terminal-header names for the review loop's roles. 'coder' here is always the FIX
+ *  coder — the initial implementation coder is dispatched by the level fan-out, not by
+ *  this function. */
+const REVIEW_ROLE_LABEL: Record<'reviewer' | 'coder' | 'issue_advisor', string> = {
+  reviewer: 'Reviewer',
+  coder: 'Fix coder',
+  issue_advisor: 'Advisor',
+};
+
 /** Dispatch one review-loop agent (reviewer or fix-coder) into the issue
  *  worktree, recording a dag_agent_runs row. Returns false if no provider. */
 async function spawnReviewAgent(
@@ -842,6 +863,10 @@ async function spawnReviewAgent(
       // concurrent invocations on the ONE 06c step, so it must be exempt from the
       // one-live-per-step index (its concurrency is bounded by dag_agent_runs).
       mode: 'dag_parallel',
+      agentTitle: issueAgentTitle(
+        issue,
+        iteration > 0 ? `${REVIEW_ROLE_LABEL[role]} ${iteration}` : REVIEW_ROLE_LABEL[role],
+      ),
       prompt: plan.effectivePrompt ?? prompt,
     })
     .returning({ id: schema.cliInvocations.id });
@@ -1788,6 +1813,7 @@ export async function resolveDagPhase(
             // 06c step, so they must be exempt from the one-live-per-step index (the
             // per-issue barrier is task_dag_issues, not the singleton index).
             mode: 'dag_parallel',
+            agentTitle: issueAgentTitle(issue, 'Coder'),
             prompt: planDispatch.effectivePrompt ?? prompt,
           })
           .returning({ id: schema.cliInvocations.id });
