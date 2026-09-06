@@ -1,4 +1,4 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type {
   PlanEdgeKind,
@@ -159,6 +159,48 @@ export async function loadPlanEdges(
     })
     .from(schema.planNodeEdges)
     .where(eq(schema.planNodeEdges.repositoryId, repositoryId));
+}
+
+/** A file the plan says implements a node, as a server-side reader needs it.
+ *
+ *  `stale` is carried, never filtered here. It means a task changed this path
+ *  since an agent last asserted the link, and only re-assertion clears it — so a
+ *  stale link is simultaneously the most useful pointer (that file just moved
+ *  under whoever depends on it) and the least trustworthy one. Which of those a
+ *  caller cares about is the caller's decision; dropping it in the loader would
+ *  make that decision for everyone, silently. */
+export interface PlanCodeLinkRecord {
+  nodeId: string;
+  repoPath: string;
+  symbol: string | null;
+  evidence: string | null;
+  stale: boolean;
+}
+
+/**
+ * Code links for a SET of nodes, in one query.
+ *
+ * The api reads this table per node for the detail panel; a caller asking "what
+ * implements any of these components" wants them together, and N round trips for
+ * a blast radius is the wrong shape. Empty input short-circuits rather than
+ * issuing `IN ()`.
+ */
+export async function loadPlanCodeLinks(
+  db: PlanReadDb,
+  nodeIds: readonly string[],
+): Promise<PlanCodeLinkRecord[]> {
+  if (nodeIds.length === 0) return [];
+  return db
+    .select({
+      nodeId: schema.planNodeCodeLinks.nodeId,
+      repoPath: schema.planNodeCodeLinks.repoPath,
+      symbol: schema.planNodeCodeLinks.symbol,
+      evidence: schema.planNodeCodeLinks.evidence,
+      stale: schema.planNodeCodeLinks.stale,
+    })
+    .from(schema.planNodeCodeLinks)
+    .where(inArray(schema.planNodeCodeLinks.nodeId, [...nodeIds]))
+    .orderBy(asc(schema.planNodeCodeLinks.repoPath));
 }
 
 export async function loadPlanNode(
