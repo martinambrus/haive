@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DelayedError, Worker, type Job, type Queue } from 'bullmq';
-import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import {
@@ -947,6 +947,55 @@ const PAUSE_DEFER_MS = 30_000;
  *  provision — because INVOKE is the only job name that spawns a sandboxed agent. */
 const LIGHT_JOB_LANE = 3;
 
+/** Of `ids`, those whose invocation is already finalized — ended, or superseded by a retry or
+ *  a cancel. Fails OPEN (empty set): an unreadable answer ranks exactly as it did before this
+ *  exclusion existed, which over-holds a slot rather than over-admitting agents. */
+async function finalizedInvocationIds(db: Database, ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  try {
+    const rows = await db
+      .select({ id: schema.cliInvocations.id })
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          inArray(schema.cliInvocations.id, ids),
+          or(
+            isNotNull(schema.cliInvocations.endedAt),
+            isNotNull(schema.cliInvocations.supersededAt),
+          ),
+        ),
+      );
+    return new Set(rows.map((r) => r.id));
+  } catch (err) {
+    log.warn({ err }, 'agent-lane finalized lookup failed; ranking without the exclusion');
+    return new Set();
+  }
+}
+
+/** Position of `jobId` among the active INVOKE jobs that still have work to do, or -1 when it
+ *  is not one of them.
+ *
+ *  A job whose invocation is already finalized is EXCLUDED, and that is the whole point: BullMQ
+ *  keeps a job in `active` holding its lock when the worker dies mid-job, and `lockDuration` is
+ *  30 minutes by design (a long step must survive a restart without redelivery). Ranking against
+ *  those corpses hands them agent slots they will never use — OBSERVED on a 16 GB host where the
+ *  measured pool is 2: two orphans from worker restarts held both slots, every real job logged
+ *  "agent pool full" every 30s for 15 minutes, and `docker ps` showed no agent container at all.
+ *  Their rows were already `ended_at` AND `superseded_at`, so the redelivery guard in
+ *  handleCliExecJob would have skipped them the moment they were reclaimed.
+ *
+ *  Pure, so the ordering and the exclusion are testable without a queue or a db. */
+export function agentLaneRank(
+  active: { id: string; priority: number; invocationId: string }[],
+  jobId: string,
+  finalized: ReadonlySet<string>,
+): number {
+  return active
+    .filter((j) => !finalized.has(j.invocationId))
+    .sort((a, b) => a.priority - b.priority || compareJobIds(a.id, b.id))
+    .findIndex((j) => j.id === jobId);
+}
+
 /** Hold INVOKE to the agent cap now that the worker runs wider than it.
  *
  *  The Worker's concurrency is agentCap + LIGHT_JOB_LANE so a light job always has somewhere to
@@ -966,6 +1015,7 @@ const LIGHT_JOB_LANE = 3;
  *  to be missing from a peer's read while outranking it, and BullMQ activates in queue order, so
  *  a job that outranks this one is already active by the time this one is. */
 async function enforceAgentLaneCap(
+  db: Database,
   job: Job<CliExecQueuePayload>,
   token: string | undefined,
   agentCap: number,
@@ -974,12 +1024,21 @@ async function enforceAgentLaneCap(
   let rank: number;
   try {
     const active = await getCliExecQueue().getActive(0, -1);
-    const invokes = active
+    const entries = active
       .filter((j) => j?.name === CLI_EXEC_JOB_NAMES.INVOKE && j.id)
-      .sort(
-        (a, b) => (a.priority ?? 0) - (b.priority ?? 0) || compareJobIds(a.id ?? '', b.id ?? ''),
-      );
-    rank = invokes.findIndex((j) => j.id === job.id);
+      .map((j) => ({
+        id: j.id as string,
+        priority: j.priority ?? 0,
+        invocationId: (j.data as CliExecJobPayload).invocationId,
+      }));
+    rank = agentLaneRank(
+      entries,
+      job.id ?? '',
+      await finalizedInvocationIds(
+        db,
+        entries.map((e) => e.invocationId),
+      ),
+    );
     // Not in the set we just read — allow rather than guess a position it does not have.
     if (rank < 0) return;
   } catch (err) {
@@ -1129,7 +1188,7 @@ export async function startCliExecWorker(
         // never stuck behind agents, and this is what still holds AGENTS to the pool size.
         // After the pause gate on purpose — a held job is briefly `active` before it defers, and
         // ranking against it would bounce a live agent for work that is not going to run.
-        await enforceAgentLaneCap(job, token, agentCap);
+        await enforceAgentLaneCap(db, job, token, agentCap);
         // Per-task cap: if this task already runs its max parallel agents, defer
         // the job (freeing the slot for others) and let BullMQ redeliver it.
         // Throws DelayedError on defer; no-op when under the cap.
