@@ -7,6 +7,7 @@ import { Button } from '@/components/ui';
 
 const BASE_NAV_ITEMS = [
   { href: '/dashboard', label: 'Dashboard' },
+  { href: '/stats', label: 'Statistics' },
   { href: '/tasks', label: 'Tasks' },
   { href: '/repos', label: 'Repositories' },
   { href: '/settings/cli-providers', label: 'Settings' },

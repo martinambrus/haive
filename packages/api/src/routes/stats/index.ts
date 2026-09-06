@@ -4,6 +4,7 @@ import type { SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, isDisplayCurrency } from '@haive/shared';
 import { computeTaskTiming } from '@haive/shared/timing';
+import { buildEstimationAccuracy } from '@haive/shared';
 import {
   computeBusySpan,
   computeDelta,
@@ -636,5 +637,347 @@ statsRoutes.get('/timeline', async (c) => {
       dutyCycle: busy.dutyCycle,
     },
     days: series,
+  });
+});
+
+/**
+ * Reliability: what wasted time, and where.
+ *
+ * The dimension the original request did not name and the most actionable one in a multi-CLI
+ * tool — every column here already existed and none of it was surfaced anywhere.
+ *
+ * Two counts are deliberately NOT filtered by `invocationAttributionFilter`. Superseded rows
+ * ARE the waste being measured (re-rolled work thrown away), and a run killed before it could
+ * be attributed to a step is exactly the failure worth counting. Every other figure keeps the
+ * filter so it reconciles with the task pages.
+ */
+statsRoutes.get('/reliability', async (c) => {
+  const userId = c.get('userId');
+  const q = parseStatsQuery(c.req.query());
+  if (q.allUsers && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for install-wide statistics');
+  }
+  const db = getDb();
+  const from = new Date(q.fromMs);
+  const to = new Date(q.toMs);
+  const scope = taskScopeFilter(q, userId);
+  const providerTerm = q.cliProviderId
+    ? [eq(schema.cliInvocations.cliProviderId, q.cliProviderId)]
+    : [];
+  const window = and(
+    ...scope,
+    ...providerTerm,
+    isNotNull(schema.cliInvocations.startedAt),
+    gte(schema.cliInvocations.startedAt, from),
+    lt(schema.cliInvocations.startedAt, to),
+  );
+
+  const [totals] = await db
+    .select({
+      invocations: sql<number>`count(*)::int`,
+      superseded: sql<number>`count(*) filter (where ${schema.cliInvocations.supersededAt} is not null)::int`,
+      // A NULL exit code on a run that ENDED is a process that was killed or orphaned, not one
+      // still going: the live rows are excluded by the ended_at test.
+      killed: sql<number>`count(*) filter (where ${schema.cliInvocations.endedAt} is not null and ${schema.cliInvocations.exitCode} is null)::int`,
+      nonZeroExit: sql<number>`count(*) filter (where ${schema.cliInvocations.exitCode} is not null and ${schema.cliInvocations.exitCode} <> 0)::int`,
+      // Within 2% of the hard budget. A run that ends AT its timeout was cut off, and that is
+      // invisible in an exit code (the process is killed, so it reports none).
+      nearTimeout: sql<number>`count(*) filter (where ${schema.cliInvocations.timeoutMs} is not null and ${schema.cliInvocations.durationMs} >= ${schema.cliInvocations.timeoutMs} * 0.98)::int`,
+      withTimeout: sql<number>`count(*) filter (where ${schema.cliInvocations.timeoutMs} is not null)::int`,
+      identityDiffers: sql<number>`count(*) filter (where ${schema.cliInvocations.modelIdentity} ->> 'match' = 'differs')::int`,
+      identityKnown: sql<number>`count(*) filter (where ${schema.cliInvocations.modelIdentity} ->> 'match' is not null)::int`,
+    })
+    .from(schema.cliInvocations)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+    .where(window);
+
+  const fatalRows = await db
+    .select({
+      provider: schema.cliProviders.name,
+      fatalClass: schema.cliInvocations.providerFatalClass,
+      n: sql<number>`count(*)::int`,
+    })
+    .from(schema.cliInvocations)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+    .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
+    .where(and(window, isNotNull(schema.cliInvocations.providerFatalClass)))
+    .groupBy(schema.cliProviders.name, schema.cliInvocations.providerFatalClass);
+
+  // Steps are scoped through their task, and by the task's own window rather than the
+  // invocation clock: a step has no started_at until it runs.
+  const stepWindow = and(
+    ...scope,
+    gte(schema.taskSteps.createdAt, from),
+    lt(schema.taskSteps.createdAt, to),
+  );
+  const [stepTotals] = await db
+    .select({
+      steps: sql<number>`count(*)::int`,
+      failed: sql<number>`count(*) filter (where ${schema.taskSteps.status} = 'failed')::int`,
+      // Output that could not be parsed and silently fell back to a stub. A quality loss that
+      // finalises as `done`, so nothing else reports it.
+      degraded: sql<number>`count(*) filter (where ${schema.taskSteps.degradedNote} is not null)::int`,
+      maxRound: sql<number>`coalesce(max(${schema.taskSteps.round}), 0)::int`,
+    })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(stepWindow);
+
+  const failingSteps = await db
+    .select({ stepId: schema.taskSteps.stepId, n: sql<number>`count(*)::int` })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(and(stepWindow, eq(schema.taskSteps.status, 'failed')))
+    .groupBy(schema.taskSteps.stepId)
+    .orderBy(sql`count(*) desc`)
+    .limit(10);
+
+  const eventRows = await db
+    .select({ eventType: schema.taskEvents.eventType, n: sql<number>`count(*)::int` })
+    .from(schema.taskEvents)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskEvents.taskId))
+    .where(
+      and(
+        ...scope,
+        gte(schema.taskEvents.createdAt, from),
+        lt(schema.taskEvents.createdAt, to),
+        inArray(schema.taskEvents.eventType, ['step.retry', 'step.revise', 'step.failed']),
+      ),
+    )
+    .groupBy(schema.taskEvents.eventType);
+
+  const invocations = Number(totals?.invocations) || 0;
+  const steps = Number(stepTotals?.steps) || 0;
+  return c.json({
+    range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
+    invocations: {
+      total: invocations,
+      superseded: Number(totals?.superseded) || 0,
+      killed: Number(totals?.killed) || 0,
+      nonZeroExit: Number(totals?.nonZeroExit) || 0,
+      nearTimeout: Number(totals?.nearTimeout) || 0,
+      withTimeout: Number(totals?.withTimeout) || 0,
+      identityDiffers: Number(totals?.identityDiffers) || 0,
+      identityKnown: Number(totals?.identityKnown) || 0,
+      supersededRatio: sampledRatio(Number(totals?.superseded) || 0, invocations),
+      killedRatio: sampledRatio(Number(totals?.killed) || 0, invocations),
+      nearTimeoutRatio: sampledRatio(
+        Number(totals?.nearTimeout) || 0,
+        Number(totals?.withTimeout) || 0,
+      ),
+    },
+    fatalClasses: fatalRows.map((r) => ({
+      provider: r.provider ?? 'unknown',
+      fatalClass: r.fatalClass ?? 'unknown',
+      count: Number(r.n) || 0,
+    })),
+    steps: {
+      total: steps,
+      failed: Number(stepTotals?.failed) || 0,
+      degraded: Number(stepTotals?.degraded) || 0,
+      maxRound: Number(stepTotals?.maxRound) || 0,
+      failedRatio: sampledRatio(Number(stepTotals?.failed) || 0, steps),
+      degradedRatio: sampledRatio(Number(stepTotals?.degraded) || 0, steps),
+      topFailing: failingSteps.map((r) => ({ stepId: r.stepId, count: Number(r.n) || 0 })),
+    },
+    events: Object.fromEntries(eventRows.map((r) => [r.eventType, Number(r.n) || 0])),
+  });
+});
+
+/**
+ * Quality: what the reviewers raised, and what became of it.
+ *
+ * Two things this must not claim. `fixed` is deliberately never written to `review_findings`,
+ * so an `open` row is NOT evidence that a defect still stands — a reviewer that was skipped,
+ * budget-killed or simply reworded produces the same absence. And `dimension` lives in `raw`
+ * and only when the reviewer emitted it, so anything else is reported as `unclassified` rather
+ * than folded into a neighbour.
+ */
+statsRoutes.get('/quality', async (c) => {
+  const userId = c.get('userId');
+  const q = parseStatsQuery(c.req.query());
+  if (q.allUsers && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for install-wide statistics');
+  }
+  const db = getDb();
+  const from = new Date(q.fromMs);
+  const to = new Date(q.toMs);
+  const scope = taskScopeFilter(q, userId);
+  const window = and(
+    ...scope,
+    gte(schema.reviewFindings.createdAt, from),
+    lt(schema.reviewFindings.createdAt, to),
+  );
+
+  const [totals] = await db
+    .select({
+      findings: sql<number>`count(*)::int`,
+      blocking: sql<number>`count(*) filter (where ${schema.reviewFindings.blocking})::int`,
+      recurring: sql<number>`count(*) filter (where ${schema.reviewFindings.recurrenceCount} > 0)::int`,
+      tasks: sql<number>`count(distinct ${schema.reviewFindings.taskId})::int`,
+    })
+    .from(schema.reviewFindings)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.reviewFindings.taskId))
+    .where(window);
+
+  const [bySeverity, byDisposition, byReviewer, byDimension] = await Promise.all([
+    db
+      .select({ key: schema.reviewFindings.severity, n: sql<number>`count(*)::int` })
+      .from(schema.reviewFindings)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.reviewFindings.taskId))
+      .where(window)
+      .groupBy(schema.reviewFindings.severity),
+    db
+      .select({ key: schema.reviewFindings.disposition, n: sql<number>`count(*)::int` })
+      .from(schema.reviewFindings)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.reviewFindings.taskId))
+      .where(window)
+      .groupBy(schema.reviewFindings.disposition),
+    db
+      .select({
+        reviewerId: schema.reviewFindings.reviewerId,
+        n: sql<number>`count(*)::int`,
+        refuted: sql<number>`count(*) filter (where ${schema.reviewFindings.disposition} = 'dismissed_refuted')::int`,
+        blocking: sql<number>`count(*) filter (where ${schema.reviewFindings.blocking})::int`,
+      })
+      .from(schema.reviewFindings)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.reviewFindings.taskId))
+      .where(window)
+      .groupBy(schema.reviewFindings.reviewerId)
+      .orderBy(sql`count(*) desc`)
+      .limit(20),
+    db
+      .select({
+        // `raw ->> 'dimension'` is present only when the reviewer emitted one; coalescing to a
+        // named bucket keeps that visible instead of implying full coverage.
+        key: sql<string>`coalesce(${schema.reviewFindings.raw} ->> 'dimension', 'unclassified')`,
+        n: sql<number>`count(*)::int`,
+      })
+      .from(schema.reviewFindings)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.reviewFindings.taskId))
+      .where(window)
+      .groupBy(sql`coalesce(${schema.reviewFindings.raw} ->> 'dimension', 'unclassified')`),
+  ]);
+
+  const findings = Number(totals?.findings) || 0;
+  const asCounts = (rows: Array<{ key: string | null; n: number }>) =>
+    rows
+      .map((r) => ({ key: r.key ?? 'unknown', count: Number(r.n) || 0 }))
+      .sort((a, b) => b.count - a.count);
+
+  return c.json({
+    range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
+    totals: {
+      findings,
+      blocking: Number(totals?.blocking) || 0,
+      recurring: Number(totals?.recurring) || 0,
+      tasksWithFindings: Number(totals?.tasks) || 0,
+      recurringRatio: sampledRatio(Number(totals?.recurring) || 0, findings),
+    },
+    bySeverity: asCounts(bySeverity),
+    byDisposition: asCounts(byDisposition),
+    byDimension: asCounts(byDimension),
+    byReviewer: byReviewer.map((r) => ({
+      reviewerId: r.reviewerId,
+      count: Number(r.n) || 0,
+      blocking: Number(r.blocking) || 0,
+      // How much of what this reviewer raised was disproved by the refutation pass. A high
+      // share is reviewer NOISE, which is the only thing here that judges a reviewer.
+      refutedRatio: sampledRatio(Number(r.refuted) || 0, Number(r.n) || 0),
+    })),
+    // Stated on the response rather than left for the reader to infer, because absence of a
+    // finding is the one thing this table cannot be read as.
+    caveat:
+      'A finding is never marked fixed: absence in a later round is not evidence of a fix, since a skipped or budget-killed reviewer produces the same absence.',
+  });
+});
+
+/**
+ * Estimate accuracy across every repository, using the same aggregator the per-repo dashboard
+ * already uses so the two cannot disagree about what MAPE means here.
+ */
+statsRoutes.get('/estimates', async (c) => {
+  const userId = c.get('userId');
+  const q = parseStatsQuery(c.req.query());
+  if (q.allUsers && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for install-wide statistics');
+  }
+  const db = getDb();
+  const from = new Date(q.fromMs);
+  const to = new Date(q.toMs);
+  const scope = taskScopeFilter(q, userId);
+
+  const rows = await db
+    .select({
+      id: schema.tasks.id,
+      title: schema.tasks.title,
+      completedAt: schema.tasks.completedAt,
+      aiEstimatedTimeHours: schema.tasks.aiEstimatedTimeHours,
+      estimatedTimeHours: schema.tasks.estimatedTimeHours,
+    })
+    .from(schema.tasks)
+    .where(
+      and(
+        ...scope,
+        eq(schema.tasks.status, 'completed'),
+        isNotNull(schema.tasks.completedAt),
+        gte(schema.tasks.completedAt, from),
+        lt(schema.tasks.completedAt, to),
+        isNotNull(schema.tasks.aiEstimatedTimeHours),
+      ),
+    );
+
+  const effortByTask = new Map<string, number>();
+  if (rows.length > 0) {
+    const stepRows = await db
+      .select({
+        taskId: schema.taskSteps.taskId,
+        startedAt: schema.taskSteps.startedAt,
+        endedAt: schema.taskSteps.endedAt,
+        idleMs: schema.taskSteps.idleMs,
+        userActiveMs: schema.taskSteps.userActiveMs,
+        waitingStartedAt: schema.taskSteps.waitingStartedAt,
+        status: schema.taskSteps.status,
+        carriedWorkMs: schema.taskSteps.carriedWorkMs,
+        carriedIdleMs: schema.taskSteps.carriedIdleMs,
+        carriedUserActiveMs: schema.taskSteps.carriedUserActiveMs,
+      })
+      .from(schema.taskSteps)
+      .where(
+        inArray(
+          schema.taskSteps.taskId,
+          rows.map((r) => r.id),
+        ),
+      );
+    const byTask = new Map<string, (typeof stepRows)[number][]>();
+    for (const s of stepRows) {
+      const list = byTask.get(s.taskId);
+      if (list) list.push(s);
+      else byTask.set(s.taskId, [s]);
+    }
+    const now = Date.now();
+    for (const t of rows) {
+      // Capped at the task's own completion, for the reason the per-repo endpoint records: an
+      // uncapped open step inflates "actual" and biases the estimator against its own past.
+      const endMs = t.completedAt ? t.completedAt.getTime() : now;
+      const timing = computeTaskTiming(byTask.get(t.id) ?? [], endMs);
+      effortByTask.set(t.id, (timing.workMs + timing.userActiveMs) / 3_600_000);
+    }
+  }
+
+  const accuracy = buildEstimationAccuracy(
+    rows.map((t) => ({
+      taskId: t.id,
+      title: t.title,
+      completedAt: t.completedAt ? t.completedAt.toISOString() : null,
+      aiEstimatedHours: t.aiEstimatedTimeHours ?? 0,
+      confirmedHours: t.estimatedTimeHours ?? null,
+      actualHours: Math.round((effortByTask.get(t.id) ?? 0) * 100) / 100,
+    })),
+  );
+
+  return c.json({
+    range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
+    ...accuracy,
   });
 });

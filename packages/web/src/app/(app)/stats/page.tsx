@@ -1,0 +1,884 @@
+'use client';
+
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
+import dynamic from 'next/dynamic';
+import { useRouter, useSearchParams } from 'next/navigation';
+import {
+  api,
+  getStatsEstimates,
+  getStatsQuality,
+  getStatsReliability,
+  getStatsSummary,
+  getStatsTimeline,
+  getUiPrefs,
+  putUiPrefs,
+  type Repository,
+  type StatsEstimates,
+  type StatsQuality,
+  type StatsQueryParams,
+  type StatsReliability,
+  type StatsSummary,
+  type StatsTaskClass,
+  type StatsTimeline,
+  type UiPrefs,
+} from '@/lib/api-client';
+import { Card, CardDescription, CardHeader, CardTitle, Input } from '@/components/ui';
+import { StatTile } from '@/components/stats/stat-tile';
+import { usePageTitle } from '@/lib/use-page-title';
+import { formatDuration } from '@/lib/format-duration';
+import { formatCost } from '@/lib/format-cost';
+import { formatTokens } from '@/lib/format-tokens';
+import {
+  formatAgentHours,
+  formatConcurrency,
+  formatCount,
+  formatPercent,
+  formatSampledRatio,
+  isUnderSampled,
+} from '@/lib/stats/format-stats';
+import {
+  isRangePresetId,
+  parseCustomRange,
+  presetIsRedundant,
+  RANGE_PRESETS,
+  resolvePreset,
+  toDatetimeLocal,
+  type RangePresetId,
+} from '@/lib/stats/range-presets';
+
+const SpendChart = dynamic(() => import('@/components/stats/charts').then((m) => m.SpendChart), {
+  ssr: false,
+  loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
+});
+const ActivityChart = dynamic(
+  () => import('@/components/stats/charts').then((m) => m.ActivityChart),
+  {
+    ssr: false,
+    loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
+  },
+);
+
+/** Repeated rather than shared: four other pages already carry their own copy of this string,
+ *  and unifying them is a refactor this change has no business making. */
+const SELECT_CLASS =
+  'h-9 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500';
+
+const TABS = ['money', 'time', 'reliability', 'quality', 'estimates'] as const;
+type Tab = (typeof TABS)[number];
+const TAB_LABELS: Record<Tab, string> = {
+  money: 'Money',
+  time: 'Time & throughput',
+  reliability: 'Reliability',
+  quality: 'Quality',
+  estimates: 'Estimates',
+};
+
+const TASK_CLASS_OPTIONS: Array<{ value: '' | StatsTaskClass; label: string }> = [
+  { value: '', label: 'All classes' },
+  { value: 'work', label: 'Work' },
+  { value: 'plan', label: 'Plan' },
+  { value: 'setup', label: 'Setup' },
+  { value: 'run', label: 'Run' },
+  { value: 'other', label: 'Other' },
+];
+
+function isTab(v: string | null): v is Tab {
+  return !!v && (TABS as readonly string[]).includes(v);
+}
+
+export default function StatsPage() {
+  return (
+    // useSearchParams needs a Suspense boundary to keep the route from opting the whole page
+    // out of static rendering.
+    <Suspense fallback={<div className="text-sm text-neutral-500">Loading...</div>}>
+      <StatsPageInner />
+    </Suspense>
+  );
+}
+
+function StatsPageInner() {
+  usePageTitle('Statistics');
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // URL is the source of truth for every filter, so a view is shareable and the back button
+  // works — the same arrangement the tasks listing uses.
+  const preset: RangePresetId = isRangePresetId(searchParams.get('preset'))
+    ? (searchParams.get('preset') as RangePresetId)
+    : '30d';
+  const tab: Tab = isTab(searchParams.get('tab')) ? (searchParams.get('tab') as Tab) : 'money';
+  const customFrom = searchParams.get('from') ?? '';
+  const customTo = searchParams.get('to') ?? '';
+  const repositoryId = searchParams.get('repositoryId') ?? '';
+  const taskClass = searchParams.get('taskClass') ?? '';
+  const filterKey = `${preset}|${customFrom}|${customTo}|${repositoryId}|${taskClass}`;
+
+  // Resolved on the CLIENT only, and null until it is. `Intl...timeZone` returns the server
+  // container's zone (UTC) during SSR and the viewer's in the browser, so seeding state with it
+  // renders two different values and React discards the whole tree on a hydration mismatch.
+  // Null also gates the first fetch, so the window is requested once, in the right zone.
+  const [timeZone, setTimeZone] = useState<string | null>(null);
+  // The clock a relative preset ("last 30 days") is measured from, anchored ONCE on the client
+  // for the same reason. Date.now() differs by milliseconds between the server render and
+  // hydration, and it reaches the DOM through the drill-through href — which React compares
+  // attribute by attribute. Anchoring it also keeps the window stable while the page is open,
+  // so a re-render cannot quietly shift the range under a chart the user is reading.
+  const [nowMs, setNowMs] = useState<number | null>(null);
+  const prefsRef = useRef<UiPrefs>({});
+
+  const [summary, setSummary] = useState<StatsSummary | null>(null);
+  const [timeline, setTimeline] = useState<StatsTimeline | null>(null);
+  const [reliability, setReliability] = useState<StatsReliability | null>(null);
+  const [quality, setQuality] = useState<StatsQuality | null>(null);
+  const [estimates, setEstimates] = useState<StatsEstimates | null>(null);
+  const [repos, setRepos] = useState<Repository[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // The stored zone wins over the browser's once it arrives. Merged with local precedence and
+  // written back whole, because putUiPrefs replaces the entire blob — the idiom the plan page
+  // established.
+  useEffect(() => {
+    setNowMs(Date.now());
+    const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    getUiPrefs()
+      .then((p) => {
+        prefsRef.current = { ...p, ...prefsRef.current };
+        setTimeZone(p.statsTimeZone || browserZone);
+      })
+      .catch(() => {
+        // A failed preference read is not a reason to show nothing.
+        setTimeZone(browserZone);
+      });
+    // Inline rather than a named wrapper, matching how the repos and new-task pages fetch it.
+    api
+      .get<{ repositories: Repository[] }>('/repos')
+      .then((r) => setRepos(r.repositories))
+      .catch(() => {
+        /* the repository filter is optional */
+      });
+  }, []);
+
+  const persistTimeZone = useCallback((tz: string) => {
+    const next = { ...prefsRef.current, statsTimeZone: tz };
+    prefsRef.current = next;
+    void putUiPrefs(next).catch(() => {
+      /* a failed preference write must not break the page */
+    });
+  }, []);
+
+  function setParam(key: string, value: string) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (value) params.set(key, value);
+    else params.delete(key);
+    const qs = params.toString();
+    router.replace(qs ? `/stats?${qs}` : '/stats', { scroll: false });
+  }
+
+  const range = useMemo(() => {
+    if (nowMs === null) return null;
+    if (preset === 'custom') {
+      // An incomplete custom range falls back to 30 days rather than requesting something the
+      // API will reject while the user is still typing the second date.
+      return parseCustomRange(customFrom, customTo) ?? resolvePreset('30d', nowMs);
+    }
+    return resolvePreset(preset, nowMs);
+    // `filterKey` deliberately drives this rather than the individual params.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey, nowMs]);
+
+  const params: StatsQueryParams | null = useMemo(
+    () =>
+      timeZone === null || range === null
+        ? null
+        : {
+            from: new Date(range.fromMs).toISOString(),
+            to: new Date(range.toMs).toISOString(),
+            tz: timeZone,
+            ...(repositoryId ? { repositoryId } : {}),
+            ...(taskClass ? { taskClass: taskClass as StatsTaskClass } : {}),
+          },
+    [range, timeZone, repositoryId, taskClass],
+  );
+
+  // Summary and timeline back the header and two tabs, so they always load. The other three
+  // load only when their tab is opened — the point of one endpoint per tab.
+  useEffect(() => {
+    if (!params) return;
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      try {
+        const [s, t] = await Promise.all([getStatsSummary(params), getStatsTimeline(params)]);
+        if (cancelled) return;
+        setSummary(s);
+        setTimeline(t);
+        setError(null);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load statistics');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [params]);
+
+  useEffect(() => {
+    if (!params) return;
+    let cancelled = false;
+    if (tab === 'reliability' && !reliability) {
+      getStatsReliability(params)
+        .then((d) => !cancelled && setReliability(d))
+        .catch(() => undefined);
+    }
+    if (tab === 'quality' && !quality) {
+      getStatsQuality(params)
+        .then((d) => !cancelled && setQuality(d))
+        .catch(() => undefined);
+    }
+    if (tab === 'estimates' && !estimates) {
+      getStatsEstimates(params)
+        .then((d) => !cancelled && setEstimates(d))
+        .catch(() => undefined);
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, params, reliability, quality, estimates]);
+
+  // A filter change invalidates the lazily-loaded tabs, or switching back would show the
+  // previous window's numbers under the new filter's heading.
+  useEffect(() => {
+    setReliability(null);
+    setQuality(null);
+    setEstimates(null);
+  }, [params]);
+
+  const cd = summary?.costDisplay ?? null;
+  const money = (usd: number) => (cd ? formatCost(usd, cd) : `$${usd.toFixed(2)}`);
+
+  /** Every drill-through carries the same window and class the chart was built from, so the
+   *  task list shows exactly the rows behind the figure. */
+  const drillHref = (extra: Record<string, string> = {}) => {
+    // Before the client clock is anchored the window is unknown, so the link points at the
+    // unfiltered list rather than at a window the server and client would disagree about.
+    if (!range) return '/tasks';
+    const p = new URLSearchParams({
+      from: new Date(range.fromMs).toISOString(),
+      to: new Date(range.toMs).toISOString(),
+      // The listing's URL name, NOT the API's `includeChats`: the tasks page reads `showChats`
+      // and translates it. Sending the API name looks right and silently drops plan chats from
+      // the list, so the drill-through would show fewer rows than the figure it came from.
+      showChats: '1',
+      ...(repositoryId ? { repositoryId } : {}),
+      ...(taskClass ? { taskClass } : {}),
+      ...extra,
+    });
+    return `/tasks?${p.toString()}`;
+  };
+
+  // Built from the resolved zone, so this never reads Intl during a server render either.
+  const zones = useMemo(() => (timeZone ? [...new Set([timeZone, 'UTC'])] : ['UTC']), [timeZone]);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="text-2xl font-bold text-neutral-50">Statistics</h1>
+        <p className="text-sm text-neutral-400">
+          Every figure is scoped to the window and filters below. Ratios built from too few
+          observations show their sample count instead of a percentage.
+        </p>
+      </div>
+
+      <Card className="flex flex-col gap-3 py-4">
+        <div className="flex flex-wrap items-center gap-2">
+          {RANGE_PRESETS.map((p) => {
+            const active = p.id === preset;
+            const redundant = presetIsRedundant(p.id, null, Date.now());
+            return (
+              <button
+                key={p.id}
+                type="button"
+                title={p.title}
+                onClick={() => setParam('preset', p.id)}
+                className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
+                  active
+                    ? 'bg-indigo-950/60 text-indigo-200'
+                    : 'text-neutral-300 hover:bg-neutral-900 hover:text-neutral-100'
+                } ${redundant ? 'opacity-60' : ''}`}
+              >
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {preset === 'custom' && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              type="datetime-local"
+              className="h-9 w-auto"
+              value={customFrom || (range ? toDatetimeLocal(range.fromMs) : '')}
+              onChange={(e) => setParam('from', e.target.value)}
+            />
+            <span className="text-sm text-neutral-500">to</span>
+            <Input
+              type="datetime-local"
+              className="h-9 w-auto"
+              value={customTo || (range ? toDatetimeLocal(range.toMs) : '')}
+              onChange={(e) => setParam('to', e.target.value)}
+            />
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            name="repositoryId"
+            aria-label="Repository"
+            className={SELECT_CLASS}
+            value={repositoryId}
+            onChange={(e) => setParam('repositoryId', e.target.value)}
+          >
+            <option value="">All repositories</option>
+            {repos.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}
+              </option>
+            ))}
+          </select>
+          <select
+            name="taskClass"
+            aria-label="Task class"
+            className={SELECT_CLASS}
+            value={taskClass}
+            onChange={(e) => setParam('taskClass', e.target.value)}
+          >
+            {TASK_CLASS_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <select
+            name="timeZone"
+            aria-label="Time zone for day buckets"
+            className={SELECT_CLASS}
+            value={timeZone ?? 'UTC'}
+            title="Day buckets are cut on this zone's calendar"
+            onChange={(e) => {
+              setTimeZone(e.target.value);
+              persistTimeZone(e.target.value);
+            }}
+          >
+            {zones.map((z) => (
+              <option key={z} value={z}>
+                {z}
+              </option>
+            ))}
+          </select>
+          <Link href={drillHref()} className="text-sm text-indigo-400 underline">
+            Open these tasks
+          </Link>
+        </div>
+      </Card>
+
+      {error && (
+        <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-1 border-b border-neutral-800">
+        {TABS.map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => setParam('tab', t)}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
+              t === tab
+                ? 'border-indigo-500 text-indigo-200'
+                : 'border-transparent text-neutral-400 hover:text-neutral-200'
+            }`}
+          >
+            {TAB_LABELS[t]}
+          </button>
+        ))}
+      </div>
+
+      {loading && !summary && <div className="text-sm text-neutral-500">Loading...</div>}
+
+      {summary && tab === 'money' && (
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle>Spend and savings</CardTitle>
+              <CardDescription>
+                Real spend is what was billed per token. The counterfactual is what the same work
+                would have cost at list API rates — money saved by a flat plan, never money spent,
+                and never added to the first figure.
+              </CardDescription>
+            </CardHeader>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <StatTile
+                label="Spent"
+                value={money(summary.spend.realUsd)}
+                delta={summary.spend.realDelta}
+                moreIsBetter={false}
+                tone="text-emerald-300"
+              />
+              <StatTile
+                label="Saved by plan"
+                value={money(summary.spend.notionalUsd)}
+                hint="at list API rates"
+                delta={summary.spend.notionalDelta}
+                tone="text-neutral-400"
+              />
+              <StatTile
+                label="Unpriced"
+                value={formatCount(summary.spend.unpricedInvocations)}
+                hint="excluded from both figures"
+                tone={summary.spend.unpricedInvocations > 0 ? 'text-amber-300' : 'text-neutral-400'}
+              />
+              <StatTile
+                label="Tokens"
+                value={formatTokens(summary.tokens.totalTokens)}
+                hint={`${formatPercent(summary.tokens.cacheHitRatio)} cached`}
+                tone="text-sky-300"
+              />
+            </div>
+            <div className="mt-6">
+              <SpendChart days={timeline?.days ?? []} costDisplay={summary.costDisplay} />
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>By provider</CardTitle>
+              <CardDescription>
+                Token totals are normalised before providers are compared: codex and gemini report
+                input inclusive of the cached prefix, the rest exclusive.
+              </CardDescription>
+            </CardHeader>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                    <th className="pb-2 font-medium">Provider</th>
+                    <th className="pb-2 text-right font-medium">Runs</th>
+                    <th className="pb-2 text-right font-medium">Spent</th>
+                    <th className="pb-2 text-right font-medium">Saved</th>
+                    <th className="pb-2 text-right font-medium">Unpriced</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.spend.byProvider.map((p) => (
+                    <tr key={p.provider} className="border-t border-neutral-800">
+                      <td className="py-2 text-neutral-200">{p.provider}</td>
+                      <td className="py-2 text-right font-mono text-neutral-300">
+                        {formatCount(p.invocations)}
+                      </td>
+                      <td className="py-2 text-right font-mono text-emerald-300">
+                        {money(p.costUsd)}
+                      </td>
+                      <td className="py-2 text-right font-mono text-neutral-400">
+                        {money(p.notionalCostUsd)}
+                      </td>
+                      <td className="py-2 text-right font-mono text-amber-300">
+                        {p.unpricedInvocations || ''}
+                      </td>
+                    </tr>
+                  ))}
+                  {summary.spend.byProvider.length === 0 && (
+                    <tr className="border-t border-neutral-800">
+                      <td colSpan={5} className="py-6 text-center text-neutral-500">
+                        No invocations in this window.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </>
+      )}
+
+      {summary && tab === 'time' && (
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle>Effort and concurrency</CardTitle>
+              <CardDescription>
+                Agent-hours counts concurrent agents separately; busy span is the clock during which
+                at least one ran. Effort is agent work plus your own focused time, and can only be
+                attributed to the tasks that FINISHED in this window — it carries no timestamps of
+                its own, so it cannot be charted per day.
+              </CardDescription>
+            </CardHeader>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+              <StatTile
+                label="Agent-hours"
+                value={formatAgentHours(summary.time.agentMs)}
+                delta={summary.time.agentDelta}
+                tone="text-indigo-300"
+              />
+              <StatTile
+                label="Busy span"
+                value={formatDuration(summary.time.busyMs)}
+                hint={`${formatCount(summary.time.islands)} runs`}
+              />
+              <StatTile
+                label="Concurrency"
+                value={formatConcurrency(summary.time.concurrency)}
+                tone="text-indigo-300"
+              />
+              <StatTile label="Duty cycle" value={formatPercent(summary.time.dutyCycle)} />
+              <StatTile
+                label="Work"
+                value={formatDuration(summary.time.workMs)}
+                tone="text-indigo-300"
+              />
+              <StatTile
+                label="Waiting on you"
+                value={formatDuration(summary.time.idleMs)}
+                hint={`${formatDuration(summary.time.userActiveMs)} active`}
+                tone="text-amber-300"
+              />
+            </div>
+            <div className="mt-6">
+              <ActivityChart days={timeline?.days ?? []} />
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Abandoned work</CardTitle>
+              <CardDescription>Tasks that ended failed or cancelled.</CardDescription>
+            </CardHeader>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <StatTile
+                label="Abandoned"
+                value={formatCount(summary.tasks.startedAbandoned)}
+                hint={`of ${formatCount(summary.tasks.started)} started`}
+                tone="text-amber-300"
+              />
+              <StatTile
+                label="Share"
+                value={formatSampledRatio(summary.tasks.abandonedRatio)}
+                underSampledNote={isUnderSampled(summary.tasks.abandonedRatio) ? 'too few' : null}
+                tone="text-amber-300"
+              />
+              <StatTile
+                label="Agent-hours lost"
+                value={formatAgentHours(summary.time.abandonedAgentMs)}
+                tone="text-amber-300"
+              />
+              <StatTile
+                label="Value lost"
+                value={money(summary.spend.abandonedNotionalUsd + summary.spend.abandonedRealUsd)}
+                tone="text-amber-300"
+              />
+            </div>
+          </Card>
+        </>
+      )}
+
+      {tab === 'reliability' && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Reliability</CardTitle>
+            <CardDescription>
+              Where time was wasted. Superseded runs are work that was re-rolled and thrown away; a
+              killed run ended with no exit code at all. These two counts deliberately include rows
+              the other tabs filter out, because those rows ARE the waste.
+            </CardDescription>
+          </CardHeader>
+          {!reliability ? (
+            <div className="text-sm text-neutral-500">Loading...</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+                <StatTile
+                  label="Runs"
+                  value={formatCount(reliability.invocations.total)}
+                  hint="including superseded"
+                />
+                <StatTile
+                  label="Superseded"
+                  value={formatSampledRatio(reliability.invocations.supersededRatio)}
+                  hint={`${formatCount(reliability.invocations.superseded)} runs`}
+                  underSampledNote={
+                    isUnderSampled(reliability.invocations.supersededRatio) ? 'too few' : null
+                  }
+                  tone="text-amber-300"
+                />
+                <StatTile
+                  label="Killed"
+                  value={formatCount(reliability.invocations.killed)}
+                  hint="no exit code"
+                  tone="text-amber-300"
+                />
+                <StatTile
+                  label="Non-zero exit"
+                  value={formatCount(reliability.invocations.nonZeroExit)}
+                  tone="text-amber-300"
+                />
+                <StatTile
+                  label="Near timeout"
+                  value={formatCount(reliability.invocations.nearTimeout)}
+                  hint={`of ${formatCount(reliability.invocations.withTimeout)} budgeted`}
+                />
+                <StatTile
+                  label="Model mismatch"
+                  value={formatCount(reliability.invocations.identityDiffers)}
+                  hint={`of ${formatCount(reliability.invocations.identityKnown)} reported`}
+                />
+              </div>
+
+              <div className="mt-6 grid gap-6 lg:grid-cols-2">
+                <div>
+                  <p className="mb-2 text-xs uppercase tracking-wider text-neutral-500">
+                    Provider failures
+                  </p>
+                  {reliability.fatalClasses.length === 0 ? (
+                    <p className="text-sm text-neutral-500">No provider failures recorded.</p>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <tbody>
+                        {reliability.fatalClasses.map((f) => (
+                          <tr
+                            key={`${f.provider}:${f.fatalClass}`}
+                            className="border-t border-neutral-800"
+                          >
+                            <td className="py-2 text-neutral-200">{f.provider}</td>
+                            <td className="py-2 text-neutral-400">{f.fatalClass}</td>
+                            <td className="py-2 text-right font-mono text-amber-300">{f.count}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+                <div>
+                  <p className="mb-2 text-xs uppercase tracking-wider text-neutral-500">
+                    Most-failed steps
+                  </p>
+                  {reliability.steps.topFailing.length === 0 ? (
+                    <p className="text-sm text-neutral-500">No step failures in this window.</p>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <tbody>
+                        {reliability.steps.topFailing.map((s) => (
+                          <tr key={s.stepId} className="border-t border-neutral-800">
+                            <td className="py-2 font-mono text-xs text-neutral-200">{s.stepId}</td>
+                            <td className="py-2 text-right font-mono text-amber-300">{s.count}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-6 flex flex-wrap gap-x-6 gap-y-2 text-xs text-neutral-500">
+                <span>Steps: {formatCount(reliability.steps.total)}</span>
+                <span>Failed: {formatCount(reliability.steps.failed)}</span>
+                <span>Degraded output: {formatCount(reliability.steps.degraded)}</span>
+                {Object.entries(reliability.events).map(([k, v]) => (
+                  <span key={k}>
+                    {k}: {formatCount(v)}
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+
+      {tab === 'quality' && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Review findings</CardTitle>
+            <CardDescription>{quality?.caveat ?? 'What the reviewers raised.'}</CardDescription>
+          </CardHeader>
+          {!quality ? (
+            <div className="text-sm text-neutral-500">Loading...</div>
+          ) : quality.totals.findings === 0 ? (
+            <p className="text-sm text-neutral-500">
+              No review findings were recorded in this window.
+            </p>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <StatTile label="Findings" value={formatCount(quality.totals.findings)} />
+                <StatTile
+                  label="Blocking"
+                  value={formatCount(quality.totals.blocking)}
+                  tone="text-amber-300"
+                />
+                <StatTile
+                  label="Recurring"
+                  value={formatSampledRatio(quality.totals.recurringRatio)}
+                  hint={`${formatCount(quality.totals.recurring)} findings`}
+                  underSampledNote={
+                    isUnderSampled(quality.totals.recurringRatio) ? 'too few' : null
+                  }
+                />
+                <StatTile
+                  label="Tasks affected"
+                  value={formatCount(quality.totals.tasksWithFindings)}
+                />
+              </div>
+
+              <div className="mt-6 grid gap-6 lg:grid-cols-3">
+                {(
+                  [
+                    ['By severity', quality.bySeverity],
+                    ['By disposition', quality.byDisposition],
+                    ['By dimension', quality.byDimension],
+                  ] as const
+                ).map(([title, rows]) => (
+                  <div key={title}>
+                    <p className="mb-2 text-xs uppercase tracking-wider text-neutral-500">
+                      {title}
+                    </p>
+                    <table className="w-full text-sm">
+                      <tbody>
+                        {rows.map((r) => (
+                          <tr key={r.key} className="border-t border-neutral-800">
+                            <td className="py-2 text-neutral-300">{r.key}</td>
+                            <td className="py-2 text-right font-mono text-neutral-200">
+                              {r.count}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-6">
+                <p className="mb-2 text-xs uppercase tracking-wider text-neutral-500">
+                  By reviewer — a high refuted share is reviewer noise, not defects found
+                </p>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                      <th className="pb-2 font-medium">Reviewer</th>
+                      <th className="pb-2 text-right font-medium">Raised</th>
+                      <th className="pb-2 text-right font-medium">Blocking</th>
+                      <th className="pb-2 text-right font-medium">Refuted</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {quality.byReviewer.map((r) => (
+                      <tr key={r.reviewerId} className="border-t border-neutral-800">
+                        <td className="py-2 font-mono text-xs text-neutral-200">{r.reviewerId}</td>
+                        <td className="py-2 text-right font-mono text-neutral-300">{r.count}</td>
+                        <td className="py-2 text-right font-mono text-amber-300">{r.blocking}</td>
+                        <td className="py-2 text-right font-mono text-neutral-400">
+                          {formatSampledRatio(r.refutedRatio)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+
+      {tab === 'estimates' && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Estimate accuracy</CardTitle>
+            <CardDescription>
+              The AI&apos;s own estimate against measured effort, for tasks that completed in this
+              window. Uses the same aggregator as the per-repository estimates page.
+            </CardDescription>
+          </CardHeader>
+          {!estimates ? (
+            <div className="text-sm text-neutral-500">Loading...</div>
+          ) : estimates.summary.taskCount === 0 ? (
+            <p className="text-sm text-neutral-500">
+              No completed task in this window carries an AI estimate.
+            </p>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <StatTile label="Tasks" value={formatCount(estimates.summary.taskCount)} />
+                <StatTile
+                  label="MAPE"
+                  value={`${estimates.summary.mapePct.toFixed(0)}%`}
+                  hint="mean absolute error"
+                  underSampledNote={estimates.summary.taskCount < 5 ? 'too few' : null}
+                />
+                <StatTile
+                  label="Bias"
+                  value={
+                    estimates.summary.medianBiasFactor == null
+                      ? '—'
+                      : `${estimates.summary.medianBiasFactor.toFixed(2)}×`
+                  }
+                  hint="median actual / estimate"
+                />
+                <StatTile
+                  label="Under / over"
+                  value={`${estimates.summary.underestimateCount} / ${estimates.summary.overestimateCount}`}
+                />
+              </div>
+              <div className="mt-6 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                      <th className="pb-2 font-medium">Task</th>
+                      <th className="pb-2 text-right font-medium">AI</th>
+                      <th className="pb-2 text-right font-medium">Yours</th>
+                      <th className="pb-2 text-right font-medium">Actual</th>
+                      <th className="pb-2 text-right font-medium">Error</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {estimates.rows.map((r) => (
+                      <tr key={r.taskId} className="border-t border-neutral-800">
+                        <td className="py-2">
+                          <Link
+                            href={`/tasks/${r.taskId}`}
+                            className="text-neutral-200 hover:text-indigo-300"
+                          >
+                            {r.title}
+                          </Link>
+                        </td>
+                        <td className="py-2 text-right font-mono text-neutral-400">
+                          {r.aiEstimatedHours.toFixed(2)}h
+                        </td>
+                        <td className="py-2 text-right font-mono text-neutral-400">
+                          {r.confirmedHours == null ? '—' : `${r.confirmedHours.toFixed(2)}h`}
+                        </td>
+                        <td className="py-2 text-right font-mono text-neutral-200">
+                          {r.actualHours.toFixed(2)}h
+                        </td>
+                        <td
+                          className={`py-2 text-right font-mono ${
+                            r.absErrorPct > 50 ? 'text-amber-400' : 'text-neutral-400'
+                          }`}
+                        >
+                          {r.signedErrorPct > 0 ? '+' : ''}
+                          {r.signedErrorPct.toFixed(0)}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}

@@ -101,7 +101,11 @@ export default function DashboardPage() {
       <div>
         <h1 className="text-2xl font-bold text-neutral-50">Dashboard</h1>
         <p className="text-sm text-neutral-400">
-          The last 30 days. Every figure compares against the 30 days before it.
+          The last 30 days. Every figure compares against the 30 days before it.{' '}
+          <Link href="/stats" className="text-indigo-400 underline">
+            Filter and explore
+          </Link>
+          .
         </p>
       </div>
 
@@ -344,6 +348,11 @@ export default function DashboardPage() {
           </Card>
 
           <div className="flex gap-3">
+            <Link href="/stats">
+              <Button variant="secondary" size="sm">
+                Advanced statistics
+              </Button>
+            </Link>
             <Link href="/tasks">
               <Button variant="secondary" size="sm">
                 All tasks

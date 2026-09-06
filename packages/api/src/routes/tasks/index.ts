@@ -4,7 +4,9 @@ import {
   asc,
   desc,
   eq,
+  gte,
   inArray,
+  lt,
   isNotNull,
   isNull,
   not,
@@ -13,6 +15,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
   buildEstimationAccuracy,
   computeFoldContribution,
@@ -112,6 +115,17 @@ taskRoutes.get('/', async (c) => {
   // instead of the plan. An exclusion layered on the status token, like
   // hidePaused above, rather than a status of its own.
   const includeChats = ['1', 'true'].includes(c.req.query('includeChats')?.trim() ?? '');
+  // Ignored when unparseable rather than rejected: this is the human listing, and a stale
+  // bookmark with a mangled date should show the list, not an error page.
+  const parseBound = (raw: string | undefined): Date | undefined => {
+    if (!raw) return undefined;
+    const d = new Date(raw);
+    return Number.isFinite(d.getTime()) ? d : undefined;
+  };
+  const createdFrom = parseBound(c.req.query('from')?.trim());
+  const createdTo = parseBound(c.req.query('to')?.trim());
+  const taskClassRaw = c.req.query('taskClass')?.trim();
+  const taskClassFilter = isTaskClass(taskClassRaw) ? taskClassRaw : undefined;
   const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
   const pageSize = Math.min(
     100,
@@ -125,6 +139,22 @@ taskRoutes.get('/', async (c) => {
 
   const conds = [eq(schema.tasks.userId, userId)];
   if (repositoryId) conds.push(eq(schema.tasks.repositoryId, repositoryId));
+  // Creation-date range + task class, so a statistics chart can drill through to exactly the
+  // rows it counted. Without them a click on one day's bar landed on an unfiltered list, which
+  // makes the drill-through a lie rather than a shortcut. Bucketed on created_at because that
+  // is the clock the stats page's task counts use.
+  if (createdFrom) conds.push(gte(schema.tasks.createdAt, createdFrom));
+  if (createdTo) conds.push(lt(schema.tasks.createdAt, createdTo));
+  if (taskClassFilter) {
+    const types = typesForClass(taskClassFilter);
+    // `other` is defined negatively — whatever the type table does not name — so it cannot be
+    // an IN list. See typesForClass in @haive/shared/stats.
+    conds.push(
+      types
+        ? inArray(schema.tasks.type, types as never[])
+        : notInArray(schema.tasks.type, knownTaskTypes() as never[]),
+    );
+  }
   if (statusToken === PAUSED_FILTER_TOKEN) {
     // Derived state, not a task status: a paused task keeps whatever status it had (usually
     // `running`) and carries `paused_at`, so expandTaskStatusFilter returns null for this token

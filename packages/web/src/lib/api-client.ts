@@ -1888,6 +1888,10 @@ export function startPlanAdvisory(
 /** Server-persisted UI prefs (plan-canvas view + pane split). Web-owned keys —
  *  the server stores the blob verbatim. Follows the account across browsers. */
 export interface UiPrefs {
+  /** IANA zone the statistics day buckets are cut on. Absent = follow the browser. Per USER
+   *  rather than per browser: which calendar a person reads their week in is about the person.
+   *  The blob is schemaless on the server, so this needed no migration. */
+  statsTimeZone?: string;
   /** 'tree' | 'tiles' — which plan-canvas view the user chose. */
   planView?: 'tree' | 'tiles';
   /** Left-pane width as a percentage for the plan canvas. Clamped 20-80 on
@@ -2088,4 +2092,77 @@ export async function getStatsSummary(params: StatsQueryParams = {}): Promise<St
 
 export async function getStatsTimeline(params: StatsQueryParams = {}): Promise<StatsTimeline> {
   return api.get<StatsTimeline>(`/stats/timeline${statsQueryString(params)}`);
+}
+
+export interface StatsReliability {
+  range: { from: string; to: string; timeZone: string };
+  invocations: {
+    total: number;
+    /** Re-rolled work that was thrown away. Counted WITHOUT the attribution filter the other
+     *  endpoints apply — superseded rows are the waste being measured. */
+    superseded: number;
+    killed: number;
+    nonZeroExit: number;
+    nearTimeout: number;
+    withTimeout: number;
+    identityDiffers: number;
+    identityKnown: number;
+    supersededRatio: SampledRatio;
+    killedRatio: SampledRatio;
+    nearTimeoutRatio: SampledRatio;
+  };
+  fatalClasses: Array<{ provider: string; fatalClass: string; count: number }>;
+  steps: {
+    total: number;
+    failed: number;
+    degraded: number;
+    maxRound: number;
+    failedRatio: SampledRatio;
+    degradedRatio: SampledRatio;
+    topFailing: Array<{ stepId: string; count: number }>;
+  };
+  events: Record<string, number>;
+}
+
+export interface StatsQuality {
+  range: { from: string; to: string; timeZone: string };
+  totals: {
+    findings: number;
+    blocking: number;
+    recurring: number;
+    tasksWithFindings: number;
+    recurringRatio: SampledRatio;
+  };
+  bySeverity: Array<{ key: string; count: number }>;
+  byDisposition: Array<{ key: string; count: number }>;
+  byDimension: Array<{ key: string; count: number }>;
+  byReviewer: Array<{
+    reviewerId: string;
+    count: number;
+    blocking: number;
+    /** How much of what this reviewer raised the refutation pass disproved. */
+    refutedRatio: SampledRatio;
+  }>;
+  /** Why an `open` finding is not evidence a defect still stands. Rendered verbatim. */
+  caveat: string;
+}
+
+export interface StatsEstimates {
+  range: { from: string; to: string; timeZone: string };
+  rows: EstimationAccuracyRow[];
+  summary: EstimationAccuracySummary;
+}
+
+export async function getStatsReliability(
+  params: StatsQueryParams = {},
+): Promise<StatsReliability> {
+  return api.get<StatsReliability>(`/stats/reliability${statsQueryString(params)}`);
+}
+
+export async function getStatsQuality(params: StatsQueryParams = {}): Promise<StatsQuality> {
+  return api.get<StatsQuality>(`/stats/quality${statsQueryString(params)}`);
+}
+
+export async function getStatsEstimates(params: StatsQueryParams = {}): Promise<StatsEstimates> {
+  return api.get<StatsEstimates>(`/stats/estimates${statsQueryString(params)}`);
 }

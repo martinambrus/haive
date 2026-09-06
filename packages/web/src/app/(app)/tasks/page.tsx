@@ -223,8 +223,27 @@ export default function TasksPage() {
   // held in the plan canvas, not work items, and listing them buries real tasks
   // among a conversation's turns. This asks for them back.
   const showChats = searchParams.get('showChats') === '1';
-  const filterKey = `${repoFilter}|${statusFilter}|${q}|${hidePaused ? '1' : ''}|${showChats ? '1' : ''}`;
-  const filtersActive = Boolean(repoFilter || statusFilter || q || hidePaused || showChats);
+  // Carried from a statistics drill-through so the list shows exactly the rows behind the
+  // figure that was clicked. Not part of the saved filter: a date window is about one visit,
+  // and restoring it days later would silently hide most of the user's tasks.
+  const fromFilter = searchParams.get('from') ?? '';
+  const toFilter = searchParams.get('to') ?? '';
+  const taskClassFilter = searchParams.get('taskClass') ?? '';
+  const filterKey = `${repoFilter}|${statusFilter}|${q}|${hidePaused ? '1' : ''}|${showChats ? '1' : ''}|${fromFilter}|${toFilter}|${taskClassFilter}`;
+  const filtersActive = Boolean(
+    repoFilter ||
+    statusFilter ||
+    q ||
+    hidePaused ||
+    showChats ||
+    fromFilter ||
+    toFilter ||
+    taskClassFilter,
+  );
+  // A statistics drill-through names its own window in the URL. Restoring the saved filter over
+  // it would silently discard the window the user just clicked and show a different set of rows,
+  // so an explicit drill-through suppresses the restore entirely.
+  const isDrillThrough = Boolean(fromFilter || toFilter || taskClassFilter);
 
   // On a bare, unfiltered visit that has a saved filter to restore, the mount
   // effect below router.replace()s to it. Detect that at render time so the
@@ -233,11 +252,12 @@ export default function TasksPage() {
   // restore effect exactly (repositoryId/status only — q is not restored).
   const willRestoreFilter = useMemo(() => {
     if (searchParams.has('repositoryId') || searchParams.has('status')) return false;
+    if (isDrillThrough) return false;
     const saved = readSavedFilter();
     return Boolean(
       saved && (saved.repositoryId || saved.status || saved.hidePaused || saved.showChats),
     );
-  }, [searchParams]);
+  }, [searchParams, isDrillThrough]);
 
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -265,6 +285,9 @@ export default function TasksPage() {
     if (q) params.set('q', q);
     if (hidePaused) params.set('hidePaused', '1');
     if (showChats) params.set('includeChats', '1');
+    if (fromFilter) params.set('from', fromFilter);
+    if (toFilter) params.set('to', toFilter);
+    if (taskClassFilter) params.set('taskClass', taskClassFilter);
     return params.toString();
   }
 
@@ -351,6 +374,7 @@ export default function TasksPage() {
   // win, so they skip this. Mount-only by design.
   useEffect(() => {
     if (searchParams.has('repositoryId') || searchParams.has('status')) return;
+    if (isDrillThrough) return;
     const saved = readSavedFilter();
     if (!saved || (!saved.repositoryId && !saved.status)) return;
     const params = new URLSearchParams();
