@@ -52,6 +52,7 @@ import { Button, FormError, Input } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { usePageTitle } from '@/lib/use-page-title';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
+import { taskDraftHref } from '@/lib/task-draft';
 import { sequenceLabel } from '@/components/plan/plan-status';
 import { PlanCardGrid } from '@/components/plan/plan-card-grid';
 import { PlanDetailPanel, type PlanPanelTab } from '@/components/plan/plan-detail-panel';
@@ -127,8 +128,10 @@ export default function PlanPage() {
   // Which panel tab is open, held HERE because the panel unmounts every time
   // the selection clears — inside it, the choice died with each Escape.
   const [panelTab, setPanelTab] = useState<PlanPanelTab>('details');
-  // Mirror for the once-registered ESC listener.
+  // Mirrors for the once-registered ESC listener.
   const selectedIdRef = useRef<string | null>(null);
+  const pickedRef = useRef<ReadonlySet<string>>(new Set());
+  const describeHintRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -143,6 +146,14 @@ export default function PlanPage() {
   // The breadcrumb's add-a-child input. Closed by default: it is an action,
   // not a permanent field, and it lives under the crumb whose child it makes.
   const [addingChild, setAddingChild] = useState(false);
+  // Nodes ticked for ONE task that spans several of them. A set, deliberately
+  // not `selectedId`: that is the cursor the detail panel follows, and reading a
+  // card must never add it to a task.
+  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set());
+  // Shown once after "Add via task description", above the chat composer. State
+  // rather than a stored preference: it explains the click that was just made,
+  // so it belongs to that click and not to the account.
+  const [describeHint, setDescribeHint] = useState(false);
   const [query, setQuery] = useState('');
   const [matches, setMatches] = useState<PlanSearchMatch[] | null>(null);
   // Whether the filter in `matches` came from the ready set rather than the
@@ -216,10 +227,22 @@ export default function PlanPage() {
   // body draft in the panel.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || !selectedIdRef.current) return;
+      if (e.key !== 'Escape') return;
       // A dialog on top owns Escape — closing it and the panel underneath on
       // one press loses work the user never asked to discard.
       if (document.querySelector('[data-haive-dialog]')) return;
+      // The hint and the pick set go first, innermost-out: both are things the
+      // user put on screen most recently, and one press should undo one of them
+      // rather than everything at once.
+      if (describeHintRef.current) {
+        setDescribeHint(false);
+        return;
+      }
+      if (pickedRef.current.size > 0) {
+        setPicked(new Set());
+        return;
+      }
+      if (!selectedIdRef.current) return;
       const t = e.target as HTMLElement | null;
       if (
         t &&
@@ -547,6 +570,11 @@ export default function PlanPage() {
   const descend = useCallback(
     async (nodeId: string) => {
       setError(null);
+      // The picked set is what is on screen right now. Descending replaces the
+      // grid, so keeping ticks for cards nobody can see any more would build a
+      // task out of nodes the user has lost track of — the same lifecycle the
+      // search filter already has.
+      setPicked(new Set());
       try {
         setFocus(await getPlanNode(repositoryId, nodeId));
         // Every way of moving to a node — a tree row, a breadcrumb, an impact
@@ -608,6 +636,8 @@ export default function PlanPage() {
   }
 
   selectedIdRef.current = selectedId;
+  pickedRef.current = picked;
+  describeHintRef.current = describeHint;
 
   // Mirror the selection into the URL. replaceState, not a push: browsing the
   // plan is not a history trail, and a push per click would make Back mean
@@ -1258,7 +1288,49 @@ export default function PlanPage() {
                       <Plus className="h-3.5 w-3.5" />
                     </button>
                   )}
+                  {/* The other way to add: describe the work and let the agent
+                      decide where it goes. Beside the + rather than inside the
+                      adder, because it answers the question the + assumes you
+                      have already answered — WHERE this belongs. Always the
+                      root: a task spanning the project is the root's to own,
+                      and the agent is handed the whole plan either way. */}
+                  {!matches && rootId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedId(rootId);
+                        setPanelTab('chat');
+                        setDescribeHint(true);
+                      }}
+                      className="ml-2 shrink-0 text-[11px] text-indigo-300 underline hover:text-indigo-200"
+                    >
+                      Add via task description
+                    </button>
+                  )}
                 </nav>
+
+                {describeHint && (
+                  // Neutral, NOT amber: amber means blocked / stale /
+                  // needs-a-person everywhere else in this UI, and this is an
+                  // instruction. Dismissible, and it dismisses itself once the
+                  // conversation it explains has started.
+                  <div className="flex items-start gap-2 rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-[11px] text-neutral-300">
+                    <p className="flex-1">
+                      Describe the work in the Chat tab on the right — what it should do, not where
+                      it goes. The agent reads the whole plan, adds the nodes where they belong, and
+                      records what has to be built before what. If it spans several nodes it will
+                      offer to run them as one task.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setDescribeHint(false)}
+                      className="shrink-0 text-neutral-500 hover:text-neutral-300"
+                      aria-label="Dismiss"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
 
                 {addingChild && !matches && (
                   <div className="flex gap-2">
@@ -1298,10 +1370,51 @@ export default function PlanPage() {
                   </div>
                 )}
 
+                {picked.size > 0 && (
+                  <div className="flex flex-wrap items-center gap-3 rounded border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
+                    <span className="flex-1">
+                      {picked.size} node{picked.size === 1 ? '' : 's'} picked for one task.
+                      {picked.size > 1 && ' They are recorded as affected; none is marked done.'}
+                    </span>
+                    <Link
+                      href={taskDraftHref(repositoryId, {
+                        title: '',
+                        description: '',
+                        planNodeIds: [...picked],
+                        // The create form asks again and can be flipped there.
+                        // Defaulting a hand-picked SET to `touched` matches the
+                        // API's own default and is the safe direction: greening
+                        // five nodes for a change that touched part of each is a
+                        // claim the plan then repeats to everyone who reads it.
+                        planNodeRole: picked.size === 1 ? 'implements' : 'touched',
+                      })}
+                      onClick={() => rememberTaskOrigin('/tasks/new', planOrigin(repositoryId))}
+                    >
+                      <Button size="sm">Start one task for these</Button>
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => setPicked(new Set())}
+                      className="text-indigo-300 underline hover:text-indigo-200"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
+
                 <PlanCardGrid
                   nodes={cards}
                   selectedId={selectedId}
                   unread={unread}
+                  picked={picked}
+                  onPick={(n, next) =>
+                    setPicked((prev) => {
+                      const copy = new Set(prev);
+                      if (next) copy.add(n.id);
+                      else copy.delete(n.id);
+                      return copy;
+                    })
+                  }
                   onSelect={(n) => setSelectedId((prev) => (prev === n.id ? null : n.id))}
                   onDescend={(n) => {
                     // Descending replaces the card list with one node's

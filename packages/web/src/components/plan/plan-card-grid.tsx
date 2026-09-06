@@ -36,6 +36,8 @@ export function PlanCardGrid({
   onDescend,
   emptyMessage,
   unread,
+  picked,
+  onPick,
 }: {
   nodes: PlanNode[];
   selectedId: string | null;
@@ -44,6 +46,14 @@ export function PlanCardGrid({
   onSelect: (node: PlanNode) => void;
   onDescend: (node: PlanNode) => void;
   emptyMessage: string;
+  /** Nodes ticked for a single task spanning several of them. Separate from
+   *  `selectedId`, which is "what the detail panel is showing" — one is a
+   *  cursor, the other is a set, and conflating them would make reading a card
+   *  add it to the task. */
+  picked?: ReadonlySet<string>;
+  /** Omitted entirely on a grid that does not offer picking, which is what
+   *  keeps the checkbox off every other use of this component. */
+  onPick?: (node: PlanNode, next: boolean) => void;
 }) {
   if (nodes.length === 0) {
     return (
@@ -75,6 +85,20 @@ export function PlanCardGrid({
             }`}
           >
             <div className="flex items-start gap-2">
+              {onPick && (
+                // Its own click target, stopping propagation: the card body
+                // selects, and a tick that also moved the detail panel would
+                // make building a set of five nodes scroll the panel five times.
+                <input
+                  type="checkbox"
+                  checked={picked?.has(node.id) ?? false}
+                  aria-label={`Include "${node.title}" in one task`}
+                  title="Include in one task"
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => onPick(node, e.target.checked)}
+                  className="mt-1 h-3.5 w-3.5 shrink-0 accent-indigo-500"
+                />
+              )}
               <span
                 className={`shrink-0 rounded border px-1 py-0.5 font-mono text-[10px] tabular-nums ${sequenceChip(node.blockedBy.length)}`}
                 title={`${sequenceLabel(node.sequence)} in build order`}

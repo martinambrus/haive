@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PlanMessage } from '@/lib/api-client';
-import { firstUnreadMessageId, opCount, startedLabel, stamp } from './plan-chat-turn';
+import { firstUnreadMessageId, opCount, startedLabel, stamp, taskProposal } from './plan-chat-turn';
 
 function msg(id: string, role: PlanMessage['role']): PlanMessage {
   return {
@@ -105,5 +105,39 @@ describe('firstUnreadMessageId', () => {
 
   it('ignores a negative count rather than pointing anywhere', () => {
     expect(firstUnreadMessageId(transcript, -1)).toBeNull();
+  });
+});
+
+describe('taskProposal', () => {
+  const good = {
+    nodeRefs: ['a', 'b'],
+    title: 'Comms plus the two on top',
+    description: 'what to build',
+    role: 'implements',
+    reason: 'both wait on comms',
+  };
+
+  it('reads an offer out of a stored patch', () => {
+    expect(taskProposal({ ops: [], taskProposal: good })).toEqual(good);
+  });
+
+  it('is null when the turn carried no offer', () => {
+    expect(taskProposal({ ops: [] })).toBeNull();
+    expect(taskProposal(null)).toBeNull();
+    expect(taskProposal('a plain reply')).toBeNull();
+  });
+
+  it('refuses an offer the button could not act on', () => {
+    // Each of these would render a button that leads somewhere useless, so the
+    // transcript is better off showing the reply alone.
+    expect(taskProposal({ taskProposal: { ...good, nodeRefs: [] } })).toBeNull();
+    expect(taskProposal({ taskProposal: { ...good, title: '' } })).toBeNull();
+    expect(taskProposal({ taskProposal: { ...good, role: 'green-them' } })).toBeNull();
+    expect(taskProposal({ taskProposal: { ...good, nodeRefs: 'a,b' } })).toBeNull();
+  });
+
+  it('tolerates a missing reason rather than dropping the whole offer', () => {
+    const { reason: _reason, ...noReason } = good;
+    expect(taskProposal({ taskProposal: noReason })?.reason).toBe('');
   });
 });

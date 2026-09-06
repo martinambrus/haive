@@ -2,10 +2,12 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Lock, Unlock } from 'lucide-react';
 import { usePageTitle } from '@/lib/use-page-title';
 import { taskOrigin, rememberTaskOrigin } from '@/lib/task-origin';
+import { readTaskDraft } from '@/lib/task-draft';
+import type { PlanNodeTaskRole } from '@haive/shared';
 import {
   api,
   API_BASE_URL,
@@ -108,8 +110,31 @@ export default function NewTaskPage() {
    *  task so its completion greens the plan node; carried in the query rather
    *  than picked here, because the node is chosen ON the canvas where its
    *  context is visible. */
-  const planNodeId = searchParams.get('planNodeId');
-  /** What that node is waiting on, if anything. Fetched rather than passed in
+  const planNodeIdParam = searchParams.get('planNodeId');
+  /** The whole node set this task serves. `planNodeId` is the older single-node
+   *  spelling and still arrives from bookmarked canvas links, so both are folded
+   *  here exactly as `resolvePlanNodeLinks` folds them server-side. */
+  const planNodeIds = useMemo(() => {
+    const fromList = (searchParams.get('planNodeIds') ?? '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean);
+    return [...new Set([...fromList, ...(planNodeIdParam ? [planNodeIdParam] : [])])];
+  }, [searchParams, planNodeIdParam]);
+  /** Title, description and role handed over from the plan, read ONCE. The prose
+   *  is too long for a query string, so it travels in sessionStorage behind the
+   *  `draft` token. */
+  const draft = useMemo(() => readTaskDraft(searchParams.get('draft')), [searchParams]);
+  /** Whether finishing this task finishes those nodes. Defaults the way the API
+   *  does — one node completes it, several deliver a slice of each — so the form
+   *  and the server never disagree about an unanswered question. */
+  const [planNodeRole, setPlanNodeRole] = useState<PlanNodeTaskRole>(
+    draft?.planNodeRole ?? (planNodeIds.length === 1 ? 'implements' : 'touched'),
+  );
+  /** The nodes as the plan describes them, so the form can name what it is about
+   *  to link rather than print uuids. */
+  const [planNodes, setPlanNodes] = useState<{ id: string; title: string }[]>([]);
+  /** What those nodes are waiting on, if anything. Fetched rather than passed in
    *  the query: the canvas link can be typed by hand or bookmarked, and the API
    *  refuses a blocked node either way — so this page has to be able to explain
    *  the refusal rather than surface it as a bare 409. */
@@ -120,8 +145,10 @@ export default function NewTaskPage() {
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [title, setTitle] = useState(searchParams.get('title') ?? '');
-  const [description, setDescription] = useState('');
+  // The draft wins over `?title=`: it is the richer of the two and only exists
+  // when something deliberately handed this form a task to create.
+  const [title, setTitle] = useState(draft?.title || (searchParams.get('title') ?? ''));
+  const [description, setDescription] = useState(draft?.description ?? '');
   const [estimatedTime, setEstimatedTime] = useState('');
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
@@ -221,22 +248,35 @@ export default function NewTaskPage() {
   }, [repositoryId, refreshStatus]);
 
   useEffect(() => {
-    if (!planNodeId || !repositoryId) return;
+    if (planNodeIds.length === 0 || !repositoryId) return;
     let cancelled = false;
     void (async () => {
-      try {
-        const detail = await getPlanNode(repositoryId, planNodeId);
-        if (!cancelled) setPlanBlockers(detail.node.blockedBy);
-      } catch {
-        // A node that cannot be read is not a node that is blocked. Say nothing
-        // and let the API's own refusal be the authority.
-        if (!cancelled) setPlanBlockers([]);
-      }
+      const details = await Promise.all(
+        planNodeIds.map((id) => getPlanNode(repositoryId, id).catch(() => null)),
+      );
+      if (cancelled) return;
+      setPlanNodes(
+        details.flatMap((d, i) =>
+          d
+            ? [{ id: d.node.id, title: d.node.title }]
+            : [{ id: planNodeIds[i]!, title: planNodeIds[i]! }],
+        ),
+      );
+      // Blockers INSIDE the set are satisfied by this task, which is the same
+      // rule the API applies — showing them would offer an override for
+      // something nothing is refusing.
+      const inSet = new Set(planNodeIds);
+      const outside = details.flatMap((d) =>
+        d ? d.node.blockedBy.filter((b) => !inSet.has(b.nodeId)) : [],
+      );
+      // A node that cannot be read is not a node that is blocked. Say nothing
+      // about it and let the API's own refusal be the authority.
+      setPlanBlockers([...new Map(outside.map((b) => [b.nodeId, b])).values()]);
     })();
     return () => {
       cancelled = true;
     };
-  }, [planNodeId, repositoryId]);
+  }, [planNodeIds, repositoryId]);
 
   // QOL: preselect the CLI dropdown from this repo's last-used CLI (the
   // cli_provider_id of the most-recent task on this repo). Only sets when that
@@ -392,8 +432,12 @@ export default function NewTaskPage() {
       if (ignoreSavedStepClis) body.ignoreSavedStepClis = true;
       if (summaryCliProviderId === SUMMARY_CLI_OFF) body.summaryLlmEnabled = false;
       else if (summaryCliProviderId) body.summaryCliProviderId = summaryCliProviderId;
-      if (planNodeId) body.planNodeId = planNodeId;
-      if (planNodeId && overrideBlocked) body.overrideBlocked = true;
+      if (planNodeIds.length > 0) {
+        body.planNodeIds = planNodeIds;
+        body.planNodeRole = planNodeRole;
+        if (overrideBlocked) body.overrideBlocked = true;
+      }
+      if (draft?.fromPlanChat) body.fromPlanChat = true;
       if (type === 'workflow') {
         body.isBugFix = isBugFix;
         if (feature.trim()) body.feature = feature.trim();
@@ -605,32 +649,82 @@ export default function NewTaskPage() {
           </p>
         </div>
 
-        {planNodeId && (
-          <p className="rounded border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
-            This task is linked to a plan node. When it completes, that node goes green.
-          </p>
-        )}
-
-        {planNodeId && planBlockers && planBlockers.length > 0 && (
-          // An override rather than a wall: a plan can contain a dependency that
-          // is unsatisfiable by construction (a cycle, or a node depending on
-          // its own ancestor), and without a way past it a bad edge would wedge
-          // that branch permanently.
-          <div className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-300">
-            <p>
-              That plan node is waiting on{' '}
-              {planBlockers.map((b) => `#${b.sequence} ${b.title}`).join(', ')}.
+        {planNodeIds.length > 0 && (
+          <div className="flex flex-col gap-2 rounded border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
+            <p className="font-medium">
+              Linked to {planNodeIds.length} plan node{planNodeIds.length === 1 ? '' : 's'}
             </p>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={overrideBlocked}
-                onChange={(e) => setOverrideBlocked(e.target.checked)}
-              />
-              Start it anyway, before those are done
-            </label>
+            <ul className="flex flex-col gap-0.5 text-indigo-200/90">
+              {(planNodes.length > 0
+                ? planNodes
+                : planNodeIds.map((id) => ({ id, title: id }))
+              ).map((n) => (
+                <li key={n.id} className="truncate">
+                  • {n.title}
+                </li>
+              ))}
+            </ul>
+            {/* The consequential question, asked plainly rather than implied by
+                a link count. Greening five form nodes because one task added a
+                checkbox to each is a claim the plan then repeats to everyone
+                who reads it, so the safe answer is the default for a set. */}
+            <fieldset className="flex flex-col gap-1 border-t border-indigo-900/60 pt-2">
+              <legend className="sr-only">What this task does to those nodes</legend>
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="planNodeRole"
+                  checked={planNodeRole === 'implements'}
+                  onChange={() => setPlanNodeRole('implements')}
+                  className="mt-0.5"
+                />
+                <span>
+                  This task <strong>completes</strong> {planNodeIds.length === 1 ? 'it' : 'them'} —
+                  {planNodeIds.length === 1 ? ' the node goes' : ' all of them go'} green when it
+                  finishes.
+                </span>
+              </label>
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="planNodeRole"
+                  checked={planNodeRole === 'touched'}
+                  onChange={() => setPlanNodeRole('touched')}
+                  className="mt-0.5"
+                />
+                <span>
+                  This task delivers <strong>part</strong> of{' '}
+                  {planNodeIds.length === 1 ? 'it' : 'them'} — nothing is marked done; the plan
+                  reconcile step proposes what changed at the end.
+                </span>
+              </label>
+            </fieldset>
           </div>
         )}
+
+        {planNodeIds.length > 0 &&
+          planNodeRole === 'implements' &&
+          planBlockers &&
+          planBlockers.length > 0 && (
+            // An override rather than a wall: a plan can contain a dependency that
+            // is unsatisfiable by construction (a cycle, or a node depending on
+            // its own ancestor), and without a way past it a bad edge would wedge
+            // that branch permanently.
+            <div className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-300">
+              <p>
+                {planNodeIds.length === 1 ? 'That plan node is' : 'Those plan nodes are'} waiting on{' '}
+                {planBlockers.map((b) => `#${b.sequence} ${b.title}`).join(', ')}.
+              </p>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={overrideBlocked}
+                  onChange={(e) => setOverrideBlocked(e.target.checked)}
+                />
+                Start it anyway, before those are done
+              </label>
+            </div>
+          )}
 
         {!isRunApp && (
           <>

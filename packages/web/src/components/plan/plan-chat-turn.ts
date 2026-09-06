@@ -1,3 +1,4 @@
+import type { PlanTaskProposal } from '@haive/shared';
 import type { PlanMessage } from '@/lib/api-client';
 
 /** How many plan operations a turn actually sent, for the count rendered
@@ -15,6 +16,32 @@ export function opCount(patch: unknown): number | null {
   if (!patch || typeof patch !== 'object') return null;
   const ops = (patch as { ops?: unknown }).ops;
   return Array.isArray(ops) ? ops.length : null;
+}
+
+/**
+ * The task offer a turn carried, or null.
+ *
+ * Read out of the stored patch the same way `opCount` reads the op list, rather
+ * than typing `PlanMessage.patch`: that field is deliberately `unknown` on the
+ * client because it is whatever an agent wrote, and one narrow reader per thing
+ * the UI actually renders is what keeps a malformed turn from breaking the
+ * transcript around it.
+ */
+export function taskProposal(patch: unknown): PlanTaskProposal | null {
+  if (!patch || typeof patch !== 'object') return null;
+  const raw = (patch as { taskProposal?: unknown }).taskProposal;
+  if (!raw || typeof raw !== 'object') return null;
+  const p = raw as Partial<PlanTaskProposal>;
+  if (!Array.isArray(p.nodeRefs) || p.nodeRefs.length === 0) return null;
+  if (typeof p.title !== 'string' || p.title === '') return null;
+  if (p.role !== 'implements' && p.role !== 'touched') return null;
+  return {
+    nodeRefs: p.nodeRefs.filter((id): id is string => typeof id === 'string'),
+    title: p.title,
+    description: typeof p.description === 'string' ? p.description : '',
+    role: p.role,
+    reason: typeof p.reason === 'string' ? p.reason : '',
+  };
 }
 
 /** A timestamp in the viewer's own locale and zone. Undefined or unparseable

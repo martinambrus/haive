@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ChevronDown, ChevronRight, Info } from 'lucide-react';
+import { ChevronDown, ChevronRight, GitBranch, Info } from 'lucide-react';
 import {
   api,
   endPlanChat,
@@ -21,8 +21,9 @@ import {
 import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
+import { taskDraftHref } from '@/lib/task-draft';
 import { groupPlanConversations, liveConversation, type PlanChatGroup } from './plan-chat-groups';
-import { firstUnreadMessageId, opCount, startedLabel, stamp } from './plan-chat-turn';
+import { firstUnreadMessageId, opCount, startedLabel, stamp, taskProposal } from './plan-chat-turn';
 
 /**
  * The per-node conversation, driven entirely from this panel.
@@ -370,6 +371,7 @@ export function PlanChat({
                     group={g}
                     defaultOpen={false}
                     firstUnreadId={firstUnreadId}
+                    repositoryId={repositoryId}
                   />
                 ))}
                 {(hiddenCount > 0 || historyExpanded) && (
@@ -415,7 +417,14 @@ export function PlanChat({
       {/* Directly above the composer, under the CLI that answers it: a live
           conversation belongs with the box you reply in, not stacked above the
           history section where it read as part of the history. */}
-      {live && <ConversationGroup group={live} defaultOpen firstUnreadId={firstUnreadId} />}
+      {live && (
+        <ConversationGroup
+          group={live}
+          defaultOpen
+          firstUnreadId={firstUnreadId}
+          repositoryId={repositoryId}
+        />
+      )}
 
       {working && (
         // The same status panel a running step wears on the task page, rather
@@ -478,10 +487,12 @@ function ConversationGroup({
   group,
   defaultOpen,
   firstUnreadId,
+  repositoryId,
 }: {
   group: PlanChatGroup;
   defaultOpen: boolean;
   firstUnreadId?: string | null;
+  repositoryId: string;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   // A live conversation is named by what it is; a finished one by WHEN it
@@ -553,10 +564,63 @@ function ConversationGroup({
                   already scrolling, and a scrollbar inside a scrollbar makes a
                   long reply almost unreadable. */}
               <MarkdownView body={m.body} className="max-h-none overflow-visible px-0 py-1" />
+              <TaskProposalCard patch={m.patch} repositoryId={repositoryId} />
             </div>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The agent's offer to run a multi-node change as one task.
+ *
+ * Rendered from the turn's own stored patch rather than from step output, which
+ * is why it survives a reload and a page revisit: the plan_chat step's revise
+ * loop resets its row every turn, and a button living there would vanish with it.
+ *
+ * Indigo, not amber. Amber in this UI means blocked / stale / needs-a-person, and
+ * this is an offer nobody has to take.
+ */
+function TaskProposalCard({
+  patch,
+  repositoryId,
+}: {
+  patch: PlanMessage['patch'];
+  repositoryId: string;
+}) {
+  const proposal = taskProposal(patch);
+  if (!proposal) return null;
+  const count = proposal.nodeRefs.length;
+  return (
+    <div className="mt-1 flex flex-col gap-2 rounded-md border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
+      <p className="flex items-start gap-2">
+        <GitBranch className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span>{proposal.reason}</span>
+      </p>
+      <p className="text-indigo-300/80">
+        {/* The role is the consequential half of the offer and the create form
+            asks about it again, so state it here rather than let the button
+            imply something the next screen contradicts. */}
+        One task across {count} node{count === 1 ? '' : 's'}
+        {proposal.role === 'implements'
+          ? ' — they go green when it finishes.'
+          : ' — recorded as affected; none marked done.'}
+      </p>
+      <Link
+        href={taskDraftHref(repositoryId, {
+          title: proposal.title,
+          description: proposal.description,
+          planNodeIds: proposal.nodeRefs,
+          planNodeRole: proposal.role,
+          fromPlanChat: true,
+        })}
+        onClick={() => rememberTaskOrigin('/tasks/new', planOrigin(repositoryId))}
+        className="self-start"
+      >
+        <Button size="sm">Start this as one task</Button>
+      </Link>
     </div>
   );
 }
