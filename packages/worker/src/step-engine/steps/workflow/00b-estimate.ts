@@ -1,12 +1,13 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { resolveRagSyncPrefs } from './_rag-index.js';
 import { retrieveSimilarTaskIds } from './_task-embedding.js';
 import {
   buildAnchors,
+  planProximityTaskIds,
   clampHours,
   computeBiasFactor,
   estimateRange,
@@ -186,6 +187,35 @@ async function resolvePreferredAnchorIds(
   }
 }
 
+/**
+ * The anchor order handed to `buildAnchors`: plan-near tasks first, then the semantic ones.
+ *
+ * Plan-first is a JUDGEMENT, not a measurement. Plan proximity is a relationship someone
+ * asserted about the project's structure; the semantic order is inferred from the task's own
+ * prose. What keeps the risk small is that ordering only decides anything once a repository
+ * has more than MAX_ANCHORS completed workflow tasks — below that every candidate lands in
+ * the anchor set either way, and the order is a prompt-ordering tie-break rather than a gate.
+ * `CONFIG_KEYS.ESTIMATE_PLAN_ANCHORS_ENABLED` off restores the previous ordering exactly.
+ *
+ * Both halves degrade to [] independently, and `buildAnchors` then keeps newest-first.
+ */
+async function resolveAnchorOrder(
+  ctx: StepContext,
+  repositoryId: string,
+  queryText: string,
+): Promise<string[]> {
+  let planIds: string[] = [];
+  try {
+    if (await configService.getBoolean(CONFIG_KEYS.ESTIMATE_PLAN_ANCHORS_ENABLED, true)) {
+      planIds = await planProximityTaskIds(ctx.db, ctx.taskId, repositoryId);
+    }
+  } catch (err) {
+    ctx.logger.warn({ err }, 'plan-proximity anchors unavailable (non-fatal)');
+  }
+  const semanticIds = await resolvePreferredAnchorIds(ctx, repositoryId, queryText);
+  return [...new Set([...planIds, ...semanticIds])];
+}
+
 export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
   metadata: {
     id: '00b-estimate',
@@ -219,7 +249,7 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
     const executionPath = task?.executionPath ?? null;
     const manualEstimateHours = task?.estimatedTimeHours ?? null;
     const preferredTaskIds = task?.repositoryId
-      ? await resolvePreferredAnchorIds(ctx, task.repositoryId, `${title}\n${description}`.trim())
+      ? await resolveAnchorOrder(ctx, task.repositoryId, `${title}\n${description}`.trim())
       : [];
     const anchors = task?.repositoryId
       ? await buildAnchors(ctx.db, ctx.taskId, task.repositoryId, preferredTaskIds)

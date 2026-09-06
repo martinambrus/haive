@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, like, ne, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 
@@ -218,6 +218,120 @@ async function fetchPreferredTaskRows(
   });
   const byId = new Map(rows.map((r) => [r.id, r]));
   return ids.map((id) => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined);
+}
+
+/**
+ * Prior tasks near this one in the PROJECT PLAN, closest first.
+ *
+ * For `00b-estimate`, which runs at index 0.6 — before 04-phase-0b exists, so
+ * `affectedComponents` is not available. `plan_node_tasks` rows are, because the
+ * create-task endpoint writes them at task INSERT; `loadFromTaskLinks` in
+ * `_plan-impact.ts` falls back to the same source for the same reason.
+ *
+ * Origins are the `implements` links ONLY. `touched` is written by the spec writer's
+ * affected-components pass and is a statement about blast radius, not about what the task
+ * is: MEASURED on a live plan, one task carried 358 `touched` rows against a 543-node plan,
+ * so seeding proximity from those would reach most of the project.
+ *
+ * Two tiers, each newest-completed first:
+ *   1. tasks implementing the SAME node;
+ *   2. tasks implementing a node in the same PARENT's subtree — one prefix predicate, which
+ *      `plan_nodes.path` supports directly (self-inclusive and slash-terminated, so the
+ *      match is structural rather than accidentally correct). Covers siblings and their
+ *      descendants without a third tier nothing has measured.
+ *
+ * A task can implement SEVERAL nodes (measured: 5 on one task), so the origin is a set.
+ * Best-effort: any failure returns [] and the caller keeps the ordering it already had.
+ */
+export async function planProximityTaskIds(
+  db: Database,
+  taskId: string,
+  repositoryId: string,
+): Promise<string[]> {
+  const origins = await db
+    .select({ nodeId: schema.planNodeTasks.nodeId, path: schema.planNodes.path })
+    .from(schema.planNodeTasks)
+    .innerJoin(schema.planNodes, eq(schema.planNodes.id, schema.planNodeTasks.nodeId))
+    .where(
+      and(
+        eq(schema.planNodeTasks.taskId, taskId),
+        eq(schema.planNodeTasks.role, 'implements'),
+        eq(schema.planNodes.repositoryId, repositoryId),
+      ),
+    );
+  if (origins.length === 0) return [];
+
+  // The parent's subtree = this node's path with its own last segment removed. The path is
+  // '/root/…/self/', so dropping the final segment yields the parent prefix every sibling
+  // (and every sibling's descendant) also starts with.
+  const parentPrefixes = [
+    ...new Set(origins.map((o) => o.path.replace(/[^/]+\/$/, '')).filter((p) => p.length > 1)),
+  ];
+  const nodeIds = origins.map((o) => o.nodeId);
+
+  const rows = await db
+    .select({
+      taskId: schema.planNodeTasks.taskId,
+      nodeId: schema.planNodeTasks.nodeId,
+      path: schema.planNodes.path,
+      completedAt: schema.tasks.completedAt,
+    })
+    .from(schema.planNodeTasks)
+    .innerJoin(schema.planNodes, eq(schema.planNodes.id, schema.planNodeTasks.nodeId))
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.planNodeTasks.taskId))
+    .where(
+      and(
+        eq(schema.planNodeTasks.role, 'implements'),
+        eq(schema.planNodes.repositoryId, repositoryId),
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'workflow'),
+        eq(schema.tasks.status, 'completed'),
+        ne(schema.planNodeTasks.taskId, taskId),
+        parentPrefixes.length > 0
+          ? or(
+              inArray(schema.planNodeTasks.nodeId, nodeIds),
+              ...parentPrefixes.map((prefix) => like(schema.planNodes.path, `${prefix}%`)),
+            )
+          : inArray(schema.planNodeTasks.nodeId, nodeIds),
+      ),
+    );
+
+  return rankPlanProximity(rows, nodeIds);
+}
+
+/** One (task, node) row as the proximity query returns it. */
+export interface PlanProximityRow {
+  taskId: string;
+  nodeId: string;
+  completedAt: Date | null;
+}
+
+/**
+ * Rank proximity rows: same-node tier first, newest-completed within a tier.
+ *
+ * Split out as a pure function because the query around it can only be exercised against a
+ * live database, while this is where the ordering rules actually live.
+ *
+ * One entry per TASK. A task implementing several nodes in range produces several rows, and
+ * it must be ranked by the CLOSEST tier it reached — not by how many nodes happened to match,
+ * which would let a task linked to a dozen distant nodes outrank one that implements exactly
+ * the node in hand.
+ */
+export function rankPlanProximity(rows: PlanProximityRow[], sameNodeIds: string[]): string[] {
+  const sameNode = new Set(sameNodeIds);
+  const best = new Map<string, { tier: number; at: number }>();
+  for (const r of rows) {
+    const tier = sameNode.has(r.nodeId) ? 0 : 1;
+    const at = r.completedAt ? r.completedAt.getTime() : 0;
+    const prev = best.get(r.taskId);
+    if (!prev || tier < prev.tier || (tier === prev.tier && at > prev.at)) {
+      best.set(r.taskId, { tier, at });
+    }
+  }
+  return [...best.entries()]
+    .sort((a, b) => a[1].tier - b[1].tier || b[1].at - a[1].at)
+    .slice(0, MAX_ANCHORS)
+    .map(([id]) => id);
 }
 
 /**

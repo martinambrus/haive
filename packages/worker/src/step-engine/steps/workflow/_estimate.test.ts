@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  MAX_ANCHORS,
+  rankPlanProximity,
   computeBiasFactor,
   effortHoursFromSteps,
   estimateRange,
@@ -122,6 +124,84 @@ describe('overlapRefinedEstimate', () => {
     ];
     // The two cross-repo overlaps are ignored; one local overlap is below the min -> null.
     expect(overlapRefinedEstimate(anchors, ['a'])).toBeNull();
+  });
+});
+
+describe('rankPlanProximity', () => {
+  const at = (iso: string) => new Date(iso);
+  const NODE = 'node-self';
+
+  it('puts a same-node task ahead of a nearer-in-time sibling task', () => {
+    // Tier beats recency: implementing the very node in hand is a stronger signal than
+    // having recently implemented something next to it.
+    const ids = rankPlanProximity(
+      [
+        { taskId: 'same-old', nodeId: NODE, completedAt: at('2026-01-01') },
+        { taskId: 'sibling-new', nodeId: 'node-sibling', completedAt: at('2026-06-01') },
+      ],
+      [NODE],
+    );
+    expect(ids).toEqual(['same-old', 'sibling-new']);
+  });
+
+  it('orders newest-completed first within a tier', () => {
+    const ids = rankPlanProximity(
+      [
+        { taskId: 'older', nodeId: 'a', completedAt: at('2026-01-01') },
+        { taskId: 'newer', nodeId: 'b', completedAt: at('2026-05-01') },
+      ],
+      [NODE],
+    );
+    expect(ids).toEqual(['newer', 'older']);
+  });
+
+  it('ranks a task by the CLOSEST node it reached, not by how many matched', () => {
+    // Otherwise a task linked to a dozen distant nodes outranks one that implements
+    // exactly the node in hand.
+    const ids = rankPlanProximity(
+      [
+        { taskId: 'broad', nodeId: 'far-1', completedAt: at('2026-07-01') },
+        { taskId: 'broad', nodeId: 'far-2', completedAt: at('2026-07-01') },
+        { taskId: 'exact', nodeId: NODE, completedAt: at('2026-02-01') },
+      ],
+      [NODE],
+    );
+    expect(ids).toEqual(['exact', 'broad']);
+  });
+
+  it('returns each task once even when several of its rows match', () => {
+    const ids = rankPlanProximity(
+      [
+        { taskId: 't', nodeId: NODE, completedAt: at('2026-03-01') },
+        { taskId: 't', nodeId: 'sibling', completedAt: at('2026-03-01') },
+      ],
+      [NODE],
+    );
+    expect(ids).toEqual(['t']);
+  });
+
+  it('treats a task with no completion date as the oldest rather than dropping it', () => {
+    const ids = rankPlanProximity(
+      [
+        { taskId: 'undated', nodeId: 'a', completedAt: null },
+        { taskId: 'dated', nodeId: 'b', completedAt: at('2026-01-01') },
+      ],
+      [NODE],
+    );
+    expect(ids).toEqual(['dated', 'undated']);
+  });
+
+  it('caps the list at the anchor budget', () => {
+    const rows = Array.from({ length: MAX_ANCHORS + 5 }, (_, i) => ({
+      taskId: `t${i}`,
+      nodeId: 'sibling',
+      completedAt: at('2026-01-01'),
+    }));
+    expect(rankPlanProximity(rows, [NODE])).toHaveLength(MAX_ANCHORS);
+  });
+
+  it('is empty with no rows', () => {
+    expect(rankPlanProximity([], [NODE])).toEqual([]);
   });
 });
 

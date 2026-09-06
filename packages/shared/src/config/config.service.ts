@@ -323,6 +323,14 @@ export const CONFIG_KEYS = {
   // then simply never queried; no data has to be undone.
   RAG_IDENTIFIER_SEARCH_ENABLED: 'config:rag:identifierSearchEnabled',
 
+  // Kill switch for plan-proximity effort anchors. On (default): 00b-estimate prefers
+  // prior completed tasks that implement the same plan node, or one in the same parent's
+  // subtree, ahead of the semantic (task-text embedding) order. Off restores the previous
+  // ordering exactly. A switch because the ranking is a JUDGEMENT, not a measurement —
+  // plan proximity is an asserted structural relationship while the semantic order is
+  // inferred from prose, and no install with real anchor history has settled which wins.
+  ESTIMATE_PLAN_ANCHORS_ENABLED: 'config:estimate:planAnchorsEnabled',
+
   // Global terseness level for agent OUTPUT prose, applied as a directive appended to
   // each CLI step's main prompt (lite | full | ultra; default full). Only the model's
   // prose is affected — the directive carves out JSON/code/diffs/specs so structured
@@ -611,6 +619,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.RAG_EMBED_BATCH_SIZE]: '8',
   [CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED]: 'true',
   [CONFIG_KEYS.RAG_IDENTIFIER_SEARCH_ENABLED]: 'true',
+  [CONFIG_KEYS.ESTIMATE_PLAN_ANCHORS_ENABLED]: 'true',
   [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
   [CONFIG_KEYS.SPEC_VIEW_MODE]: 'toc',
   // Pricing: sync ON by default (a fresh install should price itself without setup);
