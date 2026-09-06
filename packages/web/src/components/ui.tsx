@@ -36,12 +36,15 @@ const buttonSizes: Record<ButtonSize, string> = {
   lg: 'h-12 px-6 text-base',
 };
 
+// `whitespace-nowrap` is not cosmetic: every size sets a FIXED height, so a label
+// that wraps overflows its own box instead of growing it. A squeezed flex row is
+// what triggers it, and it renders as text spilling over the button's border.
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant = 'primary', size = 'md', ...props }, ref) => (
     <button
       ref={ref}
       className={cn(
-        'inline-flex items-center justify-center gap-2 rounded-md font-medium transition-colors disabled:cursor-not-allowed',
+        'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md font-medium transition-colors disabled:cursor-not-allowed',
         buttonVariants[variant],
         buttonSizes[size],
         className,
@@ -107,6 +110,8 @@ const badgeVariants: Record<BadgeVariant, string> = {
   info: 'bg-sky-900/60 text-sky-300 border-sky-800/60',
 };
 
+// Same fixed-shape reason as Button: a `rounded-full` pill that wraps becomes an
+// oval blob, so a badge never breaks its own line — the row it sits in wraps.
 export function Badge({
   className,
   variant = 'default',
@@ -115,7 +120,7 @@ export function Badge({
   return (
     <span
       className={cn(
-        'inline-flex items-center rounded-full border border-neutral-700 px-2 py-0.5 text-xs font-medium',
+        'inline-flex items-center whitespace-nowrap rounded-full border border-neutral-700 px-2 py-0.5 text-xs font-medium',
         badgeVariants[variant],
         className,
       )}

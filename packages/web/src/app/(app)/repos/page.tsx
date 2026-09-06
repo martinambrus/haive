@@ -2,6 +2,22 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import {
+  CirclePlus,
+  Download,
+  FolderMinus,
+  Gauge,
+  Link2,
+  LoaderCircle,
+  Map,
+  Play,
+  RefreshCw,
+  Rocket,
+  Terminal,
+  Trash2,
+  X,
+  type LucideIcon,
+} from 'lucide-react';
 import type { TreeNode } from '@haive/shared';
 import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
@@ -9,6 +25,7 @@ import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 import { ToolingUpgradeBanner } from '@/components/tooling-upgrade-banner';
 import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
+import { cn } from '@/lib/cn';
 import { usePageTitle } from '@/lib/use-page-title';
 import { rememberTaskOrigin } from '@/lib/task-origin';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
@@ -18,6 +35,52 @@ import { stripManagedKnowledgeGlobs } from '@haive/shared/knowledge-paths';
  *  task the form creates inherits it. Shared by the three buttons on a repo card. */
 function rememberReposOrigin(): void {
   rememberTaskOrigin('/tasks/new', { href: '/repos', label: 'Back to repositories' });
+}
+
+interface RepoActionProps {
+  /** Shown on hover and read by assistive tech — the only place the wording survives. */
+  label: string;
+  icon: LucideIcon;
+  href?: string;
+  onClick?: () => void;
+  variant?: 'primary' | 'secondary' | 'destructive';
+  disabled?: boolean;
+  /** Turns the icon into a spinner. Without a text label there is nothing else to
+   *  say a multi-second zip or re-clone is under way. */
+  spin?: boolean;
+}
+
+/** One action on a repo card. Icon-only, so up to eleven of them stay a single tidy
+ *  row and leave the title and badges the rest of the card. */
+function RepoAction({
+  label,
+  icon: Icon,
+  href,
+  onClick,
+  variant = 'secondary',
+  disabled,
+  spin,
+}: RepoActionProps) {
+  const button = (
+    <Button
+      variant={variant}
+      size="sm"
+      className="h-8 w-8 p-0"
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={href ? undefined : onClick}
+    >
+      <Icon className={cn('h-4 w-4', spin && 'animate-spin')} aria-hidden="true" />
+    </Button>
+  );
+  return href ? (
+    <Link href={href} onClick={onClick}>
+      {button}
+    </Link>
+  ) : (
+    button
+  );
 }
 
 function statusVariant(status: Repository['status']) {
@@ -357,10 +420,15 @@ function RepoCard(props: RepoCardProps) {
 
   return (
     <Card className="flex flex-col gap-3">
-      <div className="flex items-center justify-between gap-2">
-        <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold text-neutral-50">{repo.name}</h2>
+      {/* Wraps rather than squeezing: the title column claims 18rem before the
+          actions get anything, so once both no longer fit the actions drop to their
+          own full-width line instead of collapsing the title to one letter per row.
+          Content-driven, so there is no breakpoint to keep in sync with the sidebar
+          width. */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-[18rem] flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="break-words text-lg font-semibold text-neutral-50">{repo.name}</h2>
             <Badge variant={statusVariant(repo.status)}>{repo.status}</Badge>
             {notOnboarded && <Badge variant="warning">not onboarded yet</Badge>}
             {repo.detectedFramework && <Badge>{repo.detectedFramework}</Badge>}
@@ -387,80 +455,86 @@ function RepoCard(props: RepoCardProps) {
               </Link>
             )}
           </div>
-          <p className="mt-1 text-xs text-neutral-500">
+          <p className="mt-1 break-all text-xs text-neutral-500">
             {repo.localPath ?? repo.remoteUrl ?? '(no path)'}
           </p>
           {repo.statusMessage && <p className="mt-1 text-xs text-red-400">{repo.statusMessage}</p>}
         </div>
-        <div className="flex gap-2">
+        {/* Icon-only, so eleven equal-width controls line up instead of a ragged block
+            of labels — the wording lives on each button's `title`/`aria-label`. */}
+        <div className="ml-auto flex flex-wrap justify-end gap-2">
           {notOnboarded && (
-            <Link href={`/tasks/new?repositoryId=${repo.id}`} onClick={rememberReposOrigin}>
-              <Button size="sm">Onboard</Button>
-            </Link>
+            <RepoAction
+              label="Onboard"
+              icon={Rocket}
+              variant="primary"
+              href={`/tasks/new?repositoryId=${repo.id}`}
+              onClick={rememberReposOrigin}
+            />
           )}
           {repo.status === 'ready' && !notOnboarded && (
-            <Link href={`/tasks/new?repositoryId=${repo.id}`} onClick={rememberReposOrigin}>
-              <Button size="sm">Create task</Button>
-            </Link>
+            <RepoAction
+              label="Create task"
+              icon={CirclePlus}
+              variant="primary"
+              href={`/tasks/new?repositoryId=${repo.id}`}
+              onClick={rememberReposOrigin}
+            />
           )}
           {repo.status === 'ready' && !notOnboarded && (
-            <Link
+            <RepoAction
+              label="Run app"
+              icon={Play}
               href={`/tasks/new?repositoryId=${repo.id}&mode=run_app`}
               onClick={rememberReposOrigin}
-            >
-              <Button variant="secondary" size="sm">
-                Run app
-              </Button>
-            </Link>
+            />
           )}
           {repo.status === 'ready' && !isReadOnlyLocalRepo(repo) && (
-            <Link href={`/repos/${repo.id}/terminal`}>
-              <Button variant="secondary" size="sm">
-                Terminal
-              </Button>
-            </Link>
+            <RepoAction label="Terminal" icon={Terminal} href={`/repos/${repo.id}/terminal`} />
           )}
           {repo.status === 'ready' && (
-            <Link href={`/repos/${repo.id}/plan`}>
-              <Button variant="secondary" size="sm">
-                Plan
-              </Button>
-            </Link>
+            <RepoAction label="Plan" icon={Map} href={`/repos/${repo.id}/plan`} />
           )}
           {repo.status === 'ready' && (
-            <Link href={`/repos/${repo.id}/estimates`}>
-              <Button variant="secondary" size="sm">
-                Estimates
-              </Button>
-            </Link>
+            <RepoAction label="Estimates" icon={Gauge} href={`/repos/${repo.id}/estimates`} />
           )}
           {/* A repository with no remote cannot push ANYTHING — not the plan
               snapshot, not a finished task's branch. Offered here as well as on
               the plan page because the gap belongs to the repository, and this
               is the page where a repository is managed. */}
           {repo.status === 'ready' && !repo.remoteUrl && (
-            <Button variant="secondary" size="sm" onClick={() => setLinkingOrigin(true)}>
-              Link to origin
-            </Button>
+            <RepoAction
+              label="Link to origin"
+              icon={Link2}
+              onClick={() => setLinkingOrigin(true)}
+            />
           )}
           {repo.status === 'ready' && (
-            <Button variant="secondary" size="sm" onClick={downloadArchive} disabled={downloading}>
-              {downloading ? 'Zipping...' : 'Download'}
-            </Button>
+            <RepoAction
+              label={downloading ? 'Zipping...' : 'Download'}
+              icon={downloading ? LoaderCircle : Download}
+              spin={downloading}
+              onClick={downloadArchive}
+              disabled={downloading}
+            />
           )}
           {canEditScope && (
-            <Button variant="secondary" size="sm" onClick={onExpand}>
-              {expanded ? 'Close' : 'Exclusions'}
-            </Button>
+            <RepoAction
+              label={expanded ? 'Close' : 'Exclusions'}
+              icon={expanded ? X : FolderMinus}
+              onClick={onExpand}
+            />
           )}
           {repo.status === 'error' && (
-            <Button variant="secondary" size="sm" onClick={handleRetryClick} disabled={retrying}>
-              {retrying ? 'Retrying...' : 'Retry'}
-            </Button>
+            <RepoAction
+              label={retrying ? 'Retrying...' : 'Retry'}
+              icon={RefreshCw}
+              spin={retrying}
+              onClick={handleRetryClick}
+              disabled={retrying}
+            />
           )}
-          <Button variant="destructive" size="sm" onClick={onDelete}>
-            Delete
-          </Button>
+          <RepoAction label="Delete" icon={Trash2} variant="destructive" onClick={onDelete} />
         </div>
       </div>
       {linkingOrigin && (
