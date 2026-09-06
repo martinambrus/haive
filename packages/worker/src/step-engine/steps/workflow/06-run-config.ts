@@ -292,7 +292,11 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
             'Which dimensions the reviewers score this change against. Narrowing them here applies to the implementation validation and code review steps only — discovery and the spec writer already ran, and follow the repository setting on its tooling page.',
           items: [
             {
-              title: `Dimensions scored (${reviewDimensionIds.length} of ${REVIEW_DIMENSIONS.length})`,
+              // Count rendered by the form, not written in here: this schema is
+              // stored, so a baked count would keep stating the build-time
+              // selection while the user ticks the boxes below it.
+              title: 'Dimensions scored',
+              titleCountFieldId: 'reviewDimensions',
               description:
                 'A dimension left unticked is not reviewed at all — Gate 2 says so, because no findings against it is not the same as passing it.',
               fields: [

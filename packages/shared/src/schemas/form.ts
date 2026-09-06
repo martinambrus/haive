@@ -256,6 +256,14 @@ export const accordionItemSchema = z.object({
    *  Use when the user should see the item's content up front (e.g. the Q&A
    *  review gate shows each answer by default). Defaults to collapsed. */
   defaultOpen: z.boolean().optional(),
+  /** Id of a `multi-select` field in this item whose LIVE selection is appended to
+   *  the summary as `(n of m)`. The count has to be rendered rather than written
+   *  into `title`, because `task_steps.form_schema` is stored and never rebuilt
+   *  while the form is parked — a baked count states the selection at build time
+   *  and then contradicts the boxes the user is ticking underneath it. Omitted, or
+   *  naming anything but a multi-select here, renders `title` verbatim, so items
+   *  persisted before this existed are unchanged. */
+  titleCountFieldId: z.string().optional(),
 });
 
 export type AccordionItem = z.infer<typeof accordionItemSchema>;

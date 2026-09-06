@@ -14,6 +14,7 @@ import { PlanImpactSection } from '@/components/plan/plan-impact-section';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
 import { isFieldVisible } from '@/components/form-visibility';
+import { accordionItemTitle } from '@/components/form-accordion-title';
 
 export type { FormValues };
 
@@ -489,7 +490,7 @@ function AccordionField({ field, values, onChange, disabled }: AccordionFieldPro
             className="border-b border-neutral-800 last:border-b-0"
           >
             <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-100 hover:bg-neutral-900">
-              {item.title}
+              {accordionItemTitle(item, values)}
             </summary>
             <div className="flex flex-col gap-3 border-t border-neutral-800 bg-neutral-950 px-3 py-3">
               {item.description && (
