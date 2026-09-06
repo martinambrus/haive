@@ -6,11 +6,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Lock, Unlock } from 'lucide-react';
 import { usePageTitle } from '@/lib/use-page-title';
 import { taskOrigin, rememberTaskOrigin } from '@/lib/task-origin';
-import { readTaskDraft } from '@/lib/task-draft';
-import type { PlanNodeTaskRole } from '@haive/shared';
+import type { PlanNodeTaskRole, PlanTaskProposal } from '@haive/shared';
+import { describePlanNodesForTask } from '@haive/shared/plan-describe';
+import { taskProposal } from '@/components/plan/plan-chat-turn';
 import {
   api,
   API_BASE_URL,
+  getPlanMessages,
   getPlanNode,
   attachmentUploadName,
   uploadTaskAttachment,
@@ -121,16 +123,20 @@ export default function NewTaskPage() {
       .filter(Boolean);
     return [...new Set([...fromList, ...(planNodeIdParam ? [planNodeIdParam] : [])])];
   }, [searchParams, planNodeIdParam]);
-  /** Title, description and role handed over from the plan, read ONCE. The prose
-   *  is too long for a query string, so it travels in sessionStorage behind the
-   *  `draft` token. */
-  const draft = useMemo(() => readTaskDraft(searchParams.get('draft')), [searchParams]);
+  /** A plan chat's own proposal, addressed rather than copied: the turn that made
+   *  it holds it durably in `patch_json`, so the link names the turn and this
+   *  form reads it back. Both halves or neither. */
+  const proposalNode = searchParams.get('proposalNode');
+  const proposalMessage = searchParams.get('proposalMessage');
+  const fromPlanChat = searchParams.get('fromPlanChat') === '1';
   /** Whether finishing this task finishes those nodes. Defaults the way the API
    *  does — one node completes it, several deliver a slice of each — so the form
    *  and the server never disagree about an unanswered question. */
-  const [planNodeRole, setPlanNodeRole] = useState<PlanNodeTaskRole>(
-    draft?.planNodeRole ?? (planNodeIds.length === 1 ? 'implements' : 'touched'),
-  );
+  const [planNodeRole, setPlanNodeRole] = useState<PlanNodeTaskRole>(() => {
+    const p = searchParams.get('planNodeRole');
+    if (p === 'implements' || p === 'touched') return p;
+    return planNodeIds.length === 1 ? 'implements' : 'touched';
+  });
   /** The nodes as the plan describes them, so the form can name what it is about
    *  to link rather than print uuids. */
   const [planNodes, setPlanNodes] = useState<{ id: string; title: string }[]>([]);
@@ -147,8 +153,13 @@ export default function NewTaskPage() {
 
   // The draft wins over `?title=`: it is the richer of the two and only exists
   // when something deliberately handed this form a task to create.
-  const [title, setTitle] = useState(draft?.title || (searchParams.get('title') ?? ''));
-  const [description, setDescription] = useState(draft?.description ?? '');
+  const [title, setTitle] = useState(searchParams.get('title') ?? '');
+  const [description, setDescription] = useState('');
+  /** Whether the person has edited these themselves. The plan fill below writes
+   *  only into fields nobody has touched — a derived description is a starting
+   *  point, and silently restoring it over an edit would be the worse failure. */
+  const titleTouched = useRef(false);
+  const descriptionTouched = useRef(false);
   const [estimatedTime, setEstimatedTime] = useState('');
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
@@ -247,6 +258,25 @@ export default function NewTaskPage() {
     void refreshStatus(repositoryId);
   }, [repositoryId, refreshStatus]);
 
+  /**
+   * The proposal a plan chat made, read back from the turn that made it.
+   *
+   * Addressed, never copied: `patch_json` already holds it durably, so a link
+   * that names the turn survives a reload, a new tab and being shared, none of
+   * which a copy in browser storage does. Null whenever the link carries no
+   * proposal, the turn has gone, or its payload is not one — every case falls
+   * through to the description derived from the nodes themselves.
+   */
+  const loadChatProposal = useCallback(async (): Promise<PlanTaskProposal | null> => {
+    if (!proposalNode || !proposalMessage || !repositoryId) return null;
+    try {
+      const { messages } = await getPlanMessages(repositoryId, proposalNode);
+      return taskProposal(messages.find((m) => m.id === proposalMessage)?.patch);
+    } catch {
+      return null;
+    }
+  }, [proposalNode, proposalMessage, repositoryId]);
+
   useEffect(() => {
     if (planNodeIds.length === 0 || !repositoryId) return;
     let cancelled = false;
@@ -272,11 +302,38 @@ export default function NewTaskPage() {
       // A node that cannot be read is not a node that is blocked. Say nothing
       // about it and let the API's own refusal be the authority.
       setPlanBlockers([...new Map(outside.map((b) => [b.nodeId, b])).values()]);
+
+      // Write the description FROM the plan. Nobody arriving from a canvas
+      // should have to paraphrase nodes they are looking at, and an empty
+      // description is not merely inconvenient: it is what 00-triage classifies
+      // on, what 03-phase-0a searches against, and what the create endpoint
+      // refuses a workflow task without.
+      const loaded = details.flatMap((d) => (d ? [d] : []));
+      const proposal = await loadChatProposal();
+      if (cancelled) return;
+      const composed =
+        proposal?.description ||
+        describePlanNodesForTask(
+          loaded.map((d) => ({
+            id: d.node.id,
+            title: d.node.title,
+            body: d.node.body,
+            ancestry: d.ancestry.map((c) => c.title),
+          })),
+          // `blockedBy` is each node's own unmet prerequisites; the renderer
+          // keeps only the ones inside the set, which is exactly the order this
+          // one task has to build in.
+          loaded.flatMap((d) =>
+            d.node.blockedBy.map((b) => ({ fromNodeId: d.node.id, toNodeId: b.nodeId })),
+          ),
+        );
+      if (!descriptionTouched.current && composed) setDescription(composed);
+      if (!titleTouched.current && proposal?.title) setTitle(proposal.title);
     })();
     return () => {
       cancelled = true;
     };
-  }, [planNodeIds, repositoryId]);
+  }, [planNodeIds, repositoryId, loadChatProposal]);
 
   // QOL: preselect the CLI dropdown from this repo's last-used CLI (the
   // cli_provider_id of the most-recent task on this repo). Only sets when that
@@ -437,7 +494,7 @@ export default function NewTaskPage() {
         body.planNodeRole = planNodeRole;
         if (overrideBlocked) body.overrideBlocked = true;
       }
-      if (draft?.fromPlanChat) body.fromPlanChat = true;
+      if (fromPlanChat) body.fromPlanChat = true;
       if (type === 'workflow') {
         body.isBugFix = isBugFix;
         if (feature.trim()) body.feature = feature.trim();
@@ -734,7 +791,10 @@ export default function NewTaskPage() {
                 id="title"
                 type="text"
                 value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                onChange={(e) => {
+                  titleTouched.current = true;
+                  setTitle(e.target.value);
+                }}
                 placeholder={
                   inferredType === 'run_app'
                     ? 'Run app'
@@ -754,7 +814,10 @@ export default function NewTaskPage() {
                 id="description"
                 rows={3}
                 value={description}
-                onChange={(e) => setDescription(e.target.value)}
+                onChange={(e) => {
+                  descriptionTouched.current = true;
+                  setDescription(e.target.value);
+                }}
                 placeholder="What should the workflow accomplish? Be specific — this drives knowledge mining and planning."
                 required={inferredType === 'workflow'}
                 className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"

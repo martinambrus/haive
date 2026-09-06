@@ -52,7 +52,6 @@ import { Button, FormError, Input } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { usePageTitle } from '@/lib/use-page-title';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
-import { taskDraftHref } from '@/lib/task-draft';
 import { sequenceLabel } from '@/components/plan/plan-status';
 import { PlanCardGrid } from '@/components/plan/plan-card-grid';
 import { PlanDetailPanel, type PlanPanelTab } from '@/components/plan/plan-detail-panel';
@@ -1377,17 +1376,18 @@ export default function PlanPage() {
                       {picked.size > 1 && ' They are recorded as affected; none is marked done.'}
                     </span>
                     <Link
-                      href={taskDraftHref(repositoryId, {
-                        title: '',
-                        description: '',
-                        planNodeIds: [...picked],
-                        // The create form asks again and can be flipped there.
-                        // Defaulting a hand-picked SET to `touched` matches the
-                        // API's own default and is the safe direction: greening
-                        // five nodes for a change that touched part of each is a
-                        // claim the plan then repeats to everyone who reads it.
+                      // Ids only. The form loads each node anyway (for the
+                      // titles and the blockers) and writes the description from
+                      // them, so nothing about the task has to survive the hop.
+                      // The role is the one thing it cannot derive: `touched` for
+                      // a set is the safe direction, since greening five nodes
+                      // for a change that touched part of each is a claim the
+                      // plan then repeats to everyone who reads it.
+                      href={`/tasks/new?${new URLSearchParams({
+                        repositoryId,
+                        planNodeIds: [...picked].join(','),
                         planNodeRole: picked.size === 1 ? 'implements' : 'touched',
-                      })}
+                      }).toString()}`}
                       onClick={() => rememberTaskOrigin('/tasks/new', planOrigin(repositoryId))}
                     >
                       <Button size="sm">Start one task for these</Button>

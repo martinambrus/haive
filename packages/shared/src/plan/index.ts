@@ -7,3 +7,4 @@ export * from './read.js';
 export * from './render.js';
 export * from './apply-patch.js';
 export * from './impact.js';
+export * from './describe.js';

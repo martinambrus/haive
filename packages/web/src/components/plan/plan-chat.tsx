@@ -21,7 +21,6 @@ import {
 import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
-import { taskDraftHref } from '@/lib/task-draft';
 import { groupPlanConversations, liveConversation, type PlanChatGroup } from './plan-chat-groups';
 import { firstUnreadMessageId, opCount, startedLabel, stamp, taskProposal } from './plan-chat-turn';
 
@@ -564,7 +563,12 @@ function ConversationGroup({
                   already scrolling, and a scrollbar inside a scrollbar makes a
                   long reply almost unreadable. */}
               <MarkdownView body={m.body} className="max-h-none overflow-visible px-0 py-1" />
-              <TaskProposalCard patch={m.patch} repositoryId={repositoryId} />
+              <TaskProposalCard
+                patch={m.patch}
+                repositoryId={repositoryId}
+                nodeId={m.nodeId}
+                messageId={m.id}
+              />
             </div>
           ))}
         </div>
@@ -586,9 +590,15 @@ function ConversationGroup({
 function TaskProposalCard({
   patch,
   repositoryId,
+  nodeId,
+  messageId,
 }: {
   patch: PlanMessage['patch'];
   repositoryId: string;
+  /** The turn's own node and id — the address the create form reads the
+   *  proposal back from. */
+  nodeId: string;
+  messageId: string;
 }) {
   const proposal = taskProposal(patch);
   if (!proposal) return null;
@@ -609,13 +619,19 @@ function TaskProposalCard({
           : ' — recorded as affected; none marked done.'}
       </p>
       <Link
-        href={taskDraftHref(repositoryId, {
-          title: proposal.title,
-          description: proposal.description,
-          planNodeIds: proposal.nodeRefs,
+        // Everything the form needs is ADDRESSED, not carried: the proposal is
+        // already durable in this turn's `patch_json`, so the link names the turn
+        // and the form reads it back. A copy in browser storage was the previous
+        // shape and it silently degraded to a title with no description once the
+        // storage filled — a task nobody could submit.
+        href={`/tasks/new?${new URLSearchParams({
+          repositoryId,
+          planNodeIds: proposal.nodeRefs.join(','),
           planNodeRole: proposal.role,
-          fromPlanChat: true,
-        })}
+          proposalNode: nodeId,
+          proposalMessage: messageId,
+          fromPlanChat: '1',
+        }).toString()}`}
         onClick={() => rememberTaskOrigin('/tasks/new', planOrigin(repositoryId))}
         className="self-start"
       >

@@ -55,6 +55,10 @@
       "types": "./dist/plan/index.d.ts",
       "import": "./dist/plan/index.js"
     },
+    "./plan-describe": {
+      "types": "./dist/plan/describe.d.ts",
+      "import": "./dist/plan/describe.js"
+    },
     "./timing": {
       "types": "./dist/step-engine/timing.d.ts",
       "import": "./dist/step-engine/timing.js"
