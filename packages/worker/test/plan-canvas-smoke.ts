@@ -635,23 +635,44 @@ async function main(): Promise<void> {
       !reachedById.has(linkTarget!.id),
       [...reachedById.keys()],
     );
-    // The diagram is the NEAR field only; the list above carries the rest.
+    // One picture per radius the walk reached, so the gate's reach buttons have
+    // something to switch between without re-deriving the traversal in a browser
+    // that has no `viaNodeId` to draw an edge from.
+    const diagrams = resolved?.diagrams ?? [];
+    const byDepth = new Map(diagrams.map((d) => [d.depth, d]));
     check(
-      'the diagram walks one hop and says so',
-      resolved?.mermaidDepth === 1 && (resolved?.mermaid ?? '').startsWith('flowchart LR'),
-      { depth: resolved?.mermaidDepth, head: (resolved?.mermaid ?? '').slice(0, 20) },
+      'a diagram is emitted for every radius the walk reached',
+      JSON.stringify(diagrams.map((d) => d.depth)) === JSON.stringify([1, 2]),
+      diagrams.map((d) => d.depth),
     );
     check(
-      'the diagram draws the named component as an origin',
-      (resolved?.mermaid ?? '').includes(`pnode${linkTarget!.id.replace(/-/g, '')}["`) &&
-        (resolved?.mermaid ?? '').includes(':::origin'),
-      resolved?.mermaid,
+      'each diagram is a flowchart drawing the named component as an origin',
+      diagrams.length > 0 &&
+        diagrams.every(
+          (d) =>
+            d.mermaid.startsWith('flowchart LR') &&
+            d.mermaid.includes(`pnode${linkTarget!.id.replace(/-/g, '')}["`) &&
+            d.mermaid.includes(':::origin'),
+        ),
+      diagrams.map((d) => d.mermaid.slice(0, 40)),
+    );
+    // The radius is what decides the picture: a node two hops out belongs to the
+    // two-hop diagram and to no smaller one.
+    const twoHopsOut = `pnode${api!.id.replace(/-/g, '')}`;
+    check(
+      'a node two hops out is absent from the one-hop picture',
+      byDepth.get(1)?.mermaid.includes(twoHopsOut) === false && byDepth.get(1)?.omitted === 0,
+      { omitted: byDepth.get(1)?.omitted },
     );
     check(
-      'a node two hops out is not drawn, and is not counted as omitted from a one-hop picture',
-      !(resolved?.mermaid ?? '').includes(`pnode${api!.id.replace(/-/g, '')}`) &&
-        resolved?.mermaidOmitted === 0,
-      { omitted: resolved?.mermaidOmitted },
+      'the same node IS drawn once the radius reaches it',
+      byDepth.get(2)?.mermaid.includes(twoHopsOut) === true,
+      byDepth.get(2)?.mermaid,
+    );
+    check(
+      'a named set inside the diagram cap leaves no component undrawn',
+      resolved?.namedOmitted === 0,
+      resolved?.namedOmitted,
     );
     check(
       'a spec that names no plan node resolves to nothing at all',

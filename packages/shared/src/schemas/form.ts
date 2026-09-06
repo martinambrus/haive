@@ -324,19 +324,22 @@ export const planImpactSectionSchema = z.object({
    *  "nothing else is affected" is the failure this whole view exists to
    *  prevent. */
   truncated: z.object({ reason: z.enum(['depth', 'nodes']), limit: z.number().int() }).nullable(),
-  /** mermaid source, or '' when no picture was drawn (see `diagramSkipped`). */
-  mermaid: z.string(),
-  /** Hops the DIAGRAM leaves out, which `hops` still carries. */
-  mermaidOmitted: z.number().int().nonnegative(),
-  /** How many hops out the diagram walked. Smaller than the walk behind `hops`
-   *  on purpose — one hop is what "if I change this, what else must change?"
-   *  means, and the number is shown so the two are never confused. */
-  mermaidDepth: z.number().int().nonnegative(),
-  /** Why there is no diagram at all. A picture of more origins than it can hold
-   *  is a wall of disconnected boxes, so the count is stated instead. */
-  diagramSkipped: z
-    .object({ reason: z.literal('too_many_named'), limit: z.number().int() })
-    .nullable(),
+  /** One bounded picture per radius, nearest first, so the reach buttons switch
+   *  between server-rendered diagrams instead of the browser re-deriving a walk
+   *  — which it could not do anyway, since a hop above carries no `viaNodeId`.
+   *  `omitted` is the hops that radius reaches and the picture does not draw. */
+  diagrams: z.array(
+    z.object({
+      depth: z.number().int().positive(),
+      mermaid: z.string(),
+      omitted: z.number().int().nonnegative(),
+    }),
+  ),
+  /** Named components the diagram could not take as origins, which `named`
+   *  still carries. The picture's budget goes to origins first and to their
+   *  neighbours with what is left, so on a wide set this is the number that
+   *  matters. */
+  namedOmitted: z.number().int().nonnegative().optional(),
 });
 
 export type PlanImpactSection = z.infer<typeof planImpactSectionSchema>;

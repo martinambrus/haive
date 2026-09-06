@@ -90,10 +90,8 @@ function affectedComponentsSection(
           reversed: r.reversed === true,
         })),
         truncated: a.truncated,
-        mermaid: a.mermaid,
-        mermaidOmitted: a.mermaidOmitted ?? 0,
-        mermaidDepth: a.mermaidDepth ?? 0,
-        diagramSkipped: a.diagramSkipped ?? null,
+        diagrams: a.diagrams ?? [],
+        namedOmitted: a.namedOmitted ?? 0,
       },
     },
   ];
@@ -295,8 +293,10 @@ function buildSummarySection(detected: SpecGateDetect): string {
  * re-drafting of the spec, and one resolver so this can never disagree with what
  * `_plan-impact.ts` hands the implementer.
  *
- * `mermaidDepth` is the marker rather than `reversed`, because it is written on
- * every new payload while an empty `reached` would carry no hop to inspect.
+ * `diagrams` is the marker rather than `reversed`, because it is written on
+ * every new payload while an empty `reached` would carry no hop to inspect. It
+ * also covers the intermediate shape that carried directions but only one
+ * picture, which the reach buttons need one per radius of.
  *
  * A re-resolution that comes back empty leaves the section OFF rather than
  * rendering fabricated directions — the same thing the section already does when
@@ -308,7 +308,7 @@ async function withRelationDirections(
   affected: AffectedComponents | null,
 ): Promise<AffectedComponents | null> {
   if (!affected || !repositoryId) return affected;
-  if (typeof affected.mermaidDepth === 'number') return affected;
+  if (Array.isArray(affected.diagrams)) return affected;
   const ids = affected.named.map((n) => n.id);
   const rewalked = await resolveAffectedComponentsForIds(ctx, repositoryId, ids);
   if (!rewalked) {

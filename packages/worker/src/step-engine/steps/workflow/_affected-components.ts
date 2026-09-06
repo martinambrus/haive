@@ -37,14 +37,14 @@ export interface AffectedComponents {
    *  existed replays without it, and `06` re-resolves rather than guessing. */
   reached: { id: string; title: string; depth: number; via: string; reversed?: boolean }[];
   truncated: null | { reason: 'depth' | 'nodes'; limit: number };
-  mermaid: string;
-  /** Hops the DIAGRAM left out, which `reached` still carries. Optional because
-   *  this arrives from persisted output written before the diagram was bounded. */
-  mermaidOmitted?: number;
-  /** How far the DIAGRAM walked, which is not how far `reached` walked. */
-  mermaidDepth?: number;
-  /** Set when no diagram was drawn at all. */
-  diagramSkipped?: null | { reason: 'too_many_named'; limit: number };
+  /** One bounded picture per radius the walk actually found something at, so the
+   *  gate's reach buttons switch between them without the browser re-deriving a
+   *  traversal the server already owns. */
+  diagrams?: { depth: number; mermaid: string; omitted: number }[];
+  /** Named components the DIAGRAM could not take as origins. Stated rather than
+   *  implied — a picture of 40 of 161 read as the whole set is the same failure
+   *  a short list is. */
+  namedOmitted?: number;
 }
 
 /**
@@ -135,36 +135,46 @@ async function resolveForNodeIds(
   // graph is hub-shaped — a three-hop picture is "essentially the whole plan",
   // which shows nothing. The list above keeps the wider set.
   //
-  // Past the diagram's own node cap in ORIGINS alone there is no picture to draw
-  // at all: 161 named components render as 161 disconnected boxes. The count is
-  // stated instead.
-  if (named.length > IMPACT_DIAGRAM_MAX_NODES) {
-    return {
-      named,
-      reached,
-      truncated: list.truncated,
-      mermaid: '',
-      mermaidOmitted: 0,
-      mermaidDepth: IMPACT_DEFAULT_VIEW_DEPTH,
-      diagramSkipped: { reason: 'too_many_named', limit: IMPACT_DIAGRAM_MAX_NODES },
-    };
-  }
-  const near = computeImpact(
-    named.map((n) => n.id),
-    edges,
-    { maxDepth: IMPACT_DEFAULT_VIEW_DEPTH },
-  );
-  // `edges` so the links BETWEEN the named components are drawn: the walk seeds
-  // every origin as visited, so it never discovers one, and without this a
-  // multi-origin diagram is a row of unconnected boxes.
-  const diagram = renderImpactMermaid(near, titleById, { edges });
+  // `IMPACT_DIAGRAM_MAX_NODES` is the whole picture's budget here, spent on
+  // ORIGINS first and on their neighbours with whatever is left. Origins first
+  // because the components a spec NAMED are the subject; a neighbour is context.
+  //
+  // A wide named set therefore draws origins and nothing else, which is a real
+  // subgraph rather than a row of loose boxes: MEASURED on a 161-named task,
+  // the first 40 named components carry 40 edges between them and only 4 of the
+  // 40 are isolated (217 edges among all 161). `opts.edges` below is what draws
+  // those, and it is why refusing to draw at all was the wrong call.
+  const diagramOrigins = named.slice(0, IMPACT_DIAGRAM_MAX_NODES);
+  // Spec order, not "most connected": the diagram has to be explainable — which
+  // 40 of 161 got drawn is answered by "the ones the spec cites first", and a
+  // connectivity ranking answers it with nothing a reader can check.
+  const hopBudget = Math.max(0, IMPACT_DIAGRAM_MAX_NODES - diagramOrigins.length);
+  // One picture per radius the LIST found something at, rather than one at the
+  // default radius. The gate offers the same reach buttons the plan canvas's
+  // Impact tab does, and rendering them here keeps the traversal, its cycle
+  // guard and its caps on the server — the browser has no `viaNodeId` to draw an
+  // edge from and should not be re-deriving a walk either way.
+  //
+  // Only depths the walk REACHED get a button: the plan panel's fixed 1-4 can
+  // afford to offer a radius that returns nothing because it re-fetches, while
+  // a button over a frozen snapshot that changes nothing reads as broken.
+  const depths = [...new Set(list.hops.map((h) => h.depth))].sort((a, b) => a - b);
+  const originIds = diagramOrigins.map((n) => n.id);
+  const diagrams = (depths.length > 0 ? depths : [IMPACT_DEFAULT_VIEW_DEPTH]).map((depth) => {
+    // `edges` so the links BETWEEN the named components are drawn: the walk seeds
+    // every origin as visited, so it never discovers one.
+    const rendered = renderImpactMermaid(
+      computeImpact(originIds, edges, { maxDepth: depth }),
+      titleById,
+      { edges, maxNodes: hopBudget },
+    );
+    return { depth, mermaid: rendered.source, omitted: rendered.omitted };
+  });
   return {
     named,
     reached,
     truncated: list.truncated,
-    mermaid: diagram.source,
-    mermaidOmitted: diagram.omitted,
-    mermaidDepth: IMPACT_DEFAULT_VIEW_DEPTH,
-    diagramSkipped: null,
+    diagrams,
+    namedOmitted: named.length - diagramOrigins.length,
   };
 }

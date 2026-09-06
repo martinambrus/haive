@@ -282,10 +282,8 @@ describe('the affected-components section', () => {
         { id: 'n3', title: 'Theme contract', depth: 2, via: 'affects', reversed: true },
       ],
       truncated: null,
-      mermaid: 'flowchart LR\n  a --> b',
-      mermaidOmitted: 0,
-      mermaidDepth: 1,
-      diagramSkipped: null,
+      diagrams: [{ depth: 1, mermaid: 'flowchart LR\n  a --> b', omitted: 0 }],
+      namedOmitted: 0,
       ...over,
     },
   });
@@ -311,21 +309,30 @@ describe('the affected-components section', () => {
   });
 
   it('carries every cap through instead of letting a short list read as complete', () => {
-    const s = section(affected({ truncated: { reason: 'depth', limit: 3 }, mermaidOmitted: 4 }));
-    // The walk stopping and the picture being bounded are two separate limits;
-    // one must not hide the other.
+    const s = section(
+      affected({
+        truncated: { reason: 'depth', limit: 3 },
+        diagrams: [{ depth: 1, mermaid: 'flowchart LR', omitted: 4 }],
+        namedOmitted: 121,
+      }),
+    );
+    // The walk stopping, the picture leaving hops out, and the picture leaving
+    // NAMED components out are three separate limits; none may hide another.
     expect(s.planImpact?.truncated).toEqual({ reason: 'depth', limit: 3 });
-    expect(s.planImpact?.mermaidOmitted).toBe(4);
+    expect(s.planImpact?.diagrams[0]?.omitted).toBe(4);
+    expect(s.planImpact?.namedOmitted).toBe(121);
   });
 
-  it('carries the refusal to draw a diagram at all', () => {
-    // 161 named components render as 161 disconnected boxes; the count is
-    // stated instead of drawing a wall.
+  it('carries one picture per radius so the reach buttons have something to switch', () => {
     const s = section(
-      affected({ mermaid: '', diagramSkipped: { reason: 'too_many_named', limit: 40 } }),
+      affected({
+        diagrams: [
+          { depth: 1, mermaid: 'flowchart LR\n  a', omitted: 0 },
+          { depth: 2, mermaid: 'flowchart LR\n  b', omitted: 3 },
+        ],
+      }),
     );
-    expect(s.planImpact?.mermaid).toBe('');
-    expect(s.planImpact?.diagramSkipped).toEqual({ reason: 'too_many_named', limit: 40 });
+    expect(s.planImpact?.diagrams.map((d) => d.depth)).toEqual([1, 2]);
   });
 
   it('is absent when the spec named nothing the plan still holds', () => {
@@ -340,6 +347,14 @@ describe('the affected-components section', () => {
     const detected = { ...affected(), repositoryId: null };
     const schema = gate1SpecApprovalStep.form!(makeApplyCtx().ctx, detected) as FormSchema;
     expect(schema.infoSections?.some((s) => s.title === 'Affected components')).toBe(false);
+  });
+
+  it('renders a payload that carries no diagram at all rather than failing', () => {
+    // `diagrams` is [] only for a resolution that produced nothing to draw; the
+    // section is still the list, and must not depend on a picture existing.
+    const s = section(affected({ diagrams: [] }));
+    expect(s.planImpact?.diagrams).toEqual([]);
+    expect(s.planImpact?.hops.length).toBe(2);
   });
 
   it('keeps an unrecognised stored edge kind as a hop rather than dropping it', () => {

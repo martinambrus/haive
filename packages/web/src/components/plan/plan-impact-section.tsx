@@ -1,5 +1,7 @@
 'use client';
 
+import { useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { PlanImpactSection as PlanImpactSectionData } from '@haive/shared';
 import { PlanGraph } from './plan-graph';
 import { PlanImpactList } from './plan-impact-list';
@@ -21,11 +23,74 @@ export function PlanImpactSection({ data }: { data: PlanImpactSectionData }) {
   const href = (nodeId: string): string =>
     `/repos/${encodeURIComponent(data.repositoryId)}/plan?node=${encodeURIComponent(nodeId)}`;
   const namedGroups = groupNamedByParent(data.named);
-  const deeperThanDiagram = data.hops.some((h) => h.depth > data.mermaidDepth);
+  const namedOmitted = data.namedOmitted ?? 0;
+  const [namedOpen, setNamedOpen] = useState(true);
+  // The nearest radius, matching the plan panel's own default: one hop is what
+  // "if I change this, what else must change?" means, and MEASURED on a real
+  // plan two hops reach a median of 130 nodes — an answer to nothing.
+  const radii = data.diagrams.map((d) => d.depth);
+  const [reach, setReach] = useState(radii[0] ?? 1);
+  const diagram = data.diagrams.find((d) => d.depth === reach) ?? data.diagrams[0] ?? null;
+  // Cumulative, because a diagram is: a two-hop picture contains the one-hop
+  // one, and a list that did not would disagree with the image above it.
+  const shownHops = data.hops.filter((h) => h.depth <= reach);
   const distances = countByDepth(data.hops);
 
   return (
     <div className="flex flex-col gap-3 px-3 py-2">
+      {/* The reach control, then the picture. Both come first: the picture is the
+          only part that shows the SHAPE of what the spec touches, and everything
+          under it is a way to read the same set one row at a time.
+
+          Only the radii the walk actually reached are offered. The plan panel's
+          fixed 1-4 can afford a button that returns nothing because it
+          re-fetches; over a frozen snapshot such a button would just do nothing. */}
+      {radii.length > 1 && (
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] text-neutral-500">Reach</span>
+          {radii.map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => setReach(d)}
+              title={`Components within ${d} hop${d === 1 ? '' : 's'} of the ones the spec named`}
+              className={`h-5 w-6 rounded border text-[11px] ${
+                d === reach
+                  ? 'border-indigo-500 bg-indigo-500/20 text-indigo-200'
+                  : 'border-neutral-700 text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              {d}
+            </button>
+          ))}
+          <span className="text-[11px] text-neutral-600">hop{reach === 1 ? '' : 's'}</span>
+        </div>
+      )}
+      {diagram && diagram.mermaid.trim().length > 0 && (
+        <>
+          <PlanGraph
+            key={diagram.depth}
+            source={diagram.mermaid}
+            onNodeClick={(nodeId) => window.open(href(nodeId), '_blank', 'noopener')}
+          />
+          {/* Each omission is its own sentence, and none of them is arithmetic
+              on another: the diagram walks a shorter radius than the list, so
+              subtracting one count from the other would state something untrue. */}
+          {namedOmitted > 0 && (
+            <p className="text-[11px] text-neutral-500">
+              Drawn from the {data.named.length - namedOmitted} components the spec names first;{' '}
+              {namedOmitted} more are in the list below.
+            </p>
+          )}
+          {diagram.omitted > 0 && (
+            <p className="text-[11px] text-neutral-500">
+              {diagram.omitted} further component{diagram.omitted === 1 ? '' : 's'} within {reach}{' '}
+              hop{reach === 1 ? '' : 's'} are listed below rather than drawn — the picture is full.
+            </p>
+          )}
+        </>
+      )}
+
       {/* Two different facts, deliberately not one banner — the same split the
        *  Impact tab makes. Hitting the NODE limit is a cap nobody asked for and
        *  the only one that can hide something inside the radius that was walked,
@@ -44,78 +109,57 @@ export function PlanImpactSection({ data }: { data: PlanImpactSectionData }) {
         </p>
       )}
 
-      {data.diagramSkipped ? (
-        <p className="text-[11px] text-neutral-500">
-          No diagram: the spec named {data.named.length} components, and past{' '}
-          {data.diagramSkipped.limit} starting points the picture is a wall of boxes rather than a
-          graph. The lists below carry all of them.
-        </p>
-      ) : (
-        data.mermaid.trim().length > 0 && (
-          <>
-            <PlanGraph
-              source={data.mermaid}
-              onNodeClick={(nodeId) => window.open(href(nodeId), '_blank', 'noopener')}
-            />
-            {deeperThanDiagram && (
-              <p className="text-[11px] text-neutral-500">
-                The diagram reaches {data.mermaidDepth} hop
-                {data.mermaidDepth === 1 ? '' : 's'} out of the named components — further out is
-                essentially the whole plan. The full reach is in the list below.
-              </p>
-            )}
-            {data.mermaidOmitted > 0 && (
-              /* Stated ALONE, never subtracted from the reached count: the
-                 diagram walks a shorter radius than the list, so no arithmetic
-                 between the two would be true. */
-              <p className="text-[11px] text-neutral-500">
-                {data.mermaidOmitted} further component{data.mermaidOmitted === 1 ? '' : 's'} the
-                diagram reaches are listed below rather than drawn.
-              </p>
-            )}
-          </>
-        )
-      )}
-
       <div className="flex flex-col gap-1">
-        <p className="text-xs font-medium text-neutral-300">
+        {/* Collapsible for the same reason the depth groups are: on a wide spec
+            this block is 161 rows, and it sits between the diagram and the
+            reached set. */}
+        <button
+          type="button"
+          onClick={() => setNamedOpen((v) => !v)}
+          className="flex items-center gap-1 text-left text-xs font-medium text-neutral-300 hover:text-neutral-100"
+        >
+          {namedOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
           Named by the spec <span className="text-neutral-500">({data.named.length})</span>
-        </p>
-        <div className="flex max-h-56 flex-col gap-2 overflow-auto rounded border border-neutral-800 px-2 py-1.5">
-          {namedGroups.map((g) => (
-            <div key={g.key} className="flex flex-col">
-              {/* The plan parent, so the list reads like the tree the components
-                  live in rather than 161 sibling-less rows. */}
-              <p className="truncate text-[10px] uppercase tracking-wide text-indigo-300">
-                {g.parentTitle ?? 'Top level'}{' '}
-                <span className="text-neutral-400">({g.items.length})</span>
-              </p>
-              {g.items.map((n) => (
-                <a
-                  key={n.id}
-                  href={href(n.id)}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={n.title}
-                  className="truncate pl-2 text-left text-xs text-neutral-300 hover:text-neutral-100 hover:underline"
-                >
-                  {n.title}
-                </a>
-              ))}
-            </div>
-          ))}
-        </div>
+        </button>
+        {namedOpen && (
+          <div className="flex max-h-56 flex-col gap-2 overflow-auto rounded border border-neutral-800 px-2 py-1.5">
+            {namedGroups.map((g) => (
+              <div key={g.key} className="flex flex-col">
+                {/* The plan parent, so the list reads like the tree the
+                    components live in rather than 161 sibling-less rows. */}
+                <p className="truncate text-[10px] uppercase tracking-wide text-indigo-300">
+                  {g.parentTitle ?? 'Top level'}{' '}
+                  <span className="text-neutral-400">({g.items.length})</span>
+                </p>
+                {g.items.map((n) => (
+                  <a
+                    key={n.id}
+                    href={href(n.id)}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={n.title}
+                    className="truncate pl-2 text-left text-xs text-neutral-300 hover:text-neutral-100 hover:underline"
+                  >
+                    {n.title}
+                  </a>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col gap-1">
         <p className="text-xs font-medium text-neutral-300">
           Reached through the plan links{' '}
-          <span className="text-neutral-500">({data.hops.length})</span>
+          <span className="text-neutral-500">
+            ({shownHops.length}
+            {shownHops.length !== data.hops.length ? ` of ${data.hops.length}` : ''})
+          </span>
         </p>
-        {/* The distance breakdown up front, because the list below is a bounded
-            scroller: with the nearest group open and 72 rows in it, the headings
-            for the groups further out sit below the fold and nothing else says
-            they exist. */}
+        {/* What each reach button will add, before it is clicked. The list only
+            renders the radius in force, so without this the cost of widening it
+            is invisible until you have already widened it. */}
         {distances.length > 1 && (
           <p className="text-[11px] text-neutral-500">
             {distances
@@ -123,13 +167,15 @@ export function PlanImpactSection({ data }: { data: PlanImpactSectionData }) {
               .join(' · ')}
           </p>
         )}
-        {data.hops.length === 0 ? (
+        {shownHops.length === 0 ? (
           <p className="text-xs text-neutral-600">
             The plan records no links out of the components the spec named.
           </p>
         ) : (
           <div className="flex max-h-96 flex-col gap-1 overflow-auto">
-            <PlanImpactList hops={data.hops} hrefFor={href} />
+            {/* Keyed on the radius so a new reach re-derives which depth group
+                starts open, the same thing the plan panel does. */}
+            <PlanImpactList key={reach} hops={shownHops} hrefFor={href} />
           </div>
         )}
       </div>
