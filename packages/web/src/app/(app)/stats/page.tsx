@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import {
   api,
   getStatsEstimates,
+  getStatsPlan,
   getStatsQuality,
   getStatsReliability,
   getStatsSummary,
@@ -15,6 +16,7 @@ import {
   putUiPrefs,
   type Repository,
   type StatsEstimates,
+  type StatsPlan,
   type StatsQuality,
   type StatsQueryParams,
   type StatsReliability,
@@ -34,6 +36,7 @@ import {
   formatConcurrency,
   formatCount,
   formatPercent,
+  formatProjection,
   formatSampledRatio,
   isUnderSampled,
 } from '@/lib/stats/format-stats';
@@ -58,17 +61,25 @@ const ActivityChart = dynamic(
     loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
   },
 );
+const PlanVelocityChart = dynamic(
+  () => import('@/components/stats/charts').then((m) => m.PlanVelocityChart),
+  {
+    ssr: false,
+    loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
+  },
+);
 
 /** Repeated rather than shared: four other pages already carry their own copy of this string,
  *  and unifying them is a refactor this change has no business making. */
 const SELECT_CLASS =
   'h-9 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500';
 
-const TABS = ['money', 'time', 'reliability', 'quality', 'estimates'] as const;
+const TABS = ['money', 'time', 'plan', 'reliability', 'quality', 'estimates'] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABELS: Record<Tab, string> = {
   money: 'Money',
   time: 'Time & throughput',
+  plan: 'Plan',
   reliability: 'Reliability',
   quality: 'Quality',
   estimates: 'Estimates',
@@ -132,6 +143,7 @@ function StatsPageInner() {
   const [reliability, setReliability] = useState<StatsReliability | null>(null);
   const [quality, setQuality] = useState<StatsQuality | null>(null);
   const [estimates, setEstimates] = useState<StatsEstimates | null>(null);
+  const [plan, setPlan] = useState<StatsPlan | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -244,10 +256,15 @@ function StatsPageInner() {
         .then((d) => !cancelled && setEstimates(d))
         .catch(() => undefined);
     }
+    if (tab === 'plan' && !plan) {
+      getStatsPlan(params)
+        .then((d) => !cancelled && setPlan(d))
+        .catch(() => undefined);
+    }
     return () => {
       cancelled = true;
     };
-  }, [tab, params, reliability, quality, estimates]);
+  }, [tab, params, reliability, quality, estimates, plan]);
 
   // A filter change invalidates the lazily-loaded tabs, or switching back would show the
   // previous window's numbers under the new filter's heading.
@@ -255,6 +272,7 @@ function StatsPageInner() {
     setReliability(null);
     setQuality(null);
     setEstimates(null);
+    setPlan(null);
   }, [params]);
 
   const cd = summary?.costDisplay ?? null;
@@ -583,6 +601,123 @@ function StatsPageInner() {
             </div>
           </Card>
         </>
+      )}
+
+      {tab === 'plan' && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Plan progress and velocity</CardTitle>
+            <CardDescription>
+              Two different questions. <span className="text-neutral-300">Progress</span> is how
+              much of the plan already exists — a <code className="text-xs">from_repo</code> plan
+              starts partly complete because its nodes describe code that is already written.
+              <span className="text-neutral-300"> Velocity</span> counts only nodes that
+              transitioned to done inside this window, so a node created already done contributes to
+              the first and not the second.
+            </CardDescription>
+          </CardHeader>
+          {!plan ? (
+            <div className="text-sm text-neutral-500">Loading...</div>
+          ) : plan.totals.nodes === 0 ? (
+            <p className="text-sm text-neutral-500">No plan nodes for this scope.</p>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+                <StatTile
+                  label="Nodes"
+                  value={formatCount(plan.totals.nodes)}
+                  hint={`${formatCount(plan.totals.taskable)} taskable`}
+                />
+                <StatTile
+                  label="Progress"
+                  value={formatSampledRatio(plan.totals.progressRatio)}
+                  hint={`${formatCount(plan.totals.settled)} settled`}
+                  tone="text-emerald-300"
+                />
+                <StatTile
+                  label="Remaining"
+                  value={formatCount(plan.totals.remaining)}
+                  tone="text-neutral-200"
+                />
+                <StatTile
+                  label="Completed"
+                  value={formatCount(plan.velocity.completedInWindow)}
+                  hint="in this window"
+                  tone="text-emerald-300"
+                />
+                <StatTile
+                  label="Per week"
+                  value={plan.velocity.perWeek.toFixed(1)}
+                  tone="text-emerald-300"
+                />
+                <StatTile
+                  label="Time left"
+                  value={formatProjection(plan.velocity.projectedWeeksRemaining)}
+                  hint="at this window's rate"
+                />
+              </div>
+
+              {plan.coverage.doneUndated > 0 && (
+                // Said out loud rather than folded into the velocity number: a zero here can
+                // mean "nothing was finished" or "nothing was dated", and those are different.
+                <p className="mt-4 text-[11px] text-amber-400">
+                  {formatCount(plan.coverage.doneUndated)} of {formatCount(plan.coverage.doneTotal)}{' '}
+                  done nodes carry no completion date — they were created already done (describing
+                  existing code), greened before this was recorded, or restored from a committed
+                  plan snapshot. They count toward progress and not toward velocity.
+                </p>
+              )}
+
+              <div className="mt-6">
+                <PlanVelocityChart days={plan.velocity.days} />
+              </div>
+
+              <div className="mt-6 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                      <th className="pb-2 font-medium">Repository</th>
+                      <th className="pb-2 text-right font-medium">Nodes</th>
+                      <th className="pb-2 text-right font-medium">Taskable</th>
+                      <th className="pb-2 text-right font-medium">Done</th>
+                      <th className="pb-2 text-right font-medium">To do</th>
+                      <th className="pb-2 text-right font-medium">Blocked</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {plan.repositories.map((r) => (
+                      <tr key={r.repositoryId} className="border-t border-neutral-800">
+                        <td className="py-2">
+                          <Link
+                            href={`/repos/${r.repositoryId}/plan`}
+                            className="text-neutral-200 hover:text-indigo-300"
+                          >
+                            {r.name}
+                          </Link>
+                        </td>
+                        <td className="py-2 text-right font-mono text-neutral-300">
+                          {formatCount(r.total)}
+                        </td>
+                        <td className="py-2 text-right font-mono text-neutral-400">
+                          {formatCount(r.taskable)}
+                        </td>
+                        <td className="py-2 text-right font-mono text-emerald-300">
+                          {r.byStatus['done'] ?? 0}
+                        </td>
+                        <td className="py-2 text-right font-mono text-neutral-300">
+                          {r.byStatus['todo'] ?? 0}
+                        </td>
+                        <td className="py-2 text-right font-mono text-amber-300">
+                          {r.byStatus['blocked_human'] ?? 0}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </Card>
       )}
 
       {tab === 'reliability' && (

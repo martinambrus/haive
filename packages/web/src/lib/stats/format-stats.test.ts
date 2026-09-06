@@ -7,6 +7,7 @@ import {
   formatCount,
   formatDeltaPercent,
   formatPercent,
+  formatProjection,
   formatSampledRatio,
   isUnderSampled,
   STATS_DASH,
@@ -120,6 +121,29 @@ describe('formatSampledRatio', () => {
     expect(formatSampledRatio({ ratio: null, n: 0, sufficient: false })).toBe(STATS_DASH);
     expect(formatSampledRatio(null)).toBe(STATS_DASH);
     expect(isUnderSampled(null)).toBe(false);
+  });
+});
+
+describe('formatProjection', () => {
+  it('reports weeks for a plausible horizon', () => {
+    expect(formatProjection(0)).toBe('0.0 wk');
+    expect(formatProjection(12.5)).toBe('12.5 wk');
+    expect(formatProjection(103.9)).toBe('103.9 wk');
+  });
+
+  it('switches to years rather than printing an absurd week count', () => {
+    // The real figure from a 11,621-node plan at 1.2 nodes/week. "9960.9 wk" is correct and
+    // reads as a broken calculation; the unit changes, the value does not.
+    expect(formatProjection(9960.9)).toBe('191 yr');
+    expect(formatProjection(104)).toBe('2.0 yr');
+  });
+
+  it('renders an unknown projection as a dash, never as zero', () => {
+    // Null is what the API sends when nothing completed: "at zero per week it never finishes"
+    // is arithmetic, not a forecast.
+    expect(formatProjection(null)).toBe(STATS_DASH);
+    expect(formatProjection(undefined)).toBe(STATS_DASH);
+    expect(formatProjection(Number.NaN)).toBe(STATS_DASH);
   });
 });
 

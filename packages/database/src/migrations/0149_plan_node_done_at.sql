@@ -1,0 +1,44 @@
+-- When a plan node became done, so plan velocity can be measured at all.
+--
+-- `plan_nodes` records what a project is MEANT to be, and how much of it is finished, but
+-- never WHEN any of it finished. The only dated columns are `updated_at`, which any hand edit
+-- or status flip moves, and `last_reviewed_at`, which records an agent write. Neither can
+-- answer "how many nodes did we complete this week", so a burndown or an ETA was not derivable
+-- from this table at all — the statistics page could report a snapshot and nothing else.
+--
+-- Stamped on a TRANSITION into `done` and cleared on a transition out, by `applyPlanPatch` —
+-- the one write path, which every producer including the task-completion greening in
+-- `worker/src/plan/task-link.ts` already goes through. Re-sending a status the node already
+-- has (a full-node UI save, a re-run mining pass) is deliberately NOT a transition and leaves
+-- the original date alone.
+--
+-- NULL for a node CREATED already done, which is the case that decides the semantics rather
+-- than an edge of them. `from_repo` plan mining writes nodes as `done` because they describe
+-- code that already exists. MEASURED on this instance: all 537 done nodes were born that way,
+-- created_by = 'llm', and NONE has an `implements` link to a completed task. Counting those as
+-- velocity would render the chart as a single 537-node spike at plan-build time and nothing
+-- afterwards. Progress ("537 of 12,158 already exist") and velocity ("what did we finish this
+-- week") are different questions; this column answers only the second, and the stats endpoint
+-- reports both plus how many done nodes carry no date.
+--
+-- NO BACKFILL, and that is a measurement rather than laziness: the only honest source for a
+-- historical date is `plan_node_tasks` (role = 'implements') joined to `tasks.completed_at`,
+-- and on this instance that dates exactly 0 of the 537 done nodes. Where such rows do exist
+-- elsewhere they fall into the endpoint's "no recorded date" bucket, which is reported rather
+-- than silently counted. Dating them from `updated_at` would be worse than leaving them null —
+-- it would invent a velocity spike out of unrelated edits.
+--
+-- Also stays out of `.haive-data/plan.json`: that mirror is a snapshot of INTENT committed into
+-- the user's own repository, not an audit log, and its node schema is `.strict()` behind a
+-- discriminated `schemaVersion`. A node restored from a mirror therefore has no date and joins
+-- the same reported bucket.
+--
+-- No index. MEASURED: the velocity query is a 12,158-row scan at ~2 ms, and `plan_nodes`
+-- already carries four indexes; adding a fifth for a query nothing runs in a loop is write cost
+-- for nothing. Revisit if a plan reaches six figures.
+--
+-- Additive and idempotent. Rollback: revert `schema/plan.ts` and
+--   ALTER TABLE "plan_nodes" DROP COLUMN IF EXISTS "done_at";
+-- Nothing is lost but the velocity history accumulated since this shipped; every node keeps its
+-- status, so progress and the plan itself are untouched.
+ALTER TABLE "plan_nodes" ADD COLUMN IF NOT EXISTS "done_at" timestamp;

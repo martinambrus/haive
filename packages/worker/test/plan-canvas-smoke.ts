@@ -1157,6 +1157,114 @@ async function main(): Promise<void> {
     { repositoryId: freshRepoB!.id, origin: 'user' },
   );
 
+  /* --- 12.4c `done_at` records a TRANSITION, not a status ------------------ */
+
+  // Plan velocity is measured entirely from this column, so the thing that matters is not
+  // "is the node done" but "did it just BECOME done". Three writes that all leave a node in
+  // `done` have to produce three different outcomes.
+
+  const doneAtOf = async (nodeId: string): Promise<Date | null> => {
+    const [row] = await db
+      .select({ doneAt: schema.planNodes.doneAt })
+      .from(schema.planNodes)
+      .where(eq(schema.planNodes.id, nodeId))
+      .limit(1);
+    return row?.doneAt ?? null;
+  };
+
+  const velocityRepo = freshRepoB!.id;
+  // Parented under the repository's EXISTING root: a second root is refused by design, and
+  // 12.4b already created one here.
+  const velocityRoot = await findPlanRoot(db, velocityRepo);
+  check('the velocity fixture found a root to hang from', !!velocityRoot, velocityRoot);
+  const velocityBuilt = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'vroot', parentRef: velocityRoot!.id, title: 'Velocity subtree' },
+        { op: 'upsert', nodeRef: 'vtodo', parentRef: 'vroot', title: 'Starts as todo' },
+        // Born done: what `from_repo` mining writes for code that already exists.
+        {
+          op: 'upsert',
+          nodeRef: 'vborn',
+          parentRef: 'vroot',
+          title: 'Born done',
+          status: 'done' as const,
+        },
+      ],
+    },
+    { repositoryId: velocityRepo, origin: 'llm' },
+  );
+  const vTodoId = velocityBuilt.refs['vtodo']!;
+  const vBornId = velocityBuilt.refs['vborn']!;
+
+  check(
+    'a node CREATED done carries no completion date',
+    (await doneAtOf(vBornId)) === null,
+    await doneAtOf(vBornId),
+  );
+  check('a node created todo carries no completion date', (await doneAtOf(vTodoId)) === null);
+
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: vTodoId, status: 'done' as const }] },
+    { repositoryId: velocityRepo, origin: 'user' },
+  );
+  const firstGreen = await doneAtOf(vTodoId);
+  check(
+    'a transition INTO done stamps the completion date',
+    firstGreen instanceof Date,
+    firstGreen,
+  );
+
+  // Re-sending the status a node already has is what a full-node UI save and a re-run mining
+  // pass both do. Restamping there would move every historical node into today's bucket.
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: vTodoId, status: 'done' as const, title: 'Renamed while done' },
+      ],
+    },
+    { repositoryId: velocityRepo, origin: 'user' },
+  );
+  const afterNoop = await doneAtOf(vTodoId);
+  check(
+    're-sending done does NOT restamp the completion date',
+    afterNoop?.getTime() === firstGreen?.getTime(),
+    { firstGreen, afterNoop },
+  );
+
+  // Re-opening has to clear it, or the cumulative count would exceed the number of nodes that
+  // are actually done.
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: vTodoId, status: 'todo' as const }] },
+    { repositoryId: velocityRepo, origin: 'user' },
+  );
+  check('a transition OUT of done clears the completion date', (await doneAtOf(vTodoId)) === null);
+
+  // Re-greening dates the node at the SECOND completion, not the first.
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: vTodoId, status: 'done' as const }] },
+    { repositoryId: velocityRepo, origin: 'user' },
+  );
+  const regreen = await doneAtOf(vTodoId);
+  check(
+    're-greening records the latest completion, not the first',
+    regreen instanceof Date &&
+      firstGreen instanceof Date &&
+      regreen.getTime() >= firstGreen.getTime(),
+    { firstGreen, regreen },
+  );
+
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete' as const, nodeRef: velocityBuilt.refs['vroot']! }] },
+    { repositoryId: velocityRepo, origin: 'user' },
+  );
+
   /* --- 12.5 reconciling a PULLED snapshot onto a plan that exists ---------- */
 
   // What a `git pull` does to a plan that is already here. `importPlanMirror`

@@ -151,3 +151,33 @@ export function ActivityChart({ days }: { days: StatsTimelineDay[] }) {
     </ResponsiveContainer>
   );
 }
+
+/** Plan nodes completed per day.
+ *
+ *  Bars rather than an area: a completion is a discrete event, and an interpolated line
+ *  between two days implies fractional nodes finishing in between. */
+export function PlanVelocityChart({
+  days,
+}: {
+  days: Array<{ bucket: string; completed: number }>;
+}) {
+  if (days.length === 0 || days.every((d) => d.completed === 0)) {
+    return <EmptyChart message="No plan nodes were completed in this window." />;
+  }
+  return (
+    <ResponsiveContainer width="100%" height={220}>
+      <BarChart data={days} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+        <CartesianGrid stroke={CHART_CHROME.grid} vertical={false} />
+        <XAxis dataKey="bucket" tickFormatter={formatBucketLabel} minTickGap={24} {...axisProps} />
+        <YAxis width={40} allowDecimals={false} {...axisProps} />
+        <Tooltip
+          contentStyle={tooltipStyle}
+          labelFormatter={(label) => formatBucketLabel(String(label ?? ''))}
+          formatter={(value) => [String(Number(value) || 0), 'Nodes completed']}
+          cursor={{ fill: '#ffffff08' }}
+        />
+        <Bar dataKey="completed" name="Nodes completed" fill={CHART_COLORS.user} />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}

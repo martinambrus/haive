@@ -4,6 +4,7 @@ import { schema, type Database } from '@haive/database';
 import {
   planPatchSchema,
   type PlanNodeOrigin,
+  type PlanNodeStatus,
   type PlanPatch,
   type PlanPatchOp,
 } from '../schemas/plan.js';
@@ -92,6 +93,10 @@ interface NodeRow {
   parentId: string | null;
   path: string;
   version: number;
+  /** Needed to tell a TRANSITION from a no-op rewrite: `done_at` must only move when the
+   *  status actually changes, or every unrelated patch that happens to carry the current
+   *  status would restamp it and destroy the velocity measurement. */
+  status: PlanNodeStatus;
 }
 
 /**
@@ -308,6 +313,7 @@ async function applyOps(
         parentId: schema.planNodes.parentId,
         path: schema.planNodes.path,
         version: schema.planNodes.version,
+        status: schema.planNodes.status,
       })
       .from(schema.planNodes)
       .where(and(eq(schema.planNodes.id, id), eq(schema.planNodes.repositoryId, repositoryId)))
@@ -578,7 +584,16 @@ async function applyOps(
     if (op.title !== undefined) set.title = op.title;
     if (op.body !== undefined) set.body = op.body;
     if (op.kind !== undefined) set.kind = op.kind;
-    if (op.status !== undefined) set.status = op.status;
+    if (op.status !== undefined) {
+      set.status = op.status;
+      // Velocity is measured from this stamp, so it moves ONLY on a real transition. Re-sending
+      // the status a node already has — which a full-node UI save and a re-run mining pass both
+      // do — must leave the original completion date alone.
+      if (op.status !== row.status) {
+        if (op.status === 'done') set.doneAt = new Date();
+        else if (row.status === 'done') set.doneAt = null;
+      }
+    }
     if (op.taskable !== undefined) set.taskable = op.taskable;
     if (op.ordinal !== undefined) set.ordinal = op.ordinal;
 

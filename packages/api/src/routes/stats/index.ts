@@ -981,3 +981,160 @@ statsRoutes.get('/estimates', async (c) => {
     ...accuracy,
   });
 });
+
+/**
+ * Plan progress and velocity.
+ *
+ * Two different questions, deliberately reported as two different numbers:
+ *
+ *  - PROGRESS is "how much of the plan already exists" — a snapshot over `status`. A
+ *    `from_repo` plan starts partly complete by construction, because its nodes describe code
+ *    that is already written.
+ *  - VELOCITY is "how much did we finish in this window" — and it can only count nodes that
+ *    TRANSITIONED into `done`, which is what `plan_nodes.done_at` records. A node created
+ *    already done contributes to progress and not to velocity. Conflating the two produces a
+ *    chart that is one enormous spike on the day the plan was built.
+ *
+ * Coverage is reported rather than assumed: a node greened before `done_at` existed, or one
+ * restored from the committed plan mirror, carries no date. Those are counted and named, so a
+ * low velocity reading can be told apart from a missing measurement.
+ *
+ * Scoped through `repositories.user_id` — `plan_nodes` carries neither a user nor a task.
+ */
+statsRoutes.get('/plan', async (c) => {
+  const userId = c.get('userId');
+  const q = parseStatsQuery(c.req.query());
+  if (q.allUsers && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for install-wide statistics');
+  }
+  const db = getDb();
+  const from = new Date(q.fromMs);
+  const to = new Date(q.toMs);
+
+  const scope = [
+    ...(q.allUsers ? [] : [eq(schema.repositories.userId, userId)]),
+    ...(q.repositoryId ? [eq(schema.planNodes.repositoryId, q.repositoryId)] : []),
+  ];
+
+  const rows = await db
+    .select({
+      repositoryId: schema.planNodes.repositoryId,
+      repositoryName: schema.repositories.name,
+      status: schema.planNodes.status,
+      taskable: schema.planNodes.taskable,
+      n: sql<number>`count(*)::int`,
+      // Done nodes whose completion moment is actually known. The complement is what the
+      // coverage note names.
+      dated: sql<number>`count(*) filter (where ${schema.planNodes.doneAt} is not null)::int`,
+    })
+    .from(schema.planNodes)
+    .innerJoin(schema.repositories, eq(schema.repositories.id, schema.planNodes.repositoryId))
+    .where(scope.length ? and(...scope) : undefined)
+    .groupBy(
+      schema.planNodes.repositoryId,
+      schema.repositories.name,
+      schema.planNodes.status,
+      schema.planNodes.taskable,
+    );
+
+  // Nodes that TRANSITIONED into done inside the window, for the velocity series. Bucketed by
+  // the same JS day-cutter every other series uses, so a plan chart and a spend chart agree
+  // about where a day starts.
+  const completedRows = await db
+    .select({ doneAt: schema.planNodes.doneAt })
+    .from(schema.planNodes)
+    .innerJoin(schema.repositories, eq(schema.repositories.id, schema.planNodes.repositoryId))
+    .where(
+      and(
+        ...scope,
+        isNotNull(schema.planNodes.doneAt),
+        gte(schema.planNodes.doneAt, from),
+        lt(schema.planNodes.doneAt, to),
+      ),
+    );
+
+  const byDay = new Map<string, number>();
+  for (const key of dayKeysBetween(q.fromMs, q.toMs, q.timeZone)) byDay.set(key, 0);
+  for (const r of completedRows) {
+    if (!r.doneAt) continue;
+    const key = dayKey(r.doneAt.getTime(), q.timeZone);
+    byDay.set(key, (byDay.get(key) ?? 0) + 1);
+  }
+
+  interface RepoAcc {
+    repositoryId: string;
+    name: string;
+    total: number;
+    taskable: number;
+    byStatus: Record<string, number>;
+    doneDated: number;
+  }
+  const repos = new Map<string, RepoAcc>();
+  for (const r of rows) {
+    const acc = repos.get(r.repositoryId) ?? {
+      repositoryId: r.repositoryId,
+      name: r.repositoryName ?? 'unknown',
+      total: 0,
+      taskable: 0,
+      byStatus: {},
+      doneDated: 0,
+    };
+    const n = Number(r.n) || 0;
+    acc.total += n;
+    if (r.taskable) acc.taskable += n;
+    acc.byStatus[r.status] = (acc.byStatus[r.status] ?? 0) + n;
+    if (r.status === 'done') acc.doneDated += Number(r.dated) || 0;
+    repos.set(r.repositoryId, acc);
+  }
+
+  const repoList = [...repos.values()].sort((a, b) => b.total - a.total);
+  const totals = repoList.reduce(
+    (acc, r) => {
+      acc.nodes += r.total;
+      acc.taskable += r.taskable;
+      acc.doneDated += r.doneDated;
+      for (const [k, v] of Object.entries(r.byStatus)) acc.byStatus[k] = (acc.byStatus[k] ?? 0) + v;
+      return acc;
+    },
+    { nodes: 0, taskable: 0, doneDated: 0, byStatus: {} as Record<string, number> },
+  );
+
+  const done = totals.byStatus['done'] ?? 0;
+  // `not_applicable` counts as settled: it is a verdict a person entered, and a node written
+  // off is not outstanding work. Same rule the status roll-up applies when greening a parent.
+  const settled = done + (totals.byStatus['not_applicable'] ?? 0);
+  const remaining = Math.max(0, totals.nodes - settled);
+
+  const completedInWindow = completedRows.length;
+  const windowDays = Math.max(1, (q.toMs - q.fromMs) / 86_400_000);
+  const perWeek = completedInWindow > 0 ? (completedInWindow / windowDays) * 7 : 0;
+
+  return c.json({
+    range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
+    totals: {
+      nodes: totals.nodes,
+      taskable: totals.taskable,
+      byStatus: totals.byStatus,
+      settled,
+      remaining,
+      // Progress over the WHOLE plan, not the window: "how much of this project exists".
+      progressRatio: sampledRatio(settled, totals.nodes),
+    },
+    velocity: {
+      completedInWindow,
+      perWeek: Math.round(perWeek * 10) / 10,
+      // Remaining work at the rate this window actually showed. Null rather than Infinity when
+      // nothing completed: "at zero per week it never finishes" is arithmetic, not a forecast.
+      projectedWeeksRemaining: perWeek > 0 ? Math.round((remaining / perWeek) * 10) / 10 : null,
+      days: [...byDay.entries()]
+        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+        .map(([bucket, completed]) => ({ bucket, completed })),
+    },
+    coverage: {
+      doneTotal: done,
+      doneDated: totals.doneDated,
+      doneUndated: Math.max(0, done - totals.doneDated),
+    },
+    repositories: repoList,
+  });
+});

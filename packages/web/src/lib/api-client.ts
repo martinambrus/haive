@@ -2166,3 +2166,43 @@ export async function getStatsQuality(params: StatsQueryParams = {}): Promise<St
 export async function getStatsEstimates(params: StatsQueryParams = {}): Promise<StatsEstimates> {
   return api.get<StatsEstimates>(`/stats/estimates${statsQueryString(params)}`);
 }
+
+export interface StatsPlanRepository {
+  repositoryId: string;
+  name: string;
+  total: number;
+  taskable: number;
+  byStatus: Record<string, number>;
+  /** Done nodes whose completion moment is actually recorded. */
+  doneDated: number;
+}
+
+export interface StatsPlan {
+  range: { from: string; to: string; timeZone: string };
+  totals: {
+    nodes: number;
+    taskable: number;
+    byStatus: Record<string, number>;
+    /** done + not_applicable — a node written off is not outstanding work. */
+    settled: number;
+    remaining: number;
+    /** Over the WHOLE plan, not the window: how much of the project already exists. */
+    progressRatio: SampledRatio;
+  };
+  velocity: {
+    /** Nodes that TRANSITIONED into done inside the window. A node created already done
+     *  (from_repo mining describing existing code) is progress, not velocity. */
+    completedInWindow: number;
+    perWeek: number;
+    /** Null rather than Infinity when nothing completed — "never" is arithmetic, not a
+     *  forecast. */
+    projectedWeeksRemaining: number | null;
+    days: Array<{ bucket: string; completed: number }>;
+  };
+  coverage: { doneTotal: number; doneDated: number; doneUndated: number };
+  repositories: StatsPlanRepository[];
+}
+
+export async function getStatsPlan(params: StatsQueryParams = {}): Promise<StatsPlan> {
+  return api.get<StatsPlan>(`/stats/plan${statsQueryString(params)}`);
+}

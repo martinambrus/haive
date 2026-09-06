@@ -145,6 +145,29 @@ export const planNodes = pgTable(
      *  like every other prose body in the product. */
     body: text('body'),
     status: planNodeStatusEnum('status').notNull().default('todo'),
+    /** When this node's CURRENT `done` status began — the only way to measure plan velocity.
+     *
+     *  Stamped on a TRANSITION into `done` and cleared on a transition out, by `applyPlanPatch`
+     *  (the one writer, which every path including task-completion greening goes through). So it
+     *  always answers "when did this node become done", and a node that is re-opened and later
+     *  re-done reports the latest greening — which keeps the cumulative count equal to the
+     *  number of nodes that are done NOW, as a burndown requires.
+     *
+     *  NULL for a node CREATED already done, deliberately. `from_repo` mining writes its nodes
+     *  as `done` because they describe code that already exists, and no work completed at that
+     *  moment: MEASURED here, all 537 done nodes on this install were born that way and none was
+     *  greened by a task, so counting them would render velocity as one spike at plan-build time
+     *  and nothing after it. Progress ("537 of 12,158 exist") and velocity ("how many did we
+     *  finish this week") are different questions, and this column answers only the second.
+     *
+     *  NOT `updated_at`, which any status flip OR hand edit moves — the same reason
+     *  `last_reviewed_at` exists rather than reusing it.
+     *
+     *  Also NULL on a node restored from the `.haive-data/plan.json` mirror: that file is a
+     *  snapshot of INTENT committed into the user's repository, not an audit log, so this stays
+     *  out of it. Such nodes fall into the same "no recorded date" bucket the stats endpoint
+     *  reports rather than being silently counted. */
+    doneAt: timestamp('done_at'),
     /** A leaf a workflow task can be created from. Not derived from "has no
      *  children": a component can be fully decomposed and still not be a unit of
      *  work, and a coarse node can be taskable before anyone has broken it down. */

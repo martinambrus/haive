@@ -85,6 +85,17 @@ export function formatCount(n: number | null | undefined): string {
   return n.toLocaleString();
 }
 
+/** A projected remaining duration, given in weeks.
+ *
+ *  Switches to years past two, because the honest arithmetic for a large plan at an early rate
+ *  is a number like 9960.9 weeks — true, but it reads as a broken calculation rather than as
+ *  "191 years". The value is not clamped or hidden; only its unit changes. */
+export function formatProjection(weeks: number | null | undefined): string {
+  if (weeks == null || !Number.isFinite(weeks) || weeks < 0) return DASH;
+  if (weeks < 104) return `${weeks.toFixed(1)} wk`;
+  return `${(weeks / 52.18).toFixed(weeks / 52.18 < 10 ? 1 : 0)} yr`;
+}
+
 /** `2026-09-06` -> `6 Sep`, for a dense chart axis.
  *
  *  Parsed as UTC noon rather than midnight: the bucket key is already a LOCAL calendar day in
