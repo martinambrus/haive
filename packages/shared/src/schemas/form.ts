@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { planEdgeKindSchema } from './plan.js';
 
 /** Optional auxiliary content the renderer can show next to a field/option.
  *  Currently the only `kind` is `'diff'`, used by the upgrade form so each
@@ -285,6 +286,61 @@ export const formFieldSchema = z.discriminatedUnion('type', [
 
 export type FormField = z.infer<typeof formFieldSchema>;
 
+/**
+ * The blast radius of a change, as structure rather than prose.
+ *
+ * Gate 1 used to render this as one markdown list: MEASURED on a real task, 363
+ * bullets — 161 components the spec named plus 202 the plan's edges reach — flat
+ * and unsorted inside a scroller holding 10,459px of content, with the hop count
+ * as a `(2 hops)` suffix on each row. The plan canvas already answers the same
+ * question well (the detail panel's Impact tab), so this carries the data in the
+ * shape that view groups it by instead of a pre-rendered wall.
+ *
+ * Structured on the SECTION, not as a field: nothing here is an input.
+ */
+export const planImpactSectionSchema = z.object({
+  /** Which repository's plan these ids belong to — the renderer links each row
+   *  to `/repos/<id>/plan?node=<uuid>`. */
+  repositoryId: z.string(),
+  /** The components the spec itself named, with their plan parent so the list
+   *  can be grouped the way the tree the reader browses is. `parentTitle` is
+   *  null for the plan root. */
+  named: z.array(
+    z.object({ id: z.string(), title: z.string(), parentTitle: z.string().nullable() }),
+  ),
+  /** Everything the edge walk reached, in `groupImpactHops`' shape — `reversed`
+   *  is what tells "depends on" from "depended on by", and a hop missing it
+   *  would silently fall out of every relation group. */
+  hops: z.array(
+    z.object({
+      nodeId: z.string(),
+      title: z.string(),
+      depth: z.number().int().positive(),
+      viaKind: planEdgeKindSchema,
+      reversed: z.boolean(),
+    }),
+  ),
+  /** Non-null when a cap stopped the WALK. Must be shown: a short list read as
+   *  "nothing else is affected" is the failure this whole view exists to
+   *  prevent. */
+  truncated: z.object({ reason: z.enum(['depth', 'nodes']), limit: z.number().int() }).nullable(),
+  /** mermaid source, or '' when no picture was drawn (see `diagramSkipped`). */
+  mermaid: z.string(),
+  /** Hops the DIAGRAM leaves out, which `hops` still carries. */
+  mermaidOmitted: z.number().int().nonnegative(),
+  /** How many hops out the diagram walked. Smaller than the walk behind `hops`
+   *  on purpose — one hop is what "if I change this, what else must change?"
+   *  means, and the number is shown so the two are never confused. */
+  mermaidDepth: z.number().int().nonnegative(),
+  /** Why there is no diagram at all. A picture of more origins than it can hold
+   *  is a wall of disconnected boxes, so the count is stated instead. */
+  diagramSkipped: z
+    .object({ reason: z.literal('too_many_named'), limit: z.number().int() })
+    .nullable(),
+});
+
+export type PlanImpactSection = z.infer<typeof planImpactSectionSchema>;
+
 /** Read-only expandable info card shown above the form fields. Use for
  *  context the renderer should preview compactly (preview line) but make
  *  available in full when the user opts in (body). Body is auto-rendered
@@ -295,8 +351,14 @@ export const infoSectionSchema = z.object({
   title: z.string().min(1),
   /** Optional one-line preview shown next to the title (e.g. counts, sizes). */
   preview: z.string().optional(),
-  /** Full content shown when expanded. */
+  /** Full content shown when expanded. Empty when `planImpact` carries the
+   *  content instead. */
   body: z.string(),
+  /** When set, the renderer draws the structured plan-impact view in place of
+   *  `body`. A section persisted before this existed has neither and renders as
+   *  markdown exactly as it did — `task_steps.form_schema` is stored, so old
+   *  gates keep replaying their old shape. */
+  planImpact: planImpactSectionSchema.optional(),
   /** When true, the disclosure renders open on first paint. Use for the
    *  primary section users should see immediately (e.g. spec summary on
    *  the gate-1 form). Defaults to closed so secondary context stays out

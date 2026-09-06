@@ -42,7 +42,10 @@ export interface ImpactHop {
 }
 
 export interface ImpactResult {
-  originNodeId: string;
+  /** Every node the walk started from. A set rather than one id because gate 1
+   *  asks the question of the WHOLE component list a spec named, not of one of
+   *  them — see `_affected-components.ts`. */
+  originNodeIds: string[];
   hops: ImpactHop[];
   /** Set when a cap stopped the walk. Rendered to the user verbatim — the point
    *  is that a truncated answer says so. */
@@ -66,7 +69,8 @@ export const IMPACT_DEFAULT_MAX_NODES = 200;
  *  silently narrow every caller of `computeImpact` rather than one view. */
 export const IMPACT_DEFAULT_VIEW_DEPTH = 1;
 
-/** How many nodes a DIAGRAM may draw. Past this the picture stops being one:
+/** How many HOPS a diagram may draw (origins are always drawn). Past this the
+ *  picture stops being one:
  *  192 nodes rendered as a 45,871 x 950 px SVG in a 702px panel, which fits at
  *  zoom 0.0153 and draws a 16px label at a quarter of a pixel. The hops are in
  *  BFS order, so the cap keeps the NEAREST nodes — the ones the question is
@@ -79,7 +83,7 @@ export const IMPACT_DIAGRAM_MAX_NODES = 40;
 const DIAGRAM_LABEL_CHARS = 40;
 
 export function computeImpact(
-  originNodeId: string,
+  originNodeIds: string[],
   edges: PlanEdgeRecord[],
   opts: ImpactOptions = {},
 ): ImpactResult {
@@ -102,10 +106,12 @@ export function computeImpact(
   }
 
   const hops: ImpactHop[] = [];
-  // The origin is seeded as visited, which is also what makes a cycle back to it
-  // terminate rather than re-enter.
-  const visited = new Set<string>([originNodeId]);
-  let frontier: string[] = [originNodeId];
+  // Every origin is seeded as visited, which is also what makes a cycle back to
+  // one terminate rather than re-enter. It is why no origin is ever emitted as a
+  // hop of another, and so why the edges BETWEEN origins are never discovered —
+  // `renderImpactMermaid`'s `edges` option is what draws those.
+  const visited = new Set<string>(originNodeIds);
+  let frontier: string[] = [...originNodeIds];
   let truncated: ImpactResult['truncated'] = null;
 
   for (let depth = 1; depth <= maxDepth; depth++) {
@@ -116,14 +122,14 @@ export function computeImpact(
 
       for (const e of outgoing) {
         if (pushHop(e.toNodeId, current, e.kind, false, depth)) next.push(e.toNodeId);
-        if (truncated) return { originNodeId, hops, truncated };
+        if (truncated) return { originNodeIds, hops, truncated };
       }
       for (const e of incoming) {
         if (pushHop(e.fromNodeId, current, e.kind, true, depth)) next.push(e.fromNodeId);
-        if (truncated) return { originNodeId, hops, truncated };
+        if (truncated) return { originNodeIds, hops, truncated };
       }
     }
-    if (next.length === 0) return { originNodeId, hops, truncated: null };
+    if (next.length === 0) return { originNodeIds, hops, truncated: null };
     frontier = next;
   }
 
@@ -139,7 +145,7 @@ export function computeImpact(
     }),
   );
   return {
-    originNodeId,
+    originNodeIds,
     hops,
     truncated: moreToSee ? { reason: 'depth', limit: maxDepth } : null,
   };
@@ -191,7 +197,17 @@ export interface ImpactDiagram {
 export function renderImpactMermaid(
   result: ImpactResult,
   titleById: Map<string, string>,
-  opts: { maxNodes?: number } = {},
+  opts: {
+    maxNodes?: number;
+    /** Also draw every edge whose BOTH endpoints are already drawn.
+     *
+     *  The walk emits a spanning tree — one edge per node it discovered — and
+     *  seeds every origin as visited, so with several origins the edges BETWEEN
+     *  them are never discovered at all and the picture is a row of disconnected
+     *  boxes. Pass the repository's edges to close that. A single-origin caller
+     *  passes nothing and gets exactly the diagram it did before. */
+    edges?: PlanEdgeRecord[];
+  } = {},
 ): ImpactDiagram {
   const maxNodes = opts.maxNodes ?? IMPACT_DIAGRAM_MAX_NODES;
   const label = (id: string): string => {
@@ -212,19 +228,39 @@ export function renderImpactMermaid(
   // Nearest-first, because `hops` is in BFS order. A hop is drawable only if the
   // node it was reached FROM is drawn too, which nearest-first guarantees: the
   // via-node is always at a shallower depth and so at a lower index.
+  //
+  // The cap bounds HOPS; origins are always drawn. A caller holding more origins
+  // than a picture can hold has to decide not to draw one — only it knows what
+  // the diagram is for. See `_affected-components.ts`, which refuses past
+  // IMPACT_DIAGRAM_MAX_NODES named components rather than emitting a wall.
   const drawn = result.hops.slice(0, Math.max(0, maxNodes));
+  const onCanvas = new Set([...result.originNodeIds, ...drawn.map((h) => h.nodeId)]);
 
   const lines = ['flowchart LR'];
-  lines.push(`  ${nodeId(result.originNodeId)}["${label(result.originNodeId)}"]:::origin`);
+  for (const origin of result.originNodeIds) {
+    lines.push(`  ${nodeId(origin)}["${label(origin)}"]:::origin`);
+  }
   for (const hop of drawn) {
     lines.push(`  ${nodeId(hop.nodeId)}["${label(hop.nodeId)}"]`);
   }
+  // A discovery line is always drawn in the EDGE's own direction — a reversed hop
+  // is `hop -.-> via`, which is still (from, to) — so one key shape covers both
+  // halves and an extra edge below can never duplicate one.
+  const emitted = new Set<string>();
   for (const hop of drawn) {
-    const arrow = hop.reversed ? '-.->' : '-->';
-    const [a, b] = hop.reversed
-      ? [nodeId(hop.nodeId), nodeId(hop.viaNodeId)]
-      : [nodeId(hop.viaNodeId), nodeId(hop.nodeId)];
-    lines.push(`  ${a} ${arrow}|${hop.viaKind.replace(/_/g, ' ')}| ${b}`);
+    const [a, b] = hop.reversed ? [hop.nodeId, hop.viaNodeId] : [hop.viaNodeId, hop.nodeId];
+    emitted.add(`${a}|${b}|${hop.viaKind}`);
+    lines.push(
+      `  ${nodeId(a)} ${hop.reversed ? '-.->' : '-->'}|${hop.viaKind.replace(/_/g, ' ')}| ${nodeId(b)}`,
+    );
+  }
+  for (const e of opts.edges ?? []) {
+    if (!onCanvas.has(e.fromNodeId) || !onCanvas.has(e.toNodeId)) continue;
+    if (emitted.has(`${e.fromNodeId}|${e.toNodeId}|${e.kind}`)) continue;
+    emitted.add(`${e.fromNodeId}|${e.toNodeId}|${e.kind}`);
+    // Solid, always: the dotted arrow means "the walk followed this against its
+    // direction", and an edge the walk never followed cannot claim that.
+    lines.push(`  ${nodeId(e.fromNodeId)} -->|${e.kind.replace(/_/g, ' ')}| ${nodeId(e.toNodeId)}`);
   }
   lines.push('  classDef origin stroke-width:3px;');
   return { source: lines.join('\n'), omitted: result.hops.length - drawn.length };

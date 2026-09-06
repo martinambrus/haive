@@ -11,7 +11,7 @@ const edge = (
 
 describe('computeImpact', () => {
   it('walks forward one hop at a time', () => {
-    const r = computeImpact('a', [edge('a', 'b'), edge('b', 'c')], { bidirectional: false });
+    const r = computeImpact(['a'], [edge('a', 'b'), edge('b', 'c')], { bidirectional: false });
     expect(r.hops.map((h) => [h.nodeId, h.depth])).toEqual([
       ['b', 1],
       ['c', 2],
@@ -22,7 +22,7 @@ describe('computeImpact', () => {
   it('terminates on a cycle instead of looping forever', () => {
     // The failure this module exists to avoid: a recursive CTE without dedup
     // never returns on this graph.
-    const r = computeImpact('a', [edge('a', 'b'), edge('b', 'c'), edge('c', 'a')], {
+    const r = computeImpact(['a'], [edge('a', 'b'), edge('b', 'c'), edge('c', 'a')], {
       bidirectional: false,
     });
     expect(r.hops.map((h) => h.nodeId).sort()).toEqual(['b', 'c']);
@@ -30,21 +30,21 @@ describe('computeImpact', () => {
   });
 
   it('terminates on a two-node mutual cycle', () => {
-    const r = computeImpact('a', [edge('a', 'b'), edge('b', 'a')]);
+    const r = computeImpact(['a'], [edge('a', 'b'), edge('b', 'a')]);
     expect(r.hops.map((h) => h.nodeId)).toEqual(['b']);
   });
 
   it('follows edges pointing at the origin too by default', () => {
-    const r = computeImpact('b', [edge('a', 'b')]);
+    const r = computeImpact(['b'], [edge('a', 'b')]);
     expect(r.hops.map((h) => [h.nodeId, h.reversed])).toEqual([['a', true]]);
   });
 
   it('honours bidirectional:false', () => {
-    expect(computeImpact('b', [edge('a', 'b')], { bidirectional: false }).hops).toEqual([]);
+    expect(computeImpact(['b'], [edge('a', 'b')], { bidirectional: false }).hops).toEqual([]);
   });
 
   it('reports a depth cap rather than truncating silently', () => {
-    const r = computeImpact('a', [edge('a', 'b'), edge('b', 'c'), edge('c', 'd')], {
+    const r = computeImpact(['a'], [edge('a', 'b'), edge('b', 'c'), edge('c', 'd')], {
       maxDepth: 2,
       bidirectional: false,
     });
@@ -55,7 +55,7 @@ describe('computeImpact', () => {
   it('does not claim truncation when the last level is simply the end', () => {
     // Over-reporting would mark nearly every result incomplete and train the
     // reader to ignore the warning.
-    const r = computeImpact('a', [edge('a', 'b'), edge('b', 'c')], {
+    const r = computeImpact(['a'], [edge('a', 'b'), edge('b', 'c')], {
       maxDepth: 2,
       bidirectional: false,
     });
@@ -64,13 +64,13 @@ describe('computeImpact', () => {
 
   it('reports a node cap', () => {
     const edges = ['b', 'c', 'd', 'e'].map((t) => edge('a', t));
-    const r = computeImpact('a', edges, { maxNodes: 2, bidirectional: false });
+    const r = computeImpact(['a'], edges, { maxNodes: 2, bidirectional: false });
     expect(r.hops).toHaveLength(2);
     expect(r.truncated).toEqual({ reason: 'nodes', limit: 2 });
   });
 
   it('filters to the requested edge kinds', () => {
-    const r = computeImpact('a', [edge('a', 'b', 'affects'), edge('a', 'c', 'implements')], {
+    const r = computeImpact(['a'], [edge('a', 'b', 'affects'), edge('a', 'c', 'implements')], {
       kinds: ['affects'],
       bidirectional: false,
     });
@@ -78,7 +78,7 @@ describe('computeImpact', () => {
   });
 
   it('records how each node was reached', () => {
-    const r = computeImpact('a', [edge('a', 'b', 'depends_on')], { bidirectional: false });
+    const r = computeImpact(['a'], [edge('a', 'b', 'depends_on')], { bidirectional: false });
     expect(r.hops[0]).toMatchObject({ viaNodeId: 'a', viaKind: 'depends_on', reversed: false });
   });
 });
@@ -92,7 +92,7 @@ describe('renderImpactMermaid', () => {
   const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
   it('emits a flowchart with the origin marked', () => {
-    const { source, omitted } = renderImpactMermaid(computeImpact(A, [edge(A, B)]), titles);
+    const { source, omitted } = renderImpactMermaid(computeImpact([A], [edge(A, B)]), titles);
     // LR, not TD: top-down lays one BFS level out as a ROW, which is how a
     // 122-node level became a 45,871px-wide diagram.
     expect(source.startsWith('flowchart LR')).toBe(true);
@@ -110,13 +110,13 @@ describe('renderImpactMermaid', () => {
       [A, 'Say "hi"\nflowchart LR'],
       [B, 'ok'],
     ]);
-    const { source } = renderImpactMermaid(computeImpact(A, [edge(A, B)]), hostile);
+    const { source } = renderImpactMermaid(computeImpact([A], [edge(A, B)]), hostile);
     expect(source).not.toContain('Say "hi"');
     expect(source.split('\n').filter((l) => l.trim().startsWith('flowchart'))).toHaveLength(1);
   });
 
   it('renders a reversed hop with a dotted arrow', () => {
-    const { source } = renderImpactMermaid(computeImpact(B, [edge(A, B)]), titles);
+    const { source } = renderImpactMermaid(computeImpact([B], [edge(A, B)]), titles);
     expect(source).toContain('-.->');
   });
 
@@ -125,7 +125,7 @@ describe('renderImpactMermaid', () => {
     // surrounding decoration (`<renderId>-flowchart-<id>-<index>`), which is an
     // internal convention. A version that keyed on mermaid's prefix bound zero
     // click handlers and failed silently.
-    const { source } = renderImpactMermaid(computeImpact(A, [edge(A, B)]), titles);
+    const { source } = renderImpactMermaid(computeImpact([A], [edge(A, B)]), titles);
     expect(source).toContain(`pnode${A.replace(/-/g, '')}`);
     expect(source).toContain(`pnode${B.replace(/-/g, '')}`);
     const recovered = /pnode([0-9a-f]{32})/i.exec(source)?.[1];
@@ -143,7 +143,7 @@ describe('the diagram cap', () => {
   const titles = new Map([[HUB, 'Hub'], ...spokes.map((s, i) => [s, `Spoke ${i}`] as const)]);
 
   it('draws only the nearest nodes and says how many it left', () => {
-    const result = computeImpact(HUB, edges);
+    const result = computeImpact([HUB], edges);
     const { source, omitted } = renderImpactMermaid(result, titles);
     const drawn = source.split('\n').filter((l) => /^\s+pnode\w+\[/.test(l));
     // origin + the cap
@@ -155,13 +155,13 @@ describe('the diagram cap', () => {
     // The list beside the diagram shows everything; the picture is the only
     // thing bounded. A cap that ate hops would be the silent truncation this
     // whole view exists to prevent.
-    const result = computeImpact(HUB, edges);
+    const result = computeImpact([HUB], edges);
     renderImpactMermaid(result, titles);
     expect(result.hops).toHaveLength(60);
   });
 
   it('honours an explicit cap', () => {
-    const { source, omitted } = renderImpactMermaid(computeImpact(HUB, edges), titles, {
+    const { source, omitted } = renderImpactMermaid(computeImpact([HUB], edges), titles, {
       maxNodes: 5,
     });
     expect(source.split('\n').filter((l) => /^\s+pnode\w+\[/.test(l))).toHaveLength(6);
@@ -176,7 +176,7 @@ describe('the diagram cap', () => {
     );
     const chainEdges = chain.slice(0, -1).map((from, i) => edge(from, chain[i + 1]!));
     const chainTitles = new Map(chain.map((id, i) => [id, `N${i}`]));
-    const { source } = renderImpactMermaid(computeImpact(chain[0]!, chainEdges), chainTitles, {
+    const { source } = renderImpactMermaid(computeImpact([chain[0]!], chainEdges), chainTitles, {
       maxNodes: 2,
     });
     const declared = new Set([...source.matchAll(/^\s+(pnode\w+)\[/gm)].map((m) => m[1]!));
@@ -189,7 +189,7 @@ describe('the diagram cap', () => {
   it('shortens a label so the box does not set the diagram width', () => {
     const long = 'rs_dynamic_modules dialog: module picker & dynamic-module placeholder insertion';
     const { source } = renderImpactMermaid(
-      computeImpact(HUB, [edge(HUB, spoke(0))]),
+      computeImpact([HUB], [edge(HUB, spoke(0))]),
       new Map([
         [HUB, long],
         [spoke(0), 'short'],
@@ -199,5 +199,68 @@ describe('the diagram cap', () => {
     expect(source).toContain('…');
     const widest = Math.max(...[...source.matchAll(/\["([^"]*)"\]/g)].map((m) => m[1]!.length));
     expect(widest).toBeLessThanOrEqual(40);
+  });
+});
+
+describe('several origins at once', () => {
+  // Gate 1 asks the question of every component a spec named, not of one of
+  // them: before this the diagram walked `named[0]` alone and drew 19 of 363
+  // components while reporting 0 omitted.
+  const [A, B, C, D] = ['a', 'b', 'c', 'd'].map(
+    (ch) => `${ch.repeat(8)}-${ch.repeat(4)}-4${ch.repeat(3)}-8${ch.repeat(3)}-${ch.repeat(12)}`,
+  ) as [string, string, string, string];
+  const titles = new Map([
+    [A, 'A'],
+    [B, 'B'],
+    [C, 'C'],
+    [D, 'D'],
+  ]);
+
+  it('walks from every origin and never emits one as a hop of another', () => {
+    const r = computeImpact([A, B], [edge(A, C), edge(B, D), edge(A, B)]);
+    expect(r.originNodeIds).toEqual([A, B]);
+    expect(r.hops.map((h) => h.nodeId).sort()).toEqual([C, D].sort());
+  });
+
+  it('draws every origin', () => {
+    const { source } = renderImpactMermaid(computeImpact([A, B], [edge(A, C)]), titles);
+    expect(source.split('\n').filter((l) => l.includes(':::origin'))).toHaveLength(2);
+  });
+
+  it('draws the edges BETWEEN origins when given the edge list', () => {
+    // The walk seeds every origin as visited, so it never discovers an edge
+    // between two of them. Without this the multi-origin picture is a row of
+    // disconnected boxes.
+    const edges = [edge(A, B, 'depends_on'), edge(A, C)];
+    const bare = renderImpactMermaid(computeImpact([A, B], edges), titles).source;
+    expect(bare).not.toMatch(/pnode\w+ -->\|depends on\| pnode\w+/);
+    const linked = renderImpactMermaid(computeImpact([A, B], edges), titles, { edges }).source;
+    expect(linked).toContain(
+      `pnode${A.replace(/-/g, '')} -->|depends on| pnode${B.replace(/-/g, '')}`,
+    );
+  });
+
+  it('never duplicates an edge the walk already drew, in either direction', () => {
+    // A reversed hop is drawn `hop -.-> via`, which is still the edge's own
+    // (from, to) — so one key shape covers both halves.
+    const edges = [edge(A, B, 'affects')];
+    const forward = renderImpactMermaid(computeImpact([A], edges), titles, { edges }).source;
+    expect(forward.match(/\|affects\|/g)).toHaveLength(1);
+    const reversed = renderImpactMermaid(computeImpact([B], edges), titles, { edges }).source;
+    expect(reversed.match(/\|affects\|/g)).toHaveLength(1);
+    expect(reversed).toContain('-.->');
+  });
+
+  it('never draws an extra edge to a node the cap left out', () => {
+    const edges = [edge(A, C), edge(A, D), edge(C, D)];
+    const { source } = renderImpactMermaid(computeImpact([A], edges), titles, {
+      edges,
+      maxNodes: 1,
+    });
+    const declared = new Set([...source.matchAll(/^\s+(pnode\w+)\[/gm)].map((m) => m[1]!));
+    for (const [, a, b] of source.matchAll(/^\s+(pnode\w+) -[.-]?->\|[^|]*\| (pnode\w+)$/gm)) {
+      expect(declared.has(a!)).toBe(true);
+      expect(declared.has(b!)).toBe(true);
+    }
   });
 });

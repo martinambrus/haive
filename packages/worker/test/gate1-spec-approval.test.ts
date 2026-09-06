@@ -274,60 +274,84 @@ describe('gate-1 summary carries the spec diagrams', () => {
 describe('the affected-components section', () => {
   const affected = (over: Record<string, unknown> = {}) => ({
     ...detectedStub(),
+    repositoryId: 'repo-1',
     affectedComponents: {
-      named: [{ id: 'n1', title: 'Mailer' }],
+      named: [{ id: 'n1', title: 'Mailer', parentTitle: 'Delivery' }],
       reached: [
-        { id: 'n2', title: 'SMTP transport', depth: 1, via: 'depends_on' },
-        { id: 'n3', title: 'Theme contract', depth: 2, via: 'affects' },
+        { id: 'n2', title: 'SMTP transport', depth: 1, via: 'depends_on', reversed: false },
+        { id: 'n3', title: 'Theme contract', depth: 2, via: 'affects', reversed: true },
       ],
       truncated: null,
       mermaid: 'flowchart LR\n  a --> b',
+      mermaidOmitted: 0,
+      mermaidDepth: 1,
+      diagramSkipped: null,
       ...over,
     },
   });
 
-  const sectionBody = (detected: ReturnType<typeof affected>): string => {
+  const section = (detected: ReturnType<typeof affected>) => {
     const schema = gate1SpecApprovalStep.form!(makeApplyCtx().ctx, detected) as FormSchema;
-    const section = schema.infoSections?.find((s) => s.title === 'Affected components');
-    expect(section).toBeDefined();
-    return section!.body;
+    const found = schema.infoSections?.find((s) => s.title === 'Affected components');
+    expect(found).toBeDefined();
+    return found!;
   };
 
-  it('lists what the spec named and what it reaches, and fences the diagram', () => {
-    const body = sectionBody(affected());
-    expect(body).toContain('Mailer');
-    expect(body).toContain('SMTP transport — depends on (1 hop)');
-    expect(body).toContain('Theme contract — affects (2 hops)');
-    expect(body).toContain('```mermaid');
+  it('hands the renderer structure rather than a prose wall', () => {
+    // The markdown list this replaced ran to 363 flat bullets on a real task,
+    // with the hop count as a suffix. Depth and relation are the structure now.
+    const s = section(affected());
+    expect(s.body).toBe('');
+    expect(s.planImpact?.repositoryId).toBe('repo-1');
+    expect(s.planImpact?.named).toEqual([{ id: 'n1', title: 'Mailer', parentTitle: 'Delivery' }]);
+    expect(s.planImpact?.hops).toEqual([
+      { nodeId: 'n2', title: 'SMTP transport', depth: 1, viaKind: 'depends_on', reversed: false },
+      { nodeId: 'n3', title: 'Theme contract', depth: 2, viaKind: 'affects', reversed: true },
+    ]);
   });
 
-  it('says how much the diagram left out', () => {
-    // The picture is bounded so it stays readable; silence here would let a
-    // partial diagram read as the whole blast radius.
-    const body = sectionBody(affected({ mermaidOmitted: 7 }));
-    expect(body).toMatch(/7 further components .* listed above rather than drawn/);
-  });
-
-  it('says nothing when the diagram drew everything', () => {
-    expect(sectionBody(affected({ mermaidOmitted: 0 }))).not.toContain('rather than drawn');
-  });
-
-  it('still renders output written before the diagram was bounded', () => {
-    // This shape is PERSISTED in task_steps.output. A gate parked under the old
-    // shape has no mermaidOmitted at all, and must not render a broken line.
-    const body = sectionBody(affected());
-    expect(body).toContain('```mermaid');
-    expect(body).not.toContain('undefined');
-    expect(body).not.toContain('rather than drawn');
-  });
-
-  it('still states a traversal cap, which is a different fact', () => {
+  it('carries every cap through instead of letting a short list read as complete', () => {
+    const s = section(affected({ truncated: { reason: 'depth', limit: 3 }, mermaidOmitted: 4 }));
     // The walk stopping and the picture being bounded are two separate limits;
     // one must not hide the other.
-    const body = sectionBody(
-      affected({ truncated: { reason: 'depth', limit: 3 }, mermaidOmitted: 4 }),
+    expect(s.planImpact?.truncated).toEqual({ reason: 'depth', limit: 3 });
+    expect(s.planImpact?.mermaidOmitted).toBe(4);
+  });
+
+  it('carries the refusal to draw a diagram at all', () => {
+    // 161 named components render as 161 disconnected boxes; the count is
+    // stated instead of drawing a wall.
+    const s = section(
+      affected({ mermaid: '', diagramSkipped: { reason: 'too_many_named', limit: 40 } }),
     );
-    expect(body).toContain('stopped at the depth limit of 3');
-    expect(body).toContain('rather than drawn');
+    expect(s.planImpact?.mermaid).toBe('');
+    expect(s.planImpact?.diagramSkipped).toEqual({ reason: 'too_many_named', limit: 40 });
+  });
+
+  it('is absent when the spec named nothing the plan still holds', () => {
+    const schema = gate1SpecApprovalStep.form!(
+      makeApplyCtx().ctx,
+      affected({ named: [] }),
+    ) as FormSchema;
+    expect(schema.infoSections?.some((s) => s.title === 'Affected components')).toBe(false);
+  });
+
+  it('is absent for a task with no repository, which has no plan to link to', () => {
+    const detected = { ...affected(), repositoryId: null };
+    const schema = gate1SpecApprovalStep.form!(makeApplyCtx().ctx, detected) as FormSchema;
+    expect(schema.infoSections?.some((s) => s.title === 'Affected components')).toBe(false);
+  });
+
+  it('keeps an unrecognised stored edge kind as a hop rather than dropping it', () => {
+    // `via` is a plain string on a persisted payload. Dropping the row would
+    // understate the radius, which is the one direction this must never fail in.
+    const s = section(
+      affected({
+        reached: [{ id: 'n9', title: 'Odd', depth: 1, via: 'sideways', reversed: false }],
+      }),
+    );
+    expect(s.planImpact?.hops).toEqual([
+      { nodeId: 'n9', title: 'Odd', depth: 1, viaKind: 'affects', reversed: false },
+    ]);
   });
 });

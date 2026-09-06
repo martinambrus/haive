@@ -733,7 +733,7 @@ planRoutes.get('/:id/plan/impact/:nodeId', async (c) => {
   // answer is "essentially the whole plan", which answers nothing. Deeper is
   // available, but asked for.
   const depthParam = Number(c.req.query('maxDepth'));
-  const impact = computeImpact(nodeId, edges, {
+  const impact = computeImpact([nodeId], edges, {
     maxDepth:
       Number.isFinite(depthParam) && depthParam > 0 ? depthParam : IMPACT_DEFAULT_VIEW_DEPTH,
   });

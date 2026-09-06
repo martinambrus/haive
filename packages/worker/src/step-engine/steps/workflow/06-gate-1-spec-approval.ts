@@ -1,9 +1,15 @@
-import type { FormSchema, InfoSection } from '@haive/shared';
+import type { FormSchema, InfoSection, PlanEdgeKind } from '@haive/shared';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordSpecDecision } from './_spec-feedback.js';
 import { resolveTaskWorktreePath, writeSpecArtifact } from './_spec-artifact.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
+import {
+  resolveAffectedComponentsForIds,
+  type AffectedComponents,
+} from './_affected-components.js';
 
 interface SpecGateDetect {
   /** Full spec body (markdown). The renderer turns this into HTML inside
@@ -22,17 +28,9 @@ interface SpecGateDetect {
    *  node IDS rather than from the agent's prose. Null when the repo has no plan
    *  or the spec named nothing — the section is then simply absent. */
   affectedComponents: AffectedComponents | null;
-}
-
-interface AffectedComponents {
-  named: { id: string; title: string }[];
-  reached: { id: string; title: string; depth: number; via: string }[];
-  truncated: null | { reason: 'depth' | 'nodes'; limit: number };
-  mermaid: string;
-  /** Nodes the DIAGRAM left out, which `reached` above still carries. Optional
-   *  because this arrives from persisted step output: a gate parked before the
-   *  diagram was bounded has no such field, and must keep rendering. */
-  mermaidOmitted?: number;
+  /** Whose plan those ids belong to; the renderer links each row to it. Null on
+   *  a task with no repository, which also means there is no plan to show. */
+  repositoryId: string | null;
 }
 
 interface SpecGateApply {
@@ -46,54 +44,66 @@ interface PrePlanningOutput {
   affectedComponents?: AffectedComponents;
 }
 
-/** Render the affected-component set as a collapsible section with a fenced
- *  mermaid diagram, which `markdown-view` already turns into a rendered graph.
+/**
+ * The affected-component set, as a structured section the web renderer draws the
+ * way the plan canvas's own Impact tab does.
  *
- *  The cap is stated when the traversal hit one. An approver reading a short list
- *  as "nothing else is affected" is exactly the failure the impact view exists to
- *  prevent, and it is worse here than anywhere else — this is the moment they
- *  commit to the change. */
-function affectedComponentsSection(a: AffectedComponents | null): InfoSection[] {
-  if (!a || a.named.length === 0) return [];
-  const lines = ['**Named by the spec**', '', ...a.named.map((n) => `- ${n.title}`)];
-  if (a.reached.length > 0) {
-    lines.push(
-      '',
-      '**Also reached through the plan links**',
-      '',
-      ...a.reached.map(
-        (r) =>
-          `- ${r.title} — ${r.via.replace(/_/g, ' ')} (${r.depth} hop${r.depth === 1 ? '' : 's'})`,
-      ),
-    );
-  }
-  if (a.truncated) {
-    lines.push(
-      '',
-      `> The traversal stopped at the ${a.truncated.reason} limit of ${a.truncated.limit}. More components may be affected than are listed here.`,
-    );
-  }
-  lines.push('', '```mermaid', a.mermaid, '```');
-  if (a.mermaidOmitted && a.mermaidOmitted > 0) {
-    // Said UNDER the diagram, where someone who has just looked at it is:
-    // silence would let a partial picture read as the whole radius.
-    //
-    // The omitted count is stated ALONE, never subtracted from `reached`:
-    // `reached` is the union over every named node while the diagram walks only
-    // the first, so no arithmetic between the two is true.
-    lines.push(
-      '',
-      `> The diagram is bounded so it stays readable: ${a.mermaidOmitted} further component${a.mermaidOmitted === 1 ? '' : 's'} it reaches are listed above rather than drawn.`,
-    );
-  }
+ * It used to be one markdown list. MEASURED on a real task: 363 bullets — 161
+ * named plus 202 reached — flat and unsorted in a scroller holding 10,459px,
+ * with the distance that is the whole POINT of an impact answer reduced to a
+ * `(2 hops)` suffix. Depth and relation become structure here instead.
+ *
+ * Every cap still travels with the data (`truncated`, `mermaidOmitted`,
+ * `diagramSkipped`) and the renderer states each one. An approver reading a
+ * short list as "nothing else is affected" is exactly the failure this view
+ * exists to prevent, and it is worse here than anywhere else — this is the
+ * moment they commit to the change.
+ */
+function affectedComponentsSection(
+  a: AffectedComponents | null,
+  repositoryId: string | null,
+): InfoSection[] {
+  if (!a || a.named.length === 0 || !repositoryId) return [];
   return [
     {
       title: 'Affected components',
       preview: `${a.named.length} named${a.reached.length > 0 ? ` • ${a.reached.length} reached` : ''}`,
-      body: lines.join('\n'),
+      // The structured payload IS the content — see `planImpact` on the form
+      // schema, which says why `body` is empty rather than a second rendering.
+      body: '',
       defaultOpen: true,
+      planImpact: {
+        repositoryId,
+        named: a.named.map((n) => ({
+          id: n.id,
+          title: n.title,
+          parentTitle: n.parentTitle ?? null,
+        })),
+        hops: a.reached.map((r) => ({
+          nodeId: r.id,
+          title: r.title,
+          depth: r.depth,
+          viaKind: coercePlanEdgeKind(r.via),
+          // Detect re-resolves a payload that predates this field, so by here it
+          // is always present; the fallback keeps a hop out of the "reached
+          // against the arrow" half rather than inventing a direction.
+          reversed: r.reversed === true,
+        })),
+        truncated: a.truncated,
+        mermaid: a.mermaid,
+        mermaidOmitted: a.mermaidOmitted ?? 0,
+        mermaidDepth: a.mermaidDepth ?? 0,
+        diagramSkipped: a.diagramSkipped ?? null,
+      },
     },
   ];
+}
+
+/** The stored `via` is a plain string on a persisted payload. An unrecognised
+ *  one lands on `affects` — the least specific of the three — rather than
+ *  dropping the hop, which would understate the radius. */
+function coercePlanEdgeKind(via: string): PlanEdgeKind {
+  return via === 'depends_on' || via === 'implements' || via === 'affects' ? via : 'affects';
 }
 
 interface QualityFinding {
@@ -275,6 +285,42 @@ function buildSummarySection(detected: SpecGateDetect): string {
   return lines.join('\n');
 }
 
+/**
+ * Repair a payload written before the walk recorded edge DIRECTION.
+ *
+ * `04`'s output is persisted, so a gate reached after this shape changed still
+ * replays the old one — and the grouped view keys its "Depends on" / "Depended
+ * on by" headings on `reversed`, which the old shape does not carry. The node
+ * ids are the durable part, so the walk is simply redone from them: no CLI, no
+ * re-drafting of the spec, and one resolver so this can never disagree with what
+ * `_plan-impact.ts` hands the implementer.
+ *
+ * `mermaidDepth` is the marker rather than `reversed`, because it is written on
+ * every new payload while an empty `reached` would carry no hop to inspect.
+ *
+ * A re-resolution that comes back empty leaves the section OFF rather than
+ * rendering fabricated directions — the same thing the section already does when
+ * the spec named nothing the plan still holds.
+ */
+async function withRelationDirections(
+  ctx: StepContext,
+  repositoryId: string | null,
+  affected: AffectedComponents | null,
+): Promise<AffectedComponents | null> {
+  if (!affected || !repositoryId) return affected;
+  if (typeof affected.mermaidDepth === 'number') return affected;
+  const ids = affected.named.map((n) => n.id);
+  const rewalked = await resolveAffectedComponentsForIds(ctx, repositoryId, ids);
+  if (!rewalked) {
+    ctx.logger.warn(
+      { nodes: ids.length },
+      'affected components could not be re-resolved; omitting the gate section',
+    );
+    return null;
+  }
+  return rewalked;
+}
+
 export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply> = {
   metadata: {
     id: '06-gate-1-spec-approval',
@@ -299,6 +345,12 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? planOutput.summary ?? '';
     const iterations = (quality?.iterations ?? []) as IterationEntry[];
     const exhaustedBudget = iterations.some((entry) => entry.exhaustedBudget === true);
+    const [task] = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    const repositoryId = task?.repositoryId ?? null;
 
     return {
       specBody,
@@ -312,7 +364,12 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
         : [],
       iterationHistory: iterations.map(summariseIteration),
       exhaustedBudget,
-      affectedComponents: planOutput.affectedComponents ?? null,
+      affectedComponents: await withRelationDirections(
+        ctx,
+        repositoryId,
+        planOutput.affectedComponents ?? null,
+      ),
+      repositoryId,
     };
   },
 
@@ -345,7 +402,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
         preview: fullPreview,
         body: fullSpecBody,
       },
-      ...affectedComponentsSection(detected.affectedComponents),
+      ...affectedComponentsSection(detected.affectedComponents, detected.repositoryId),
     ];
     return {
       title: 'Gate 1: Spec approval',

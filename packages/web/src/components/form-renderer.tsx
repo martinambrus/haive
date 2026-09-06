@@ -10,6 +10,7 @@ import { GlobalKbStatusPanel } from '@/components/global-kb-status-panel';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { InlineMarkdown, INLINE_MD_CLASS } from '@/components/markdown/inline-markdown';
 import { PersistedDetails } from '@/components/persisted-details';
+import { PlanImpactSection } from '@/components/plan/plan-impact-section';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
 import { isFieldVisible } from '@/components/form-visibility';
@@ -81,7 +82,15 @@ export function InfoSections({
           }
         >
           <div className="border-t border-neutral-800">
-            <MarkdownView body={section.body} enhanced title={section.title} toolbar />
+            {/* A section carrying structured plan impact renders as the plan
+                canvas's Impact view rather than as prose — see `planImpact` on
+                the form schema. Sections persisted before that existed have no
+                such payload and take the markdown path unchanged. */}
+            {section.planImpact ? (
+              <PlanImpactSection data={section.planImpact} />
+            ) : (
+              <MarkdownView body={section.body} enhanced title={section.title} toolbar />
+            )}
           </div>
         </PersistedDetails>
       ))}

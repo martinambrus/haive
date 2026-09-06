@@ -34,6 +34,7 @@ import { HAIVE_DATA_FILES, PLAN_MIRROR_SCHEMA_VERSION, type PlanMirror } from '@
 import { initDatabase, getDb } from '../src/db.js';
 import { importPlanMirror, reconcilePlanMirror, writePlanMirror } from '../src/plan/mirror.js';
 import { completePlanNodesForTask } from '../src/plan/task-link.js';
+import { resolveAffectedComponents } from '../src/step-engine/steps/workflow/_affected-components.js';
 
 const log = logger.child({ module: 'plan-patch-smoke' });
 
@@ -586,6 +587,77 @@ async function main(): Promise<void> {
     },
     { repositoryId, origin: 'user', sourceTaskId: linkTaskId },
   );
+
+  // ---- what gate 1 shows the approver -------------------------------------
+  //
+  // The resolver reads the spec's `node:<uuid>` refs and walks the edge graph
+  // from ALL of them. It used to walk each named node separately for the LIST
+  // and then draw the diagram from `named[0]` alone — on a real task that drew
+  // 19 of 363 components while reporting nothing omitted.
+  {
+    const smokeCtx = {
+      db,
+      taskId: linkTaskId,
+      logger: log,
+    } as unknown as Parameters<typeof resolveAffectedComponents>[0];
+    const spec = `Touches node:${linkTarget!.id} and nothing else worth naming.`;
+    const resolved = await resolveAffectedComponents(smokeCtx, repositoryId, spec);
+    check(
+      'the node refs in a spec resolve to plan components',
+      resolved?.named.length === 1,
+      resolved?.named,
+    );
+    check(
+      'a named component carries its plan parent, so the list groups like the tree',
+      resolved?.named[0]?.parentTitle != null,
+      resolved?.named[0],
+    );
+    const reachedById = new Map((resolved?.reached ?? []).map((r) => [r.id, r]));
+    check(
+      'a forward edge is recorded as followed WITH the arrow',
+      reachedById.get(opsNode!.id)?.reversed === false,
+      reachedById.get(opsNode!.id),
+    );
+    // Without this the grouped view labels an inbound edge "Depends on" instead
+    // of "Depended on by" — the two are opposite facts about the same row.
+    check(
+      'an inbound edge is recorded as followed AGAINST the arrow',
+      reachedById.get(legalNode!.id)?.reversed === true,
+      reachedById.get(legalNode!.id),
+    );
+    check(
+      'the walk keeps going past one hop',
+      reachedById.get(api!.id)?.depth === 2,
+      reachedById.get(api!.id),
+    );
+    check(
+      'no named component is also listed as something it reaches',
+      !reachedById.has(linkTarget!.id),
+      [...reachedById.keys()],
+    );
+    // The diagram is the NEAR field only; the list above carries the rest.
+    check(
+      'the diagram walks one hop and says so',
+      resolved?.mermaidDepth === 1 && (resolved?.mermaid ?? '').startsWith('flowchart LR'),
+      { depth: resolved?.mermaidDepth, head: (resolved?.mermaid ?? '').slice(0, 20) },
+    );
+    check(
+      'the diagram draws the named component as an origin',
+      (resolved?.mermaid ?? '').includes(`pnode${linkTarget!.id.replace(/-/g, '')}["`) &&
+        (resolved?.mermaid ?? '').includes(':::origin'),
+      resolved?.mermaid,
+    );
+    check(
+      'a node two hops out is not drawn, and is not counted as omitted from a one-hop picture',
+      !(resolved?.mermaid ?? '').includes(`pnode${api!.id.replace(/-/g, '')}`) &&
+        resolved?.mermaidOmitted === 0,
+      { omitted: resolved?.mermaidOmitted },
+    );
+    check(
+      'a spec that names no plan node resolves to nothing at all',
+      (await resolveAffectedComponents(smokeCtx, repositoryId, 'no refs here')) === undefined,
+    );
+  }
 
   // These rows are deliberately present when the mirror is written. They are
   // useful local construction/audit state, but they must not travel to a fresh
