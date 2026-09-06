@@ -9,6 +9,7 @@ import {
   applyAgentPatch,
   conversationalReply,
   parsePlanPatch,
+  resolveTaskProposal,
 } from './_plan-prompt.js';
 
 /**
@@ -63,6 +64,10 @@ interface PlanChatApply {
   continueRequested: boolean;
   /** Which pass this was, for the step summary and for anyone reading the row. */
   pass: 'answer' | 'collect';
+  /** How many nodes the turn offered to run as one task, 0 when it offered
+   *  nothing. The offer itself lives in the transcript, where the button is; this
+   *  is here so the step row says an offer was made. */
+  proposedTaskNodes: number;
   error: string | null;
 }
 
@@ -230,6 +235,7 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       summary: '',
       continueRequested: false,
       pass: d.pendingQuestion !== null ? 'answer' : 'collect',
+      proposedTaskNodes: 0,
       error: null,
     };
     if (!d.repositoryId || !d.nodeId) return result;
@@ -241,6 +247,9 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       // it — and that is a reply the user asked for. Only a turn with no words
       // AND no patch is an error.
       const spokenOnly = patch ? null : conversationalReply(args.llmOutput);
+      // Resolved from the applied patch below, so a proposal naming nodes this
+      // very reply created can address them by uuid.
+      let proposal: ReturnType<typeof resolveTaskProposal> = null;
       if (!patch) {
         if (!spokenOnly) result.error = 'The agent did not reply with a usable patch.';
       } else {
@@ -257,6 +266,21 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
             result.updated = res.updated.length;
             result.deleted = res.deleted.length;
             result.linked = res.linked;
+            proposal = resolveTaskProposal(patch.taskProposal, res.refs);
+          } else {
+            // No ops means no new nodes, so every ref must already be a uuid the
+            // agent copied out of the plan it was shown. An empty map says
+            // exactly that and costs nothing.
+            proposal = resolveTaskProposal(patch.taskProposal, {});
+          }
+          if (proposal) {
+            result.proposedTaskNodes = proposal.proposal.nodeRefs.length;
+            if (proposal.droppedRefs.length > 0) {
+              ctx.logger.warn(
+                { dropped: proposal.droppedRefs },
+                'task proposal named refs that resolved to no node',
+              );
+            }
           }
         } catch (err) {
           // A conflict is reported to the USER rather than retried: the plan moved
@@ -284,8 +308,15 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
           result.error !== null
             ? `${spoken || 'Could not apply that.'}\n\n_${result.error}_`
             : spoken || 'Done.',
+        // The proposal rides the turn's own patch record rather than the step
+        // output, for the same reason the transcript does: a revise cycle resets
+        // the step row every turn and would take the button with it.
         patchJson: patch
-          ? { ops: patch.ops, ...(patch.summary ? { summary: patch.summary } : {}) }
+          ? {
+              ops: patch.ops,
+              ...(patch.summary ? { summary: patch.summary } : {}),
+              ...(proposal ? { taskProposal: proposal.proposal } : {}),
+            }
           : null,
       });
 

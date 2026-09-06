@@ -1,5 +1,10 @@
-import { PLAN_PATCH_MAX_OPS } from '@haive/shared';
-import { PlanPatchError, applyPlanPatch, type ApplyPlanPatchResult } from '@haive/shared/plan';
+import { PLAN_PATCH_MAX_OPS, planTaskProposalSchema, type PlanTaskProposal } from '@haive/shared';
+import {
+  PlanPatchError,
+  applyPlanPatch,
+  stripNodeRefPrefix,
+  type ApplyPlanPatchResult,
+} from '@haive/shared/plan';
 import type { Database } from '@haive/database';
 import { RetryableParseError } from '../../step-definition.js';
 import { parseAgentJson } from '../workflow/_agent-json.js';
@@ -85,6 +90,31 @@ Rules:
 - \`kind\` for links: \`depends_on\` (this cannot proceed until the target does),
   \`affects\` (changing the target forces a change here), \`implements\` (this
   realises the target).
+- \`taskProposal\` is OPTIONAL and offers to run what you just wrote as ONE task.
+  Add it when your ops span more than one node — most of all when some of them
+  cannot start until others land, which you will have just written as
+  \`depends_on\` links. One task decomposes that into a dependency graph, builds
+  the prerequisite first and then works the independent parts in parallel, which
+  is what the person would otherwise have to drive by hand one node at a time.
+  This is an OFFER shown beside a button, never a condition. Write the nodes and
+  the links first, always, and propose in addition — a reply that withholds the
+  plan to push someone towards a task has destroyed the work it just did.
+
+  \`\`\`json
+  { "taskProposal": {
+      "nodeRefs": ["tmp-comms", "tmp-ux", "tmp-workflow"],
+      "title": "External comms layer plus the UX and workflow on top",
+      "description": "<what the task should do, in full — this becomes the task's description>",
+      "role": "implements",
+      "reason": "The UX and the workflow both wait on the comms layer, so one task builds it first and then runs the other two together." } }
+  \`\`\`
+
+  \`nodeRefs\` uses the SAME refs as your ops — temp ids for nodes you just
+  created, uuids for ones that already existed. \`role\` is \`implements\` when
+  finishing the task finishes those nodes entirely, and \`touched\` when it only
+  delivers part of each (adding one field to five forms is \`touched\`: it
+  changes all five and completes none of them). When in doubt use \`touched\`,
+  because a node wrongly marked done is a plan that lies to whoever reads it next.
 - At most ${PLAN_PATCH_MAX_OPS} ops. Never invent a uuid — only use ones shown to you.
 - An id you get wrong by one character names nothing, and that op is DISCARDED.
   Copy ids; do not retype them. When you are expanding one node, write
@@ -109,7 +139,7 @@ Rules:
  */
 export function parsePlanPatch(
   raw: unknown,
-): { ops: unknown[]; summary?: string; reply?: string } | null {
+): { ops: unknown[]; summary?: string; reply?: string; taskProposal?: unknown } | null {
   const parsed = parseAgentJson<Record<string, unknown>>(raw, (candidate) => {
     if (!candidate || typeof candidate !== 'object') return null;
     const c = candidate as Record<string, unknown>;
@@ -140,16 +170,72 @@ export function parsePlanPatch(
   // even when the step asks for an answer — measured twice on live chats, which
   // both came back as "Answered the question; no plan changes."
   const reply = replyField;
+  // Passed through UNVALIDATED. The caller resolves its refs against the applied
+  // patch and validates the result, because a ref is only checkable once the
+  // patch has run — a node created in the same reply has no uuid until then.
+  const taskProposal = (parsed as { taskProposal?: unknown }).taskProposal;
   return {
     ops,
     ...(typeof summary === 'string' ? { summary } : {}),
     ...(typeof reply === 'string' ? { reply } : {}),
+    ...(taskProposal !== undefined ? { taskProposal } : {}),
   };
+}
+
+/** A resolved offer plus the refs that named nothing, so a caller can say what
+ *  it dropped instead of quietly shrinking the set. */
+export interface ResolvedTaskProposal {
+  proposal: PlanTaskProposal;
+  droppedRefs: string[];
+}
+
+/**
+ * Turn an agent's task offer into one addressed to real nodes.
+ *
+ * Refs can only be resolved AFTER the patch runs: half of them typically name
+ * nodes the same reply created, which have no uuid until then. `refs` is the
+ * applier's patch-local ref -> uuid map, and a ref absent from it is either a
+ * uuid the agent copied from the plan it was shown, or a mistake.
+ *
+ * Returns null rather than throwing anywhere. The offer is the least important
+ * thing in the reply — the plan is already written by the time this runs — so a
+ * malformed one must cost the user nothing but the button.
+ */
+export function resolveTaskProposal(
+  raw: unknown,
+  refs: Record<string, string>,
+): ResolvedTaskProposal | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const candidate = raw as { nodeRefs?: unknown };
+  if (!Array.isArray(candidate.nodeRefs)) return null;
+
+  const droppedRefs: string[] = [];
+  const seen = new Set<string>();
+  for (const ref of candidate.nodeRefs) {
+    if (typeof ref !== 'string') continue;
+    // The same lookup order the applier uses: the map first (a temp id), then
+    // the ref itself once its `node:` marker is stripped (a copied uuid).
+    const resolved = refs[ref] ?? refs[ref.toLowerCase()] ?? null;
+    const bare = stripNodeRefPrefix(ref).toLowerCase();
+    if (resolved) seen.add(resolved);
+    else if (UUID_RE.test(bare)) seen.add(bare);
+    else droppedRefs.push(ref);
+  }
+  if (seen.size === 0) return null;
+
+  const parsed = planTaskProposalSchema.safeParse({ ...raw, nodeRefs: [...seen] });
+  if (!parsed.success) return null;
+  return { proposal: parsed.data, droppedRefs };
 }
 
 /** How much of a prose reply is kept in a transcript. A conversational turn is
  *  a paragraph or two; anything past this is a stream that lost its way. */
 const CONVERSATIONAL_MAX = 8000;
+
+/** Shape test for a ref the agent copied from the rendered plan rather than
+ *  inventing. Matches the applier's own, which is what decides whether a ref
+ *  names an existing node or introduces a new one. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The part of a reply a person can read, for a turn that carried no patch.

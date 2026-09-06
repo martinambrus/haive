@@ -160,7 +160,7 @@ export async function markPlanMirrorDirty(tx: DbOrTx, repositoryId: string): Pro
  * renderer writes with, not a literal, because two spellings of this would drift
  * apart silently — the failure mode is a dropped op, not an error.
  */
-function stripNodeRefPrefix(ref: string): string {
+export function stripNodeRefPrefix(ref: string): string {
   if (!ref.toLowerCase().startsWith(PLAN_NODE_REF_PREFIX)) return ref;
   const bare = ref.slice(PLAN_NODE_REF_PREFIX.length);
   return UUID_RE.test(bare) ? bare : ref;
