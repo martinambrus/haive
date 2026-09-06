@@ -14,6 +14,7 @@ import { defaultDockerRunner, type DockerRunner, type DockerVolumeMount } from '
 import { expandTildeToSandbox } from './cli-auth-volume.js';
 import { buildMcpAddArgv, type McpServerSpec } from './mcp-config.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
+import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 import { SANDBOX_USER_HOME } from './sandbox-runner.js';
 import { CLI_CREDENTIAL_FILES } from '../usage-window/credential-files.js';
 import { readVolumeFile } from '../usage-window/token-source.js';
@@ -126,6 +127,12 @@ async function ensureTaskAuthVolumesUnlocked(
   taskId: string,
   runner: DockerRunner,
 ): Promise<void> {
+  // Before isTaskVolumeReady, not just before the copy helper: that probe reports
+  // readiness as `exitCode === 0` of a container run on HELPER_IMAGE, so a pruned base
+  // reads as "not ready" and the branch below DELETES an already-populated auth volume
+  // before anything fails. Losing credentials to a missing image is not a fair trade.
+  await ensureSandboxCoreImage(HELPER_IMAGE, runner);
+
   const meta = getCliProviderMetadata(ctx.providerName);
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
     const userVol = userVolumeForCtx(ctx, idx);

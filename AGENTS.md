@@ -635,6 +635,37 @@ Costs are stored canonically in USD. `fx_rates` holds daily ECB USD-per-unit rat
 
 `packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. Only the cloned repository is bind-mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end.
 
+**The base image builds itself, and that is why there is no manual first-boot step.**
+`haive-cli-sandbox:latest` is built from `packages/worker/sandbox-image/` and pushed to no
+registry, so `docker image prune` — and a fresh checkout — leave docker resolving a
+Docker Hub repository that does not exist, which is what "pull access denied" means here
+and not an auth problem. `ensureSandboxCoreImage` (`sandbox/sandbox-core-image.ts`) is the
+one builder: fire-and-forget at boot beside `ensureDdevCa` so a pruned host heals BEFORE
+the first task, and again at every site that needs the image — the two build entry points
+(`handleBuildSandboxImageJob`, `resolveBaseImageId`) plus the three that `docker run` the
+base DIRECTLY (`runInSandbox`'s no-derived-image fallback, `ensureTaskAuthVolumes`,
+`ensureIdeVolumes`). Deliberately NOT the three sites that swallow their own failure
+(`usage-window/token-source.ts`, `npm-cache.ts`, the login chown helper) — a throwing call
+inside a deliberately-silent path changes its contract, and they inherit the healed image
+anyway. The in-flight promise is load-bearing rather than a boolean flag: cli-exec runs at
+concurrency 5-7 and a flag set only on success lets every one of them start the same
+multi-minute build.
+
+Two consequences worth keeping. The ensure is a no-op whenever `SANDBOX_IMAGE` names
+something other than the core tag, because building ours over an operator's pinned image
+would silently replace it — the "missing image" failure is then correctly theirs to fix.
+And `packages/worker/Dockerfile`'s production stage must keep copying `sandbox-image/` and
+`docker/`: it otherwise ships only `dist`, which leaves both this self-heal and
+`ensureDdevRunnerImage` with no build context on a deployed host.
+
+`cli_providers.sandbox_image_build_status` is reconciled against the real images on every
+boot (`clearPrunedSandboxImageState`, `data-migrations.ts`). Not cosmetic: a stale `ready`
+clears `createSandboxLoginContainer`'s gate and turns "not built" into `No such image`,
+and a stuck `building` — which nothing else anywhere resets — DISABLES the Rebuild button
+that is the only way out of it. Resetting `building` is safe there and only there, because
+`runDataMigrations` runs before any queue starts and compose pins the worker to one
+instance.
+
 Secret-file masking (default on, Tier 1): before each cli-exec invocation the worker hides files matching a secret deny-list from the AI CLI agent by bind-mounting empty read-only files over them inside the cli-exec sandbox (`packages/worker/src/queues/cli-exec/secret-mask.ts`, threaded via `resolveSecretMasks` in `exec-core.ts` for the `cli`/`agent_mining`/sub-agent kinds). The effective set is `DEFAULT_SECRET_DENY_GLOBS` (in `@haive/shared`) plus per-repo `secret_mask_deny_extend`, minus `DEFAULT_SECRET_CARVEOUTS` and per-repo `secret_mask_allow`. Untracked files only (`git ls-files` filter) — committed secrets are out of scope FOR MASKING, and are instead REPORTED once per repo by the `07_7-secret-sweep` onboarding step (which is why they are two features and not one: masking stops an agent reading a secret, the sweep tells the human one is already in their history). The tracked filter asks each linked worktree about its own paths, because `git ls-files` reports paths relative to the tree it runs in, so the repo root never lists `.haive/worktrees/<name>/x`. The app runtime (app-runner/ddev mount the same `haive_repos` subpath without masks) still sees the real files. Per-repo controls live on the tooling settings page (`secret_mask_enabled`/`secret_mask_allow`/`secret_mask_deny_extend`); `CONFIG_KEYS.SECRET_MASK_ENABLED` is the global kill-switch.
 
 Masking fails closed. A scan that throws, a scan root that is not a readable directory, a match count over `SECRET_MASK_LIMIT`, or a task/repository row that cannot be resolved raises `SecretMaskError` instead of masking a partial set — a subset leaves the remainder readable, which is the one outcome the deny-list exists to prevent. "Masking is off" and "no secrets found" are only ever concluded from evidence that says so: the kill-switch, `secret_mask_enabled`, or a task with no repository (which mounts no tree). The repo root mirrors `resolveTaskRepoMount` exactly, so a repo with no `storage_path` is scanned at its named-volume subpath rather than skipped, and the root is `stat`ed before the scan — glob answers `[]` for a root that does not exist, which is byte-identical to a clean repo, while the sandbox mount binds the real tree regardless of what the worker can see. `handleCliExecJob` records it on the invocation (exit -1) and fails the step. The escape hatches are the repo's `secret_mask_allow` globs and the masking toggles; disabling masking skips the scan and never raises.

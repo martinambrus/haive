@@ -9,6 +9,7 @@ import {
   type DockerVolumeMount,
 } from './docker-runner.js';
 import { createEgressGateway, type EgressGateway } from './egress-gateway.js';
+import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 import { OLLAMA_THINKING_PROXY_HOST } from '../cli-adapters/ollama-thinking-proxy.js';
 import { OPENROUTER_COMPAT_PROXY_HOST } from '../cli-adapters/openrouter-proxy.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
@@ -206,6 +207,12 @@ export async function runInSandbox(
   const wrapperSandboxRoot = options.wrapperSandboxPath ?? DEFAULT_WRAPPER_SANDBOX_PATH;
   const workdir = options.workdir ?? DEFAULT_WORKDIR;
   const runner = options.docker ?? defaultDockerRunner;
+
+  // A provider with no install lines and no Dockerfile extras resolves to no derived image
+  // (image-cache.ts), so this runs the locally-built base DIRECTLY — and a pruned host
+  // would otherwise fail here at `docker run`. A no-op for a derived tag, and for a base
+  // an operator pinned themselves via SANDBOX_IMAGE.
+  await ensureSandboxCoreImage(image, runner);
 
   const mounts: DockerVolumeMount[] = [
     { source: volumeName, target: wrapperSandboxRoot, readOnly: true },

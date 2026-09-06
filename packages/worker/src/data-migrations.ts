@@ -2,6 +2,7 @@ import { and, inArray, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import { withGlobalKb } from '@haive/shared/global-kb';
+import { defaultDockerRunner } from './sandbox/docker-runner.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
 
 const log = logger.child({ module: 'data-migrations' });
@@ -16,6 +17,65 @@ export async function runDataMigrations(db: Database): Promise<void> {
   await skipRemovedSteps(db);
   await supersedePhantomAgentArtifacts(db);
   await dropHeadingOnlyGlobalKbChunks(db);
+  await clearPrunedSandboxImageState(db);
+}
+
+/** Reconcile `cli_providers` sandbox-image state against the images this host actually
+ *  has, and reset the rows that no longer describe reality.
+ *
+ *  Two states go stale, and neither is cosmetic:
+ *
+ *  `ready` — a `docker image prune` leaves the row green while the image is gone. Nothing
+ *  in the exec path is fooled (it inspects the image before it reads the row), but
+ *  createSandboxLoginContainer gates on `status === 'ready'` and then hands the tag to
+ *  dockerode, so a stale row turns "not built yet" into `No such image`.
+ *
+ *  `building` — nothing anywhere resets it. The api writes it before `queue.add`, the
+ *  worker writes it around a build that a SIGKILL can interrupt, and the jobs are
+ *  `removeOnComplete`, so a lost job never comes back. A stuck row blocks Test-connection
+ *  and interactive login, makes the provider form poll every 2.5s forever, and — the trap —
+ *  DISABLES the Rebuild button that is the only way out of it.
+ *
+ *  Resetting `building` unconditionally is safe here and only here: runDataMigrations is
+ *  awaited by bootstrap() before main() starts a single queue, and compose pins the worker
+ *  to one instance (`container_name: haive-worker`), so no build can be in flight at this
+ *  moment. Replicating the worker is what would break this first.
+ *
+ *  `idle` rather than `failed`: the row is not a failure, it is an absence. The build error
+ *  text is left alone so a genuine past failure stays readable. Docker errors are swallowed
+ *  — this runs on the boot path and a docker hiccup must not stop the worker starting. */
+async function clearPrunedSandboxImageState(db: Database): Promise<void> {
+  try {
+    const rows = await db
+      .select({
+        id: schema.cliProviders.id,
+        tag: schema.cliProviders.sandboxImageTag,
+        status: schema.cliProviders.sandboxImageBuildStatus,
+      })
+      .from(schema.cliProviders)
+      .where(inArray(schema.cliProviders.sandboxImageBuildStatus, ['ready', 'building']));
+    if (rows.length === 0) return;
+
+    // Providers whose rendered Dockerfile is identical share one tag, so inspect the
+    // distinct set rather than once per row.
+    const present = new Map<string, boolean>();
+    for (const tag of new Set(rows.map((r) => r.tag).filter((t): t is string => !!t))) {
+      present.set(tag, (await defaultDockerRunner.inspect(tag)).exists);
+    }
+
+    const stale = rows
+      .filter((r) => r.status === 'building' || !r.tag || !present.get(r.tag))
+      .map((r) => r.id);
+    if (stale.length === 0) return;
+
+    await db
+      .update(schema.cliProviders)
+      .set({ sandboxImageBuildStatus: 'idle', updatedAt: new Date() })
+      .where(inArray(schema.cliProviders.id, stale));
+    log.info({ count: stale.length }, 'reset sandbox image state for providers with no image');
+  } catch (err) {
+    log.warn({ err }, 'sandbox image state reconcile skipped');
+  }
 }
 
 /** Template ids removed when the RTK awareness markdown was consolidated into

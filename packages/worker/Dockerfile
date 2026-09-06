@@ -81,4 +81,11 @@ COPY --from=builder /app/packages/database/node_modules ./packages/database/node
 COPY --from=builder /app/packages/worker/package.json ./packages/worker/
 COPY --from=builder /app/packages/worker/dist ./packages/worker/dist
 COPY --from=builder /app/packages/worker/node_modules ./packages/worker/node_modules
+# Docker build contexts the worker builds AT RUNTIME through the mounted socket:
+# sandbox-image/ is haive-cli-sandbox:latest, docker/ddev-runner is haive-ddev-runner.
+# Neither image is published to a registry, so without these the self-heal in
+# sandbox-core-image.ts and ddev-runner.ts has nothing to build from and a pruned (or
+# never-built) prod host cannot recover. Dev gets them from the `.:/app` bind mount.
+COPY --from=builder /app/packages/worker/sandbox-image ./packages/worker/sandbox-image
+COPY --from=builder /app/packages/worker/docker ./packages/worker/docker
 CMD ["node", "packages/worker/dist/index.js"]

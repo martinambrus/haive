@@ -47,6 +47,7 @@ import {
 } from '../../cli-versions/index.js';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js';
+import { ensureSandboxCoreImage } from '../../sandbox/sandbox-core-image.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import { resolveProviderSecrets } from '../../secrets/provider-secrets.js';
 import { provisionOllamaProvider } from '../../sandbox/ollama-provision.js';
@@ -489,6 +490,11 @@ export async function handleBuildSandboxImageJob(
   const dockerfilePath = join(buildDir, 'Dockerfile');
 
   try {
+    // Every rendered Dockerfile here is `FROM haive-cli-sandbox:latest`, which is built
+    // locally and pushed nowhere — so a pruned host makes docker try to PULL it and the
+    // build dies on "pull access denied". Inside the try so the failure lands in
+    // sandbox_image_build_error like any other build failure.
+    await ensureSandboxCoreImage();
     await mkdir(buildDir, { recursive: true });
     await writeFile(dockerfilePath, dockerfileContent, 'utf8');
 

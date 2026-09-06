@@ -11,6 +11,7 @@ import {
   type SandboxImageComposition,
 } from './image-composer.js';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
+import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 
 const log = logger.child({ module: 'composed-image-cache' });
 
@@ -90,6 +91,14 @@ export async function ensureComposedImage(
  * which is the legacy behavior.
  */
 async function resolveBaseImageId(runner: DockerRunner): Promise<string | null> {
+  // Best-effort, because this function's contract is already "null when the base is not
+  // built" and an env-template composition need not reference the base at all. Rebuilding
+  // it here is what stops the silent half of a prune: with no base image the hash below
+  // loses its base contribution, so a composed tag built on the OLD base is then served as
+  // a cache hit against a rebuilt one — the exact drift this id exists to catch.
+  await ensureSandboxCoreImage(SANDBOX_CORE_IMAGE, runner).catch((err: unknown) => {
+    log.warn({ err, baseImage: SANDBOX_CORE_IMAGE }, 'sandbox-core base image rebuild failed');
+  });
   const inspected = await runner.inspect(SANDBOX_CORE_IMAGE);
   if (!inspected.exists) {
     log.warn(

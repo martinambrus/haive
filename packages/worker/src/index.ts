@@ -34,6 +34,7 @@ import { reapOrphanEnvTemplates } from './sandbox/env-template-reaper.js';
 import { reapStaleComposedImages } from './sandbox/composed-image-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js';
+import { ensureSandboxCoreImage } from './sandbox/sandbox-core-image.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
@@ -147,6 +148,16 @@ async function main(): Promise<void> {
   // background; per-model failures are logged, not fatal.
   void ensureOllamaModels(getDb()).catch((err) => {
     logger.warn({ err }, 'ollama model provisioning on boot failed');
+  });
+  // Build the CLI sandbox base image if this host does not have it. It is built locally
+  // and published to no registry, so a `docker image prune` or a fresh checkout removes it
+  // and EVERY cli-exec then dies trying to pull a repository that does not exist. Every
+  // use site ensures it too; doing it here means a pruned host heals before the first task
+  // rather than during it. Non-blocking for the same reason ensureDdevCa is — the build
+  // takes minutes and must not gate queue startup; the ensure is single-flight, so the
+  // first job to need the image joins this build instead of starting a second.
+  void ensureSandboxCoreImage().catch((err) => {
+    logger.warn({ err }, 'sandbox base image provisioning on boot failed');
   });
   // Generate the shared DDEV mkcert CA once (into its named volume) so direct
   // browser access can serve a trusted https://<name>.ddev.site. Non-blocking: a

@@ -121,16 +121,18 @@ Everything builds and runs inside containers — never `pnpm install` or
 poisons the bind-mounted `dist`). Manage the whole stack with `scripts/dev.sh`,
 aliased as `pnpm docker:dev` and `pnpm docker <cmd>`:
 
-| Command                     | What it does                                                                                                                                                     |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm docker:dev`           | Boot the stack (GPU-aware). Alias for `scripts/dev.sh up`.                                                                                                       |
-| `pnpm docker:down`          | Stop the stack; keeps all data (never `-v`).                                                                                                                     |
-| `pnpm docker restart [svc]` | Recreate the stack (or one service) with the shared libs rebuilt once.                                                                                           |
-| `pnpm docker logs [svc]`    | Follow logs.                                                                                                                                                     |
-| `pnpm docker status`        | Show service status.                                                                                                                                             |
-| `pnpm docker libs`          | Rebuild `@haive/shared` + `@haive/database` after editing their source.                                                                                          |
-| `pnpm docker rebuild [svc]` | Pick up a dependency/lockfile change (rebuild image + recreate node_modules volumes). No args = full rebuild; a root/shared/database dep needs the full rebuild. |
-| `pnpm docker reset`         | Full rebuild + wipe compiled `dist` to recover a stale/corrupt build. Preserves all data.                                                                        |
+| Command                     | What it does                                                                                                                                                                                                              |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm docker:dev`           | Boot the stack (GPU-aware). Alias for `scripts/dev.sh up`.                                                                                                                                                                |
+| `pnpm docker:down`          | Stop the stack; keeps all data (never `-v`).                                                                                                                                                                              |
+| `pnpm docker restart [svc]` | Recreate the stack (or one service) with the shared libs rebuilt once.                                                                                                                                                    |
+| `pnpm docker logs [svc]`    | Follow logs.                                                                                                                                                                                                              |
+| `pnpm docker status`        | Show service status.                                                                                                                                                                                                      |
+| `pnpm docker libs`          | Rebuild `@haive/shared` + `@haive/database` after editing their source.                                                                                                                                                   |
+| `pnpm docker rebuild [svc]` | Pick up a dependency/lockfile change (rebuild image + recreate node_modules volumes). No args = full rebuild; a root/shared/database dep needs the full rebuild.                                                          |
+| `pnpm docker reset`         | Full rebuild + wipe compiled `dist` to recover a stale/corrupt build. Preserves all data.                                                                                                                                 |
+| `pnpm docker sandbox-build` | Build the CLI sandbox base image `haive-cli-sandbox:latest`, which every agent container derives from. The worker builds it on its own when it is missing, so this is the manual path — reach for it if that build fails. |
+| `pnpm docker migrate`       | Push the DB schema (`drizzle-kit push --force`).                                                                                                                                                                          |
 
 `rebuild`/`reset` only touch the `node_modules` and `.next` caches — data volumes
 (postgres/redis/repos/…), your own `ddev-*` projects, and per-task runtimes are

@@ -92,8 +92,12 @@ function makeRunner(
       runCalls.push(runOpts);
       return runHandler(runOpts);
     },
+    // Image inspect, not volume. ensureTaskAuthVolumes now guarantees the sandbox base
+    // image before it probes readiness (a missing base makes the probe report "not ready"
+    // and the volume gets deleted), so a provisioned host reports it present — which is
+    // also what keeps the `build should not be called` guard above meaningful.
     async inspect() {
-      return { exists: false, imageId: null };
+      return { exists: true, imageId: 'sha256:test-base' };
     },
     async remove() {
       return { ok: true, stderr: '' };

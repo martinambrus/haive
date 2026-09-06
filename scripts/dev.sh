@@ -173,7 +173,7 @@ Commands:
                      node_modules volumes. No args = full rebuild; a root/shared/database
                      dependency needs the full rebuild (those node_modules are shared).
   reset              Full rebuild + wipe compiled dist (recover a stale/corrupt build).
-  sandbox-build      Build the cli-sandbox image.
+  sandbox-build      Build the cli-sandbox image (the worker also builds it when missing).
   migrate            Push the DB schema (drizzle-kit push --force).
   help               This text.
 
@@ -181,7 +181,11 @@ HAIVE_GPU=cpu <cmd>  Skip the GPU probes and boot Ollama on CPU on purpose.
 
 rebuild/reset only ever touch the node_modules and .next caches — data volumes
 (postgres/redis/repos/…), your own ddev-* projects, and per-task runtimes are
-never touched. Never run `down -v` or `docker volume prune` against this stack.
+never touched. Never run `down -v` or `docker volume prune` against this stack — the
+CLI auth volumes hold your logins and nothing can rebuild them. `docker image prune`
+is survivable but not free: it deletes the locally-built haive-cli-sandbox and
+haive-ddev-runner images, which the worker then rebuilds, costing minutes on the next
+task.
 EOF
 }
 

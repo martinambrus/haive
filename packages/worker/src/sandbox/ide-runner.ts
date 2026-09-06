@@ -15,6 +15,7 @@ import {
 } from '@haive/shared';
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
 import { defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
+import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 
 // Per-task browser IDE: a code-server container serving the task's worktree as its
 // ONLY workspace folder. It mirrors the app-runner's lifecycle (long-lived
@@ -103,6 +104,10 @@ export async function ensureIdeVolumes(
   userId: string,
   settingsJson: string,
 ): Promise<{ extVolume: string; udataVolume: string }> {
+  // The seed helper below runs on HELPER_IMAGE, which is built locally and pushed to no
+  // registry — a pruned host fails here and the Editor tab never opens.
+  await ensureSandboxCoreImage(HELPER_IMAGE);
+
   const extVolume = ideExtensionsVolumeName(userId);
   const udataVolume = ideUserDataVolumeName(taskId);
 
