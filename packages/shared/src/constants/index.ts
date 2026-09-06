@@ -696,8 +696,10 @@ export function ideSessionKey(taskId: string): string {
  *  ensures the runtime (it alone can read the runner's live published ports); the
  *  web "Open in your browser" card renders them as links. `kind` discriminates the
  *  exposure mechanism:
- *   - `localhost`     a host-published loopback port (app-runner, and the DDEV http
- *                     fallback): `http://localhost:<port>`.
+ *   - `localhost`     a host-published loopback port, straight off the container with no
+ *                     router in front: `http://localhost:<port>`. APP-RUNNER ONLY — DDEV
+ *                     cannot use it, because its router matches the project hostname and
+ *                     answers `Host: localhost` with a 404 (see `ddevAccessUrls`).
  *   - `ddev-http` / `ddev-https`  the project's `*.ddev.site` name on its published
  *                     port; the only form that routes correctly for DDEV apps that
  *                     hard-code their hostname.

@@ -822,19 +822,23 @@ export function decideMailpitHostUrls(
 }
 
 /** The user-facing URLs for opening this task's DDEV app in their OWN browser: the
- *  project's *.ddev.site name on its published https/http ports (the only form that
- *  routes for DDEV apps that hard-code their hostname) plus a localhost fallback.
- *  Ports come from the runner's labels (the real post-retry values); the hostname
- *  from the live primary_url. Empty when nothing was published (direct access off
- *  at runner start).
+ *  project's *.ddev.site name on its published https/http ports. Ports come from the
+ *  runner's labels (the real post-retry values); the hostname from the live primary_url.
+ *  Empty when nothing was published (direct access off at runner start).
  *
- *  The project's Mailpit UI rides the same list when its ports were published. It gets NO
- *  localhost twin, unlike the app above: the router matches `HostRegexp(^<project>\.ddev\.
- *  site$)` and there is no catch-all, so a `Host: localhost` request is answered 404
- *  (MEASURED on a live runner, along with the app's own localhost entry — which is
- *  pre-existing and left alone here). Its URLs come from DDEV rather than being composed,
- *  so a project that reconfigured or omitted Mailpit contributes nothing instead of a
- *  guess. */
+ *  That name is the ONLY form offered, and a `localhost` twin is not a missing convenience
+ *  — it cannot work. The runner's whole traefik config carries exactly one rule,
+ *  `HostRegexp(^<project>\.ddev\.site$)`, and `default_config.yaml` holds only TLS stores,
+ *  so there is no catch-all: MEASURED, `Host: localhost` is answered 404 while
+ *  `Host: <project>.ddev.site:9999` answers 200 — the router strips the port and matches
+ *  the NAME, on every entrypoint. Nothing here registers `additional_hostnames`. A
+ *  `localhost` entry shipped in this list from 83897d67 until it was removed, and had
+ *  never routed. `kind: 'localhost'` itself stays correct for `appRunnerAccessUrls`, whose
+ *  port is published straight off the container with no router in front.
+ *
+ *  The project's Mailpit UI rides the same list when its ports were published, and is
+ *  bound by the same rule. Its URLs come from DDEV rather than being composed, so a
+ *  project that reconfigured or omitted Mailpit contributes nothing instead of a guess. */
 export async function ddevAccessUrls(
   handle: DdevRunnerHandle,
   taskId: string,
@@ -865,7 +869,6 @@ export async function ddevAccessUrls(
       trusted: ddevCaReady,
     },
     { kind: 'ddev-http', label: 'DDEV (HTTP)', url: `http://${host}:${ports.http}` },
-    { kind: 'localhost', label: 'Localhost', url: `http://localhost:${ports.http}` },
     ...(mailpit.https
       ? [
           {
