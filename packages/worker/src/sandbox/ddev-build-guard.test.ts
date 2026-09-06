@@ -9,7 +9,10 @@ import {
   isDdevBuildInputFailure,
   isDdevContainerConfigFailure,
   isDdevEntrypointRuntimeFailure,
+  isDdevAptPinFailure,
   isDdevHookFailure,
+  parseUnresolvableAptPins,
+  unpinAptPackages,
 } from './ddev-build-guard.js';
 import { findDdevNginxIncludeCollisions } from './ddev-nginx-include-guard.js';
 
@@ -396,5 +399,101 @@ describe('the host-level veto is scoped to the line that carries the config erro
           'nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)',
       ),
     ).toBe(false);
+  });
+});
+
+// Task 75d8cbab ("selective PDF field visibility", elmont_rs_185-testa), 2026-09-06, verbatim
+// shape. The project's own `.ddev/db-build/Dockerfile` pinned a pgvector version pgdg had
+// since rolled off its index (it carries 0.8.6/0.8.5/0.8.4 and nothing older). The stored
+// failure is the whole 618 chars — note it carries NO BuildKit sentinel, which is exactly why
+// isDdevBuildInputFailure returned false and 01c hard-failed with no fix loop to route to.
+const APT_PIN_FAILURE =
+  'ddev start failed: #26 CANCELED\n' +
+  '------\n' +
+  ' > [db 8/9] RUN apt-get update && apt-get install -y postgresql-17-pgvector=0.8.1* ' +
+  '&& rm -rf /var/lib/apt/lists/*:\n' +
+  '0.820 Hit:3 http://deb.debian.org/debian-security trixie-security InRelease\n' +
+  '0.820 Hit:4 http://apt.postgresql.org/pub/repos/apt trixie-pgdg InRelease\n' +
+  '5.478 Package postgresql-17-pgvector is not available, but is referred to by another package.\n' +
+  "5.482 E: Version '0.8.1*' for 'postgresql-17-pgvector' was not found\n" +
+  '------\n';
+
+describe('parseUnresolvableAptPins', () => {
+  it('names the package and version from the failure that killed task 75d8cbab', () => {
+    expect(parseUnresolvableAptPins(APT_PIN_FAILURE)).toEqual([
+      { package: 'postgresql-17-pgvector', version: '0.8.1*' },
+    ]);
+  });
+
+  it('de-duplicates a package apt reported more than once', () => {
+    const twice =
+      "E: Version '1.2' for 'foo' was not found\nE: Version '1.2' for 'foo' was not found\n";
+    expect(parseUnresolvableAptPins(twice)).toHaveLength(1);
+  });
+
+  // A failed `apt-get update` produces these two, so they would route a HOST network problem
+  // to the implementing agent. The version error cannot: apt found the package, which proves
+  // it read the index, so only the project's own pin is wrong.
+  it('ignores the resolution errors a broken apt-get update also produces', () => {
+    expect(parseUnresolvableAptPins('E: Unable to locate package postgresql-17-pgvector')).toEqual(
+      [],
+    );
+    expect(
+      parseUnresolvableAptPins("E: Package 'postgresql-17-pgvector' has no installation candidate"),
+    ).toEqual([]);
+  });
+
+  it('finds nothing in a healthy build', () => {
+    expect(isDdevAptPinFailure('#26 DONE 5.4s')).toBe(false);
+  });
+
+  // Without this the pin reaches 07c classified as host-level and hard-fails the task, even
+  // though the only apt lines a DDEV build runs come from files the implementation owns.
+  it('routes the pin failure to the implementing agent', () => {
+    expect(isDdevBuildInputFailure(APT_PIN_FAILURE)).toBe(true);
+    expect(isDdevAgentFixableFailure(APT_PIN_FAILURE)).toBe(true);
+  });
+});
+
+describe('unpinAptPackages', () => {
+  it('drops the pin from the line that failed, leaving the rest of the command intact', () => {
+    const before =
+      '# Install pgvector\n' +
+      'RUN apt-get update && apt-get install -y postgresql-17-pgvector=0.8.1* ' +
+      '&& rm -rf /var/lib/apt/lists/*\n';
+    expect(unpinAptPackages(before, ['postgresql-17-pgvector'])).toBe(
+      '# Install pgvector\n' +
+        'RUN apt-get update && apt-get install -y postgresql-17-pgvector ' +
+        '&& rm -rf /var/lib/apt/lists/*\n',
+    );
+  });
+
+  it('leaves a pin apt did not complain about exactly as it is', () => {
+    // The whole bargain: this runs off apt's verdict, so a pin that still resolves — and a
+    // pin against an archival source, where it is correct — is never relaxed.
+    const before = 'RUN apt-get install -y ddev=1.25.3 postgresql-17-pgvector=0.8.1*\n';
+    expect(unpinAptPackages(before, ['postgresql-17-pgvector'])).toBe(
+      'RUN apt-get install -y ddev=1.25.3 postgresql-17-pgvector\n',
+    );
+  });
+
+  it('does not match a package whose name is a suffix of the pinned one', () => {
+    expect(unpinAptPackages('RUN apt-get install -y libfoo-dev=1.0\n', ['foo-dev'])).toBeNull();
+  });
+
+  it('handles a name carrying regex metacharacters', () => {
+    expect(unpinAptPackages('RUN apt-get install -y libstdc++6=12.2\n', ['libstdc++6'])).toBe(
+      'RUN apt-get install -y libstdc++6\n',
+    );
+  });
+
+  it('stops the pin at a line continuation', () => {
+    expect(unpinAptPackages('RUN apt-get install -y foo=1.0 \\\n    && true\n', ['foo'])).toBe(
+      'RUN apt-get install -y foo \\\n    && true\n',
+    );
+  });
+
+  it('returns null when nothing was pinned', () => {
+    expect(unpinAptPackages('RUN apt-get install -y foo\n', ['foo'])).toBeNull();
   });
 });

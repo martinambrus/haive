@@ -63,8 +63,9 @@ const ABSENT_COMMANDS = new Map<string, string>([
   ['apk', DEBIAN_ADVICE],
 ]);
 
-/** The directories DDEV splices into its generated image Dockerfiles. */
-const BUILD_DIRS = ['web-build', 'db-build'];
+/** The directories DDEV splices into its generated image Dockerfiles. Exported because the
+ *  runner-side pin repair rewrites exactly the set this module reads. */
+export const BUILD_DIRS = ['web-build', 'db-build'];
 
 /** `Dockerfile` and `Dockerfile.<suffix>` are included in the build; `Dockerfile.example`
  *  is DDEV's own inert sample — the generated `.ddev/.gitignore` excludes every `*.example`
@@ -224,6 +225,76 @@ export async function checkDdevBuildInputs(workspace: string): Promise<string | 
   return findDdevBuildBreakage(files);
 }
 
+/** An apt version pin the package repo no longer offers, as apt itself reported it. */
+export interface UnresolvableAptPin {
+  /** Package name exactly as apt named it, which is how the Dockerfile spelled it. */
+  package: string;
+  /** Version spec that no longer resolves, e.g. `0.8.1*`. */
+  version: string;
+}
+
+/** apt's own error for a pinned version its index does not carry. A fixed format string in
+ *  apt's source, so this is a stable error ID — the same class of invariant as nginx's
+ *  `[emerg]` and apache's AH00526 above, and unlike BuildKit's wrapper wording, which a
+ *  truncated DDEV output does not reliably carry. Task 75d8cbab is where that mattered: the
+ *  stored failure was 618 chars of BuildKit detail with no `failed to solve` line anywhere in
+ *  it, so isDdevBuildInputFailure returned false and a rolled-off pin hard-failed the task.
+ *
+ *  Deliberately NOT joined by apt's other resolution errors. `Unable to locate package` and
+ *  `has no installation candidate` are also what a FAILED `apt-get update` produces, so they
+ *  would route a host network problem to the implementing agent — the expensive direction.
+ *  This one is unambiguous: apt found the package and only the pinned version is missing, so
+ *  the index was fetched and the pin is the project's own.
+ *
+ *  Anchored on a WHITESPACE boundary rather than line start: BuildKit prefixes every line of
+ *  a build step's output with its elapsed seconds, so the line reaching us reads
+ *  `5.482 E: Version '0.8.1*' for '…' was not found` and a `^E:` anchor matches none of them. */
+const APT_MISSING_VERSION_RE = /(?:^|\s)E: Version '([^']*)' for '([^']*)' was not found/gm;
+
+/** Every version pin in a build failure that the package repo no longer offers, de-duplicated
+ *  by package. Empty when apt reported no such error, which is the normal path. */
+export function parseUnresolvableAptPins(output: string): UnresolvableAptPin[] {
+  const pins = new Map<string, UnresolvableAptPin>();
+  for (const match of output.matchAll(APT_MISSING_VERSION_RE)) {
+    const pkg = match[2] ?? '';
+    if (pkg) pins.set(pkg, { package: pkg, version: match[1] ?? '' });
+  }
+  return [...pins.values()];
+}
+
+/** True when a DDEV bring-up died on an apt version pin the repo has rolled off. */
+export function isDdevAptPinFailure(errorMessage: string): boolean {
+  return parseUnresolvableAptPins(errorMessage).length > 0;
+}
+
+/** Regex-safe form of one apt package name. `+` and `.` are both legal in a Debian package
+ *  name (`libstdc++6`, `python3.12-venv`) and both are regex metacharacters. */
+function escapeForRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * `content` with the `=<version>` pin dropped from each named package, or null when none of
+ * them is pinned in it.
+ *
+ * Only the packages apt NAMED are touched, and unpinning is the whole repair — there is no
+ * version to bump TO. The pin breaks precisely because its repo does not archive: MEASURED on
+ * task 75d8cbab, pgdg's trixie index offers pgvector 0.8.6/0.8.5/0.8.4 and nothing older, so
+ * `postgresql-17-pgvector=0.8.1*` resolved when it was written and cannot now, and any
+ * replacement pin rolls off the same way. Pins against archival sources — npm, PyPI, git tags,
+ * Microsoft's Edge apt repo (184 debs across 39 majors) — are correct and durable, and are
+ * never reached here because apt never complains about them.
+ */
+export function unpinAptPackages(content: string, packages: string[]): string | null {
+  let out = content;
+  for (const pkg of packages) {
+    // The version spec runs to the next shell boundary: whitespace, or the backslash that
+    // continues a Dockerfile line.
+    out = out.replace(new RegExp(`(^|\\s)${escapeForRegex(pkg)}=[^\\s\\\\]+`, 'g'), `$1${pkg}`);
+  }
+  return out === content ? null : out;
+}
+
 /** VOLATILE: BuildKit's failure wording, not a contract. A miss only costs us today's
  *  behaviour (the step fails outright instead of looping back), never correctness, so it
  *  degrades gracefully — same trade as isDdevVersionConstraintFailure in ddev-runner. */
@@ -248,7 +319,11 @@ const BUILDKIT_FAILURE_RE = /did not complete successfully: exit code:|failed to
  * host-level and hard-fails, which is the pre-existing behaviour rather than a new one.
  */
 export function isDdevBuildInputFailure(errorMessage: string): boolean {
-  return errorMessage.includes(DDEV_BUILD_INPUT_PREFIX) || BUILDKIT_FAILURE_RE.test(errorMessage);
+  return (
+    errorMessage.includes(DDEV_BUILD_INPUT_PREFIX) ||
+    BUILDKIT_FAILURE_RE.test(errorMessage) ||
+    isDdevAptPinFailure(errorMessage)
+  );
 }
 
 /** Fatal, config-caused errors from the daemons inside the web/db containers, keyed on ERROR

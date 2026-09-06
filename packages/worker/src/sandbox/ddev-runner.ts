@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +35,13 @@ import {
   markBrowserDesktopDown,
   markBrowserDesktopUp,
 } from './runtime-admission.js';
+import {
+  BUILD_DIRS,
+  isBuildDockerfile,
+  isDdevAptPinFailure,
+  parseUnresolvableAptPins,
+  unpinAptPackages,
+} from './ddev-build-guard.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
@@ -503,6 +510,59 @@ async function repairVersionConstraint(
     log.warn({ taskId, configPath, err }, 'could not relax the ddev_version_constraint');
     return false;
   }
+}
+
+/** Drop apt version pins the package repo no longer offers from the project's own DDEV build
+ *  Dockerfiles, in place. Called only after apt has already rejected the pin, so it costs
+ *  nothing on the normal path and apt's verdict — not our reading of any package index — is
+ *  what triggers it, exactly as repairVersionConstraint leans on DDEV's own rejection.
+ *
+ *  A rolled-off pin fails IDENTICALLY on every retry and no later step can reach it: the only
+ *  bring-up before implementation is 01c, which has no fix loop, so without this the task is
+ *  dead on a line that was correct the day it was written. See {@link unpinAptPackages} for
+ *  why unpinning rather than bumping is the repair.
+ *
+ *  Only `.ddev/{web,db}-build/Dockerfile*` is rewritten. The same pin in
+ *  `*image_extra_packages` in config.yaml is left alone and reaches the implementing agent
+ *  instead, via isDdevBuildInputFailure. Best-effort throughout: an unreadable or unwritable
+ *  tree is not a new failure mode, it falls back to the error the caller was about to throw. */
+async function repairAptVersionPins(
+  taskId: string,
+  repoSubpath: string,
+  ddevOutput: string,
+  onProgress?: (line: string) => void,
+): Promise<boolean> {
+  const pins = parseUnresolvableAptPins(ddevOutput);
+  if (pins.length === 0) return false;
+  const packages = pins.map((pin) => pin.package);
+  const ddevDir = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath, '.ddev');
+  let repaired = false;
+  for (const dir of BUILD_DIRS) {
+    const buildDir = path.join(ddevDir, dir);
+    const names = await readdir(buildDir).catch(() => null);
+    if (names === null) continue;
+    for (const name of names.filter(isBuildDockerfile).sort()) {
+      const file = path.join(buildDir, name);
+      try {
+        const before = await readFile(file, 'utf8');
+        const after = unpinAptPackages(before, packages);
+        if (after === null) continue;
+        await writeFile(file, after, 'utf8');
+        repaired = true;
+        log.warn(
+          { taskId, file, packages },
+          'dropped apt version pins the package repo no longer offers',
+        );
+        onProgress?.(
+          `.ddev/${dir}/${name} pins ${pins.map((pin) => `${pin.package}=${pin.version}`).join(', ')}, ` +
+            `which the package repo no longer offers — removed the pin and retrying`,
+        );
+      } catch (err) {
+        log.warn({ taskId, file, err }, 'could not drop the apt version pin');
+      }
+    }
+  }
+  return repaired;
 }
 
 /** Actionable failure for an unsatisfiable version pin — names the fix (relax the pin to a
@@ -1487,6 +1547,13 @@ async function ensureDdevStartedInner(
       // transiently. The images are built now, so one retry usually clears it.
       log.warn({ taskId, output: start.output.slice(-800) }, 'ddev start failed; retrying once');
       start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
+    }
+    // Last resort, after the transient retry has already failed: a version pin the package
+    // repo has rolled off cannot clear on a retry, and 01c has no fix loop to route it to.
+    if (start.exitCode !== 0 && isDdevAptPinFailure(start.output)) {
+      if (await repairAptVersionPins(taskId, repoSubpath, start.output, opts.onProgress)) {
+        start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
+      }
     }
     if (start.exitCode !== 0) {
       throw new Error(await ddevFailureMessage(handle, 'ddev start failed', start.output));
