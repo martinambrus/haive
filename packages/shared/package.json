@@ -47,6 +47,10 @@
       "types": "./dist/review/index.d.ts",
       "import": "./dist/review/index.js"
     },
+    "./stats": {
+      "types": "./dist/stats/index.d.ts",
+      "import": "./dist/stats/index.js"
+    },
     "./global-kb": {
       "types": "./dist/global-kb/index.d.ts",
       "import": "./dist/global-kb/index.js"

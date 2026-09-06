@@ -26,6 +26,7 @@ import { ddevControlRoutes } from './routes/ddev-control.js';
 import { systemRoutes } from './routes/system.js';
 import { taskRoutes } from './routes/tasks.js';
 import { usageWindowRoutes } from './routes/usage-window.js';
+import { statsRoutes } from './routes/stats/index.js';
 import { upgradeRoutes } from './routes/upgrades.js';
 import { toolingUpgradeRoutes } from './routes/tooling-upgrades.js';
 import { planRoutes } from './routes/plan.js';
@@ -72,6 +73,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/tasks', taskRoutes);
   app.route('/system', systemRoutes);
   app.route('/usage-window', usageWindowRoutes);
+  app.route('/stats', statsRoutes);
   app.route('/rag', ragRoutes);
   app.route('/ddev', ddevControlRoutes);
   app.route('/internal', internalRoutes);

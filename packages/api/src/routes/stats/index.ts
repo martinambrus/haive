@@ -1,0 +1,640 @@
+import { Hono } from 'hono';
+import { and, eq, gte, inArray, isNotNull, isNull, lt, notInArray, or, sql } from 'drizzle-orm';
+import type { SQL } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { CONFIG_KEYS, configService, isDisplayCurrency } from '@haive/shared';
+import { computeTaskTiming } from '@haive/shared/timing';
+import {
+  computeBusySpan,
+  computeDelta,
+  dayKey,
+  dayKeysBetween,
+  knownTaskTypes,
+  previousWindow,
+  resolveTaskClass,
+  sampledRatio,
+  sumNormalizedTokens,
+  TASK_CLASSES,
+  typesForClass,
+  type Delta,
+  type TaskClass,
+} from '@haive/shared/stats';
+import { getDb } from '../../db.js';
+import { requireAuth } from '../../middleware/auth.js';
+import { HttpError, type AppEnv } from '../../context.js';
+import {
+  realCostRowSql,
+  realCostUsdSql,
+  notionalCostRowSql,
+  notionalCostUsdSql,
+  resolveCostDisplay,
+  sumProviderBreakdownWhere,
+  type CostDisplay,
+  type TaskProviderUsage,
+} from '../tasks/_helpers.js';
+import { parseStatsQuery, type StatsQuery } from './_query.js';
+
+export const statsRoutes = new Hono<AppEnv>();
+
+statsRoutes.use('*', requireAuth);
+
+/** Task statuses that mean "this task produced nothing".
+ *
+ *  Surfaced as its own figure because it is otherwise invisible and it is large: MEASURED on
+ *  the dev install, 14 of 25 tasks (56%) ended this way, consuming 13% of notional spend and
+ *  29% of all agent-hours. */
+const ABANDONED_STATUSES = ['failed', 'cancelled'] as const;
+
+/** The reconciliation filter every invocation rollup in this codebase carries. Without it a
+ *  window's totals stop matching the per-task figures the task pages already show:
+ *  superseded rows are re-rolled work, and a row attributed to no step at all predates the
+ *  summary-attribution column and must stay out of both sides. */
+function invocationAttributionFilter(): SQL {
+  return and(
+    isNull(schema.cliInvocations.supersededAt),
+    or(
+      isNotNull(schema.cliInvocations.taskStepId),
+      isNotNull(schema.cliInvocations.summaryForStepId),
+    ),
+  )!;
+}
+
+/** Scope predicate shared by every query: ownership plus the facets.
+ *
+ *  `cli_invocations`, `task_steps` and `review_findings` carry no `user_id`, so ownership is
+ *  always reached through `tasks` — the caller is responsible for having joined it. */
+function taskScopeFilter(q: StatsQuery, userId: string): SQL[] {
+  const terms: SQL[] = [];
+  if (!q.allUsers) terms.push(eq(schema.tasks.userId, userId));
+  if (q.repositoryId) terms.push(eq(schema.tasks.repositoryId, q.repositoryId));
+  if (q.taskClass) {
+    const types = typesForClass(q.taskClass);
+    // `other` is defined negatively — whatever the type table does not name — so it cannot be
+    // expressed as an IN list. See typesForClass.
+    terms.push(
+      types
+        ? inArray(schema.tasks.type, types as never[])
+        : notInArray(schema.tasks.type, knownTaskTypes() as never[]),
+    );
+  }
+  return terms;
+}
+
+interface TaskClassCount {
+  taskClass: TaskClass;
+  started: number;
+  completed: number;
+  abandoned: number;
+}
+
+interface SpendTotals {
+  realUsd: number;
+  notionalUsd: number;
+  unpricedInvocations: number;
+  invocations: number;
+}
+
+/** Real + notional spend over an arbitrary invocation predicate.
+ *
+ *  Both halves are reported. On a subscription plan the real number is 0.00 and the whole
+ *  value of the product is in the counterfactual — MEASURED on the dev install, $0.00 real
+ *  against $717.16 notional across five days — so showing only "spend" would report this
+ *  install as costing nothing and saving nothing. */
+async function spendOver(
+  db: ReturnType<typeof getDb>,
+  where: SQL | undefined,
+): Promise<SpendTotals> {
+  const [row] = await db
+    .select({
+      realUsd: realCostUsdSql(),
+      notionalUsd: notionalCostUsdSql(),
+      invocations: sql<number>`count(*)::int`,
+      unpricedInvocations: sql<number>`count(*) filter (where ${schema.cliInvocations.cost} ->> 'source' = 'none')::int`,
+    })
+    .from(schema.cliInvocations)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+    .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
+    .where(where);
+  return {
+    realUsd: Number(row?.realUsd) || 0,
+    notionalUsd: Number(row?.notionalUsd) || 0,
+    invocations: Number(row?.invocations) || 0,
+    unpricedInvocations: Number(row?.unpricedInvocations) || 0,
+  };
+}
+
+/** Agent-hours and the busy-span union over an arbitrary invocation predicate.
+ *
+ *  Fetches one narrow row per invocation because the union cannot be computed from an
+ *  aggregate — see the module comment on computeBusySpan for why this is JS and not SQL. */
+async function timeOver(
+  db: ReturnType<typeof getDb>,
+  where: SQL | undefined,
+  timeZone: string,
+): Promise<ReturnType<typeof computeBusySpan>> {
+  const rows = await db
+    .select({
+      start: schema.cliInvocations.startedAt,
+      end: schema.cliInvocations.endedAt,
+    })
+    .from(schema.cliInvocations)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+    .where(
+      and(
+        where,
+        isNotNull(schema.cliInvocations.startedAt),
+        isNotNull(schema.cliInvocations.endedAt),
+      ),
+    );
+  return computeBusySpan(rows, { timeZone });
+}
+
+/** Effort (agent work + the user's own focused time) for the tasks that COMPLETED in a window.
+ *
+ *  Effort has no timestamps — `idle_ms` and `user_active_ms` are client-posted durations with
+ *  no location in time — so it can only be attributed to a task and then bucketed by that
+ *  task's completion. It can never be unioned or charted "per day of expenditure". */
+async function effortOver(
+  db: ReturnType<typeof getDb>,
+  taskRows: Array<{ id: string; completedAt: Date | null }>,
+): Promise<{ workMs: number; idleMs: number; userActiveMs: number; effortMs: number }> {
+  if (taskRows.length === 0) return { workMs: 0, idleMs: 0, userActiveMs: 0, effortMs: 0 };
+  const stepRows = await db
+    .select({
+      taskId: schema.taskSteps.taskId,
+      startedAt: schema.taskSteps.startedAt,
+      endedAt: schema.taskSteps.endedAt,
+      idleMs: schema.taskSteps.idleMs,
+      userActiveMs: schema.taskSteps.userActiveMs,
+      waitingStartedAt: schema.taskSteps.waitingStartedAt,
+      status: schema.taskSteps.status,
+      carriedWorkMs: schema.taskSteps.carriedWorkMs,
+      carriedIdleMs: schema.taskSteps.carriedIdleMs,
+      carriedUserActiveMs: schema.taskSteps.carriedUserActiveMs,
+    })
+    .from(schema.taskSteps)
+    .where(
+      inArray(
+        schema.taskSteps.taskId,
+        taskRows.map((t) => t.id),
+      ),
+    );
+
+  const byTask = new Map<string, (typeof stepRows)[number][]>();
+  for (const s of stepRows) {
+    const list = byTask.get(s.taskId);
+    if (list) list.push(s);
+    else byTask.set(s.taskId, [s]);
+  }
+
+  const now = Date.now();
+  let workMs = 0;
+  let idleMs = 0;
+  let userActiveMs = 0;
+  for (const t of taskRows) {
+    // Capped at the task's own completion instant, never the live clock: a step whose
+    // ended_at was never stamped otherwise bills start -> now as work and grows on every
+    // request. One such row read 670 h against a 1.78 h wall before this cap existed.
+    const endMs = t.completedAt ? t.completedAt.getTime() : now;
+    const timing = computeTaskTiming(byTask.get(t.id) ?? [], endMs);
+    workMs += timing.workMs;
+    idleMs += timing.idleMs;
+    userActiveMs += timing.userActiveMs;
+  }
+  return { workMs, idleMs, userActiveMs, effortMs: workMs + userActiveMs };
+}
+
+/** Per-provider token totals, normalised for the cache-inclusive reporters before summing.
+ *
+ *  The order matters: codex and gemini report `input` INCLUSIVE of the cached prefix, so
+ *  adding raw fields across providers and normalising once at the end mixes two different
+ *  definitions of the same column. See `sumNormalizedTokens`. */
+function normalizeBreakdown(breakdown: TaskProviderUsage[]) {
+  return sumNormalizedTokens(
+    breakdown.map((p) => ({
+      provider: p.provider,
+      inputTokens: p.inputTokens,
+      outputTokens: p.outputTokens,
+      cacheReadTokens: p.cacheReadTokens,
+      cacheCreationTokens: p.cacheCreationTokens,
+    })),
+  );
+}
+
+/**
+ * Range summary: what this window cost, saved, ran and produced.
+ *
+ * THREE CLOCKS, each labelled, because one window cannot mean the same thing for all of them:
+ *  - spend / tokens / agent-hours / busy span are scoped by `cli_invocations.started_at` —
+ *    money is spent when the agent ran, whatever the task's own dates are;
+ *  - `tasks.started` is scoped by `tasks.created_at` — what you set off in this window;
+ *  - `tasks.completed` and all effort are scoped by `tasks.completed_at` — what finished.
+ * A task started before the window and finished inside it therefore counts in `completed` but
+ * not in `started`, which is the honest reading of both questions rather than a compromise
+ * that answers neither.
+ */
+statsRoutes.get('/summary', async (c) => {
+  const userId = c.get('userId');
+  const q = parseStatsQuery(c.req.query());
+  if (q.allUsers && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for install-wide statistics');
+  }
+  const db = getDb();
+
+  const from = new Date(q.fromMs);
+  const to = new Date(q.toMs);
+  const prev = previousWindow({ fromMs: q.fromMs, toMs: q.toMs });
+  const prevFrom = new Date(prev.fromMs);
+  const prevTo = new Date(prev.toMs);
+
+  const scope = taskScopeFilter(q, userId);
+  const providerTerm = q.cliProviderId
+    ? [eq(schema.cliInvocations.cliProviderId, q.cliProviderId)]
+    : [];
+
+  // Half-open [from, to): a row exactly on the boundary belongs to one window only, so the
+  // current and previous windows can never double-count it.
+  const invocationWindow = (lo: Date, hi: Date): SQL =>
+    and(
+      ...scope,
+      ...providerTerm,
+      invocationAttributionFilter(),
+      gte(schema.cliInvocations.startedAt, lo),
+      lt(schema.cliInvocations.startedAt, hi),
+    )!;
+
+  const [spend, prevSpend, breakdown, busy, prevBusy] = await Promise.all([
+    spendOver(db, invocationWindow(from, to)),
+    spendOver(db, invocationWindow(prevFrom, prevTo)),
+    sumProviderBreakdownWhere(db, invocationWindow(from, to)),
+    timeOver(db, invocationWindow(from, to), q.timeZone),
+    timeOver(db, invocationWindow(prevFrom, prevTo), q.timeZone),
+  ]);
+
+  // What the abandoned half of the window consumed. Same window, restricted to tasks that
+  // ended with nothing to show for it.
+  const abandonedSpend = await spendOver(
+    db,
+    and(invocationWindow(from, to), inArray(schema.tasks.status, [...ABANDONED_STATUSES]))!,
+  );
+  const abandonedTime = await timeOver(
+    db,
+    and(invocationWindow(from, to), inArray(schema.tasks.status, [...ABANDONED_STATUSES]))!,
+    q.timeZone,
+  );
+
+  // Tasks STARTED in the window, by class and outcome.
+  const startedRows = await db
+    .select({
+      type: schema.tasks.type,
+      status: schema.tasks.status,
+      metadata: schema.tasks.metadata,
+      executionPath: schema.tasks.executionPath,
+      n: sql<number>`count(*)::int`,
+    })
+    .from(schema.tasks)
+    .where(and(...scope, gte(schema.tasks.createdAt, from), lt(schema.tasks.createdAt, to)))
+    .groupBy(
+      schema.tasks.type,
+      schema.tasks.status,
+      schema.tasks.metadata,
+      schema.tasks.executionPath,
+    );
+
+  const byClass = new Map<TaskClass, TaskClassCount>();
+  for (const cls of TASK_CLASSES) {
+    byClass.set(cls, { taskClass: cls, started: 0, completed: 0, abandoned: 0 });
+  }
+  let started = 0;
+  let startedAbandoned = 0;
+  for (const row of startedRows) {
+    const n = Number(row.n) || 0;
+    const { taskClass } = resolveTaskClass({
+      type: row.type,
+      metadata: row.metadata,
+      executionPath: row.executionPath,
+    });
+    const entry = byClass.get(taskClass)!;
+    entry.started += n;
+    if (row.status === 'completed') entry.completed += n;
+    if ((ABANDONED_STATUSES as readonly string[]).includes(row.status)) {
+      entry.abandoned += n;
+      startedAbandoned += n;
+    }
+    started += n;
+  }
+
+  const [prevStartedRow] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.tasks)
+    .where(
+      and(...scope, gte(schema.tasks.createdAt, prevFrom), lt(schema.tasks.createdAt, prevTo)),
+    );
+
+  // Tasks COMPLETED in the window — the population effort and estimates are measured over.
+  const completedRows = await db
+    .select({
+      id: schema.tasks.id,
+      completedAt: schema.tasks.completedAt,
+      estimatedTimeHours: schema.tasks.estimatedTimeHours,
+      aiEstimatedTimeHours: schema.tasks.aiEstimatedTimeHours,
+    })
+    .from(schema.tasks)
+    .where(
+      and(
+        ...scope,
+        eq(schema.tasks.status, 'completed'),
+        isNotNull(schema.tasks.completedAt),
+        gte(schema.tasks.completedAt, from),
+        lt(schema.tasks.completedAt, to),
+      ),
+    );
+
+  const prevCompletedRows = await db
+    .select({ id: schema.tasks.id, completedAt: schema.tasks.completedAt })
+    .from(schema.tasks)
+    .where(
+      and(
+        ...scope,
+        eq(schema.tasks.status, 'completed'),
+        isNotNull(schema.tasks.completedAt),
+        gte(schema.tasks.completedAt, prevFrom),
+        lt(schema.tasks.completedAt, prevTo),
+      ),
+    );
+
+  const [effort, prevEffort] = await Promise.all([
+    effortOver(db, completedRows),
+    effortOver(db, prevCompletedRows),
+  ]);
+
+  const displayCurrencyRaw = await configService.get(CONFIG_KEYS.COST_DISPLAY_CURRENCY);
+  // Dated on the window's END rather than today, so re-opening a past range reports the same
+  // figure — the same reasoning as dating a task's conversion on the task.
+  const costDisplay: CostDisplay = await resolveCostDisplay(
+    db,
+    isDisplayCurrency(displayCurrencyRaw) ? displayCurrencyRaw : 'USD',
+    to,
+  );
+
+  const tokens = normalizeBreakdown(breakdown);
+
+  const delta = (cur: number, before: number): Delta => computeDelta(cur, before);
+
+  return c.json({
+    range: {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      timeZone: q.timeZone,
+      previousFrom: prevFrom.toISOString(),
+      previousTo: prevTo.toISOString(),
+    },
+    scope: {
+      allUsers: q.allUsers,
+      repositoryId: q.repositoryId,
+      cliProviderId: q.cliProviderId,
+      taskClass: q.taskClass,
+    },
+    costDisplay,
+    spend: {
+      realUsd: spend.realUsd,
+      notionalUsd: spend.notionalUsd,
+      invocations: spend.invocations,
+      unpricedInvocations: spend.unpricedInvocations,
+      abandonedRealUsd: abandonedSpend.realUsd,
+      abandonedNotionalUsd: abandonedSpend.notionalUsd,
+      byProvider: breakdown,
+      realDelta: delta(spend.realUsd, prevSpend.realUsd),
+      notionalDelta: delta(spend.notionalUsd, prevSpend.notionalUsd),
+    },
+    tokens,
+    time: {
+      agentMs: busy.agentMs,
+      busyMs: busy.busyMs,
+      calendarMs: busy.calendarMs,
+      islands: busy.islands,
+      concurrency: busy.concurrency,
+      dutyCycle: busy.dutyCycle,
+      abandonedAgentMs: abandonedTime.agentMs,
+      workMs: effort.workMs,
+      idleMs: effort.idleMs,
+      userActiveMs: effort.userActiveMs,
+      effortMs: effort.effortMs,
+      agentDelta: delta(busy.agentMs, prevBusy.agentMs),
+      effortDelta: delta(effort.effortMs, prevEffort.effortMs),
+    },
+    tasks: {
+      started,
+      startedAbandoned,
+      completed: completedRows.length,
+      // Sample-gated: on a young install this is a ratio over a handful of rows, and a
+      // percentage from three tasks reads exactly like one from three hundred.
+      abandonedRatio: sampledRatio(startedAbandoned, started),
+      byClass: [...byClass.values()],
+      startedDelta: delta(started, Number(prevStartedRow?.n) || 0),
+      completedDelta: delta(completedRows.length, prevCompletedRows.length),
+      withHumanEstimate: completedRows.filter((t) => t.estimatedTimeHours != null).length,
+      withAiEstimate: completedRows.filter((t) => t.aiEstimatedTimeHours != null).length,
+    },
+  });
+});
+
+interface DayAccumulator {
+  realUsd: number;
+  notionalUsd: number;
+  invocations: number;
+  agentMs: number;
+  /** Per provider, because the cache-inclusive reporters must be normalised BEFORE the
+   *  providers are added together. */
+  tokensByProvider: Map<
+    string,
+    {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+    }
+  >;
+  tasksStarted: number;
+  tasksCompleted: number;
+}
+
+function emptyDay(): DayAccumulator {
+  return {
+    realUsd: 0,
+    notionalUsd: 0,
+    invocations: 0,
+    agentMs: 0,
+    tokensByProvider: new Map(),
+    tasksStarted: 0,
+    tasksCompleted: 0,
+  };
+}
+
+/**
+ * Daily series for the dashboard charts and the stats page's time tab.
+ *
+ * ONE COST RULE, ONE BUCKETER. The cost decision is selected PER ROW in SQL
+ * (`realCostRowSql` / `notionalCostRowSql`) and the day buckets are cut here in JS with
+ * `Intl`. The alternative — grouping by `date_trunc` in SQL — would put a second bucketing
+ * implementation alongside the one the busy-span union already needs in JS, and two
+ * bucketers that must agree eventually will not. The correct SQL form is recorded here for
+ * the day that changes:
+ *   date_trunc('day', (started_at AT TIME ZONE 'UTC') AT TIME ZONE $tz)
+ * A single `AT TIME ZONE $tz` is WRONG — the column is `timestamp without time zone` holding
+ * UTC wall clock, so one conversion reads it as already-local and shifts every row by the
+ * offset. MEASURED: that moves 5-10% of rows into the wrong day on this install.
+ *
+ * TWO ATTRIBUTION RULES, deliberately. `busyMs` SPLITS an invocation that crosses local
+ * midnight across both days — it measures clock time, and part of it really did happen on
+ * each. `agentMs` attributes the whole invocation to the day it STARTED, because it measures
+ * work done and splitting it would imply a precision the duration does not have. Both sum to
+ * their correct totals; only the within-day split differs, which is why no per-day
+ * concurrency ratio is exposed.
+ */
+statsRoutes.get('/timeline', async (c) => {
+  const userId = c.get('userId');
+  const q = parseStatsQuery(c.req.query());
+  if (q.allUsers && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for install-wide statistics');
+  }
+  const db = getDb();
+
+  const from = new Date(q.fromMs);
+  const to = new Date(q.toMs);
+  const scope = taskScopeFilter(q, userId);
+  const providerTerm = q.cliProviderId
+    ? [eq(schema.cliInvocations.cliProviderId, q.cliProviderId)]
+    : [];
+
+  const tu = schema.cliInvocations.tokenUsage;
+  const rows = await db
+    .select({
+      startedAt: schema.cliInvocations.startedAt,
+      endedAt: schema.cliInvocations.endedAt,
+      provider: schema.cliProviders.name,
+      realUsd: realCostRowSql(),
+      notionalUsd: notionalCostRowSql(),
+      inputTokens: sql<number>`coalesce((${tu} ->> 'inputTokens')::numeric, 0)::bigint`,
+      outputTokens: sql<number>`coalesce((${tu} ->> 'outputTokens')::numeric, 0)::bigint`,
+      cacheReadTokens: sql<number>`coalesce((${tu} ->> 'cacheReadTokens')::numeric, 0)::bigint`,
+      cacheCreationTokens: sql<number>`coalesce((${tu} ->> 'cacheCreationTokens')::numeric, 0)::bigint`,
+    })
+    .from(schema.cliInvocations)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+    .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
+    .where(
+      and(
+        ...scope,
+        ...providerTerm,
+        invocationAttributionFilter(),
+        isNotNull(schema.cliInvocations.startedAt),
+        gte(schema.cliInvocations.startedAt, from),
+        lt(schema.cliInvocations.startedAt, to),
+      ),
+    );
+
+  const days = new Map<string, DayAccumulator>();
+  const dayOf = (key: string): DayAccumulator => {
+    let d = days.get(key);
+    if (!d) {
+      d = emptyDay();
+      days.set(key, d);
+    }
+    return d;
+  };
+
+  for (const row of rows) {
+    if (!row.startedAt) continue;
+    const d = dayOf(dayKey(row.startedAt.getTime(), q.timeZone));
+    d.realUsd += Number(row.realUsd) || 0;
+    d.notionalUsd += Number(row.notionalUsd) || 0;
+    d.invocations += 1;
+    if (row.endedAt) d.agentMs += Math.max(0, row.endedAt.getTime() - row.startedAt.getTime());
+    const provider = row.provider ?? 'unknown';
+    const t = d.tokensByProvider.get(provider) ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    };
+    t.inputTokens += Number(row.inputTokens) || 0;
+    t.outputTokens += Number(row.outputTokens) || 0;
+    t.cacheReadTokens += Number(row.cacheReadTokens) || 0;
+    t.cacheCreationTokens += Number(row.cacheCreationTokens) || 0;
+    d.tokensByProvider.set(provider, t);
+  }
+
+  // The union, split across local days by the one bucketer.
+  const busy = computeBusySpan(
+    rows.map((r) => ({ start: r.startedAt, end: r.endedAt })),
+    { timeZone: q.timeZone },
+  );
+  const busyByDay = new Map(busy.buckets.map((b) => [b.bucket, b.busyMs]));
+
+  const [startedRows, completedRows] = await Promise.all([
+    db
+      .select({ at: schema.tasks.createdAt })
+      .from(schema.tasks)
+      .where(and(...scope, gte(schema.tasks.createdAt, from), lt(schema.tasks.createdAt, to))),
+    db
+      .select({ at: schema.tasks.completedAt })
+      .from(schema.tasks)
+      .where(
+        and(
+          ...scope,
+          eq(schema.tasks.status, 'completed'),
+          isNotNull(schema.tasks.completedAt),
+          gte(schema.tasks.completedAt, from),
+          lt(schema.tasks.completedAt, to),
+        ),
+      ),
+  ]);
+  for (const r of startedRows)
+    if (r.at) dayOf(dayKey(r.at.getTime(), q.timeZone)).tasksStarted += 1;
+  for (const r of completedRows) {
+    if (r.at) dayOf(dayKey(r.at.getTime(), q.timeZone)).tasksCompleted += 1;
+  }
+
+  // Every day in the range, so a chart draws an explicit zero for a quiet day instead of
+  // joining a line straight across it.
+  for (const key of dayKeysBetween(q.fromMs, q.toMs, q.timeZone)) dayOf(key);
+
+  const series = [...days.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([bucket, d]) => {
+      const tokens = sumNormalizedTokens(
+        [...d.tokensByProvider.entries()].map(([provider, t]) => ({ provider, ...t })),
+      );
+      return {
+        bucket,
+        realUsd: d.realUsd,
+        notionalUsd: d.notionalUsd,
+        invocations: d.invocations,
+        agentMs: d.agentMs,
+        busyMs: busyByDay.get(bucket) ?? 0,
+        tasksStarted: d.tasksStarted,
+        tasksCompleted: d.tasksCompleted,
+        freshInputTokens: tokens.freshInputTokens,
+        outputTokens: tokens.outputTokens,
+        cacheReadTokens: tokens.cacheReadTokens,
+        cacheCreationTokens: tokens.cacheCreationTokens,
+        totalTokens: tokens.totalTokens,
+      };
+    });
+
+  return c.json({
+    range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
+    totals: {
+      realUsd: series.reduce((n, d) => n + d.realUsd, 0),
+      notionalUsd: series.reduce((n, d) => n + d.notionalUsd, 0),
+      invocations: rows.length,
+      agentMs: busy.agentMs,
+      busyMs: busy.busyMs,
+      islands: busy.islands,
+      concurrency: busy.concurrency,
+      dutyCycle: busy.dutyCycle,
+    },
+    days: series,
+  });
+});

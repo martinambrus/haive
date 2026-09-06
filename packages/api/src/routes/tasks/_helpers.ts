@@ -1,5 +1,5 @@
 import { relative, resolve } from 'node:path';
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_DISPATCH_STEP_IDS,
@@ -451,10 +451,18 @@ export function currentStepParkedSql() {
  *  A CASE on the PRESENCE of the snapshot, never a `coalesce` on its value: a snapshot
  *  that deliberately prices a row at zero (a subscription plan, an unpriced model)
  *  would otherwise fall through and resurrect the legacy number for that row. */
-function realCostUsdSql() {
+export function realCostUsdSql() {
+  return sql<number>`coalesce(sum(${realCostRowSql()}), 0)::double precision`;
+}
+
+/** The per-ROW form of the same rule, for callers that bucket in JS instead of grouping in
+ *  SQL — the timeline endpoint cuts its day buckets in the viewer's zone with `Intl`, and
+ *  re-implementing the cost decision there would be a second copy of the rule that could
+ *  drift from this one. Selecting the decision per row keeps ONE cost rule and ONE bucketer. */
+export function realCostRowSql() {
   const cost = schema.cliInvocations.cost;
   const tu = schema.cliInvocations.tokenUsage;
-  return sql<number>`coalesce(sum(
+  return sql<number>`(
     case
       when ${cost} is not null then
         (case when ${cost} ->> 'billable' = 'true'
@@ -465,7 +473,7 @@ function realCostUsdSql() {
         coalesce((${tu} ->> 'costUsd')::numeric, 0)
       else 0
     end
-  ), 0)::double precision`;
+  )`;
 }
 
 /** The mirror of realCostUsdSql: what the invocations that are NOT billed per token
@@ -488,10 +496,15 @@ function realCostUsdSql() {
  *
  *  Priced at whatever rate applied when the run happened, which is the right reading of
  *  "what we would have paid" rather than "what those tokens would cost today". */
-function notionalCostUsdSql() {
+export function notionalCostUsdSql() {
+  return sql<number>`coalesce(sum(${notionalCostRowSql()}), 0)::double precision`;
+}
+
+/** Per-ROW notional cost. Same reason as realCostRowSql. */
+export function notionalCostRowSql() {
   const cost = schema.cliInvocations.cost;
   const tu = schema.cliInvocations.tokenUsage;
-  return sql<number>`coalesce(sum(
+  return sql<number>`(
     case
       when ${cost} is not null then
         (case when ${cost} ->> 'billable' = 'false' and ${cost} ->> 'source' <> 'none'
@@ -502,7 +515,7 @@ function notionalCostUsdSql() {
         coalesce((${tu} ->> 'costUsd')::numeric, 0)
       else 0
     end
-  ), 0)::double precision`;
+  )`;
 }
 
 /** Why the "What the agent did" panel is empty when it should not be.
@@ -844,6 +857,29 @@ export async function sumTaskProviderBreakdown(
   db: ReturnType<typeof getDb>,
   taskId: string,
 ): Promise<TaskProviderUsage[]> {
+  return providerBreakdownWhere(db, eq(schema.cliInvocations.taskId, taskId));
+}
+
+/** The same rollup over an arbitrary set of invocations — a date range, a repository, one
+ *  user's rows — for the statistics endpoints.
+ *
+ *  Shares one body with the per-task version rather than copying forty lines of cost SQL,
+ *  because the two totals have to agree: a task's provider card and the same task inside a
+ *  stats window must not disagree about what it cost.
+ *
+ *  `where` is ANDed with the reconciliation filter every invocation rollup carries
+ *  (non-superseded, attributed to a step). Callers scope by user through the `tasks` join. */
+export async function sumProviderBreakdownWhere(
+  db: ReturnType<typeof getDb>,
+  where: SQL | undefined,
+): Promise<TaskProviderUsage[]> {
+  return providerBreakdownWhere(db, where);
+}
+
+async function providerBreakdownWhere(
+  db: ReturnType<typeof getDb>,
+  where: SQL | undefined,
+): Promise<TaskProviderUsage[]> {
   const tu = schema.cliInvocations.tokenUsage;
   const rows = await db
     .select({
@@ -867,10 +903,14 @@ export async function sumTaskProviderBreakdown(
       unpricedInvocations: sql<number>`count(*) filter (where ${schema.cliInvocations.cost} ->> 'source' = 'none')::int`,
     })
     .from(schema.cliInvocations)
+    // Behaviour-neutral for the per-task caller and required by the range callers, which scope
+    // by tasks.user_id: cli_invocations.task_id is NOT NULL with a cascade FK, so an inner join
+    // here can never drop a row that the un-joined query would have returned.
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
     .where(
       and(
-        eq(schema.cliInvocations.taskId, taskId),
+        where,
         isNull(schema.cliInvocations.supersededAt),
         or(
           isNotNull(schema.cliInvocations.taskStepId),

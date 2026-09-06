@@ -1,3 +1,7 @@
+// Type-only, so this stays erased at build time and api-client keeps its no-runtime-import
+// shape. format-cost has no imports of its own, so there is no cycle.
+import type { CostDisplay } from './format-cost';
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
 export const API_BASE_URL = API_BASE;
@@ -1907,4 +1911,181 @@ export function putUiPrefs(prefs: UiPrefs): Promise<void> {
   return api
     .put('/user-settings/ui-prefs', { settingsJson: JSON.stringify(prefs) })
     .then(() => undefined);
+}
+
+// --- Statistics -----------------------------------------------------------
+// Local mirrors of the /stats response shapes. Web keeps its own copies of API response
+// types rather than importing the @haive/shared barrel (which drags ioredis/dns into the
+// bundle) — the same convention as OpenRouterModelEntry above. Keep in sync with
+// packages/api/src/routes/stats/index.ts.
+
+/** Period-over-period comparison. `changeRatio` is null when there is no baseline to divide
+ *  by — growth from zero has no ratio, and `direction` carries the meaning there. */
+export interface StatsDelta {
+  current: number;
+  previous: number;
+  changeRatio: number | null;
+  direction: 'up' | 'down' | 'flat';
+}
+
+/** A ratio that carries its own sample count. `sufficient` false means the UI must show the
+ *  shortfall rather than the percentage — on a young install most of these are noise. */
+export interface SampledRatio {
+  ratio: number | null;
+  n: number;
+  sufficient: boolean;
+}
+
+export type StatsTaskClass = 'work' | 'plan' | 'setup' | 'run' | 'other';
+
+export interface StatsTaskClassCount {
+  taskClass: StatsTaskClass;
+  started: number;
+  completed: number;
+  abandoned: number;
+}
+
+/** Mirrors TaskProviderUsage in the api's tasks/_helpers.ts. */
+export interface StatsProviderUsage {
+  provider: string;
+  costBasis: string;
+  invocations: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number;
+  notionalCostUsd: number;
+  costSource: string;
+  unpricedInvocations: number;
+}
+
+export interface StatsSummary {
+  range: {
+    from: string;
+    to: string;
+    timeZone: string;
+    previousFrom: string;
+    previousTo: string;
+  };
+  scope: {
+    allUsers: boolean;
+    repositoryId: string | null;
+    cliProviderId: string | null;
+    taskClass: StatsTaskClass | null;
+  };
+  costDisplay: CostDisplay;
+  spend: {
+    realUsd: number;
+    /** The subscription counterfactual: what these runs WOULD have cost at list API rates.
+     *  Never money spent, and never rendered in the same colour as realUsd. */
+    notionalUsd: number;
+    invocations: number;
+    unpricedInvocations: number;
+    abandonedRealUsd: number;
+    abandonedNotionalUsd: number;
+    byProvider: StatsProviderUsage[];
+    realDelta: StatsDelta;
+    notionalDelta: StatsDelta;
+  };
+  tokens: {
+    freshInputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    totalTokens: number;
+    /** Normalised across providers (codex/gemini report input inclusive of cache). */
+    cacheHitRatio: number | null;
+  };
+  time: {
+    /** Σ invocation durations — compute consumed. Not a duration; never render it beside one. */
+    agentMs: number;
+    /** Union of the invocation intervals: clock during which at least one agent ran. */
+    busyMs: number;
+    calendarMs: number;
+    islands: number;
+    concurrency: number | null;
+    dutyCycle: number | null;
+    abandonedAgentMs: number;
+    workMs: number;
+    idleMs: number;
+    userActiveMs: number;
+    effortMs: number;
+    agentDelta: StatsDelta;
+    effortDelta: StatsDelta;
+  };
+  tasks: {
+    started: number;
+    startedAbandoned: number;
+    completed: number;
+    abandonedRatio: SampledRatio;
+    byClass: StatsTaskClassCount[];
+    startedDelta: StatsDelta;
+    completedDelta: StatsDelta;
+    withHumanEstimate: number;
+    withAiEstimate: number;
+  };
+}
+
+export interface StatsTimelineDay {
+  /** Local calendar day, YYYY-MM-DD, in the requested zone. */
+  bucket: string;
+  realUsd: number;
+  notionalUsd: number;
+  invocations: number;
+  agentMs: number;
+  busyMs: number;
+  tasksStarted: number;
+  tasksCompleted: number;
+  freshInputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  totalTokens: number;
+}
+
+export interface StatsTimeline {
+  range: { from: string; to: string; timeZone: string };
+  totals: {
+    realUsd: number;
+    notionalUsd: number;
+    invocations: number;
+    agentMs: number;
+    busyMs: number;
+    islands: number;
+    concurrency: number | null;
+    dutyCycle: number | null;
+  };
+  days: StatsTimelineDay[];
+}
+
+export interface StatsQueryParams {
+  from?: string;
+  to?: string;
+  tz?: string;
+  repositoryId?: string;
+  cliProviderId?: string;
+  taskClass?: StatsTaskClass;
+  allUsers?: boolean;
+}
+
+function statsQueryString(params: StatsQueryParams): string {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set('from', params.from);
+  if (params.to) qs.set('to', params.to);
+  if (params.tz) qs.set('tz', params.tz);
+  if (params.repositoryId) qs.set('repositoryId', params.repositoryId);
+  if (params.cliProviderId) qs.set('cliProviderId', params.cliProviderId);
+  if (params.taskClass) qs.set('taskClass', params.taskClass);
+  if (params.allUsers) qs.set('allUsers', '1');
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
+export async function getStatsSummary(params: StatsQueryParams = {}): Promise<StatsSummary> {
+  return api.get<StatsSummary>(`/stats/summary${statsQueryString(params)}`);
+}
+
+export async function getStatsTimeline(params: StatsQueryParams = {}): Promise<StatsTimeline> {
+  return api.get<StatsTimeline>(`/stats/timeline${statsQueryString(params)}`);
 }
