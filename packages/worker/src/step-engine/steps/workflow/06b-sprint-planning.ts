@@ -14,6 +14,7 @@ import { resolveSpecView } from './_spec-artifact.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { buildAnchors, overlapRefinedEstimate } from './_estimate.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { loadSeededPlanNodes, renderPlanOrderingConstraint } from './_plan-task-nodes.js';
 
 // Phase 2c — Sprint planning (the DAG decision). An agent reads the spec
 // approved at gate 1 and decides mode 'single' (one implementation agent, the
@@ -27,6 +28,12 @@ interface SprintPlanningDetect {
   specSummary: string;
   spec: string;
   gateFeedback: string;
+  /** Build order the PLAN already records among the nodes this task was created
+   *  to serve, one line per prerequisite. Empty when the task names no node, or
+   *  when the set declares no order among itself — which is the parallel case and
+   *  needs no words. The planner cannot see the plan, so this is the only way that
+   *  ordering reaches it. */
+  planOrdering: string;
 }
 
 interface SprintPlanningApply {
@@ -282,6 +289,29 @@ async function refineEstimateFromPlan(ctx: StepContext, plan: SprintPlan): Promi
   }
 }
 
+/**
+ * The plan's own build order among this task's nodes, for the planner prompt.
+ *
+ * Best-effort and silent: the DAG decision must not depend on the plan canvas
+ * being present, readable, or even enabled. A repo without one is the normal case
+ * and gets exactly the prompt it always got.
+ */
+async function loadPlanOrdering(ctx: StepContext): Promise<string> {
+  try {
+    const [task] = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    if (!task?.repositoryId) return '';
+    const seeded = await loadSeededPlanNodes(ctx, task.repositoryId);
+    return seeded ? renderPlanOrderingConstraint(seeded) : '';
+  } catch (err) {
+    ctx.logger.warn({ err }, 'plan build order unavailable for the sprint planner');
+    return '';
+  }
+}
+
 export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlanningApply> = {
   metadata: {
     id: '06b-sprint-planning',
@@ -304,6 +334,7 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
       // sections every coder is then pointed at, so an index would plan against headings.
       spec: (await resolveSpecView(ctx, { full: true })).text,
       gateFeedback: gateOutput.feedback ?? '',
+      planOrdering: await loadPlanOrdering(ctx),
     };
   },
 
@@ -316,6 +347,19 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
       return [
         ...PLANNER_RULES,
         '',
+        ...(d.planOrdering
+          ? [
+              '=== Build order the project plan already records ===',
+              'Someone chose the plan nodes this task delivers, and the plan says which of them',
+              'have to land before which. Your levels MUST respect it — an issue implementing the',
+              'far side of one of these lines cannot sit at the same level as one implementing the',
+              'near side. This is exactly the shape a DAG is for: build the prerequisite, then run',
+              'what was waiting on it in parallel.',
+              '',
+              d.planOrdering,
+              '',
+            ]
+          : []),
         `Gate 1 feedback: ${d.gateFeedback || '(none)'}`,
         '',
         '=== Approved spec ===',
@@ -339,8 +383,22 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
     retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
   },
 
-  form(_ctx, _detected, llmOutput): FormSchema | null {
+  form(_ctx, detected, llmOutput): FormSchema | null {
     const plan = parseSprintPlan(llmOutput);
+    // Shown, never enforced. The planner's issues are not one-to-one with plan
+    // nodes, so a machine check would either reject good decompositions or wave
+    // bad ones through; putting the recorded order in front of the person who is
+    // already confirming the DAG is the honest version of the same check.
+    const orderingSection: InfoSection[] = detected?.planOrdering
+      ? [
+          {
+            title: 'Build order the plan records',
+            preview: 'from the nodes this task delivers',
+            body: `The project plan says the work has to land in this order:\n\n${detected.planOrdering}\n\nCheck the levels below put it that way round.`,
+            defaultOpen: true,
+          },
+        ]
+      : [];
     // Single-agent: the fast path — there's no decomposition to confirm. But still
     // SHOW the agent's decision + rationale (rather than letting the runner fall back
     // to a bare "Continue" confirm with the generic step description) so the user can
@@ -351,16 +409,22 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
         title: 'Phase 2c: Sprint planning',
         description:
           'The planning agent chose a single implementation agent — no parallel decomposition is needed for this spec. Implementation runs next; Retry this step to re-plan.',
-        infoSections: plan.rationale
-          ? [
-              {
-                title: 'Planner decision: single agent',
-                preview: 'rationale',
-                body: plan.rationale,
-                defaultOpen: true,
-              },
-            ]
-          : undefined,
+        infoSections: [
+          ...(plan.rationale
+            ? [
+                {
+                  title: 'Planner decision: single agent',
+                  preview: 'rationale',
+                  body: plan.rationale,
+                  defaultOpen: true,
+                },
+              ]
+            : []),
+          // Single-agent honours any order by construction, but the person is
+          // being asked to accept that choice and this is part of what they are
+          // accepting.
+          ...orderingSection,
+        ],
         fields: [],
         submitLabel: 'Continue',
         // Nothing to decide — the agent chose single-agent. Flow through without
@@ -375,6 +439,7 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
         body: planSummaryBody(plan),
         defaultOpen: true,
       },
+      ...orderingSection,
     ];
     return {
       title: 'Phase 2c: Sprint planning',

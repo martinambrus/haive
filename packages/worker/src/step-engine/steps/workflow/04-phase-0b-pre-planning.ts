@@ -19,6 +19,7 @@ import {
   dimensionScopeLines,
   resolveTaskReviewDimensions,
 } from '../../review-dimension-context.js';
+import { loadSeededPlanNodes, renderSeededNodesForSpec } from './_plan-task-nodes.js';
 import {
   computeImpact,
   findPlanRoot,
@@ -96,6 +97,15 @@ interface PrePlanningDetect {
    *  bodies), when it has one. Empty string when it does not — a repo with no plan
    *  is the normal case and must change nothing about this step. */
   planIndex: string;
+  /** The nodes this task was CREATED to serve, rendered in full — bodies,
+   *  ancestry and their `depends_on` links among each other.
+   *
+   *  Separate from `planIndex` because that is capped at three levels for
+   *  prompt size, and a seeded node is routinely deeper than that: it would be
+   *  absent from the vocabulary and the spec could not name it even though the
+   *  whole chain from the plan through this spec to the DAG planner depends on
+   *  it doing so. Empty when the task names no node, which is most tasks. */
+  seededNodes: string;
   planRepositoryId: string | null;
   /** Review dimensions this repository scores changes against (ids from
    *  REVIEW_DIMENSIONS). Resolved at REPO scope, not task: 06-run-config runs at
@@ -112,7 +122,8 @@ interface PrePlanningDetect {
  *  "Affected components" section names real ones. Silent when the repo has no plan. */
 async function loadPlanIndex(
   ctx: StepContext,
-): Promise<{ planIndex: string; planRepositoryId: string | null }> {
+): Promise<{ planIndex: string; seededNodes: string; planRepositoryId: string | null }> {
+  const none = { planIndex: '', seededNodes: '', planRepositoryId: null };
   try {
     const [task] = await ctx.db
       .select({ repositoryId: schema.tasks.repositoryId })
@@ -120,21 +131,32 @@ async function loadPlanIndex(
       .where(eq(schema.tasks.id, ctx.taskId))
       .limit(1);
     const repositoryId = task?.repositoryId ?? null;
-    if (!repositoryId) return { planIndex: '', planRepositoryId: null };
+    if (!repositoryId) return none;
     if (!(await findPlanRoot(ctx.db, repositoryId))) {
-      return { planIndex: '', planRepositoryId: repositoryId };
+      return { planIndex: '', seededNodes: '', planRepositoryId: repositoryId };
     }
     const planIndex = await renderPlanMarkdown(ctx.db, repositoryId, {
       titlesOnly: true,
       maxDepth: 3,
     });
-    return { planIndex, planRepositoryId: repositoryId };
+    return {
+      planIndex,
+      seededNodes: await renderSeededNodesFor(ctx, repositoryId),
+      planRepositoryId: repositoryId,
+    };
   } catch (err) {
     // The plan is context, never a dependency: a lookup failure must not stop the
     // spec being written.
     ctx.logger.warn({ err }, 'plan index unavailable for the spec prompt');
-    return { planIndex: '', planRepositoryId: null };
+    return none;
   }
+}
+
+/** The seeded set for the spec prompt, or '' when the task names no node.
+ *  Thin because both halves are shared with 06b — see `_plan-task-nodes.ts`. */
+async function renderSeededNodesFor(ctx: StepContext, repositoryId: string): Promise<string> {
+  const seeded = await loadSeededPlanNodes(ctx, repositoryId);
+  return seeded ? renderSeededNodesForSpec(seeded) : '';
 }
 
 function kbHeading(text: string): string | null {
@@ -531,6 +553,22 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
               'short reason. Copy the ids VERBATIM from the index above — do not invent one, and do',
               'not name a component that is not in it. If the change touches nothing in the plan,',
               'write "none" under that heading and say why.',
+              '',
+            ].join('\n')
+          : '',
+        // After the index, so the required set is the most recent word on it — and
+        // separate from it, because these nodes are a REQUIREMENT rather than
+        // vocabulary and are shown in full at whatever depth they sit at.
+        detected.seededNodes
+          ? [
+              '## The nodes this task was created to deliver',
+              '',
+              detected.seededNodes,
+              'These are not a suggestion: someone chose them when they created this task, so every',
+              'one MUST appear in your `## Affected components` section whatever else you add to it.',
+              'Where a node above says it cannot start until another lands, the spec must order the',
+              'work that way — that ordering is what the implementation planner reads to decide what',
+              'can be built in parallel, and it cannot see the plan itself.',
               '',
             ].join('\n')
           : '',
