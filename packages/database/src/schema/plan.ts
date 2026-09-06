@@ -244,6 +244,16 @@ export const planNodeEdges = pgTable(
   ],
 );
 
+/** What a linked file DOES for the node, and it decides who the link is for.
+ *
+ *  - implements: the file builds the thing the node describes. What every link
+ *    meant before this existed, and what the impact view hands a coder.
+ *  - covers: the file TESTS it. A test rarely appears in an impact list derived
+ *    from implementation files — it references URLs and selectors, not source
+ *    paths — so without this the test-management step can only grep for one and
+ *    a test that quietly stopped covering the whole behaviour is invisible. */
+export const planCodeLinkRoleEnum = pgEnum('plan_code_link_role', ['implements', 'covers']);
+
 export const planNodeCodeLinks = pgTable(
   'plan_node_code_links',
   {
@@ -258,6 +268,10 @@ export const planNodeCodeLinks = pgTable(
     repoPath: text('repo_path').notNull(),
     /** Optional symbol within the file (a class, a function, an export). */
     symbol: text('symbol'),
+    /** Defaults to `implements` so every row written before this column existed
+     *  keeps the meaning it had: the builders that wrote them were all told to
+     *  link "the files that already implement a node". */
+    role: planCodeLinkRoleEnum('role').notNull().default('implements'),
     /** Why the agent linked it. Without this an impact list is an unfalsifiable
      *  claim — a human cannot tell a real link from a hallucinated one. */
     evidence: text('evidence'),
@@ -279,7 +293,9 @@ export const planNodeCodeLinks = pgTable(
     // coalesce(symbol,'') rather than the bare column: `symbol` is nullable and
     // Postgres treats NULLs as DISTINCT in a unique index, so a plain
     // (node, path, symbol) unique would let unlimited duplicate FILE-level links
-    // through — which is the common case, not the edge one.
+    // through — which is the common case, not the edge one. `role` is deliberately
+    // NOT part of the key: one file plays one part for one node, so re-asserting
+    // it with a different role corrects the row rather than growing a second.
     uniqueIndex('plan_node_code_links_unique_idx').on(
       table.nodeId,
       table.repoPath,

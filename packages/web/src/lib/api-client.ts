@@ -1394,6 +1394,9 @@ export interface PlanCodeLink {
   derivedAtCommit: string | null;
   confidence: number | null;
   stale: boolean;
+  /** What the file does for the node: builds it, or tests it. Optional because a
+   *  response from an API older than the column carries neither. */
+  role?: 'implements' | 'covers';
 }
 
 export interface PlanNodeTask {

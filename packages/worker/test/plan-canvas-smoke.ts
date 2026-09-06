@@ -443,6 +443,7 @@ async function main(): Promise<void> {
         symbol: schema.planNodeCodeLinks.symbol,
         stale: schema.planNodeCodeLinks.stale,
         commit: schema.planNodeCodeLinks.derivedAtCommit,
+        role: schema.planNodeCodeLinks.role,
       })
       .from(schema.planNodeCodeLinks)
       .where(eq(schema.planNodeCodeLinks.nodeId, linkTarget!.id));
@@ -513,6 +514,65 @@ async function main(): Promise<void> {
   const untouched = links.find((l) => l.symbol === 'useSession');
   check('re-asserting a link clears its stale flag', reasserted?.stale === false, reasserted);
   check('a link nobody re-asserted stays stale', untouched?.stale === true, untouched);
+
+  // A test file is linked with `role: 'covers'`. The impact block hands those to
+  // the test-management step, which is the only way it can be told which tests
+  // cover a component — a test references URLs and selectors, not source paths.
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        {
+          op: 'upsert',
+          nodeRef: linkTarget!.id,
+          codeLinks: [
+            {
+              repoPath: 'tests/mobile/App.spec.ts',
+              role: 'covers',
+              evidence: 'drives the shell end to end',
+            },
+          ],
+        },
+      ],
+    },
+    { repositoryId, origin: 'llm', derivedAtCommit: 'jkl012' },
+  );
+  links = await readLinks();
+  const testLink = links.find((l) => l.repoPath === 'tests/mobile/App.spec.ts');
+  check(
+    'a test file links as covers, beside the implementation links',
+    testLink?.role === 'covers',
+    {
+      links,
+    },
+  );
+  check(
+    'an implementation link keeps the default role',
+    links.filter((l) => l.repoPath === 'src/mobile/App.tsx').every((l) => l.role === 'implements'),
+    links,
+  );
+
+  // The demotion guard: re-assertion is the NORMAL event, and most prompts never
+  // mention roles. An op that omits `role` must leave the stored one alone.
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        {
+          op: 'upsert',
+          nodeRef: linkTarget!.id,
+          codeLinks: [{ repoPath: 'tests/mobile/App.spec.ts', evidence: 're-checked' }],
+        },
+      ],
+    },
+    { repositoryId, origin: 'llm', derivedAtCommit: 'mno345' },
+  );
+  links = await readLinks();
+  check(
+    're-asserting a covers link without naming a role does NOT demote it',
+    links.find((l) => l.repoPath === 'tests/mobile/App.spec.ts')?.role === 'covers',
+    links,
+  );
 
   /* --- 12. the .haive-data mirror round-trips onto a fresh clone ----------- */
 
@@ -757,6 +817,7 @@ async function main(): Promise<void> {
       evidence: schema.planNodeCodeLinks.evidence,
       derivedAtCommit: schema.planNodeCodeLinks.derivedAtCommit,
       stale: schema.planNodeCodeLinks.stale,
+      role: schema.planNodeCodeLinks.role,
     })
     .from(schema.planNodeCodeLinks)
     .where(eq(schema.planNodeCodeLinks.repositoryId, repositoryId));
@@ -1001,6 +1062,7 @@ async function main(): Promise<void> {
       evidence: schema.planNodeCodeLinks.evidence,
       derivedAtCommit: schema.planNodeCodeLinks.derivedAtCommit,
       stale: schema.planNodeCodeLinks.stale,
+      role: schema.planNodeCodeLinks.role,
     })
     .from(schema.planNodeCodeLinks)
     .where(eq(schema.planNodeCodeLinks.repositoryId, freshRepoB!.id));

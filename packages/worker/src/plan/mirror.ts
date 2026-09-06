@@ -92,6 +92,7 @@ async function writePlanMirrorLocked(
         evidence: schema.planNodeCodeLinks.evidence,
         derivedAtCommit: schema.planNodeCodeLinks.derivedAtCommit,
         stale: schema.planNodeCodeLinks.stale,
+        role: schema.planNodeCodeLinks.role,
       })
       .from(schema.planNodeCodeLinks)
       .where(eq(schema.planNodeCodeLinks.repositoryId, repositoryId)),
@@ -371,6 +372,7 @@ export async function importPlanMirror(
           evidence: link.evidence,
           derivedAtCommit: link.derivedAtCommit,
           stale: link.stale,
+          role: link.role,
           confidence: null,
         })),
       );
@@ -643,6 +645,7 @@ export async function reconcilePlanMirror(
             evidence: l.evidence,
             derivedAtCommit: l.derivedAtCommit,
             stale: l.stale,
+            role: l.role,
             confidence: null,
           })),
         )

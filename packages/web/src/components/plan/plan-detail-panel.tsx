@@ -870,29 +870,39 @@ export function PlanDetailPanel({
             );
           })}
 
-          {detail.codeLinks.length > 0 && (
-            <div className="border-t border-neutral-800 pt-3">
-              <p className="mb-1 text-xs font-medium text-neutral-400">Code</p>
-              {detail.codeLinks.map((l) => (
-                <button
-                  key={l.id}
-                  type="button"
-                  title="Open this file"
-                  onClick={() =>
-                    setPreview({
-                      repoPath: l.repoPath,
-                      symbol: l.symbol,
-                      evidence: l.evidence ?? null,
-                    })
-                  }
-                  className="block w-full truncate text-left font-mono text-[11px] text-neutral-400 hover:text-neutral-200 hover:underline"
-                >
-                  {l.repoPath}
-                  {l.symbol ? `::${l.symbol}` : ''}
-                  {l.stale && <span className="ml-1 text-amber-400">(stale)</span>}
-                </button>
-              ))}
-            </div>
+          {/* Two groups, because "builds this" and "tests this" answer different
+              questions. A link from an API older than the role column has none and
+              reads as code, which is what every link meant before it existed. */}
+          {(
+            [
+              ['Code', detail.codeLinks.filter((l) => l.role !== 'covers')],
+              ['Tests', detail.codeLinks.filter((l) => l.role === 'covers')],
+            ] as const
+          ).map(([heading, links]) =>
+            links.length === 0 ? null : (
+              <div key={heading} className="border-t border-neutral-800 pt-3">
+                <p className="mb-1 text-xs font-medium text-neutral-400">{heading}</p>
+                {links.map((l) => (
+                  <button
+                    key={l.id}
+                    type="button"
+                    title="Open this file"
+                    onClick={() =>
+                      setPreview({
+                        repoPath: l.repoPath,
+                        symbol: l.symbol,
+                        evidence: l.evidence ?? null,
+                      })
+                    }
+                    className="block w-full truncate text-left font-mono text-[11px] text-neutral-400 hover:text-neutral-200 hover:underline"
+                  >
+                    {l.repoPath}
+                    {l.symbol ? `::${l.symbol}` : ''}
+                    {l.stale && <span className="ml-1 text-amber-400">(stale)</span>}
+                  </button>
+                ))}
+              </div>
+            ),
           )}
         </div>
       )}

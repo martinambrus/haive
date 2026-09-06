@@ -495,15 +495,24 @@ async function applyOps(
         stale: false,
         updatedAt: new Date(),
       };
+      // `role` is spread in only when the op named one. Folding it into `fields`
+      // with a default would let any prompt that never mentions roles demote a
+      // `covers` link to `implements` the next time it re-asserted the path —
+      // and re-assertion is the normal event, not a rare one.
       if (existing) {
         await tx
           .update(schema.planNodeCodeLinks)
-          .set(fields)
+          .set(link.role ? { ...fields, role: link.role } : fields)
           .where(eq(schema.planNodeCodeLinks.id, existing.id));
       } else {
-        await tx
-          .insert(schema.planNodeCodeLinks)
-          .values({ repositoryId, nodeId, repoPath: link.repoPath, symbol, ...fields });
+        await tx.insert(schema.planNodeCodeLinks).values({
+          repositoryId,
+          nodeId,
+          repoPath: link.repoPath,
+          symbol,
+          ...fields,
+          ...(link.role ? { role: link.role } : {}),
+        });
       }
       result.codeLinked++;
     }

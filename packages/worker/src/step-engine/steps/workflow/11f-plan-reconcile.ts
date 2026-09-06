@@ -85,10 +85,17 @@ export function describePlanOp(op: ProposedOp, titleById: Map<string, string>): 
       if (op.title) parts.push('rename');
       if (op.body !== undefined) parts.push('rewrite its description');
       if (Array.isArray(op.codeLinks)) {
-        const paths = op.codeLinks
-          .map((l) => (l as { repoPath?: unknown }).repoPath)
-          .filter((x): x is string => typeof x === 'string');
-        if (paths.length > 0) parts.push(`link ${paths.join(', ')}`);
+        // Split by role rather than listing paths flat: "link X" and "link X as a
+        // test that covers this" are different claims, and the developer ticking
+        // the box can only judge the one they can see.
+        const byRole = { implements: [] as string[], covers: [] as string[] };
+        for (const raw of op.codeLinks) {
+          const link = raw as { repoPath?: unknown; role?: unknown };
+          if (typeof link.repoPath !== 'string') continue;
+          byRole[link.role === 'covers' ? 'covers' : 'implements'].push(link.repoPath);
+        }
+        if (byRole.implements.length > 0) parts.push(`link ${byRole.implements.join(', ')}`);
+        if (byRole.covers.length > 0) parts.push(`link tests ${byRole.covers.join(', ')}`);
       }
       return `Update ${name(op.nodeRef)}: ${parts.length > 0 ? parts.join('; ') : 'no visible change'}`;
     }
@@ -202,9 +209,11 @@ function buildReconcilePrompt(d: PlanReconcileDetect): string {
     '   A node this task merely touched is NOT finished — most affected components are still',
     '   partly built, and marking one done when it is not is worse than leaving it alone,',
     '   because the plan is what someone reads to decide what is left.',
-    '2. CODE LINKS. Add `codeLinks` for files above that implement an existing node. Only for a',
+    '2. CODE LINKS. Add `codeLinks` for files above that belong to an existing node. Only for a',
     '   file you can see in the list, and say in `evidence` why it belongs. A guessed path makes',
-    '   the impact view lie.',
+    '   the impact view lie. Set `"role": "covers"` for a TEST file and leave the default',
+    '   `implements` for production code — the test steps of a later task are told which tests',
+    '   cover the components it touches, and they can only be told from these links.',
     '3. NEW NODES. Add a node only for a real capability this task built that the plan does not',
     '   describe anywhere. Check the plan above first — a node that duplicates an existing one',
     '   is worse than a missing one.',

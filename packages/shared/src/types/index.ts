@@ -292,6 +292,7 @@ export interface PlanMirror {
     evidence: string | null;
     derivedAtCommit: string | null;
     stale: boolean;
+    role: string;
   }[];
 }
 

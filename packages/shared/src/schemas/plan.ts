@@ -39,6 +39,15 @@ export type PlanNodeOrigin = z.infer<typeof planNodeOriginSchema>;
 export const planNodeTaskRoleSchema = z.enum(['implements', 'touched']);
 export type PlanNodeTaskRole = z.infer<typeof planNodeTaskRoleSchema>;
 
+/** What a linked FILE does for a node, mirroring `plan_node_code_links.role`.
+ *
+ *  `implements` builds the thing, `covers` tests it. Separate from
+ *  `planNodeTaskRoleSchema` despite sharing a member name: that one is about a
+ *  task, this one about a file, and the two vocabularies have no reason to move
+ *  together. */
+export const planCodeLinkRoleSchema = z.enum(['implements', 'covers']);
+export type PlanCodeLinkRole = z.infer<typeof planCodeLinkRoleSchema>;
+
 /* ------------------------------------------------------------------ */
 /* Repository mirror                                                   */
 /* ------------------------------------------------------------------ */
@@ -109,6 +118,12 @@ export const planMirrorV2Schema = z
             evidence: z.string().max(2_000).nullable(),
             derivedAtCommit: z.string().max(40).nullable(),
             stale: z.boolean(),
+            // A key, not a schemaVersion bump: an older mirror file has no `role`
+            // and still parses, defaulting to what its links already meant. The
+            // cost of that choice is one-directional — a mirror written WITH the
+            // key is rejected by an older build, whose `.strict()` object does not
+            // declare it — which is accepted while this is pre-release.
+            role: planCodeLinkRoleSchema.default('implements'),
           })
           .strict(),
       )
@@ -138,14 +153,20 @@ export const planNodeRefSchema = z.string().trim().min(1).max(128);
  *                  the applier rejects it (a new node must say where it goes).
  *    - null     -> this is the plan ROOT.
  *    - a ref    -> parent it here (a move, when the node already exists). */
-/** A file (optionally a symbol within it) that implements a node. `evidence` is
- *  required in spirit if not in type: an impact list without it is an
- *  unfalsifiable claim, and a human cannot tell a real link from a guess. */
+/** A file (optionally a symbol within it) that implements or tests a node.
+ *  `evidence` is required in spirit if not in type: an impact list without it is
+ *  an unfalsifiable claim, and a human cannot tell a real link from a guess.
+ *
+ *  `role` is OPTIONAL rather than defaulted, and the applier keeps that
+ *  distinction: an op that omits it leaves an existing link's role alone. A
+ *  default here would let any prompt that never mentions roles silently demote a
+ *  `covers` link the next time it re-asserted the path. */
 export const planCodeLinkSchema = z.object({
   repoPath: portableRepoPathSchema,
   symbol: z.string().trim().max(512).optional(),
   evidence: z.string().max(2_000).optional(),
   confidence: z.number().min(0).max(1).optional(),
+  role: planCodeLinkRoleSchema.optional(),
 });
 export type PlanCodeLinkInput = z.infer<typeof planCodeLinkSchema>;
 
@@ -361,6 +382,7 @@ export interface PlanCodeLinkView {
   derivedAtCommit: string | null;
   confidence: number | null;
   stale: boolean;
+  role: PlanCodeLinkRole;
 }
 
 export interface PlanMessageView {

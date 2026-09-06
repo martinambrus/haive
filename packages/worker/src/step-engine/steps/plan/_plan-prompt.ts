@@ -78,11 +78,15 @@ Rules:
   Naming a file in a title is a claim, not a link: a node called
   \`SMTP transport (smtp.php)\` still needs \`smtp.php\` in its \`codeLinks\`, or the
   plan only knows the filename as prose.
+  \`role\` says what the file DOES for the node: \`implements\` (the default — it builds
+  the thing) or \`covers\` (it TESTS the thing). Omit it unless you mean \`covers\`.
 
   \`\`\`json
   { "op": "upsert", "nodeRef": "<uuid>", "codeLinks": [
       { "repoPath": "src/auth/session.ts", "symbol": "createSession",
-        "evidence": "the only place a session cookie is minted", "confidence": 0.9 } ] }
+        "evidence": "the only place a session cookie is minted", "confidence": 0.9 },
+      { "repoPath": "tests/auth/session.spec.ts", "role": "covers",
+        "evidence": "exercises login, expiry and logout end to end" } ] }
   \`\`\`
 - \`ops\` is the ONLY thing that changes the plan. An empty array changes nothing,
   no matter what your prose says, so never report a change you did not send as an

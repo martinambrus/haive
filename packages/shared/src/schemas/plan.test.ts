@@ -50,6 +50,7 @@ function portableMirror() {
         evidence: 'API entry point',
         derivedAtCommit: '0123456789abcdef0123456789abcdef01234567',
         stale: true,
+        role: 'implements',
       },
     ],
   };
@@ -58,6 +59,21 @@ function portableMirror() {
 describe('planMirrorPayloadSchema', () => {
   it('accepts the complete v2 portable plan product state', () => {
     expect(planMirrorPayloadSchema.parse(portableMirror())).toEqual(portableMirror());
+  });
+
+  it('reads a mirror written before code links carried a role, as what they meant', () => {
+    // A key rather than a schemaVersion bump: a plan.json committed by an earlier
+    // build has no `role`, and every link in it was an implementation link.
+    const value = portableMirror();
+    const { role: _dropped, ...linkWithoutRole } = value.codeLinks[0]!;
+    const parsed = planMirrorPayloadSchema.parse({ ...value, codeLinks: [linkWithoutRole] });
+    expect(parsed).toEqual(value);
+  });
+
+  it('carries a covers link through the portable snapshot', () => {
+    const value = portableMirror();
+    value.codeLinks[0]!.role = 'covers';
+    expect(planMirrorPayloadSchema.parse(value)).toEqual(value);
   });
 
   it('keeps the shipped v1 node-and-edge snapshot readable', () => {

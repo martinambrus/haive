@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type {
+  PlanCodeLinkRole,
   PlanEdgeKind,
   PlanEdgeView,
   PlanNodeKind,
@@ -175,6 +176,10 @@ export interface PlanCodeLinkRecord {
   symbol: string | null;
   evidence: string | null;
   stale: boolean;
+  /** `implements` builds the node, `covers` tests it. Carried so a caller can
+   *  present the two separately — the test-management step needs the second and
+   *  a coder needs the first. */
+  role: PlanCodeLinkRole;
 }
 
 /**
@@ -197,6 +202,7 @@ export async function loadPlanCodeLinks(
       symbol: schema.planNodeCodeLinks.symbol,
       evidence: schema.planNodeCodeLinks.evidence,
       stale: schema.planNodeCodeLinks.stale,
+      role: schema.planNodeCodeLinks.role,
     })
     .from(schema.planNodeCodeLinks)
     .where(inArray(schema.planNodeCodeLinks.nodeId, [...nodeIds]))

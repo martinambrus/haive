@@ -30,6 +30,19 @@ describe('describePlanOp', () => {
     ).toBe('Update "Auth service": link src/a.ts, src/b.ts');
   });
 
+  it('says which links are TESTS, because that is a different claim to approve', () => {
+    expect(
+      describePlanOp(
+        {
+          op: 'upsert',
+          nodeRef: KNOWN,
+          codeLinks: [{ repoPath: 'src/a.ts' }, { repoPath: 'tests/a.spec.ts', role: 'covers' }],
+        },
+        titles,
+      ),
+    ).toBe('Update "Auth service": link src/a.ts; link tests tests/a.spec.ts');
+  });
+
   it('says so when an update changes nothing visible', () => {
     // Better than a tick box with an empty label next to it.
     expect(describePlanOp({ op: 'upsert', nodeRef: KNOWN }, titles)).toContain('no visible change');
