@@ -11,7 +11,14 @@ import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 // VNC bridge uses, so it returns once the app is serving and its port is published.
 
 interface AccessEndpoint {
-  kind: 'localhost' | 'ddev-http' | 'ddev-https' | 'proxy-subdomain' | 'database';
+  kind:
+    | 'localhost'
+    | 'ddev-http'
+    | 'ddev-https'
+    | 'proxy-subdomain'
+    | 'database'
+    | 'mailpit'
+    | 'mailpit-https';
   label: string;
   url: string;
   trusted?: boolean;

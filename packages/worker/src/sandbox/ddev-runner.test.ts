@@ -5,7 +5,9 @@ import {
   isDdevVersionConstraintFailure,
   parseProcNetRouteGateway,
   parseDdevPrimaryUrl,
+  parseDdevMailpitUrls,
   parseDdevProjectStatus,
+  decideMailpitHostUrls,
   renderXdebugIni,
   ddevDbInternalPort,
   ddevRegistryMirrorUrl,
@@ -222,6 +224,89 @@ describe('parseDdevPrimaryUrl', () => {
   it('returns null when no line carries raw.primary_url', () => {
     expect(parseDdevPrimaryUrl('{"level":"info","msg":"no url here"}\n')).toBeNull();
     expect(parseDdevPrimaryUrl('')).toBeNull();
+  });
+});
+
+describe('parseDdevMailpitUrls', () => {
+  const payload = (raw: Record<string, string>) =>
+    JSON.stringify({ level: 'info', msg: 'Project Information...', raw });
+  const full = {
+    primary_url: 'https://x.ddev.site',
+    mailpit_url: 'http://x.ddev.site:8025',
+    mailpit_https_url: 'https://x.ddev.site:8026',
+  };
+
+  it('reads both Mailpit URLs off the describe payload', () => {
+    expect(parseDdevMailpitUrls(payload(full))).toEqual({
+      http: 'http://x.ddev.site:8025',
+      https: 'https://x.ddev.site:8026',
+    });
+  });
+
+  // Same failure parseDdevPrimaryUrl exists for: a stray log object ahead of the payload
+  // makes an indexOf('{')..lastIndexOf('}') slice span two objects and throw.
+  it('survives a log line preceding the payload', () => {
+    const warning = JSON.stringify({ level: 'info', msg: "PHP Warning: Module 'mysql' loaded" });
+    expect(parseDdevMailpitUrls(`${warning}\n${payload(full)}\n`)?.http).toBe(
+      'http://x.ddev.site:8025',
+    );
+  });
+
+  // A DDEV predating Mailpit, or a project that omitted the service, must contribute
+  // nothing rather than half an answer pointing at a port nobody is listening on.
+  it('returns null when either URL is missing, and when there is no payload at all', () => {
+    const { mailpit_https_url: _dropped, ...httpOnly } = full;
+    expect(parseDdevMailpitUrls(payload(httpOnly))).toBeNull();
+    expect(parseDdevMailpitUrls(payload({ primary_url: 'https://x.ddev.site' }))).toBeNull();
+    expect(parseDdevMailpitUrls('')).toBeNull();
+  });
+
+  // Read off the SAME object that carries primary_url, so a stray line cannot contribute.
+  it('ignores mailpit keys on an object with no primary_url', () => {
+    const stray = JSON.stringify({ raw: { mailpit_url: 'http://nope', mailpit_https_url: 'x' } });
+    expect(parseDdevMailpitUrls(stray)).toBeNull();
+  });
+});
+
+// Which reported Mailpit URL may be handed to a browser on the HOST. `ddev config global
+// --mailpit-*-port` is what the runner pins, but a project's own .ddev/config.yaml OVERRIDES
+// global (DDEV says so in its own --help) and agents write that file unprompted — so the
+// reported port and the published one can disagree, and a link on the wrong port 404s.
+describe('decideMailpitHostUrls', () => {
+  const reported = { http: 'http://x.ddev.site:8025', https: 'https://x.ddev.site:8026' };
+
+  it('offers both when the reported ports are the ones this runner published', () => {
+    expect(decideMailpitHostUrls(reported, { http: 8025, https: 8026 })).toEqual(reported);
+  });
+
+  it('drops only the half whose port disagrees', () => {
+    expect(decideMailpitHostUrls(reported, { http: 8025, https: 9999 })).toEqual({
+      http: reported.http,
+    });
+  });
+
+  it('offers nothing when the project moved both ports out from under the pin', () => {
+    expect(decideMailpitHostUrls(reported, { http: 9998, https: 9999 })).toEqual({});
+  });
+
+  // No labels = direct access was off at runner start (or the runner predates the feature),
+  // so nothing was published and there is no host link to give.
+  it('offers nothing with no reported URLs and nothing with no published ports', () => {
+    expect(decideMailpitHostUrls(null, { http: 8025, https: 8026 })).toEqual({});
+    expect(decideMailpitHostUrls(reported, null)).toEqual({});
+  });
+
+  // A portless URL carries no port to agree with — never assume the default.
+  it('offers nothing for a URL with no explicit port', () => {
+    expect(
+      decideMailpitHostUrls(
+        { http: 'http://x.ddev.site', https: 'https://x.ddev.site' },
+        {
+          http: 80,
+          https: 443,
+        },
+      ),
+    ).toEqual({});
   });
 });
 

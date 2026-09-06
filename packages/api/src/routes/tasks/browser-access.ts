@@ -110,6 +110,38 @@ browserAccessRoutes.get('/:id/db-access', async (c) => {
   }
 });
 
+/** Point the task's in-app (VNC) browser at the DDEV project's Mailpit UI, so the user can
+ *  read the mail the app just sent without typing a URL into a pixel stream.
+ *
+ *  Carries no URL: the worker derives it from the live runner, so this cannot be used to
+ *  aim the in-app browser somewhere else. A DISTINCT jobId — the ensure routes above all
+ *  share `ensure-${taskId}`, and BullMQ coalesces on it, so reusing that id would hand back
+ *  a running ensure job and the navigate would never happen.
+ *
+ *  409 means the task has no Mailpit to open (not a DDEV runtime, or the project reports
+ *  none); 202 `pending` means the runtime is still coming up and the client should retry. */
+browserAccessRoutes.post('/:id/open-mailpit', async (c) => {
+  const userId = c.get('userId');
+  const taskId = c.req.param('id');
+  await requireOwnedTask(taskId, userId);
+
+  try {
+    const job = await getRuntimeEnsureQueue().add(
+      RUNTIME_ENSURE_JOB_NAMES.NAVIGATE_MAILPIT,
+      { taskId, userId } satisfies RuntimeEnsurePayload,
+      { jobId: `mailpit-${taskId}-${Date.now()}`, removeOnComplete: true, removeOnFail: true },
+    );
+    const result = (await job.waitUntilFinished(
+      getRuntimeEnsureQueueEvents(),
+      ACCESS_ENSURE_TIMEOUT_MS,
+    )) as RuntimeEnsureResult;
+    if (result?.ok) return c.json({ ok: true, url: result.url });
+    return c.json({ ok: false, reason: 'unavailable' }, 409);
+  } catch {
+    return c.json({ ok: false, pending: true }, 202);
+  }
+});
+
 /** Ensure the task's browser IDE (code-server) is up before the Editor tab loads
  *  it in an iframe. Same coalesced ensure-and-await handshake as the VNC panel
  *  (shared jobId `ensure-ide-<taskId>`). 202 `pending` means the ensure (incl. a

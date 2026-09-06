@@ -32,6 +32,7 @@ import { ensureAppServing } from './_app-runtime.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import {
   ddevContainerFailureLogs,
+  ddevMailpitUrls,
   runnerExec,
   startBrowserDesktop,
 } from '../../../sandbox/ddev-runner.js';
@@ -103,6 +104,11 @@ interface BrowserVerifyDetect {
   liveBrowser: {
     available: boolean;
     appUrl: string | null;
+    /** The DDEV project's Mailpit UI, so mail the app sent is one click away. OPTIONAL:
+     *  detect_output is persisted and only rebuilt when null, so a step parked before the
+     *  field existed replays a payload without it and must still render. Absent/null on a
+     *  non-DDEV runtime and on a project reporting no Mailpit. */
+    mailpitUrl?: string | null;
     probe: BrowserReport | null;
     reason?: string;
   } | null;
@@ -460,8 +466,12 @@ async function bringUpLiveBrowser(
     const runtime = await ensureAppServing(ctx);
     const appUrl = detected.appUrl || runtime.url || 'http://localhost';
     let probe: BrowserReport | null = null;
+    let mailpitUrl: string | null = null;
     if (runtime.mode === 'ddev') {
       await startBrowserDesktop(runtime.handle);
+      // http, not https: opened in the runner's own Chromium, whose trust store is separate
+      // from the system one, so https would risk an interstitial instead of the mailbox.
+      mailpitUrl = (await ddevMailpitUrls(runtime.handle))?.http ?? null;
       const r = await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
         timeoutMs: 60_000,
       });
@@ -475,7 +485,7 @@ async function bringUpLiveBrowser(
       );
       probe = extractReport(r.output);
     }
-    return { available: true, appUrl, probe };
+    return { available: true, appUrl, mailpitUrl, probe };
   } catch (err) {
     ctx.logger.warn({ err }, '08a live browser bring-up failed');
     return {

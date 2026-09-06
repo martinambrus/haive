@@ -161,7 +161,7 @@ function liveBrowserPanel(
   opts: { autoCollapse: boolean; title?: string; splitTerminal?: boolean },
 ) {
   const det = step.detectOutput as {
-    liveBrowser?: { available?: boolean; appUrl?: string | null };
+    liveBrowser?: { available?: boolean; appUrl?: string | null; mailpitUrl?: string | null };
     directAccess?: boolean;
     dbAccess?: boolean;
   } | null;
@@ -181,6 +181,7 @@ function liveBrowserPanel(
       autoCollapse={opts.autoCollapse}
       persistId={step.id}
       appUrl={det.liveBrowser.appUrl}
+      mailpitUrl={det.liveBrowser.mailpitUrl}
       // Split view (browser beside the agent's prose) is offered only where an agent is
       // driving this browser — the browser-testing step. At gate 2 or in run_app the
       // browser is the user's to click, so there is no run to watch.
@@ -215,7 +216,7 @@ function RunAppReadyPanels({
 }) {
   const det = step.detectOutput as {
     mode?: string;
-    liveBrowser?: { available?: boolean; appUrl?: string | null };
+    liveBrowser?: { available?: boolean; appUrl?: string | null; mailpitUrl?: string | null };
     directAccess?: boolean;
     dbAccess?: boolean;
     diffArtifactPath?: string | null;
@@ -246,6 +247,7 @@ function RunAppReadyPanels({
           autoCollapse={autoCollapse}
           persistId={`${step.id}-vnc`}
           appUrl={det?.liveBrowser?.appUrl}
+          mailpitUrl={det?.liveBrowser?.mailpitUrl}
         />
       )}
       {showDirect && (

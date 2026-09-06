@@ -181,6 +181,12 @@ export interface GlobalKbSyncJobPayload {
 
 export const RUNTIME_ENSURE_JOB_NAMES = {
   ENSURE: 'ensure-runtime',
+  /** Point the task's headed-browser desktop at the DDEV project's Mailpit UI. Its own
+   *  job name rather than a field on ENSURE because every ENSURE enqueue shares
+   *  `jobId: ensure-<taskId>`, and BullMQ coalesces on that: a second add returns the
+   *  running job and DROPS the new payload, so a navigate target riding ENSURE would be
+   *  silently ignored whenever an ensure was already in flight. */
+  NAVIGATE_MAILPIT: 'navigate-mailpit',
 } as const;
 
 /** Payload for `RUNTIME_ENSURE_JOB_NAMES.ENSURE`. The api enqueues this (e.g. when
@@ -702,9 +708,20 @@ export function ideSessionKey(taskId: string): string {
  *   - `database`      a DDEV project's database on a published loopback port (opt-in
  *                     per task). `url` is a ready connection URI; engine/host/port/
  *                     user/password/database carry the parts a local DB client needs.
- *                     Remote DB access will ride the same `proxy-subdomain` seam. */
+ *                     Remote DB access will ride the same `proxy-subdomain` seam.
+ *   - `mailpit` / `mailpit-https`  the DDEV project's mail catcher, on the router's
+ *                     Mailpit ports. Deliberately NO localhost twin: the router matches
+ *                     `HostRegexp(^<project>\.ddev\.site$)` with no catch-all, so a
+ *                     `Host: localhost` request 404s (MEASURED). */
 export interface TaskAccessEndpoint {
-  kind: 'localhost' | 'ddev-http' | 'ddev-https' | 'proxy-subdomain' | 'database';
+  kind:
+    | 'localhost'
+    | 'ddev-http'
+    | 'ddev-https'
+    | 'proxy-subdomain'
+    | 'database'
+    | 'mailpit'
+    | 'mailpit-https';
   /** Short link label, e.g. "Localhost" or "DDEV (HTTPS)". */
   label: string;
   /** Absolute URL the user opens in their browser. For `database` this is a ready
@@ -726,9 +743,10 @@ export interface TaskAccessEndpoint {
 /** Deterministic loopback host port for publishing a task's runtime to the user's
  *  browser (direct browser access). Keyed on the taskId so a task's URL stays
  *  stable across runner restarts, drawn from the ephemeral range 49152–65535.
- *  `slot` separates a DDEV runner's https (0) and http (1) ports; `attempt` shifts
- *  the candidate when a host-port bind collides (the worker retries with the next
- *  attempt). Pure (FNV-1a) so the worker and any caller derive the same value. */
+ *  `slot` separates a DDEV runner's https (0), http (1), database (2) and Mailpit
+ *  http (3) / https (4) ports; `attempt` shifts the candidate when a host-port bind
+ *  collides (the worker retries with the next attempt). Pure (FNV-1a) so the worker
+ *  and any caller derive the same value. */
 export function taskHostPort(taskId: string, slot = 0, attempt = 0): number {
   const RANGE_START = 49152;
   const RANGE_SIZE = 65536 - RANGE_START; // 16384 ephemeral ports
@@ -741,6 +759,7 @@ export function taskHostPort(taskId: string, slot = 0, attempt = 0): number {
   const base = (h >>> 0) % RANGE_SIZE;
   return RANGE_START + ((base + attempt * 257) % RANGE_SIZE);
 }
+
 /** Two minutes of grace after the last WS disconnect before a session's
  *  container is reaped. Long enough to survive a tab nav-away-and-return,
  *  short enough that abandoned sessions don't pile up under WSL's container

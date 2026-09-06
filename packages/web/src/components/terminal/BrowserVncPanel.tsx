@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { apiWebSocketUrl } from '@/lib/api-client';
+import { api, apiWebSocketUrl, type ApiError } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { useFloatWindow } from '@/lib/use-float-window';
 import { useSplitPane } from '@/lib/use-split-pane';
@@ -37,6 +37,12 @@ interface BrowserVncPanelProps {
    *  port is not published to the host, so this URL only resolves inside the environment
    *  streamed below — direct mode is the one that hands out host-openable URLs. */
   appUrl?: string | null;
+  /** The DDEV project's Mailpit UI, shown as a caption and opened in the embedded browser
+   *  by the Open Mailpit button. Same non-link reasoning as appUrl: in VNC mode the port
+   *  is unpublished, so this resolves only inside the streamed environment — which is
+   *  exactly where the button drives it. Null/absent off DDEV, on a project reporting no
+   *  Mailpit, and on any step whose detect payload predates the field. */
+  mailpitUrl?: string | null;
   /** task_steps row id whose CLI output the split view streams beside the browser.
    *  Passing it is what OFFERS the split view: only the browser-testing step, where an
    *  agent is actually driving this browser, has prose worth watching live. Panels
@@ -58,6 +64,7 @@ export function BrowserVncPanel({
   autoCollapse,
   persistId,
   appUrl,
+  mailpitUrl,
   terminalStepRowId,
 }: BrowserVncPanelProps) {
   // Persisted per task (when a persistId is given) so a reload restores whether this
@@ -196,6 +203,46 @@ export function BrowserVncPanel({
     setMessage(null);
     void connect();
   }, [connect]);
+
+  // Open Mailpit: the api can't reach the runner, so this asks the worker to drive the
+  // SAME embedded browser (its own runtime-ensure job name). The URL is resolved worker-side
+  // from the live runner, so nothing here can steer that browser elsewhere.
+  //
+  // 202 resolves (it is a 2xx, so api.post does NOT throw) and means the runtime is still
+  // coming up; 409 throws with that status and means there is no Mailpit to open. Both get
+  // their own words — a button that silently does nothing reads as broken.
+  const [mailpitNote, setMailpitNote] = useState<string | null>(null);
+  const [openingMailpit, setOpeningMailpit] = useState(false);
+  const openMailpit = useCallback(async () => {
+    setOpeningMailpit(true);
+    setMailpitNote(null);
+    try {
+      const res = await api.post<{ ok?: boolean; pending?: boolean }>(
+        `/tasks/${taskId}/open-mailpit`,
+        {},
+      );
+      if (!res?.ok) setMailpitNote('Environment still starting…');
+    } catch (err) {
+      setMailpitNote(
+        (err as ApiError)?.status === 409 ? 'No Mailpit here' : 'Could not open Mailpit',
+      );
+    } finally {
+      setOpeningMailpit(false);
+      setTimeout(() => setMailpitNote(null), 4000);
+    }
+  }, [taskId]);
+
+  const [copiedMailpit, setCopiedMailpit] = useState(false);
+  const copyMailpit = useCallback(() => {
+    if (!mailpitUrl) return;
+    void navigator.clipboard?.writeText(mailpitUrl).then(
+      () => {
+        setCopiedMailpit(true);
+        setTimeout(() => setCopiedMailpit(false), 1500);
+      },
+      () => {},
+    );
+  }, [mailpitUrl]);
 
   // Clipboard sharing (host → remote): readText() needs a user gesture + the
   // clipboard-read permission, so it's driven by the Paste button rather than synced
@@ -365,6 +412,18 @@ export function BrowserVncPanel({
           </span>
           <div className="flex items-center gap-2">
             {pasteNote && <span className="text-xs text-amber-400">{pasteNote}</span>}
+            {mailpitNote && <span className="text-xs text-amber-400">{mailpitNote}</span>}
+            {expanded && state === 'connected' && mailpitUrl && (
+              <button
+                type="button"
+                onClick={() => void openMailpit()}
+                disabled={openingMailpit}
+                title="Open the project's Mailpit inbox in the browser below"
+                className="text-xs text-indigo-400 underline disabled:text-neutral-500 disabled:no-underline"
+              >
+                {openingMailpit ? 'Opening…' : 'Open Mailpit'}
+              </button>
+            )}
             {expanded && state === 'connected' && canPaste && (
               <button
                 type="button"
@@ -445,11 +504,30 @@ export function BrowserVncPanel({
             </button>
           </div>
         </div>
-        {appUrl && (
-          <p className="px-0.5 text-[11px] text-neutral-500" style={rowSpan(2)}>
-            Testing <span className="font-mono text-neutral-400">{appUrl}</span> in the environment
-            below
-          </p>
+        {/* ONE element for both captions, deliberately: a second sibling here would shift
+            the noVNC container's slot (and split mode's grid is exactly three tracks). */}
+        {(appUrl || mailpitUrl) && (
+          <div className="px-0.5 text-[11px] text-neutral-500" style={rowSpan(2)}>
+            {appUrl && (
+              <p>
+                Testing <span className="font-mono text-neutral-400">{appUrl}</span> in the
+                environment below
+              </p>
+            )}
+            {mailpitUrl && (
+              <p>
+                Mail catcher <span className="font-mono text-neutral-400">{mailpitUrl}</span>{' '}
+                <button
+                  type="button"
+                  onClick={copyMailpit}
+                  className="text-indigo-400 underline"
+                  title="Copy the Mailpit URL"
+                >
+                  {copiedMailpit ? 'Copied' : 'Copy'}
+                </button>
+              </p>
+            )}
+          </div>
         )}
         {expanded && (
           <div

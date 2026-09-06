@@ -256,9 +256,16 @@ export async function startDdevRunner(params: {
   const weightArgs = runnerCaps
     ? ['--label', `${RUNTIME_WEIGHT_LABEL}=${await resolveRuntimeWeightMb(params.taskId, 'ddev')}`]
     : [];
-  const buildRunArgs = (attempt: number): { args: string[]; ports: DdevPublishedPorts | null } => {
+  const buildRunArgs = (
+    attempt: number,
+  ): {
+    args: string[];
+    ports: DdevPublishedPorts | null;
+    mailpitPorts: DdevPublishedPorts | null;
+  } => {
     const publish: string[] = [];
     let ports: DdevPublishedPorts | null = null;
+    let mailpitPorts: DdevPublishedPorts | null = null;
     if (directAccess) {
       const https = taskHostPort(params.taskId, 0, attempt);
       const http = taskHostPort(params.taskId, 1, attempt);
@@ -273,6 +280,24 @@ export async function startDdevRunner(params: {
         '--label',
         `${DDEV_HTTP_PORT_LABEL}=${http}`,
       );
+      // Mailpit reservation (slots 3/4), on the same direct-access flag: only a browser on
+      // the HOST needs a published port. Host port == container port == router port, so the
+      // one URL `ddev describe` reports is correct both inside the runner and outside it —
+      // the routing itself would survive a mismatch (the router strips the port before
+      // matching its `HostRegexp`), but the URL we print would not.
+      const mailpitHttps = taskHostPort(params.taskId, 4, attempt);
+      const mailpitHttp = taskHostPort(params.taskId, 3, attempt);
+      mailpitPorts = { https: mailpitHttps, http: mailpitHttp };
+      publish.push(
+        '-p',
+        `127.0.0.1:${mailpitHttps}:${mailpitHttps}`,
+        '-p',
+        `127.0.0.1:${mailpitHttp}:${mailpitHttp}`,
+        '--label',
+        `${DDEV_MAILPIT_HTTPS_PORT_LABEL}=${mailpitHttps}`,
+        '--label',
+        `${DDEV_MAILPIT_HTTP_PORT_LABEL}=${mailpitHttp}`,
+      );
     }
     // DB port reservation (slot 2). Kept OUT of `ports`/chosenPorts: it is a socat hop,
     // not a DDEV-router port, so it must not feed the router-port config below. The
@@ -283,6 +308,7 @@ export async function startDdevRunner(params: {
     }
     return {
       ports,
+      mailpitPorts,
       args: [
         'run',
         '-d',
@@ -316,13 +342,15 @@ export async function startDdevRunner(params: {
 
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 90_000 }).catch(() => {});
   let chosenPorts: DdevPublishedPorts | null = null;
+  let chosenMailpitPorts: DdevPublishedPorts | null = null;
   let started = false;
   const maxAttempts = directAccess || dbAccess ? 5 : 1;
   for (let attempt = 0; attempt < maxAttempts && !started; attempt++) {
-    const { args, ports } = buildRunArgs(attempt);
+    const { args, ports, mailpitPorts } = buildRunArgs(attempt);
     try {
       await exec('docker', args, { timeout: 60_000 });
       chosenPorts = ports;
+      chosenMailpitPorts = mailpitPorts;
       started = true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -333,6 +361,7 @@ export async function startDdevRunner(params: {
         try {
           await exec('docker', args, { timeout: 60_000 });
           chosenPorts = ports;
+          chosenMailpitPorts = mailpitPorts;
           started = true;
         } catch (err2) {
           const msg2 = err2 instanceof Error ? err2.message : String(err2);
@@ -398,10 +427,16 @@ export async function startDdevRunner(params: {
   //    or the LAN, because host exposure is the `-p` publish below and that stays opt-in.
   //  - The router PORTS are pinned only under direct access, where the host publish needs
   //    host port == container port so the app's canonical URLs carry the right port instead
-  //    of bouncing to a portless, unpublished :443.
+  //    of bouncing to a portless, unpublished :443. The Mailpit pair rides the same rule for
+  //    the same reason, and is what makes the single URL `ddev describe` reports usable from
+  //    the host as well as from the runner's own headed browser.
   const routerPortFlags =
     directAccess && chosenPorts
       ? ` --router-https-port=${chosenPorts.https} --router-http-port=${chosenPorts.http}`
+      : '';
+  const mailpitPortFlags =
+    directAccess && chosenMailpitPorts
+      ? ` --mailpit-https-port=${chosenMailpitPorts.https} --mailpit-http-port=${chosenMailpitPorts.http}`
       : '';
   await exec(
     'docker',
@@ -412,7 +447,7 @@ export async function startDdevRunner(params: {
       name,
       'bash',
       '-lc',
-      `ddev config global --router-bind-all-interfaces=true${routerPortFlags}`,
+      `ddev config global --router-bind-all-interfaces=true${routerPortFlags}${mailpitPortFlags}`,
     ],
     { timeout: 30_000 },
   ).catch((err) => {
@@ -438,6 +473,15 @@ const DDEV_HTTP_PORT_LABEL = 'haive.ddev.httpport';
  *  db access was on at runner start; absent => the port was never reserved, so the DB
  *  can't be exposed without a runner recreate. */
 const DDEV_DB_PORT_LABEL = 'haive.ddev.dbport';
+
+/** Docker labels stamping a DDEV runner's published Mailpit host ports (the actual
+ *  post-collision values), read back by ddevAccessUrls. Stamped only under direct browser
+ *  access, since a Mailpit link the user opens in their OWN browser is the only thing they
+ *  serve — the in-runner headed browser reaches Mailpit with nothing published. Kept OUT of
+ *  `DdevPublishedPorts` for the same reason the db port is: that struct feeds the
+ *  `--router-*-port` config, and these are the `--mailpit-*-port` pair. */
+const DDEV_MAILPIT_HTTP_PORT_LABEL = 'haive.ddev.mailpithttpport';
+const DDEV_MAILPIT_HTTPS_PORT_LABEL = 'haive.ddev.mailpithttpsport';
 
 interface DdevPublishedPorts {
   https: number;
@@ -745,19 +789,63 @@ export async function ensureDdevRegistryCache(): Promise<void> {
   }
 }
 
+/** The port in a URL, or null when it carries none / can't be parsed. */
+function urlPort(url: string): number | null {
+  try {
+    const port = Number(new URL(url).port);
+    return Number.isFinite(port) && port ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Which of DDEV's reported Mailpit URLs may be offered to a browser on the HOST.
+ *
+ *  A reported URL is usable there only if its port is the one this runner actually
+ *  published, and the two can legitimately disagree: `ddev config global --mailpit-*-port`
+ *  is what we pin, but a project's own `.ddev/config.yaml` OVERRIDES global (DDEV says so in
+ *  its own `--help`), and agents write to that file unprompted — the failure mode
+ *  ddev-version-constraint.ts exists for. Dropping the endpoint on a mismatch degrades to
+ *  "no host link" instead of a link that 404s.
+ *
+ *  Pure so the decision is unit-testable without docker (the rule this module follows for
+ *  decideDdevRecovery / isHostPortCollision / ddevDbInternalPort). */
+export function decideMailpitHostUrls(
+  reported: DdevMailpitUrls | null,
+  published: DdevPublishedPorts | null,
+): Partial<DdevMailpitUrls> {
+  if (!reported || !published) return {};
+  return {
+    ...(urlPort(reported.http) === published.http ? { http: reported.http } : {}),
+    ...(urlPort(reported.https) === published.https ? { https: reported.https } : {}),
+  };
+}
+
 /** The user-facing URLs for opening this task's DDEV app in their OWN browser: the
  *  project's *.ddev.site name on its published https/http ports (the only form that
  *  routes for DDEV apps that hard-code their hostname) plus a localhost fallback.
  *  Ports come from the runner's labels (the real post-retry values); the hostname
  *  from the live primary_url. Empty when nothing was published (direct access off
- *  at runner start). */
+ *  at runner start).
+ *
+ *  The project's Mailpit UI rides the same list when its ports were published. It gets NO
+ *  localhost twin, unlike the app above: the router matches `HostRegexp(^<project>\.ddev\.
+ *  site$)` and there is no catch-all, so a `Host: localhost` request is answered 404
+ *  (MEASURED on a live runner, along with the app's own localhost entry — which is
+ *  pre-existing and left alone here). Its URLs come from DDEV rather than being composed,
+ *  so a project that reconfigured or omitted Mailpit contributes nothing instead of a
+ *  guess. */
 export async function ddevAccessUrls(
   handle: DdevRunnerHandle,
   taskId: string,
 ): Promise<TaskAccessEndpoint[]> {
-  const ports = await readDdevPublishedPorts(ddevRunnerName(taskId));
+  const runner = ddevRunnerName(taskId);
+  const ports = await readDdevPublishedPorts(runner);
   if (!ports) return [];
-  const primary = await ddevPrimaryUrl(handle);
+  // ONE `describe -j` for both answers: this runs on every access-urls/db-access poll, and
+  // the call carries a 30s timeout, so parsing the same output twice beats shelling twice.
+  const described = await ddevExec(handle, 'describe -j', { timeoutMs: 30_000 });
+  const primary = described.exitCode === 0 ? parseDdevPrimaryUrl(described.output) : null;
   let host: string | null = null;
   try {
     if (primary) host = new URL(primary).hostname;
@@ -765,6 +853,10 @@ export async function ddevAccessUrls(
     host = null;
   }
   if (!host) return [];
+  const mailpit = decideMailpitHostUrls(
+    described.exitCode === 0 ? parseDdevMailpitUrls(described.output) : null,
+    await readDdevMailpitPorts(runner),
+  );
   return [
     {
       kind: 'ddev-https',
@@ -774,19 +866,36 @@ export async function ddevAccessUrls(
     },
     { kind: 'ddev-http', label: 'DDEV (HTTP)', url: `http://${host}:${ports.http}` },
     { kind: 'localhost', label: 'Localhost', url: `http://localhost:${ports.http}` },
+    ...(mailpit.https
+      ? [
+          {
+            kind: 'mailpit-https' as const,
+            label: 'Mailpit (HTTPS)',
+            url: mailpit.https,
+            trusted: ddevCaReady,
+          },
+        ]
+      : []),
+    ...(mailpit.http
+      ? [{ kind: 'mailpit' as const, label: 'Mailpit (HTTP)', url: mailpit.http }]
+      : []),
   ];
 }
 
-/** Read a DDEV runner's published host ports from its labels, or null when direct
- *  access was off at start (no labels stamped). */
-async function readDdevPublishedPorts(name: string): Promise<DdevPublishedPorts | null> {
+/** Read an https/http host-port pair off a runner's labels, or null when either is
+ *  missing (the ports were never reserved, so nothing was published). */
+async function readPortPairLabels(
+  name: string,
+  httpsLabel: string,
+  httpLabel: string,
+): Promise<DdevPublishedPorts | null> {
   try {
     const { stdout } = await exec(
       'docker',
       [
         'inspect',
         '-f',
-        `{{index .Config.Labels "${DDEV_HTTPS_PORT_LABEL}"}},{{index .Config.Labels "${DDEV_HTTP_PORT_LABEL}"}}`,
+        `{{index .Config.Labels "${httpsLabel}"}},{{index .Config.Labels "${httpLabel}"}}`,
         name,
       ],
       { timeout: 8_000 },
@@ -799,6 +908,19 @@ async function readDdevPublishedPorts(name: string): Promise<DdevPublishedPorts 
   } catch {
     return null;
   }
+}
+
+/** Read a DDEV runner's published host ports from its labels, or null when direct
+ *  access was off at start (no labels stamped). */
+async function readDdevPublishedPorts(name: string): Promise<DdevPublishedPorts | null> {
+  return readPortPairLabels(name, DDEV_HTTPS_PORT_LABEL, DDEV_HTTP_PORT_LABEL);
+}
+
+/** Read a DDEV runner's published Mailpit host ports from its labels, or null when they
+ *  were never reserved — direct access off at runner start, or a runner created before
+ *  Mailpit was surfaced. Either way there is no host link to offer. */
+async function readDdevMailpitPorts(name: string): Promise<DdevPublishedPorts | null> {
+  return readPortPairLabels(name, DDEV_MAILPIT_HTTPS_PORT_LABEL, DDEV_MAILPIT_HTTP_PORT_LABEL);
 }
 
 // --- Direct database access (DDEV) --------------------------------------------
@@ -1279,6 +1401,47 @@ export async function ddevPrimaryUrl(handle: DdevRunnerHandle): Promise<string |
   const res = await ddevExec(handle, 'describe -j', { timeoutMs: 30_000 });
   if (res.exitCode !== 0) return null;
   return parseDdevPrimaryUrl(res.output);
+}
+
+/** The project's Mailpit (mail catcher) URLs. */
+export interface DdevMailpitUrls {
+  http: string;
+  https: string;
+}
+
+/** `raw.mailpit_url` / `raw.mailpit_https_url` from `ddev describe -j`. Same line-by-line
+ *  scan and same reason as {@link parseDdevPrimaryUrl}, and read off the SAME object that
+ *  carries `primary_url` so a stray log line cannot contribute half an answer.
+ *
+ *  DDEV computes these itself and we never compose them, which is what keeps one string
+ *  correct in both viewing modes: the headed browser runs INSIDE the runner and dials the
+ *  same `*.ddev.site` name the host does. Null when either key is missing — a DDEV old
+ *  enough to predate Mailpit, or a project that omitted the service, then simply surfaces
+ *  nothing rather than a link to a port no one is listening on. */
+export function parseDdevMailpitUrls(output: string): DdevMailpitUrls | null {
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        raw?: { primary_url?: string; mailpit_url?: string; mailpit_https_url?: string };
+      };
+      if (!parsed.raw?.primary_url) continue;
+      const { mailpit_url: http, mailpit_https_url: https } = parsed.raw;
+      return http && https ? { http, https } : null;
+    } catch {
+      // Not a complete JSON object on this line (log noise / truncation) — skip it.
+    }
+  }
+  return null;
+}
+
+/** The DDEV project's Mailpit URLs, via `ddev describe -j` inside the runner. Null when
+ *  the project isn't running, the output can't be parsed, or it reports no Mailpit. */
+export async function ddevMailpitUrls(handle: DdevRunnerHandle): Promise<DdevMailpitUrls | null> {
+  const res = await ddevExec(handle, 'describe -j', { timeoutMs: 30_000 });
+  if (res.exitCode !== 0) return null;
+  return parseDdevMailpitUrls(res.output);
 }
 
 /** Parse DDEV's registry file (`~/.ddev/project_list.yaml`) for the project name registered

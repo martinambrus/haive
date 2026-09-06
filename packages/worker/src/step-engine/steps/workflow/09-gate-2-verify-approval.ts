@@ -15,6 +15,7 @@ import {
   stopBrowserDesktop as stopDdevBrowserDesktop,
   runnerExec,
   ddevPrimaryUrl,
+  ddevMailpitUrls,
   restoreRunnerBrowserWindow,
 } from '../../../sandbox/ddev-runner.js';
 import {
@@ -139,6 +140,11 @@ interface VerifyGateDetect {
   liveBrowser: {
     available: boolean;
     appUrl: string | null;
+    /** The DDEV project's Mailpit UI, so mail the app sent is one click away. OPTIONAL:
+     *  detect_output is persisted and only rebuilt when null, so a task parked at this
+     *  gate before the field existed replays a payload without it and must still render.
+     *  Absent/null on a non-DDEV runtime and on a project reporting no Mailpit. */
+    mailpitUrl?: string | null;
     reason?: string;
     consoleErrors?: string[];
     networkErrors?: string[];
@@ -627,7 +633,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           // navigate below so the human's first paint is already the right size.
           await restoreRunnerBrowserWindow(ctx.taskId);
           const appUrl = pa?.appUrl || (await ddevPrimaryUrl(handle)) || 'http://localhost';
-          liveBrowser = { available: true, appUrl };
+          // http, not https: this URL is opened in the runner's own Chromium, which keeps a
+          // trust store separate from the system one curl uses, and an interstitial would
+          // put the user on a warning page instead of their mailbox.
+          const mailpitUrl = (await ddevMailpitUrls(handle))?.http ?? null;
+          liveBrowser = { available: true, appUrl, mailpitUrl };
           const nav = await runnerExec(handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
             timeoutMs: 30_000,
           });

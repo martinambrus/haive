@@ -5,7 +5,7 @@ import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { ensureAppServing } from '../workflow/_app-runtime.js';
-import { runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
+import { ddevMailpitUrls, runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
 import {
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
@@ -28,8 +28,11 @@ interface RunAppReadyDetect {
   /** Runtime mode + URL the app is serving on (resolved via ensureAppServing). */
   mode: 'ddev' | 'app-runner' | 'host' | 'none';
   appUrl: string | null;
-  /** Drives the in-app VNC panel (BrowserVncPanel); offered whenever a runtime is up. */
-  liveBrowser: { available: boolean; appUrl: string | null } | null;
+  /** Drives the in-app VNC panel (BrowserVncPanel); offered whenever a runtime is up.
+   *  `mailpitUrl` is the DDEV project's mail catcher; OPTIONAL because detect_output is
+   *  persisted and only rebuilt when null, so a step parked before the field existed
+   *  replays a payload without it. Absent/null off DDEV or with no Mailpit reported. */
+  liveBrowser: { available: boolean; appUrl: string | null; mailpitUrl?: string | null } | null;
   /** Drives the own-browser URL panel (BrowserDirectPanel); the global feature flag. */
   directAccess: boolean;
   /** Drives the DB connection panel (DatabaseAccessPanel) when the task opted into direct
@@ -87,10 +90,15 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     // at a dead app. Idempotent; best-effort (a failure still renders the gate).
     let mode: RunAppReadyDetect['mode'] = 'none';
     let appUrl: string | null = null;
+    let mailpitUrl: string | null = null;
     try {
       const runtime = await ensureAppServing(ctx);
       mode = runtime.mode;
       appUrl = runtime.url;
+      // http, not https: opened in the runner's own Chromium, whose trust store is separate
+      // from the system one, so https would risk an interstitial instead of the mailbox.
+      if (runtime.mode === 'ddev')
+        mailpitUrl = (await ddevMailpitUrls(runtime.handle))?.http ?? null;
       // Navigate the in-runner headed browser to the app so the VNC view opens ON
       // the running app instead of a blank browser (mirrors 08a/gate-2). VNC mode
       // only — own-browser mode skips the desktop entirely. Best-effort: a
@@ -166,7 +174,8 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     return {
       mode,
       appUrl,
-      liveBrowser: viewMode === 'vnc' && mode !== 'none' ? { available: true, appUrl } : null,
+      liveBrowser:
+        viewMode === 'vnc' && mode !== 'none' ? { available: true, appUrl, mailpitUrl } : null,
       directAccess,
       dbAccess,
       workspacePath,
