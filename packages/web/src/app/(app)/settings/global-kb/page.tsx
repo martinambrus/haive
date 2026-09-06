@@ -179,6 +179,10 @@ export default function GlobalKbPage() {
   // Arriving from the onboarding step-04 link (?repo=&cli=) pre-fills the repo +
   // CLI so the user does not re-pick what the task already knows. Once, on mount.
   const prefilledEnrich = useRef(false);
+  // Flipped once that pass has consumed the URL params. The mirror effect below
+  // waits for it: on the first commit the filter state is still at its defaults,
+  // so an ungated mirror would strip the very params this pass has not read yet.
+  const [paramsRead, setParamsRead] = useState(false);
   useEffect(() => {
     if (prefilledEnrich.current) return;
     prefilledEnrich.current = true;
@@ -209,7 +213,27 @@ export default function GlobalKbPage() {
         document.getElementById('add-house-rule')?.scrollIntoView({ behavior: 'smooth' });
       }, 150);
     }
+    setParamsRead(true);
   }, []);
+
+  // Mirror the filters the mount read consumes back into the URL, so the address
+  // bar and the controls cannot disagree: changing the status dropdown or hitting
+  // "Clear task filter" left `?status=draft&sourceTaskId=` behind, and a reload
+  // then re-applied the filter the user had just cleared. Only those two keys are
+  // mirrored — exactly the set a reload restores — and the rest of the URL
+  // (?repo=/?cli= for the enrich form, #add) is carried through untouched.
+  // replaceState, not a push: filtering a list is not a history trail, and a push
+  // per keystroke would make Back mean "undo one filter" instead of "leave".
+  useEffect(() => {
+    if (!paramsRead) return;
+    const url = new URL(window.location.href);
+    if (statusFilter !== 'all') url.searchParams.set('status', statusFilter);
+    else url.searchParams.delete('status');
+    if (sourceTaskId) url.searchParams.set('sourceTaskId', sourceTaskId);
+    else url.searchParams.delete('sourceTaskId');
+    if (url.href !== window.location.href) window.history.replaceState(null, '', url);
+  }, [paramsRead, statusFilter, sourceTaskId]);
+
   // Leaving the Global KB page is a strong "done managing the KB" signal: ask the
   // API to release the embedding model from the GPU. The endpoint self-gates (only
   // evicts when the model is resident and no live task / in-flight sync needs it),
