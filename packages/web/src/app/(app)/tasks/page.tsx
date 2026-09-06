@@ -63,56 +63,87 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
           label: 'Back to tasks',
         })
       }
-      className="block"
+      // min-w-0 because a grid item's floor is its MIN-CONTENT, and the capped title
+      // contributes its whole cap to that: MEASURED, the widest row's min-content came out
+      // 1104px inside a 960px track and the card overflowed the page. Before the cap the h2
+      // could wrap, so the floor was one word wide and nothing showed.
+      className="block min-w-0"
     >
       <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             {/* Ahead of the title because this is where tasks are COMPARED — the list is
                 sorted by it, so the column of scores reads down the page. */}
             <TaskVote taskId={task.id} score={task.voteScore ?? 0} />
-            <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
-            {/* Both a paused task and one queued behind a capacity cap stay `running` in the
-                DB, which made "working", "held" and "waiting in line" look identical here.
-                Paused wins: it is the deliberate state, and the server already suppresses
-                slotWait for a paused task so the two can never both be set. */}
-            {task.pausedAt ? (
-              <Badge
-                variant="warning"
-                title={`Paused by you at ${new Date(task.pausedAt).toLocaleString()} — the orchestrator is not handing this task any work.`}
-              >
-                paused
-              </Badge>
-            ) : task.slotWait ? (
-              <SlotWaitBadge slotWait={task.slotWait} />
-            ) : (
-              <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
-            )}
-            <Badge>{TYPE_LABELS[task.type]}</Badge>
-            {task.repository && (
-              <Badge variant="info" className="gap-1">
-                <FolderGit2 className="h-3 w-3" />
-                {task.repository.name}
-              </Badge>
-            )}
-            {/* Current step as a badge, matching the fixed-header strip on the task page.
-                The server sends the same derived label to both surfaces, so this reads
-                "Phase 4: Implementation validation (fix loop 7)" exactly as the task header
-                does; the raw step id stays as the hover title, and is the fallback when an
-                older api omits the label. Hidden on done/cancelled tasks — there is no
-                "current" step then, and an amber badge would read as an alert. */}
-            {task.currentStepId && task.status !== 'completed' && task.status !== 'cancelled' && (
-              <Badge variant="warning" className="gap-1" title={task.currentStepId}>
-                <CircleDot className="h-3 w-3" />
-                {task.currentStepLabel ?? task.currentStepId}
-              </Badge>
-            )}
+            {/* Capped and truncated for the same reason as the task page's fixed strip: the
+                title is the only elastic item on the row, and an h2 with no ceiling WRAPS
+                rather than shrinking — MEASURED, an 88-character title stood 2 lines tall at
+                1920px with 12px left over before the timestamp, and 7 lines tall at 1280px.
+                Every line of that tower is width the badges never get. Full string on hover.
+                shrink-[2] settles who gives way once the row is genuinely tight: MEASURED at
+                1280px the default weighting left the title 432px and squeezed the badges onto
+                THREE lines, while losing 118px of title puts them back on two. */}
+            <h2
+              className="min-w-0 max-w-[36rem] shrink-[2] truncate text-lg font-semibold text-neutral-50"
+              title={task.title}
+            >
+              {task.title}
+            </h2>
+            {/* The badges are their own flex line so they can WRAP under pressure instead of
+                overflowing the card: with the title truncating, nothing else on the row gives.
+                No min-w-0 here on purpose — min-width:auto bottoms the group out at its widest
+                badge, which is exactly as far as it should compress. */}
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Both a paused task and one queued behind a capacity cap stay `running` in the
+                  DB, which made "working", "held" and "waiting in line" look identical here.
+                  Paused wins: it is the deliberate state, and the server already suppresses
+                  slotWait for a paused task so the two can never both be set. */}
+              {task.pausedAt ? (
+                <Badge
+                  variant="warning"
+                  title={`Paused by you at ${new Date(task.pausedAt).toLocaleString()} — the orchestrator is not handing this task any work.`}
+                >
+                  paused
+                </Badge>
+              ) : task.slotWait ? (
+                <SlotWaitBadge slotWait={task.slotWait} />
+              ) : (
+                <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
+              )}
+              <Badge>{TYPE_LABELS[task.type]}</Badge>
+              {task.repository && (
+                <Badge variant="info" className="gap-1">
+                  <FolderGit2 className="h-3 w-3" />
+                  {task.repository.name}
+                </Badge>
+              )}
+              {/* Current step as a badge, matching the fixed-header strip on the task page.
+                  The server sends the same derived label to both surfaces, so this reads
+                  "Phase 4: Implementation validation (fix loop 7)" exactly as the task header
+                  does; the raw step id stays as the hover title, and is the fallback when an
+                  older api omits the label. Hidden on done/cancelled tasks — there is no
+                  "current" step then, and an amber badge would read as an alert. */}
+              {task.currentStepId && task.status !== 'completed' && task.status !== 'cancelled' && (
+                <Badge variant="warning" className="gap-1" title={task.currentStepId}>
+                  <CircleDot className="h-3 w-3" />
+                  {task.currentStepLabel ?? task.currentStepId}
+                </Badge>
+              )}
+            </div>
           </div>
-          <span className="text-xs text-neutral-500">
+          <span className="shrink-0 whitespace-nowrap text-xs text-neutral-500">
             {new Date(task.createdAt).toLocaleString()}
           </span>
         </div>
-        {task.description && <p className="text-xs text-neutral-400">{task.description}</p>}
+        {/* Clamped: a task brief runs to a couple of thousand characters and rendered in full
+            it was 7 to 12 lines per row, which is what pushed the next task off the screen.
+            Two lines is the gist; the rest is one hover away and the whole of it is on the
+            task page. */}
+        {task.description && (
+          <p className="line-clamp-2 text-xs text-neutral-400" title={task.description}>
+            {task.description}
+          </p>
+        )}
         {task.errorMessage && <p className="text-xs text-red-400">{task.errorMessage}</p>}
         {task.timing && task.startedAt && (
           <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
