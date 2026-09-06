@@ -491,6 +491,10 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
     // selective test run's result. The runner evaluates this before fixLoop and
     // returns early while it continues, so fixLoop only sees an exhausted budget.
     maxIterations: 6,
+    // Pass 0 writes the tests; every later pass is a fix driven by the selective run
+    // that failed. Same agent and same provider throughout, so there is no cliRoles
+    // entry to name it — see StepLoopSpec.passLabel.
+    passLabel: (iteration) => (iteration === 0 ? 'Test writer' : `Test fixer ${iteration}`),
     shouldContinue: ({ applyOutput }) => {
       const out = applyOutput as TestManagementApply;
       return out.testsPassed === false;

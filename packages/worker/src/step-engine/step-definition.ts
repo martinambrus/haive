@@ -451,6 +451,12 @@ export interface StepLoopSpec<TApply = unknown> {
    *  odd iterations correct). Null/omitted uses the step's single 'default'
    *  provider. Must match a role id in `metadata.cliRoles`. */
   resolveRole?(iteration: number): string | null;
+  /** Optional. Names what THIS pass is doing, for the terminal header
+   *  (cli_invocations.agent_title). For a loop whose passes differ in job but not
+   *  in provider, so `metadata.cliRoles` — whose PRESENCE marks a multi-CLI loop
+   *  and whose LENGTH is read as passesPerRound by api/web — would be the wrong
+   *  thing to declare. A role label from `cliRoles` wins where both exist. */
+  passLabel?(iteration: number): string | null;
   /** Number of LLM passes that make up one user-facing "round" for budgeting and
    *  display — e.g. spec-quality runs 2 passes per round (review + correct). The
    *  form budget (maxIterations) and the UI counter are expressed in ROUNDS; the

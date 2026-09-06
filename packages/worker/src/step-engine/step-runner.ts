@@ -763,10 +763,15 @@ async function resolveLlmPhase(
   const mode = plan.mode === 'subagent_emulated' ? 'subagent_emulated' : 'cli';
   // For multi-CLI loop steps, label the invocation with its role (Validator /
   // Fixer / Reviewer / Corrector / …) so the terminal header shows which pass it is.
+  // A loop whose passes share one provider has no role to name, so it names the pass
+  // itself instead — otherwise every run in the step renders an identical header and
+  // only its ordinal separates the first pass from the fifth fix attempt.
   const roleLabel =
-    role !== 'default'
+    (role !== 'default'
       ? (stepDef.metadata.cliRoles?.find((r) => r.id === role)?.label ?? null)
-      : null;
+      : null) ??
+    stepDef.loop?.passLabel?.(upcomingIteration) ??
+    null;
   const payloadKind: CliExecInvocationKind =
     plan.invocation.kind === 'subagent'
       ? plan.mode === 'subagent_emulated'

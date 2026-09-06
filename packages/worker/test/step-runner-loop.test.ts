@@ -226,6 +226,7 @@ interface LoopStepOpts {
   shouldContinue: (args: StepLoopShouldContinueArgs) => boolean | Promise<boolean>;
   applyReturns?: (iter: number) => unknown;
   buildIterationPrompt?: boolean;
+  passLabel?: (iteration: number) => string | null;
 }
 
 function loopStep(opts: LoopStepOpts): StepDefinition {
@@ -256,6 +257,7 @@ function loopStep(opts: LoopStepOpts): StepDefinition {
             buildIterationPrompt: (a) => `iter=${a.iteration} prev=${a.previousIterations.length}`,
           }
         : {}),
+      ...(opts.passLabel ? { passLabel: opts.passLabel } : {}),
     },
     async apply(_ctx, args) {
       return opts.applyReturns
@@ -400,6 +402,98 @@ describe('advanceStep loop hook', () => {
     // The new invocation's prompt comes from buildIterationPrompt.
     const inserted = state.inserts.find((i) => i.table === 'cli_invocations');
     expect(inserted!.row.prompt).toContain('iter=1 prev=1');
+  });
+
+  it('titles each pass from loop.passLabel so one loop step does not render N identical terminals', async () => {
+    // Pass 0: nothing run yet, so the FIRST dispatch has to carry the label too — a
+    // loop whose passes share one provider has no cliRoles entry to fall back on.
+    const first = freshState();
+    first.taskStepRow = { ...first.taskStepRow, status: 'pending' };
+    await advanceStep({
+      db: makeMockDb(first),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: loopStep({
+        maxIterations: 3,
+        shouldContinue: () => false,
+        passLabel: (i) => (i === 0 ? 'Test writer' : `Test fixer ${i}`),
+      }),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation() {},
+      },
+    });
+    const firstInsert = first.inserts.find((i) => i.table === 'cli_invocations');
+    expect(firstInsert!.row.agentTitle).toBe('Test writer');
+
+    // Pass 1: the re-dispatch after a completed iteration 0 gets the fix label.
+    const state = freshState();
+    state.taskStepRow = {
+      ...state.taskStepRow,
+      status: 'waiting_cli',
+      detectOutput: { ready: true },
+      formValues: {},
+    };
+    state.cliInvocationRows = [
+      {
+        id: 'inv-0',
+        taskId: 'task-1',
+        taskStepId: 'ts-1',
+        cliProviderId: 'prov-1',
+        mode: 'cli',
+        prompt: 'p',
+        rawOutput: 'r',
+        parsedOutput: { findings: ['err'] },
+        exitCode: 0,
+        errorMessage: null,
+        createdAt: new Date(Date.now() - 1000),
+        endedAt: new Date(),
+        supersededAt: null,
+        consumedAt: null,
+      },
+    ];
+    await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: loopStep({
+        maxIterations: 3,
+        shouldContinue: (a) => a.iteration === 0,
+        passLabel: (i) => (i === 0 ? 'Test writer' : `Test fixer ${i}`),
+      }),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation() {},
+      },
+    });
+    const inserted = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(inserted!.row.agentTitle).toBe('Test fixer 1');
+  });
+
+  it('leaves agentTitle null for a loop step that declares no passLabel', async () => {
+    const state = freshState();
+    state.taskStepRow = { ...state.taskStepRow, status: 'pending' };
+    await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: loopStep({ maxIterations: 3, shouldContinue: () => false }),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation() {},
+      },
+    });
+    const inserted = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(inserted!.row.agentTitle).toBeNull();
   });
 
   it('marks last entry exhaustedBudget=true and finishes when budget caps the loop', async () => {
