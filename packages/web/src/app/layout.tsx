@@ -13,7 +13,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body>{children}</body>
+      {/* Extensions (password managers, colour pickers) stamp their own attributes
+          onto <body> before React hydrates, and suppressHydrationWarning only covers
+          the element it sits on — the one on <html> does not reach here. */}
+      <body suppressHydrationWarning>{children}</body>
     </html>
   );
 }
