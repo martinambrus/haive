@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { parseSimplifierOutput, parseFixupOutput } from './07a-code-simplify.js';
+import {
+  parseSimplifierOutput,
+  parseFixupOutput,
+  parallelAuthorshipLines,
+} from './07a-code-simplify.js';
 
 describe('parseSimplifierOutput', () => {
   it('parses a fenced JSON simplifier report', () => {
@@ -57,5 +61,22 @@ describe('parseFixupOutput', () => {
   it('applies defaults for omitted fields', () => {
     const p = parseFixupOutput({ fixes_needed: false });
     expect(p.fixesMade).toEqual([]);
+  });
+});
+
+describe('parallelAuthorshipLines', () => {
+  it('names the coder and level counts for a DAG task', () => {
+    const lines = parallelAuthorshipLines({ issues: 7, levels: 3 });
+    expect(lines.join('\n')).toContain('7 agents across 3 dependency levels');
+    expect(lines.join('\n')).toContain('isolated worktree');
+  });
+
+  it('says nothing for single-agent work, or a detect payload written before the field', () => {
+    expect(parallelAuthorshipLines(null)).toEqual([]);
+    expect(parallelAuthorshipLines(undefined)).toEqual([]);
+  });
+
+  it('says nothing for a one-issue DAG — there is no cross-issue boundary', () => {
+    expect(parallelAuthorshipLines({ issues: 1, levels: 1 })).toEqual([]);
   });
 });

@@ -34,6 +34,9 @@ interface SimplifyDetect {
    *  plus currently-dirty worktree files; deduped, capped for prompt size — the
    *  set reports the cap rather than hiding it. */
   implementationFiles: ImplementationFileSet;
+  /** 06c's issue/level counts when DAG execution ran, else null (single-agent
+   *  work). Absent on a detect payload persisted before this field existed. */
+  dagExecution: { issues: number; levels: number } | null;
 }
 
 interface SimplifyApply {
@@ -99,6 +102,27 @@ function priorSimplifier(previous: StepLoopPassRecord[]): SimplifyApply | null {
     if (out && (out.source === 'simplifier' || out.source === 'stub')) return out;
   }
   return null;
+}
+
+/**
+ * The one thing this step sees that no implementation agent could. DAG coders run in
+ * parallel, each in an isolated worktree that cannot see its siblings' files, so two of
+ * them adding the same helper is invisible to both — and 07a is the first step to read
+ * the merged union. Empty for single-agent work, and for a detect payload persisted
+ * before the field existed.
+ */
+export function parallelAuthorshipLines(
+  dag: { issues: number; levels: number } | null | undefined,
+): string[] {
+  if (!dag || dag.issues < 2) return [];
+  return [
+    '',
+    `These files were written by ${dag.issues} agents across ${dag.levels} dependency levels,`,
+    'each in an isolated worktree that could not see the others. Duplication ACROSS those',
+    'issue boundaries — two agents adding the same helper, constant, type, or pattern under',
+    'different names — was invisible to every one of them, and you are the first to read the',
+    'merged result. Look for it specifically and consolidate onto one definition.',
+  ];
 }
 
 const SEARCH_LADDER = [
@@ -203,6 +227,10 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
     // must deliver, and can Read any section it needs in full.
     const spec = (await resolveSpecView(ctx)).text;
 
+    const dag = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06c-dag-execute');
+    // A skipped step writes no output, so single-agent tasks land on null here.
+    const dagOut = dag?.output as { ran?: boolean; issues?: number; levels?: number } | null;
+
     return {
       worktreePath: wt.worktreePath,
       // Per-invocation isolation mounts the worktree alone at the workdir root, so the
@@ -211,6 +239,7 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
       sandboxWorktreePath: ctx.sandboxWorkdir,
       spec,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
+      dagExecution: dagOut?.ran ? { issues: dagOut.issues ?? 0, levels: dagOut.levels ?? 0 } : null,
     };
   },
 
@@ -231,6 +260,7 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
           'The recently modified code (your Focus Scope)',
           'Determine the recently-implemented files from the workspace — they are your Focus Scope.',
         ),
+        ...parallelAuthorshipLines(d.dagExecution),
         '',
         'If you find areas to simplify, edit the files directly. If the code is already clean,',
         'report that no changes were needed.',
