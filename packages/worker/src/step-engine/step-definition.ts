@@ -233,6 +233,11 @@ export interface DagCoderContext {
   provides: string;
   /** The coder's cwd inside the sandbox (its own git worktree). */
   sandboxWorktreePath: string;
+  /** What the project plan says stands on the components this task touches,
+   *  pre-rendered. A property of the TASK, not of the issue, so the executor
+   *  builds it once per dispatch pass and every coder in the level gets the same
+   *  one. Empty string when the repo has no plan. */
+  planImpact: string;
 }
 
 /** Declared by the DAG-executor step. The runner drives the persisted DAG one

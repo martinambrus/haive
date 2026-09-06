@@ -56,6 +56,7 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
     issue.acceptanceCriteria.length > 0
       ? `Acceptance criteria (for this issue only):\n- ${issue.acceptanceCriteria.join('\n- ')}`
       : '',
+    issue.planImpact ? `\n${issue.planImpact}` : '',
     upstreamDebt ? `\n${upstreamDebt}` : '',
     ...ddevConfigGuidanceLines(
       [issue.title, issue.description, issue.provides, ...issue.specSections].join(' '),

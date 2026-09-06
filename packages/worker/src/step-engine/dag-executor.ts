@@ -38,6 +38,7 @@ import {
 import { killCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
 import { overrideOr, overrideOrLearned, escalatedTimeoutMs } from './dispatch-timeout.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
+import { loadPlanImpactContext, planImpactBlock } from './steps/workflow/_plan-impact.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
@@ -244,8 +245,14 @@ export async function issueSpecText(
   return { text: view.spec, condensed: false };
 }
 
-function coderContext(issue: DagIssueRow, specText: string, condensed: boolean): DagCoderContext {
+function coderContext(
+  issue: DagIssueRow,
+  specText: string,
+  condensed: boolean,
+  planImpact: string,
+): DagCoderContext {
   return {
+    planImpact,
     issueKey: issue.issueKey,
     title: issue.title,
     description: issue.description ?? '',
@@ -1724,6 +1731,11 @@ export async function resolveDagPhase(
       // Resolved once for the level; issueSpecText then decides per issue, since the
       // artifact the pointer names is copied into each worktree separately.
       const specView = await resolveSpecView(ctx);
+      // Once per dispatch pass, not per issue: the blast radius is a property of
+      // the task. `isolated: true` — a coder owns ONE worktree merged at the level
+      // barrier, so editing a file another issue owns is a merge conflict, and the
+      // block tells it to report rather than edit.
+      const planImpact = planImpactBlock(await loadPlanImpactContext(ctx), { isolated: true });
       let dispatched = 0;
       for (const issue of undispatched) {
         const issueSpec = await issueSpecText(specView, issue);
@@ -1734,7 +1746,7 @@ export async function resolveDagPhase(
           db,
           ctx.taskId,
           spec.buildCoderPrompt(
-            coderContext(issue, issueSpec.text, issueSpec.condensed),
+            coderContext(issue, issueSpec.text, issueSpec.condensed, planImpact),
             upstreamDebt,
           ),
         );

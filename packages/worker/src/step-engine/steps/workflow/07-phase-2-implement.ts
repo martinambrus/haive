@@ -4,6 +4,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadTaskMeta } from './_task-meta.js';
+import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import {
   commentPolicyLines,
@@ -41,6 +42,10 @@ interface ImplementDetect {
   priorFixContext: string;
   /** Fix-loop round (0 = original implementation pass). */
   round: number;
+  /** What the project plan says stands on the components this change touches,
+   *  pre-rendered. Empty on a repo with no plan, a spec that named no component,
+   *  or a disabled canvas — the prompt is then what it always was. */
+  planImpact: string;
   /** Env template ready with browserTesting on → a chrome-devtools MCP is wired to
    *  the running app's browser (same gate as resolvers.ts), so the fix pass directs
    *  the agent to verify its change in-browser. */
@@ -272,6 +277,10 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       // Background ledger of what earlier fix rounds already did / ruled out (empty on round 0).
       priorFixContext: await loadPriorFixContext(ctx),
       round: ctx.round,
+      // This agent holds the WHOLE worktree, so a consumer whose contract the
+      // change breaks is legitimately its to fix — which is what the scope fence
+      // already says. `isolated: false` selects that wording.
+      planImpact: planImpactBlock(await loadPlanImpactContext(ctx), { isolated: false }),
       browserTesting,
     };
   },
@@ -340,6 +349,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         `Gate 1 feedback: ${detected.gateFeedback || '(none)'}`,
         `Extra instructions: ${values.instructions ?? '(none)'}`,
         ...ddevConfigGuidanceLines(detected.spec),
+        ...(detected.planImpact ? ['', detected.planImpact] : []),
       ];
 
       // When the repo does browser testing, a chrome-devtools MCP is wired to the
