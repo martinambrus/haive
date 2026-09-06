@@ -11,6 +11,7 @@ import {
   configService,
   decryptEmail,
   DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
+  DEFAULT_CLI_PROMPT_RETENTION_DAYS,
   DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS,
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
   DEFAULT_CLI_TIMEOUT_LADDER,
@@ -1264,4 +1265,49 @@ adminRoutes.put('/config/cli-stream-log-retention', async (c) => {
   await configService.set(CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS, String(retentionDays));
   log.info({ retentionDays }, 'cli stream-log retention updated');
   return c.json({ retentionDays });
+});
+
+adminRoutes.get('/config/cli-prompt-retention', async (c) => {
+  const retentionDays = await configService.getNumber(
+    CONFIG_KEYS.CLI_PROMPT_RETENTION_DAYS,
+    DEFAULT_CLI_PROMPT_RETENTION_DAYS,
+  );
+  return c.json({ retentionDays });
+});
+
+adminRoutes.put('/config/cli-prompt-retention', async (c) => {
+  // Same bounds and the same sweep as the transcript window, but its own number: blanking
+  // a prompt stands down wave-agent retry recovery, which the transcript window does not.
+  const { retentionDays } = cliStreamLogRetentionSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.CLI_PROMPT_RETENTION_DAYS, String(retentionDays));
+  log.info({ retentionDays }, 'cli prompt retention updated');
+  return c.json({ retentionDays });
+});
+
+/** What the two sweepable columns currently occupy, so the retention settings are a choice
+ *  rather than a guess. Both windows default to "keep forever" precisely because the sweep
+ *  is irreversible, which makes the size the missing half of that decision.
+ *
+ *  `pg_column_size` reads the TOAST pointer's stored (compressed) size and does NOT detoast
+ *  the value, so this is a heap-only scan: MEASURED 3.6 ms over 2,584 rows holding 445 MB.
+ *  Kept as its own endpoint rather than folded into either config GET so a slow instance
+ *  cannot make the settings themselves slow to load. */
+adminRoutes.get('/config/cli-retention-usage', async (c) => {
+  const db = getDb();
+  const [row] = await db
+    .select({
+      invocations: sql<number>`count(*)::int`,
+      withStreamLog: sql<number>`count(*) filter (where ${schema.cliInvocations.streamLog} is not null)::int`,
+      withPrompt: sql<number>`count(*) filter (where ${schema.cliInvocations.prompt} <> '')::int`,
+      streamLogBytes: sql<number>`coalesce(sum(pg_column_size(${schema.cliInvocations.streamLog})), 0)::bigint`,
+      promptBytes: sql<number>`coalesce(sum(pg_column_size(${schema.cliInvocations.prompt})), 0)::bigint`,
+    })
+    .from(schema.cliInvocations);
+  return c.json({
+    invocations: Number(row?.invocations ?? 0),
+    withStreamLog: Number(row?.withStreamLog ?? 0),
+    withPrompt: Number(row?.withPrompt ?? 0),
+    streamLogBytes: Number(row?.streamLogBytes ?? 0),
+    promptBytes: Number(row?.promptBytes ?? 0),
+  });
 });

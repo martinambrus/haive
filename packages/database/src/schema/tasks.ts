@@ -395,6 +395,12 @@ export const tasks = pgTable(
     index('tasks_repository_id_idx').on(table.repositoryId),
     index('tasks_env_template_id_idx').on(table.envTemplateId),
     index('tasks_parent_task_id_idx').on(table.parentTaskId),
+    // Every statistics query is "this user's tasks that finished inside a window", and
+    // every one of them was a full scan filtered by tasks_user_id_idx alone.
+    index('tasks_user_completed_at_idx').on(table.userId, table.completedAt),
+    // The CLI retention sweep's task subquery (terminal status + completed_at < cutoff),
+    // which had no index at all and ran hourly.
+    index('tasks_status_completed_at_idx').on(table.status, table.completedAt),
   ],
 );
 
@@ -891,6 +897,13 @@ export const cliInvocations = pgTable(
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),
     index('cli_invocations_task_step_id_idx').on(table.taskStepId),
+    // Statistics range scans: every window ("what did I spend / run between X and Y") and
+    // the busy-span interval fetch order by this column and were seq scans without it.
+    index('cli_invocations_started_at_idx').on(table.startedAt),
+    // Both retention sweeps age off ended_at. Plain rather than partial on
+    // `stream_log IS NOT NULL`: one index serves the prompt sweep too, and with the default
+    // window off there is nothing swept for a partial index to exclude anyway.
+    index('cli_invocations_ended_at_idx').on(table.endedAt),
     // At most one LIVE singleton invocation per step. Closes the TOCTOU race in
     // resolveLlmPhase's dispatch guard (see migration 0096): a second concurrent
     // live insert fails with 23505 and the dispatch path re-parks the loser.

@@ -24,6 +24,14 @@ export const DEFAULT_TASK_ATTACHMENT_MAX_BYTES = 256 * 1024 * 1024;
  *  CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS. */
 export const DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS = 0;
 
+/** Default retention window for CLI prompts: 0 = keep forever, and off for the same
+ *  reason the transcript window is — the sweep blanks the column irreversibly. Kept
+ *  SEPARATE from the transcript window rather than sharing it: the two columns have
+ *  different consumers, so one number would hide that raising the transcript window
+ *  also stands down wave-agent retry recovery (see the prompt note on the reaper).
+ *  Admin-tunable via CONFIG_KEYS.CLI_PROMPT_RETENTION_DAYS. */
+export const DEFAULT_CLI_PROMPT_RETENTION_DAYS = 0;
+
 export const CONFIG_KEYS = {
   DATABASE_URL: 'config:database:url',
   API_PORT: 'config:server:apiPort',
@@ -252,6 +260,17 @@ export const CONFIG_KEYS = {
   // output, token usage and timings, and the replay endpoint falls back to rawOutput.
   // 0 keeps transcripts forever (the default) — nulling is irreversible, so it is opt-in.
   CLI_STREAM_LOG_RETENTION_DAYS: 'config:tasks:cliStreamLogRetentionDays',
+
+  // Retention window (days) for cli_invocations.prompt — the full prompt text every
+  // invocation was dispatched with. The single largest column after the transcript
+  // (measured here: 168 MB against stream_log's 255 MB), and unlike the transcript it
+  // has no UI at all: its only reader is the step-runner's mining-retry recovery, which
+  // re-dispatches a wave agent selectAgents can no longer author. The sweep blanks it to
+  // '' rather than NULL because the column is NOT NULL; that reader already does
+  // `if (!prompt) continue;`, so a blanked row degrades to "this agent cannot be
+  // re-dispatched" instead of dispatching an empty prompt.
+  // 0 keeps prompts forever (the default) — blanking is irreversible, so it is opt-in.
+  CLI_PROMPT_RETENTION_DAYS: 'config:tasks:cliPromptRetentionDays',
 
   APP_URL: 'config:app:url',
 
@@ -570,6 +589,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.ALLOWANCE_WATCH_MODE]: 'notify',
   [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),
   [CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS]: String(DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS),
+  [CONFIG_KEYS.CLI_PROMPT_RETENTION_DAYS]: String(DEFAULT_CLI_PROMPT_RETENTION_DAYS),
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',
   [CONFIG_KEYS.MAINTENANCE_MESSAGE]: 'Maintenance in progress. Please check back shortly.',

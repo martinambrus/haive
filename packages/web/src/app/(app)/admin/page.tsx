@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { usePageTitle } from '@/lib/use-page-title';
+import { formatBytes } from '@/lib/format-bytes';
 import {
   api,
   type AdminHealthResponse,
@@ -19,6 +20,17 @@ import {
   CardTitle,
   FormError,
 } from '@/components/ui';
+
+/** What the two sweepable CLI text columns currently occupy. Shown beside the retention
+ *  windows because both default to "keep forever" — the size is the half of that decision
+ *  the settings could not previously answer. */
+type CliRetentionUsage = {
+  invocations: number;
+  withStreamLog: number;
+  withPrompt: number;
+  streamLogBytes: number;
+  promptBytes: number;
+};
 
 /** Runtime governor settings. Every number is 0 = auto-derive from this host. */
 type RuntimeLimitsSettings = {
@@ -189,6 +201,10 @@ export default function AdminPage() {
   const [streamLogRetentionDays, setStreamLogRetentionDays] = useState<number | null>(null);
   const [streamLogRetentionInput, setStreamLogRetentionInput] = useState('');
   const [savingStreamLogRetention, setSavingStreamLogRetention] = useState(false);
+  const [promptRetentionDays, setPromptRetentionDays] = useState<number | null>(null);
+  const [promptRetentionInput, setPromptRetentionInput] = useState('');
+  const [savingPromptRetention, setSavingPromptRetention] = useState(false);
+  const [retentionUsage, setRetentionUsage] = useState<CliRetentionUsage | null>(null);
   const [chromeMcpTimeoutMs, setChromeMcpTimeoutMs] = useState<number | null>(null);
   const [chromeMcpTimeoutInput, setChromeMcpTimeoutInput] = useState('');
   const [savingChromeMcpTimeout, setSavingChromeMcpTimeout] = useState(false);
@@ -243,6 +259,7 @@ export default function AdminPage() {
         prWorkflowData,
         runtimeLimitsData,
         streamLogRetentionData,
+        promptRetentionData,
         chromeMcpTimeoutData,
         globalPauseData,
         ragEmbeddingData,
@@ -281,6 +298,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
         api.get<RuntimeLimitsResponse>('/admin/config/runtime-limits'),
         api.get<{ retentionDays: number }>('/admin/config/cli-stream-log-retention'),
+        api.get<{ retentionDays: number }>('/admin/config/cli-prompt-retention'),
         api.get<{ timeoutMs: number }>('/admin/config/chrome-mcp-timeout'),
         api.get<{ paused: boolean }>('/admin/config/global-pause'),
         api.get<RagEmbeddingSettings>('/admin/config/rag-embedding'),
@@ -335,6 +353,8 @@ export default function AdminPage() {
       setRuntimeLimitsForm(runtimeLimitsFormOf(runtimeLimitsData));
       setStreamLogRetentionDays(streamLogRetentionData.retentionDays);
       setStreamLogRetentionInput(String(streamLogRetentionData.retentionDays));
+      setPromptRetentionDays(promptRetentionData.retentionDays);
+      setPromptRetentionInput(String(promptRetentionData.retentionDays));
       setChromeMcpTimeoutMs(chromeMcpTimeoutData.timeoutMs);
       setChromeMcpTimeoutInput(String(chromeMcpTimeoutData.timeoutMs));
       setGlobalPause(globalPauseData.paused);
@@ -352,6 +372,24 @@ export default function AdminPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Retention sizes are display-only, so they get their own fetch rather than a slot in
+  // load()'s Promise.all: a failure there would reject the whole batch and blank the page,
+  // and this figure is the one thing on it nothing depends on.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<CliRetentionUsage>('/admin/config/cli-retention-usage')
+      .then((usage) => {
+        if (!cancelled) setRetentionUsage(usage);
+      })
+      .catch(() => {
+        /* the card renders without sizes */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function runAction(user: AdminUser, action: AdminUserAction, role?: 'admin' | 'user') {
     const payload: { action: AdminUserAction; role?: 'admin' | 'user' } = { action };
@@ -466,6 +504,28 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update CLI transcript retention');
     } finally {
       setSavingStreamLogRetention(false);
+    }
+  }
+
+  async function savePromptRetention() {
+    const days = Number.parseInt(promptRetentionInput, 10);
+    if (!Number.isFinite(days) || days < 0 || days > 3650) {
+      setError('CLI prompt retention must be between 0 and 3650 days.');
+      return;
+    }
+    setSavingPromptRetention(true);
+    try {
+      const result = await api.put<{ retentionDays: number }>(
+        '/admin/config/cli-prompt-retention',
+        { retentionDays: days },
+      );
+      setPromptRetentionDays(result.retentionDays);
+      setPromptRetentionInput(String(result.retentionDays));
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update CLI prompt retention');
+    } finally {
+      setSavingPromptRetention(false);
     }
   }
 
@@ -1439,39 +1499,103 @@ export default function AdminPage() {
       {streamLogRetentionDays !== null && (
         <Card>
           <CardHeader>
-            <CardTitle>CLI transcript retention</CardTitle>
+            <CardTitle>CLI text retention</CardTitle>
             <CardDescription>
-              Age out the full CLI transcript behind each step&apos;s Raw terminal tab. Nothing else
-              ever deletes it, so it only accrues. Age counts from when the task finished
-              (completed, failed or cancelled), never from the invocation, so a task still running
-              past the window keeps the transcripts of its earlier rounds. Only the transcript is
-              dropped — the invocation row keeps its result, token usage and timings, and the Raw
-              tab falls back to the parsed result.{' '}
-              <span className="text-amber-400">Dropping a transcript cannot be undone.</span> 0
-              keeps every transcript forever (default). Applies within ~30s; persists across
+              Age out the two large text columns on each CLI invocation. Nothing else ever deletes
+              them, so they only accrue. Age counts from when the task finished (completed, failed
+              or cancelled), never from the invocation, so a task still running past the window
+              keeps the text of its earlier rounds. Every number the rest of the product reads —
+              result, token usage, cost, model identity, timings — stays on the row, so a swept
+              invocation still counts in full on the task pages and in statistics.{' '}
+              <span className="text-amber-400">Neither sweep can be undone.</span> 0 keeps that
+              column forever, and is the default for both. Applies within ~30s; persists across
               restarts.
             </CardDescription>
           </CardHeader>
-          <div className="flex items-end gap-2">
-            <label className="flex flex-col gap-1 text-xs text-neutral-400">
-              Retention (days, 0 = keep forever)
-              <input
-                type="number"
-                min={0}
-                max={3650}
-                value={streamLogRetentionInput}
-                onChange={(e) => setStreamLogRetentionInput(e.target.value)}
-                className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
-              />
-            </label>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={savingStreamLogRetention}
-              onClick={() => void saveStreamLogRetention()}
-            >
-              {savingStreamLogRetention ? 'Saving...' : 'Save'}
-            </Button>
+          {retentionUsage && (
+            <div className="mb-4 flex flex-wrap gap-x-6 gap-y-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs">
+              <span className="text-neutral-500">
+                {retentionUsage.invocations.toLocaleString()} invocations
+              </span>
+              <span className="text-neutral-400">
+                Transcripts{' '}
+                <span className="font-mono text-neutral-200">
+                  {formatBytes(retentionUsage.streamLogBytes)}
+                </span>{' '}
+                <span className="text-neutral-600">
+                  across {retentionUsage.withStreamLog.toLocaleString()}
+                </span>
+              </span>
+              <span className="text-neutral-400">
+                Prompts{' '}
+                <span className="font-mono text-neutral-200">
+                  {formatBytes(retentionUsage.promptBytes)}
+                </span>{' '}
+                <span className="text-neutral-600">
+                  across {retentionUsage.withPrompt.toLocaleString()}
+                </span>
+              </span>
+            </div>
+          )}
+          <div className="flex flex-col gap-4">
+            <div>
+              <div className="flex items-end gap-2">
+                <label className="flex flex-col gap-1 text-xs text-neutral-400">
+                  Transcripts (days, 0 = keep forever)
+                  <input
+                    type="number"
+                    min={0}
+                    max={3650}
+                    value={streamLogRetentionInput}
+                    onChange={(e) => setStreamLogRetentionInput(e.target.value)}
+                    className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+                  />
+                </label>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={savingStreamLogRetention}
+                  onClick={() => void saveStreamLogRetention()}
+                >
+                  {savingStreamLogRetention ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
+              <p className="mt-1 text-[11px] text-neutral-500">
+                The full CLI transcript behind each step&apos;s Raw terminal tab. Dropping it leaves
+                the Raw tab showing the parsed result instead.
+              </p>
+            </div>
+            {promptRetentionDays !== null && (
+              <div>
+                <div className="flex items-end gap-2">
+                  <label className="flex flex-col gap-1 text-xs text-neutral-400">
+                    Prompts (days, 0 = keep forever)
+                    <input
+                      type="number"
+                      min={0}
+                      max={3650}
+                      value={promptRetentionInput}
+                      onChange={(e) => setPromptRetentionInput(e.target.value)}
+                      className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+                    />
+                  </label>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={savingPromptRetention}
+                    onClick={() => void savePromptRetention()}
+                  >
+                    {savingPromptRetention ? 'Saving...' : 'Save'}
+                  </Button>
+                </div>
+                <p className="mt-1 text-[11px] text-neutral-500">
+                  The prompt each invocation was dispatched with. It has no UI; its only reader
+                  re-dispatches a fan-out agent when a finished task is retried or auto-resumed
+                  after a rate limit. Dropping it means those agents cannot be re-run for tasks
+                  older than the window — a separate window from transcripts for that reason.
+                </p>
+              </div>
+            )}
           </div>
         </Card>
       )}
