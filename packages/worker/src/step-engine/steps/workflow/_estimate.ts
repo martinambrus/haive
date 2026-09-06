@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 
@@ -218,6 +218,61 @@ async function fetchPreferredTaskRows(
   });
   const byId = new Map(rows.map((r) => [r.id, r]));
   return ids.map((id) => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined);
+}
+
+/**
+ * Prior tasks that actually changed any of `paths`, best overlap first.
+ *
+ * For `06b`'s post-planning refinement, which knows the files the planner predicted.
+ * `overlapRefinedEstimate` scores anchors by exactly this overlap and needs
+ * `MIN_OVERLAP_ANCHORS` of them, but it can only score what `buildAnchors` handed it — and
+ * that was the newest `MAX_ANCHORS` tasks, which excludes the tasks that touched these files
+ * whenever they are not also among the most recent. This is the candidate query that stops
+ * that; the SCORING stays in `overlapRefinedEstimate`, so the count computed here only orders
+ * the selection.
+ *
+ * `tasks.changed_paths` is `jsonb` (not `text[]`), so the predicate is the jsonb
+ * "contains any of these strings" operator `?|`, not the array overlap operator `&&`. The
+ * path list goes through `sql.param` because drizzle expands a bare `${array}` into a
+ * parenthesised record — `?|` wants ONE text[] parameter, and the record form fails with
+ * "cannot cast type record to text[]".
+ *
+ * No row cap: an arbitrary bound on the candidate pool is the bug being fixed. Matching rows
+ * are relevant by definition, and each row's `changed_paths` is already capped when written.
+ */
+export async function fileOverlapTaskIds(
+  db: Database,
+  taskId: string,
+  repositoryId: string,
+  paths: string[],
+): Promise<string[]> {
+  if (paths.length === 0) return [];
+  const rows = await db
+    .select({
+      id: schema.tasks.id,
+      changedPaths: schema.tasks.changedPaths,
+      completedAt: schema.tasks.completedAt,
+    })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'workflow'),
+        eq(schema.tasks.status, 'completed'),
+        ne(schema.tasks.id, taskId),
+        sql`${schema.tasks.changedPaths} ?| ${sql.param(paths)}::text[]`,
+      ),
+    );
+  const wanted = new Set(paths);
+  return rows
+    .map((r) => ({
+      id: r.id,
+      overlap: (r.changedPaths ?? []).filter((p) => wanted.has(p)).length,
+      at: r.completedAt ? r.completedAt.getTime() : 0,
+    }))
+    .filter((r) => r.overlap > 0)
+    .sort((a, b) => b.overlap - a.overlap || b.at - a.at)
+    .map((r) => r.id);
 }
 
 /** Gather the anchor set: the repository's prior COMPLETED workflow tasks with their MEASURED

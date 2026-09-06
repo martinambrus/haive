@@ -12,7 +12,7 @@ import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveSpecView } from './_spec-artifact.js';
 import { parseJsonLoose } from '../_fenced-json.js';
-import { buildAnchors, overlapRefinedEstimate } from './_estimate.js';
+import { buildAnchors, fileOverlapTaskIds, overlapRefinedEstimate } from './_estimate.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadSeededPlanNodes, renderPlanOrderingConstraint } from './_plan-task-nodes.js';
 
@@ -260,7 +260,17 @@ async function refineEstimateFromPlan(ctx: StepContext, plan: SprintPlan): Promi
       columns: { repositoryId: true, aiEstimatedTimeHours: true },
     });
     if (!task?.repositoryId) return;
-    const anchors = await buildAnchors(ctx.db, ctx.taskId, task.repositoryId);
+    // Pick the candidates by the files themselves. Without this the pool is the newest
+    // MAX_ANCHORS tasks, and overlapRefinedEstimate — which scores by exactly this overlap
+    // and needs MIN_OVERLAP_ANCHORS of them — never sees the tasks that touched these files
+    // unless they happen to also be the most recent.
+    const overlapping = await fileOverlapTaskIds(
+      ctx.db,
+      ctx.taskId,
+      task.repositoryId,
+      predictedFiles,
+    );
+    const anchors = await buildAnchors(ctx.db, ctx.taskId, task.repositoryId, overlapping);
     const refined = overlapRefinedEstimate(anchors, predictedFiles);
     if (!refined) return;
     const previous = task.aiEstimatedTimeHours ?? null;
