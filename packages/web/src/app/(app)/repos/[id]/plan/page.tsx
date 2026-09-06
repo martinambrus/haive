@@ -711,7 +711,7 @@ export default function PlanPage() {
                 onClick={() => setDeleting(true)}
                 title="Delete this plan"
                 aria-label="Delete this plan"
-                className="text-neutral-500 hover:text-red-400"
+                className="text-red-400 hover:text-red-300"
               >
                 <Trash2 className="h-4 w-4" />
               </button>
@@ -1253,7 +1253,7 @@ export default function PlanPage() {
                         setNewTitle('');
                         setAddingChild((v) => !v);
                       }}
-                      className="ml-2.5 text-neutral-500 hover:text-neutral-200"
+                      className="ml-2.5 inline-flex shrink-0 items-center justify-center rounded-full bg-emerald-400 p-0.5 text-neutral-950 hover:bg-emerald-300"
                     >
                       <Plus className="h-3.5 w-3.5" />
                     </button>

@@ -771,7 +771,7 @@ export function PlanDetailPanel({
                       setLinkTarget('');
                       setAddingLinkTo((cur) => (cur === group.id ? null : group.id));
                     }}
-                    className="text-neutral-500 hover:text-neutral-200"
+                    className="text-emerald-400 hover:text-emerald-300"
                   >
                     <Plus className="h-3.5 w-3.5" />
                   </span>
