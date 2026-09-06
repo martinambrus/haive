@@ -26,12 +26,8 @@ import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { looksLikeMarkdown } from '@/components/markdown/looks-like-markdown';
 import { groupPlanEdges } from './plan-edge-groups';
-import {
-  DEFAULT_IMPACT_DEPTH,
-  IMPACT_DEPTH_CHOICES,
-  defaultOpenImpactDepths,
-  groupImpactHops,
-} from './plan-impact-groups';
+import { DEFAULT_IMPACT_DEPTH, IMPACT_DEPTH_CHOICES } from './plan-impact-groups';
+import { PlanImpactList } from './plan-impact-list';
 import { PlanChat } from './plan-chat';
 import { PlanGraph } from './plan-graph';
 import {
@@ -97,7 +93,6 @@ export function PlanDetailPanel({
   // The radius the Impact tab opens at. One hop, because on a real plan two
   // reach a median of 130 nodes — a transitive answer is "the whole plan".
   const [impactDepth, setImpactDepth] = useState<number>(DEFAULT_IMPACT_DEPTH);
-  const [openImpactDepths, setOpenImpactDepths] = useState<Set<number> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -176,12 +171,9 @@ export function PlanDetailPanel({
     void getPlanImpact(repositoryId, nodeId, impactDepth)
       .then((next) => {
         setImpact(next);
-        setOpenImpactDepths(null);
       })
       .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load impact'));
   }, [tab, impact, impactDepth, repositoryId, nodeId]);
-
-  const impactGroups = groupImpactHops(impact?.hops ?? []);
 
   // Returns whether the write landed, so a caller holding an in-place editor
   // can keep the user's draft on failure instead of silently dropping it.
@@ -1002,72 +994,10 @@ export function PlanDetailPanel({
                       {impact.mermaidOmitted} more are in the list below.
                     </p>
                   )}
-                  {impactGroups.map((g) => {
-                    const open = (openImpactDepths ?? defaultOpenImpactDepths(impactGroups)).has(
-                      g.depth,
-                    );
-                    return (
-                      <div key={g.depth} className="rounded border border-neutral-800">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setOpenImpactDepths((prev) => {
-                              const next = new Set(prev ?? defaultOpenImpactDepths(impactGroups));
-                              if (next.has(g.depth)) next.delete(g.depth);
-                              else next.add(g.depth);
-                              return next;
-                            })
-                          }
-                          className="flex w-full items-center gap-1 px-2 py-1 text-left text-[11px] text-neutral-400 hover:text-neutral-200"
-                        >
-                          {open ? (
-                            <ChevronDown className="h-3 w-3" />
-                          ) : (
-                            <ChevronRight className="h-3 w-3" />
-                          )}
-                          {g.label}
-                          {/* Same weight as the relation counts below it, so
-                              the two rows do not disagree about how loud a
-                              count is. */}
-                          <span className="text-neutral-400">({g.hops.length})</span>
-                        </button>
-                        {open && (
-                          <div className="flex flex-col gap-2 border-t border-neutral-800 px-2 py-1.5">
-                            {/* Relation sub-groups, all open: the depth group
-                                above is the thing that collapses, and a second
-                                closed layer would hide every row behind two
-                                clicks. Only relations that are actually present
-                                are emitted, so none of these is ever empty. */}
-                            {g.relations.map((r) => (
-                              <div key={r.id} className="flex flex-col">
-                                {/* Indigo, matching the chat transcript's
-                                    speaker label: the neutral-600/700 pair
-                                    this used is the same one that was already
-                                    found barely legible on this background,
-                                    and these headings are what the reader
-                                    scans the list by. */}
-                                <p className="text-[10px] uppercase tracking-wide text-indigo-300">
-                                  {r.label}{' '}
-                                  <span className="text-neutral-400">({r.hops.length})</span>
-                                </p>
-                                {r.hops.map((h) => (
-                                  <button
-                                    key={h.nodeId}
-                                    type="button"
-                                    onClick={() => onNavigate(h.nodeId)}
-                                    title={h.title ?? undefined}
-                                    className="truncate pl-2 text-left text-xs text-neutral-300 hover:text-neutral-100"
-                                  >
-                                    {h.title}
-                                  </button>
-                                ))}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                  {/* Keyed on the radius so a new reach re-derives which group
+                      starts open, which is what the panel-local state reset did
+                      before this list owned it. */}
+                  <PlanImpactList key={impactDepth} hops={impact.hops} onSelect={onNavigate} />
                 </>
               )}
             </>

@@ -1,4 +1,21 @@
-import type { PlanEdgeKind, PlanImpactHop } from '@/lib/api-client';
+import type { PlanEdgeKind } from '@/lib/api-client';
+
+/** Everything the grouping and its render need from a hop, and nothing more.
+ *
+ *  Two producers feed it: the plan panel, whose rows come from `/plan/impact`
+ *  (`PlanImpactHop`, which also carries `viaNodeId` and `status`), and gate 1,
+ *  whose rows arrive inside a persisted form schema and carry neither. Naming
+ *  the used fields is what lets one grouping serve both without the gate
+ *  inventing a `viaNodeId` it does not have. */
+export interface PlanImpactHopLike {
+  nodeId: string;
+  title: string | null;
+  depth: number;
+  viaKind: PlanEdgeKind;
+  /** Whether the walk crossed the edge against its direction — half the meaning
+   *  of a relation label, which is why it is required here. */
+  reversed: boolean;
+}
 
 /** Mirrors IMPACT_DEFAULT_VIEW_DEPTH in @haive/shared/plan/impact. Web must not
  *  import from that barrel — it reaches the database layer and drags drizzle and
@@ -19,7 +36,7 @@ export interface PlanImpactRelationGroup {
   /** `Depends on` / `Depended on by` — the relation read in the direction the
    *  walk actually crossed it. */
   label: string;
-  hops: PlanImpactHop[];
+  hops: PlanImpactHopLike[];
 }
 
 export interface PlanImpactGroup {
@@ -27,7 +44,7 @@ export interface PlanImpactGroup {
   depth: number;
   /** `1 hop` / `2 hops`, already pluralised. */
   label: string;
-  hops: PlanImpactHop[];
+  hops: PlanImpactHopLike[];
   /** The same hops split by relation, in the Links tab's order. */
   relations: PlanImpactRelationGroup[];
 }
@@ -49,13 +66,13 @@ const RELATION_ORDER: PlanEdgeKind[] = ['depends_on', 'affects', 'implements'];
 
 /** By name. A group can hold over a hundred hops, and the order the walk
  *  happened to reach them tells the reader nothing they can use to find one. */
-const byTitle = (a: PlanImpactHop, b: PlanImpactHop): number =>
+const byTitle = (a: PlanImpactHopLike, b: PlanImpactHopLike): number =>
   (a.title ?? '').localeCompare(b.title ?? '');
 
 /** Split one depth's hops by relation, emitting only the relations that are
  *  actually there. Unlike the Links tab, an empty group here offers nothing —
  *  there is no "add a hop" action, a hop is something the walk found. */
-function relationGroups(hops: PlanImpactHop[]): PlanImpactRelationGroup[] {
+function relationGroups(hops: PlanImpactHopLike[]): PlanImpactRelationGroup[] {
   const out: PlanImpactRelationGroup[] = [];
   for (const kind of RELATION_ORDER) {
     for (const dir of ['out', 'in'] as const) {
@@ -85,8 +102,8 @@ function relationGroups(hops: PlanImpactHop[]): PlanImpactRelationGroup[] {
  * suffix. Within a relation, rows are alphabetical. Nothing is dropped: the
  * diagram beside this is the bounded surface, this one is the complete answer.
  */
-export function groupImpactHops(hops: PlanImpactHop[]): PlanImpactGroup[] {
-  const byDepth = new Map<number, PlanImpactHop[]>();
+export function groupImpactHops(hops: PlanImpactHopLike[]): PlanImpactGroup[] {
+  const byDepth = new Map<number, PlanImpactHopLike[]>();
   for (const hop of hops) {
     const run = byDepth.get(hop.depth);
     if (run) run.push(hop);
