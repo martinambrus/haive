@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import type { StepContext } from '../../step-definition.js';
 import {
   salvageImplementOutput,
   parseImplementOutput,
@@ -166,5 +167,44 @@ describe('phase2ImplementStep prior-fix-rounds ledger', () => {
   it('omits the prior-fix block when priorFixContext is empty', () => {
     const p = prompt({ fixContext: 'DB error', round: 1, priorFixContext: '' });
     expect(p).not.toContain('Prior fix rounds (background)');
+  });
+});
+
+// The fix loop re-enters at this step by a hardcoded target, and this step is the only
+// reader of the diagnosis — so a DAG task that skipped every fix round burned its whole
+// round budget re-running the review chain against unchanged code (task 681f0f99).
+function sprintModeDb(mode: string | null) {
+  const rows = mode === null ? [] : [{ detectOutput: null, output: { mode }, iterations: [] }];
+  const chain: Record<string, unknown> = {};
+  Object.assign(chain, {
+    select: () => chain,
+    from: () => chain,
+    where: () => chain,
+    orderBy: () => chain,
+    limit: async () => rows,
+  });
+  return chain;
+}
+
+const shouldRunCtx = (mode: string | null, round: number) =>
+  ({ db: sprintModeDb(mode), taskId: 't1', round }) as unknown as StepContext;
+
+describe('07 shouldRun', () => {
+  it('skips the initial DAG build — 06c-dag-execute implements it', async () => {
+    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 0))).toBe(false);
+  });
+
+  it('runs every DAG FIX round, so the fix-loop diagnosis is actually read', async () => {
+    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 1))).toBe(true);
+    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 4))).toBe(true);
+  });
+
+  it('runs in single mode at every round', async () => {
+    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('single', 0))).toBe(true);
+    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('single', 2))).toBe(true);
+  });
+
+  it('runs when 06b never produced a mode (legacy task)', async () => {
+    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx(null, 0))).toBe(true);
   });
 });

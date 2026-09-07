@@ -218,11 +218,19 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
-    // Skip when 2c sprint planning chose DAG mode — 06c-dag-execute implements
-    // instead. Runs for single mode or when 06b is absent (legacy tasks).
+    // Single mode (or a legacy task with no 06b) always runs. DAG mode splits by ROUND:
+    // 06c-dag-execute owns the initial build, so round 0 skips — but every FIX round is
+    // this step's, because it is the only reader of loadFixLoopDiagnosis and the fix loop
+    // re-enters at a hardcoded FIX_LOOP_TARGET_STEP_ID. Skipping a fix round left the
+    // diagnosis unread and re-ran the whole review chain against unchanged code until the
+    // round cap: task 681f0f99 spent 3 rounds that way, each recording a fix_loop.requested
+    // nothing consumed. Pointing the loop at 06c instead is not the alternative — after a
+    // successful build every level is checkpointed, so resolveDagPhase resolves without
+    // dispatching an agent, and the issue worktrees were removed at checkpoint. The tree a
+    // fix pass must edit is 01-worktree-setup's integration worktree in both modes.
     const sprint = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06b-sprint-planning');
     const mode = (sprint?.output as { mode?: string } | null)?.mode;
-    return mode !== 'dag';
+    return mode !== 'dag' || ctx.round > 0;
   },
 
   async detect(ctx: StepContext): Promise<ImplementDetect> {
