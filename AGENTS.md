@@ -70,6 +70,61 @@ Every legacy markdown step becomes a `StepDefinition<TInput, TOutput>` with four
 
 Step lifecycle: `pending` to `running(detect)` to `waiting_form` to `running(apply)` to optional `waiting_cli` then back to `running(apply)` to `done` or `failed` or `skipped`.
 
+### Fix loop
+
+A downstream step that finds a blocking defect returns `loop_back` instead of failing: the
+queue bumps the round, records the diagnosis as a `fix_loop.requested` task event and
+re-enters at `FIX_LOOP_TARGET_STEP_ID` (`_fix-loop.ts`), which is `07-phase-2-implement` and
+is HARDCODED. Nine steps emit one (07b, 07c, 08, 08a, 08b, 08c, 08d2, 09), and 07 is the only
+reader of `loadFixLoopDiagnosis`, so a round in which 07 does not run is a round in which
+nobody reads the defect.
+
+**The target is fixed; what varies is whether 07 runs.** In DAG mode
+(`06b-sprint-planning.output.mode === 'dag'`) 07 used to skip at EVERY round, so every
+loop_back wrote a diagnosis nothing consumed and re-ran the whole review chain against
+unchanged code until the round cap. MEASURED on task 681f0f99: 07 `skipped` at rounds 1-4,
+three `fix_loop.requested`/`fix_loop.started` pairs all sourced from `08b-test-management`,
+none consumed. That was permanent, not transient — the loop enqueues only the target and the
+forward walk never goes backwards, so 06b never re-runs and its round-0 mode stands for the
+life of the task. `shouldRun` splits by ROUND instead: `06c-dag-execute` owns the initial
+build (round 0 still skips), 07 owns every fix round. That is also what makes
+`guidance-context.ts`'s standing claim — "a DAG-mode run gets the guidance only once the fix
+loop routes back to 07" — true rather than false.
+
+Repointing the target at `06c-dag-execute` is NOT the alternative, for four structural
+reasons. `resolveDagPhase` derives its cursor as `levels.find(l => l.checkpointedAt === null)`,
+so after a successful build every level is checkpointed and it resolves without dispatching an
+agent; the per-issue worktrees were removed at checkpoint; `buildCoderPrompt` has no diagnosis
+channel; and `PATH_REQUIRED_TARGETS` (`execution-paths.ts`) is a `Record<string, string>` that
+cannot hold two targets for one emitter, with a second independent copy of the same mapping in
+`_prompt-defect.ts`. The tree a fix pass must edit is `01-worktree-setup`'s integration
+worktree in BOTH modes, which is exactly what 07 already uses.
+
+**A round must not be spent on a failure no agent can repair, and that verdict has to be
+reachable without a human.** `08b-test-management` is the worked example. Its fix loop is
+driven by `testsPassed`, and `null` there means "not a defect" — `fixLoop.evaluate` returns
+nothing, so no round is spent and a `degradedNote` reaches the person instead. Two guards
+produce it, and they cover different classes: the enumerate guard (`buildCollectCommand`, a
+`--list` whose non-zero exit means the runner loaded nothing) catches a LOAD failure, while
+`classifyTestEnvFailure` (`_test-env-guard.ts`) reads the RUN's own output for an ENVIRONMENT
+failure. The second exists because the first is structurally blind to it: Playwright builds its
+list task set without `createGlobalSetupTasks`, so `--list` never runs globalSetup — MEASURED,
+a container with no browser binaries listed 50 tests and exited 0 while the real run died at
+`chromium.launch()`, and five consecutive fix agents each re-derived that diagnosis and wrote
+it to a field nothing read. The classifier keys on error IDs Playwright raises itself
+(`registry/index.js`'s "Executable doesn't exist at", `registry/dependencies.js`'s "Host system
+is missing dependencies"), never on the decorative install box beside them, and claims nothing
+for a framework whose output has not been measured. It applies from pass 0, unlike the
+enumerate guard — a browser missing from the container is never something the tester's own
+first pass could have caused.
+
+**Each fix pass is a fresh CLI process, so what earlier passes concluded has to be carried
+explicitly.** `priorPassNotes` (08b) does it inside one step's loop and `loadPriorFixContext`
+(`_fix-loop.ts`) does it across rounds; both dedupe with the ledger's `contentFingerprint` and
+share the same budget (400 chars per entry, 4000 per block). That dedupe collapses a verbatim
+repeat but NOT two rewordings of one finding — the same limit `review_findings` measured for
+prose keys — so the cap, not the dedupe, is what bounds a loop that keeps re-deriving itself.
+
 ### Step summaries
 
 The "What the agent did" panel (`task_steps.summary`) has two producers, and the cheap one wins. `resolveCuratedSummary` (`_step-summary.ts`) lifts `findingsSummary`/`summary`/`notes` straight off the apply output for the steps that emit one — no LLM, and it mirrors its own task-ledger entry. Only when the output carries none of those keys does `maybeEnqueueStepSummary` (`step-runner.ts`) spend a CLI call, and that pass is best-effort throughout: a missing provider, a `skip` dispatch, an empty agent text or a failure all leave `summary` null and never touch the step machine.
@@ -679,6 +734,51 @@ Secret-file masking (default on, Tier 1): before each cli-exec invocation the wo
 Masking fails closed. A scan that throws, a scan root that is not a readable directory, a match count over `SECRET_MASK_LIMIT`, or a task/repository row that cannot be resolved raises `SecretMaskError` instead of masking a partial set — a subset leaves the remainder readable, which is the one outcome the deny-list exists to prevent. "Masking is off" and "no secrets found" are only ever concluded from evidence that says so: the kill-switch, `secret_mask_enabled`, or a task with no repository (which mounts no tree). The repo root mirrors `resolveTaskRepoMount` exactly, so a repo with no `storage_path` is scanned at its named-volume subpath rather than skipped, and the root is `stat`ed before the scan — glob answers `[]` for a root that does not exist, which is byte-identical to a clean repo, while the sandbox mount binds the real tree regardless of what the worker can see. `handleCliExecJob` records it on the invocation (exit -1) and fails the step. The escape hatches are the repo's `secret_mask_allow` globs and the masking toggles; disabling masking skips the scan and never raises.
 
 Worktree gitfile masking (always on): every agent prompt states that git is unavailable inside the sandbox and that the host stages and commits (`10-gate-3-commit`, `completeMergeHostSide`). That invariant is enforced, not incidental — `worktreeGitfileMask` (`packages/worker/src/queues/cli-exec/gitfile-mask.ts`) bind-mounts an empty read-only file over the worktree's `.git` gitfile for every cli-exec invocation. Without it an agent can repoint the gitfile at the container path (`printf 'gitdir: /haive/workdir/.git/worktrees/<name>' > .git`), which both grants itself a working git behind the commit gate and leaves host-side git fatally broken for every later step. It rides the same `SandboxExtraFile` mechanism as secret masking but is an integrity control, so `SECRET_MASK_ENABLED` never disables it. Never masked at the repo root (there `.git` is a directory), and never applied to the terminal, IDE, app-runner or ddev containers, whose git must keep working. `removeWorktreeDir` runs `git worktree repair` before removal so worktrees poisoned before this existed still clean up.
+
+**A `ddev restart` RECREATES the web container, so nothing installed inside it survives one.**
+Only `/mnt/ddev-global-cache` (a named volume) and the bind-mounted project outlive it;
+`/home/ddev/.cache` is in the container's writable layer and is not a symlink into that cache.
+That made two things wrong at once. `07c-ddev-reconcile` compared the on-disk `.ddev/` hash
+against a baseline read from `01c-ddev-env`'s ROUND-0 output that nothing ever rewrote, so once
+the implementation touched anything under `.ddev/` the hashes differed permanently and every
+later fix round restarted DDEV again — MEASURED on task 681f0f99, rounds 1/2/3 all
+`action: restart` with php unchanged 8.3 -> 8.3. A successful restart/migrate now stamps
+`appliedBaseline` (the state it applied) and later rounds diff against that; the field is
+OPTIONAL, so a payload written before it existed falls back to the boot baseline and behaves
+exactly as it did. `loadAppliedBaseline` deliberately does not use `loadPreviousStepOutput`:
+that returns the highest-round row, which during this step's own run is THIS row with a null
+output, so the prior round's answer would never be seen — filtering on a written output also
+makes a retry correct for free, since the reset nulls that column.
+
+**Playwright's runtime is provisioned per task, and the two halves have different lifetimes.**
+The DDEV web image ships neither the browser binaries nor the libraries they link against —
+MEASURED on `ddev/ddev-webserver`: `ms-playwright` absent and 13 of the 15 libraries chromium
+needs missing — and nothing in the sandbox can add them, since the CLI is given
+`ddev_status`/`logs`/`restart` and no `ddev exec`. `ensureDdevPlaywrightBrowsers`
+(`sandbox/ddev-playwright.ts`, called from 08b before a ddev playwright run, idempotent) puts
+the BINARIES on the `ddev-global-cache` volume behind a symlink at the path Playwright already
+looks in — so no `PLAYWRIGHT_BROWSERS_PATH` has to be threaded through the run command and a
+human running `ddev exec npx playwright test` gets the same browsers — while the apt packages,
+which cannot leave the container layer, are re-installed per container behind a `/tmp` marker,
+the lifetime that matches. MEASURED: ~70s to re-provision after a restart, with no re-download.
+
+`playwright install-deps` CANNOT be used, and that is measured rather than assumed: on Debian
+trixie Playwright falls back to its ubuntu20.04 package set and asks apt for
+`ttf-ubuntu-font-family`, which Debian does not have, and one unavailable name aborts the whole
+`apt-get install` — so the command exits 0 having installed NOTHING. The package list therefore
+comes from Playwright itself (`install-deps --dry-run`) and each name is filtered by `apt-get
+install -s`, the authoritative resolver. That filter is load-bearing, not defensive:
+`libasound2`, `libatk1.0-0` and `libfontconfig` are all `Candidate: (none)` in trixie and all
+three are libraries chromium needs, so filtering on `apt-cache policy` instead would have
+silently dropped three real dependencies and produced the broken browser this exists to
+prevent; the simulator resolves them through their t64 providers and rejects only the package
+Debian genuinely lacks. Reading that list is the one volatile dependency, so it FAILS LOUD with
+its own exit code rather than installing an empty set and marking the container done. The
+script ships base64-encoded because `ddevExec` interpolates its argument into a `bash -lc`
+running in the RUNNER, where `$HOME` and `$(…)` would evaluate against the wrong container.
+Chromium only — `playwright install` cannot be told what a config needs, and naming no browser
+downloads all three — so a suite driving firefox or webkit reports the gap through 08b's
+`degradedNote` instead. `CONFIG_KEYS.TEST_BROWSER_PROVISION_ENABLED` is the kill-switch.
 
 The DDEV project's Mailpit is surfaced at every step that already shows the running app (08a, Gate 2, `99-run-app-ready`), and the URL is always what `ddev describe -j` REPORTS (`parseDdevMailpitUrls`), never one we compose. That is what makes a single string right in both viewing modes: the headed browser runs INSIDE the runner and dials the same `*.ddev.site` name the host does, so the VNC half needs nothing published — MEASURED, `curl http://<project>.ddev.site:8025` from inside a runner answers 200. The host half publishes slots 3/4 at runner create (the DB-port argument: `01c` boots before the browser choice is known) and pins `ddev config global --mailpit-{http,https}-port` to the same numbers, in the exec that already sets `--router-*-port`; global config is per-runner, so no repo file is touched and nothing lands in review scope. NOTHING gets a `localhost` twin: the runner's whole traefik config carries one rule, `HostRegexp(^<project>\.ddev\.site$)`, with no catch-all, so `Host: localhost` is answered 404 on every entrypoint while `Host: <project>.ddev.site:9999` answers 200 — the router strips the port and matches the NAME (all MEASURED), and nothing here registers `additional_hostnames`. The app had carried such an entry since `83897d67` without it ever routing; it was removed rather than fixed, since the two `*.ddev.site` URLs already cover the case. `kind: 'localhost'` stays correct for `appRunnerAccessUrls`, whose port is published straight off the container with no router in front. Routing itself survives a port mismatch (the router strips the port before matching, MEASURED at 200 on a deliberately wrong one); the pin exists so the printed URL is right, and `decideMailpitHostUrls` drops a host link whose reported port disagrees with the published one, since a project's own `.ddev/config.yaml` OVERRIDES the global pin. The in-app "Open Mailpit" button is its own `runtime-ensure` job name, NOT a field on ENSURE — every ENSURE enqueue shares `jobId: ensure-<taskId>` and BullMQ coalesces on it, dropping a second payload silently — and it carries no URL, which the worker resolves itself so the route cannot aim that browser anywhere else. It navigates to the http URL: the runner's Chromium keeps a trust store separate from the system one curl uses, and an interstitial would land the user on a warning page instead of their mailbox.
 
