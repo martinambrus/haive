@@ -69,6 +69,45 @@ interface VerifyApply {
   typecheck: CheckResult;
   passed: boolean;
   runtimeSmoke: RuntimeSmoke | null;
+  /** Amber caveat for the step card, read by the runner's computeDegradedNote. Set only when
+   *  NO check ran — `passed` is true there because nothing failed, which reads as a green
+   *  verification of a workspace nothing was verified in. */
+  degradedNote?: string;
+}
+
+/** Why no check ran, named per slot, or `''` when at least one did.
+ *
+ *  `passed` is computed as "nothing that ran failed", so three skipped slots produce
+ *  `passed: true` — the same value a fully green run produces. Gate 2 reads that as
+ *  `allPassed` and pre-selects Approve, while its status table omits every non-run check, so
+ *  the developer is shown a clean gate for a workspace where test, lint and typecheck were
+ *  never executed. Same rule as 07b's `excludedDimensions`: a check nobody ran yields exactly
+ *  the same empty result as one that passed, and only saying so keeps the two apart.
+ *
+ *  Deliberately per-slot: "no runner exists in this repo" and "a runner exists and you
+ *  unticked it" are different facts, and only the first is nobody's decision. */
+export function buildUnverifiedNote(
+  slots: { test: SlotCommand | null; lint: SlotCommand | null; typecheck: SlotCommand | null },
+  results: { test: CheckResult; lint: CheckResult; typecheck: CheckResult },
+): string {
+  if (results.test.ran || results.lint.ran || results.typecheck.ran) return '';
+  const undetected: string[] = [];
+  const unticked: string[] = [];
+  for (const name of ['test', 'lint', 'typecheck'] as const) {
+    (slots[name] === null ? undetected : unticked).push(name);
+  }
+  const parts = [
+    `No verification check ran this pass, so this step passing means nothing was checked — not that everything passed.`,
+  ];
+  if (undetected.length > 0) {
+    parts.push(
+      `No runner was detected in this workspace for: ${undetected.join(', ')}. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.`,
+    );
+  }
+  if (unticked.length > 0) {
+    parts.push(`Detected but not selected for this pass: ${unticked.join(', ')}.`);
+  }
+  return parts.join('\n\n');
 }
 
 /**
@@ -536,6 +575,17 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
           : 'runtime smoke: no servable runtime',
       ].join('; '),
     });
-    return { test, lint, typecheck, passed, runtimeSmoke };
+    const unverified = buildUnverifiedNote(
+      { test: testCmd, lint: lintCmd, typecheck: typeCmd },
+      { test, lint, typecheck },
+    );
+    return {
+      test,
+      lint,
+      typecheck,
+      passed,
+      runtimeSmoke,
+      ...(unverified ? { degradedNote: unverified } : {}),
+    };
   },
 };

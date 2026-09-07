@@ -30,9 +30,13 @@ describe('gate-2 restartLoop diagnosis', () => {
 });
 
 describe('gate-2 status summary', () => {
+  // A verification that actually RAN and passed. The base fixture used to leave all three
+  // slots null, which is not "a clean run" but "nothing was checked" — the two now differ, so
+  // every case below that is about some OTHER signal has to start from a real green run.
+  const ranClean = { ran: true, passed: true, output: '' };
   const baseDetect = (overrides: Record<string, unknown>) =>
     ({
-      verify: { test: null, lint: null, typecheck: null },
+      verify: { test: ranClean, lint: ranClean, typecheck: ranClean },
       allPassed: true,
       validation: null,
       testManagement: null,
@@ -245,15 +249,52 @@ describe('gate-2 status summary', () => {
     expect(form(d).description ?? '').not.toContain('All verification checks passed');
   });
 
-  it('emits no rows when every verify check was skipped', () => {
+  // A skipped check is not a failure, so it still gets no pass/fail row — but with all three
+  // skipped, omission alone left an empty table beside an `allPassed` that is true only
+  // because nothing ran, and the gate pre-selected Approve on that.
+  const allSkipped = {
+    test: { ran: false, passed: false, output: 'skipped' },
+    lint: { ran: false, passed: false, output: 'skipped' },
+    typecheck: { ran: false, passed: false, output: 'skipped' },
+  };
+
+  it('states that nothing was verified instead of emitting an empty table', () => {
+    const d = baseDetect({ verify: allSkipped });
+    expect(rows(d).map((r) => r.label)).toEqual(['Tests / lint / typecheck']);
+    const r = row(d, 'Tests / lint / typecheck');
+    expect(r?.status).toBe('warn');
+    expect(r?.statusLabel).toBe('NOT RUN');
+    expect(r?.defaultOpen).toBe(true);
+    expect(r?.body).toContain('subdirectory');
+  });
+
+  it('does not default to approve when nothing was verified', () => {
+    expect(decisionDefault(baseDetect({ verify: allSkipped }))).toBe('reject');
+    // Absent slots entirely — an 08 payload that recorded no verify block at all.
+    expect(
+      decisionDefault(baseDetect({ verify: { test: null, lint: null, typecheck: null } })),
+    ).toBe('reject');
+  });
+
+  it('says nothing about "not run" once any one check ran', () => {
     const d = baseDetect({
-      verify: {
-        test: { ran: false, passed: false, output: 'skipped' },
-        lint: { ran: false, passed: false, output: 'skipped' },
-        typecheck: { ran: false, passed: false, output: 'skipped' },
-      },
+      verify: { ...allSkipped, lint: { ran: true, passed: true, output: '' } },
     });
-    expect(rows(d).length).toBe(0);
+    expect(row(d, 'Tests / lint / typecheck')).toBeUndefined();
+    expect(row(d, 'Lint')?.status).toBe('pass');
+    expect(decisionDefault(d)).toBe('approve');
+  });
+
+  // A check that RAN and failed is a failure, not an absence — it must keep its own red row
+  // and must not also be reported as "not run".
+  it('keeps a real failure as a failure', () => {
+    const d = baseDetect({
+      verify: { ...allSkipped, test: { ran: true, passed: false, output: '1 failing' } },
+      allPassed: false,
+    });
+    expect(row(d, 'Tests / lint / typecheck')).toBeUndefined();
+    expect(row(d, 'Tests')?.status).toBe('fail');
+    expect(decisionDefault(d)).toBe('reject');
   });
 
   it('a standalone smoke failure defaults the gate to reject', () => {

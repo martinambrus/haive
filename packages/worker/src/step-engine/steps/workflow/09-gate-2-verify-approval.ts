@@ -781,6 +781,15 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // non-run check is not a failure), so there's no contradictory "FAIL / skipped"
     // row and no "all passed" line when nothing actually ran.
     const fenced = (s: string) => ['```', s || '(empty)', '```'].join('\n');
+    // Whether ANY of the three checks actually executed. Derived from the slots this gate
+    // already reads rather than a new payload field, so it answers the same on a gate parked
+    // before it existed. `allPassed` cannot stand in: 08 computes it as "nothing that ran
+    // failed", which is true when nothing ran at all.
+    const verificationRan = [
+      detected.verify.test,
+      detected.verify.lint,
+      detected.verify.typecheck,
+    ].some((c) => c?.ran === true);
     const rows: StatusSummaryItem[] = [];
 
     for (const [label, c] of [
@@ -795,6 +804,21 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         ...(c.passed || !c.output.trim()
           ? {}
           : { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }),
+      });
+    }
+    // Omitting every non-run check is right — a skipped check is not a failure — but with ALL
+    // THREE skipped that leaves no verification rows at all, beside an `allPassed` that is true
+    // only because nothing ran. One row so the absence is stated rather than inferred from an
+    // empty table. Derived from the same slots already read, so a gate parked before this
+    // existed answers identically without a payload field.
+    if (!verificationRan) {
+      rows.push({
+        label: 'Tests / lint / typecheck',
+        status: 'warn',
+        statusLabel: 'NOT RUN',
+        detail: 'no check was executed — this is not a passing verification',
+        body: '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Nothing here says the code is correct.',
+        defaultOpen: true,
       });
     }
 
@@ -1104,6 +1128,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           ],
           default:
             detected.allPassed &&
+            // `allPassed` is true when NOTHING ran, so on its own it pre-selects Approve for a
+            // workspace where test, lint and typecheck were never executed. A default is a
+            // recommendation; recommending approval on the strength of an absence is the one
+            // thing it must not do. The human can still approve — the row above says why.
+            verificationRan &&
             validationOk &&
             testsOk &&
             browserOk &&

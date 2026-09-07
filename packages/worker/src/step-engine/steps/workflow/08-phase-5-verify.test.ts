@@ -5,6 +5,7 @@ const { ensureAppServing } = vi.hoisted(() => ({ ensureAppServing: vi.fn() }));
 vi.mock('./_app-runtime.js', () => ({ ensureAppServing }));
 
 import {
+  buildUnverifiedNote,
   buildVerifyCommand,
   parseRuntimeSmokeOutput,
   phase5VerifyStep,
@@ -216,5 +217,55 @@ describe('phase5VerifyStep.fixLoopOnError', () => {
           "your DDEV version 'v1.25.3' doesn't meet the constraint '= v1.24.8'",
       ),
     ).toBe(false);
+  });
+});
+
+describe('buildUnverifiedNote', () => {
+  const cmd = { kind: 'host' as const, label: 'pnpm run test', argv: ['pnpm', 'run', 'test'] };
+  const ran = { ran: true, passed: true, command: 'pnpm run test', output: '' };
+  const skipped = { ran: false, passed: false, command: null, output: 'skipped' };
+
+  // `passed` is "nothing that ran failed", so three skipped slots produce the same true a
+  // fully green run produces — and gate 2 reads that as allPassed.
+  it('names the slots that had no runner at all', () => {
+    const note = buildUnverifiedNote(
+      { test: null, lint: null, typecheck: null },
+      { test: skipped, lint: skipped, typecheck: skipped },
+    );
+    expect(note).toContain('No verification check ran this pass');
+    expect(note).toContain('test, lint, typecheck');
+    expect(note).toContain('subdirectory');
+    expect(note).not.toContain('not selected');
+  });
+
+  // "no runner exists" and "you unticked it" are different facts; only the first is nobody's
+  // decision, so the note keeps them apart.
+  it('separates undetected slots from unticked ones', () => {
+    const note = buildUnverifiedNote(
+      { test: cmd, lint: null, typecheck: null },
+      { test: skipped, lint: skipped, typecheck: skipped },
+    );
+    expect(note).toContain('lint, typecheck');
+    expect(note).toContain('Detected but not selected for this pass: test');
+  });
+
+  it('says nothing once any check actually ran', () => {
+    expect(
+      buildUnverifiedNote(
+        { test: cmd, lint: null, typecheck: null },
+        { test: ran, lint: skipped, typecheck: skipped },
+      ),
+    ).toBe('');
+  });
+
+  // A check that ran and FAILED is a failure, not an absence — it has its own route (fixLoop)
+  // and must not also be reported as unverified.
+  it('says nothing when a check ran and failed', () => {
+    expect(
+      buildUnverifiedNote(
+        { test: cmd, lint: null, typecheck: null },
+        { test: { ...ran, passed: false }, lint: skipped, typecheck: skipped },
+      ),
+    ).toBe('');
   });
 });
