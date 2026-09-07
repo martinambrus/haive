@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { and, desc, eq, isNotNull } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { FormSchema } from '@haive/shared';
@@ -56,6 +58,11 @@ interface ReconcileApply {
   from: string | null;
   to: string | null;
   output: string;
+  /** The `.ddev/` state this reconcile actually APPLIED, and the baseline every later round
+   *  diffs against. Optional because step outputs are persisted and replayed: a payload
+   *  written before this field existed carries none and falls back to 01c's boot baseline,
+   *  which is exactly the previous behaviour. */
+  appliedBaseline?: DdevBaseline;
 }
 
 function ddevConfigPath(workspace: string): string {
@@ -98,6 +105,45 @@ export function classifyDrift(
   return { kind: 'none', migrateTarget: null, unsupportedReason: null };
 }
 
+/**
+ * The `.ddev/` state a PREVIOUS reconcile applied, or null when none has run yet.
+ *
+ * Deliberately not loadPreviousStepOutput: that returns the HIGHEST-round row, which during
+ * this step's own run is this row with a null output — so the prior round's answer would
+ * never be seen and the stamp would do nothing. Filtering on a written output also makes a
+ * retry correct for free, since resetRowsForRerun nulls the column.
+ */
+async function loadAppliedBaseline(ctx: StepContext): Promise<DdevBaseline | null> {
+  const rows = await ctx.db
+    .select({ output: schema.taskSteps.output })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, ctx.taskId),
+        eq(schema.taskSteps.stepId, '07c-ddev-reconcile'),
+        isNotNull(schema.taskSteps.output),
+      ),
+    )
+    .orderBy(desc(schema.taskSteps.round))
+    .limit(1);
+  return ((rows[0]?.output ?? null) as ReconcileApply | null)?.appliedBaseline ?? null;
+}
+
+/** The baseline to stamp on a reconcile that succeeded: what is on disk now, which is what
+ *  the restarted runtime is running. */
+export function appliedBaselineOf(
+  target: DdevConfigFields | null,
+  targetHash: string | null,
+): DdevBaseline | undefined {
+  if (!target || targetHash === null) return undefined;
+  return {
+    phpVersion: target.phpVersion,
+    dbType: target.dbType,
+    dbVersion: target.dbVersion,
+    configHash: targetHash,
+  };
+}
+
 /** Shared loader for detect (form rendering) and apply (authoritative — detect
  *  output is cached and not re-run on retry, so apply re-reads from scratch). */
 async function loadReconcileState(ctx: StepContext): Promise<{
@@ -105,11 +151,18 @@ async function loadReconcileState(ctx: StepContext): Promise<{
   workspace: string | null;
   baseline: DdevBaseline | null;
   target: DdevConfigFields | null;
+  targetHash: string | null;
   drift: { kind: DriftKind; migrateTarget: string | null; unsupportedReason: string | null };
 }> {
   const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
   const row = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01c-ddev-env');
-  const baseline = ((row?.output ?? null) as DdevEnvApply | null)?.baseline ?? null;
+  const booted = ((row?.output ?? null) as DdevEnvApply | null)?.baseline ?? null;
+  // What an earlier reconcile ACTUALLY applied outranks 01c's boot baseline. Diffing against
+  // the boot forever means that once the implementation touches `.ddev/`, every later fix
+  // round restarts DDEV again — MEASURED on task 681f0f99: rounds 1, 2 and 3 all recorded
+  // `action: restart` with php unchanged (8.3 -> 8.3). A restart RECREATES the containers, so
+  // that also discarded everything the previous round had installed in them.
+  const baseline = (await loadAppliedBaseline(ctx)) ?? booted;
   const workspace = ws?.workspace ?? null;
 
   let target: DdevConfigFields | null = null;
@@ -131,7 +184,7 @@ async function loadReconcileState(ctx: StepContext): Promise<{
       ? classifyDrift(baseline, target, targetHash)
       : { kind: 'none' as DriftKind, migrateTarget: null, unsupportedReason: null };
 
-  return { repoSubpath: ws?.repoSubpath ?? null, workspace, baseline, target, drift };
+  return { repoSubpath: ws?.repoSubpath ?? null, workspace, baseline, target, targetHash, drift };
 }
 
 export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> = {
@@ -243,7 +296,11 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
 
   async apply(ctx, args): Promise<ReconcileApply> {
     // Re-derive from scratch — detect output is cached across retries.
-    const { repoSubpath, workspace, baseline, target, drift } = await loadReconcileState(ctx);
+    const { repoSubpath, workspace, baseline, target, targetHash, drift } =
+      await loadReconcileState(ctx);
+    // Stamped on every reconcile that actually applied something, so the next round diffs
+    // against what is running rather than against the pre-change boot.
+    const appliedBaseline = appliedBaselineOf(target, targetHash);
 
     const noop = (output: string): ReconcileApply => ({
       action: 'none',
@@ -356,6 +413,7 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
         snapshotName,
         from: fromDb,
         to: drift.migrateTarget,
+        ...(appliedBaseline ? { appliedBaseline } : {}),
         output: `Migrated database ${fromDb} -> ${drift.migrateTarget} and restarted DDEV.`,
       };
     }
@@ -394,6 +452,7 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
         snapshotName,
         from: registeredName,
         to: configName,
+        ...(appliedBaseline ? { appliedBaseline } : {}),
         output: `Renamed DDEV project ${registeredName} → ${configName} (snapshot + restart, data preserved).`,
       };
     }
@@ -411,6 +470,7 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
       snapshotName: null,
       from: baseline.phpVersion,
       to: target.phpVersion,
+      ...(appliedBaseline ? { appliedBaseline } : {}),
       output: `Restarted DDEV to apply post-implementation .ddev config changes (php ${baseline.phpVersion ?? '?'} -> ${target.phpVersion ?? '?'}).`,
     };
   },

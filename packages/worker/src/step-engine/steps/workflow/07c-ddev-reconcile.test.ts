@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
-import { classifyDrift, ddevReconcileStep } from './07c-ddev-reconcile.js';
+import { appliedBaselineOf, classifyDrift, ddevReconcileStep } from './07c-ddev-reconcile.js';
 import { parseDdevProjectListForApproot } from '../../../sandbox/ddev-runner.js';
 import { parseDdevConfig, renderDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
 import type { DdevBaseline } from './01c-ddev-env.js';
@@ -193,5 +193,45 @@ describe('parseDdevProjectListForApproot (Slice C name-drift detection)', () => 
 
   it('returns null on an empty/missing registry', () => {
     expect(parseDdevProjectListForApproot('', '/x')).toBeNull();
+  });
+});
+
+// Once the implementation touches `.ddev/`, diffing forever against 01c's BOOT baseline made
+// every later fix round restart DDEV again — measured on task 681f0f99, rounds 1/2/3 all
+// `action: restart` with php unchanged. A restart recreates the containers, so it also threw
+// away whatever the previous round had installed in them.
+describe('appliedBaselineOf', () => {
+  const target: DdevConfigFields = {
+    phpVersion: '8.3',
+    dbType: 'mariadb',
+    dbVersion: '10.11',
+    webserver: 'nginx-fpm',
+    docroot: '',
+  };
+
+  it('records what is on disk, which is what the restarted runtime runs', () => {
+    expect(appliedBaselineOf(target, 'hash-after')).toEqual({
+      phpVersion: '8.3',
+      dbType: 'mariadb',
+      dbVersion: '10.11',
+      configHash: 'hash-after',
+    });
+  });
+
+  it('stamps nothing when there is no config to describe', () => {
+    expect(appliedBaselineOf(null, 'hash-after')).toBeUndefined();
+    expect(appliedBaselineOf(target, null)).toBeUndefined();
+  });
+
+  it('makes the next round see no drift, where the boot baseline saw a restart', () => {
+    const booted: DdevBaseline = { ...target, configHash: 'hash-before' };
+    expect(classifyDrift(booted, target, 'hash-after').kind).toBe('restart');
+    const stamped = appliedBaselineOf(target, 'hash-after')!;
+    expect(classifyDrift(stamped, target, 'hash-after').kind).toBe('none');
+  });
+
+  it('still restarts when `.ddev/` changes again after a stamped reconcile', () => {
+    const stamped = appliedBaselineOf(target, 'hash-after')!;
+    expect(classifyDrift(stamped, target, 'hash-later').kind).toBe('restart');
   });
 });
