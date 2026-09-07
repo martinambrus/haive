@@ -15,6 +15,7 @@ import {
   previousWindow,
   resolveTaskClass,
   sampledRatio,
+  normalizeTokens,
   sumNormalizedTokens,
   TASK_CLASSES,
   typesForClass,
@@ -211,16 +212,32 @@ async function effortOver(
  *  The order matters: codex and gemini report `input` INCLUSIVE of the cached prefix, so
  *  adding raw fields across providers and normalising once at the end mixes two different
  *  definitions of the same column. See `sumNormalizedTokens`. */
+function toRawTotals(p: TaskProviderUsage) {
+  return {
+    provider: p.provider,
+    inputTokens: p.inputTokens,
+    outputTokens: p.outputTokens,
+    cacheReadTokens: p.cacheReadTokens,
+    cacheCreationTokens: p.cacheCreationTokens,
+  };
+}
+
 function normalizeBreakdown(breakdown: TaskProviderUsage[]) {
-  return sumNormalizedTokens(
-    breakdown.map((p) => ({
-      provider: p.provider,
-      inputTokens: p.inputTokens,
-      outputTokens: p.outputTokens,
-      cacheReadTokens: p.cacheReadTokens,
-      cacheCreationTokens: p.cacheCreationTokens,
-    })),
-  );
+  return sumNormalizedTokens(breakdown.map(toRawTotals));
+}
+
+/** The same normalisation, kept per provider.
+ *
+ *  Attached to the response rather than folded into `TaskProviderUsage` itself: that interface
+ *  is mirrored by the task detail page, and this is a statistics concern. Sharing `toRawTotals`
+ *  with the total above is what makes Σ these rows equal `tokens` STRUCTURALLY rather than by
+ *  two call sites happening to agree — the parts and the whole cannot drift.
+ *
+ *  Per provider is where the normalisation actually shows: MEASURED, the naive ratio reports
+ *  codex at 45.8% cached where it is really 84.6%, because codex counts the cached prefix
+ *  inside `input` and the rest of the providers do not. */
+function providerTokens(breakdown: TaskProviderUsage[]) {
+  return breakdown.map((p) => ({ ...p, tokens: normalizeTokens(toRawTotals(p)) }));
 }
 
 /**
@@ -405,7 +422,7 @@ statsRoutes.get('/summary', async (c) => {
       unpricedInvocations: spend.unpricedInvocations,
       abandonedRealUsd: abandonedSpend.realUsd,
       abandonedNotionalUsd: abandonedSpend.notionalUsd,
-      byProvider: breakdown,
+      byProvider: providerTokens(breakdown),
       realDelta: delta(spend.realUsd, prevSpend.realUsd),
       notionalDelta: delta(spend.notionalUsd, prevSpend.notionalUsd),
     },

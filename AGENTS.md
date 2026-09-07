@@ -801,13 +801,22 @@ column on a non-ranked list states the opposite of the truth.
 Provider bars were considered and left out: three providers on this install, and the table is
 already ordered by tokens, so a second ranking on the same card would compete with it.
 
-**Per-provider token bars need an API change and are deliberately absent.** `spend.byProvider`
-ships RAW `inputTokens`, while `summary.tokens` is normalised by `sumNormalizedTokens` — codex and
-gemini report input inclusive of the cached prefix, so splitting a per-provider bar from the raw
-column double-counts cache reads for exactly the two providers the normalisation exists for
-(codex reads as 45.8% cached where it is really 84.6%). `inputIncludesCache` lives in
-`@haive/shared` and web cannot import it, so the fix is normalised per-provider tokens on the
-endpoint, not a duplicated provider list in the browser.
+**Per-provider token bars are served normalised, and that is the whole reason they exist.**
+`spend.byProvider` ships the RAW `inputTokens` its `TaskProviderUsage` shape has always carried,
+so a bar built from that column would double-count cache reads for exactly the two providers the
+normalisation exists for — MEASURED live, codex reads 46.5% cached raw against 86.9% normalised.
+`/stats/summary` therefore attaches a `tokens` object per provider, and `toRawTotals` is SHARED
+between that map and the window total, so Σ the rows equals `tokens` structurally rather than by
+two call sites happening to agree (VERIFIED live: all five fields match exactly). It is attached
+to the response and NOT folded into `TaskProviderUsage`, which the task detail page mirrors and
+which has no business carrying a statistics concern. Doing it in the browser was never an option:
+`inputIncludesCache` lives in `@haive/shared`, which web must not import.
+
+Every bar in that card — the window total included — shares one left edge and one
+`tokenSegments` definition. Each is normalised to its OWN total, so the card compares
+COMPOSITION and never size (size is the figure beside the name), and a segment that changed
+colour or position between the total and a provider row would make that reading wrong rather
+than merely inconsistent. The legend is rendered once, on the total.
 
 ### Per-step spend and model identity
 

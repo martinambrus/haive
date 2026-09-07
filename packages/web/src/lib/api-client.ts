@@ -1965,6 +1965,17 @@ export interface StatsTaskClassCount {
 }
 
 /** Mirrors TaskProviderUsage in the api's tasks/_helpers.ts. */
+/** Per-provider tokens, normalised the way the window total is — codex and gemini report input
+ *  inclusive of the cached prefix, so a raw column cannot be compared across providers. */
+export interface StatsNormalizedTokens {
+  freshInputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  totalTokens: number;
+  cacheHitRatio: number | null;
+}
+
 export interface StatsProviderUsage {
   provider: string;
   costBasis: string;
@@ -1973,6 +1984,9 @@ export interface StatsProviderUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** The four raw columns above, normalised. Attached by /stats/summary only — the task page's
+   *  own copy of this shape does not carry it. */
+  tokens: StatsNormalizedTokens;
   costUsd: number;
   notionalCostUsd: number;
   costSource: string;

@@ -20,6 +20,7 @@ import {
   type StatsEstimates,
   type StatsPlan,
   type StatsQuality,
+  type StatsNormalizedTokens,
   type StatsQueryParams,
   type StatsReliability,
   type StatsSteps,
@@ -119,6 +120,35 @@ const SEVERITY_COLOR: Record<string, string> = {
   medium: '#fab219',
   low: '#a3a3a3',
 };
+
+/** The four token buckets as bar segments, in a fixed order with a fixed colour each.
+ *
+ *  One definition for the window total and for every per-provider row: the rows are read
+ *  against the total directly above them, so a segment that changed colour or position between
+ *  the two would make that comparison wrong rather than merely inconsistent. */
+function tokenSegments(t: StatsNormalizedTokens) {
+  return [
+    {
+      key: 'cacheRead',
+      label: 'Cache read',
+      value: t.cacheReadTokens,
+      color: TOKEN_COLORS.cacheRead,
+    },
+    {
+      key: 'freshInput',
+      label: 'Fresh input',
+      value: t.freshInputTokens,
+      color: TOKEN_COLORS.freshInput,
+    },
+    {
+      key: 'cacheCreation',
+      label: 'Cache write',
+      value: t.cacheCreationTokens,
+      color: TOKEN_COLORS.cacheCreation,
+    },
+    { key: 'output', label: 'Output', value: t.outputTokens, color: TOKEN_COLORS.output },
+  ];
+}
 
 /** Mirrors ABANDONED_STATUSES in the stats route: a task that ended with nothing to show. */
 const ABANDONED_TASK_STATUSES = new Set(['failed', 'cancelled']);
@@ -545,36 +575,66 @@ function StatsPageInner() {
                 above, which is of the prompt side alone.
               </CardDescription>
             </CardHeader>
-            <StackedShareBar
-              segments={[
-                {
-                  key: 'cacheRead',
-                  label: 'Cache read',
-                  value: summary.tokens.cacheReadTokens,
-                  color: TOKEN_COLORS.cacheRead,
-                },
-                {
-                  key: 'freshInput',
-                  label: 'Fresh input',
-                  value: summary.tokens.freshInputTokens,
-                  color: TOKEN_COLORS.freshInput,
-                },
-                {
-                  key: 'cacheCreation',
-                  label: 'Cache write',
-                  value: summary.tokens.cacheCreationTokens,
-                  color: TOKEN_COLORS.cacheCreation,
-                },
-                {
-                  key: 'output',
-                  label: 'Output',
-                  value: summary.tokens.outputTokens,
-                  color: TOKEN_COLORS.output,
-                },
-              ]}
-              formatValue={formatTokens}
-              emptyMessage="No tokens recorded in this window."
-            />
+            {/* Every bar shares one left edge, the total included, so the mixes can be read
+                against each other by shape. Each is normalised to its OWN total, so this
+                compares composition and never size — the size is the figure beside the name. */}
+            <div className="flex flex-col gap-3">
+              <div className="grid grid-cols-[7rem_1fr_5.5rem] items-center gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-xs font-medium text-neutral-200">All providers</div>
+                  <div className="font-mono text-[10px] text-neutral-500">
+                    {formatTokens(summary.tokens.totalTokens)}
+                  </div>
+                </div>
+                <StackedShareBar
+                  segments={tokenSegments(summary.tokens)}
+                  formatValue={formatTokens}
+                  emptyMessage="No tokens recorded in this window."
+                />
+                <div className="text-right">
+                  <span className="font-mono text-xs text-sky-300">
+                    {formatPercent(summary.tokens.cacheHitRatio)}
+                  </span>
+                  <span className="ml-1 text-[10px] text-neutral-500">cached</span>
+                </div>
+              </div>
+
+              {summary.spend.byProvider.length > 0 && (
+                <>
+                  <p className="mt-3 border-t border-neutral-800 pt-3 text-xs uppercase tracking-wider text-neutral-500">
+                    Per provider — the cached share is what the normalisation is for
+                  </p>
+                  {summary.spend.byProvider.map((p) => (
+                    <div
+                      key={p.provider}
+                      className="grid grid-cols-[7rem_1fr_5.5rem] items-center gap-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-xs text-neutral-300">{p.provider}</div>
+                        <div className="font-mono text-[10px] text-neutral-500">
+                          {formatTokens(p.tokens.totalTokens)}
+                        </div>
+                      </div>
+                      {/* No legend per row: the four labels are stated once on the total above,
+                          and repeating them per provider buries the comparison these rows exist
+                          to make. */}
+                      <StackedShareBar
+                        segments={tokenSegments(p.tokens)}
+                        formatValue={formatTokens}
+                        showLegend={false}
+                        emptyMessage="No tokens."
+                      />
+                      <div className="text-right">
+                        <span className="font-mono text-xs text-sky-300">
+                          {formatPercent(p.tokens.cacheHitRatio)}
+                        </span>
+                        <span className="ml-1 text-[10px] text-neutral-500">cached</span>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
           </Card>
 
           <Card>

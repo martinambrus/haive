@@ -22,11 +22,15 @@ export function StackedShareBar({
   segments,
   formatValue,
   emptyMessage = 'Nothing recorded in this window.',
+  showLegend = true,
   className,
 }: {
   segments: ShareSegment[];
   formatValue: (value: number) => string;
   emptyMessage?: string;
+  /** Off for a stack of bars that share one legend above them — repeating four labels per row
+   *  buries the comparison the rows exist to make. */
+  showLegend?: boolean;
   className?: string;
 }) {
   const shown = segments.filter((s) => Number.isFinite(s.value) && s.value > 0);
@@ -55,20 +59,22 @@ export function StackedShareBar({
       </div>
       {/* Every segment is named here rather than inside the fill. A 1.7% segment cannot hold a
           legible label, and a label clipped by its own segment is worse than one below it. */}
-      <div className="flex flex-wrap gap-x-4 gap-y-1">
-        {shown.map((s) => (
-          <div key={s.key} className="flex items-baseline gap-1.5 text-[11px]">
-            <span
-              aria-hidden
-              className="inline-block h-2 w-2 shrink-0 translate-y-[1px] rounded-[2px]"
-              style={{ backgroundColor: s.color }}
-            />
-            <span className="text-neutral-400">{s.label}</span>
-            <span className="font-mono text-neutral-200">{formatValue(s.value)}</span>
-            <span className="font-mono text-neutral-500">{share(s.value).toFixed(1)}%</span>
-          </div>
-        ))}
-      </div>
+      {showLegend && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {shown.map((s) => (
+            <div key={s.key} className="flex items-baseline gap-1.5 text-[11px]">
+              <span
+                aria-hidden
+                className="inline-block h-2 w-2 shrink-0 translate-y-[1px] rounded-[2px]"
+                style={{ backgroundColor: s.color }}
+              />
+              <span className="text-neutral-400">{s.label}</span>
+              <span className="font-mono text-neutral-200">{formatValue(s.value)}</span>
+              <span className="font-mono text-neutral-500">{share(s.value).toFixed(1)}%</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
