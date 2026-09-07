@@ -1,10 +1,12 @@
-import { and, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService, logger, type OnboardingToolingMirror } from '@haive/shared';
 import { withGlobalKb } from '@haive/shared/global-kb';
+import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { defaultDockerRunner } from './sandbox/docker-runner.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
+import { describePlanOp, proposedOps } from './step-engine/steps/workflow/11f-plan-reconcile.js';
 
 const log = logger.child({ module: 'data-migrations' });
 
@@ -20,6 +22,7 @@ export async function runDataMigrations(db: Database): Promise<void> {
   await dropHeadingOnlyGlobalKbChunks(db);
   await clearPrunedSandboxImageState(db);
   await flagHashIndexedRestoredRepos(db);
+  await relabelPlanReconcileForms(db);
 }
 
 /** Flag repos whose RAG index was built with no embedding endpoint, so the query side
@@ -306,5 +309,108 @@ async function dropHeadingOnlyGlobalKbChunks(db: Database): Promise<void> {
     });
   } catch (err) {
     log.warn({ err }, 'heading-only global KB chunk cleanup skipped');
+  }
+}
+
+/** Re-label a parked plan-reconcile form whose options describe the wrong change.
+ *
+ *  `11f-plan-reconcile`'s form built its option labels against an EMPTY title
+ *  map, and `describePlanOp` decided "is this a new node?" by asking that map.
+ *  Every status change and code link on an existing node therefore rendered as
+ *  `Add node "untitled" under a node` — a label describing the opposite of what
+ *  ticking the box does, on the one control that exists so a developer can judge
+ *  a proposal they are about to approve. MEASURED on a parked task: 7 of 8
+ *  options, all of them upserts naming live node uuids.
+ *
+ *  A form is rebuilt only when its persisted schema is null, and nulling it here
+ *  would leave the step with no form and nothing to re-advance it. The option
+ *  labels are the only wrong part — indices, defaults and the ops they select are
+ *  untouched — so they are recomputed in place through the shipped labeller,
+ *  which is also what stops this drifting from what a fresh form would say.
+ *
+ *  Idempotent by construction rather than by a marker: a row is written only when
+ *  a recomputed label actually differs, so a converged form costs one read. */
+async function relabelPlanReconcileForms(db: Database): Promise<void> {
+  try {
+    const rows = await db
+      .select({
+        id: schema.taskSteps.id,
+        detectOutput: schema.taskSteps.detectOutput,
+        formSchema: schema.taskSteps.formSchema,
+        repositoryId: schema.tasks.repositoryId,
+      })
+      .from(schema.taskSteps)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+      .where(
+        and(
+          eq(schema.taskSteps.stepId, '11f-plan-reconcile'),
+          eq(schema.taskSteps.status, 'waiting_form'),
+        ),
+      );
+
+    let fixed = 0;
+    for (const row of rows) {
+      const form = row.formSchema as {
+        fields?: { id?: string; options?: { value?: string; label?: string }[] }[];
+      } | null;
+      const field = form?.fields?.find((f) => f.id === 'applyOps');
+      if (!field?.options?.length) continue;
+
+      // Same read resolveLlmPhase does — the step's live, unconsumed invocation.
+      const [invocation] = await db
+        .select({
+          parsedOutput: schema.cliInvocations.parsedOutput,
+          rawOutput: schema.cliInvocations.rawOutput,
+        })
+        .from(schema.cliInvocations)
+        .where(
+          and(
+            eq(schema.cliInvocations.taskStepId, row.id),
+            isNull(schema.cliInvocations.supersededAt),
+            isNull(schema.cliInvocations.consumedAt),
+            ne(schema.cliInvocations.mode, 'agent_mining'),
+          ),
+        )
+        .orderBy(desc(schema.cliInvocations.createdAt))
+        .limit(1);
+      if (!invocation) continue;
+
+      const ops = proposedOps(invocation.parsedOutput ?? invocation.rawOutput);
+      if (ops.length !== field.options.length) continue;
+
+      // The titles the form should have carried. A payload written before detect
+      // stored them gets them backfilled here rather than left to render as
+      // shortened uuids — naming the node is the whole reason the label exists,
+      // and the value is the one a fresh detect would have written.
+      const detect = row.detectOutput as { nodeTitles?: Record<string, string> } | null;
+      let titles = detect?.nodeTitles;
+      const backfill = titles === undefined && detect !== null && row.repositoryId !== null;
+      if (backfill) {
+        const nodes = await loadPlanSkeletons(db, row.repositoryId!);
+        titles = Object.fromEntries(nodes.map((n) => [n.id, n.title]));
+      }
+      const titleById = new Map(Object.entries(titles ?? {}));
+
+      const relabelled = field.options.map((opt, i) => ({
+        ...opt,
+        label: describePlanOp(ops[i]!, titleById),
+      }));
+      const same = relabelled.every((opt, i) => opt.label === field.options![i]!.label);
+      if (same && !backfill) continue;
+
+      field.options = relabelled;
+      await db
+        .update(schema.taskSteps)
+        .set({
+          formSchema: form,
+          ...(backfill ? { detectOutput: { ...detect, nodeTitles: titles } } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskSteps.id, row.id));
+      fixed += 1;
+    }
+    if (fixed > 0) log.info({ fixed }, 'relabelled parked plan-reconcile forms');
+  } catch (err) {
+    log.warn({ err }, 'plan reconcile form relabel skipped');
   }
 }
