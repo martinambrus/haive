@@ -44,6 +44,11 @@ const ActivityChart = dynamic(
   },
 );
 
+/** Calendar months the activity heatmap covers. Six is what fits the card beside Spend and
+ *  savings without either outgrowing the other — MEASURED, the grid area is 395x306 and a month
+ *  block is 104x141, so three across and two down. */
+const HEATMAP_MONTHS = 6;
+
 /** Statuses the listing's `active` token covers — what is running right now. */
 const ACTIVE_TOKEN = 'active';
 
@@ -58,6 +63,9 @@ export default function DashboardPage() {
   // resolves it there rather than during render.
   const [timeZone, setTimeZone] = useState<string | null>(null);
   const [heatMetric, setHeatMetric] = useState<HeatMetric>('agent');
+  // The heatmap's own, wider window. Everything else on this page is the API's 30-day default,
+  // and widening the shared fetch would move every tile and every delta with it.
+  const [heatTimeline, setHeatTimeline] = useState<StatsTimeline | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,6 +87,29 @@ export default function DashboardPage() {
         if (!cancelled) setLoading(false);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** Six calendar months for the heatmap, and exactly six: 180 days back from today lands
+   *  mid-month and would touch SEVEN blocks, so the window starts at the first of the month five
+   *  months ago. Built from local Date parts, the same zone the buckets are cut on.
+   *
+   *  Its own fetch for two reasons: this is the one panel whose question is "when did I work",
+   *  which 30 days cannot answer, and a wider range is the expensive one — /stats/timeline reads
+   *  a row per invocation — so a failure here has to leave the rest of the page standing. */
+  useEffect(() => {
+    let cancelled = false;
+    const now = new Date();
+    const first = new Date(now.getFullYear(), now.getMonth() - HEATMAP_MONTHS + 1, 1);
+    getStatsTimeline({
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      from: first.toISOString(),
+      to: now.toISOString(),
+    })
+      .then((t) => !cancelled && setHeatTimeline(t))
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -176,8 +207,14 @@ export default function DashboardPage() {
         <>
           {/* The only pair on this page that sits side by side: WHEN the work happened next
               to WHAT it cost, which are the two questions a dashboard opens with. Everything
-              below stays full width. */}
-          <div className="grid gap-6 lg:grid-cols-2">
+              below stays full width.
+
+              Paired at xl, not lg. The heatmap reserves a fixed 176px strip so its tooltips
+              cannot leave the card, and in a half-width column that strip is most of the
+              width: MEASURED at a 1060px viewport the column is 351px, leaving 125px of grid,
+              which fits ONE month block per row — six rows, a 1251px card, and Spend stretched
+              to match. At xl the column clears two blocks and the pair stays balanced. */}
+          <div className="grid gap-6 xl:grid-cols-2">
             {/* flex-col + a growing heatmap, NOT h-full: grid stretch gives the card a used
                 height while its computed height stays auto, so a percentage child does not
                 resolve against it and spills out of the card instead. */}
@@ -185,13 +222,16 @@ export default function DashboardPage() {
               <CardHeader>
                 <CardTitle>Activity</CardTitle>
                 <CardDescription>
-                  One square per day in your own time zone, shaded by quartile of the days on which
-                  anything ran — so one long day cannot flatten the rest of the month against it.
+                  The last {HEATMAP_MONTHS} months — wider than the rest of this page, which is the
+                  30 days above. One square per day in your own time zone, shaded by quartile of the
+                  days on which anything ran, so one long day cannot flatten the rest against it.
                   Hovering reports every metric; clicking opens that day&apos;s tasks.
                 </CardDescription>
               </CardHeader>
               <ActivityHeatmap
-                days={timeline?.days ?? []}
+                // Falls back to the 30-day series until the wider one lands, and stays there if
+                // it failed — a narrower heatmap beats an empty card.
+                days={(heatTimeline ?? timeline)?.days ?? []}
                 metric={heatMetric}
                 onMetricChange={setHeatMetric}
                 money={money}
@@ -221,7 +261,8 @@ export default function DashboardPage() {
                   )}
                 </CardDescription>
               </CardHeader>
-              <div className="grid grid-cols-2 gap-4">
+              {/* Four across while this card is full width, 2x2 once it is half of a pair. */}
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 xl:grid-cols-2">
                 <StatTile
                   label="Spent"
                   value={money(summary.spend.realUsd)}
