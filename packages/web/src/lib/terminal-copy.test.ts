@@ -4,6 +4,7 @@ import { createOsc52Clipboard, type Osc52Clipboard } from './terminal-copy';
 type Selection = Parameters<Osc52Clipboard['provider']['writeText']>[0];
 const SYSTEM = 'c' as unknown as Selection;
 const PRIMARY = 'p' as unknown as Selection;
+const EMPTY = '' as unknown as Selection;
 
 function stubClipboard(writeText: (text: string) => Promise<void>) {
   vi.stubGlobal('navigator', { clipboard: { writeText, readText: async () => '' } });
@@ -58,6 +59,19 @@ describe('createOsc52Clipboard', () => {
     expect(c.getPending()).toBeNull();
   });
 
+  // MEASURED: tmux rewrites an application's `]52;c;<b64>` to `]52;;<b64>` on the way out,
+  // so the addon hands the provider an empty selection for every copy made inside tmux.
+  it("treats tmux's empty selection field as the system clipboard", async () => {
+    const writeText = vi.fn(async () => {
+      throw new Error('nope');
+    });
+    stubClipboard(writeText);
+    const c = createOsc52Clipboard();
+    await c.provider.writeText(EMPTY, 'from tmux');
+    expect(writeText).toHaveBeenCalledWith('from tmux');
+    expect(c.getPending()).toBe('from tmux');
+  });
+
   it('ignores a non-system selection', async () => {
     const writeText = vi.fn(async () => {
       throw new Error('nope');
@@ -81,6 +95,22 @@ describe('createOsc52Clipboard', () => {
     await a.provider.writeText(SYSTEM, 'from a');
     expect(a.getPending()).toBe('from a');
     expect(b.getPending()).toBeNull();
+  });
+
+  // xterm suspends its write queue while a parser handler's promise is pending, so an
+  // unsettled clipboard call freezes the terminal. The handler must always settle.
+  it('parks the text when the clipboard call never settles', async () => {
+    vi.useFakeTimers();
+    try {
+      stubClipboard(() => new Promise<void>(() => {}));
+      const c = createOsc52Clipboard();
+      const write = c.provider.writeText(SYSTEM, 'hangs');
+      await vi.advanceTimersByTimeAsync(2500);
+      await write;
+      expect(c.getPending()).toBe('hangs');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('unsubscribes', async () => {

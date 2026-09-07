@@ -53,6 +53,36 @@ export interface Osc52Clipboard {
  * (MEASURED — forwarded only under `on`), so the bytes never reached any
  * browser. See `worker/src/terminal/terminal-container.ts`.
  */
+/**
+ * Cap on a clipboard call made from inside the OSC 52 handler.
+ *
+ * xterm SUSPENDS its write queue while a parser handler's promise is pending, so an
+ * unsettled clipboard call does not merely lose a copy — it freezes the terminal, and
+ * nothing after it renders. MEASURED on Chrome: `readText()` from an automated page sat
+ * unsettled past 120s on the permission prompt, and a `writeText()` that never settled
+ * left a live shell's tmux status bar three minutes stale while output queued behind it.
+ * A real write on the same page resolves in 1ms, so this bound costs nothing and only
+ * ever fires when the call was never going to answer. A timed-out write is treated as
+ * refused, which is already the honest outcome: the text is parked for the button.
+ */
+const CLIPBOARD_CALL_TIMEOUT_MS = 2000;
+
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('clipboard call timed out')), ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 export function createOsc52Clipboard(): Osc52Clipboard {
   let pending: string | null = null;
   const listeners = new Set<() => void>();
@@ -65,20 +95,18 @@ export function createOsc52Clipboard(): Osc52Clipboard {
 
   return {
     provider: {
-      // `selection` is a const enum that cannot be imported as a value under
-      // isolatedModules; compare its string value instead ('c' is SYSTEM).
       async readText(selection) {
-        if (String(selection) !== 'c') return '';
+        if (!isSystemSelection(selection)) return '';
         try {
-          return await navigator.clipboard.readText();
+          return await withTimeout(navigator.clipboard.readText(), CLIPBOARD_CALL_TIMEOUT_MS);
         } catch {
           return '';
         }
       },
       async writeText(selection, text) {
-        if (String(selection) !== 'c') return;
+        if (!isSystemSelection(selection)) return;
         try {
-          await navigator.clipboard.writeText(text);
+          await withTimeout(navigator.clipboard.writeText(text), CLIPBOARD_CALL_TIMEOUT_MS);
           setPending(null);
         } catch {
           setPending(text);
@@ -99,6 +127,26 @@ export function createOsc52Clipboard(): Osc52Clipboard {
       return true;
     },
   };
+}
+
+/**
+ * Does this OSC 52 target the system clipboard?
+ *
+ * `selection` is a const enum that cannot be imported as a value under
+ * isolatedModules, so compare its string value: 'c' is SYSTEM.
+ *
+ * EMPTY counts too, and that is the case that matters here rather than an edge
+ * one: tmux REWRITES the selection field when it forwards an application's copy
+ * — MEASURED, `ESC ]52;c;<b64>BEL` emitted inside a pane reaches the outer
+ * terminal as `ESC ]52;;<b64>BEL`, and the addon hands that on as ''. Matching
+ * 'c' alone therefore dropped every copy made inside tmux, which is every copy
+ * this product's terminals carry. The spec defaults an omitted target to `s0`,
+ * but an emitter that omits it is asking the terminal for its clipboard; 'p'
+ * (PRIMARY) stays ignored, since a browser cannot write that selection.
+ */
+function isSystemSelection(selection: unknown): boolean {
+  const s = String(selection);
+  return s === 'c' || s === '';
 }
 
 /** Synchronous copy through a throwaway off-screen textarea. Focus is handed
