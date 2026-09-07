@@ -6,6 +6,7 @@ import { CONFIG_KEYS, configService, isDisplayCurrency } from '@haive/shared';
 import { computeTaskTiming } from '@haive/shared/timing';
 import { buildEstimationAccuracy } from '@haive/shared';
 import {
+  buildTaskTimeBreakdown,
   computeBusySpan,
   computeDelta,
   dayKey,
@@ -637,6 +638,105 @@ statsRoutes.get('/timeline', async (c) => {
       dutyCycle: busy.dutyCycle,
     },
     days: series,
+  });
+});
+
+/**
+ * Per-task breakdown of the window's agent time — the rows behind the Time tab's tiles.
+ *
+ * The interval set is identical to the one `/summary` builds its agent-hours and busy-span tiles
+ * from (`invocationWindow` + `timeOver`), so Σ row `agentMs` equals that tile exactly. Busy span
+ * deliberately does NOT add up across rows: two tasks running the same minute each own that
+ * minute, while the window owns it once. See `buildTaskTimeBreakdown`.
+ *
+ * Intervals are not clamped at `to` for the same reason the tiles do not clamp them — an
+ * invocation counts where it STARTED, whole. Clamping here alone would break the reconciliation
+ * that is the point of the table.
+ *
+ * Its own endpoint rather than extra fields on `/timeline`, which the page fetches eagerly for
+ * every tab: rows bolted there would ride along on five tabs that never render them.
+ */
+statsRoutes.get('/tasks', async (c) => {
+  const userId = c.get('userId');
+  const q = parseStatsQuery(c.req.query());
+  if (q.allUsers && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for install-wide statistics');
+  }
+  const db = getDb();
+
+  const from = new Date(q.fromMs);
+  const to = new Date(q.toMs);
+  const scope = taskScopeFilter(q, userId);
+  const providerTerm = q.cliProviderId
+    ? [eq(schema.cliInvocations.cliProviderId, q.cliProviderId)]
+    : [];
+
+  const intervals = await db
+    .select({
+      taskId: schema.cliInvocations.taskId,
+      start: schema.cliInvocations.startedAt,
+      end: schema.cliInvocations.endedAt,
+    })
+    .from(schema.cliInvocations)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+    .where(
+      and(
+        ...scope,
+        ...providerTerm,
+        invocationAttributionFilter(),
+        isNotNull(schema.cliInvocations.startedAt),
+        isNotNull(schema.cliInvocations.endedAt),
+        gte(schema.cliInvocations.startedAt, from),
+        lt(schema.cliInvocations.startedAt, to),
+      ),
+    );
+
+  const breakdown = buildTaskTimeBreakdown(intervals, { timeZone: q.timeZone });
+
+  // Metadata for the rows that survived the cap only: a two-year window can rank thousands of
+  // tasks and still needs titles for two hundred.
+  const ids = breakdown.rows.map((r) => r.taskId);
+  const meta = ids.length
+    ? await db
+        .select({
+          id: schema.tasks.id,
+          title: schema.tasks.title,
+          type: schema.tasks.type,
+          status: schema.tasks.status,
+          metadata: schema.tasks.metadata,
+          executionPath: schema.tasks.executionPath,
+          repositoryId: schema.tasks.repositoryId,
+          repositoryName: schema.repositories.name,
+        })
+        .from(schema.tasks)
+        .leftJoin(schema.repositories, eq(schema.repositories.id, schema.tasks.repositoryId))
+        .where(inArray(schema.tasks.id, ids))
+    : [];
+  const byId = new Map(meta.map((m) => [m.id, m]));
+
+  return c.json({
+    range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
+    rows: breakdown.rows.map((r) => {
+      // Present unless the task was deleted between the two queries — the innerJoin above
+      // proves it existed a moment ago.
+      const m = byId.get(r.taskId);
+      return {
+        ...r,
+        title: m?.title ?? null,
+        taskClass: m
+          ? resolveTaskClass({
+              type: m.type,
+              metadata: m.metadata,
+              executionPath: m.executionPath,
+            }).taskClass
+          : null,
+        status: m?.status ?? null,
+        repositoryId: m?.repositoryId ?? null,
+        repositoryName: m?.repositoryName ?? null,
+      };
+    }),
+    taskCount: breakdown.taskCount,
+    truncated: breakdown.truncated,
   });
 });
 

@@ -2170,6 +2170,41 @@ export async function getStatsEstimates(params: StatsQueryParams = {}): Promise<
   return api.get<StatsEstimates>(`/stats/estimates${statsQueryString(params)}`);
 }
 
+/** One task's share of the window's agent time.
+ *
+ *  `agentMs` sums across rows to `StatsSummary.time.agentMs` exactly. `busyMs` does NOT and is
+ *  not meant to — two tasks running the same minute each own that minute, while the window owns
+ *  it once. */
+export interface StatsTaskTimeRow {
+  taskId: string;
+  /** Null only if the task was deleted between the two server queries. */
+  title: string | null;
+  taskClass: StatsTaskClass | null;
+  status: string | null;
+  repositoryId: string | null;
+  repositoryName: string | null;
+  invocations: number;
+  agentMs: number;
+  busyMs: number;
+  calendarMs: number;
+  islands: number;
+  concurrency: number | null;
+  dutyCycle: number | null;
+}
+
+export interface StatsTaskTime {
+  range: { from: string; to: string; timeZone: string };
+  /** Ranked by `agentMs` desc, then capped. */
+  rows: StatsTaskTimeRow[];
+  /** Distinct tasks before the cap. */
+  taskCount: number;
+  truncated: boolean;
+}
+
+export async function getStatsTaskTime(params: StatsQueryParams = {}): Promise<StatsTaskTime> {
+  return api.get<StatsTaskTime>(`/stats/tasks${statsQueryString(params)}`);
+}
+
 export interface StatsPlanRepository {
   repositoryId: string;
   name: string;

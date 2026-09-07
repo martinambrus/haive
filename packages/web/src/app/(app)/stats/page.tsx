@@ -11,6 +11,7 @@ import {
   getStatsQuality,
   getStatsReliability,
   getStatsSummary,
+  getStatsTaskTime,
   getStatsTimeline,
   getUiPrefs,
   putUiPrefs,
@@ -22,6 +23,7 @@ import {
   type StatsReliability,
   type StatsSummary,
   type StatsTaskClass,
+  type StatsTaskTime,
   type StatsTimeline,
   type UiPrefs,
 } from '@/lib/api-client';
@@ -94,6 +96,12 @@ const TASK_CLASS_OPTIONS: Array<{ value: '' | StatsTaskClass; label: string }> =
   { value: 'other', label: 'Other' },
 ];
 
+/** Derived from the filter options rather than restated, so a relabelled class renames both. */
+const TASK_CLASS_LABELS = new Map(TASK_CLASS_OPTIONS.map((o) => [o.value, o.label]));
+
+/** Mirrors ABANDONED_STATUSES in the stats route: a task that ended with nothing to show. */
+const ABANDONED_TASK_STATUSES = new Set(['failed', 'cancelled']);
+
 function isTab(v: string | null): v is Tab {
   return !!v && (TABS as readonly string[]).includes(v);
 }
@@ -144,6 +152,7 @@ function StatsPageInner() {
   const [quality, setQuality] = useState<StatsQuality | null>(null);
   const [estimates, setEstimates] = useState<StatsEstimates | null>(null);
   const [plan, setPlan] = useState<StatsPlan | null>(null);
+  const [taskTime, setTaskTime] = useState<StatsTaskTime | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -261,10 +270,15 @@ function StatsPageInner() {
         .then((d) => !cancelled && setPlan(d))
         .catch(() => undefined);
     }
+    if (tab === 'time' && !taskTime) {
+      getStatsTaskTime(params)
+        .then((d) => !cancelled && setTaskTime(d))
+        .catch(() => undefined);
+    }
     return () => {
       cancelled = true;
     };
-  }, [tab, params, reliability, quality, estimates, plan]);
+  }, [tab, params, reliability, quality, estimates, plan, taskTime]);
 
   // A filter change invalidates the lazily-loaded tabs, or switching back would show the
   // previous window's numbers under the new filter's heading.
@@ -273,6 +287,7 @@ function StatsPageInner() {
     setQuality(null);
     setEstimates(null);
     setPlan(null);
+    setTaskTime(null);
   }, [params]);
 
   const cd = summary?.costDisplay ?? null;
@@ -599,6 +614,96 @@ function StatsPageInner() {
                 tone="text-amber-300"
               />
             </div>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Per task</CardTitle>
+              <CardDescription>
+                Where this window&apos;s agent time went, ranked by agent-hours. Agent-hours add up
+                to the tile above exactly; busy spans do not, and are not meant to — two tasks
+                running the same minute each own that minute, while the window owns it once. A task
+                is listed when an agent ran for it in this window; deterministic step work carries
+                no CLI invocation and is outside the span.
+              </CardDescription>
+            </CardHeader>
+            {!taskTime ? (
+              <div className="text-sm text-neutral-500">Loading...</div>
+            ) : taskTime.taskCount === 0 ? (
+              <p className="text-sm text-neutral-500">No agent ran for any task in this window.</p>
+            ) : (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                        <th className="pb-2 font-medium">Task</th>
+                        <th className="pb-2 font-medium">Repository</th>
+                        <th className="pb-2 font-medium">Class</th>
+                        <th className="pb-2 font-medium">Status</th>
+                        <th className="pb-2 text-right font-medium">Runs</th>
+                        <th className="pb-2 text-right font-medium">Agent-hours</th>
+                        <th className="pb-2 text-right font-medium">Busy span</th>
+                        <th className="pb-2 text-right font-medium">Concurrency</th>
+                        <th className="pb-2 text-right font-medium">Calendar span</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {taskTime.rows.map((r) => (
+                        <tr key={r.taskId} className="border-t border-neutral-800">
+                          <td className="py-2">
+                            <Link
+                              href={`/tasks/${r.taskId}`}
+                              title={r.title ?? r.taskId}
+                              className="block max-w-[22rem] truncate text-neutral-200 hover:text-indigo-300"
+                            >
+                              {r.title ?? r.taskId}
+                            </Link>
+                          </td>
+                          <td className="py-2 text-neutral-400">{r.repositoryName ?? '—'}</td>
+                          <td className="py-2 text-neutral-400">
+                            {r.taskClass === null
+                              ? '—'
+                              : (TASK_CLASS_LABELS.get(r.taskClass) ?? r.taskClass)}
+                          </td>
+                          <td
+                            className={`py-2 ${
+                              ABANDONED_TASK_STATUSES.has(r.status ?? '')
+                                ? 'text-amber-400'
+                                : 'text-neutral-400'
+                            }`}
+                          >
+                            {r.status === null ? '—' : r.status.replace(/_/g, ' ')}
+                          </td>
+                          <td className="py-2 text-right font-mono text-neutral-400">
+                            {formatCount(r.invocations)}
+                          </td>
+                          <td className="py-2 text-right font-mono text-indigo-300">
+                            {formatAgentHours(r.agentMs)}
+                          </td>
+                          <td className="py-2 text-right font-mono text-neutral-200">
+                            {formatDuration(r.busyMs)}
+                          </td>
+                          <td className="py-2 text-right font-mono text-neutral-400">
+                            {formatConcurrency(r.concurrency)}
+                          </td>
+                          <td className="py-2 text-right font-mono text-neutral-400">
+                            {formatDuration(r.calendarMs)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {taskTime.truncated && (
+                  <p className="mt-3 text-xs text-neutral-500">
+                    Showing the {formatCount(taskTime.rows.length)} tasks with the most agent-hours,
+                    of {formatCount(taskTime.taskCount)} — the rows shown do not add up to the
+                    window total.
+                  </p>
+                )}
+              </>
+            )}
           </Card>
         </>
       )}
