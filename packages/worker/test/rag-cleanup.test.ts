@@ -1,12 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import { cleanupRagForRepository } from '../src/step-engine/steps/onboarding/_rag-connection.js';
 
-/** Records every `haiveDb.execute()` SQL the function emits so the test can
- *  assert call ordering without standing up a real postgres. We extract a
- *  best-effort textual representation by walking drizzle's `queryChunks`
- *  array (where templated SQL stores its literal fragments) and falling
- *  back to JSON for unrecognised shapes. */
+/** `openExistingRagDatabase` opens a real postgres pool, so it is the one thing the fake
+ *  cannot provide. Everything else in the module (RAG_TABLE, ragDatabaseName, …) must keep
+ *  its real behaviour — `ragDatabaseName` in particular, since the sanitised name is what
+ *  the keeper compares on. */
+const openExistingRagDatabase = vi.fn();
+vi.mock('@haive/shared/rag', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  openExistingRagDatabase: (...args: unknown[]) => openExistingRagDatabase(...args),
+}));
+
+const { cleanupRagForRepository } =
+  await import('../src/step-engine/steps/onboarding/_rag-connection.js');
+
+/** Best-effort textual rendering of a drizzle SQL object, by walking `queryChunks`. */
 function sqlText(sqlObj: unknown): string {
   if (sqlObj == null || typeof sqlObj !== 'object') return String(sqlObj);
   const obj = sqlObj as Record<string, unknown>;
@@ -19,9 +27,8 @@ function sqlText(sqlObj: unknown): string {
           const inner = c as Record<string, unknown>;
           if (typeof inner.value === 'string') return inner.value;
           if (Array.isArray(inner.value)) return inner.value.join('');
-          if (Array.isArray((inner as { queryChunks?: unknown }).queryChunks)) {
+          if (Array.isArray((inner as { queryChunks?: unknown }).queryChunks))
             return sqlText(inner);
-          }
         }
         return '';
       })
@@ -30,36 +37,30 @@ function sqlText(sqlObj: unknown): string {
   return JSON.stringify(obj);
 }
 
-interface ExecuteCall {
-  sql: string;
-}
+type RepoRow = { id: string; onboardingTooling: unknown; onboardingEnvironment: unknown };
 
 interface FakeDb {
   db: Database;
-  calls: ExecuteCall[];
-  /** Set what the next `execute()` call returns. `kind: 'collision'` means a
-   *  collision-check query (the function expects an array; `rows.length > 0`
-   *  short-circuits to "kept"). For DDL (`pg_terminate_backend`,
-   *  `DROP DATABASE`), the function ignores the return value. */
+  calls: string[];
   queueResult: (rows: unknown[]) => void;
-  /** Throw an error from the next execute() — used to simulate DROP failures. */
   queueError: (err: Error) => void;
 }
 
-function makeFakeDb(): FakeDb {
-  const calls: ExecuteCall[] = [];
+/** `repos` is what keeper 2 sees. `execute` serves the pg_stat_activity probe, the
+ *  no-mirror fallback query and the DROP, in the order the function issues them. */
+function makeFakeDb(repos: RepoRow[] = []): FakeDb {
+  const calls: string[] = [];
   const queue: Array<{ rows?: unknown[]; err?: Error }> = [];
   const execute = vi.fn(async (sqlObj: unknown) => {
-    calls.push({ sql: sqlText(sqlObj) });
+    calls.push(sqlText(sqlObj));
     const next = queue.shift();
     if (next?.err) throw next.err;
     return next?.rows ?? [];
   });
-  // Only `execute` is touched by cleanupRagForRepository. The rest of the
-  // Database surface stays unimplemented — any unintentional usage will
-  // throw and surface as a test failure.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const db = { execute } as unknown as Database;
+  const db = {
+    execute,
+    query: { repositories: { findMany: async () => repos } },
+  } as unknown as Database;
   return {
     db,
     calls,
@@ -68,10 +69,52 @@ function makeFakeDb(): FakeDb {
   };
 }
 
+/** A per-project store holding `rows` rows after the delete removes `deleted` of them. */
+function fakeStore(opts: { deleted?: number; remaining?: number }): {
+  conn: unknown;
+  statements: string[];
+  closed: () => boolean;
+} {
+  const statements: string[] = [];
+  let didClose = false;
+  const conn = {
+    mode: 'internal',
+    embeddingDimensions: 2560,
+    pg: {
+      unsafe: async (q: string) => {
+        statements.push(q);
+        if (q.startsWith('DELETE')) return { count: opts.deleted ?? 0 };
+        if (q.includes('LIMIT 1')) return (opts.remaining ?? 0) > 0 ? [{ '?column?': 1 }] : [];
+        return [];
+      },
+    },
+    close: async () => {
+      didClose = true;
+    },
+  };
+  return { conn, statements, closed: () => didClose };
+}
+
+const mirrorRepo = (id: string, projectName: string, ragMode = 'internal'): RepoRow => ({
+  id,
+  onboardingTooling: { schemaVersion: 1, tooling: { ragMode } },
+  onboardingEnvironment: {
+    schemaVersion: 1,
+    envDetectData: { project: { name: projectName } },
+    confirmedValues: {},
+  },
+});
+
+const payload = (projectNames: string[]) => ({
+  repositoryId: 'deleted-repo',
+  userId: 'user-1',
+  projectNames,
+});
+
 let fake: FakeDb;
 
 beforeEach(() => {
-  fake = makeFakeDb();
+  openExistingRagDatabase.mockReset();
 });
 
 afterEach(() => {
@@ -79,133 +122,167 @@ afterEach(() => {
 });
 
 describe('cleanupRagForRepository', () => {
-  it('returns immediately when projectNames is empty (no execute calls)', async () => {
-    const result = await cleanupRagForRepository(fake.db, {
-      repositoryId: 'r1',
-      userId: 'u1',
-      projectNames: [],
-    });
-    expect(result).toEqual({ dropped: [], kept: [] });
+  it('does nothing when there are no project names', async () => {
+    fake = makeFakeDb();
+    const res = await cleanupRagForRepository(fake.db, payload([]));
+
+    expect(res).toEqual({ dropped: [], kept: [] });
     expect(fake.calls).toHaveLength(0);
+    expect(openExistingRagDatabase).not.toHaveBeenCalled();
   });
 
-  it('keeps the database when a surviving task references the same project name', async () => {
-    fake.queueResult([{ '?column?': 1 }]); // collision check returns a row
-
-    const result = await cleanupRagForRepository(fake.db, {
-      repositoryId: 'r1',
-      userId: 'u1',
-      projectNames: ['RDApi'],
-    });
-
-    expect(result.dropped).toEqual([]);
-    expect(result.kept).toEqual(['haive_rag_rdapi']);
-    // Exactly one query — the collision check. No terminate_backend / no DROP.
-    expect(fake.calls).toHaveLength(1);
-    expect(fake.calls[0]!.sql).toMatch(/repository_id IS NOT NULL/);
-    expect(fake.calls[0]!.sql).toMatch(/ragMode/);
-  });
-
-  it('drops the database when no surviving task references the project name', async () => {
-    fake.queueResult([]); // collision check returns no rows
-    fake.queueResult([]); // pg_terminate_backend
-    fake.queueResult([]); // DROP DATABASE
-
-    const result = await cleanupRagForRepository(fake.db, {
-      repositoryId: 'r1',
-      userId: 'u1',
-      projectNames: ['RDApi'],
-    });
-
-    expect(result.dropped).toEqual(['haive_rag_rdapi']);
-    expect(result.kept).toEqual([]);
-    expect(fake.calls).toHaveLength(3);
-    expect(fake.calls[0]!.sql).toMatch(/repository_id IS NOT NULL/);
-    expect(fake.calls[1]!.sql).toContain('pg_terminate_backend');
-    expect(fake.calls[1]!.sql).toContain("'haive_rag_rdapi'");
-    expect(fake.calls[2]!.sql).toContain('DROP DATABASE IF EXISTS "haive_rag_rdapi"');
-  });
-
-  it('keeps the database when DROP fails (caught + logged, not re-thrown)', async () => {
-    fake.queueResult([]); // no collision
-    fake.queueResult([]); // pg_terminate_backend ok
-    fake.queueError(new Error('database "haive_rag_rdapi" is being accessed by other users'));
-
-    const result = await cleanupRagForRepository(fake.db, {
-      repositoryId: 'r1',
-      userId: 'u1',
-      projectNames: ['RDApi'],
-    });
-
-    expect(result.dropped).toEqual([]);
-    expect(result.kept).toEqual(['haive_rag_rdapi']);
-  });
-
-  it('keeps the database when the collision check itself errors (fail-safe)', async () => {
-    fake.queueError(new Error('connection lost'));
-
-    const result = await cleanupRagForRepository(fake.db, {
-      repositoryId: 'r1',
-      userId: 'u1',
-      projectNames: ['RDApi'],
-    });
-
-    // Better to leak an orphan database than to drop one that another live
-    // repo depends on. The test enforces this fail-safe stance.
-    expect(result.dropped).toEqual([]);
-    expect(result.kept).toEqual(['haive_rag_rdapi']);
-    expect(fake.calls).toHaveLength(1);
-  });
-
-  it('skips empty / whitespace-only project names without consuming a query slot', async () => {
-    fake.queueResult([]); // for the one valid name
-    fake.queueResult([]); // pg_terminate_backend
+  it('deletes the repo rows and drops the database when nothing is left', async () => {
+    fake = makeFakeDb([]);
+    const store = fakeStore({ deleted: 9199, remaining: 0 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+    fake.queueResult([]); // pg_stat_activity: nobody connected
     fake.queueResult([]); // DROP
 
-    const result = await cleanupRagForRepository(fake.db, {
-      repositoryId: 'r1',
-      userId: 'u1',
-      projectNames: ['', '   ', 'RDApi'],
-    });
+    const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
 
-    expect(result.dropped).toEqual(['haive_rag_rdapi']);
-    expect(fake.calls).toHaveLength(3);
+    expect(res.dropped).toEqual(['haive_rag_rdapi']);
+    expect(store.statements[0]).toContain('DELETE FROM ai_rag_embeddings');
+    // The pool must be closed before the DROP, or our own backend blocks it.
+    expect(store.closed()).toBe(true);
+    expect(fake.calls[fake.calls.length - 1]).toContain(
+      'DROP DATABASE IF EXISTS "haive_rag_rdapi"',
+    );
   });
 
-  it('dedupes by sanitized database name so the same DB is not processed twice', async () => {
-    // 'RDApi' and 'rdapi' both sanitize to 'haive_rag_rdapi'. The function
-    // tracks a Set on the dbName so the second occurrence is silently skipped.
-    fake.queueResult([]); // collision check (only runs once)
-    fake.queueResult([]); // pg_terminate_backend
+  it('KEEPS the database when another repo still has rows in it', async () => {
+    // The measured data-loss case: two repos share one store, one is deleted.
+    fake = makeFakeDb([]);
+    const store = fakeStore({ deleted: 9199, remaining: 9278 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+
+    const res = await cleanupRagForRepository(fake.db, payload(['elmont-rs']));
+
+    expect(res).toEqual({ dropped: [], kept: ['haive_rag_elmont_rs'] });
+    expect(fake.calls.some((c) => c.includes('DROP DATABASE'))).toBe(false);
+  });
+
+  it('KEEPS the database when a surviving repo claims it, even with zero rows left', async () => {
+    // The mirror-restored blind spot: this repo has no onboarding task at all, so the old
+    // task_steps collision query could not see it and dropped its store.
+    fake = makeFakeDb([mirrorRepo('survivor', 'elmont-rs')]);
+    const store = fakeStore({ deleted: 10, remaining: 0 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+
+    const res = await cleanupRagForRepository(fake.db, payload(['elmont-rs']));
+
+    expect(res).toEqual({ dropped: [], kept: ['haive_rag_elmont_rs'] });
+    expect(fake.calls.some((c) => c.includes('DROP DATABASE'))).toBe(false);
+  });
+
+  it('KEEPS it when a survivor names the same database under a different raw name', async () => {
+    // `elmont.rs` and `elmont-rs` both sanitise to haive_rag_elmont_rs. The old query
+    // compared RAW names while the DROP targeted the sanitised one, so this survivor did
+    // not protect its own store.
+    fake = makeFakeDb([mirrorRepo('survivor', 'elmont.rs')]);
+    const store = fakeStore({ deleted: 10, remaining: 0 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+
+    const res = await cleanupRagForRepository(fake.db, payload(['elmont-rs']));
+
+    expect(res.kept).toEqual(['haive_rag_elmont_rs']);
+  });
+
+  it('does not treat an external-mode survivor as a claim', async () => {
+    fake = makeFakeDb([mirrorRepo('survivor', 'elmont-rs', 'ddev')]);
+    const store = fakeStore({ deleted: 10, remaining: 0 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+    fake.queueResult([]); // pg_stat_activity
     fake.queueResult([]); // DROP
 
-    const result = await cleanupRagForRepository(fake.db, {
-      repositoryId: 'r1',
-      userId: 'u1',
-      projectNames: ['RDApi', 'rdapi'],
-    });
+    const res = await cleanupRagForRepository(fake.db, payload(['elmont-rs']));
 
-    expect(result.dropped).toEqual(['haive_rag_rdapi']);
-    expect(result.kept).toEqual([]);
-    expect(fake.calls).toHaveLength(3);
+    expect(res.dropped).toEqual(['haive_rag_elmont_rs']);
   });
 
-  it('processes multiple distinct project names independently', async () => {
-    // alpha → kept (collision), beta → dropped, gamma → kept (collision)
-    fake.queueResult([{ '?column?': 1 }]); // alpha collision
-    fake.queueResult([]); // beta no collision
-    fake.queueResult([]); // beta pg_terminate_backend
-    fake.queueResult([]); // beta DROP
-    fake.queueResult([{ '?column?': 1 }]); // gamma collision
+  it('KEEPS the database when another backend is connected', async () => {
+    fake = makeFakeDb([]);
+    const store = fakeStore({ deleted: 10, remaining: 0 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+    fake.queueResult([{ '?column?': 1 }]); // pg_stat_activity: someone is in there
 
-    const result = await cleanupRagForRepository(fake.db, {
-      repositoryId: 'r1',
-      userId: 'u1',
-      projectNames: ['Alpha', 'Beta', 'Gamma'],
-    });
+    const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
 
-    expect(result.dropped).toEqual(['haive_rag_beta']);
-    expect(result.kept.sort()).toEqual(['haive_rag_alpha', 'haive_rag_gamma']);
-    expect(fake.calls).toHaveLength(5);
+    expect(res).toEqual({ dropped: [], kept: ['haive_rag_rdapi'] });
+    expect(fake.calls.some((c) => c.includes('DROP DATABASE'))).toBe(false);
+  });
+
+  it('never creates a database that is not there', async () => {
+    fake = makeFakeDb([]);
+    openExistingRagDatabase.mockResolvedValue(null);
+
+    const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
+
+    expect(res).toEqual({ dropped: [], kept: ['haive_rag_rdapi'] });
+    expect(fake.calls.some((c) => c.includes('CREATE DATABASE'))).toBe(false);
+    expect(fake.calls.some((c) => c.includes('DROP DATABASE'))).toBe(false);
+  });
+
+  it('keeps the database when the row cleanup itself fails (fail-safe)', async () => {
+    fake = makeFakeDb([]);
+    openExistingRagDatabase.mockRejectedValue(new Error('connection refused'));
+
+    const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
+
+    expect(res).toEqual({ dropped: [], kept: ['haive_rag_rdapi'] });
+  });
+
+  it('keeps the database when the survivor check itself errors (fail-safe)', async () => {
+    const db = {
+      execute: vi.fn(),
+      query: {
+        repositories: {
+          findMany: async () => {
+            throw new Error('db down');
+          },
+        },
+      },
+    } as unknown as Database;
+
+    const res = await cleanupRagForRepository(db, payload(['RDApi']));
+
+    expect(res).toEqual({ dropped: [], kept: ['haive_rag_rdapi'] });
+    expect(openExistingRagDatabase).not.toHaveBeenCalled();
+  });
+
+  it('keeps the database when the DROP throws', async () => {
+    fake = makeFakeDb([]);
+    const store = fakeStore({ deleted: 10, remaining: 0 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+    fake.queueResult([]); // pg_stat_activity
+    fake.queueError(new Error('permission denied'));
+
+    const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
+
+    expect(res).toEqual({ dropped: [], kept: ['haive_rag_rdapi'] });
+  });
+
+  it('retries the DROP once when the database is still in use', async () => {
+    fake = makeFakeDb([]);
+    const store = fakeStore({ deleted: 10, remaining: 0 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+    fake.queueResult([]); // pg_stat_activity
+    const inUse = Object.assign(new Error('is being accessed by other users'), { code: '55006' });
+    fake.queueError(inUse);
+    fake.queueResult([]); // the retry succeeds
+
+    const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
+
+    expect(res.dropped).toEqual(['haive_rag_rdapi']);
+    expect(fake.calls.filter((c) => c.includes('DROP DATABASE'))).toHaveLength(2);
+  });
+
+  it('skips blank names and dedupes by sanitized database name', async () => {
+    fake = makeFakeDb([]);
+    openExistingRagDatabase.mockResolvedValue(null);
+
+    const res = await cleanupRagForRepository(fake.db, payload(['  ', 'RDApi', 'rdapi']));
+
+    expect(res.kept).toEqual(['haive_rag_rdapi']);
+    expect(openExistingRagDatabase).toHaveBeenCalledTimes(1);
   });
 });

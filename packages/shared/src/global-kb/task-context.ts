@@ -32,12 +32,12 @@ export interface TaskStackContext {
 /** envDetectData and confirmed always travel together: they are the DETECTED and
  *  CONFIRMED halves of one stack answer, and mixing tiers yields a stack that was
  *  never true (PHP 8 detected on a later round, PHP 7 confirmed on an earlier one). */
-interface StackTier {
+export interface StackTier {
   envDetectData: Record<string, unknown>;
   confirmed: ConfirmedStackValues | null;
 }
 
-interface ResolvedTier {
+export interface ResolvedTier {
   tooling: Record<string, unknown> | null;
   stack: StackTier | null;
 }
@@ -101,8 +101,23 @@ async function readMirrorTier(db: Database, repositoryId: string): Promise<Resol
     columns: { onboardingTooling: true, onboardingEnvironment: true },
   });
 
-  const toolingMirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
-  const envMirror = repo?.onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
+  return stackContextFromMirror(repo?.onboardingTooling, repo?.onboardingEnvironment);
+}
+
+/** The mirror tier as a PURE function of the two repository columns.
+ *
+ *  Split out because the repository-delete path reads those columns inside its own
+ *  transaction and cannot call a `Database`-taking resolver there: `collectInternalRag
+ *  ProjectNamesForRepo` receives a `PgTransaction`, which is not structurally assignable
+ *  to `PostgresJsDatabase` (it has no `$client`). Handing that caller the two blobs it
+ *  has already selected keeps one parser for both, which is the point — a second reading
+ *  of these columns is how the retrieval bugs in 013af86e happened. */
+export function stackContextFromMirror(
+  onboardingTooling: unknown,
+  onboardingEnvironment: unknown,
+): ResolvedTier {
+  const toolingMirror = onboardingTooling as OnboardingToolingMirror | null | undefined;
+  const envMirror = onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
 
   const tooling =
     toolingMirror?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION && toolingMirror.tooling
@@ -119,6 +134,22 @@ async function readMirrorTier(db: Database, repositoryId: string): Promise<Resol
       : null;
 
   return { tooling, stack };
+}
+
+/** The project name a repository's RAG store is keyed on, from its mirror columns alone,
+ *  plus the ragMode that decides whether Haive owns that store at all. Returns null when
+ *  the mirror says nothing — never 'default', because a caller enumerating databases to
+ *  clean must not be handed a name the repo never used. */
+export function repoRagIdentityFromMirror(
+  onboardingTooling: unknown,
+  onboardingEnvironment: unknown,
+): { projectName: string; ragMode: string } | null {
+  const tier = stackContextFromMirror(onboardingTooling, onboardingEnvironment);
+  const ragMode = (tier.tooling as { ragMode?: string } | null)?.ragMode;
+  const projectName = (tier.stack?.envDetectData as { project?: { name?: string } } | undefined)
+    ?.project?.name;
+  if (!ragMode || !projectName || !projectName.trim()) return null;
+  return { projectName: projectName.trim(), ragMode };
 }
 
 /** Resolve the stack-describing answers for a task, in three tiers: the task's own steps,

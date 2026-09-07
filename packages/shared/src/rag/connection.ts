@@ -102,6 +102,54 @@ export function ragDatabaseName(projectName: string): string {
 /* Connection resolvers                                                */
 /* ------------------------------------------------------------------ */
 
+/** The per-project database's connection string: DATABASE_URL with the path swapped.
+ *  `url.search` is preserved deliberately — an install that carries `sslmode` or any
+ *  other parameter there must carry it to the per-project store too. */
+function internalRagUrl(dbName: string): string {
+  const haiveUrl = process.env.DATABASE_URL;
+  if (!haiveUrl) throw new Error('DATABASE_URL not set');
+  const url = new URL(haiveUrl);
+  url.pathname = `/${dbName}`;
+  return url.toString();
+}
+
+/** True when a database of that name exists. Kept separate from the create branch so
+ *  callers that must NOT create one can ask the same question. */
+async function ragDatabaseExists(haiveDb: Database, dbName: string): Promise<boolean> {
+  const rows = (await haiveDb.execute(
+    sql.raw(`SELECT 1 FROM pg_database WHERE datname = '${dbName}'`),
+  )) as unknown[];
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+/** Open an EXISTING per-project database, or null when there is none.
+ *
+ *  The distinction from `resolveRagConnection` is the whole point: its internal branch
+ *  CREATEs the database when absent, which is right for indexing and catastrophic for
+ *  cleanup — connecting through it to decide whether to drop a store would conjure the
+ *  very store being dropped. `max: 1` because the one caller opens this to run two
+ *  statements and then has to wait for the pool to drain before `DROP DATABASE` can
+ *  succeed; five backends is five things to close. */
+export async function openExistingRagDatabase(
+  haiveDb: Database,
+  dbName: string,
+  embeddingDimensions = 2560,
+): Promise<RagConnection | null> {
+  if (!(await ragDatabaseExists(haiveDb, dbName))) return null;
+
+  const pg = postgres(internalRagUrl(dbName), { max: 1 });
+  return {
+    mode: 'internal',
+    pg,
+    embeddingDimensions,
+    // A timeout because postgres.js's default end() waits indefinitely for in-flight
+    // queries, and the caller cannot drop the database until this resolves.
+    close: async () => {
+      await pg.end({ timeout: 5 });
+    },
+  };
+}
+
 async function resolveInternal(
   haiveDb: Database,
   projectName: string,
@@ -110,10 +158,7 @@ async function resolveInternal(
   const dbName = ragDatabaseName(projectName);
 
   try {
-    const rows = (await haiveDb.execute(
-      sql.raw(`SELECT 1 FROM pg_database WHERE datname = '${dbName}'`),
-    )) as unknown[];
-    if (!Array.isArray(rows) || rows.length === 0) {
+    if (!(await ragDatabaseExists(haiveDb, dbName))) {
       await haiveDb.execute(sql.raw(`CREATE DATABASE "${dbName}"`));
       log.info({ dbName }, 'created per-project RAG database');
     }
@@ -124,13 +169,7 @@ async function resolveInternal(
     }
   }
 
-  const haiveUrl = process.env.DATABASE_URL;
-  if (!haiveUrl) throw new Error('DATABASE_URL not set');
-  const url = new URL(haiveUrl);
-  url.pathname = `/${dbName}`;
-  const connStr = url.toString();
-
-  const pg = postgres(connStr, { max: 5 });
+  const pg = postgres(internalRagUrl(dbName), { max: 5 });
   return {
     mode: 'internal',
     pg,

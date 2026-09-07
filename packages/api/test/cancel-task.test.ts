@@ -234,6 +234,54 @@ describe('collectInternalRagProjectNamesForRepo', () => {
     expect(names).toEqual([]);
   });
 
+  it('collects the name from the repo mirror when there is no onboarding task', async () => {
+    // The shape `importHaiveDataMirror` restores: config on the repository row, no
+    // onboarding task anywhere. Before the mirror was read here this returned [], so
+    // `enqueueRepoRagCleanupJob` early-returned and the store was never cleaned at all.
+    const { tx } = makeQueueTx([[]]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1', {
+      onboardingTooling: { schemaVersion: 1, tooling: { ragMode: 'internal' } },
+      onboardingEnvironment: {
+        schemaVersion: 1,
+        envDetectData: { project: { name: 'elmont-rs' } },
+        confirmedValues: {},
+      },
+    });
+    expect(names).toEqual(['elmont-rs']);
+  });
+
+  it('ignores a mirror whose ragMode is not internal', async () => {
+    const { tx } = makeQueueTx([[]]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1', {
+      onboardingTooling: { schemaVersion: 1, tooling: { ragMode: 'ddev' } },
+      onboardingEnvironment: {
+        schemaVersion: 1,
+        envDetectData: { project: { name: 'elmont-rs' } },
+        confirmedValues: {},
+      },
+    });
+    expect(names).toEqual([]);
+  });
+
+  it('unions the mirror name with the task-derived ones rather than replacing them', async () => {
+    // A repo re-onboarded under a new project name wrote to two databases; the mirror
+    // carries only the current one, so dropping the task scan would orphan the older.
+    const { tx } = makeQueueTx([
+      [{ id: 't1' }],
+      [{ output: { tooling: { ragMode: 'internal' } } }],
+      [{ detectOutput: { data: { project: { name: 'old-name' } } } }],
+    ]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1', {
+      onboardingTooling: { schemaVersion: 1, tooling: { ragMode: 'internal' } },
+      onboardingEnvironment: {
+        schemaVersion: 1,
+        envDetectData: { project: { name: 'new-name' } },
+        confirmedValues: {},
+      },
+    });
+    expect(names.sort()).toEqual(['new-name', 'old-name']);
+  });
+
   it('returns project names only for tasks with ragMode=internal', async () => {
     // Sequence:
     //   1. select tasks for repo  -> [{id:'t1'},{id:'t2'},{id:'t3'}]
@@ -323,7 +371,14 @@ describe('enqueueRepoRagCleanupJob', () => {
     expect(queueAdd).toHaveBeenCalledWith(
       'cleanup-repo-rag',
       { repositoryId: 'repo-1', userId: 'user-1', projectNames: ['Alpha', 'Beta'] },
-      { removeOnComplete: 50, removeOnFail: 50 },
+      // Retried: the worker body is idempotent (a re-run deletes zero rows and re-decides)
+      // and `55006 object_in_use` on the DROP is transient.
+      {
+        removeOnComplete: 50,
+        removeOnFail: 50,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+      },
     );
   });
 });

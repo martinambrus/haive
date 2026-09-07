@@ -5,9 +5,11 @@ import {
   IDENTIFIER_TSV_SENTINEL,
   RAG_TABLE,
   identifierTsvSql,
+  openExistingRagDatabase,
   ragDatabaseName,
   type RagConnection,
 } from '@haive/shared/rag';
+import { repoRagIdentityFromMirror } from '@haive/shared/global-kb';
 
 // Connection resolution + types moved to @haive/shared/rag so the API query
 // path can reuse them without importing the worker. Re-exported here so
@@ -246,15 +248,42 @@ async function dedupeAndEnforceRepoUniqueness(conn: RagConnection): Promise<void
 /* ------------------------------------------------------------------ */
 
 /**
- * Drop the per-project internal RAG database for each `projectName` after a
- * repository has been deleted. A database is dropped only when no surviving
- * task targets the same project name with `ragMode='internal'` — otherwise
- * another (non-deleted) repo would lose its embeddings.
+ * Reclaim the per-project internal RAG storage of a deleted repository.
  *
- * External and ddev RAG modes are NEVER touched: they live on infrastructure
- * Haive does not own (a customer DDEV project, a customer-supplied postgres).
- * Caller is responsible for filtering `projectNames` to only those that
- * originated from `ragMode='internal'` tasks of the deleted repo.
+ * Two halves, because they answer different questions. RECLAMATION deletes the deleted
+ * repo's own rows — the only mechanism by which a database shared with a co-tenant can
+ * shrink when one of them leaves. Then three independent KEEPERS decide whether the
+ * database itself may go; it is dropped only when ALL of them are false:
+ *
+ *   1. rows remain in the table,
+ *   2. a SURVIVING repository resolves to this same database,
+ *   3. another backend is connected to it.
+ *
+ * This replaces a single collision query over `task_steps`, which was wrong in three
+ * separate ways and destroyed data. It required a surviving TASK carrying both an
+ * `01-env-detect` project name and an `04-tooling-infrastructure` `ragMode='internal'`,
+ * so: a repo whose config lives only in the repository mirror columns (no onboarding
+ * task at all — what `importHaiveDataMirror` produces) was invisible to it; deleting a
+ * repo NULLs its own tasks' `repository_id` via the FK, and the query's
+ * `repository_id IS NOT NULL` filter then discarded the last evidence; and it compared
+ * RAW project names while the DROP targeted the SANITISED database name, so a surviving
+ * `elmont.rs` did not protect the store that deleting `elmont-rs` dropped. MEASURED on a
+ * live install: two repos sharing one database, and deleting either destroyed 9,278
+ * chunks belonging to the other.
+ *
+ * Keeper 2 is that check done right — asked of `repositories` rather than `tasks`, and
+ * compared on `ragDatabaseName()`. Keeper 1 alone would NOT be enough: `10-rag-populate`
+ * in full-rebuild mode deletes a repo's rows and re-inserts them over the whole embedding
+ * run, so an emptiness test taken during that window would drop the store out from under
+ * it. Keeper 3 closes the same window from the other side, which is also why the old
+ * `pg_terminate_backend` is gone: clearing those backends is precisely the wrong move.
+ *
+ * External and ddev RAG modes are NEVER touched: they live on infrastructure Haive does
+ * not own. The caller filters `projectNames` to `ragMode='internal'` names of the deleted
+ * repo.
+ *
+ * Never throws, and every uncertainty resolves to `kept`: a leaked database costs disk,
+ * a wrongly dropped one cannot be recovered.
  */
 export async function cleanupRagForRepository(
   haiveDb: Database,
@@ -271,63 +300,166 @@ export async function cleanupRagForRepository(
     if (seen.has(dbName)) continue;
     seen.add(dbName);
 
-    // Collision check: a surviving task (any user, any repo) that ran step 04
-    // with ragMode='internal' AND step 01-env-detect with the same project
-    // name keeps the database alive. Repo deletion sets `tasks.repository_id`
-    // to NULL via FK ON DELETE SET NULL, so orphaned tasks of the deleted
-    // repo are still in the table — but they no longer represent a live
-    // consumer. Filter them out via `repository_id IS NOT NULL`.
-    let hasCollision = false;
+    // Keeper 2, asked BEFORE anything is written: does a surviving repository resolve to
+    // this same database? Compared on the sanitised name, since several raw project names
+    // map onto one database.
+    let claimedBySurvivor: boolean;
     try {
-      const rows = (await haiveDb.execute(sql`
-        SELECT 1
-        FROM task_steps env_step
-        JOIN task_steps tooling_step ON tooling_step.task_id = env_step.task_id
-        JOIN tasks t ON t.id = env_step.task_id
-        WHERE env_step.step_id = '01-env-detect'
-          AND tooling_step.step_id = '04-tooling-infrastructure'
-          AND t.repository_id IS NOT NULL
-          AND env_step.detect_output -> 'data' -> 'project' ->> 'name' = ${projectName}
-          AND tooling_step.output -> 'tooling' ->> 'ragMode' = 'internal'
-        LIMIT 1
-      `)) as unknown as unknown[];
-      hasCollision = Array.isArray(rows) && rows.length > 0;
+      claimedBySurvivor = await isRagDatabaseClaimed(haiveDb, dbName);
     } catch (err) {
-      log.warn({ err, dbName, projectName }, 'collision check failed; keeping rag database');
+      log.warn({ err, dbName, projectName }, 'survivor check failed; keeping rag database');
       kept.push(dbName);
       continue;
     }
 
-    if (hasCollision) {
-      log.info(
-        { dbName, projectName, repositoryId: payload.repositoryId },
-        'rag database kept — surviving task references the same project name',
-      );
-      kept.push(dbName);
-      continue;
-    }
-
+    // Reclamation still runs when a survivor claims the database — the deleted repo's rows
+    // are dead weight either way, and this is the only thing that shrinks a shared store.
+    let rowsRemain = true;
+    let deletedRows = 0;
+    let conn: RagConnection | null = null;
     try {
-      // Terminate any active connections to the per-project DB before drop.
-      // Quote the database name to survive non-identifier characters even
-      // though sanitizeDbName already constrains it.
-      const escaped = dbName.replace(/'/g, "''");
-      await haiveDb.execute(
-        sql.raw(
-          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${escaped}' AND pid <> pg_backend_pid()`,
-        ),
-      );
-      await haiveDb.execute(sql.raw(`DROP DATABASE IF EXISTS "${dbName}"`));
+      conn = await openExistingRagDatabase(haiveDb, dbName);
+      if (!conn) {
+        // Nothing on disk. `DROP DATABASE IF EXISTS` would be a no-op, and opening through
+        // resolveRagConnection would have CREATED it.
+        log.info({ dbName, projectName }, 'no per-project rag database to clean');
+        kept.push(dbName);
+        continue;
+      }
+      const removed = await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE repository_id = $1`, [
+        payload.repositoryId,
+      ]);
+      deletedRows = removed.count ?? 0;
+      const remaining = (await conn.pg.unsafe(
+        `SELECT 1 FROM ${RAG_TABLE} LIMIT 1`,
+      )) as unknown as unknown[];
+      rowsRemain = Array.isArray(remaining) && remaining.length > 0;
+      // Dead tuples and HNSW tombstones the old whole-database DROP used to reclaim in one
+      // go are now the surviving tenant's to pay for on every query. Best-effort, and it
+      // cannot run inside a transaction — which is another reason nothing here is wrapped.
+      if (deletedRows > 0 && rowsRemain) {
+        await conn.pg.unsafe(`VACUUM ${RAG_TABLE}`).catch(() => {});
+      }
+    } catch (err) {
+      log.warn({ err, dbName, projectName }, 'rag row cleanup failed; keeping rag database');
+      kept.push(dbName);
+      continue;
+    } finally {
+      // Must resolve before any DROP: our own pool is a connected backend.
+      if (conn) await conn.close().catch(() => {});
+    }
+
+    if (rowsRemain || claimedBySurvivor) {
       log.info(
-        { dbName, projectName, repositoryId: payload.repositoryId },
-        'dropped per-project rag database after repo deletion',
+        {
+          dbName,
+          projectName,
+          repositoryId: payload.repositoryId,
+          deletedRows,
+          rowsRemain,
+          claimedBySurvivor,
+        },
+        'rag database kept — still in use',
       );
+      kept.push(dbName);
+      continue;
+    }
+
+    // Keeper 3, last because it is the most perishable: anyone else connected right now is
+    // reason enough to leave it alone. Asked after our own pool closed, or we would see
+    // ourselves.
+    try {
+      const others = (await haiveDb.execute(
+        sql`SELECT 1 FROM pg_stat_activity WHERE datname = ${dbName} AND pid <> pg_backend_pid() LIMIT 1`,
+      )) as unknown as unknown[];
+      if (Array.isArray(others) && others.length > 0) {
+        log.info({ dbName, projectName }, 'rag database kept — another backend is connected');
+        kept.push(dbName);
+        continue;
+      }
+    } catch (err) {
+      log.warn({ err, dbName, projectName }, 'connection check failed; keeping rag database');
+      kept.push(dbName);
+      continue;
+    }
+
+    if (await dropRagDatabase(haiveDb, dbName, projectName, payload.repositoryId)) {
       dropped.push(dbName);
-    } catch (err) {
-      log.warn({ err, dbName, projectName }, 'failed to drop rag database (non-fatal)');
+    } else {
       kept.push(dbName);
     }
   }
 
   return { dropped, kept };
+}
+
+/** Keeper 2: does any SURVIVING repository resolve to this database?
+ *
+ *  Reads `repositories` rather than `tasks` — repository rows are hard-deleted, so
+ *  "present" IS "surviving", where a task's `repository_id` is merely NULLed and its
+ *  step rows outlive the repo they described. Resolution goes through the shared mirror
+ *  parser so a repo restored from `.haive-data/` (which has no onboarding task at all) is
+ *  visible here; a repo with no mirror falls back to its onboarding task's step rows.
+ *  Comparison is on `ragDatabaseName`, because that is what the DROP targets. */
+async function isRagDatabaseClaimed(haiveDb: Database, dbName: string): Promise<boolean> {
+  const repos = await haiveDb.query.repositories.findMany({
+    columns: { id: true, onboardingTooling: true, onboardingEnvironment: true },
+  });
+
+  for (const repo of repos) {
+    const identity = repoRagIdentityFromMirror(repo.onboardingTooling, repo.onboardingEnvironment);
+    if (identity) {
+      if (identity.ragMode === 'internal' && ragDatabaseName(identity.projectName) === dbName) {
+        return true;
+      }
+      continue;
+    }
+    // No mirror: fall back to this repo's onboarding task, the pre-mirror shape.
+    const rows = (await haiveDb.execute(sql`
+      SELECT env_step.detect_output -> 'data' -> 'project' ->> 'name' AS project_name
+      FROM task_steps env_step
+      JOIN task_steps tooling_step ON tooling_step.task_id = env_step.task_id
+      JOIN tasks t ON t.id = env_step.task_id
+      WHERE t.repository_id = ${repo.id}
+        AND env_step.step_id = '01-env-detect'
+        AND tooling_step.step_id = '04-tooling-infrastructure'
+        AND tooling_step.output -> 'tooling' ->> 'ragMode' = 'internal'
+    `)) as unknown as Array<{ project_name: string | null }>;
+    for (const row of rows) {
+      const name = row.project_name?.trim();
+      if (name && ragDatabaseName(name) === dbName) return true;
+    }
+  }
+
+  return false;
+}
+
+/** Drop the database, retrying once on `55006 object_in_use`: postgres.js closing its
+ *  socket is not synchronous with the server tearing the backend down, so a drop issued
+ *  immediately after `pg.end()` can still lose that race. Returns whether it went. */
+async function dropRagDatabase(
+  haiveDb: Database,
+  dbName: string,
+  projectName: string,
+  repositoryId: string,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await haiveDb.execute(sql.raw(`DROP DATABASE IF EXISTS "${dbName}"`));
+      log.info(
+        { dbName, projectName, repositoryId },
+        'dropped per-project rag database after repo deletion',
+      );
+      return true;
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code === '55006' && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        continue;
+      }
+      log.warn({ err, dbName, projectName }, 'failed to drop rag database (non-fatal)');
+      return false;
+    }
+  }
+  return false;
 }

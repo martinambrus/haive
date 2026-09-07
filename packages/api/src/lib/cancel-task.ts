@@ -6,6 +6,7 @@ import {
   type RepoResourceCleanupPayload,
   type TaskJobPayload,
 } from '@haive/shared';
+import { repoRagIdentityFromMirror } from '@haive/shared/global-kb';
 import type { getDb } from '../db.js';
 import { getTaskQueue } from '../queues.js';
 
@@ -140,17 +141,32 @@ export async function collectInternalRagProjectNamesForRepo(
   tx: DbOrTx,
   repoId: string,
   userId: string,
+  /** The repo's `onboarding_tooling` / `onboarding_environment`, selected by the caller
+   *  inside the same transaction. A repo restored from a committed `.haive-data/` has NO
+   *  onboarding task, so the task scan below finds nothing for it and its database was
+   *  never cleaned at all — the mirror is the only place its project name exists. */
+  mirror?: { onboardingTooling: unknown; onboardingEnvironment: unknown },
 ): Promise<string[]> {
+  const out = new Set<string>();
+
+  const identity = mirror
+    ? repoRagIdentityFromMirror(mirror.onboardingTooling, mirror.onboardingEnvironment)
+    : null;
+  if (identity?.ragMode === 'internal') out.add(identity.projectName);
+
   const tasks = await tx
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
     .where(and(eq(schema.tasks.repositoryId, repoId), eq(schema.tasks.userId, userId)));
-  if (tasks.length === 0) return [];
 
   const taskIds = tasks.map((t) => t.id);
-  const out = new Set<string>();
 
   for (const taskId of taskIds) {
+    // No `.limit(1)` and no ordering on either read: this enumerates EVERY database the
+    // repo may have written to, not the stack it currently has. A repo re-onboarded under
+    // a new project name wrote to two, and picking one round would leave the other
+    // orphaned forever. Over-collecting is free — a name whose store holds none of this
+    // repo's rows deletes nothing and keeps itself.
     const tooling = await tx
       .select({ output: schema.taskSteps.output })
       .from(schema.taskSteps)
@@ -159,36 +175,45 @@ export async function collectInternalRagProjectNamesForRepo(
           eq(schema.taskSteps.taskId, taskId),
           eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
         ),
-      )
-      .limit(1);
-    const toolingOutput = tooling[0]?.output as { tooling?: { ragMode?: string } } | null;
-    if (toolingOutput?.tooling?.ragMode !== 'internal') continue;
+      );
+    const anyInternal = tooling.some(
+      (row) =>
+        (row.output as { tooling?: { ragMode?: string } } | null)?.tooling?.ragMode === 'internal',
+    );
+    if (!anyInternal) continue;
 
     const env = await tx
       .select({ detectOutput: schema.taskSteps.detectOutput })
       .from(schema.taskSteps)
-      .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, '01-env-detect')))
-      .limit(1);
-    const envDetect = env[0]?.detectOutput as {
-      data?: { project?: { name?: string } };
-    } | null;
-    const name = envDetect?.data?.project?.name;
-    if (typeof name === 'string' && name.trim().length > 0) {
-      out.add(name.trim());
+      .where(
+        and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, '01-env-detect')),
+      );
+    for (const row of env) {
+      const name = (row.detectOutput as { data?: { project?: { name?: string } } } | null)?.data
+        ?.project?.name;
+      if (typeof name === 'string' && name.trim().length > 0) {
+        out.add(name.trim());
+      }
     }
   }
   return Array.from(out);
 }
 
-/** Enqueue the worker-side job that drops per-project internal RAG databases
- *  belonging to a deleted repository. The worker re-checks for surviving
- *  consumers before each drop so a project name shared with another live
- *  repo does not lose its embeddings. Skipped if `projectNames` is empty. */
+/** Enqueue the worker-side job that reclaims a deleted repository's per-project internal
+ *  RAG storage: it deletes that repo's own rows, and drops the database only when nothing
+ *  is left, no surviving repository resolves to it, and nobody is connected. Skipped if
+ *  `projectNames` is empty — with the mirror now folded into the collector, that means the
+ *  repo genuinely never named an internal store, not that we failed to find its name.
+ *
+ *  Retried, unlike before: the job body is idempotent (a re-run deletes zero rows and
+ *  re-decides) and `55006 object_in_use` is genuinely transient. */
 export async function enqueueRepoRagCleanupJob(payload: RepoRagCleanupPayload): Promise<void> {
   if (payload.projectNames.length === 0) return;
   await getTaskQueue().add(TASK_JOB_NAMES.CLEANUP_REPO_RAG, payload, {
     removeOnComplete: 50,
     removeOnFail: 50,
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 },
   });
 }
 

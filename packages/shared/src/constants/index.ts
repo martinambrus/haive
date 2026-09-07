@@ -284,10 +284,11 @@ export interface TaskJobPayload {
   epoch?: number;
 }
 
-/** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RAG`. The worker drops every
- *  per-project RAG database matching one of `projectNames` UNLESS another
- *  surviving task (different repository) targets the same project name with
- *  `ragMode='internal'`. */
+/** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RAG`. For each of `projectNames` the worker
+ *  deletes `repositoryId`'s own rows from that per-project RAG store, then drops the
+ *  database only when all three keepers are false: rows remain, a surviving repository
+ *  resolves to the same database, or another backend is connected to it. `repositoryId`
+ *  is what scopes the delete — it is not merely for logging. */
 export interface RepoRagCleanupPayload {
   repositoryId: string;
   userId: string;

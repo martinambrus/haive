@@ -1040,6 +1040,8 @@ repoRoutes.delete('/:id', async (c) => {
       .select({
         id: schema.repositories.id,
         storagePath: schema.repositories.storagePath,
+        onboardingTooling: schema.repositories.onboardingTooling,
+        onboardingEnvironment: schema.repositories.onboardingEnvironment,
       })
       .from(schema.repositories)
       .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
@@ -1050,8 +1052,13 @@ repoRoutes.delete('/:id', async (c) => {
     // Capture project names of this repo's internal-mode RAG tasks before
     // the delete cascades `tasks.repository_id` to NULL. After cascade the
     // worker can no longer trace tasks back to this repo, so the project
-    // names must travel in the cleanup job payload.
-    internalRagProjectNames = await collectInternalRagProjectNamesForRepo(tx, id, userId);
+    // names must travel in the cleanup job payload. The mirror columns go with
+    // them: a repo restored from a committed `.haive-data/` has no onboarding
+    // task, so they are the only record of the project name it indexed under.
+    internalRagProjectNames = await collectInternalRagProjectNamesForRepo(tx, id, userId, {
+      onboardingTooling: repoRows[0]!.onboardingTooling,
+      onboardingEnvironment: repoRows[0]!.onboardingEnvironment,
+    });
 
     // Same reason: capture the repo's tasks (+ their env templates) before the
     // cascade, so the resource-cleanup worker can tear down runners/images it
