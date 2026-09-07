@@ -74,6 +74,13 @@ merge-to-main the release trigger would mean either 39 releases a day or a secon
   by default, or a module customer would upgrade themselves out of their modules. `minFrom` and the
   migration head come from the base release either way, so only the digests differ and no second
   migration story is created.
+- An install carrying the user's OWN modules builds api+worker locally from a `haive-builder` image
+  (same plan, "A user's OWN module must not require DEV-IT"), so its running images have local tags
+  with no digest in any manifest. **Phase 0 gains a build for those installs**: pull the new base
+  and the matching builder, rebuild locally, and only then proceed — an install still running images
+  built against the PREVIOUS base is precisely the half-upgraded state this plan exists to prevent.
+  A build that fails there aborts with nothing stopped, exactly like a failed pull, which is why it
+  belongs in Phase 0 and not later.
 - `v0.2.0-rc.1` publishes to a `next` channel. Not optional: the only way to test an upgrade
   mechanism is to perform an upgrade, and that cannot be rehearsed on users.
 - `release/0.2.x` maintenance branches are NOT created now. They are the answer to "patch an old

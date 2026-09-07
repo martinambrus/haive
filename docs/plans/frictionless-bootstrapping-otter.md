@@ -41,12 +41,18 @@ install still performs no build and holds no registry token. See "DECIDED — a 
 install gets PER-CUSTOMER images built by the vendor" in that plan, which owns the reasoning and the
 rejected alternatives.
 
-Two consequences land on this plan. A module customer's compose bundle pins their per-customer
-api+worker tags (web stays the stock public image, since nav and pages are runtime-fetched), so the
-installer must fetch the manifest for the customer's channel rather than the public one. And
-folder-drop module installation is DEV-IT only — a RUN-IT host has no `modules/` tree — so the
-installer and the Modules page must not offer it here. A module-free RUN-IT install is unaffected in
-every respect and remains the default this plan describes.
+Two consequences land on this plan, and neither costs the default install anything. A module
+customer's compose bundle pins their per-customer api+worker tags (web stays the stock public image,
+since nav and pages are runtime-fetched), so the installer fetches the manifest for the customer's
+channel rather than the public one. And a user installing their OWN module — from a git URL or by
+folder-drop — pulls a `haive-builder` image the stack runs as a one-shot to build api+worker
+locally; they never clone Haive and never install a toolchain, so no RUN-IT user is pushed into
+DEV-IT to extend their own install. The delivery matrix for all four combinations is in that plan.
+
+A module-free RUN-IT install is unaffected in every respect and remains the default this plan
+describes. Worth knowing for the installer's copy: authoring a TASK TYPE needs none of this —
+`rippling-wibbling-puffin` makes task types data, and states at its Phase 3.1 that prompt-template
+steps "need no rebuild". Only a module contributing steps, routes or jobs does.
 
 ## Shape of the command
 

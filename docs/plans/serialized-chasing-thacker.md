@@ -228,13 +228,49 @@ What the decision commits to:
   of their modules.
 - **Rebuild triggers are entitlement change OR new base release**, nothing else — that bound is what
   stops the build matrix growing with time rather than with customers.
-- **Folder-drop becomes DEV-IT only.** A RUN-IT host has no `modules/` tree to drop into. The
-  power-user path below is unchanged for contributors and simply does not exist on a published-image
-  install; the Modules page must not offer it there.
-
 The failure mode to verify against is leakage, not breakage: an image built for customer A must
 contain NO module A is not entitled to. That is paid closed-source code in the wrong hands, and it
 is the one defect here that cannot be undone by a later release.
+
+#### A user's OWN module must not require DEV-IT — the builder image
+
+The constraint the vendor build answers is not "folder-drop", it is **any module the vendor did not
+build**. The git UI-install path lands in `modules/<id>/` and needs the same build-time codegen and
+rebuild that a folder-drop does, so scoping the problem to folder-drop would have missed the case
+that matters most: a user writing their own module, or installing one from a public repo. Forcing
+them to clone Haive and run pnpm is exactly the burden RUN-IT exists to remove, so that is not the
+answer.
+
+**`haive-builder:<version>`** is: the source tree plus the build stages the Dockerfiles already
+have. The core is MIT, so publishing its source costs nothing. The stack runs it as a ONE-SHOT with
+docker.sock and the module directory mounted — the same shape as
+`steadfast-committing-gray`'s updater, and for the same reason — where it runs `gen-modules.mjs`,
+builds api+worker, and tags them locally for the updater to swap in. The user never clones anything
+and never installs a toolchain; the cost is build time and disk, paid inside a container.
+
+**Delivery is a four-cell matrix, decided together (2026-09-07):**
+
+| Install has | Gets | Builds locally? |
+|---|---|---|
+| no modules | public prebuilt images | no |
+| paid modules only | per-customer prebuilt images | no |
+| own modules only | public builder image | yes |
+| paid + own | **per-customer builder image** (source + that customer's entitled module packages baked in) | yes |
+
+The fourth cell is why the builder is per-customer rather than universal: a paid module's `dist`
+lives in the vendor image's `node_modules`, so a public builder has nothing to compose it with.
+Baking the entitled packages INTO that customer's builder also keeps the property the whole decision
+was made for — **the scoped registry token still never reaches the customer's machine**, because
+nothing there fetches a package.
+
+Two limits worth stating rather than discovering. Only api+worker are built, so an escape-hatch
+`./web` module (Slice 5) additionally needs web built and is the one module kind that is not cheap
+here. And the build re-runs after every base upgrade, which is a phase in
+`steadfast-committing-gray`'s sequence rather than a manual step — an install whose local images
+were built against the previous base is exactly the half-upgraded state that plan exists to prevent.
+
+Folder-drop (below) therefore stays available on a published-image install: what a RUN-IT host lacks
+is not the ability to place a module, it is the ability to build one, and the builder supplies it.
 
 ### How a user installs a module — UI first, folder-drop for power users
 

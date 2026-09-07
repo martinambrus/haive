@@ -69,6 +69,12 @@ Verified against the tree on this date, not taken from the plan bodies.
   built by the vendor**, derived from a base release, with web left as the stock public image. The
   reasoning and the two rejected alternatives live in `serialized-chasing-thacker` under "DECIDED —
   a published-image install gets PER-CUSTOMER images built by the vendor", because it is that plan's
-  locked rebuild-on-install constraint that created the conflict.
-  `frictionless-bootstrapping-otter` (RUN-IT), `kind-riding-dream` and `translator-module` inherit
-  it; `steadfast-committing-gray` carries the one consequence — its release manifest is per-channel.
+  locked rebuild-on-install constraint that created the conflict. A user's OWN module is the other
+  half of the same decision and does NOT force them into a developer checkout: the stack runs a
+  published `haive-builder` image as a one-shot to build api+worker locally. Four-cell delivery
+  matrix in that section. `frictionless-bootstrapping-otter` (RUN-IT), `kind-riding-dream` and
+  `translator-module` inherit it; `steadfast-committing-gray` carries two consequences — a
+  per-channel release manifest, and a Phase 0 local rebuild for installs that carry own modules.
+- Authoring a TASK TYPE is unaffected by all of the above: `rippling-wibbling-puffin` makes task
+  types data and states at Phase 3.1 that prompt-template steps need no rebuild. Only a module
+  contributing steps, routes or jobs requires a build.
