@@ -19,6 +19,7 @@ import { ensureAppServing } from './_app-runtime.js';
 import { runnerHandleForTask, ddevExec, DDEV_PROJECT_MOUNT } from '../../../sandbox/ddev-runner.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
+import { cleanText, contentFingerprint } from '../../task-ledger.js';
 
 // Phase 5b — Test management (legacy phase5b-test-management.md). Runs straight
 // after the implementation chain and BEFORE 08-phase-5-verify, so the suite verify
@@ -518,6 +519,45 @@ async function runTestCommand(
  *  so it gets a fraction of the run's budget rather than sharing it. */
 const COLLECT_TIMEOUT_MS = 120_000;
 
+/** Budget for the prior-pass block. Mirrors loadPriorFixContext's (400 chars per entry,
+ *  4000 for the block) so this loop and the round-level one read the same way. */
+const PRIOR_PASS_ENTRY_LIMIT = 400;
+const PRIOR_PASS_BLOCK_LIMIT = 4000;
+
+/**
+ * What earlier passes of THIS step already concluded, deduped by prose.
+ *
+ * Each pass is a fresh CLI process handed only the failing run's command and output, so
+ * without this every pass re-derives the same diagnosis from the same bytes. MEASURED on
+ * task 681f0f99: five consecutive passes independently concluded "the Playwright browser
+ * binaries are not installed in the DDEV web container" and each wrote it to `notes`, which
+ * nothing read. Deduped with the ledger's own fingerprint rather than a second convention,
+ * which collapses a verbatim repeat but NOT two rewordings of one finding — the same limit
+ * review_findings measured when it keyed recurrence on prose. The block cap is what bounds
+ * that case, and five near-identical paragraphs are still a better prompt than none.
+ */
+export function priorPassNotes(previous: StepLoopPassRecord[]): string {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  previous.forEach((p, i) => {
+    const raw = (p.applyOutput as TestManagementApply | undefined)?.notes ?? '';
+    const notes = cleanText(raw, PRIOR_PASS_ENTRY_LIMIT);
+    if (notes.length === 0) return;
+    const fp = contentFingerprint('08b-pass', notes);
+    if (seen.has(fp)) return;
+    seen.add(fp);
+    lines.push(`- pass ${i}: ${notes}`);
+  });
+  if (lines.length === 0) return '';
+  const block = [
+    'WHAT EARLIER PASSES OF THIS STEP ALREADY CONCLUDED (background — do not repeat this',
+    'diagnosis work, build on it. If a pass already established the failure is not a test or',
+    'code defect, say so plainly and change nothing rather than re-deriving it):',
+    ...lines,
+  ].join('\n');
+  return block.length > PRIOR_PASS_BLOCK_LIMIT ? block.slice(0, PRIOR_PASS_BLOCK_LIMIT) : block;
+}
+
 /** The fix-loop diagnosis handed to the implementer once the tester's own passes are
  *  spent. Carries the same three-way framing the tester agent was given, so the
  *  implementer does not treat the failing assertion as gospel. */
@@ -528,6 +568,7 @@ function buildTestFailureDiagnosis(out: TestManagementApply): string {
     'Decide per failure whether the TEST is wrong (fix the test), the CODE is wrong (fix the',
     'code), or the test is FLAKY (replace arbitrary waits with proper assertions).',
     touched.length > 0 ? `\nTests written or updated by that step:\n- ${touched.join('\n- ')}` : '',
+    out.notes ? `\nWhat the tester agent concluded on its last pass:\n${out.notes}` : '',
     out.testRun?.command ? `\nCommand: ${out.testRun.command}` : '',
     out.testRun?.output ? `\nFailure output:\n${out.testRun.output}` : '',
   ]
@@ -755,6 +796,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         run ? `Command: ${run.command}` : '',
         run ? `Failure output:\n${run.output}` : '',
         '',
+        priorPassNotes(previousIterations),
         'Determine for each failure whether:',
         '(a) the TEST is wrong (selector/assertion outdated) → fix the test,',
         '(b) the CODE has a bug → fix the application code,',

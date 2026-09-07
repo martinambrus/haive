@@ -9,6 +9,7 @@ import {
   buildSelectiveCommand,
   filterTestFiles,
   primaryFrameworkRoot,
+  priorPassNotes,
   repairInvocation,
   scanTestInfra,
   scopeToRoot,
@@ -605,5 +606,44 @@ describe('repairInvocation', () => {
   it('drops the root when the framework is rooted at the workspace', () => {
     const at_root = d({ ddev: false, frameworkRoots: { playwright: '' } });
     expect(repairInvocation(at_root, 'npx playwright install')).toBe('npx playwright install');
+  });
+});
+
+describe('priorPassNotes', () => {
+  const pass = (notes: string) => ({ applyOutput: { notes } }) as never;
+
+  it('carries what earlier passes concluded, numbered by pass', () => {
+    const block = priorPassNotes([pass('browser binaries missing'), pass('config root is wrong')]);
+    expect(block).toContain('- pass 0: browser binaries missing');
+    expect(block).toContain('- pass 1: config root is wrong');
+  });
+
+  it('collapses a verbatim repeat, ignoring case and the paths and numbers in it', () => {
+    const block = priorPassNotes([
+      pass('Browser missing at /home/ddev/.cache/ms-playwright/chromium-1181'),
+      pass('browser missing at /root/.cache/ms-playwright/chromium-1204'),
+    ]);
+    expect(block.match(/- pass /g)).toHaveLength(1);
+  });
+
+  // The honest limit: contentFingerprint hashes the prose, so two passes that describe one
+  // finding in different sentences are two entries. That is the same effect review_findings
+  // measured (0.05% fingerprint match across rounds); the block cap is what bounds it.
+  it('does not collapse two rewordings of one finding', () => {
+    const block = priorPassNotes([
+      pass('The Playwright browser binaries are not installed.'),
+      pass('Playwright has no browser binaries in this container.'),
+    ]);
+    expect(block.match(/- pass /g)).toHaveLength(2);
+  });
+
+  it('is empty on the tester’s own pass and when no pass said anything', () => {
+    expect(priorPassNotes([])).toBe('');
+    expect(priorPassNotes([pass(''), pass('   ')])).toBe('');
+  });
+
+  it('caps the block so it cannot crowd out the failure output', () => {
+    const many = Array.from({ length: 40 }, (_, i) => pass(`finding ${i} `.repeat(60)));
+    expect(priorPassNotes(many).length).toBeLessThanOrEqual(4000);
   });
 });
