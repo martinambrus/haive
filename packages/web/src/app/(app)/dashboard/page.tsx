@@ -177,8 +177,11 @@ export default function DashboardPage() {
           {/* The only pair on this page that sits side by side: WHEN the work happened next
               to WHAT it cost, which are the two questions a dashboard opens with. Everything
               below stays full width. */}
-          <div className="grid items-start gap-6 lg:grid-cols-2">
-            <Card>
+          <div className="grid gap-6 lg:grid-cols-2">
+            {/* flex-col + a growing heatmap, NOT h-full: grid stretch gives the card a used
+                height while its computed height stays auto, so a percentage child does not
+                resolve against it and spills out of the card instead. */}
+            <Card className="flex flex-col">
               <CardHeader>
                 <CardTitle>Activity</CardTitle>
                 <CardDescription>
@@ -193,6 +196,7 @@ export default function DashboardPage() {
                 onMetricChange={setHeatMetric}
                 money={money}
                 dayHref={dayHref}
+                className="flex-1"
               />
             </Card>
 

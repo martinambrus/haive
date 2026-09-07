@@ -36,19 +36,23 @@ export function ActivityHeatmap({
   onMetricChange,
   money,
   dayHref,
+  className,
 }: {
   days: StatsTimelineDay[];
   metric: HeatMetric;
   onMetricChange: (metric: HeatMetric) => void;
   money: (usd: number) => string;
   dayHref: (bucket: string) => string;
+  /** Lets a caller make this a growing flex child, so a card stretched taller than the grid
+   *  puts the slack between the grid and the legend instead of below everything. */
+  className?: string;
 }) {
   const byDay = new Map(days.map((d) => [d.bucket, d]));
   const thresholds = heatThresholds(days.map((d) => heatValue(d, metric)));
   const months = calendarMonths(days.map((d) => d.bucket));
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className={cn('flex flex-col gap-4', className)}>
       <div className="flex flex-wrap items-center gap-2">
         {HEAT_METRICS.map((m) => (
           <button
@@ -77,8 +81,13 @@ export function ActivityHeatmap({
            last 176px — so the widest tooltip still lands inside it, by construction rather
            than by guessing where a block sits. MEASURED at 144px for the widest of these
            (a four-row tooltip carrying a formatted cost); the rest is headroom for a longer
-           currency string. Blocks just wrap one column earlier, invisible at this cell size. */
-        <div className="flex flex-wrap gap-6 pr-44">
+           currency string. Blocks just wrap one column earlier, invisible at this cell size.
+
+           flex-1 + content-start so a caller that stretches this panel (the dashboard pairs it
+           with a taller card) puts the slack BELOW the month blocks and keeps the legend at the
+           foot. Inert everywhere else: an auto-height column has no free space to hand out, so
+           /stats renders exactly as it did. */
+        <div className="flex flex-1 flex-wrap content-start gap-6 pr-44">
           {months.map((month) => (
             <div key={month.key} className="flex flex-col gap-1">
               <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
