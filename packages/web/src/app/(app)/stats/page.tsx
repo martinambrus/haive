@@ -29,6 +29,9 @@ import {
 } from '@/lib/api-client';
 import { Card, CardDescription, CardHeader, CardTitle, Input } from '@/components/ui';
 import { StatTile } from '@/components/stats/stat-tile';
+import { ActivityHeatmap } from '@/components/stats/activity-heatmap';
+import { StackedShareBar } from '@/components/stats/stacked-share-bar';
+import { TOKEN_COLORS } from '@/components/stats/palette';
 import { usePageTitle } from '@/lib/use-page-title';
 import { formatDuration } from '@/lib/format-duration';
 import { formatCost } from '@/lib/format-cost';
@@ -42,6 +45,7 @@ import {
   formatSampledRatio,
   isUnderSampled,
 } from '@/lib/stats/format-stats';
+import { isHeatMetric, localDayRange, type HeatMetric } from '@/lib/stats/heat-scale';
 import {
   isRangePresetId,
   parseCustomRange,
@@ -127,6 +131,9 @@ function StatsPageInner() {
     ? (searchParams.get('preset') as RangePresetId)
     : '30d';
   const tab: Tab = isTab(searchParams.get('tab')) ? (searchParams.get('tab') as Tab) : 'money';
+  const heatMetric: HeatMetric = isHeatMetric(searchParams.get('heat'))
+    ? (searchParams.get('heat') as HeatMetric)
+    : 'agent';
   const customFrom = searchParams.get('from') ?? '';
   const customTo = searchParams.get('to') ?? '';
   const repositoryId = searchParams.get('repositoryId') ?? '';
@@ -313,6 +320,20 @@ function StatsPageInner() {
     return `/tasks?${p.toString()}`;
   };
 
+  /** A drill-through narrowed to the single local day a heat cell stands for.
+   *
+   *  Falls back to the window-wide link when the zone is not resolved yet or the key is
+   *  malformed — a link to the right rows for a wider window is honest; one built from a
+   *  fabricated day boundary is not. */
+  const dayDrillHref = (bucket: string) => {
+    const day = timeZone ? localDayRange(bucket, timeZone) : null;
+    if (!day) return drillHref();
+    return drillHref({
+      from: new Date(day.fromMs).toISOString(),
+      to: new Date(day.toMs).toISOString(),
+    });
+  };
+
   // Built from the resolved zone, so this never reads Intl during a server render either.
   const zones = useMemo(() => (timeZone ? [...new Set([timeZone, 'UTC'])] : ['UTC']), [timeZone]);
 
@@ -489,6 +510,51 @@ function StatsPageInner() {
 
           <Card>
             <CardHeader>
+              <CardTitle>Token mix</CardTitle>
+              <CardDescription>
+                What the tokens in this window actually were. Cache reads dominate on any install
+                that reuses a prompt, and they are billed at a fraction of fresh input — so the
+                single &quot;Tokens&quot; figure above says much less about cost than this split
+                does. Normalised before the buckets are added: codex and gemini report input
+                inclusive of the cached prefix, the rest exclusive. These shares are of all four
+                buckets, so the cache-read share here is lower than the &quot;cached&quot; figure
+                above, which is of the prompt side alone.
+              </CardDescription>
+            </CardHeader>
+            <StackedShareBar
+              segments={[
+                {
+                  key: 'cacheRead',
+                  label: 'Cache read',
+                  value: summary.tokens.cacheReadTokens,
+                  color: TOKEN_COLORS.cacheRead,
+                },
+                {
+                  key: 'freshInput',
+                  label: 'Fresh input',
+                  value: summary.tokens.freshInputTokens,
+                  color: TOKEN_COLORS.freshInput,
+                },
+                {
+                  key: 'cacheCreation',
+                  label: 'Cache write',
+                  value: summary.tokens.cacheCreationTokens,
+                  color: TOKEN_COLORS.cacheCreation,
+                },
+                {
+                  key: 'output',
+                  label: 'Output',
+                  value: summary.tokens.outputTokens,
+                  color: TOKEN_COLORS.output,
+                },
+              ]}
+              formatValue={formatTokens}
+              emptyMessage="No tokens recorded in this window."
+            />
+          </Card>
+
+          <Card>
+            <CardHeader>
               <CardTitle>By provider</CardTitle>
               <CardDescription>
                 Token totals are normalised before providers are compared: codex and gemini report
@@ -540,6 +606,24 @@ function StatsPageInner() {
 
       {summary && tab === 'time' && (
         <>
+          <Card>
+            <CardHeader>
+              <CardTitle>Activity</CardTitle>
+              <CardDescription>
+                One square per day, cut on the calendar of the zone selected above. Shading is by
+                quartile of the days on which anything ran, so a single long day cannot flatten the
+                rest of the week against it. Hovering reports every metric, not just the shaded one.
+              </CardDescription>
+            </CardHeader>
+            <ActivityHeatmap
+              days={timeline?.days ?? []}
+              metric={heatMetric}
+              onMetricChange={(m) => setParam('heat', m === 'agent' ? '' : m)}
+              money={money}
+              dayHref={dayDrillHref}
+            />
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>Effort and concurrency</CardTitle>

@@ -694,6 +694,104 @@ Admin control is two-level and BOTH are enforced at lookup, not only at sync, so
 
 Costs are stored canonically in USD. `fx_rates` holds daily ECB USD-per-unit rates and a task converts at the rate effective on ITS OWN date (`resolveCostDisplay`), so re-rendering a finished task yields the same figure; dated on the task rather than per invocation because FX drift within one task is far below the displayed precision. ECB publishes only the current day, so past rows cannot be re-fetched — do not truncate that table. A task older than FX collection converts at the earliest rate on record and is flagged `approximate`.
 
+## Statistics
+
+`/stats` (`packages/web/src/app/(app)/stats/page.tsx`) and the smaller `/dashboard` both read
+`packages/api/src/routes/stats/`, which is seven endpoints sharing one query parser
+(`_query.ts`: 30-day default, `MAX_RANGE_DAYS` 731, IANA zone validated against `Intl`, repo /
+task-class / provider facets, and an `allUsers` flag each ROUTE re-checks against the caller's
+role because the parser has no access to it). Every arithmetic answer is a pure function in
+`@haive/shared/stats` — the api fetches and scopes, `computeBusySpan` / `buildTaskTimeBreakdown`
+/ `buildEstimationAccuracy` do the maths, and none of them needs a database to test.
+
+**ONE BUCKETER.** Day buckets are cut in JS with `Intl` (`dayKey`), never with `date_trunc` in
+SQL, because the busy-span union already needs a bucketer in JS and two that must agree
+eventually will not. The correct SQL form is recorded at `index.ts:476-489` for the day that
+changes, along with the trap: the columns are `timestamp without time zone` holding UTC wall
+clock, so a single `AT TIME ZONE $tz` reads them as already-local and MEASURED moves 5-10% of
+rows into the wrong day. The consequence for new features is that anything day-shaped rides the
+existing `/stats/timeline` payload rather than adding a day-aggregate endpoint.
+
+**`/summary` + `/timeline` are fetched for every tab; the other five endpoints are lazy**, so an
+unopened tab costs nothing. A new section belongs on a tab that already pays for its data —
+`/stats/tasks` exists as its own endpoint for exactly this reason rather than as extra fields on
+`/timeline`. Both pages resolve `timeZone` and the relative-preset clock on the CLIENT only and
+leave them null until then, because `Intl` reports the container's zone during SSR and
+`Date.now()` differs by milliseconds; both nulls GATE the first fetch. That mismatch, not a chart
+bug, is what used to blank the charts.
+
+**Under-sampling is disclosed, not smoothed.** `sampledRatio` carries `n` and `formatSampledRatio`
+prints `n=3` INSTEAD of a percentage below `MIN_SAMPLES_FOR_TREND` (5); a figure that cannot be
+computed renders as an em dash and never as zero. `computeDelta` returns a null `changeRatio`
+against a zero baseline, which the UI shows as "new" — growth from nothing is neither infinite
+percent nor 100%.
+
+### The heatmap and the token bar
+
+`ActivityHeatmap` and `StackedShareBar` (`components/stats/`) are plain DOM and STATICALLY
+imported; only the three recharts charts are behind `next/dynamic`, and only because recharts is
+a ~7 MB package with a d3/redux tree. Both render fields `/stats/timeline` and `/stats/summary`
+had always computed and nothing had ever displayed — the per-day token series, `invocations`,
+`tasksStarted`/`tasksCompleted`, and all four `tokens.*` buckets.
+
+**Shading is by quantile of the WORKED days, not by a fraction of the maximum.** Nearest-rank
+quartiles over the non-zero days, so every cut point is a value that actually occurred. MEASURED
+on the real day series (agent-hours 44.76, 20.78, 16.36, 15.87, 13.19, 12.61, 8.35), dividing by
+the maximum puts five of seven days under 0.37, and a fixed 0.3/0.6 threshold on that then
+collapses them into one or two shades — a skewed week is the normal case here, since one long day
+sets the maximum. Zero days are excluded from the quantiles and get their own colour and their own
+legend swatch: "nothing ran" and "the quietest day that had work" are different claims.
+`heat-scale.ts` also owns `localDayRange`, the INVERSE of the shared bucketer (a local day back to
+an instant range) for the per-day drill-through — duplicated rather than imported because web must
+not pull the `@haive/shared` barrel into the bundle, and tested against both DST days
+(23h and 25h, which a single naive offset guess renders as 24).
+
+**A tooltip's position cannot be inferred from an index.** The month blocks are `flex-wrap`, so
+neither the month index nor the weekday column says where a block actually sits — MEASURED on a
+one-year window, 15 blocks wrap and the LAST one starts a new row at the card's LEFT edge, where
+an "it must be the rightmost block" rule hung the tooltip 105px outside the card. Tooltips
+therefore open rightwards from the cell and the grid container RESERVES a right strip (`pr-44`,
+against a measured 144px widest tooltip) so they fit by construction. Verified zero overflow past
+the card and past the viewport at 366 cells / 15 blocks, at both 1600px and 900px wide.
+
+**Chart colour is computed, not chosen**, with the `dataviz` skill's validator against the page
+surface `#0a0a0a` (the app is dark-only: `globals.css` has one unconditional `:root`, zero `dark:`
+variants, no `prefers-color-scheme`). Two sets, and both REJECTED alternatives are worth keeping:
+
+- `HEAT_RAMP` is indigo-700/500/300/100, running deep to pale as magnitude RISES because on a dark
+  surface lightness is prominence. The obvious Tailwind run indigo-900/800/600/400/300 FAILS —
+  900↔800 are 0.04 apart in lightness and 800 sits at 1.73:1 against the surface, i.e. a busy day
+  rendering as background.
+- `TOKEN_COLORS` is sky-600/orange-600/emerald-600/violet-500 (worst adjacent CVD ΔE 10.1,
+  normal-vision 28.8, all ≥ 3:1). Reusing the existing `tokens`/`cached`/`fresh` trio FAILS
+  outright — sky-300 vs cyan-300 measure CVD ΔE 4.6 and normal-vision ΔE 5.6, indistinguishable to
+  everyone. Those three were picked for the task page's total-time card, where each figure has its
+  own text label doing the identifying; adjacent fills in one bar have no such crutch, which is why
+  the task page keeps them unchanged.
+
+Colour binds to the ENTITY and never to rank, so a filter that reorders segments repaints nothing.
+
+**The token mix is a bar, not a donut,** and that is a measurement: cache reads are 73.4% of all
+tokens on the dev install and output is 1.7%, which as a pie is a six-degree slice beside an arc
+three-quarters of the way round. Segments carry no inline labels — a 1.7% segment cannot hold a
+legible one, and a label clipped by its own segment is worse than one in the legend beneath. Note
+the two different denominators on that tab: the bar's cache-read share is of all four buckets while
+the "cached" tile is `cacheHitRatio`, of the prompt side alone, so the card says so.
+
+**Per-provider token bars need an API change and are deliberately absent.** `spend.byProvider`
+ships RAW `inputTokens`, while `summary.tokens` is normalised by `sumNormalizedTokens` — codex and
+gemini report input inclusive of the cached prefix, so splitting a per-provider bar from the raw
+column double-counts cache reads for exactly the two providers the normalisation exists for
+(codex reads as 45.8% cached where it is really 84.6%). `inputIncludesCache` lives in
+`@haive/shared` and web cannot import it, so the fix is normalised per-provider tokens on the
+endpoint, not a duplicated provider list in the browser.
+
+**Mining-agent ranking was evaluated and dropped.** `task_step_agent_minings` holds 1,486 rows
+across 1,467 distinct `agent_id`s — 321 are generated `plan-expand-<nodeId>-p<N>` ids and the rest
+are near-unique too — so a "most used agents" list is ~1,400 entries tied at n=1-2. Grouping on
+`agent_title` is worse (1,456 distinct), because those are per-node prose rather than persona
+names. The only signal in that table is failure rate, which belongs on the reliability tab.
+
 ## Sandbox
 
 `packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. Only the cloned repository is bind-mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end.

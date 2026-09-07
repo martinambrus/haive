@@ -13,6 +13,7 @@ import {
 } from '@/lib/api-client';
 import { Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { StatTile } from '@/components/stats/stat-tile';
+import { ActivityHeatmap } from '@/components/stats/activity-heatmap';
 import { usePageTitle } from '@/lib/use-page-title';
 import { formatDuration } from '@/lib/format-duration';
 import { formatCost } from '@/lib/format-cost';
@@ -26,6 +27,7 @@ import {
   formatSampledRatio,
   isUnderSampled,
 } from '@/lib/stats/format-stats';
+import { localDayRange, type HeatMetric } from '@/lib/stats/heat-scale';
 
 // recharts is a ~7 MB package with a redux/d3 transitive tree. Nothing about it belongs in
 // the server render or the initial client bundle, so both charts load on demand. First use of
@@ -51,6 +53,11 @@ export default function DashboardPage() {
   const [summary, setSummary] = useState<StatsSummary | null>(null);
   const [timeline, setTimeline] = useState<StatsTimeline | null>(null);
   const [active, setActive] = useState<Task[] | null>(null);
+  // Kept from the fetch effect so the heatmap can turn a day back into an instant range for
+  // its drill-through. Null until the client resolves it, for the same reason the effect
+  // resolves it there rather than during render.
+  const [timeZone, setTimeZone] = useState<string | null>(null);
+  const [heatMetric, setHeatMetric] = useState<HeatMetric>('agent');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,6 +67,7 @@ export default function DashboardPage() {
       // The viewer's own zone, so day buckets line up with their calendar rather than UTC.
       // MEASURED on this install: that moves 5-10% of rows between adjacent days.
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      setTimeZone(tz);
       try {
         const [s, t] = await Promise.all([getStatsSummary({ tz }), getStatsTimeline({ tz })]);
         if (cancelled) return;
@@ -95,6 +103,20 @@ export default function DashboardPage() {
 
   const cd = summary?.costDisplay ?? null;
   const money = (usd: number) => (cd ? formatCost(usd, cd) : `$${usd.toFixed(2)}`);
+
+  /** A heat cell opens the tasks that ran on that day. `showChats` is the LISTING's parameter
+   *  name, not the API's `includeChats` — sending the API name silently drops plan chats, so
+   *  the list would show fewer rows than the square that was clicked. */
+  const dayHref = (bucket: string) => {
+    const day = timeZone ? localDayRange(bucket, timeZone) : null;
+    if (!day) return '/tasks';
+    const p = new URLSearchParams({
+      from: new Date(day.fromMs).toISOString(),
+      to: new Date(day.toMs).toISOString(),
+      showChats: '1',
+    });
+    return `/tasks?${p.toString()}`;
+  };
 
   return (
     <div className="flex flex-col gap-6">
@@ -203,6 +225,24 @@ export default function DashboardPage() {
             <div className="mt-6">
               <SpendChart days={timeline?.days ?? []} costDisplay={summary.costDisplay} />
             </div>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Activity</CardTitle>
+              <CardDescription>
+                One square per day in your own time zone, shaded by quartile of the days on which
+                anything ran — so one long day cannot flatten the rest of the month against it.
+                Hovering reports every metric; clicking opens that day&apos;s tasks.
+              </CardDescription>
+            </CardHeader>
+            <ActivityHeatmap
+              days={timeline?.days ?? []}
+              metric={heatMetric}
+              onMetricChange={setHeatMetric}
+              money={money}
+              dayHref={dayHref}
+            />
           </Card>
 
           <Card>
