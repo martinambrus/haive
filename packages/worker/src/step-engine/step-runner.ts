@@ -1625,6 +1625,24 @@ async function dispatchMiningAgents(
   return enqueued;
 }
 
+/**
+ * Is this advanceStep call a step's FIRST entry, rather than a continuation of one already
+ * under way? Only a fresh entry may be re-gated by `shouldRun`.
+ *
+ * `pending` is the whole answer: a new row inserts with it and `resetStepAndDownstream`
+ * returns to it, so a retry and every new round are still gated (07's per-round DAG split
+ * keeps working). Every other status is a continuation — a mining wave parks `waiting_cli`
+ * and returns, a form parks `waiting_form` — and re-asking `shouldRun` there hands the step a
+ * precondition its OWN work may have falsified. MEASURED on task 4ff3dab8:
+ * `10_8-plan-build`'s extraShouldRun is `findPlanRoot(...) === null`, wave 0 created that
+ * root, and the first wave-1 agent to finish re-entered, evaluated false and marked the step
+ * `skipped` while four agents were still running — their output never folded, the plan frozen
+ * at one level, and every later completion refused by the other-step advance guard.
+ */
+export function isFreshStepEntry(status: TaskStepRow['status']): boolean {
+  return status === 'pending';
+}
+
 const CANCEL_POLL_INTERVAL_MS = 2_000;
 
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
@@ -1699,7 +1717,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   };
 
   try {
-    if (stepDef.shouldRun) {
+    if (stepDef.shouldRun && isFreshStepEntry(row.status)) {
       const should = await stepDef.shouldRun(ctx);
       if (!should) {
         const updated = await updateRow(db, row.id, {
