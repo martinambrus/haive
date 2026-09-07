@@ -10,7 +10,10 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
 import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
-import { ensureDdevPlaywrightBrowsers } from '../../../sandbox/ddev-playwright.js';
+import {
+  ensureDdevPlaywrightBrowsers,
+  killStalePlaywrightRuns,
+} from '../../../sandbox/ddev-playwright.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import type { TestFramework } from './08b-test-management.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
@@ -577,6 +580,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       testFramework === 'playwright'
     ) {
       await ensureDdevPlaywrightBrowsers(runnerHandleForTask(ctx.taskId, repoSubpath), '');
+      await killStalePlaywrightRuns(runnerHandleForTask(ctx.taskId, repoSubpath));
     }
     let test =
       values.runTest && testCmd

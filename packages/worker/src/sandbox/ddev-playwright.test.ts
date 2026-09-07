@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { failureReason, provisionScript } from './ddev-playwright.js';
+import { failureReason, provisionScript, sweepScript } from './ddev-playwright.js';
 
 describe('provisionScript', () => {
   const script = provisionScript();
@@ -45,5 +45,30 @@ describe('failureReason', () => {
     expect(failureReason(3)).toContain("Playwright's own dependency list");
     expect(failureReason(4)).toContain('resolved by apt');
     expect(failureReason(1)).toContain('exited 1');
+  });
+});
+
+// A run abandoned by a worker restart keeps running inside the container — killing the
+// `docker exec` client does not kill what it started — and under the html reporter it ends
+// by serving the report forever while its cleanup keeps mutating the app.
+describe('sweepScript', () => {
+  const script = sweepScript();
+
+  it('counts before killing, and reports the count on a marker of ours', () => {
+    expect(script).toContain('HAIVE_KILLED=');
+    expect(script.indexOf('grep -cE')).toBeLessThan(script.indexOf('pkill'));
+  });
+
+  it('kills the report server as well as the test runner', () => {
+    expect(script).toContain('pkill -f playwright');
+    expect(script).toContain('pkill -f headless_shell');
+  });
+
+  it('treats a clean container as the normal path, not an error', () => {
+    // grep -c exits 1 on no match; every failure-capable step is tolerated so a container
+    // with nothing to kill cannot read as a sweep failure.
+    expect(script).not.toContain('set -e');
+    expect(script).toContain('|| true');
+    expect(script).toContain('${n:-0}');
   });
 });

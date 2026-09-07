@@ -759,10 +759,24 @@ export async function resumeStepIfLinked(
     where: eq(schema.taskSteps.id, payload.taskStepId),
     columns: { stepId: true, round: true },
   });
+  // Stamp the orchestration epoch this work belongs to. Without it the job is EXEMPT from
+  // handleAdvanceStep's epoch guard, which deliberately allows an un-stamped payload so a
+  // pre-deploy enqueue is never falsely skipped — and that exemption is what let a job
+  // enqueued here outlive a retry. MEASURED on task 681f0f99: this site enqueued job 3984 at
+  // 02:10:54; a worker restart orphaned it mid-apply, the step was retried at 02:27:13 (epoch
+  // bumped), and BullMQ's stalled recovery re-delivered 3984 at 02:41:43 — running a second
+  // apply() concurrently with the retry's own, so two playwright runs fought over one app.
+  // The same-id stalled re-delivery is exempt from the duplicate guard by design, so the
+  // epoch is the only thing that can tell this job apart from live work.
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, payload.taskId),
+    columns: { orchestrationEpoch: true },
+  });
   const taskPayload: TaskJobPayload = {
     taskId: payload.taskId,
     userId: payload.userId,
     stepId: stepRow?.stepId,
+    epoch: task?.orchestrationEpoch,
     // Carry the step's round so the resume advances the SAME round. Without it the
     // advance defaults to round 0 (handleAdvanceStep: `payload.round ?? 0`), so a
     // fix-loop step (round > 0) that finishes its CLI never gets resumed: its

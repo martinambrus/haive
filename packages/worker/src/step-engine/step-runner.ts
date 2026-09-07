@@ -2270,6 +2270,17 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
+    // A Stop/Cancel that landed DURING apply() must win over every routing decision
+    // below, not just over the `done` write. The check further down guards only that
+    // one exit; the loop hook, fixLoop, restartLoop and revise all return earlier, so a
+    // stopped task could be handed a fresh CLI pass and put straight back to `running`.
+    // MEASURED on task 681f0f99: a Stop landed inside 08b's ~10-minute test run, apply
+    // finished, loop.shouldContinue saw red tests and dispatched the next pass — three
+    // times in a row, so the user could not stop the task at all. One call here covers
+    // every exit, because nothing between this point and them awaits anything that could
+    // clear the flag. The pre-`done` check stays as the narrower backstop it always was.
+    throwIfCancelled();
+
     // Curated per-step recap for the "What the agent did" panel. LLM steps that
     // already emit a summary field get it for free here; steps that ran an agent
     // but emit no summary field are left null for the async LLM summarizer

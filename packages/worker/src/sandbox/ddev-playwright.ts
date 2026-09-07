@@ -111,6 +111,50 @@ export function provisionScript(): string {
   ].join('\n');
 }
 
+/**
+ * Kill playwright processes left behind in the web container by an ABANDONED run.
+ *
+ * `ddevExec` reaches the container through `docker exec`. Killing that client — a worker
+ * restart, a job orphaned by BullMQ, a user Stop — does NOT kill the process it started
+ * inside the container, and nothing else sweeps it. Two things then make the leftover
+ * permanent rather than transient: a failed run under playwright's html reporter ends by
+ * SERVING the report ("Serving HTML report at http://localhost:NNNNN. Press Ctrl+C to
+ * quit."), which blocks forever, and its `globalSetup` cleanup keeps mutating the app.
+ * MEASURED on task 681f0f99: three runs alive at once, the oldest 33 minutes past the
+ * worker restart that abandoned it, interleaving cleanups against one app until logins
+ * failed 210 times and Drupal's flood control locked the test accounts out.
+ *
+ * Safe as an unconditional pre-run sweep because the DDEV runner is PER TASK and only this
+ * step starts tests in it, so anything already running when we are about to start is a
+ * leftover by construction. Best-effort: a failure here is never worth failing a step for,
+ * and the run that follows reports the truth either way.
+ */
+export function sweepScript(): string {
+  return [
+    // grep -c exits 1 on no match, so no `set -e` here — a clean container is the normal
+    // path and must not read as an error.
+    "n=$(ps -eo args | grep -cE '[p]laywright|[h]eadless_shell' || true)",
+    'if [ "${n:-0}" -gt 0 ]; then sudo -n pkill -f playwright || true; sudo -n pkill -f headless_shell || true; fi',
+    'echo "HAIVE_KILLED=${n:-0}"',
+  ].join('\n');
+}
+
+export async function killStalePlaywrightRuns(handle: DdevRunnerHandle): Promise<number> {
+  const encoded = Buffer.from(sweepScript(), 'utf8').toString('base64');
+  try {
+    const res = await ddevExec(handle, `exec bash -c "echo ${encoded} | base64 -d | bash"`, {
+      timeoutMs: 60_000,
+    });
+    const killed = Number(/HAIVE_KILLED=(\d+)/.exec(res.output)?.[1] ?? 0);
+    if (killed > 0) {
+      log.warn({ container: handle.container, killed }, 'killed abandoned playwright processes');
+    }
+    return killed;
+  } catch {
+    return 0;
+  }
+}
+
 /** What a non-zero exit means, so the note names the cause instead of quoting apt. */
 export function failureReason(exitCode: number): string {
   if (exitCode === EXIT_NO_DEP_LIST) {

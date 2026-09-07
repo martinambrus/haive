@@ -17,7 +17,10 @@ import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
 import { runnerHandleForTask, ddevExec, DDEV_PROJECT_MOUNT } from '../../../sandbox/ddev-runner.js';
-import { ensureDdevPlaywrightBrowsers } from '../../../sandbox/ddev-playwright.js';
+import {
+  ensureDdevPlaywrightBrowsers,
+  killStalePlaywrightRuns,
+} from '../../../sandbox/ddev-playwright.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import { cleanText, contentFingerprint } from '../../task-ledger.js';
@@ -896,6 +899,11 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
             primaryFrameworkRoot(d) ?? '',
           );
           if (provisioned.attempted && !provisioned.ok) provisionNote = provisioned.note;
+          // A run abandoned by a worker restart keeps running inside the container and, under
+          // the html reporter, ends by serving its report forever — mutating the app under
+          // whatever runs next. The runner is per task and only this step starts tests in it,
+          // so anything alive here is a leftover.
+          await killStalePlaywrightRuns(runnerHandleForTask(ctx.taskId, d.repoSubpath!));
         }
 
         // A selective run is still minutes of silence — one spec file can hold ~50 browser
