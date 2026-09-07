@@ -17,9 +17,11 @@ highest-value change here and may bring cheaper models into range.
 Ships as `@haive-module/translator`, distributed exactly like the deep-analysis module (private
 registry, BuildKit-secret token, `entitlementId`) per the distribution and module-step rules in
 `serialized-chasing-thacker.md` and `rippling-wibbling-puffin.md`. **Executes only after both land.**
-It inherits that plan's open question too — a published-image install cannot rebuild api+worker and
-so cannot install this module at all ("OPEN — a published-image install cannot rebuild"), which
-decides who can buy it.
+It inherits that plan's delivery answer too: a published-image install cannot rebuild api+worker, so
+a paying customer receives a per-customer api+worker image the VENDOR builds with this module in
+("DECIDED — a published-image install gets PER-CUSTOMER images built by the vendor", 2026-09-07).
+Adding a second language therefore costs a rebuild of every entitled customer's image, not just a
+package publish — worth knowing before the two-language split below is treated as free.
 
 ## Why it fits Haive better than it looks
 

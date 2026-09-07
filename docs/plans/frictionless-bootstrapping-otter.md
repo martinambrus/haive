@@ -32,15 +32,21 @@ target is "one command, then a browser tab," not "one dependency."
 The split matters because RUN-IT has a hard prerequisite DEV-IT does not: **published, versioned
 images in a public registry**. That is the real cost of this feature, and most of the work.
 
-**RUN-IT's "no build" collides with the module system, and the collision is unresolved.** A module
-is rebuild-on-install by `serialized-chasing-thacker`'s locked decision — the customer adds a
-dependency and rebuilds api+worker — which a RUN-IT host, having no source and no toolchain, cannot
-do. So a RUN-IT install can currently run no modules at all, including the paid ones that plan's
-private-registry distribution exists to sell. The options (a `haive build` profile, per-customer
-images built in CI, or the already-rejected runtime loading) are set out in that plan under "OPEN —
-a published-image install cannot rebuild", where the decision belongs, since it is its constraint
-that creates the conflict. This plan does not need the answer to ship a module-free RUN-IT install,
-but the installer must not promise modules until it exists.
+**RUN-IT's "no build" collided with the module system; DECIDED 2026-09-07 in favour of per-customer
+images.** A module is rebuild-on-install by `serialized-chasing-thacker`'s locked decision — the
+customer adds a dependency and rebuilds api+worker — which a RUN-IT host, having no source and no
+toolchain, cannot do. The resolution keeps RUN-IT's promise exactly as written: the VENDOR builds
+api+worker with that customer's entitled modules and publishes a private per-customer tag, so the
+install still performs no build and holds no registry token. See "DECIDED — a published-image
+install gets PER-CUSTOMER images built by the vendor" in that plan, which owns the reasoning and the
+rejected alternatives.
+
+Two consequences land on this plan. A module customer's compose bundle pins their per-customer
+api+worker tags (web stays the stock public image, since nav and pages are runtime-fetched), so the
+installer must fetch the manifest for the customer's channel rather than the public one. And
+folder-drop module installation is DEV-IT only — a RUN-IT host has no `modules/` tree — so the
+installer and the Modules page must not offer it here. A module-free RUN-IT install is unaffected in
+every respect and remains the default this plan describes.
 
 ## Shape of the command
 

@@ -44,7 +44,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `replicated-zooming-beacon` | Agent memory + spec handoff optimisation | Not started; all three defects re-verified as still real |
 | `rippling-wibbling-puffin` | Modular (user-definable) task types | Not started |
 | `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; companion to the above, neither supersedes the other |
-| `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started; carries an OPEN decision — a published-image install cannot rebuild, so it can install no module — that gates `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` |
+| `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started. Delivery to a published-image install DECIDED 2026-09-07: per-customer api+worker images built by the vendor; `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` inherit it |
 | `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | Not started; row verified against the tree 2026-09-07, later than this table's header date |
 | `translator-module` | Translator — resellable module | Not started |
 
@@ -63,10 +63,12 @@ Verified against the tree on this date, not taken from the plan bodies.
   install after it, which is the follow-up otter names and defers.
 - `steadfast-committing-gray` generalises `serialized-chasing-thacker`'s urgent/graceful drain
   choice from module scope to system scope.
-- **OPEN across four plans:** a published-image install has no source and no build, while a module is
-  rebuild-on-install, so such an install can run no modules — including the paid ones the module
-  system exists to sell. The options and the decision live in `serialized-chasing-thacker` under
-  "OPEN — a published-image install cannot rebuild", because it is that plan's locked
-  rebuild-on-install constraint that creates the conflict.
-  `frictionless-bootstrapping-otter` (RUN-IT), `kind-riding-dream` and `translator-module` (both
-  shipping as registry dependencies of api+worker) each point at it and inherit the answer.
+- **Decided 2026-09-07, spanning four plans:** a published-image install has no source and no build,
+  while a module is rebuild-on-install — so such an install could run no modules, including the paid
+  ones the module system exists to sell. Resolved in favour of **per-customer api+worker images
+  built by the vendor**, derived from a base release, with web left as the stock public image. The
+  reasoning and the two rejected alternatives live in `serialized-chasing-thacker` under "DECIDED —
+  a published-image install gets PER-CUSTOMER images built by the vendor", because it is that plan's
+  locked rebuild-on-install constraint that created the conflict.
+  `frictionless-bootstrapping-otter` (RUN-IT), `kind-riding-dream` and `translator-module` inherit
+  it; `steadfast-committing-gray` carries the one consequence — its release manifest is per-channel.

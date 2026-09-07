@@ -37,9 +37,12 @@ a dependency of api + worker (registry token via BuildKit secret — see "Distri
 entitlement" in `serialized-chasing-thacker.md`).
 
 That install path presumes the customer can REBUILD api+worker, which a published-image install
-cannot — see "OPEN — a published-image install cannot rebuild" in `serialized-chasing-thacker.md`.
-Unresolved there, and it decides who can buy this module, so it is a gate on selling it rather than
-on writing it.
+cannot. DECIDED 2026-09-07 (`serialized-chasing-thacker.md`, "DECIDED — a published-image install
+gets PER-CUSTOMER images built by the vendor"): for such a customer the VENDOR builds api+worker
+with this module in and publishes a private per-customer tag. So the `pnpm module add` path above is
+the DEV-IT story, and the shipping story for a paying customer is a per-customer image derived from
+the base release. Nothing about what this module SHIPS changes; what changes is who runs the build,
+and that revoking the entitlement stops the next image being built.
 
 - `./manifest` — `hasSteps`, `composableSteps` (its steps, for the task-type composer),
   `taskTypes` (the `deep_scan` seed), `nav` + `pages` (a findings dashboard), `globalSettings`.

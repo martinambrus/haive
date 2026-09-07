@@ -191,31 +191,50 @@ failure this project keeps designing against.
 - The row flips to `active` on the **loader's boot report** of the module ids it actually registered,
   never on a successful `pnpm install`. That is the only evidence the rebuilt process loaded it.
 
-#### OPEN — a published-image install cannot rebuild, so it cannot install a module
+#### DECIDED (2026-09-07) — a published-image install gets PER-CUSTOMER images built by the vendor
 
 Rebuild-on-install assumes the customer has a source tree, a toolchain and a build. The two install
 plans say they will not: `frictionless-bootstrapping-otter`'s RUN-IT mode is "One command fetches a
 versioned compose bundle, generates secrets, pulls images ... **No source, no build**", and
 `steadfast-committing-gray` makes every upgrade after it an image-tag swap for the same reason. So
-the paying customer this plan's private-registry distribution exists FOR is precisely the customer
-who cannot run `pnpm module add`. Neither install plan noticed; this section is where the decision
-belongs, because it is this plan's constraint that creates it.
+the paying customer this plan's private-registry distribution exists FOR was precisely the customer
+who could not run `pnpm module add`. Neither install plan noticed; the decision belongs here,
+because it is this plan's rebuild-on-install constraint that creates the conflict.
 
-Three ways out, none free:
+**The vendor builds api+worker with that customer's entitled modules and publishes to a private
+per-customer tag they pull.** The customer's install still performs no build and holds no registry
+token. Two rejected, each for a reason worth keeping:
 
-- **A build profile.** `haive build` fetches the compose bundle WITH build contexts and the customer
-  builds locally. Honest and cheap to specify, but it hands every module customer the toolchain
-  burden that RUN-IT exists to remove, and the registry token must then live on their machine.
-- **Per-customer images built in CI.** The vendor builds api+worker with that customer's entitled
-  modules and publishes to a private tag they pull. Keeps RUN-IT's "no build" promise intact and
-  keeps the registry token vendor-side — the strongest fit with the entitlement model, and the most
-  vendor infrastructure.
-- **Runtime module loading.** Already rejected in this plan for the Next.js `output: 'standalone'`
-  wall and for keeping closed source out of the OSS core. Named so nobody re-proposes it as new.
+- **A build profile** (`haive build` fetching the compose bundle WITH build contexts, customer builds
+  locally). Cheap to specify, and rejected because it hands every module customer the toolchain
+  burden RUN-IT exists to remove AND puts the scoped registry token on their machine — which
+  weakens the entitlement model this plan's Distribution section chose the registry FOR.
+- **Runtime module loading.** Already rejected above for the Next.js `output: 'standalone'` wall and
+  for keeping closed source out of the OSS core. Named again so nobody re-proposes it as new.
 
-Not decided here. Whichever is chosen, it changes what "install" MEANS on a RUN-IT host, so it must
-be settled before this plan's Slice 0 fixes the Dockerfile story — and `kind-riding-dream` and
-`translator-module` both inherit the answer, since both ship as registry dependencies of api+worker.
+What the decision commits to:
+
+- **Only api+worker fork per customer; web stays the stock public image.** That falls out of the
+  generic-UI path — nav and pages are runtime-fetched from the API — and is what this plan's
+  verification step 4 already asserts. It is also what keeps the per-customer build affordable.
+- **Entitlement gets teeth.** Revoking a customer's entitlement means their next image is not built.
+  That is stronger than revoking a read token, which only stops them fetching a package; here they
+  cannot assemble an image at all. Neither claws back what they already run — stated plainly, as the
+  Distribution section states the same limit for `dist`.
+- **A second release axis.** A per-customer image is DERIVED from a base release, so
+  `steadfast-committing-gray`'s release manifest becomes per-channel: the public channel for
+  module-free installs, a per-customer channel carrying that customer's digests. `haive upgrade`
+  reads the customer's channel, never the public one, or a module customer upgrades themselves out
+  of their modules.
+- **Rebuild triggers are entitlement change OR new base release**, nothing else — that bound is what
+  stops the build matrix growing with time rather than with customers.
+- **Folder-drop becomes DEV-IT only.** A RUN-IT host has no `modules/` tree to drop into. The
+  power-user path below is unchanged for contributors and simply does not exist on a published-image
+  install; the Modules page must not offer it there.
+
+The failure mode to verify against is leakage, not breakage: an image built for customer A must
+contain NO module A is not entitled to. That is paid closed-source code in the wrong hands, and it
+is the one defect here that cannot be undone by a later release.
 
 ### How a user installs a module — UI first, folder-drop for power users
 
@@ -507,6 +526,13 @@ Distribution and entitlement:
    BuildKit secret mount, not an ARG).
 9. An absent or revoked token fails `pnpm install` with a clear message and leaves the previously
    installed version running — a failed upgrade must not disable a paid module already in service.
+9a. Per-customer build: an image built for customer A contains **only** A's entitled modules —
+   verified by listing the loaded module ids off `GET /admin/modules/loaded` in a container run from
+   that image, not by trusting the build matrix. This is the one defect a later release cannot undo,
+   so it is checked per build rather than per release.
+9b. A per-customer install pulls its own channel: `haive upgrade` on customer A's host resolves A's
+   manifest and never the public one, so upgrading does not silently drop A's modules
+   (`steadfast-committing-gray`, release manifest).
 10. A module's composable steps appear in the task-type composer palette (`rippling-wibbling-puffin.md`,
     "Definitions may reference module-contributed steps").
 11. Removing the dependency + rebuild returns to the zero-module state, and any task-type definition

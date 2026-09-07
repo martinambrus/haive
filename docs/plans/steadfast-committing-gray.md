@@ -66,6 +66,14 @@ merge-to-main the release trigger would mean either 39 releases a day or a secon
 - Each tag publishes a **release manifest**: version, image digests, `minFrom` (the lowest version
   that may upgrade directly to it), and the migration head. `haive upgrade` reads it and refuses an
   illegal jump rather than discovering the problem mid-migration.
+- The manifest is per **channel**, because a module customer does not run the public images.
+  `serialized-chasing-thacker` decided (2026-09-07) that a published-image install with modules gets
+  per-customer api+worker images built by the vendor and DERIVED from a base release; web stays the
+  stock public image, since nav and pages are runtime-fetched. So an install reads the manifest for
+  ITS channel — public for a module-free install, per-customer otherwise — and never the public one
+  by default, or a module customer would upgrade themselves out of their modules. `minFrom` and the
+  migration head come from the base release either way, so only the digests differ and no second
+  migration story is created.
 - `v0.2.0-rc.1` publishes to a `next` channel. Not optional: the only way to test an upgrade
   mechanism is to perform an upgrade, and that cannot be rehearsed on users.
 - `release/0.2.x` maintenance branches are NOT created now. They are the answer to "patch an old
@@ -368,7 +376,8 @@ exactly as before.*
   migration is a promise this project cannot keep, and the additive-first rule exists so the promise
   is rarely needed.
 - Module upgrade. `serialized-chasing-thacker` owns it — bump the dependency version and rebuild.
-  Its unresolved joint with published images is named below rather than solved here.
+  Its joint with published images is decided (per-customer images built by the vendor); what that
+  costs THIS plan is one field, recorded under the release model, not a slice.
 - Backing up per-repo RAG stores and module databases. The volume snapshot covers them only when the
   whole Postgres volume is copied; a dump-based snapshot would not, and the difference must be
   stated wherever the operator picks. `db_uploads` (`database/src/schema/db-dumps.ts`) is NOT
@@ -380,9 +389,8 @@ exactly as before.*
   overlay are its RUN-IT prerequisite and this plan's Phase 0 prerequisite. Whichever ships first
   builds them; neither should build them twice.
 - `serialized-chasing-thacker` shares the urgent/graceful drain choice (Slice 4 generalises it from
-  module scope to system scope) and carries an **unresolved contradiction with this plan**: RUN-IT
-  installs pull published images with no source and no build, while a module is rebuild-on-install.
-  A RUN-IT customer therefore cannot install any module. Neither plan states this. The options are a
-  build profile (`haive build` fetching the compose bundle WITH build contexts), per-customer images
-  built in CI, or runtime module loading — which that plan already rejected for the standalone-build
-  reason. It needs a decision before either plan ships, and it belongs to that plan, not this one.
+  module scope to system scope), and its published-image joint with this plan is **decided**
+  (2026-09-07): a module customer receives per-customer api+worker images built by the vendor, so
+  the customer still performs no build. What that costs this plan is the per-customer channel in the
+  release model above — one manifest axis, not a slice. That plan owns the decision and its
+  alternatives.
