@@ -23,6 +23,18 @@ type UpsertOp = Extract<PlanPatchOp, { op: 'upsert' }>;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * True when a ref names a node that already exists.
+ *
+ * The same rule `applyUpsert` decides on: a uuid is an existing node (one that
+ * resolves to nothing is a stale id and an error, never a request to create),
+ * and anything else is a temp id the patch introduces. Exported so a caller
+ * DESCRIBING a patch classifies its ops the way applying one will.
+ */
+export function isPlanNodeId(ref: unknown): ref is string {
+  return typeof ref === 'string' && UUID_RE.test(ref);
+}
+
 export interface ApplyPlanPatchOptions {
   repositoryId: string;
   /** The commit the patch's code links were derived at. Stored beside each link

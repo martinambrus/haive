@@ -4,7 +4,9 @@ import { CONFIG_KEYS, configService, type FormSchema, type FormValues } from '@h
 import {
   applyPlanPatch,
   findPlanRoot,
-  loadPlanNodes,
+  isPlanNodeId,
+  loadPlanSkeletons,
+  stripNodeRefPrefix,
   renderPlanMarkdown,
 } from '@haive/shared/plan';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -38,6 +40,11 @@ export interface PlanReconcileDetect {
   /** Nodes 04-phase-0b said this task affects, so the agent starts where the
    *  spec already pointed rather than re-deriving it from the diff. */
   affected: { id: string; title: string }[];
+  /** Every node id to its title, so the form can NAME what each op touches.
+   *  form() is synchronous and cannot read the database, so the titles have to
+   *  travel in the detect payload. Optional: a payload persisted before this
+   *  existed renders shortened ids instead. */
+  nodeTitles?: Record<string, string>;
   nodeCount: number;
 }
 
@@ -70,15 +77,40 @@ export function proposedOps(llmOutput: unknown): ProposedOp[] {
  * developer and approving something they did not understand, so an op shape it
  * cannot describe must say so rather than render as an empty tick box.
  */
+/** `text` as an inline code span, so a form label can set a node title or a path
+ *  apart from the prose around it. The fence is sized to the content because
+ *  titles are written by people and agents: a one-backtick fence around a title
+ *  that contains one ends the span early and spills markdown into the label. */
+function code(text: string): string {
+  const fence = '`'.repeat(Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length)) + 1);
+  const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
+  return `${fence}${pad}${text}${pad}${fence}`;
+}
+
 export function describePlanOp(op: ProposedOp, titleById: Map<string, string>): string {
+  // Refs arrive as the agent wrote them — `parsePlanPatch` normalises nothing,
+  // and the patch contract tells the agent to quote ids as `node:<uuid>`, which
+  // apply-patch measured as the common shape. Both the id test below and the
+  // title lookup want the bare id, so strip with the same function apply uses.
+  const bare = (ref: unknown): string | null =>
+    typeof ref === 'string' ? stripNodeRefPrefix(ref) : null;
   const name = (ref: unknown): string => {
-    if (typeof ref !== 'string') return 'a node';
-    return titleById.get(ref) ? `"${titleById.get(ref)}"` : `"${ref.slice(0, 8)}…"`;
+    const id = bare(ref);
+    if (id === null) return 'a node';
+    // Bold as well as code: the paths further along the line are code too, and
+    // the node is what the reader is scanning a list of these for.
+    return `**${code(titleById.get(id) ?? `${id.slice(0, 8)}…`)}**`;
   };
   switch (op.op) {
     case 'upsert': {
-      const known = typeof op.nodeRef === 'string' && titleById.has(op.nodeRef);
-      if (!known) return `Add node "${String(op.title ?? 'untitled')}" under ${name(op.parentRef)}`;
+      // Decided on the REF SHAPE, the same rule `applyUpsert` applies — a uuid
+      // names a node that already exists. Asking the title map instead made the
+      // answer depend on a DISPLAY resource: a form built with an empty one
+      // rendered every status and code-link update as `Add node "untitled"
+      // under a node`, which is not what ticking the box would have done.
+      if (!isPlanNodeId(bare(op.nodeRef))) {
+        return `Add node **${code(String(op.title ?? 'untitled'))}** under ${name(op.parentRef)}`;
+      }
       const parts: string[] = [];
       if (op.status) parts.push(`mark ${String(op.status)}`);
       if (op.taskable !== undefined) parts.push(op.taskable ? 'mark taskable' : 'unmark taskable');
@@ -94,8 +126,9 @@ export function describePlanOp(op: ProposedOp, titleById: Map<string, string>): 
           if (typeof link.repoPath !== 'string') continue;
           byRole[link.role === 'covers' ? 'covers' : 'implements'].push(link.repoPath);
         }
-        if (byRole.implements.length > 0) parts.push(`link ${byRole.implements.join(', ')}`);
-        if (byRole.covers.length > 0) parts.push(`link tests ${byRole.covers.join(', ')}`);
+        const paths = (list: string[]): string => list.map(code).join(', ');
+        if (byRole.implements.length > 0) parts.push(`link ${paths(byRole.implements)}`);
+        if (byRole.covers.length > 0) parts.push(`link tests ${paths(byRole.covers)}`);
       }
       return `Update ${name(op.nodeRef)}: ${parts.length > 0 ? parts.join('; ') : 'no visible change'}`;
     }
@@ -148,7 +181,7 @@ async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
   const [planMarkdown, spec, nodes] = await Promise.all([
     renderPlanMarkdown(ctx.db, task.repositoryId, { titlesOnly: true, maxDepth: 4 }),
     resolveApprovedSpec(ctx),
-    loadPlanNodes(ctx.db, task.repositoryId),
+    loadPlanSkeletons(ctx.db, task.repositoryId),
   ]);
 
   // 04-phase-0b resolved this already; it is best-effort because `_step-reset`
@@ -171,6 +204,7 @@ async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
     spec,
     changedPaths,
     affected,
+    nodeTitles: Object.fromEntries(nodes.map((n) => [n.id, n.title])),
     nodeCount: nodes.length,
   };
 }
@@ -281,7 +315,7 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     // existing node. Parking a form on it would ask the developer to confirm
     // that nothing happened.
     if (ops.length === 0) return null;
-    const titleById = new Map<string, string>();
+    const titleById = new Map(Object.entries(detected.nodeTitles ?? {}));
     return {
       title: 'Plan updates from this task',
       description:
