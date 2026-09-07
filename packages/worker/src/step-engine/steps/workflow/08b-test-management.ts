@@ -15,7 +15,7 @@ import {
 } from './_impl-changes.js';
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
-import { ensureAppServing } from './_app-runtime.js';
+import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
 import { runnerHandleForTask, ddevExec, DDEV_PROJECT_MOUNT } from '../../../sandbox/ddev-runner.js';
 import { ensureDdevPlaywrightBrowsers } from '../../../sandbox/ddev-playwright.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
@@ -488,11 +488,14 @@ async function runTestCommand(
   d: TestManagementDetect,
   cmd: TestCommand,
   timeoutMs: number,
+  onLine?: (line: string) => void,
 ): Promise<{ exitCode: number; command: string; output: string }> {
   const joined = cmd.args.join(' ');
   if (cmd.kind === 'ddev') {
     const handle = runnerHandleForTask(ctx.taskId, d.repoSubpath!);
-    const res = await ddevExec(handle, joined, { timeoutMs });
+    // `onLine` switches ddevExec to its streaming path, so the caller can surface the
+    // runner's latest line. Absent for the enumerate probe, which is bounded and silent.
+    const res = await ddevExec(handle, joined, { timeoutMs, ...(onLine ? { onLine } : {}) });
     return { exitCode: res.exitCode, command: `ddev ${joined}`, output: res.output.slice(-4000) };
   }
   const [bin, ...rest] = cmd.args;
@@ -895,12 +898,20 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
           if (provisioned.attempted && !provisioned.ok) provisionNote = provisioned.note;
         }
 
-        await ctx.emitProgress(
-          cmd.kind === 'ddev'
-            ? 'Running related tests in the DDEV environment…'
-            : 'Running related tests…',
+        // A selective run is still minutes of silence — one spec file can hold ~50 browser
+        // tests — and a fixed "Running related tests…" line is indistinguishable from a stuck
+        // task. withDdevProgress is the same live status every long DDEV op already uses: the
+        // runner's latest line plus an elapsed counter that ticks through silent phases. Its
+        // name says ddev but its contract is just `emitProgress`, so the host branch gets the
+        // counter too — execFile buffers and has no line to give, and "looks frozen" is the
+        // half that matters there.
+        const run = await withDdevProgress(
+          ctx,
+          cmd.kind === 'ddev' ? 'Running related tests in DDEV' : 'Running related tests',
+          (onLine) =>
+            runTestCommand(ctx, d, cmd, 600_000, cmd.kind === 'ddev' ? onLine : undefined),
+          { initialLine: cmd.args.join(' ') },
         );
-        const run = await runTestCommand(ctx, d, cmd, 600_000);
         testRun = {
           ran: true,
           passed: run.exitCode === 0,

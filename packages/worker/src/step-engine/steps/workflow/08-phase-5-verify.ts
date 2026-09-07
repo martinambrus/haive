@@ -9,7 +9,10 @@ import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
-import { ensureAppServing } from './_app-runtime.js';
+import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
+import { ensureDdevPlaywrightBrowsers } from '../../../sandbox/ddev-playwright.js';
+import { classifyTestEnvFailure } from './_test-env-guard.js';
+import type { TestFramework } from './08b-test-management.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 
 // Phase 5 verify: runs the project's test / lint / typecheck checks and records
@@ -38,6 +41,12 @@ interface VerifyDetect {
   workspacePath: string;
   ddevMode: boolean;
   repoSubpath: string | null;
+  /** The project's test framework, carried over from 08b-test-management's detect — the only
+   *  place it is identified. This step resolves a SlotCommand with a LABEL, not a framework,
+   *  so it cannot classify an environment failure on its own. Optional because detect_output
+   *  is persisted and replayed: a payload written before this field existed reads as null and
+   *  behaves exactly as it did. */
+  testFramework?: TestFramework | null;
   test: SlotCommand | null;
   lint: SlotCommand | null;
   typecheck: SlotCommand | null;
@@ -73,6 +82,28 @@ interface VerifyApply {
    *  NO check ran — `passed` is true there because nothing failed, which reads as a green
    *  verification of a workspace nothing was verified in. */
   degradedNote?: string;
+}
+
+/**
+ * The amber caveat for the step card.
+ *
+ * Both inputs can be true at once — an environment blocker is itself a reason nothing ran —
+ * so they are JOINED rather than one winning, and the blocker leads because it is the half
+ * that names a repair. `''` when neither applies, which is the green path.
+ */
+export function buildVerifyDegradedNote(
+  blocker: { reason: string; repair: string } | null,
+  unverified: string,
+): string {
+  return [
+    blocker
+      ? `The test suite could not be run: ${blocker.reason}. The suite is NOT known to be ` +
+        `green, and no fix round can repair this. Repair with: ${blocker.repair}`
+      : '',
+    unverified,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 /** Why no check ran, named per slot, or `''` when at least one did.
@@ -267,7 +298,15 @@ async function runSlot(
       };
     }
     const handle = runnerHandleForTask(ctx.taskId, repoSubpath);
-    const res = await ddevExec(handle, cmd.argv.join(' '), { timeoutMs: 600_000 });
+    // A full suite is minutes of silence, and a fixed status line is indistinguishable from a
+    // stuck task. Same live status every long DDEV op already uses: latest line + an elapsed
+    // counter that ticks through silent phases.
+    const res = await withDdevProgress(
+      ctx,
+      `Running ${cmd.label}`,
+      (onLine) => ddevExec(handle, cmd.argv.join(' '), { timeoutMs: 600_000, onLine }),
+      { initialLine: cmd.argv.join(' ') },
+    );
     return {
       ran: true,
       passed: res.exitCode === 0,
@@ -277,11 +316,15 @@ async function runSlot(
   }
   try {
     const [bin, ...rest] = cmd.argv;
-    const { stdout, stderr } = await exec(bin!, rest, {
-      cwd: workspace,
-      timeout: 600_000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    // execFile buffers, so there is no line to stream — the elapsed counter is the half that
+    // matters here, and withDdevProgress ticks it for an op with no output of its own.
+    const { stdout, stderr } = await withDdevProgress(ctx, `Running ${cmd.label}`, () =>
+      exec(bin!, rest, {
+        cwd: workspace,
+        timeout: 600_000,
+        maxBuffer: 10 * 1024 * 1024,
+      }),
+    );
     return {
       ran: true,
       passed: true,
@@ -471,8 +514,13 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       repoSubpath = ws.repoSubpath;
       workspace = ws.workspace;
     }
+    // 08b-test-management runs immediately before this step (index 7.9 against 8), so its
+    // detect is the freshest identification of the framework in this workspace.
+    const infra = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08b-test-management');
+    const testFramework =
+      ((infra?.detect ?? null) as { primary?: TestFramework | null } | null)?.primary ?? null;
     const slots = await resolveSlots(workspace, ddevMode);
-    return { workspacePath: workspace, ddevMode, repoSubpath, ...slots };
+    return { workspacePath: workspace, ddevMode, repoSubpath, testFramework, ...slots };
   },
 
   form(_ctx, detected): FormSchema {
@@ -511,15 +559,37 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     const {
       workspacePath,
       repoSubpath,
+      testFramework,
       test: testCmd,
       lint: lintCmd,
       typecheck: typeCmd,
     } = args.detected;
 
-    const test =
+    // The DDEV web image ships no browser runtime, and a full suite is exactly where that
+    // surfaces on a repo whose root `test` script drives one. 08b provisions before its own
+    // selective run, but only when it HAS a run to make — a change touching no test file
+    // leaves the container cold for this step. Idempotent, so the usual case costs seconds.
+    if (
+      values.runTest &&
+      testCmd &&
+      testCmd.kind === 'ddev' &&
+      repoSubpath &&
+      testFramework === 'playwright'
+    ) {
+      await ensureDdevPlaywrightBrowsers(runnerHandleForTask(ctx.taskId, repoSubpath), '');
+    }
+    let test =
       values.runTest && testCmd
         ? await runSlot(testCmd, ctx, workspacePath, repoSubpath)
         : skippedResult();
+    // An environment that cannot run a browser is not a failing test, and this step's fixLoop
+    // routes ANY failing check back to implementation — so without this a missing browser
+    // burns a whole round on something no agent can repair, which is the exact failure 08b's
+    // own guard exists for. `ran: false` keeps it out of `passed` the same way a skipped slot
+    // is kept out, and the note below says so rather than letting it read as green.
+    const testEnvBlocker =
+      test.ran && !test.passed ? classifyTestEnvFailure(testFramework ?? null, test.output) : null;
+    if (testEnvBlocker) test = { ...test, ran: false };
     const lint =
       values.runLint && lintCmd
         ? await runSlot(lintCmd, ctx, workspacePath, repoSubpath)
@@ -579,13 +649,14 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       { test: testCmd, lint: lintCmd, typecheck: typeCmd },
       { test, lint, typecheck },
     );
+    const degradedNote = buildVerifyDegradedNote(testEnvBlocker, unverified);
     return {
       test,
       lint,
       typecheck,
       passed,
       runtimeSmoke,
-      ...(unverified ? { degradedNote: unverified } : {}),
+      ...(degradedNote ? { degradedNote } : {}),
     };
   },
 };

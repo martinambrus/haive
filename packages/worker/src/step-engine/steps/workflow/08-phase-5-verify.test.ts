@@ -2,10 +2,17 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 
 const { ensureAppServing } = vi.hoisted(() => ({ ensureAppServing: vi.fn() }));
 
-vi.mock('./_app-runtime.js', () => ({ ensureAppServing }));
+// withDdevProgress must be a real passthrough, not a stub: runSlot wraps every check in it,
+// so a mock that omits it makes the module throw the moment a test reaches a slot.
+vi.mock('./_app-runtime.js', () => ({
+  ensureAppServing,
+  withDdevProgress: <T>(_ctx: unknown, _label: string, run: (onLine: (l: string) => void) => T) =>
+    run(() => {}),
+}));
 
 import {
   buildUnverifiedNote,
+  buildVerifyDegradedNote,
   buildVerifyCommand,
   parseRuntimeSmokeOutput,
   phase5VerifyStep,
@@ -267,5 +274,38 @@ describe('buildUnverifiedNote', () => {
         { test: { ...ran, passed: false }, lint: skipped, typecheck: skipped },
       ),
     ).toBe('');
+  });
+});
+
+// This step's fixLoop routes ANY failing check back to implementation, so an environment
+// failure it cannot name burns a whole round on something no agent can repair — the same
+// failure 08b's guard exists for.
+describe('buildVerifyDegradedNote', () => {
+  const blocker = {
+    reason: 'the browser binaries are not installed',
+    repair: 'npx playwright install --with-deps',
+  };
+
+  it('names the blocker and the repair, and says the suite is not green', () => {
+    const note = buildVerifyDegradedNote(blocker, '');
+    expect(note).toContain('the browser binaries are not installed');
+    expect(note).toContain('npx playwright install --with-deps');
+    expect(note).toContain('NOT known to be green');
+  });
+
+  it('joins both halves, blocker first — a blocker is itself a reason nothing ran', () => {
+    const note = buildVerifyDegradedNote(blocker, 'No runner was detected for: lint.');
+    expect(note.indexOf('could not be run')).toBeLessThan(note.indexOf('No runner was detected'));
+    expect(note).toContain('No runner was detected for: lint.');
+  });
+
+  it('passes the unverified note through untouched when nothing is blocked', () => {
+    expect(buildVerifyDegradedNote(null, 'No runner was detected for: test.')).toBe(
+      'No runner was detected for: test.',
+    );
+  });
+
+  it('is empty on the green path', () => {
+    expect(buildVerifyDegradedNote(null, '')).toBe('');
   });
 });
