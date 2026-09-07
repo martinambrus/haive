@@ -45,6 +45,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `rippling-wibbling-puffin` | Modular (user-definable) task types | Not started |
 | `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; companion to the above, neither supersedes the other |
 | `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started |
+| `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | Not started; row verified against the tree 2026-09-07, later than this table's header date |
 | `translator-module` | Translator — resellable module | Not started |
 
 ## Cross-plan dependencies
@@ -56,3 +57,12 @@ Verified against the tree on this date, not taken from the plan bodies.
   joint: a module's steps must reach the composable step catalog.
 - `glistening-percolating-snowflake` rides `.haive-data/`, which shipped as slice 2 of
   `amber-fencing-hopper`.
+- `steadfast-committing-gray` and `frictionless-bootstrapping-otter` share one slice exactly:
+  published images plus the compose `run` overlay are otter's RUN-IT prerequisite and gray's Phase 0
+  prerequisite. Whichever ships first builds them. Otter owns the FIRST install; gray owns every
+  install after it, which is the follow-up otter names and defers.
+- `steadfast-committing-gray` generalises `serialized-chasing-thacker`'s urgent/graceful drain
+  choice from module scope to system scope, and records the two plans' unresolved contradiction: a
+  RUN-IT install pulls published images with no source and no build, while a module is
+  rebuild-on-install, so a RUN-IT customer cannot install one. The decision belongs to the module
+  plan.
