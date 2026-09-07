@@ -1,9 +1,16 @@
-import { describe, it, expect } from 'vitest';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { describe, it, expect, afterAll } from 'vitest';
 import {
   actionInstructions,
   parseTesterOutput,
+  buildCollectCommand,
   buildSelectiveCommand,
   filterTestFiles,
+  primaryFrameworkRoot,
+  scanTestInfra,
+  scopeToRoot,
   testManagementStep,
 } from './08b-test-management.js';
 
@@ -94,7 +101,7 @@ describe('buildSelectiveCommand', () => {
       ddev: true,
       ddevPlaywrightAddon: true,
     });
-    expect(cmd).toEqual({ kind: 'ddev', args: ['playwright', 'test', 'tests/a.spec.ts'] });
+    expect(cmd).toEqual({ kind: 'ddev', args: ['playwright', 'test', 'tests/a.spec.ts'], cwd: '' });
   });
 
   it('falls back to ddev exec npx playwright without the addon', () => {
@@ -105,6 +112,7 @@ describe('buildSelectiveCommand', () => {
     expect(cmd).toEqual({
       kind: 'ddev',
       args: ['exec', 'npx', 'playwright', 'test', 'tests/a.spec.ts'],
+      cwd: '',
     });
   });
 
@@ -113,7 +121,11 @@ describe('buildSelectiveCommand', () => {
       ddev: false,
       ddevPlaywrightAddon: false,
     });
-    expect(cmd).toEqual({ kind: 'host', args: ['npx', 'playwright', 'test', 'tests/a.spec.ts'] });
+    expect(cmd).toEqual({
+      kind: 'host',
+      args: ['npx', 'playwright', 'test', 'tests/a.spec.ts'],
+      cwd: '',
+    });
   });
 
   it('builds phpunit + pytest + vitest variants', () => {
@@ -122,16 +134,16 @@ describe('buildSelectiveCommand', () => {
         ddev: true,
         ddevPlaywrightAddon: false,
       }),
-    ).toEqual({ kind: 'ddev', args: ['exec', 'vendor/bin/phpunit', 'tests/FooTest.php'] });
+    ).toEqual({ kind: 'ddev', args: ['exec', 'vendor/bin/phpunit', 'tests/FooTest.php'], cwd: '' });
     expect(
       buildSelectiveCommand('pytest', ['tests/test_x.py'], {
         ddev: false,
         ddevPlaywrightAddon: false,
       }),
-    ).toEqual({ kind: 'host', args: ['pytest', 'tests/test_x.py'] });
+    ).toEqual({ kind: 'host', args: ['pytest', 'tests/test_x.py'], cwd: '' });
     expect(
       buildSelectiveCommand('vitest', files, { ddev: false, ddevPlaywrightAddon: false }),
-    ).toEqual({ kind: 'host', args: ['npx', 'vitest', 'run', 'tests/a.spec.ts'] });
+    ).toEqual({ kind: 'host', args: ['npx', 'vitest', 'run', 'tests/a.spec.ts'], cwd: '' });
   });
 
   it('refuses plain test scripts (would run the full suite) and empty file lists', () => {
@@ -146,6 +158,268 @@ describe('buildSelectiveCommand', () => {
     ).toBeNull();
     expect(
       buildSelectiveCommand(null, files, { ddev: false, ddevPlaywrightAddon: false }),
+    ).toBeNull();
+  });
+
+  // The bug this scoping exists for. Config and node_modules under test-playwright/, nothing at
+  // the repo root: measured on a live runner, the un-scoped command lists 0 tests and exits 1
+  // while this one lists 48 and exits 0.
+  it('runs from the framework project root with root-relative paths (ddev)', () => {
+    expect(
+      buildSelectiveCommand('playwright', ['test-playwright/tests/a.spec.ts'], {
+        ddev: true,
+        ddevPlaywrightAddon: false,
+        root: 'test-playwright',
+      }),
+    ).toEqual({
+      kind: 'ddev',
+      // Absolute --dir: a relative one exits 128.
+      args: [
+        'exec',
+        '-d',
+        '/var/www/html/test-playwright',
+        'npx',
+        'playwright',
+        'test',
+        'tests/a.spec.ts',
+      ],
+      cwd: 'test-playwright',
+    });
+  });
+
+  it('carries the root as a cwd on the host path instead of a --dir', () => {
+    expect(
+      buildSelectiveCommand('vitest', ['packages/web/src/a.test.ts'], {
+        ddev: false,
+        ddevPlaywrightAddon: false,
+        root: 'packages/web',
+      }),
+    ).toEqual({
+      kind: 'host',
+      args: ['npx', 'vitest', 'run', 'src/a.test.ts'],
+      cwd: 'packages/web',
+    });
+  });
+
+  // A detect payload written before frameworkRoots existed replays with root undefined and must
+  // build exactly the command it originally built — no --dir, workspace-relative paths.
+  it('is byte-identical to the pre-root command when the root is absent or empty', () => {
+    const legacy = buildSelectiveCommand('playwright', files, {
+      ddev: true,
+      ddevPlaywrightAddon: false,
+    });
+    expect(
+      buildSelectiveCommand('playwright', files, {
+        ddev: true,
+        ddevPlaywrightAddon: false,
+        root: '',
+      }),
+    ).toEqual(legacy);
+    expect(legacy!.args).toEqual(['exec', 'npx', 'playwright', 'test', 'tests/a.spec.ts']);
+  });
+
+  it('refuses to run when no config file was found for the framework', () => {
+    expect(
+      buildSelectiveCommand('playwright', files, {
+        ddev: true,
+        ddevPlaywrightAddon: false,
+        root: null,
+      }),
+    ).toBeNull();
+  });
+
+  // The addon owns its own working directory, so it keeps the workspace-relative paths it has
+  // always been handed — a null root must not take that path away from it either.
+  it('leaves the ddev playwright addon path untouched by the root', () => {
+    expect(
+      buildSelectiveCommand('playwright', files, {
+        ddev: true,
+        ddevPlaywrightAddon: true,
+        root: null,
+      }),
+    ).toEqual({ kind: 'ddev', args: ['playwright', 'test', 'tests/a.spec.ts'], cwd: '' });
+  });
+
+  it('drops files outside the project root, and refuses when none is left', () => {
+    expect(
+      buildSelectiveCommand('playwright', ['test-playwright/tests/a.spec.ts', 'other/b.spec.ts'], {
+        ddev: false,
+        ddevPlaywrightAddon: false,
+        root: 'test-playwright',
+      })!.args,
+    ).toEqual(['npx', 'playwright', 'test', 'tests/a.spec.ts']);
+    expect(
+      buildSelectiveCommand('playwright', ['other/b.spec.ts'], {
+        ddev: false,
+        ddevPlaywrightAddon: false,
+        root: 'test-playwright',
+      }),
+    ).toBeNull();
+  });
+});
+
+describe('scopeToRoot', () => {
+  it('passes files through untouched at the workspace root', () => {
+    expect(scopeToRoot(['tests/a.spec.ts'], '')).toEqual(['tests/a.spec.ts']);
+  });
+
+  // A `../` path is the "Total: 0 tests in 0 files" failure this exists to prevent, so it is
+  // dropped rather than handed to a runner that will reject it and exit non-zero with nothing run.
+  it('drops anything that escapes the root, including the root itself', () => {
+    expect(scopeToRoot(['sub/a.spec.ts', 'b.spec.ts', '../c.spec.ts', 'sub'], 'sub')).toEqual([
+      'a.spec.ts',
+    ]);
+  });
+});
+
+describe('scanTestInfra', () => {
+  const made: string[] = [];
+  const tree = async (files: Record<string, string>): Promise<string> => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'haive-08b-'));
+    made.push(dir);
+    for (const [rel, body] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
+      await writeFile(path.join(dir, rel), body);
+    }
+    return dir;
+  };
+  afterAll(async () => {
+    await Promise.all(made.map((d) => rm(d, { recursive: true, force: true })));
+  });
+
+  // The layout that produced the bug: a Drupal root with the whole playwright project one level
+  // down. Detection fired off the directory alone and the root was never resolved, so the runner
+  // was invoked where neither the config nor node_modules lives.
+  it('roots a framework at the subdirectory holding its config', async () => {
+    const dir = await tree({
+      'test-playwright/playwright.config.ts': '',
+      'test-playwright/tests/a.spec.ts': '',
+      'index.php': '',
+    });
+    const infra = await scanTestInfra(dir);
+    expect(infra.frameworks).toEqual(['playwright']);
+    expect(infra.roots).toEqual({ playwright: 'test-playwright' });
+  });
+
+  it('roots a framework at the workspace when its config is there', async () => {
+    const dir = await tree({ 'playwright.config.ts': '', 'vitest.config.ts': '' });
+    const infra = await scanTestInfra(dir);
+    expect(infra.roots).toEqual({ playwright: '', vitest: '' });
+  });
+
+  // Detection is deliberately unchanged — the marker directory still detects playwright on its
+  // own — but with no config anywhere the root is null and apply declines to claim a run.
+  it('reports a null root when the marker directory carries no config', async () => {
+    const dir = await tree({ 'test-playwright/tests/a.spec.ts': '' });
+    const infra = await scanTestInfra(dir);
+    expect(infra.frameworks).toEqual(['playwright']);
+    expect(infra.roots).toEqual({ playwright: null });
+  });
+
+  it('does not root a framework inside installed dependencies', async () => {
+    const dir = await tree({
+      cypress: '',
+      'node_modules/some-dep/cypress.config.js': '',
+      'vendor/other/phpunit.xml': '',
+    });
+    const infra = await scanTestInfra(dir);
+    expect(infra.roots.cypress).toBeNull();
+    expect(infra.frameworks).not.toContain('phpunit');
+  });
+
+  // The script pseudo-frameworks are the repo's own manifests, rooted at the workspace by
+  // construction — never searched for.
+  it('roots the script pseudo-frameworks at the workspace', async () => {
+    const dir = await tree({
+      'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      'composer.json': JSON.stringify({ scripts: { test: 'phpunit' } }),
+    });
+    const infra = await scanTestInfra(dir);
+    expect(infra.roots).toEqual({ 'pkg-script': '', 'composer-script': '' });
+  });
+});
+
+describe('primaryFrameworkRoot', () => {
+  it('reads the primary framework root', () => {
+    expect(
+      primaryFrameworkRoot({
+        primary: 'playwright',
+        frameworkRoots: { playwright: 'test-playwright', vitest: '' },
+      }),
+    ).toBe('test-playwright');
+  });
+
+  it('distinguishes "no config found" (null) from "at the workspace root" ("")', () => {
+    expect(
+      primaryFrameworkRoot({ primary: 'playwright', frameworkRoots: { playwright: null } }),
+    ).toBeNull();
+    expect(
+      primaryFrameworkRoot({ primary: 'playwright', frameworkRoots: { playwright: '' } }),
+    ).toBe('');
+  });
+
+  // detect_output is persisted and replayed. A payload from before the field existed means the
+  // workspace root, which is the command it originally built — NOT "no config found".
+  it('replays a pre-field payload as the workspace root', () => {
+    expect(primaryFrameworkRoot({ primary: 'playwright' })).toBe('');
+    expect(primaryFrameworkRoot({ primary: 'playwright', frameworkRoots: {} })).toBe('');
+  });
+
+  it('has no root without a primary framework', () => {
+    expect(primaryFrameworkRoot({ primary: null, frameworkRoots: {} })).toBeNull();
+  });
+});
+
+describe('buildCollectCommand', () => {
+  const files = ['test-playwright/tests/a.spec.ts'];
+
+  it('splices --list after the playwright subcommand, keeping the root scoping', () => {
+    expect(
+      buildCollectCommand('playwright', files, {
+        ddev: true,
+        ddevPlaywrightAddon: false,
+        root: 'test-playwright',
+      }),
+    ).toEqual({
+      kind: 'ddev',
+      args: [
+        'exec',
+        '-d',
+        '/var/www/html/test-playwright',
+        'npx',
+        'playwright',
+        'test',
+        '--list',
+        'tests/a.spec.ts',
+      ],
+      cwd: 'test-playwright',
+    });
+  });
+
+  // Playwright only: its --list exit code was measured against a live runner. Every other
+  // framework keeps the previous behaviour verbatim until its list mode is measured too, and the
+  // addon's flag pass-through is unmeasured.
+  it('offers nothing for unmeasured frameworks or the addon', () => {
+    for (const framework of ['vitest', 'jest', 'phpunit', 'pytest', 'cypress'] as const) {
+      expect(
+        buildCollectCommand(framework, ['tests/a.spec.ts'], {
+          ddev: false,
+          ddevPlaywrightAddon: false,
+        }),
+      ).toBeNull();
+    }
+    expect(
+      buildCollectCommand('playwright', files, { ddev: true, ddevPlaywrightAddon: true }),
+    ).toBeNull();
+  });
+
+  it('offers nothing when the selective run itself is impossible', () => {
+    expect(
+      buildCollectCommand('playwright', files, {
+        ddev: true,
+        ddevPlaywrightAddon: false,
+        root: null,
+      }),
     ).toBeNull();
   });
 });
@@ -205,6 +479,19 @@ describe('testManagementStep.fixLoop', () => {
           command: 'ddev exec npx vitest run a',
           output: 'DDEV runner unavailable for the selective test run — skipped',
         },
+      }),
+      // The runner could enumerate none of the tests, so nothing ran and there is no failing
+      // assertion for an implementer to act on. This is the shape that used to arrive as
+      // testsPassed:false and buy 5 fix passes plus a whole round back through implementation.
+      mkApply({
+        testsUpdated: ['test-playwright/tests/a.spec.ts'],
+        testRun: {
+          ran: false,
+          passed: false,
+          command: 'ddev exec npx playwright test test-playwright/tests/a.spec.ts',
+          output: 'Total: 0 tests in 0 files',
+        },
+        degradedNote: 'The playwright runner could not enumerate any of the tests…',
       }),
     ];
     for (const out of noVerdict) {

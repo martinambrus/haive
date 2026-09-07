@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
@@ -16,7 +16,7 @@ import {
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { ensureAppServing } from './_app-runtime.js';
-import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
+import { runnerHandleForTask, ddevExec, DDEV_PROJECT_MOUNT } from '../../../sandbox/ddev-runner.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 
 // Phase 5b — Test management (legacy phase5b-test-management.md). Runs straight
@@ -47,6 +47,11 @@ interface TestManagementDetect {
   sandboxWorktreePath: string;
   frameworks: TestFramework[];
   primary: TestFramework | null;
+  /** Where each detected framework's PROJECT ROOT is, repo-relative — `''` for the workspace
+   *  root, `null` when no config file for it was found anywhere. Optional because
+   *  `task_steps.detect_output` is persisted and replayed: a payload written before this
+   *  field existed must still build the command it built then, which is the `''` case. */
+  frameworkRoots?: Record<string, string | null>;
   testDirs: string[];
   ddev: boolean;
   ddevPlaywrightAddon: boolean;
@@ -77,6 +82,9 @@ interface TestManagementApply {
   /** null = no selective run happened; false escalates at gate-2. */
   testsPassed: boolean | null;
   fixPasses: number;
+  /** Amber caveat for the step card, read by the runner's computeDegradedNote. Set only when
+   *  the tests were written but could NOT be run — never on an ordinary pass or failure. */
+  degradedNote?: string;
 }
 
 const testerOutputSchema = z.object({
@@ -120,46 +128,144 @@ export function filterTestFiles(files: string[]): string[] {
   return files.filter((f) => TEST_FILE_RE.test(f));
 }
 
+export interface TestCommand {
+  kind: 'ddev' | 'host';
+  args: string[];
+  /** Repo-relative directory the command must run in — the framework's own project root,
+   *  `''` for the workspace root. Already baked into `args` as `exec -d` on the ddev path
+   *  (which needs an absolute container path); the host path applies it as a cwd. */
+  cwd: string;
+}
+
+/**
+ * `files` (workspace-relative) rewritten relative to the framework's project root, dropping
+ * any that lands OUTSIDE it.
+ *
+ * A `../` path is precisely the "Total: 0 tests in 0 files" failure this whole scoping exists
+ * to prevent — a runner rejects a path outside its own testDir and then exits non-zero with
+ * nothing run, which is indistinguishable from a failing test. Dropping is the honest answer;
+ * the caller reports what it dropped.
+ */
+export function scopeToRoot(files: string[], root: string): string[] {
+  if (!root) return files;
+  const scoped: string[] = [];
+  for (const file of files) {
+    const rel = path.posix.relative(root, file);
+    if (rel === '' || rel === '..' || rel.startsWith('../')) continue;
+    scoped.push(rel);
+  }
+  return scoped;
+}
+
+/** `exec` plus, when the framework's root is a SUBDIRECTORY, the `--dir` that puts the runner
+ *  there. Absolute because a relative `--dir` exits 128 (measured, ddev v1.25.3), and omitted
+ *  entirely at the project root so the command is byte-identical to the one that shipped
+ *  before roots were resolved at all. */
+function ddevExecPrefix(root: string): string[] {
+  return root ? ['exec', '-d', `${DDEV_PROJECT_MOUNT}/${root}`] : ['exec'];
+}
+
 /**
  * The selective run command for ONLY the given test files (never the full
  * suite). `kind: 'ddev'` runs via ddevExec in the per-task runner ('ddev' is
  * prepended by the runner); `kind: 'host'` runs via execFile in the worktree.
- * Returns null when the framework cannot run a file-scoped subset (plain
- * package/composer test scripts would run the whole suite — forbidden).
+ *
+ * Runs from the framework's OWN project root (`opts.root`), not from the repo root. A repo
+ * whose test project is a subdirectory — config and node_modules under `test-playwright/`,
+ * nothing at the root — otherwise gets a runner that resolves no config and no framework
+ * install: measured, `ddev exec npx playwright test test-playwright/tests/x.spec.ts` lists 0
+ * tests and exits 1, while the same run with `-d /var/www/html/test-playwright` and a
+ * root-relative path lists 48 and exits 0.
+ *
+ * Returns null when the framework cannot run a file-scoped subset (plain package/composer test
+ * scripts would run the whole suite — forbidden), when no config file was found for it
+ * (`root: null`), or when no requested file lives inside its root.
  */
 export function buildSelectiveCommand(
   framework: TestFramework | null,
   files: string[],
-  opts: { ddev: boolean; ddevPlaywrightAddon: boolean },
-): { kind: 'ddev' | 'host'; args: string[] } | null {
+  opts: { ddev: boolean; ddevPlaywrightAddon: boolean; root?: string | null },
+): TestCommand | null {
   if (!framework || files.length === 0) return null;
+  // The addon owns its own working directory, so it keeps the workspace-relative paths it has
+  // always been handed. Not reproducible here, so deliberately left exactly as it was.
+  if (framework === 'playwright' && opts.ddev && opts.ddevPlaywrightAddon)
+    return { kind: 'ddev', args: ['playwright', 'test', ...files], cwd: '' };
+  if (opts.root === null) return null;
+  // undefined = a detect payload from before roots existed; the workspace root is what it meant.
+  const root = opts.root ?? '';
+  const scoped = scopeToRoot(files, root);
+  if (scoped.length === 0) return null;
+  const ddevPrefix = ddevExecPrefix(root);
   switch (framework) {
     case 'playwright':
-      if (opts.ddev && opts.ddevPlaywrightAddon)
-        return { kind: 'ddev', args: ['playwright', 'test', ...files] };
-      if (opts.ddev) return { kind: 'ddev', args: ['exec', 'npx', 'playwright', 'test', ...files] };
-      return { kind: 'host', args: ['npx', 'playwright', 'test', ...files] };
+      if (opts.ddev)
+        return {
+          kind: 'ddev',
+          args: [...ddevPrefix, 'npx', 'playwright', 'test', ...scoped],
+          cwd: root,
+        };
+      return { kind: 'host', args: ['npx', 'playwright', 'test', ...scoped], cwd: root };
     case 'cypress': {
-      const spec = ['run', '--spec', files.join(',')];
-      if (opts.ddev) return { kind: 'ddev', args: ['exec', 'npx', 'cypress', ...spec] };
-      return { kind: 'host', args: ['npx', 'cypress', ...spec] };
+      const spec = ['run', '--spec', scoped.join(',')];
+      if (opts.ddev)
+        return { kind: 'ddev', args: [...ddevPrefix, 'npx', 'cypress', ...spec], cwd: root };
+      return { kind: 'host', args: ['npx', 'cypress', ...spec], cwd: root };
     }
     case 'vitest':
-      if (opts.ddev) return { kind: 'ddev', args: ['exec', 'npx', 'vitest', 'run', ...files] };
-      return { kind: 'host', args: ['npx', 'vitest', 'run', ...files] };
+      if (opts.ddev)
+        return {
+          kind: 'ddev',
+          args: [...ddevPrefix, 'npx', 'vitest', 'run', ...scoped],
+          cwd: root,
+        };
+      return { kind: 'host', args: ['npx', 'vitest', 'run', ...scoped], cwd: root };
     case 'jest':
-      if (opts.ddev) return { kind: 'ddev', args: ['exec', 'npx', 'jest', ...files] };
-      return { kind: 'host', args: ['npx', 'jest', ...files] };
+      if (opts.ddev)
+        return { kind: 'ddev', args: [...ddevPrefix, 'npx', 'jest', ...scoped], cwd: root };
+      return { kind: 'host', args: ['npx', 'jest', ...scoped], cwd: root };
     case 'phpunit':
-      if (opts.ddev) return { kind: 'ddev', args: ['exec', 'vendor/bin/phpunit', ...files] };
-      return { kind: 'host', args: ['vendor/bin/phpunit', ...files] };
+      if (opts.ddev)
+        return { kind: 'ddev', args: [...ddevPrefix, 'vendor/bin/phpunit', ...scoped], cwd: root };
+      return { kind: 'host', args: ['vendor/bin/phpunit', ...scoped], cwd: root };
     case 'pytest':
-      if (opts.ddev) return { kind: 'ddev', args: ['exec', 'pytest', ...files] };
-      return { kind: 'host', args: ['pytest', ...files] };
+      if (opts.ddev) return { kind: 'ddev', args: [...ddevPrefix, 'pytest', ...scoped], cwd: root };
+      return { kind: 'host', args: ['pytest', ...scoped], cwd: root };
     case 'pkg-script':
     case 'composer-script':
       return null; // a plain test script runs the whole suite — never that
   }
+}
+
+/**
+ * The framework's ENUMERATE-ONLY form of the same command, or null when we have no measured
+ * one for it. Used to tell "the runner never started" apart from "the tests failed".
+ *
+ * Playwright only, deliberately. MEASURED against a live runner: `--list` exits 0 whenever at
+ * least ONE requested spec enumerates (one real plus one nonexistent spec listed 19 tests and
+ * exited 0) and 1 when none does — the broken invocation above, and a spec the tester reported
+ * but never wrote. That makes the EXIT CODE the entire classifier, with no output parsing and
+ * so nothing to break when the runner rewords itself. Every other framework returns null and
+ * keeps the previous behaviour verbatim; adding one means measuring its list mode the same way
+ * first, not assuming it behaves like this one.
+ *
+ * Not offered for the ddev-playwright addon, whose flag pass-through is unmeasured.
+ */
+export function buildCollectCommand(
+  framework: TestFramework | null,
+  files: string[],
+  opts: { ddev: boolean; ddevPlaywrightAddon: boolean; root?: string | null },
+): TestCommand | null {
+  if (framework !== 'playwright') return null;
+  if (opts.ddev && opts.ddevPlaywrightAddon) return null;
+  const run = buildSelectiveCommand(framework, files, opts);
+  if (!run) return null;
+  const subcommand = run.args.indexOf('test');
+  if (subcommand < 0) return null;
+  return {
+    ...run,
+    args: [...run.args.slice(0, subcommand + 1), '--list', ...run.args.slice(subcommand + 1)],
+  };
 }
 
 async function readJson(file: string): Promise<Record<string, unknown> | null> {
@@ -178,50 +284,88 @@ async function anyExists(dir: string, names: string[]): Promise<boolean> {
   return false;
 }
 
-interface InfraScan {
+/** Config files that identify each framework's PROJECT ROOT. The same names the detection
+ *  below looks for at the workspace root, reused as the thing a subdirectory search matches —
+ *  so "detected" and "rooted at" can never disagree about what a playwright project is. The
+ *  two script pseudo-frameworks are the repo's own package/composer manifests and are rooted
+ *  at the workspace by construction. */
+const FRAMEWORK_CONFIGS: Record<TestFramework, string[]> = {
+  playwright: ['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs'],
+  cypress: ['cypress.config.ts', 'cypress.config.js'],
+  vitest: ['vitest.config.ts', 'vitest.config.js', 'vitest.config.mts'],
+  jest: ['jest.config.js', 'jest.config.ts', 'jest.config.mjs', 'jest.config.cjs'],
+  phpunit: ['phpunit.xml', 'phpunit.xml.dist'],
+  pytest: ['pytest.ini'],
+  'pkg-script': [],
+  'composer-script': [],
+};
+
+/** Directories a subdirectory search never descends into: installed dependencies and build
+ *  output both carry other projects' configs. */
+const ROOT_SEARCH_SKIP = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage']);
+
+/**
+ * Repo-relative directory holding this framework's config: `''` when it is at the workspace
+ * root, the subdirectory name when it is one level down, `null` when there is none.
+ *
+ * Only ONE level down, and only reached when the root has no config — a config deeper than
+ * that belongs to a nested package rather than to the repo's test project, and for every
+ * framework detected BY its root config the search short-circuits on the first check, so this
+ * changes nothing for them. Entries are sorted so a repo with two candidates resolves the same
+ * way on every host.
+ */
+async function resolveFrameworkRoot(workspace: string, configs: string[]): Promise<string | null> {
+  if (configs.length === 0) return '';
+  if (await anyExists(workspace, configs)) return '';
+  const entries = await readdir(workspace, { withFileTypes: true }).catch(() => []);
+  const dirs = entries
+    .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !ROOT_SEARCH_SKIP.has(e.name))
+    .map((e) => e.name)
+    .sort();
+  for (const dir of dirs) {
+    if (await anyExists(path.join(workspace, dir), configs)) return dir;
+  }
+  return null;
+}
+
+export interface InfraScan {
   frameworks: TestFramework[];
   primary: TestFramework | null;
+  roots: Record<string, string | null>;
   testDirs: string[];
 }
 
 /** Deterministic test-infrastructure scan (the legacy Step-1 table, no LLM). */
-async function scanTestInfra(workspace: string): Promise<InfraScan> {
+export async function scanTestInfra(workspace: string): Promise<InfraScan> {
   const frameworks: TestFramework[] = [];
   const testDirs: string[] = [];
 
+  // Detection is deliberately UNCHANGED: a marker directory still detects playwright/cypress
+  // on its own. Requiring a resolvable config here would newly skip the whole step on repos it
+  // runs on today; the conservative failure is to still write the tests and decline to claim we
+  // ran them (see the null-command branch in apply).
   if (
-    (await anyExists(workspace, [
-      'playwright.config.ts',
-      'playwright.config.js',
-      'playwright.config.mjs',
-    ])) ||
+    (await anyExists(workspace, FRAMEWORK_CONFIGS.playwright)) ||
     (await pathExists(path.join(workspace, 'test-playwright')))
   ) {
     frameworks.push('playwright');
   }
   if (
-    (await anyExists(workspace, ['cypress.config.ts', 'cypress.config.js'])) ||
+    (await anyExists(workspace, FRAMEWORK_CONFIGS.cypress)) ||
     (await pathExists(path.join(workspace, 'cypress')))
   ) {
     frameworks.push('cypress');
   }
-  if (await anyExists(workspace, ['vitest.config.ts', 'vitest.config.js', 'vitest.config.mts'])) {
+  if (await anyExists(workspace, FRAMEWORK_CONFIGS.vitest)) {
     frameworks.push('vitest');
   }
-  if (
-    await anyExists(workspace, [
-      'jest.config.js',
-      'jest.config.ts',
-      'jest.config.mjs',
-      'jest.config.cjs',
-    ])
-  ) {
+  if (await anyExists(workspace, FRAMEWORK_CONFIGS.jest)) {
     frameworks.push('jest');
   }
-  if (await anyExists(workspace, ['phpunit.xml', 'phpunit.xml.dist'])) {
+  if (await anyExists(workspace, FRAMEWORK_CONFIGS.phpunit)) {
     frameworks.push('phpunit');
   }
-  if (await pathExists(path.join(workspace, 'pytest.ini'))) {
+  if (await anyExists(workspace, FRAMEWORK_CONFIGS.pytest)) {
     frameworks.push('pytest');
   }
 
@@ -240,7 +384,25 @@ async function scanTestInfra(workspace: string): Promise<InfraScan> {
     if (await pathExists(path.join(workspace, dir))) testDirs.push(dir);
   }
 
-  return { frameworks, primary: frameworks[0] ?? null, testDirs };
+  const roots: Record<string, string | null> = {};
+  for (const framework of frameworks) {
+    roots[framework] = await resolveFrameworkRoot(workspace, FRAMEWORK_CONFIGS[framework]);
+  }
+
+  return { frameworks, primary: frameworks[0] ?? null, roots, testDirs };
+}
+
+/** The project root of the framework the selective run will use. `undefined` in the payload
+ *  means it predates the field, and the workspace root is what it meant — the command it
+ *  replays is then the one it originally built. */
+export function primaryFrameworkRoot(detected: {
+  primary: TestFramework | null;
+  frameworkRoots?: Record<string, string | null>;
+}): string | null {
+  if (!detected.primary) return null;
+  const roots = detected.frameworkRoots;
+  if (!roots || !(detected.primary in roots)) return '';
+  return roots[detected.primary] ?? null;
 }
 
 async function resolveWorkspace(ctx: StepContext): Promise<{ workspace: string; sandbox: string }> {
@@ -306,6 +468,46 @@ export function actionInstructions(): string[] {
     '6. If a category does not apply, skip it — do not invent work; report zero changes honestly.',
   ];
 }
+
+/** Run one built command through whichever path its `kind` names, so the selective run and the
+ *  enumerate-only classifier below cannot diverge in how they reach the runner. The ddev branch
+ *  requires a resolved `repoSubpath`; the caller checks that before it gets here. */
+async function runTestCommand(
+  ctx: StepContext,
+  d: TestManagementDetect,
+  cmd: TestCommand,
+  timeoutMs: number,
+): Promise<{ exitCode: number; command: string; output: string }> {
+  const joined = cmd.args.join(' ');
+  if (cmd.kind === 'ddev') {
+    const handle = runnerHandleForTask(ctx.taskId, d.repoSubpath!);
+    const res = await ddevExec(handle, joined, { timeoutMs });
+    return { exitCode: res.exitCode, command: `ddev ${joined}`, output: res.output.slice(-4000) };
+  }
+  const [bin, ...rest] = cmd.args;
+  try {
+    const { stdout, stderr } = await exec(bin!, rest, {
+      cwd: path.join(d.workspacePath, cmd.cwd),
+      timeout: timeoutMs,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return { exitCode: 0, command: joined, output: `${stdout}${stderr}`.slice(-4000) };
+  } catch (err) {
+    // execFile reports a spawn failure as a STRING code (ENOENT, ETIMEDOUT) and a non-zero exit
+    // as a number, so anything non-numeric becomes a plain 1 rather than leaking into a field
+    // every caller compares against 0.
+    const e = err as { stdout?: string; stderr?: string; code?: unknown };
+    return {
+      exitCode: typeof e.code === 'number' ? e.code : 1,
+      command: joined,
+      output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-4000),
+    };
+  }
+}
+
+/** Enumerating is cheap by construction — it loads the config and the spec files and stops —
+ *  so it gets a fraction of the run's budget rather than sharing it. */
+const COLLECT_TIMEOUT_MS = 120_000;
 
 /** The fix-loop diagnosis handed to the implementer once the tester's own passes are
  *  spent. Carries the same three-way framing the tester agent was given, so the
@@ -393,6 +595,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       sandboxWorktreePath: sandbox,
       frameworks: infra.frameworks,
       primary: infra.primary,
+      frameworkRoots: infra.roots,
       testDirs: infra.testDirs,
       ddev,
       ddevPlaywrightAddon,
@@ -406,10 +609,19 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
   },
 
   form(_ctx, detected): FormSchema {
+    // Name where each framework is rooted: a project the runner cannot find is otherwise
+    // indistinguishable here from one that works, and this form is where a human would look.
+    const infra = detected.frameworks
+      .map((f) => {
+        const root = detected.frameworkRoots?.[f];
+        if (root === null) return `${f} (no config file found)`;
+        return root ? `${f} (in ${root}/)` : f;
+      })
+      .join(', ');
     return {
       title: 'Phase 5b: Test management',
       description: [
-        `Detected test infrastructure: ${detected.frameworks.join(', ')}`,
+        `Detected test infrastructure: ${infra}`,
         detected.testDirs.length > 0 ? `Test directories: ${detected.testDirs.join(', ')}` : '',
         detected.ddev
           ? `DDEV project — selective runs execute in the per-task DDEV environment${detected.ddevPlaywrightAddon ? ' (playwright addon present)' : ''}.`
@@ -580,39 +792,32 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
     const changed = acc.created.size + acc.updated.size + acc.deleted.size > 0;
     let testRun: TestRunResult | null = null;
     let testsPassed: boolean | null = null;
+    let degradedNote: string | undefined;
 
     if (values.runTests !== false && changed) {
       const targets = filterTestFiles([...acc.created, ...acc.updated]);
-      const cmd = buildSelectiveCommand(d.primary, targets, {
-        ddev: d.ddev,
-        ddevPlaywrightAddon: d.ddevPlaywrightAddon,
-      });
+      const root = primaryFrameworkRoot(d);
+      const buildOpts = { ddev: d.ddev, ddevPlaywrightAddon: d.ddevPlaywrightAddon, root };
+      const cmd = buildSelectiveCommand(d.primary, targets, buildOpts);
       // Idempotent no-op when the runtime is already up; guards against the idle
       // reaper having reclaimed it during the 07→07c chain.
       if (cmd !== null) await ensureAppServing(ctx);
       if (cmd === null) {
-        testRun = {
-          ran: false,
-          passed: false,
-          command: '',
-          output:
-            targets.length === 0
-              ? 'no runnable test files among the changes — selective run skipped'
-              : 'selective run unsupported for plain test scripts (would run the full suite) — skipped',
-        };
+        // Four reasons, kept distinct: two are routine, and two mean the tests were WRITTEN and
+        // could not be run — a caveat a human has to see rather than a quiet skip.
+        const scriptOnly = d.primary === 'pkg-script' || d.primary === 'composer-script';
+        const output =
+          targets.length === 0
+            ? 'no runnable test files among the changes — selective run skipped'
+            : scriptOnly
+              ? 'selective run unsupported for plain test scripts (would run the full suite) — skipped'
+              : root === null
+                ? `no ${d.primary} configuration file was found in the workspace, so the related tests could not be run — they were written but never executed`
+                : `none of the changed test files are inside the ${d.primary} project root (${root}/), so the related tests could not be run — they were written but never executed`;
+        testRun = { ran: false, passed: false, command: '', output };
         testsPassed = null;
-      } else if (cmd.kind === 'ddev' && d.repoSubpath) {
-        await ctx.emitProgress('Running related tests in the DDEV environment…');
-        const handle = runnerHandleForTask(ctx.taskId, d.repoSubpath);
-        const res = await ddevExec(handle, cmd.args.join(' '), { timeoutMs: 600_000 });
-        testRun = {
-          ran: true,
-          passed: res.exitCode === 0,
-          command: `ddev ${cmd.args.join(' ')}`,
-          output: res.output.slice(-4000),
-        };
-        testsPassed = testRun.passed;
-      } else if (cmd.kind === 'ddev') {
+        if (targets.length > 0 && !scriptOnly) degradedNote = output;
+      } else if (cmd.kind === 'ddev' && !d.repoSubpath) {
         // DDEV command but no per-task runner subpath — host-side ddev is the
         // broken DooD path, so skip rather than fail confusingly.
         testRun = {
@@ -623,30 +828,46 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         };
         testsPassed = null;
       } else {
-        await ctx.emitProgress('Running related tests…');
-        const [bin, ...rest] = cmd.args;
-        try {
-          const { stdout, stderr } = await exec(bin!, rest, {
-            cwd: d.workspacePath,
-            timeout: 600_000,
-            maxBuffer: 10 * 1024 * 1024,
-          });
-          testRun = {
-            ran: true,
-            passed: true,
-            command: cmd.args.join(' '),
-            output: `${stdout}${stderr}`.slice(-4000),
-          };
-        } catch (err) {
-          const e = err as { stdout?: string; stderr?: string };
-          testRun = {
-            ran: true,
-            passed: false,
-            command: cmd.args.join(' '),
-            output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-4000),
-          };
-        }
+        await ctx.emitProgress(
+          cmd.kind === 'ddev'
+            ? 'Running related tests in the DDEV environment…'
+            : 'Running related tests…',
+        );
+        const run = await runTestCommand(ctx, d, cmd, 600_000);
+        testRun = {
+          ran: true,
+          passed: run.exitCode === 0,
+          command: run.command,
+          output: run.output,
+        };
         testsPassed = testRun.passed;
+
+        // A failed run is only worth a fix agent if the runner actually ran something. Ask it to
+        // ENUMERATE the same files: a non-zero exit there means it could enumerate NONE of them
+        // — a harness it cannot load, or files the tester reported but never wrote — and no fix
+        // pass can act on that. Skipped when the run passed, so the green path costs nothing.
+        //
+        // From the FIRST fix pass onward, never from the tester's own pass: a spec the tester
+        // just wrote with a syntax error also enumerates as nothing, and that IS the fixer's to
+        // repair. Giving it one pass keeps that repair while capping the failure this exists for
+        // — the observed task spent 5 passes and a whole round back through implementation on a
+        // playwright install its command never reached.
+        const collect =
+          testRun.passed || args.iteration === 0
+            ? null
+            : buildCollectCommand(d.primary, targets, buildOpts);
+        if (collect) {
+          const listed = await runTestCommand(ctx, d, collect, COLLECT_TIMEOUT_MS);
+          if (listed.exitCode !== 0) {
+            testRun = { ...testRun, ran: false };
+            testsPassed = null;
+            degradedNote =
+              `The ${d.primary} runner could not enumerate any of the tests this step wrote, so ` +
+              `none of them were executed and further fix passes were stood down. The suite is ` +
+              `NOT known to be green.\n\nRun: ${testRun.command}\nEnumerate: ${listed.command}` +
+              `\n\n${listed.output}`;
+          }
+        }
       }
     }
 
@@ -657,6 +878,8 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         updated: acc.updated.size,
         deleted: acc.deleted.size,
         testsPassed,
+        frameworkRoot: primaryFrameworkRoot(d),
+        notRun: degradedNote !== undefined,
         iteration: args.iteration,
       },
       'test management pass complete',
@@ -670,6 +893,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       testRun,
       testsPassed,
       fixPasses,
+      ...(degradedNote ? { degradedNote } : {}),
     };
   },
 };

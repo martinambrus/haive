@@ -56,6 +56,13 @@ const log = logger.child({ module: 'ddev-runner' });
 
 const REPO_VOLUME = 'haive_repos';
 
+/** Where DDEV mounts the PROJECT ROOT inside its own containers, whatever the project's
+ *  type or docroot — the same path `sandbox/ide-settings.ts` maps to /workspace. Exported
+ *  because `ddev exec --dir` needs an ABSOLUTE container path: a relative one exits 128
+ *  (measured against ddev v1.25.3), so a caller that must run a command in a subdirectory
+ *  of the project has to name this. */
+export const DDEV_PROJECT_MOUNT = '/var/www/html';
+
 /** Worker-side root of the haive_repos volume (same mount the runner sees at
  *  /repos). Used to write the per-task xdebug ini straight into the worktree. */
 const XDEBUG_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';

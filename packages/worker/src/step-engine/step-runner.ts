@@ -368,12 +368,20 @@ const DEGRADED_SOURCES = new Set(['stub', 'salvage', 'fallback']);
  *  and it degraded to a stub; null otherwise. Keys on the step's own `source`
  *  provenance (already emitted by most LLM steps) and requires the model to have
  *  actually produced output, so a legitimately skipped/absent LLM is never flagged. */
-function computeDegradedNote(
+export function computeDegradedNote(
   stepDef: StepDefinition,
   llmOutput: unknown,
   agentMiningResults: AgentMiningResult[] | undefined,
   output: unknown,
 ): string | null {
+  // An explicit note is the step SAYING it degraded, not this function INFERRING it from the
+  // model's provenance, so it skips the preconditions those inferences need — and is therefore
+  // available to a deterministic branch (08b's "the test runner enumerated nothing", which is
+  // about the runner and not about any AI output).
+  if (output !== null && typeof output === 'object') {
+    const stated = (output as { degradedNote?: unknown }).degradedNote;
+    if (typeof stated === 'string' && stated.trim() !== '') return stated.trim();
+  }
   if (!stepDef.llm && !stepDef.agentMining) return null;
   const llmProduced =
     llmOutput !== undefined &&
