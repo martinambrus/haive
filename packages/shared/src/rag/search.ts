@@ -1,6 +1,17 @@
-import { type RagConnection, KNOWLEDGE_SOURCE_TYPES, RAG_TABLE } from './connection.js';
+import {
+  type RagConnection,
+  KNOWLEDGE_SOURCE_TYPES,
+  RAG_TABLE,
+  TASK_SOURCE_TYPE,
+} from './connection.js';
 import { vectorLiteral } from './embed.js';
 import { extractIdentifiers, identifierTsQuery } from './identifiers.js';
+
+/** Keeps the effort estimator's per-task embeddings out of every candidate CTE — see
+ *  TASK_SOURCE_TYPE. A literal from our own constant, not a bind parameter, because the
+ *  param numbering in both branches below is positional and hand-computed; adding one
+ *  more placeholder would shift the facet, boost, repository and identifier offsets. */
+const EXCLUDE_TASK_ROWS = `source_type <> '${TASK_SOURCE_TYPE}'`;
 
 /** Tunable knobs for hybrid retrieval. Defaults are conservative and chosen so
  *  a dense-strong / lexical-zero code hit still clears the gate — the exact
@@ -391,7 +402,7 @@ export async function ragHybridSearch(
     // repository predicates. Local search passes repositoryId (per-repo isolation);
     // the global KB passes the facet filter. They are mutually exclusive today but
     // combine cleanly (AND) if both are ever supplied.
-    const conds = [fc?.core, repoCond].filter(Boolean) as string[];
+    const conds = [fc?.core, repoCond, EXCLUDE_TASK_ROWS].filter(Boolean) as string[];
     const denseWhere = conds.length ? `WHERE ${conds.join('\n          AND ')}` : '';
     const lexExtra = conds.map((c) => `\n          AND ${c}`).join('');
     // The identifier ranker is a THIRD input to the fusion, appended after every
@@ -529,9 +540,11 @@ export async function ragHybridSearch(
     const fc = filter ? buildFacetClause(filter, 4) : null;
     const boostParamJ = 3 + (fc?.params.length ?? 0) + 1;
     const repoParamJ = repositoryId ? boostParamJ + 1 : 0;
-    const conds = [fc?.core, repositoryId ? `repository_id = $${repoParamJ}` : null].filter(
-      Boolean,
-    ) as string[];
+    const conds = [
+      fc?.core,
+      repositoryId ? `repository_id = $${repoParamJ}` : null,
+      EXCLUDE_TASK_ROWS,
+    ].filter(Boolean) as string[];
     const lexExtra = conds.map((c) => ` AND ${c}`).join('');
     rows = (await conn.pg.unsafe(
       `

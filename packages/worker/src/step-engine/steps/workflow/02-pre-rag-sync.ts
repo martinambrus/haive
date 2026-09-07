@@ -23,6 +23,8 @@ interface RagSyncDetect {
   kbFileCount: number;
   codeFileCount: number;
   ollamaReachable: boolean;
+  /** The embedding endpoint was re-derived; this repo's existing rows are hash vectors. */
+  ollamaUrlDerived: boolean;
 }
 
 interface RagSyncApply {
@@ -83,6 +85,7 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
       kbFileCount,
       codeFileCount,
       ollamaReachable,
+      ollamaUrlDerived: resolved.ollamaUrlDerived,
     };
   },
 
@@ -139,6 +142,7 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
       projectName: detected.projectName,
       ollamaReachable: detected.ollamaReachable,
       codeCollect: detected.codeCollect,
+      ollamaUrlDerived: detected.ollamaUrlDerived,
     });
   },
 };

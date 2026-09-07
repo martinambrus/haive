@@ -1,7 +1,8 @@
-import { and, inArray, isNull, notInArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { CONFIG_KEYS, configService, logger } from '@haive/shared';
+import { CONFIG_KEYS, configService, logger, type OnboardingToolingMirror } from '@haive/shared';
 import { withGlobalKb } from '@haive/shared/global-kb';
+import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { defaultDockerRunner } from './sandbox/docker-runner.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
 
@@ -18,6 +19,68 @@ export async function runDataMigrations(db: Database): Promise<void> {
   await supersedePhantomAgentArtifacts(db);
   await dropHeadingOnlyGlobalKbChunks(db);
   await clearPrunedSandboxImageState(db);
+  await flagHashIndexedRestoredRepos(db);
+}
+
+/** Flag repos whose RAG index was built with no embedding endpoint, so the query side
+ *  holds them lexical-only until the indexer replaces those vectors.
+ *
+ *  `ollamaUrl` is stripped from the committed `.haive-data/tooling.json` as
+ *  machine-specific, and until `resolveToolingOllamaUrl` existed nothing re-derived it on
+ *  a machine that RESTORED that mirror. `useOllama` was therefore false for every sync of
+ *  such a repo and every chunk was hash-embedded — MEASURED on one: all 9,278 chunks, best
+ *  dense similarity for a real query embedding 0.0707 against 0.7273 on its non-restored
+ *  twin.
+ *
+ *  A NEW restore no longer needs this: `02-pre-rag-sync` (step index 2) re-derives the URL,
+ *  forces the re-embed and stamps the flag itself, and it runs before the first step that
+ *  can issue a `rag_search`. This exists for repos ALREADY indexed that way, where the
+ *  re-derivation would otherwise let the api embed a real query vector against hash rows —
+ *  which ranks worse than not using the dense half at all, because the 0.7-weighted dense
+ *  half then contributes a random ordering.
+ *
+ *  Idempotent by construction: it only ever stamps a repo that has NO degradation record,
+ *  and the flag is cleared by a sync that embedded for real. Once cleared it is never
+ *  re-stamped, because the clearing sync also replaced the `chunk_hash` values this reads.
+ *  `ragEmbedLexicalOnly` repos are skipped — that is a decision a person made, and their
+ *  hash rows are already excluded from the dense half. */
+async function flagHashIndexedRestoredRepos(db: Database): Promise<void> {
+  try {
+    const repos = await db.query.repositories.findMany({
+      columns: {
+        id: true,
+        onboardingTooling: true,
+        ragEmbedDegradedAt: true,
+        ragEmbedLexicalOnly: true,
+      },
+    });
+
+    for (const repo of repos) {
+      if (repo.ragEmbedDegradedAt || repo.ragEmbedLexicalOnly) continue;
+      const tooling = (repo.onboardingTooling as OnboardingToolingMirror | null)?.tooling;
+      if (!tooling) continue;
+      const { ragMode } = tooling as { ragMode?: string };
+      if (!ragMode || ragMode === 'none') continue;
+      if (!resolveToolingOllamaUrl(tooling).derived) continue;
+
+      await db
+        .update(schema.repositories)
+        .set({
+          ragEmbedDegradedAt: new Date(),
+          ragEmbedDegradedReason:
+            'Indexed without an embedding endpoint (the URL was stripped from the committed onboarding mirror). The next RAG sync re-embeds it.',
+        })
+        .where(eq(schema.repositories.id, repo.id));
+      log.warn(
+        { repositoryId: repo.id },
+        'repo indexed without an embedding endpoint; held lexical-only until re-embedded',
+      );
+    }
+  } catch (err) {
+    // Boot path: a failure here must not stop the worker starting. The cost of skipping
+    // is a degraded ranking, not a broken one.
+    log.error({ err }, 'failed to flag hash-indexed restored repos');
+  }
 }
 
 /** Reconcile `cli_providers` sandbox-image state against the images this host actually

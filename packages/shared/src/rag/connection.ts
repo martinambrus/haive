@@ -1,6 +1,7 @@
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
 import { type Database } from '@haive/database';
+import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { logger } from '../logger/index.js';
 
 const log = logger.child({ module: 'rag-connection' });
@@ -14,6 +15,54 @@ export const RAG_TABLE = 'ai_rag_embeddings';
  *  They have no counter in `logRagQuery`, so one surfacing in an agent's results
  *  would be an invisible hit. */
 export const KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning'] as const;
+
+/** The `source_type` of those per-task rows. Declared here rather than in the worker
+ *  (`workflow/_task-embedding.ts` imports it from here) so the writer and the search
+ *  that must exclude them cannot drift.
+ *
+ *  `ragHybridSearch` filters them out of every candidate CTE. They are keyed by task
+ *  UUID rather than a repo file, so they are never an answer to a retrieval query —
+ *  MEASURED before the filter existed: on a repo with 2 such rows they took ranks 1
+ *  and 2 of EVERY page, consuming 2 of a `top_k` of 8-12 and appearing in no column
+ *  of the RAG panel, whose per-type counts consequently never summed to `hit_count`.
+ *  The effort estimator does not go through this path — it reads them with its own
+ *  `source_type = 'task'` query — so excluding them here costs it nothing.
+ *
+ *  Written as "not task" rather than an allow-list of the retrievable four: the
+ *  invariant is that these rows are not retrievable content, and an allow-list would
+ *  silently drop any source type added later. */
+export const TASK_SOURCE_TYPE = 'task';
+
+/** Resolve the embedding endpoint from a stored tooling object, re-deriving it when the
+ *  committed mirror dropped it.
+ *
+ *  `ollamaUrl` is one of ONBOARDING_TOOLING_INFRA_KEYS, stripped from
+ *  `.haive-data/tooling.json` at 12-post-onboarding because it is machine-specific — but
+ *  `ollamaMode` survives, and for 'internal' the URL is a docker service name that is the
+ *  same on every install. `04-tooling-infrastructure` already derives it that way on the
+ *  origin machine; nothing did so on a machine that RESTORED the mirror, so `useOllama`
+ *  was false and every chunk was hash-embedded. MEASURED on such a repo: all 9,278 chunks
+ *  were hash vectors, best dense similarity for a real query embedding 0.0707 against
+ *  0.7273 on its non-restored twin, and identical-content chunks across the two
+ *  correlating at ~0.01.
+ *
+ *  `derived` is the load-bearing half of the answer, not a diagnostic: it is true exactly
+ *  when the stored tooling had no URL, which means every prior sync that read this tooling
+ *  ran without an endpoint and therefore hashed. It is the only provenance signal for an
+ *  index built out of hash vectors — nothing is recorded per row — so the indexer uses it
+ *  to force one re-embed rather than leaving a poisoned store that content hashing would
+ *  otherwise preserve forever.
+ *
+ *  'external' carries a user-typed, genuinely machine-specific URL and is NOT re-derived. */
+export function resolveToolingOllamaUrl(tooling: { ollamaUrl?: unknown; ollamaMode?: unknown }): {
+  url: string | null;
+  derived: boolean;
+} {
+  const stored = typeof tooling.ollamaUrl === 'string' ? tooling.ollamaUrl : '';
+  if (stored) return { url: stored, derived: false };
+  if (tooling.ollamaMode === 'internal') return { url: IN_STACK_OLLAMA_URL, derived: true };
+  return { url: null, derived: false };
+}
 
 export type RagMode = 'internal' | 'external' | 'ddev' | 'none';
 

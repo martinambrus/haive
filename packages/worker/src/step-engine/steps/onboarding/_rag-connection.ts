@@ -13,7 +13,12 @@ import {
 // path can reuse them without importing the worker. Re-exported here so
 // existing worker imports keep resolving unchanged. The schema-creation,
 // dedup, and cleanup helpers below are populate/cleanup-side and stay worker-local.
-export { RAG_TABLE, ragDatabaseName, resolveRagConnection } from '@haive/shared/rag';
+export {
+  RAG_TABLE,
+  ragDatabaseName,
+  resolveRagConnection,
+  resolveToolingOllamaUrl,
+} from '@haive/shared/rag';
 export type { RagMode, RagToolingPrefs, RagConnection } from '@haive/shared/rag';
 
 const log = logger.child({ module: 'rag-connection' });

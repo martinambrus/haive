@@ -13,11 +13,13 @@ import {
 } from '@haive/shared/knowledge-paths';
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
+import { gitRun } from '../../../repo/git-push.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import { collectCodeFiles, type CodeCollectOptions } from '../onboarding/_rag-collect.js';
 import {
   resolveRagConnection,
+  resolveToolingOllamaUrl,
   ensureRagSchema,
   RAG_TABLE,
   type RagMode,
@@ -84,6 +86,44 @@ export async function collectKbFiles(repo: string): Promise<string[]> {
 export { collectCodeFiles };
 export type { CodeCollectOptions };
 
+/** The paths a scan of `scanRoot` structurally CANNOT see, so that the orphan sweep
+ *  never reads their absence as a deletion.
+ *
+ *  `git worktree add` materialises TRACKED files only, so a worktree can never contain
+ *  the main checkout's untracked files. 11c scans the worktree while 02 scans the repo
+ *  root, and `source_path` is stored relative to whichever root was scanned — so the two
+ *  sets are directly comparable, and everything 02 indexed from an untracked file looked
+ *  orphaned to 11c. MEASURED: a repo whose `.haive-data/knowledge_base/` was never
+ *  committed had all 41 of its `kb` chunks deleted on the first 11c run, while the 7 files
+ *  still sat on disk at the repo root.
+ *
+ *  Keyed on TRACKEDNESS, not on presence: a tracked file deleted on the branch is absent
+ *  from the worktree AND absent from this set, so real deletions still propagate. That is
+ *  what a plain union of the two roots would have broken — the repo root still holds the
+ *  pre-merge copy.
+ *
+ *  Fail-closed like `filterUntracked` in cli-exec/secret-mask.ts: when git cannot answer,
+ *  protect everything found at the repo root. A stale row is recoverable, a deleted one is
+ *  not. Empty (and free) whenever the scan root IS the repo root, which is 02's case. */
+export async function resolveSweepProtectedPaths(
+  repoRoot: string,
+  scanRoot: string,
+  codeCollect: CodeCollectOptions,
+): Promise<ReadonlySet<string>> {
+  if (path.resolve(repoRoot) === path.resolve(scanRoot)) return new Set();
+
+  const rootFiles = [
+    ...(await collectKbFiles(repoRoot)),
+    ...(await collectCodeFiles(repoRoot, codeCollect)),
+  ];
+
+  const ls = await gitRun(scanRoot, ['ls-files', '-z']);
+  if (ls.code !== 0) return new Set(rootFiles);
+
+  const tracked = new Set(ls.stdout.split('\0').filter(Boolean));
+  return new Set(rootFiles.filter((rel) => !tracked.has(rel)));
+}
+
 export interface RagSyncResult {
   performed: boolean;
   reason: string;
@@ -110,6 +150,9 @@ export interface RagSyncResolved {
   /** The SAME collector inputs onboarding's 10-rag-populate used, so a workflow
    *  re-index collects the set onboarding indexed rather than its own. */
   codeCollect: CodeCollectOptions;
+  /** The embedding endpoint was re-derived from `ollamaMode` because the tooling this
+   *  resolved from carries none — see `resolveToolingOllamaUrl`. */
+  ollamaUrlDerived: boolean;
 }
 
 /** Map a persisted 04-tooling `tooling` object to RAG sync prefs. Shared by the
@@ -118,10 +161,17 @@ export function toRagPrefs(t: Record<string, unknown>): RagToolingPrefs {
   return {
     ragMode: ((t.ragMode as string) ?? 'none') as RagMode,
     ragConnectionString: (t.ragConnectionString as string) || null,
-    ollamaUrl: (t.ollamaUrl as string) || null,
+    ollamaUrl: resolveToolingOllamaUrl(t).url,
     embeddingModel: (t.embeddingModel as string) || null,
     embeddingDimensions: typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
   };
+}
+
+/** True when this repo's stored tooling carries no embedding endpoint of its own, so the
+ *  URL above was re-derived — which means every earlier sync hash-embedded. See
+ *  `resolveToolingOllamaUrl`. */
+export function ragOllamaUrlWasDerived(t: Record<string, unknown>): boolean {
+  return resolveToolingOllamaUrl(t).derived;
 }
 
 /** Resolve the repo's RAG prefs + project name. Prefers the repo-level
@@ -143,6 +193,7 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
   const repositoryId = taskRow?.repositoryId ?? null;
 
   let ragPrefs: RagToolingPrefs | null = null;
+  let ollamaUrlDerived = false;
   let projectName = 'default';
   // The per-repo scope deny list is authoritative and lives on the repository
   // row, so it is available even when no onboarding task survives.
@@ -164,6 +215,7 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
       toolingMirror.tooling
     ) {
       ragPrefs = toRagPrefs(toolingMirror.tooling);
+      ollamaUrlDerived = ragOllamaUrlWasDerived(toolingMirror.tooling);
     }
     if (envMirror?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION) {
       const p = (envMirror.envDetectData as { project?: { name?: string } } | undefined)?.project;
@@ -188,6 +240,7 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
         if (toolingPrev?.output) {
           const o = toolingPrev.output as { tooling?: Record<string, unknown> };
           ragPrefs = toRagPrefs(o.tooling ?? {});
+          ollamaUrlDerived = ragOllamaUrlWasDerived(o.tooling ?? {});
         }
       }
 
@@ -225,6 +278,7 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
     ragToolingPrefs: ragPrefs,
     projectName,
     codeCollect: { exclude, selectedDirs, extensionSet },
+    ollamaUrlDerived,
   };
 }
 
@@ -239,6 +293,13 @@ export interface RunRagIndexOpts {
    *  counted with — a narrower set here than at detect time means the orphan
    *  sweep below deletes the difference. */
   codeCollect: CodeCollectOptions;
+  /** Indexed paths this scan root cannot see, from `resolveSweepProtectedPaths`.
+   *  The orphan sweep skips them instead of reading their absence as a deletion.
+   *  Omitted by a repo-root scan, where every indexed path is in fact visible. */
+  sweepProtectedPaths?: ReadonlySet<string>;
+  /** From `resolveRagSyncPrefs`: the endpoint above had to be re-derived because the
+   *  stored tooling carried none, so this repo's existing rows are hash vectors. */
+  ollamaUrlDerived?: boolean;
 }
 
 const EMPTY_RESULT = (reason: string): RagSyncResult => ({
@@ -260,7 +321,7 @@ export async function runRagIndexSync(
   ctx: StepContext,
   opts: RunRagIndexOpts,
 ): Promise<RagSyncResult> {
-  const { repoPath, prefs, projectName, ollamaReachable, codeCollect } = opts;
+  const { repoPath, prefs, projectName, ollamaReachable, codeCollect, sweepProtectedPaths } = opts;
 
   await ctx.emitProgress('Connecting to RAG database...');
   const conn = await resolveRagConnection(prefs, ctx.db, projectName);
@@ -288,6 +349,35 @@ export async function runRagIndexSync(
       return EMPTY_RESULT('task has no repository_id');
     }
     const health = await loadRagEmbedHealth(ctx.db, repositoryId);
+
+    // A re-derived endpoint means the stored tooling never carried one, so every earlier
+    // sync of this repo ran with `useOllama` false and wrote hash vectors. Content hashing
+    // would preserve them forever — `chunk_hash` records the CONTENT, not how it was
+    // embedded, so an unchanged file is skipped no matter what its vector is. Null the
+    // hashes once so this run re-embeds for real, and mark the repo degraded meanwhile so
+    // the query side stays lexical-only rather than fusing a genuine query vector against
+    // hash rows (which ranks worse than not using the dense half at all). The existing
+    // `useOllama && health.degradedAt` clear below lifts it when this run finishes.
+    if (useOllama && opts.ollamaUrlDerived && !health.degradedAt && !health.lexicalOnly) {
+      const reset = await conn.pg.unsafe(
+        `UPDATE ${RAG_TABLE} SET chunk_hash = NULL
+          WHERE repository_id = $1 AND chunk_hash IS NOT NULL`,
+        [repositoryId],
+      );
+      if (reset.count > 0) {
+        ctx.logger.warn(
+          { repositoryId, rows: reset.count },
+          'embedding endpoint was re-derived; forcing a re-embed of hash-indexed chunks',
+        );
+        await recordRagEmbedDegraded(
+          ctx.db,
+          repositoryId,
+          'Indexed without an embedding endpoint (the URL was stripped from the committed onboarding mirror). Re-embedding now.',
+          ctx.logger,
+        );
+        health.degradedAt = new Date();
+      }
+    }
 
     let embedDevice: EmbedDevice = 'unknown';
     if (useOllama) {
@@ -553,12 +643,14 @@ export async function runRagIndexSync(
     // repository_id so orphans from prior tasks on the same repo also get cleaned.
     // EXCLUDE source_type='task' rows: those are the effort-estimator's task embeddings
     // (source_path = a task id, not a repo file), so they are never "orphaned files" and
-    // must not be swept here (task-time estimation v2.2).
+    // must not be swept here (task-time estimation v2.2). Also EXCLUDE the paths this scan
+    // root cannot see (`resolveSweepProtectedPaths`) — absence there is not a deletion.
     const orphanRows = (await conn.pg.unsafe(
       `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_type <> $2`,
       [repositoryId, TASK_EMBED_SOURCE_TYPE],
     )) as Array<{ source_path: string }>;
     for (const row of orphanRows) {
+      if (sweepProtectedPaths?.has(row.source_path)) continue;
       if (!processedPaths.has(row.source_path)) {
         const result = await conn.pg.unsafe(
           `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2`,

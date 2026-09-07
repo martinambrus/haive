@@ -11,6 +11,7 @@ import {
   embedQueryOrNull,
   ragHybridSearch,
   resolveRagConnection,
+  resolveToolingOllamaUrl,
   verifyRagToken,
   type RagConnection,
   type RagMode,
@@ -18,9 +19,9 @@ import {
   type RagToolingPrefs,
 } from '@haive/shared/rag';
 import {
-  confirmedStackValues,
   extractProjectFacets,
   resolveTaskStackContext,
+  stackProjectName,
   withGlobalKb,
   type ProjectFacetSet,
 } from '@haive/shared/global-kb';
@@ -30,21 +31,49 @@ import { HttpError, type AppEnv } from '../context.js';
 const log = logger.child({ module: 'rag-routes' });
 
 interface ToolingShape {
-  tooling?: {
-    ragMode?: string;
-    ragConnectionString?: string;
-    ollamaUrl?: string;
-    embeddingModel?: string;
-    embeddingDimensions?: number;
-  };
+  ragMode?: string;
+  ragConnectionString?: string;
+  ollamaUrl?: string;
+  /** Survives the mirror strip that drops `ollamaUrl`, so it is what re-derives it. */
+  ollamaMode?: string;
+  embeddingModel?: string;
+  embeddingDimensions?: number;
 }
 
-function prefsFromTooling(output: unknown): RagToolingPrefs {
-  const t = (output as ToolingShape | null)?.tooling ?? {};
+const RAG_PREFS_NONE: RagToolingPrefs = {
+  ragMode: 'none',
+  ragConnectionString: null,
+  ollamaUrl: null,
+  embeddingModel: null,
+  embeddingDimensions: 2560,
+};
+
+/** Takes the `tooling` OBJECT from `resolveTaskStackContext`, already unwrapped. */
+function prefsFromTooling(tooling: Record<string, unknown> | null): RagToolingPrefs {
+  const t = (tooling ?? {}) as ToolingShape;
+  const ragMode = (t.ragMode ?? 'none') as RagMode;
+  const ragConnectionString = t.ragConnectionString || null;
+
+  // `ragConnectionString` is one of ONBOARDING_TOOLING_INFRA_KEYS, stripped from the
+  // committed `.haive-data/tooling.json` because it is machine-specific — so a repo
+  // restored from that mirror declares `external`/`ddev` with no connection string, and
+  // `resolveRagConnection` THROWS rather than degrading. Reaching it would turn a silent
+  // zero-hit into a 500 on EVERY agent tool call. Degrade to 'none' instead: no local
+  // hits, the global KB still served, and the reason logged once per search.
+  if ((ragMode === 'external' || ragMode === 'ddev') && !ragConnectionString) {
+    log.warn(
+      { ragMode },
+      'rag connection string missing (stripped from the onboarding mirror); serving global KB only',
+    );
+    return RAG_PREFS_NONE;
+  }
+
   return {
-    ragMode: (t.ragMode ?? 'none') as RagMode,
-    ragConnectionString: t.ragConnectionString || null,
-    ollamaUrl: t.ollamaUrl || null,
+    ragMode,
+    ragConnectionString,
+    // Re-derived when the committed mirror stripped it; the repo is held lexical-only
+    // until the indexer has replaced the hash rows that absence produced.
+    ollamaUrl: resolveToolingOllamaUrl(t).url,
     embeddingModel: t.embeddingModel || null,
     embeddingDimensions: typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
   };
@@ -82,19 +111,13 @@ async function resolveTaskRagContext(
   facets: ProjectFacetSet;
   repositoryId: string | null;
 }> {
-  const { repositoryId, toolingOutput, envDetect, confirmedOutput } = await resolveTaskStackContext(
-    db,
-    taskId,
-  );
+  const ctx = await resolveTaskStackContext(db, taskId);
 
-  const projectName =
-    (envDetect as { data?: { project?: { name?: string } } } | null)?.data?.project?.name ??
-    'default';
   return {
-    prefs: prefsFromTooling(toolingOutput),
-    projectName,
-    facets: extractProjectFacets(envDetect, confirmedStackValues(confirmedOutput)),
-    repositoryId,
+    prefs: prefsFromTooling(ctx.tooling),
+    projectName: stackProjectName(ctx),
+    facets: extractProjectFacets(ctx.envDetectData, ctx.confirmed),
+    repositoryId: ctx.repositoryId,
   };
 }
 
@@ -280,19 +303,22 @@ ragRoutes.post('/search', async (c) => {
     try {
       conn = await resolveRagConnection(prefs, db, projectName);
       if (conn) {
-        // Two ways to end up ranking on full text alone, and both must skip the
+        // Three ways to end up ranking on full text alone, and all must skip the
         // dense half rather than feed it a hash vector: the repo's owner accepted
-        // lexical-only after embeddings failed (its stored vectors are hashes), or
-        // this one query could not be embedded. A hash vector is noise, not a weak
-        // embedding — it can push a genuine lexical hit down the fused ranking.
-        const repoLexicalOnly = repositoryId
-          ? ((
-              await db.query.repositories.findFirst({
-                where: eq(schema.repositories.id, repositoryId),
-                columns: { ragEmbedLexicalOnly: true },
-              })
-            )?.ragEmbedLexicalOnly ?? false)
-          : false;
+        // lexical-only after embeddings failed (its stored vectors are hashes), the
+        // repo is currently DEGRADED (its store holds hash rows the indexer has not
+        // replaced yet), or this one query could not be embedded. A hash vector is
+        // noise, not a weak embedding — it can push a genuine lexical hit down the
+        // fused ranking, and a REAL query vector against hash rows is worse still,
+        // because the 0.7-weighted dense half then contributes a random ordering.
+        const repoRow = repositoryId
+          ? await db.query.repositories.findFirst({
+              where: eq(schema.repositories.id, repositoryId),
+              columns: { ragEmbedLexicalOnly: true, ragEmbedDegradedAt: true },
+            })
+          : null;
+        const repoLexicalOnly =
+          (repoRow?.ragEmbedLexicalOnly ?? false) || repoRow?.ragEmbedDegradedAt != null;
         const queryVec = repoLexicalOnly
           ? null
           : await embedQueryOrNull(query, {

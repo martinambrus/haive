@@ -8,6 +8,7 @@ import {
   collectKbFiles,
   collectCodeFiles,
   resolveRagSyncPrefs,
+  resolveSweepProtectedPaths,
   runRagIndexSync,
   type CodeCollectOptions,
 } from './_rag-index.js';
@@ -26,6 +27,8 @@ interface RagReindexDetect {
   kbFileCount: number;
   codeFileCount: number;
   ollamaReachable: boolean;
+  /** The embedding endpoint was re-derived; this repo's existing rows are hash vectors. */
+  ollamaUrlDerived: boolean;
 }
 
 interface RagReindexApply {
@@ -100,6 +103,7 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
       kbFileCount,
       codeFileCount,
       ollamaReachable,
+      ollamaUrlDerived: resolved.ollamaUrlDerived,
     };
   },
 
@@ -150,12 +154,24 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
       };
     }
 
+    // This step scans the worktree, which holds tracked files only, while 02 indexed
+    // the repo root. Anything untracked there is invisible here and must not be read
+    // as a deletion — without this every `kb` chunk of a repo with an uncommitted
+    // `.haive-data/knowledge_base/` was swept on the first run of this step.
+    const sweepProtectedPaths = await resolveSweepProtectedPaths(
+      ctx.repoPath,
+      detected.worktreePath,
+      detected.codeCollect,
+    );
+
     const result = await runRagIndexSync(ctx, {
       repoPath: detected.worktreePath,
       prefs: detected.ragToolingPrefs,
       projectName: detected.projectName,
       ollamaReachable: detected.ollamaReachable,
       codeCollect: detected.codeCollect,
+      ollamaUrlDerived: detected.ollamaUrlDerived,
+      sweepProtectedPaths,
     });
 
     // The same trigger, for the same reason: the code just moved, so anything

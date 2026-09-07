@@ -1,4 +1,4 @@
-import { ollamaEmbed, probeOllama, vectorLiteral } from '@haive/shared/rag';
+import { ollamaEmbed, probeOllama, vectorLiteral, TASK_SOURCE_TYPE } from '@haive/shared/rag';
 import type { StepContext } from '../../step-definition.js';
 import {
   RAG_TABLE,
@@ -23,8 +23,11 @@ import {
 // estimator's newest-first anchor selection.
 
 /** source_type tag for a task-embedding row. NOT a file type, so runRagIndexSync's
- *  orphaned-file cleanup must exclude it (it deletes by source_path not in the file set). */
-export const TASK_EMBED_SOURCE_TYPE = 'task';
+ *  orphaned-file cleanup must exclude it (it deletes by source_path not in the file set).
+ *  Re-exported from @haive/shared/rag rather than declared here: `ragHybridSearch` filters
+ *  the same value out of agent-facing retrieval, and the writer and that filter drifting
+ *  apart is precisely how these rows reached rank 1 of every page. */
+export const TASK_EMBED_SOURCE_TYPE = TASK_SOURCE_TYPE;
 const TASK_EMBED_SECTION = 'task';
 /** Bound the embed input — a title plus a lead slice of the description is plenty of signal. */
 const TASK_TEXT_CAP = 2000;
