@@ -174,76 +174,81 @@ export default function DashboardPage() {
 
       {summary && (
         <>
-          <Card>
-            <CardHeader>
-              <CardTitle>Spend and savings</CardTitle>
-              <CardDescription>
-                What ran in this window cost{' '}
-                <span className="text-emerald-300">{money(summary.spend.realUsd)}</span> in metered
-                billing. On a flat plan the per-token dollars are notional, so the second figure is
-                what the same work would have cost at list API rates — money saved, never money
-                spent.
-                {summary.spend.unpricedInvocations > 0 && (
-                  <>
-                    {' '}
-                    <span className="text-amber-400">
-                      {formatCount(summary.spend.unpricedInvocations)} invocation
-                      {summary.spend.unpricedInvocations === 1 ? '' : 's'} could not be priced
-                    </span>{' '}
-                    and are excluded from both.
-                  </>
-                )}
-              </CardDescription>
-            </CardHeader>
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <StatTile
-                label="Spent"
-                value={money(summary.spend.realUsd)}
-                delta={summary.spend.realDelta}
-                moreIsBetter={false}
-                tone="text-emerald-300"
+          {/* The only pair on this page that sits side by side: WHEN the work happened next
+              to WHAT it cost, which are the two questions a dashboard opens with. Everything
+              below stays full width. */}
+          <div className="grid items-start gap-6 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Activity</CardTitle>
+                <CardDescription>
+                  One square per day in your own time zone, shaded by quartile of the days on which
+                  anything ran — so one long day cannot flatten the rest of the month against it.
+                  Hovering reports every metric; clicking opens that day&apos;s tasks.
+                </CardDescription>
+              </CardHeader>
+              <ActivityHeatmap
+                days={timeline?.days ?? []}
+                metric={heatMetric}
+                onMetricChange={setHeatMetric}
+                money={money}
+                dayHref={dayHref}
               />
-              <StatTile
-                label="Saved by plan"
-                value={money(summary.spend.notionalUsd)}
-                hint="at list API rates"
-                delta={summary.spend.notionalDelta}
-                tone="text-neutral-400"
-              />
-              <StatTile
-                label="Tokens"
-                value={formatTokens(summary.tokens.totalTokens)}
-                hint={`${formatPercent(summary.tokens.cacheHitRatio)} of the prompt side from cache`}
-                tone="text-sky-300"
-              />
-              <StatTile
-                label="Invocations"
-                value={formatCount(summary.spend.invocations)}
-                hint={`${summary.spend.byProvider.length} provider${summary.spend.byProvider.length === 1 ? '' : 's'}`}
-              />
-            </div>
-            <div className="mt-6">
-              <SpendChart days={timeline?.days ?? []} costDisplay={summary.costDisplay} />
-            </div>
-          </Card>
+            </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Activity</CardTitle>
-              <CardDescription>
-                One square per day in your own time zone, shaded by quartile of the days on which
-                anything ran — so one long day cannot flatten the rest of the month against it.
-                Hovering reports every metric; clicking opens that day&apos;s tasks.
-              </CardDescription>
-            </CardHeader>
-            <ActivityHeatmap
-              days={timeline?.days ?? []}
-              metric={heatMetric}
-              onMetricChange={setHeatMetric}
-              money={money}
-              dayHref={dayHref}
-            />
-          </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Spend and savings</CardTitle>
+                <CardDescription>
+                  What ran in this window cost{' '}
+                  <span className="text-emerald-300">{money(summary.spend.realUsd)}</span> in
+                  metered billing. On a flat plan the per-token dollars are notional, so the second
+                  figure is what the same work would have cost at list API rates — money saved,
+                  never money spent.
+                  {summary.spend.unpricedInvocations > 0 && (
+                    <>
+                      {' '}
+                      <span className="text-amber-400">
+                        {formatCount(summary.spend.unpricedInvocations)} invocation
+                        {summary.spend.unpricedInvocations === 1 ? '' : 's'} could not be priced
+                      </span>{' '}
+                      and are excluded from both.
+                    </>
+                  )}
+                </CardDescription>
+              </CardHeader>
+              <div className="grid grid-cols-2 gap-4">
+                <StatTile
+                  label="Spent"
+                  value={money(summary.spend.realUsd)}
+                  delta={summary.spend.realDelta}
+                  moreIsBetter={false}
+                  tone="text-emerald-300"
+                />
+                <StatTile
+                  label="Saved by plan"
+                  value={money(summary.spend.notionalUsd)}
+                  hint="at list API rates"
+                  delta={summary.spend.notionalDelta}
+                  tone="text-neutral-400"
+                />
+                <StatTile
+                  label="Tokens"
+                  value={formatTokens(summary.tokens.totalTokens)}
+                  hint={`${formatPercent(summary.tokens.cacheHitRatio)} of the prompt side from cache`}
+                  tone="text-sky-300"
+                />
+                <StatTile
+                  label="Invocations"
+                  value={formatCount(summary.spend.invocations)}
+                  hint={`${summary.spend.byProvider.length} provider${summary.spend.byProvider.length === 1 ? '' : 's'}`}
+                />
+              </div>
+              <div className="mt-6">
+                <SpendChart days={timeline?.days ?? []} costDisplay={summary.costDisplay} />
+              </div>
+            </Card>
+          </div>
 
           <Card>
             <CardHeader>
