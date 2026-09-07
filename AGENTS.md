@@ -778,6 +778,29 @@ legible one, and a label clipped by its own segment is worse than one in the leg
 the two different denominators on that tab: the bar's cache-read share is of all four buckets while
 the "cached" tile is `cacheHitRatio`, of the prompt side alone, so the card says so.
 
+### Ranked bar lists
+
+`RankedBars` (`components/stats/ranked-bars.tsx`) replaces the two-column count tables on the
+quality and reliability tabs, and `InlineBar` adds a scan aid to the per-task agent-hours column.
+Tracks are sized against the LARGEST row, not the total: these lists answer "which of these is
+biggest", which is a different question from `StackedShareBar`'s, and a share denominator
+flattens every row once the list is long.
+
+**One hue per list, and never one per rank.** These are magnitude comparisons, so colour carries
+no identity; `COLORS[index % COLORS.length]` — the obvious shortcut, and what the upstream design
+this borrows from does — repaints every surviving row whenever a filter changes the set. Where a
+row's colour does mean something, the caller passes a function keyed on the ROW.
+
+**Severity is a SCALE, so it is not sorted by count** (`order="given"` plus `SEVERITY_RANK`,
+imposed on the page because the endpoint groups without an `ORDER BY`). Two consequences: the
+colours are the reserved status steps, each read beside its own label rather than from hue alone;
+and the rank number is SUPPRESSED whenever the order is not by value. MEASURED on the dev install,
+numbering the scale reads "1 high, 2 medium, 3 low" against counts of 4, 35 and 33 — a rank
+column on a non-ranked list states the opposite of the truth.
+
+Provider bars were considered and left out: three providers on this install, and the table is
+already ordered by tokens, so a second ranking on the same card would compete with it.
+
 **Per-provider token bars need an API change and are deliberately absent.** `spend.byProvider`
 ships RAW `inputTokens`, while `summary.tokens` is normalised by `sumNormalizedTokens` — codex and
 gemini report input inclusive of the cached prefix, so splitting a per-provider bar from the raw

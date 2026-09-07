@@ -31,7 +31,8 @@ import { Card, CardDescription, CardHeader, CardTitle, Input } from '@/component
 import { StatTile } from '@/components/stats/stat-tile';
 import { ActivityHeatmap } from '@/components/stats/activity-heatmap';
 import { StackedShareBar } from '@/components/stats/stacked-share-bar';
-import { TOKEN_COLORS } from '@/components/stats/palette';
+import { RankedBars, InlineBar } from '@/components/stats/ranked-bars';
+import { CHART_COLORS, TOKEN_COLORS } from '@/components/stats/palette';
 import { usePageTitle } from '@/lib/use-page-title';
 import { formatDuration } from '@/lib/format-duration';
 import { formatCost } from '@/lib/format-cost';
@@ -102,6 +103,19 @@ const TASK_CLASS_OPTIONS: Array<{ value: '' | StatsTaskClass; label: string }> =
 
 /** Derived from the filter options rather than restated, so a relabelled class renames both. */
 const TASK_CLASS_LABELS = new Map(TASK_CLASS_OPTIONS.map((o) => [o.value, o.label]));
+
+/** Severity is an ORDERED SCALE, so its breakdown renders in scale order rather than by count —
+ *  sorting a scale by size destroys the thing the scale encodes. The endpoint groups without an
+ *  ORDER BY, so the order has to be imposed here; an unknown key sorts last rather than being
+ *  dropped. The colours are the reserved status steps, which is what a severity IS, and each one
+ *  is read alongside its own label rather than from the hue alone. */
+const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+const SEVERITY_COLOR: Record<string, string> = {
+  critical: '#d03b3b',
+  high: '#ec835a',
+  medium: '#fab219',
+  low: '#a3a3a3',
+};
 
 /** Mirrors ABANDONED_STATUSES in the stats route: a task that ended with nothing to show. */
 const ABANDONED_TASK_STATUSES = new Set(['failed', 'cancelled']);
@@ -764,6 +778,15 @@ function StatsPageInner() {
                           </td>
                           <td className="py-2 text-right font-mono text-indigo-300">
                             {formatAgentHours(r.agentMs)}
+                            {/* The rows are already ranked by this column, so the bar is a scan
+                                aid for the SHAPE of the ranking — where it falls off — not a
+                                second ordering. Scaled against the top row, which is the first
+                                one, so the eye has a fixed reference. */}
+                            <InlineBar
+                              value={r.agentMs}
+                              max={taskTime.rows[0]?.agentMs ?? 0}
+                              color={CHART_COLORS.agent}
+                            />
                           </td>
                           <td className="py-2 text-right font-mono text-neutral-200">
                             {formatDuration(r.busyMs)}
@@ -989,20 +1012,14 @@ function StatsPageInner() {
                   <p className="mb-2 text-xs uppercase tracking-wider text-neutral-500">
                     Most-failed steps
                   </p>
-                  {reliability.steps.topFailing.length === 0 ? (
-                    <p className="text-sm text-neutral-500">No step failures in this window.</p>
-                  ) : (
-                    <table className="w-full text-sm">
-                      <tbody>
-                        {reliability.steps.topFailing.map((s) => (
-                          <tr key={s.stepId} className="border-t border-neutral-800">
-                            <td className="py-2 font-mono text-xs text-neutral-200">{s.stepId}</td>
-                            <td className="py-2 text-right font-mono text-amber-300">{s.count}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
+                  <RankedBars
+                    rows={reliability.steps.topFailing.map((s) => ({
+                      key: s.stepId,
+                      value: s.count,
+                    }))}
+                    color={CHART_COLORS.idle}
+                    emptyMessage="No step failures in this window."
+                  />
                 </div>
               </div>
 
@@ -1057,9 +1074,21 @@ function StatsPageInner() {
               </div>
 
               <div className="mt-6 grid gap-6 lg:grid-cols-3">
+                <div>
+                  <p className="mb-2 text-xs uppercase tracking-wider text-neutral-500">
+                    By severity
+                  </p>
+                  <RankedBars
+                    rows={[...quality.bySeverity]
+                      .sort((a, b) => (SEVERITY_RANK[a.key] ?? 99) - (SEVERITY_RANK[b.key] ?? 99))
+                      .map((r) => ({ key: r.key, value: r.count }))}
+                    order="given"
+                    color={(row) => SEVERITY_COLOR[row.key] ?? CHART_COLORS.notional}
+                    emptyMessage="No findings in this window."
+                  />
+                </div>
                 {(
                   [
-                    ['By severity', quality.bySeverity],
                     ['By disposition', quality.byDisposition],
                     ['By dimension', quality.byDimension],
                   ] as const
@@ -1068,18 +1097,11 @@ function StatsPageInner() {
                     <p className="mb-2 text-xs uppercase tracking-wider text-neutral-500">
                       {title}
                     </p>
-                    <table className="w-full text-sm">
-                      <tbody>
-                        {rows.map((r) => (
-                          <tr key={r.key} className="border-t border-neutral-800">
-                            <td className="py-2 text-neutral-300">{r.key}</td>
-                            <td className="py-2 text-right font-mono text-neutral-200">
-                              {r.count}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                    <RankedBars
+                      rows={rows.map((r) => ({ key: r.key, value: r.count }))}
+                      color={CHART_COLORS.work}
+                      emptyMessage="No findings in this window."
+                    />
                   </div>
                 ))}
               </div>
