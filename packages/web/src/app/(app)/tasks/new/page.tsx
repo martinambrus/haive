@@ -183,6 +183,7 @@ export default function NewTaskPage() {
   const [statusError, setStatusError] = useState<string | null>(null);
 
   const [resetting, setResetting] = useState(false);
+  const [marking, setMarking] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -421,6 +422,25 @@ export default function NewTaskPage() {
     }
   }
 
+  /** Accept a repository whose onboarding artifacts are all there but whose run never
+   *  reached `completed` — a failure at a late step leaves a finished knowledge base and no
+   *  verdict, and the only other way back would be wiping it all and starting again. */
+  async function handleMarkOnboarded() {
+    if (!repositoryId) return;
+    setMarking(true);
+    try {
+      await api.post<{ ok: boolean; onboardedAt: string }>(
+        `/repos/${repositoryId}/mark-onboarded`,
+        {},
+      );
+      await refreshStatus(repositoryId);
+    } catch (err) {
+      setStatusError((err as Error).message ?? 'Failed to mark the repository onboarded');
+    } finally {
+      setMarking(false);
+    }
+  }
+
   // Parent-task picker options: completed workflow tasks in the selected repo,
   // fetched only when this is a bug fix and a repo is chosen (cleared otherwise).
   // Filtered to type==='workflow' to keep the dropdown to real features; the API
@@ -453,6 +473,12 @@ export default function NewTaskPage() {
     }
     if (!isRunApp && !onboardingStatus) {
       setError('Waiting for onboarding status check');
+      return;
+    }
+    // The inferred type here is `onboarding`, and the API refuses a second run on a repo
+    // that already has one in flight — so say why instead of posting into a 409.
+    if (!isRunApp && onboardingStatus?.onboardingTaskId) {
+      setError('Onboarding is still running on this repository. Open that task or wait for it.');
       return;
     }
     // `nothingToOnboard` counts as onboarded HERE and only here: without it a
@@ -590,6 +616,17 @@ export default function NewTaskPage() {
               {resetting ? 'Resetting...' : 'Re-run onboarding'}
             </Button>
           )}
+          {onboardingStatus?.canMarkOnboarded && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={marking}
+              onClick={handleMarkOnboarded}
+            >
+              {marking ? 'Marking...' : 'Mark as onboarded'}
+            </Button>
+          )}
           <Link href={origin?.href ?? '/tasks'}>
             <Button variant="secondary" size="sm">
               Cancel
@@ -642,26 +679,46 @@ export default function NewTaskPage() {
                   <div className="flex items-center gap-2">
                     <span
                       className={
-                        onboardingStatus.onboarded
-                          ? 'rounded bg-green-950/50 px-2 py-0.5 text-green-300'
-                          : onboardingStatus.nothingToOnboard
-                            ? 'rounded bg-neutral-800 px-2 py-0.5 text-neutral-300'
-                            : 'rounded bg-amber-950/50 px-2 py-0.5 text-amber-300'
+                        onboardingStatus.onboardingTaskId
+                          ? 'rounded bg-sky-950/50 px-2 py-0.5 text-sky-300'
+                          : onboardingStatus.onboarded
+                            ? 'rounded bg-green-950/50 px-2 py-0.5 text-green-300'
+                            : onboardingStatus.nothingToOnboard
+                              ? 'rounded bg-neutral-800 px-2 py-0.5 text-neutral-300'
+                              : 'rounded bg-amber-950/50 px-2 py-0.5 text-amber-300'
                       }
                     >
                       {/* Neutral, not amber: an empty project is not a repo in a
                           bad state, and an amber "Not onboarded" sitting beside
                           "Will run: workflow" reads as a contradiction. */}
-                      {onboardingStatus.onboarded
-                        ? 'Onboarded'
-                        : onboardingStatus.nothingToOnboard
-                          ? 'Empty project'
-                          : 'Not onboarded'}
+                      {onboardingStatus.onboardingTaskId
+                        ? 'Onboarding in progress'
+                        : onboardingStatus.onboarded
+                          ? 'Onboarded'
+                          : onboardingStatus.nothingToOnboard
+                            ? 'Empty project'
+                            : 'Not onboarded'}
                     </span>
-                    <span className="text-neutral-400">
-                      Will run: <strong>{inferredType}</strong>
-                    </span>
+                    {onboardingStatus.onboardingTaskId ? (
+                      <Link
+                        href={`/tasks/${onboardingStatus.onboardingTaskId}`}
+                        className="text-indigo-300 underline"
+                      >
+                        Open the running task
+                      </Link>
+                    ) : (
+                      <span className="text-neutral-400">
+                        Will run: <strong>{inferredType}</strong>
+                      </span>
+                    )}
                   </div>
+                  {onboardingStatus.onboardingTaskId && (
+                    <p className="text-neutral-500">
+                      This repository is being onboarded right now. A second onboarding run would
+                      write the same files, so it is refused until this one finishes or is
+                      cancelled.
+                    </p>
+                  )}
                   {onboardingStatus.nothingToOnboard && (
                     <p className="text-neutral-500">
                       Nothing to onboard yet — this project has no source to build a knowledge base
@@ -675,6 +732,14 @@ export default function NewTaskPage() {
                         Missing: {onboardingStatus.missing.join(', ')}
                       </p>
                     )}
+                  {onboardingStatus.canMarkOnboarded && (
+                    <p className="text-neutral-500">
+                      Every onboarding artifact is on disk, but no onboarding run ever finished here
+                      — the last one was cancelled or failed. Run onboarding again, or use
+                      &quot;Mark as onboarded&quot; above if the earlier run had already done the
+                      work.
+                    </p>
+                  )}
                   {onboardingStatus.onboarded && (
                     <p className="text-neutral-500">
                       Use &quot;Re-run onboarding&quot; above to wipe the generated workflow files
@@ -1129,7 +1194,14 @@ export default function NewTaskPage() {
         <FormError message={error} />
 
         <div>
-          <Button type="submit" disabled={submitting || (!isRunApp && !onboardingStatus)}>
+          <Button
+            type="submit"
+            disabled={
+              submitting ||
+              (!isRunApp && !onboardingStatus) ||
+              (!isRunApp && !!onboardingStatus?.onboardingTaskId)
+            }
+          >
             {submitting
               ? isRunApp
                 ? 'Starting...'

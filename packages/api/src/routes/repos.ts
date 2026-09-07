@@ -40,6 +40,11 @@ import {
   enqueueRepoResourceCleanupJob,
 } from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
+import {
+  loadOnboardingTaskFacts,
+  NO_ONBOARDING_TASKS,
+  resolveOnboardingVerdict,
+} from '../lib/onboarding-state.js';
 import { createRepoArchiveStream } from '../lib/repo-archive.js';
 
 function maxUploadBytes(): number {
@@ -144,6 +149,14 @@ repoRoutes.get('/', async (c) => {
     )
     .groupBy(schema.tasks.repositoryId, schema.tasks.status);
 
+  // Onboarding-run facts for every row in one query: the markers on disk cannot tell a
+  // finished run from a cancelled or a still-running one (see resolveOnboardingVerdict).
+  const onboardingFacts = await loadOnboardingTaskFacts(
+    db,
+    userId,
+    rows.map((r) => r.id),
+  );
+
   const countsByRepo = new Map<string, { open: number; active: number }>();
   for (const row of taskCounts) {
     if (!row.repositoryId) continue;
@@ -164,7 +177,14 @@ repoRoutes.get('/', async (c) => {
       // the check is a few parallel stats per repo.
       const root = repo.storagePath ?? repo.localPath;
       const markers = repo.status === 'ready' && root ? await checkOnboardingMarkers(root) : null;
-      const onboarded = markers ? markers.missing.length === 0 : false;
+      const verdict = markers
+        ? resolveOnboardingVerdict({
+            missing: markers.missing,
+            onboardedAt: repo.onboardedAt,
+            facts: onboardingFacts.get(repo.id) ?? NO_ONBOARDING_TASKS,
+          })
+        : null;
+      const onboarded = verdict?.onboarded ?? false;
       // An empty project: scaffolded, but with nothing to build a knowledge base
       // from. Offering to onboard it would offer an action that cannot
       // accomplish anything, and forcing the first task to be an onboarding run
@@ -178,6 +198,9 @@ repoRoutes.get('/', async (c) => {
         activeTaskCount: counts.active,
         onboarded,
         nothingToOnboard,
+        // Set while an onboarding run is in flight, so the card can link to it instead of
+        // offering to start a second one.
+        onboardingTaskId: verdict?.inProgressTaskId ?? null,
       };
     }),
   );
@@ -790,9 +813,11 @@ export async function hasOnboardableSource(root: string): Promise<boolean> {
   }
 }
 
-/** A repo is "onboarded" once all ONBOARDING_MARKERS exist on disk. Marker
- *  checks run in parallel; results keep marker order so the detail endpoint's
- *  present/missing lists stay stable. */
+/** Which ONBOARDING_MARKERS exist on disk. NOT the onboarded verdict on its own — every
+ *  one of them is written by 07-generate-files, the 8th of 27 onboarding steps, so a
+ *  cancelled run and a live one leave exactly the same files; `resolveOnboardingVerdict`
+ *  combines this with the repo's onboarding task history. Marker checks run in parallel;
+ *  results keep marker order so the detail endpoint's present/missing lists stay stable. */
 async function checkOnboardingMarkers(
   root: string,
 ): Promise<{ present: string[]; missing: string[] }> {
@@ -952,16 +977,67 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const root = await resolveRepoRoot(db, userId, id);
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { id: true, storagePath: true, localPath: true, onboardedAt: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  const root = repo.storagePath ?? repo.localPath;
+  if (!root) throw new HttpError(409, 'Repository has no resolvable path');
 
   const { present, missing } = await checkOnboardingMarkers(root);
-  const onboarded = missing.length === 0;
+  const facts = (await loadOnboardingTaskFacts(db, userId, [id])).get(id) ?? NO_ONBOARDING_TASKS;
+  const { onboarded, inProgressTaskId, canMarkOnboarded } = resolveOnboardingVerdict({
+    missing,
+    onboardedAt: repo.onboardedAt,
+    facts,
+  });
   return c.json({
     onboarded,
     present,
     missing,
     nothingToOnboard: onboarded ? false : !(await hasOnboardableSource(root)),
+    onboardingTaskId: inProgressTaskId,
+    canMarkOnboarded,
   });
+});
+
+/**
+ * Record that this repository is onboarded, without a run having said so.
+ *
+ * The escape hatch for a run that did all the work and then failed at a late step — the KB,
+ * the agents and the skills are all on disk, but no task ever reached `completed`, so the
+ * verdict would otherwise stay "not onboarded" forever and the only route back would be the
+ * destructive artifact reset.
+ *
+ * Refuses when a marker is missing (there is nothing to vouch for) or while a run is live
+ * (the answer is minutes away, and marking it now would be a claim about work still in
+ * flight). Idempotent: re-marking an already-marked repo just moves the date.
+ */
+repoRoutes.post('/:id/mark-onboarded', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const root = await resolveRepoRoot(db, userId, id);
+
+  const { missing } = await checkOnboardingMarkers(root);
+  if (missing.length > 0) {
+    throw new HttpError(
+      409,
+      `This repository is missing onboarding artifacts (${missing.join(', ')}), so it cannot be marked onboarded. Run onboarding instead.`,
+    );
+  }
+  const facts = (await loadOnboardingTaskFacts(db, userId, [id])).get(id) ?? NO_ONBOARDING_TASKS;
+  if (facts.liveTaskId) {
+    throw new HttpError(409, 'An onboarding run is still in progress for this repository');
+  }
+
+  const onboardedAt = new Date();
+  await db
+    .update(schema.repositories)
+    .set({ onboardedAt, updatedAt: new Date() })
+    .where(eq(schema.repositories.id, id));
+  return c.json({ ok: true, onboardedAt: onboardedAt.toISOString() });
 });
 
 repoRoutes.get('/:id/archive', async (c) => {
@@ -1016,6 +1092,12 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
     if (result.deleted) removed.push(rel);
     else if (result.changed) cleaned.push(rel);
   }
+  // The completion stamp cannot outlive the files it vouches for: this is the "start over"
+  // action, and a repo whose artifacts are gone is not onboarded however it got marked.
+  await db
+    .update(schema.repositories)
+    .set({ onboardedAt: null, updatedAt: new Date() })
+    .where(eq(schema.repositories.id, id));
   return c.json({ ok: true, removed, cleaned });
 });
 

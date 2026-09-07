@@ -80,6 +80,20 @@ export const repositories = pgTable(
      *  @haive/shared OnboardingToolingMirror. NULL = fall back to the onboarding-task
      *  04-tooling output lookup. */
     onboardingTooling: jsonb('onboarding_tooling').$type<Record<string, unknown>>(),
+    /** When an onboarding RUN finished for this repository, as opposed to when its
+     *  artifacts appeared on disk. NULL = no onboarding run has completed here.
+     *
+     *  The four on-disk markers the API checks (.claude/agents, .claude/skills,
+     *  workflow-config.json, the knowledge base) are all written by step 07 of 27, so
+     *  they say "a run got a third of the way in", not "a run finished" — a cancelled
+     *  run and a LIVE one both left them. Stamped by the worker's markTaskCompleted for
+     *  an `onboarding` task (cancel and fail write through their own functions and never
+     *  stamp), set by hand via POST /repos/:id/mark-onboarded when a run failed at a late
+     *  step with everything already built, and cleared by the artifact reset.
+     *
+     *  Not sufficient on its own: the verdict still requires the markers to be present,
+     *  so a hand-deleted `.claude/` reads as not onboarded however this column is set. */
+    onboardedAt: timestamp('onboarded_at'),
     storagePath: text('storage_path'),
     sizeBytes: integer('size_bytes'),
     credentialsSecretId: uuid('credentials_secret_id').references(() => repoCredentials.id, {

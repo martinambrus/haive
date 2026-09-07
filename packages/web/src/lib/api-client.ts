@@ -274,10 +274,16 @@ export interface Repository {
    *  onboarding has not produced a scope yet — the repos-page exclusions editor
    *  stays hidden until then. */
   scopeExcludeGlobs: string[] | null;
-  /** True once all onboarding markers exist on disk (.claude/agents, skills,
-   *  workflow-config.json, .haive-data/knowledge_base). Sent by the list endpoint only
-   *  (undefined on the single-repo detail payload); false for non-ready repos. */
+  /** True once an onboarding RUN has finished for this repo and its markers are on disk
+   *  (.claude/agents, skills, workflow-config.json, .haive-data/knowledge_base). The markers
+   *  alone are NOT enough — they are written at step 07 of 27, so a cancelled run and a live
+   *  one leave the same files. Sent by the list endpoint only (undefined on the single-repo
+   *  detail payload); false for non-ready repos. */
   onboarded?: boolean;
+  /** The onboarding task running on this repo right now, or null. `onboarded` is false while
+   *  this is set, and it is a different thing from never having been onboarded: the card
+   *  links to the run instead of offering to start a second one. */
+  onboardingTaskId?: string | null;
   /** The repo holds nothing an onboarding run could learn from — a project
    *  created empty, scaffolded but with no source yet. Distinct from
    *  `onboarded`: there is no knowledge base, and there is nothing to build one
@@ -590,6 +596,12 @@ export interface OnboardingStatus {
   nothingToOnboard: boolean;
   present: string[];
   missing: string[];
+  /** See Repository.onboardingTaskId. */
+  onboardingTaskId: string | null;
+  /** Every marker is on disk but no run ever finished here — the case
+   *  POST /repos/:id/mark-onboarded exists for (a run that failed at a late step with all
+   *  the work already done). */
+  canMarkOnboarded: boolean;
 }
 
 export interface RepoFile {

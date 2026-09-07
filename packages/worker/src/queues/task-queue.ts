@@ -31,6 +31,7 @@ import { fairPriority } from '@haive/shared/fair-priority';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
 import { completePlanNodesForTask } from '../plan/task-link.js';
+import { stampRepositoryOnboarded } from '../repo/onboarded.js';
 import { markPlanCodeLinksStale } from '../plan/code-link-staleness.js';
 import { getBullRedis, getRedis } from '../redis.js';
 import { reapAllSessionsForTask } from '../sandbox/terminal-session-reaper.js';
@@ -400,6 +401,10 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
   // Hooked to COMPLETION specifically: cancel and fail write through their own
   // functions, so an abandoned task can never green a plan node.
   await completePlanNodesForTask(db, taskId);
+  // Same hook, same reason: only a run that FINISHED may say the repository is onboarded.
+  // The four on-disk markers appear at step 07 of 27 and cannot tell a finished run from a
+  // cancelled or a live one.
+  await stampRepositoryOnboarded(db, taskId);
   // The code-link staleness pass ALSO runs here, not only in 11c-rag-reindex.
   // 11c lives in PLAN_TASKLIST_EXTRA rather than SPINE, so a quick_bugfix task
   // never reaches it, and it is user-skippable on the paths that do — either way

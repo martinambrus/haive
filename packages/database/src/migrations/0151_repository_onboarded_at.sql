@@ -1,0 +1,33 @@
+-- When an onboarding RUN completed for a repository, as opposed to when its artifacts
+-- appeared on disk.
+--
+-- "Is this repo onboarded" was decided by stat-ing four paths — .claude/agents,
+-- .claude/skills, .claude/workflow-config.json and the knowledge base — all of which are
+-- written by 07-generate-files, the 8th of 27 onboarding steps. So a run cancelled at KB QA
+-- and a run that is executing RIGHT NOW both read as "onboarded": the next task on such a
+-- repo was created as a `workflow` task against a knowledge base that was never finished,
+-- and the repos list offered "Create task" for a repository mid-onboarding.
+--
+-- The markers are the ARTIFACT; the verdict is the onboarding TASK reaching `completed` —
+-- the same evidence routes/upgrades.ts and the onboarding_upgrade gate already ask for.
+--
+-- Stamped by the worker's markTaskCompleted for an `onboarding` task ONLY (cancel and fail
+-- write through their own functions, so an abandoned run can never stamp a repo), set by
+-- hand via POST /repos/:id/mark-onboarded for a run that failed at a late step with the KB
+-- already built, and nulled by DELETE /repos/:id/onboarding-artifacts so the column cannot
+-- outlive the files it describes.
+--
+-- NOT sufficient alone: the read rule is `markers present AND no live onboarding task AND
+-- (onboarded_at IS NOT NULL OR a completed onboarding task exists OR no onboarding task
+-- history at all)`. Accepting a completed task as equal evidence is what makes this
+-- deployable with NO backfill — every existing repo keeps its current verdict — and it is
+-- why no boot-time data migration re-stamps rows, which would resurrect a reset repo.
+--
+-- No index: the column is read per repository row alongside the disk stats the same
+-- endpoints already perform, never filtered on.
+--
+-- Additive and idempotent. Rollback: revert `schema/repos.ts` and
+--   ALTER TABLE "repositories" DROP COLUMN IF EXISTS "onboarded_at";
+-- Nothing is lost — the verdict falls back to the completed-task evidence it already
+-- accepts, and every repository returns to the marker-only reading.
+ALTER TABLE "repositories" ADD COLUMN IF NOT EXISTS "onboarded_at" timestamp;

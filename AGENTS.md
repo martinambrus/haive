@@ -884,6 +884,50 @@ Phase 0 scaffold is complete when `pnpm install` and `pnpm docker:dev` boot all 
 - The Docker socket mount in the worker container is effectively root on the host. Document this in the README and offer rootless Docker instructions in Phase 9 hardening.
 - All step content lives in TypeScript modules. Do not pipe legacy markdown into a CLI prompt.
 
+## Onboarding completion
+
+**"Onboarded" is the RUN's verdict, not the artifacts'.** The four markers the API checks —
+`.claude/agents`, `.claude/skills`, `.claude/workflow-config.json`, `KB_DIR` — are all written
+by `07-generate-files`, the 8th of 27 registered onboarding steps, with the KB following at 08
+and skills at 09_5. So from a third of the way in, a cancelled run and a run executing RIGHT
+NOW leave a tree indistinguishable from a finished one: a task created against such a repo was
+typed `workflow` and aimed at a knowledge base nobody finished building, and the repos list
+offered "Create task" for a repository mid-onboarding.
+
+`resolveOnboardingVerdict` (`api/src/lib/onboarding-state.ts`) is the one reader, shared by
+`GET /repos` and `GET /repos/:id/onboarding-status`:
+
+```
+onboarded = markers present
+            AND no live onboarding task (created|queued|running|paused|waiting_user|waiting_pr)
+            AND (repositories.onboarded_at IS NOT NULL
+                 OR a completed onboarding task exists
+                 OR no onboarding task was ever started here)
+```
+
+`waiting_user` counts as LIVE deliberately — parked on a form is the normal state of
+onboarding for most of its life, and it is the state the misreading happened in.
+
+The last clause is what makes this deployable with NO backfill: a repo cloned in already
+onboarded, and every repo onboarded before the column existed, keeps the verdict it had. It is
+also why nothing re-derives the stamp at boot — a data migration that re-stamped from task
+history would resurrect a repo whose artifacts were just reset.
+
+`onboarded_at` is stamped by `stampRepositoryOnboarded` from the worker's `markTaskCompleted`
+(`onboarding` type only), the same hook and the same reason as `completePlanNodesForTask`:
+cancel and fail write through their own functions, so an abandoned run can never stamp a repo.
+Cleared by `DELETE /repos/:id/onboarding-artifacts`, since the stamp must not outlive the files
+it vouches for. `POST /repos/:id/mark-onboarded` is the manual route, for a run that did all
+the work and then failed at a late step (13-onboarding-push against a repo with no remote); it
+refuses when a marker is missing or a run is live.
+
+Two consequences are refusals, and only two. A SECOND onboarding task on a repo that has a live
+one is a 409 at `POST /tasks` — two runs write the same `.claude/` files, the same KB and the
+same scope list, so it is a corruption path rather than a queue. Everything else stays the
+caller's call: a `workflow` or `run_app` task on a mid-onboarding repo is allowed by the API,
+and only the New Task form declines to submit one (its inferred type there is `onboarding`).
+Same stance as `computePlanReady` — a rule strict enough to CHOOSE must not REFUSE.
+
 ## Onboarding template versioning
 
 Deterministic onboarding artifacts (agent specs, slash commands, `workflow-config.json`, Drupal LSP plugin files, the `agents/README.md` index) are registered as `TemplateItem`s in `packages/worker/src/step-engine/template-manifest.ts`. Every item has:

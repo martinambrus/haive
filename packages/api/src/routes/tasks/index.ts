@@ -48,6 +48,7 @@ import {
   loadPlanSkeletons,
 } from '@haive/shared/plan';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
+import { loadOnboardingTaskFacts, NO_ONBOARDING_TASKS } from '../../lib/onboarding-state.js';
 import { enqueuePlanMirrorRefresh } from '../../lib/plan-mirror.js';
 import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
@@ -395,6 +396,21 @@ taskRoutes.post('/', async (c) => {
       columns: { id: true },
     });
     if (!repo) throw new HttpError(404, 'Repository not found');
+  }
+
+  // Two onboarding runs on one repository write the same `.claude/` files, the same KB and
+  // the same scope list, so the second is a corruption path rather than a queue. Refused
+  // here only — a workflow or run_app task on a repo mid-onboarding stays the caller's call.
+  if (body.type === 'onboarding' && body.repositoryId) {
+    const facts =
+      (await loadOnboardingTaskFacts(db, userId, [body.repositoryId])).get(body.repositoryId) ??
+      NO_ONBOARDING_TASKS;
+    if (facts.liveTaskId) {
+      throw new HttpError(
+        409,
+        `Onboarding is already running for this repository (task ${facts.liveTaskId})`,
+      );
+    }
   }
 
   if (body.type === 'onboarding_upgrade') {

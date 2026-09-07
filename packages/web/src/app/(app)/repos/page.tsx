@@ -372,8 +372,16 @@ function RepoCard(props: RepoCardProps) {
   // scaffold but no source, so an onboarding run would have nothing to read.
   // This one flag drives all three consequences — no badge, no Onboard button,
   // and the ordinary CTAs below become available instead.
+  // An onboarding run in flight. Distinct from never-onboarded: the artifacts it will leave
+  // are already half there, and what this card owes the user is a way back to the run — not
+  // an Onboard button that would be refused, nor a Create task button that would aim a
+  // workflow at a knowledge base still being written.
+  const onboardingRunning = repo.status === 'ready' && !!repo.onboardingTaskId;
   const notOnboarded =
-    repo.status === 'ready' && repo.onboarded === false && repo.nothingToOnboard !== true;
+    repo.status === 'ready' &&
+    repo.onboarded === false &&
+    repo.nothingToOnboard !== true &&
+    !onboardingRunning;
   const excludedCount = repo.scopeExcludeGlobs?.length ?? 0;
   const counts = scope ? fileCountsFromIncluded(scope.tree, scope.included) : null;
 
@@ -431,6 +439,16 @@ function RepoCard(props: RepoCardProps) {
             <h2 className="break-words text-lg font-semibold text-neutral-50">{repo.name}</h2>
             <Badge variant={statusVariant(repo.status)}>{repo.status}</Badge>
             {notOnboarded && <Badge variant="warning">not onboarded yet</Badge>}
+            {onboardingRunning && (
+              <Link href={`/tasks/${repo.onboardingTaskId}`}>
+                <Badge
+                  variant="info"
+                  className="cursor-pointer transition-colors hover:bg-sky-800/60"
+                >
+                  onboarding in progress
+                </Badge>
+              </Link>
+            )}
             {repo.detectedFramework && <Badge>{repo.detectedFramework}</Badge>}
             {excludedCount > 0 && (
               <Badge variant="warning">
@@ -472,7 +490,7 @@ function RepoCard(props: RepoCardProps) {
               onClick={rememberReposOrigin}
             />
           )}
-          {repo.status === 'ready' && !notOnboarded && (
+          {repo.status === 'ready' && !notOnboarded && !onboardingRunning && (
             <RepoAction
               label="Create task"
               icon={CirclePlus}
@@ -481,11 +499,20 @@ function RepoCard(props: RepoCardProps) {
               onClick={rememberReposOrigin}
             />
           )}
-          {repo.status === 'ready' && !notOnboarded && (
+          {repo.status === 'ready' && !notOnboarded && !onboardingRunning && (
             <RepoAction
               label="Run app"
               icon={Play}
               href={`/tasks/new?repositoryId=${repo.id}&mode=run_app`}
+              onClick={rememberReposOrigin}
+            />
+          )}
+          {onboardingRunning && (
+            <RepoAction
+              label="Open onboarding task"
+              icon={Rocket}
+              variant="primary"
+              href={`/tasks/${repo.onboardingTaskId}`}
               onClick={rememberReposOrigin}
             />
           )}
