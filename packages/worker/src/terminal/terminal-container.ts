@@ -189,6 +189,11 @@ export async function ensureShellContainer(
     const inspect = await existing.inspect();
     if (inspect.State.Running) {
       const shell = await detectShell(docker, containerName);
+      // A container that has been alive since before a tmux setting changed never
+      // re-reads the conf, so push the settings at the live server too. Best-effort.
+      await applyTmuxSettings(docker, containerName).catch((err) => {
+        log.warn({ err, containerName }, 'tmux settings not applied to reused container');
+      });
       log.info({ containerName, scope, scopeId, providerId }, 'reusing existing shell container');
       return { containerName, created: false, shell, imageTag };
     }
@@ -361,20 +366,12 @@ export async function ensureShellContainer(
     log.warn({ err, containerName }, 'failed to write mcp config into shell container');
   });
 
-  // Enable tmux mouse mode. The interactive shell runs inside a tmux session
-  // (terminal-session-manager) which owns the alternate screen, so the xterm
-  // buffer is always 'alternate' — there the browser terminal converts the
-  // mouse wheel into cursor-key escapes, which bash reads as history
-  // navigation instead of scrolling earlier output. `mouse on` makes tmux
-  // consume the wheel and scroll its own pane history (copy mode). Written
-  // before the first attach so the tmux server reads it when it starts.
-  await writeFileInto(
-    docker,
-    containerName,
-    `${SANDBOX_USER_HOME}/.tmux.conf`,
-    'set -g mouse on\n',
-  ).catch((err) => {
-    log.warn({ err, containerName }, 'failed to write tmux.conf — wheel scrollback may not work');
+  // Written before the first attach so the tmux server reads the conf when it starts.
+  await applyTmuxSettings(docker, containerName).catch((err) => {
+    log.warn(
+      { err, containerName },
+      'failed to apply tmux settings — wheel scrollback and clipboard may not work',
+    );
   });
 
   // Repo-scope: dual-home onto the internal sandbox network so the git
@@ -650,6 +647,43 @@ async function installGitCredentialHelper(docker: Docker, containerName: string)
 
 /** Write a file into the container by piping content over the exec's stdin
  *  (cat > path), avoiding any shell-escaping of the content itself. */
+/**
+ * tmux settings the browser terminal depends on.
+ *
+ * `mouse on`: the shell runs inside a tmux session that owns the alternate screen,
+ * so the xterm buffer is always 'alternate' — there the browser terminal converts
+ * the mouse wheel into cursor-key escapes, which bash reads as history navigation
+ * instead of scrolling earlier output. `mouse on` makes tmux consume the wheel and
+ * scroll its own pane history (copy mode).
+ *
+ * `set-clipboard on`: tmux 3.3a defaults this to `external`, which DROPS an
+ * application's OSC 52 outright — MEASURED, an isolated probe server forwarded the
+ * payload to the outer pty under `on` and not under `external`. The sandbox image
+ * carries no xclip/xsel/wl-copy, so OSC 52 is the only clipboard route a TUI has,
+ * and every copy one reported making was discarded here before any browser saw it.
+ * Deliberately NOT `allow-passthrough on`: Claude Code emits the plain sequence
+ * alongside its DCS-wrapped copy, so this alone is enough, and passthrough would
+ * let anything in the sandbox write arbitrary escape sequences into the user's
+ * browser terminal.
+ */
+async function applyTmuxSettings(docker: Docker, containerName: string): Promise<void> {
+  await writeFileInto(
+    docker,
+    containerName,
+    `${SANDBOX_USER_HOME}/.tmux.conf`,
+    'set -g mouse on\nset -g set-clipboard on\n',
+  );
+  // `has-session` guard because a bare `tmux set` STARTS a server, and it is the
+  // first real attach that seeds the server's env (terminal-session-manager) — a
+  // server pre-started here would leave the shell without its provider env vars.
+  // Non-zero exit just means there is no server yet; the conf above covers that.
+  await execDrain(docker, containerName, [
+    'sh',
+    '-c',
+    'tmux has-session 2>/dev/null && tmux set -g set-clipboard on',
+  ]);
+}
+
 async function writeFileInto(
   docker: Docker,
   containerName: string,
