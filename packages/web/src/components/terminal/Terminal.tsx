@@ -13,8 +13,9 @@ import {
   type TerminalSessionSummary,
 } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
-import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
+import { copyTerminalSelection } from '@/lib/terminal-copy';
 import { useTerminalCopy } from '@/lib/use-terminal-copy';
+import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
@@ -38,6 +39,12 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
   const [rawLogError, setRawLogError] = useState<string | null>(null);
   const [rawLogLoading, setRawLogLoading] = useState(false);
   const { attach: attachCopy, copy, hasSelection, copied } = useTerminalCopy();
+  const {
+    provider: cliClipboard,
+    pendingChars: cliPendingChars,
+    copied: cliCopied,
+    copyPending,
+  } = usePendingCliCopy();
 
   const loadRawLog = async () => {
     setRawLogLoading(true);
@@ -99,7 +106,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
-    const clipboardAddon = new ClipboardAddon(undefined, osc52ClipboardProvider);
+    const clipboardAddon = new ClipboardAddon(undefined, cliClipboard);
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.loadAddon(clipboardAddon);
@@ -274,7 +281,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
       }
       term.dispose();
     };
-  }, [containerId, onExit, attachCopy]);
+  }, [containerId, onExit, attachCopy, cliClipboard]);
 
   return (
     <div className={`flex flex-col gap-2 ${fill ? 'h-full min-h-0' : ''}`}>
@@ -284,6 +291,16 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
           {errorMsg && <span className="text-red-400">{errorMsg}</span>}
         </div>
         <div className="flex items-center gap-3">
+          {cliPendingChars !== null && (
+            <button
+              type="button"
+              onClick={copyPending}
+              title="The CLI asked to copy this, but the browser only allows a clipboard write from a click. Click to complete it."
+              className="rounded border border-indigo-600 px-2 py-0.5 text-xs text-indigo-300 hover:bg-indigo-950"
+            >
+              {cliCopied ? 'Copied' : `Copy from CLI (${cliPendingChars})`}
+            </button>
+          )}
           <button
             type="button"
             onClick={copy}

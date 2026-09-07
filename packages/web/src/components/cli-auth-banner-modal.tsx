@@ -8,7 +8,7 @@ import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { Button, FormError } from '@/components/ui';
 import { apiWebSocketUrl, type CliProbeResult, type CliProviderName } from '@/lib/api-client';
-import { osc52ClipboardProvider } from '@/lib/terminal-copy';
+import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { describeSlotHolders } from '@/components/cli-slot-wait';
 import { runCliProbe } from '@/lib/cli-jobs';
 
@@ -80,6 +80,12 @@ export function CliAuthBannerModal({
   onLoginComplete,
 }: CliAuthBannerModalProps) {
   const wsRef = useRef<WebSocket | null>(null);
+  const {
+    provider: cliClipboard,
+    pendingChars: cliPendingChars,
+    copied: cliCopied,
+    copyPending,
+  } = usePendingCliCopy();
   const termRef = useRef<XTerm | null>(null);
   const termMountRef = useRef<HTMLDivElement | null>(null);
   const [phase, setPhase] = useState<Phase>('connecting');
@@ -296,7 +302,7 @@ export function CliAuthBannerModal({
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon());
-    term.loadAddon(new ClipboardAddon(undefined, osc52ClipboardProvider));
+    term.loadAddon(new ClipboardAddon(undefined, cliClipboard));
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true;
       if (ev.ctrlKey && ev.shiftKey && (ev.key === 'V' || ev.key === 'v')) {
@@ -358,7 +364,7 @@ export function CliAuthBannerModal({
       term.dispose();
       termRef.current = null;
     };
-  }, [open, providerName, retryNonce]);
+  }, [open, providerName, retryNonce, cliClipboard]);
 
   const handleSubmitToken = useCallback(() => {
     const ws = wsRef.current;
@@ -436,14 +442,26 @@ export function CliAuthBannerModal({
             <h2 className="text-lg font-semibold text-neutral-50">Sign in — {providerLabel}</h2>
             <p className="text-xs text-neutral-500">{providerName}</p>
           </div>
-          <button
-            type="button"
-            onClick={handleClose}
-            className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
-            aria-label="Close"
-          >
-            Close
-          </button>
+          <div className="flex items-center gap-2">
+            {cliPendingChars !== null && (
+              <button
+                type="button"
+                onClick={copyPending}
+                title="The CLI asked to copy this, but the browser only allows a clipboard write from a click. Click to complete it."
+                className="rounded border border-indigo-600 px-2 py-1 text-xs text-indigo-300 hover:bg-indigo-950"
+              >
+                {cliCopied ? 'Copied' : `Copy from CLI (${cliPendingChars})`}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleClose}
+              className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
+              aria-label="Close"
+            >
+              Close
+            </button>
+          </div>
         </div>
 
         <FormError message={error} />

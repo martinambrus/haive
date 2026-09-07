@@ -8,7 +8,8 @@ import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { api, apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
-import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
+import { copyTerminalSelection } from '@/lib/terminal-copy';
+import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
 import { describeRetry, describeStall, isStalled, type CliRetryInfo } from '@/lib/stream-health';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -113,6 +114,12 @@ export function CliStreamViewer({
   // overlay doesn't linger on a 0-byte invocation). Drives the centered
   // placeholder rendered absolutely over the terminal mount node.
   const [hasOutput, setHasOutput] = useState(false);
+  const {
+    provider: cliClipboard,
+    pendingChars: cliPendingChars,
+    copied: cliCopied,
+    copyPending,
+  } = usePendingCliCopy();
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<ConnectionState>('connecting');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -251,7 +258,7 @@ export function CliStreamViewer({
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
-    const clipboardAddon = new ClipboardAddon(undefined, osc52ClipboardProvider);
+    const clipboardAddon = new ClipboardAddon(undefined, cliClipboard);
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.loadAddon(clipboardAddon);
@@ -489,7 +496,7 @@ export function CliStreamViewer({
     // The component is re-mounted whenever invocationId changes, so the cleanup
     // tears down the old socket and a fresh one opens for the new invocation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [invocationId, isReplay, staticOutput, staticExitCode]);
+  }, [invocationId, isReplay, staticOutput, staticExitCode, cliClipboard]);
 
   // Re-fit xterm whenever the Raw panel becomes visible. While the Clean tab is
   // active the xterm container is display:none (zero size), so fit() must run
@@ -666,6 +673,16 @@ export function CliStreamViewer({
             <span className={steerInline.tone === 'error' ? 'text-red-400' : 'text-indigo-300'}>
               {steerInline.text}
             </span>
+          )}
+          {cliPendingChars !== null && (
+            <button
+              type="button"
+              onClick={copyPending}
+              title="The CLI asked to copy this, but the browser only allows a clipboard write from a click. Click to complete it."
+              className="rounded border border-indigo-600 px-2 py-0.5 text-indigo-300 hover:bg-indigo-950"
+            >
+              {cliCopied ? 'Copied' : `Copy from CLI (${cliPendingChars})`}
+            </button>
           )}
         </div>
         {!isReplay && (

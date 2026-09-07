@@ -20,38 +20,86 @@ export function copyTerminalSelection(text: string): void {
   void navigator.clipboard?.writeText(text).catch(() => {});
 }
 
+/** Per-terminal OSC 52 bridge, handed to `ClipboardAddon` as its provider. */
+export interface Osc52Clipboard {
+  provider: IClipboardProvider;
+  /** Subscribe to pending-copy changes; returns the unsubscribe. */
+  subscribe: (cb: () => void) => () => void;
+  /** The text a refused write is holding, or null. Stable snapshot. */
+  getPending: () => string | null;
+  /** Write the pending text. Call ONLY from inside a user gesture. */
+  flush: () => boolean;
+}
+
 /**
- * OSC 52 clipboard provider for `ClipboardAddon`.
+ * OSC 52 is a copy the CLI asked for, so it arrives in a WebSocket message with
+ * no user activation behind it — and Firefox requires transient activation to
+ * write, with no `clipboard-write` permission to grant instead (MDN Clipboard
+ * API, Security considerations). `execCommandCopy` is no escape hatch either:
+ * it is gated on "is handling user input", which a socket callback is not. The
+ * write genuinely cannot happen at the moment it is requested, so the text is
+ * PARKED and the caller renders a button for it — clicking that button is the
+ * gesture, and `flush` then takes the synchronous route. Deliberately not
+ * flushed on the next click anywhere in the terminal: that would replace a
+ * clipboard the user filled for something else, on a click they never meant as
+ * a copy.
  *
- * The addon's own provider hands the raw `navigator.clipboard` promise back to
- * the addon, which chains `.then(() => true)` and never catches. OSC 52 is
- * driven by CLI output rather than by a keystroke, so Firefox always refuses the
- * write — no user activation, and no synchronous `execCommand` route exists
- * outside a user-input handler either — and the rejection surfaces as the same
- * page-level `NotAllowedError`. Nothing can grant the access from here, so the
- * honest behaviour is a silent no-op: the CLI's copy request is dropped and the
- * page stays up.
+ * One store per terminal, never a module singleton — a task page mounts many
+ * CliStreamViewers at once and one terminal's refused copy must not raise a
+ * button on all of them.
+ *
+ * The other half of this bug lives in the sandbox, not here: tmux 3.3a defaults
+ * `set-clipboard` to `external`, which drops an application's OSC 52 outright
+ * (MEASURED — forwarded only under `on`), so the bytes never reached any
+ * browser. See `worker/src/terminal/terminal-container.ts`.
  */
-export const osc52ClipboardProvider: IClipboardProvider = {
-  // `selection` is a const enum that cannot be imported as a value under
-  // isolatedModules; compare its string value instead ('c' is SYSTEM).
-  async readText(selection) {
-    if (String(selection) !== 'c') return '';
-    try {
-      return await navigator.clipboard.readText();
-    } catch {
-      return '';
-    }
-  },
-  async writeText(selection, text) {
-    if (String(selection) !== 'c') return;
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // Clipboard denied without a user gesture — drop the OSC 52 copy.
-    }
-  },
-};
+export function createOsc52Clipboard(): Osc52Clipboard {
+  let pending: string | null = null;
+  const listeners = new Set<() => void>();
+
+  const setPending = (next: string | null): void => {
+    if (pending === next) return;
+    pending = next;
+    for (const cb of listeners) cb();
+  };
+
+  return {
+    provider: {
+      // `selection` is a const enum that cannot be imported as a value under
+      // isolatedModules; compare its string value instead ('c' is SYSTEM).
+      async readText(selection) {
+        if (String(selection) !== 'c') return '';
+        try {
+          return await navigator.clipboard.readText();
+        } catch {
+          return '';
+        }
+      },
+      async writeText(selection, text) {
+        if (String(selection) !== 'c') return;
+        try {
+          await navigator.clipboard.writeText(text);
+          setPending(null);
+        } catch {
+          setPending(text);
+        }
+      },
+    },
+    subscribe: (cb) => {
+      listeners.add(cb);
+      return () => {
+        listeners.delete(cb);
+      };
+    },
+    getPending: () => pending,
+    flush: () => {
+      if (pending === null) return false;
+      if (!execCommandCopy(pending)) return false;
+      setPending(null);
+      return true;
+    },
+  };
+}
 
 /** Synchronous copy through a throwaway off-screen textarea. Focus is handed
  *  back to whatever held it (the terminal) so the selection survives the copy. */

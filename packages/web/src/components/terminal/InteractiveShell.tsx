@@ -9,8 +9,9 @@ import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
-import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
+import { copyTerminalSelection } from '@/lib/terminal-copy';
 import { useTerminalCopy } from '@/lib/use-terminal-copy';
+import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
@@ -49,6 +50,12 @@ export function InteractiveShell(props: InteractiveShellProps) {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [containerLabel, setContainerLabel] = useState<string | null>(null);
   const { attach: attachCopy, copy, hasSelection, copied } = useTerminalCopy();
+  const {
+    provider: cliClipboard,
+    pendingChars: cliPendingChars,
+    copied: cliCopied,
+    copyPending,
+  } = usePendingCliCopy();
 
   useEffect(() => {
     if (disabled) return;
@@ -77,7 +84,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon());
-    term.loadAddon(new ClipboardAddon(undefined, osc52ClipboardProvider));
+    term.loadAddon(new ClipboardAddon(undefined, cliClipboard));
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true;
       if (ev.ctrlKey && ev.shiftKey && (ev.key === 'C' || ev.key === 'c')) {
@@ -237,7 +244,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
       }
       term.dispose();
     };
-  }, [scope, scopeId, cliProviderId, disabled, attachCopy]);
+  }, [scope, scopeId, cliProviderId, disabled, attachCopy, cliClipboard]);
 
   if (disabled) {
     if (disabledReason === 'preparing') {
@@ -291,8 +298,19 @@ export function InteractiveShell(props: InteractiveShellProps) {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[10px] text-neutral-500">
-            Shift+drag to select (the shell&apos;s own mouse mode takes a plain drag).
+            Shift+drag to select (the shell&apos;s own mouse mode takes a plain drag), then Copy or
+            right-click.
           </span>
+          {cliPendingChars !== null && (
+            <button
+              type="button"
+              onClick={copyPending}
+              title="The CLI asked to copy this, but the browser only allows a clipboard write from a click. Click to complete it."
+              className="rounded border border-indigo-600 px-2 py-0.5 text-xs text-indigo-300 hover:bg-indigo-950"
+            >
+              {cliCopied ? 'Copied' : `Copy from CLI (${cliPendingChars})`}
+            </button>
+          )}
           <button
             type="button"
             onClick={copy}
