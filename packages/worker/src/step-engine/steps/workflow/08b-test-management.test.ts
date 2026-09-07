@@ -9,10 +9,12 @@ import {
   buildSelectiveCommand,
   filterTestFiles,
   primaryFrameworkRoot,
+  repairInvocation,
   scanTestInfra,
   scopeToRoot,
   testManagementStep,
 } from './08b-test-management.js';
+import { classifyTestEnvFailure } from './_test-env-guard.js';
 
 describe('parseTesterOutput', () => {
   it('parses a fenced tester report', () => {
@@ -525,5 +527,83 @@ describe('testManagementStep.fixLoop', () => {
     expect(v!.diagnosis).toMatch(/TEST is wrong/);
     expect(v!.diagnosis).toMatch(/CODE is wrong/);
     expect(v!.diagnosis).toMatch(/FLAKY/);
+  });
+});
+
+// Verbatim fragments of the three failure outputs task 681f0f99 actually stored. Rounds 1-2
+// are a LOAD failure (the enumerate guard's class); round 3 is the environment failure that
+// guard cannot see, because `--list` skips globalSetup and exited 0 on the same container.
+const ROUND12_LOAD_FAILURE = [
+  'Error: Playwright Test did not expect test.describe() to be called here.',
+  'Most common reasons include:',
+  '- You are calling test.describe() in a configuration file.',
+  'Error: No tests found.',
+].join('\n');
+
+const ROUND3_BROWSER_MISSING = [
+  '[global-setup] Running global setup',
+  "Error: browserType.launch: Executable doesn't exist at /home/ddev/.cache/ms-playwright/chromium_headless_shell-1181/chrome-linux/headless_shell",
+  '║ Looks like Playwright Test or Playwright was just installed or updated. ║',
+  '    at performCleanup (/var/www/html/test-playwright/global-teardown.ts:352:34)',
+].join('\n');
+
+describe('classifyTestEnvFailure', () => {
+  it('names the environment failure the enumerate guard cannot see', () => {
+    const b = classifyTestEnvFailure('playwright', ROUND3_BROWSER_MISSING);
+    expect(b).not.toBeNull();
+    expect(b!.reason).toContain('browser binaries are not installed');
+    expect(b!.repair).toBe('npx playwright install --with-deps');
+  });
+
+  it('classifies a missing shared library as its own blocker', () => {
+    const b = classifyTestEnvFailure(
+      'playwright',
+      'Host system is missing dependencies to run browsers.',
+    );
+    expect(b!.repair).toBe('npx playwright install-deps');
+  });
+
+  it('reports the missing binary when both errors appear, since --with-deps covers both', () => {
+    const b = classifyTestEnvFailure(
+      'playwright',
+      `${ROUND3_BROWSER_MISSING}\nHost system is missing dependencies to run browsers.`,
+    );
+    expect(b!.repair).toBe('npx playwright install --with-deps');
+  });
+
+  it('leaves a load failure to the enumerate guard', () => {
+    expect(classifyTestEnvFailure('playwright', ROUND12_LOAD_FAILURE)).toBeNull();
+  });
+
+  it('claims nothing for a framework whose output has not been measured', () => {
+    expect(classifyTestEnvFailure('vitest', ROUND3_BROWSER_MISSING)).toBeNull();
+    expect(classifyTestEnvFailure(null, ROUND3_BROWSER_MISSING)).toBeNull();
+  });
+});
+
+describe('repairInvocation', () => {
+  const d = (over: Record<string, unknown>) =>
+    ({
+      ddev: true,
+      primary: 'playwright',
+      frameworkRoots: { playwright: 'test-playwright' },
+      ...over,
+    }) as never;
+
+  it('reuses the failing run’s own ddev invocation shape', () => {
+    expect(repairInvocation(d({}), 'npx playwright install --with-deps')).toBe(
+      'ddev exec -d /var/www/html/test-playwright npx playwright install --with-deps',
+    );
+  });
+
+  it('carries the root as a cd on the host path', () => {
+    expect(repairInvocation(d({ ddev: false }), 'npx playwright install')).toBe(
+      'cd test-playwright && npx playwright install',
+    );
+  });
+
+  it('drops the root when the framework is rooted at the workspace', () => {
+    const at_root = d({ ddev: false, frameworkRoots: { playwright: '' } });
+    expect(repairInvocation(at_root, 'npx playwright install')).toBe('npx playwright install');
   });
 });

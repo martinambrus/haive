@@ -18,6 +18,7 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { runnerHandleForTask, ddevExec, DDEV_PROJECT_MOUNT } from '../../../sandbox/ddev-runner.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
+import { classifyTestEnvFailure } from './_test-env-guard.js';
 
 // Phase 5b — Test management (legacy phase5b-test-management.md). Runs straight
 // after the implementation chain and BEFORE 08-phase-5-verify, so the suite verify
@@ -163,6 +164,14 @@ export function scopeToRoot(files: string[], root: string): string[] {
  *  before roots were resolved at all. */
 function ddevExecPrefix(root: string): string[] {
   return root ? ['exec', '-d', `${DDEV_PROJECT_MOUNT}/${root}`] : ['exec'];
+}
+
+/** The failing run's own invocation shape with a repair command in place of the test
+ *  command, so the line handed to a human is runnable rather than a bare hint. */
+export function repairInvocation(d: TestManagementDetect, repair: string): string {
+  const root = primaryFrameworkRoot(d) ?? '';
+  if (d.ddev) return `ddev ${[...ddevExecPrefix(root), repair].join(' ')}`;
+  return root ? `cd ${root} && ${repair}` : repair;
 }
 
 /**
@@ -842,6 +851,23 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         };
         testsPassed = testRun.passed;
 
+        // An environment that cannot run a browser is not a test defect, and no fix pass can
+        // repair it from inside the sandbox — the CLI is given ddev_status/logs/restart and no
+        // `ddev exec`. Read from the RUN's own output, because the enumerate guard below cannot
+        // see this class at all: `--list` skips globalSetup, so a container with no browser
+        // binaries lists every test and exits 0. Applies from pass 0, unlike that guard — a
+        // browser missing from the container is never something the tester's own pass caused.
+        const blocked = testRun.passed ? null : classifyTestEnvFailure(d.primary, run.output);
+        if (blocked) {
+          testRun = { ...testRun, ran: false };
+          testsPassed = null;
+          degradedNote =
+            `The related tests could not be run: ${blocked.reason}. They were written but never ` +
+            `executed, and the suite is NOT known to be green. No fix pass can repair this from ` +
+            `inside the sandbox.\n\nRun: ${testRun.command}\n\nRepair with:\n` +
+            `${repairInvocation(d, blocked.repair)}\n\n${run.output}`;
+        }
+
         // A failed run is only worth a fix agent if the runner actually ran something. Ask it to
         // ENUMERATE the same files: a non-zero exit there means it could enumerate NONE of them
         // — a harness it cannot load, or files the tester reported but never wrote — and no fix
@@ -853,7 +879,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         // — the observed task spent 5 passes and a whole round back through implementation on a
         // playwright install its command never reached.
         const collect =
-          testRun.passed || args.iteration === 0
+          blocked || testRun.passed || args.iteration === 0
             ? null
             : buildCollectCommand(d.primary, targets, buildOpts);
         if (collect) {
