@@ -1,6 +1,21 @@
 # Onboarding Scope + LSP + Onboarding-Mirror + Retrieval Refactor
 
-Status: IN PROGRESS. SLICE 1 COMPLETE + COMMITTED/PUSHED (7272078 main). SLICE 2 COMPLETE + COMMITTED/PUSHED (e0bee51 main; 2A-2F + cli-exec follow-up, unit/tsc verified, NOT live-e2e): repo-level persistence refactor — onboarding_environment/onboarding_tooling jsonb cols + .haive-data/ committed mirror (environment/tooling/exclusions), written at 12-post-onboarding, imported non-clobbering in persistDetection; consumers (loadRepoStackAnchors, resolveRagSyncPrefs, declare-deps, cli-exec resolveRagMcpConfig + loadUserMcpServers) read col-first + fallback. Next: commit slice 2 (pending user), then Slice 3 (LSP compose layer) OR Slice 4.
+> **Status — in progress**, re-verified 2026-08-21 against the tree rather than taken from this
+> file. The per-slice `[DONE]`/`[TODO]` markers below agree with it.
+>
+> - **Slice 1 — complete** (1a-1g, including 1g-D dropping the dead columns). NOT live-verified:
+>   the API `/repos/:id/scope-tree` endpoint and the web tree editor have never been hit in a
+>   browser.
+> - **Slice 2 — complete and pushed** (`e0bee51`): repo-level persistence refactor —
+>   `onboarding_environment`/`onboarding_tooling` jsonb cols + the `.haive-data/` committed mirror
+>   (environment/tooling/exclusions), written at `12-post-onboarding`, imported non-clobbering in
+>   `persistDetection`; consumers (`loadRepoStackAnchors`, `resolveRagSyncPrefs`, `declare-deps`,
+>   cli-exec `resolveRagMcpConfig` + `loadUserMcpServers`) read col-first + fallback. NOT
+>   live-verified e2e (onboard on host A, clone to host B, confirm the columns restore).
+> - **Slice 3 — partly shipped** (`5ca82ac`): 3a (PHP LSP fix) and 3c (composed-image eviction)
+>   are DONE; **3b** (LSP compose layer) and **3d** (live PHP LSP e2e) are still TODO.
+> - **Slice 4 — not started.**
+> - Slice 1 landed as `7272078`.
 Owner context: Drupal 11 onboarding took ~3h on a 7-module repo because the expensive
 agentic mining steps crawl the WHOLE repo (vendor, core, contrib). This refactor scopes
 them to custom code, fixes LSP so tasks can use installed language servers, syncs
@@ -137,21 +152,3 @@ Order: 1 ∥ 3 → 2 after 1 → 4 after 3.
 - New llm step / shared change: rebuild shared dist or worker assertCliDispatchListInSync crash-loops.
 - DB change: edit schema + paired numbered src/migrations/0NNN.sql (idempotent) + drizzle push --force.
 - Small reviewable slices; don't bundle. WSL: ≤7 concurrent subagents.
-
----
-
-# Amendment — 2026-08-21: the header Status line is stale
-
-The `Status:` line at the top ends "Next: commit slice 2 (pending user), then Slice 3 (LSP compose
-layer) OR Slice 4". That is no longer where the work stands — slice 2 was committed and slice 3 is
-partly shipped. Actual state:
-
-- **SLICE 1 — complete** (1a-1g, including 1g-D dropping the dead columns). Not live-verified: the
-  API `/repos/:id/scope-tree` endpoint and the web tree editor have never been hit in a browser.
-- **SLICE 2 — complete and pushed** (`e0bee51`). Not live-verified e2e (onboard on host A, clone to
-  host B, confirm the columns restore).
-- **SLICE 3 — partly shipped** (`5ca82ac`): 3a (PHP LSP fix) and 3c (composed-image eviction) are
-  DONE. **3b** (LSP compose layer) and **3d** (live PHP LSP e2e) are still TODO.
-- **SLICE 4 — not started.**
-
-Read the per-task `[DONE]`/`[TODO]` markers in the body, which are accurate; the header line is not.

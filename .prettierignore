@@ -14,7 +14,7 @@ yarn.lock
 orchestration.zip
 
 # Archives of Claude Code plan files, which are auto-deleted from ~/.claude/plans
-# after 30 days. The original body of each is kept byte-identical; later revisions
-# are APPENDED under an `# Amendment — <date>` heading rather than edited in, so the
-# plan as approved stays readable next to what changed.
+# after 30 days. Revisions are folded into the section they belong to rather than
+# appended as amendments, so a reader never has to sweep the file to assemble one
+# subject. Excluded here so formatting never rewrites a body. See docs/plans/README.md.
 docs/plans

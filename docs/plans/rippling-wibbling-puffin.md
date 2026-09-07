@@ -1,5 +1,20 @@
 # Modular (user-definable) task types
 
+> **Not started** — none of `schema/task-types.ts`, `routes/task-types.ts`,
+> `task-type-manifest.ts`, `composable-catalog.ts`, `routes/custom-mcp.ts` or the admin
+> task-types page exists (re-verified 2026-08-21).
+>
+> **Two files describe this feature and neither supersedes the other.** This one is the whole
+> design and the locked user decisions.
+> `rippling-wibbling-puffin-agent-a233cf7f9b59974f6.md` is a subagent-written **half A** — data
+> model, `buildRunList`, pgEnum, migration and seed — grounded line-by-line against the tree at
+> the time. Read this one for the design, half A for the migration mechanics and the `findIndex`
+> invariant. Half A covers only the first slice; it is not an alternative plan.
+>
+> Anchor drift shared by both: `buildRunList` is now `task-queue.ts:152` (half A says 112-130)
+> and `buildRunAppRunList` is `:186` (says 146-178). Both `execution-paths.ts:98`
+> (`PATH_REQUIRED_TARGETS`) and `:133` (`orderWorkflowRunList`) still resolve exactly as cited.
+
 ## Context
 
 Today a task type (onboarding, workflow, run_app, onboarding_upgrade, plus internal kb_author / env_replicate) is hardcoded TypeScript in four duplicated declaration sites (shared union, zod enum, web copy, Postgres pgEnum), and its step list is emergent from statically-imported `StepDefinition` modules bucketed by `metadata.workflowType`. Adding or tuning a task type requires a code change across shared + database + worker + web. The goal is to make task types data-driven: admins author them in an admin UI by composing existing steps plus per-step config, enable/disable them, and — for genuinely bespoke logic — attach an agent prompt template and/or a custom MCP tool that runs inside the existing sandbox. The existing runtime capabilities (agent dispatch, the Docker sandbox envelope, browser testing, DDEV/app-runner, terminal, IDE, verify/QA gates) are already task-type-agnostic and gate on data flags, not `tasks.type`, so they come along for free once the definition layer is data-driven.
@@ -34,6 +49,58 @@ Not every registered step is safe to drop into an arbitrary order (09-gate-2-ver
 - New `composable_step_catalog` table + `syncComposableCatalog(db)` boot-upsert (near-verbatim copy of template-manifest.ts:304-343), called right after `registerAllSteps` in bootstrap.
 - Shared pure validator in @haive/shared: walk `stepIds` in order, accumulate `provides`, reject if any step's `needs` is not already provided upstream, and reject a list containing a `fixLoop`/`restartLoop`/`fixLoopOnError` step whose declared loop target is absent. This is the DB-driven analog of the existing boot invariant `assertPathStepSetsClosed` (packages/worker/src/step-engine/steps/index.ts:39). Run it client-side (live composer feedback) and authoritatively at POST/PUT and again at task-create (defense in depth).
 - Generalize `PATH_REQUIRED_TARGETS` (packages/worker/src/orchestrator/execution-paths.ts:98-108) into a reusable `STEP_LOOP_TARGETS` map the validator consumes. Steps whose loop target is runtime-computed (revise/restart) are excluded from the composable set.
+
+### Definitions may reference module-contributed steps
+
+Companion to "Module-contributed steps must reach the composable step catalog" in
+`serialized-chasing-thacker.md`, so a distributed module
+(the deep project analysis scan) can contribute steps a task type is composed from.
+
+The module system exports `./steps` and its loader registers them, but this plan composes task types
+from a **curated** `composable_step_catalog` — so without this, a module's steps are registered yet
+invisible to the composer and unusable by any task type.
+
+- The catalog is the union of core entries and every loaded module's `composableSteps`, namespaced
+  `module.<moduleId>.<stepId>` so a module can never shadow a core step id (its companion rule in
+  `serialized-chasing-thacker.md`).
+- The prereq validator needs **no special-casing**: it walks `requires`/`provides` capability tokens,
+  not step ids, so a module step that `provides: ['worktree']` satisfies a core step's need exactly as
+  `01-worktree-setup` does. This is the payoff of the capability-token design already in this plan.
+- `buildRunList` resolves module step ids through the same registry, which the module loader has
+  populated before the catalog sync runs.
+
+### Dangling references — a module removed under a live definition
+
+Data-driven types plus distributed modules create a failure mode neither has alone: a definition's
+ordered step list can reference steps that no longer exist, because the module supplying them was
+disabled, removed, or failed to load after a rebuild.
+
+- Validate that every `stepId` resolves at boot **and** at task-create (the existing defence-in-depth
+  pattern this plan already applies to prereq validation).
+- A definition with an unresolvable step becomes **not selectable, with a named reason** — "requires
+  module `deep-analysis`, which is not installed". Never a crash, and never silently dropping the
+  missing step, which would run a truncated pipeline the admin never authored and cannot see.
+- Tasks already running are untouched: their run list is materialised, and `buildRunList` is
+  forward-walked from the current step. This gates new task creation only.
+
+### Spatial composability is these capability tokens — already done, do not "add" it
+
+Cordis's "spatial composability" means a plugin declares what it needs from the environment and the
+runtime resolves it reactively: a dependency that disappears makes the plugin "just deactivate and
+wait, without erroring," rather than crash. This plan independently arrived at exactly that:
+
+- The `requires`/`provides` capability tokens (`'worktree'`, `'runtime'`, `'spec'`) ARE the
+  dependency declaration — a step needs `worktree`, and any step that provides it satisfies the
+  need, so alternatives compose without special-casing (the payoff noted just above).
+- The dangling-reference rule above IS "deactivate and wait" verbatim: a definition referencing a step that
+  no longer resolves (its module was removed) becomes not-selectable WITH A NAMED REASON, never a
+  crash and never a silently truncated pipeline.
+
+So no change is needed here — this is recorded only so a future reader does not "add spatial
+composability" as if it were missing. It is the design already locked. What Haive deliberately does
+NOT take is the reactive RUNTIME rebind (swap a provider under a live task and reload it): a running
+task's run list is materialised and forward-walked precisely so a mid-flight definition edit cannot
+mutate it, which is the correct choice and the opposite of Cordis's live rebind.
 
 ---
 
@@ -118,6 +185,44 @@ Rides `buildDefaultMcpServers` exactly like `haive-rag` / `ddev-control` (packag
 - Composer control: bespoke React modeled on the existing `bundle-composer` custom field + `BundleComposer` component (packages/web/src/components/form-renderer.tsx:881) — FormRenderer renders a flat field list and has no reorderable-sub-form primitive. Palette (curated catalog) on the left; ordered `stepIds` with reorder/remove + live prereq validation on the right; per-step params rendered inline with FormRenderer against each step's `paramFormSchema` (this part reuses FormRenderer directly). The reorder editor is shown only for `runListStrategy = 'static'`; for the two dynamic built-ins the admin edits enable/disable + params only.
 - New Task form (packages/web/src/app/(app)/tasks/new/page.tsx:251-255,329-335,462-493): replace the binary run-app toggle with a real select sourced from `GET /task-types`, keeping onboarding-status auto-detect as the fallback default.
 
+### A module may seed a task-type definition
+
+A module that ships steps will usually want to ship the task type that composes them, so the customer
+does not have to hand-assemble it in the composer to get the thing they paid for.
+
+- Manifest gains `taskTypes?: TaskTypeDefinitionSeed[]`, upserted by the module loader the same way
+  the composable catalog is — the boot-upsert pattern this plan already borrows from
+  `syncTemplateManifestCache`.
+- Seeded rows carry `source: 'module:<id>'` so an admin can see they are vendor-supplied, and so they
+  are removed with the module.
+- An admin may **disable** a module-seeded definition but not delete it: deletion would simply be
+  undone at the next boot upsert, and a control that silently reverts is worse than no control.
+  Removing it for real means removing the module.
+
+### Creator mode: describe a step in chat, generate the DATA-DRIVEN definition
+
+Cordis's "creator mode" scaffolds and hot-loads a new plugin from a chat description after an
+approval click. The dangerous half of that (hot-loading executable code into a live process) is
+exactly what Phase 3 refused. But the SAFE half maps perfectly onto this plan, because a
+prompt-template step is DATA, not code:
+
+- An admin describes the step they want in natural language ("review the changed SQL migrations for
+  destructive operations and report each with severity"). An LLM turn produces a candidate
+  `{ kind:'prompt-template', stepSlug, title, promptTemplate, requiredCapabilities, timeoutMs,
+  uiPanels? }` entry — the exact shape Phase 3.1 already synthesizes into a StepDefinition.
+- Nothing executes on generation. The output is a definition row the admin previews, edits in the
+  composer, and saves. It flows through the SAME prereq/loop-closure validator and the SAME
+  `synthesizeStepDefinition` factory — there is no new execution path, no runtime code injection,
+  and no rebuild (prompt-template steps are data and need none, per Phase 3.1).
+- This is strictly an authoring convenience over Phase 3's manual composer, so it trails Phase 3 and
+  cannot precede it. It reuses one existing LLM dispatch and adds no new trust surface: the
+  generated artifact is a prompt template that runs in the sandbox like any other, gated by the
+  same `CUSTOM_TASK_TYPES_ENABLED` switch.
+- Explicitly NOT in scope even here: generating a custom MCP TOOL's callback from a description.
+  Tool callbacks are the vetted allow-list (Phase 3.2); a described-into-existence handler would be
+  arbitrary code and is the exact thing that plan section keeps behind the allow-list. Creator mode
+  generates prompt-template steps only.
+
 ---
 
 ## Net-new infrastructure (everything else reuses existing patterns)
@@ -168,127 +273,11 @@ Phase 1 is the foundation and the bulk of the value and risk (schema, seed, byte
 - Arbitrary admin-authored MCP callback handler code (vetted allow-list only for MVP).
 - Per-user (non-global) task types.
 - Exposing all ~60 registered steps as composable (curated allow-list only).
+- The reactive RUNTIME rebind other plugin harnesses do (swap a provider under a live task and
+  reload it). A running task's run list is materialised and forward-walked precisely so a mid-flight
+  definition edit cannot mutate it — the opposite choice, and the correct one here.
 
----
-
-# Amendment — 2026-08-20: composing module-contributed steps
-
-*Appended after the original plan was archived; the body above is unchanged. Companion to the
-amendment on `serialized-chasing-thacker.md`. Added so a distributed module (the deep project
-analysis scan) can contribute steps that a task type is then composed from.*
-
-## F. Definitions may reference module-contributed steps
-
-The module system exports `./steps` and its loader registers them, but this plan composes task types
-from a **curated** `composable_step_catalog` — so without this, a module's steps are registered yet
-invisible to the composer and unusable by any task type.
-
-- The catalog is the union of core entries and every loaded module's `composableSteps`, namespaced
-  `module.<moduleId>.<stepId>` so a module can never shadow a core step id (companion amendment A).
-- The prereq validator needs **no special-casing**: it walks `requires`/`provides` capability tokens,
-  not step ids, so a module step that `provides: ['worktree']` satisfies a core step's need exactly as
-  `01-worktree-setup` does. This is the payoff of the capability-token design already in this plan.
-- `buildRunList` resolves module step ids through the same registry, which the module loader has
-  populated before the catalog sync runs.
-
-## G. Dangling references — a module removed under a live definition
-
-Data-driven types plus distributed modules create a failure mode neither has alone: a definition's
-ordered step list can reference steps that no longer exist, because the module supplying them was
-disabled, removed, or failed to load after a rebuild.
-
-- Validate that every `stepId` resolves at boot **and** at task-create (the existing defence-in-depth
-  pattern this plan already applies to prereq validation).
-- A definition with an unresolvable step becomes **not selectable, with a named reason** — "requires
-  module `deep-analysis`, which is not installed". Never a crash, and never silently dropping the
-  missing step, which would run a truncated pipeline the admin never authored and cannot see.
-- Tasks already running are untouched: their run list is materialised, and `buildRunList` is
-  forward-walked from the current step. This gates new task creation only.
-
-## H. A module may seed a task-type definition
-
-A module that ships steps will usually want to ship the task type that composes them, so the customer
-does not have to hand-assemble it in the composer to get the thing they paid for.
-
-- Manifest gains `taskTypes?: TaskTypeDefinitionSeed[]`, upserted by the module loader the same way
-  the composable catalog is — the boot-upsert pattern this plan already borrows from
-  `syncTemplateManifestCache`.
-- Seeded rows carry `source: 'module:<id>'` so an admin can see they are vendor-supplied, and so they
-  are removed with the module.
-- An admin may **disable** a module-seeded definition but not delete it: deletion would simply be
-  undone at the next boot upsert, and a control that silently reverts is worse than no control.
-  Removing it for real means removing the module.
-
----
-
-# Amendment — 2026-08-21: unbuilt; and how the two puffin files relate
-
-Unbuilt — none of `schema/task-types.ts`, `routes/task-types.ts`, `task-type-manifest.ts`,
-`composable-catalog.ts`, `routes/custom-mcp.ts` or the admin task-types page exists.
-
-**Two files describe this feature and neither supersedes the other.** This file is the whole design
-and the locked user decisions. `rippling-wibbling-puffin-agent-a233cf7f9b59974f6.md` is a
-subagent-written **half A** — data model, `buildRunList`, pgEnum, migration and seed — grounded
-line-by-line against the tree at the time. They are complementary: read this one for the design and
-the amendment on module-contributed steps, and half A for the migration mechanics and the
-`findIndex` invariant. Half A covers only the first slice; it is not an alternative plan.
-
-Anchor drift shared by both: `buildRunList` is now `task-queue.ts:152` (half A says 112-130) and
-`buildRunAppRunList` is `:186` (says 146-178). Both `execution-paths.ts:98`
-(`PATH_REQUIRED_TARGETS`) and `:133` (`orderWorkflowRunList`) still resolve exactly as cited, in
-`packages/worker/src/orchestrator/execution-paths.ts`.
-
----
-
-# Amendment — 2026-08-25: creator-mode authoring + a note that spatial composability is already here
-
-*Prompted by the DeepSeek/Cordis harness (harness.pdf). Two of its ideas touch this plan: one is
-already built into it, and one is a natural extension of Phase 3's admin authoring.*
-
-## I. Spatial composability is this plan's capability tokens — already done
-
-Cordis's "spatial composability" means a plugin declares what it needs from the environment and the
-runtime resolves it reactively: a dependency that disappears makes the plugin "just deactivate and
-wait, without erroring," rather than crash. This plan independently arrived at exactly that:
-
-- The `requires`/`provides` capability tokens (`'worktree'`, `'runtime'`, `'spec'`) ARE the
-  dependency declaration — a step needs `worktree`, and any step that provides it satisfies the
-  need, so alternatives compose without special-casing (the payoff already noted in amendment F).
-- Amendment G is the "deactivate and wait" behaviour verbatim: a definition referencing a step that
-  no longer resolves (its module was removed) becomes not-selectable WITH A NAMED REASON, never a
-  crash and never a silently truncated pipeline.
-
-So no change is needed here — this is recorded only so a future reader does not "add spatial
-composability" as if it were missing. It is the design already locked. What Haive deliberately does
-NOT take is the reactive RUNTIME rebind (swap a provider under a live task and reload it): a running
-task's run list is materialised and forward-walked precisely so a mid-flight definition edit cannot
-mutate it, which is the correct choice and the opposite of Cordis's live rebind.
-
-## J. Creator mode: describe a step in chat, generate the DATA-DRIVEN definition
-
-Cordis's "creator mode" scaffolds and hot-loads a new plugin from a chat description after an
-approval click. The dangerous half of that (hot-loading executable code into a live process) is
-exactly what Phase 3 refused. But the SAFE half maps perfectly onto this plan, because a
-prompt-template step is DATA, not code:
-
-- An admin describes the step they want in natural language ("review the changed SQL migrations for
-  destructive operations and report each with severity"). An LLM turn produces a candidate
-  `{ kind:'prompt-template', stepSlug, title, promptTemplate, requiredCapabilities, timeoutMs,
-  uiPanels? }` entry — the exact shape Phase 3.1 already synthesizes into a StepDefinition.
-- Nothing executes on generation. The output is a definition row the admin previews, edits in the
-  composer, and saves. It flows through the SAME prereq/loop-closure validator and the SAME
-  `synthesizeStepDefinition` factory — there is no new execution path, no runtime code injection,
-  and no rebuild (prompt-template steps are data and need none, per Phase 3.1).
-- This is strictly an authoring convenience over Phase 3's manual composer, so it trails Phase 3 and
-  cannot precede it. It reuses one existing LLM dispatch and adds no new trust surface: the
-  generated artifact is a prompt template that runs in the sandbox like any other, gated by the
-  same `CUSTOM_TASK_TYPES_ENABLED` switch.
-- Explicitly NOT in scope even here: generating a custom MCP TOOL's callback from a description.
-  Tool callbacks are the vetted allow-list (Phase 3.2); a described-into-existence handler would be
-  arbitrary code and is the exact thing that plan section keeps behind the allow-list. Creator mode
-  generates prompt-template steps only.
-
-## What Haive is already ahead on (recorded, not actioned)
+**Already built, recorded so it is not "discovered" later as a gap.**
 
 The harness author is envious of an append-only session log with a trajectory view — "what did the
 model actually see is a click." Haive already has it: `task_events`, `cli_invocations` with

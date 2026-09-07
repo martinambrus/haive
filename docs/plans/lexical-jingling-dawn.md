@@ -1,5 +1,9 @@
 # Learned step guidance (self-improving prompts)
 
+> **Shipped** and verified on the dev stack, as written apart from the five departures marked
+> **As built** below. A historical record, not pending work — do not re-implement from it. Line
+> numbers below are as of writing and have since drifted; resolve any reference by symbol name.
+
 ## Context
 
 Haive already learns from finished runs, but only about the user's *code*: `11-phase-8-learning`
@@ -9,7 +13,9 @@ dropped by construction. Nothing in the system captures "this step's instruction
 that is why the fix loop ran".
 
 The manual version of that loop already exists and demonstrably pays: `ddevConfigGuidanceLines()` in
-`packages/worker/src/step-engine/steps/_retrieval-guidance.ts:162` is a hand-written learned lesson,
+`packages/worker/src/step-engine/steps/_retrieval-guidance.ts:176` (`:162` when this was written,
+which now falls inside its doc comment — a comment that has since grown two further rules by hand,
+which is exactly the cost this plan removes) is a hand-written learned lesson,
 relevance-gated on `/\bddev\b/i`, whose own comment records the evidence ("Observed across six
 add-ddev tasks: four wrote ranges, two wrote exact pins and both tasks died at `ddev start`"). This
 feature automates the capture and storage of such lessons; a human still approves every one.
@@ -54,6 +60,14 @@ from a CLI call (the non-human keys of `PATH_REQUIRED_TARGETS`):
 `07b-phase-4-validate.ts`, `08-phase-5-verify.ts`, `08c-code-review.ts` (next to the existing
 `INSIGHTS_INSTRUCTION` in `reviewAssignment()`), `08d-adversarial-qa.ts`.
 
+**As built the sites are 07b / 08a / 08c / 08d.** `08-phase-5-verify` satisfies only the first half
+of that rule: it has no `llm` and no `agentMining` block (`08-phase-5-verify.ts:385-403`) — it runs
+test/lint/typecheck deterministically and emits no prompt at all. `08a-browser-verify` satisfies
+both (an `llm` tester/fixer loop plus fixLoop + restartLoop + fixLoopOnError), so it took the fourth
+slot. On 07b the instruction rides BOTH validator prompts (pass 0 and the re-validation pass) and
+neither fixer prompt; on 08a only the tester, not the fixer and not the human-facing manual
+checklist.
+
 Gate: feature switch only, resolved in each step's `detect()` and carried on the detect payload as
 `promptDefectCapture: boolean` (`buildPrompt` has no `ctx`). Not gated on `round > 0` — the round
 that *first* rejects is the observation, and the prompt is fixed before the model knows it will
@@ -64,11 +78,27 @@ reject.
 New `packages/worker/src/step-engine/steps/workflow/11e-prompt-guidance.ts`, index `11.5`,
 `requiresCli: false`, no `llm` block. Structurally a copy of `08e-insights-triage.ts`.
 
+**As built the index is `11.8`.** 11.5 is `11b-kb-commit` (11.4 is 11d, 11.7 is 11c); 11.8 puts
+triage at the end of the learning phase, ahead of the 11a push gate at 12.
+
 - `shouldRun`: feature enabled AND at least one parsed defect. Clean runs never see the form.
 - `detect`: scan this task's `cli_invocations.rawOutput` joined to `task_steps` (same query shape as
   `collectInsights()`), parse, dedupe by fingerprint, drop any fingerprint already `rejected`, look
   up existing rows for the `seen Nx` count, and load `loadRepoStackAnchors()` (`_repo-stack.ts:100`)
   for facets plus the repo's project name.
+**As built, an already-active candidate is a RECURRENCE, not a re-decision — the plan's tombstone
+rule would have destroyed approved guidance.** This plan says every unkept candidate becomes a
+`rejected` tombstone. But a defect that is already `active` can be re-reported on a later run, and
+under that rule leaving it unchecked deactivates guidance the user previously approved — silently,
+and by DEFAULT, since an unticked multi-select is the resting state and an auto-continued run
+submits exactly that empty payload. Candidates therefore carry a `disposition`: `new` (the only
+class put to the user), `active` (not offered; the run only bumps `occurrences`), `display_only`
+(`task_description_defect`, shown and never stored). `rejected` still means never re-offer, and the
+off-switch for an active item is the explicit Deactivate action on the repo tooling page.
+Consequence, stated in the code: a run whose only candidates are already active does not park a
+form, so its recurrences go uncounted — acceptable because `occurrences` is a ranking hint, never a
+metric.
+
 - `form`: two multi-selects over the same candidate list — `keep` (default none) and `global` (a
   subset of `keep`, described as "applies to every repo on this stack"). Items in both become
   `scope='global'`; items only in `keep` become `scope='repo'`.
@@ -100,10 +130,19 @@ Unique index on `(step_id, scope, coalesce(repository_id, '00000000-0000-0000-00
 fingerprint)`. Authored in the numbered `.sql` because it is an expression index; the table is new so
 no dedup pass is needed first.
 
+**As built: two partial unique indexes, not one `coalesce()` expression index over a sentinel uuid.**
+`repository_id` is genuinely NULL for a global item; a partial index says so without inventing a
+magic value a future join could match. Drizzle expresses both directly, so `drizzle-kit push` owns
+the schema and the `.sql` stays the idempotent parity record (verified: re-running it is a clean
+no-op). The upsert names the matching predicate via `targetWhere`, which was probed against the live
+database because a partial-index conflict target only fails at runtime (42P10).
+
 Per-repo opt-out column on `repositories`: `step_guidance_enabled boolean NOT NULL DEFAULT true`,
 matching how `pr_workflow_enabled` pairs with a default-off global switch.
 
-Migration `packages/database/src/migrations/0109_step_guidance.sql` — `CREATE TABLE IF NOT EXISTS`,
+Migration `packages/database/src/migrations/0109_step_guidance.sql` — **as built `0123`; 0109 has
+been `cli_provider_model_limits.sql` since before this plan was written and the series was at 0122**
+— `CREATE TABLE IF NOT EXISTS`,
 `CREATE UNIQUE INDEX IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. Fully additive and
 idempotent, per the `0108_task_paused_at.sql` convention.
 
@@ -126,6 +165,12 @@ Call site: `packages/worker/src/step-engine/step-runner.ts`, between the existin
 `augmentPromptWithAttachments` (line 606) and `augmentPromptWithTerseness` (line 609), so the result
 still flows through `resolveTaskDispatch` and its capability adaptation. Not wired into the agent-
 mining path at `step-runner.ts:1096` in v1.
+
+**As built, and commented at `augmentPromptWithLearnedGuidance`:** injection is wired to the
+step-runner's `llm` dispatch only. It reaches `07-phase-2-implement` (the sole guidance target) on a
+normal run and on every fix round, but NOT the DAG coder prompts (`dag-executor.ts` builds those)
+nor the agent-mining fan-outs. A DAG-mode run gets the guidance only once the fix loop routes back
+to 07.
 
 ### 5. Switches and UI
 
@@ -184,6 +229,23 @@ until the libs rebuild lands.
      `07-phase-2-implement` contains the guidance block
   5. flip the admin switch off; run again; the same prompt is byte-identical to a pre-feature run
 
+**What the shipped change actually covered.** `pnpm typecheck` and the full Vitest suite in each
+package's own container: 3717 tests pass (worker 2941, shared 383, api 169, web 224), Prettier
+clean. 33 new unit assertions across `prompt-defect-parse`, `guidance-context` and
+`prompt-guidance-triage`, covering the parser, the fingerprint's id/path/digit normalisation, the
+5-item / 1500-char caps, global facet overlap and non-overlap, and byte-identical output when the
+switch is off, when the repo opted out, when nothing matches and when the query throws.
+`workflow-smoke.ts` passes (`WORKFLOW_OK`) with `11e-prompt-guidance` correctly `skipped` under the
+default-off switch. End to end on the dev stack, worker stopped for the smoke rather than bounced
+mid-CLI: a seeded `## PROMPT-DEFECT` block flows through 11e's shouldRun/detect/form/apply into an
+`active` `step_guidance` row, appears in a LATER task's `07-phase-2-implement` prompt, leaves an
+unrelated step untouched, and returns byte-identical the moment the admin switch is flipped off. A
+declined new defect is never re-offered; an empty submit against an active item bumps `occurrences`
+to 2 and leaves it active. Admin `GET`/`PUT /admin/config/step-guidance` round-trip and reject a bad
+body with 400; the per-repo toggle round-trips through `tooling-config`/`PATCH tooling`, and
+`POST /repositories/:id/step-guidance/:id/archive` archives rather than deletes, 404ing on an
+already-archived or unknown id.
+
 ## Limitations to state in code comments
 
 - **No statistical validation.** Sample counts per (step, repo) are far too low to show that guidance
@@ -195,91 +257,6 @@ until the libs rebuild lands.
   an item stale; there is no reaper. Archive by hand.
 - **Global scope carries repo-authored text across repos.** Mitigated by explicit per-item human
   selection, the project-name scrub, the length cap, and facet scoping — not eliminated.
-
----
-
-# Amendment — 2026-08-21: unbuilt; the worked example moved
-
-Unbuilt — none of the proposed files exist (`schema/step-guidance.ts`,
-`step-engine/guidance-context.ts`, `steps/workflow/_prompt-defect.ts`,
-`steps/workflow/11e-prompt-guidance.ts`, migration `0109_step_guidance.sql`).
-
-The hand-written lesson the plan generalises from is intact but moved:
-`ddevConfigGuidanceLines` is `_retrieval-guidance.ts:176`, not `:162` (line 162 now falls inside its
-doc comment). That comment has also grown two further rules since the body was written, which
-strengthens rather than weakens the argument — the manual list is accumulating by hand, which is
-exactly the cost this plan removes.
-
----
-
-# Amendment — 2026-08-21: shipped
-
-Built and verified on the dev stack. Five deviations from the plan as written, each forced by
-what the code actually does:
-
-1. **`08-phase-5-verify` cannot carry the capture instruction; `08a-browser-verify` does instead.**
-   The plan picked the four steps "that can route a run back to implementation and that emit their
-   verdict from a CLI call". 08 satisfies only the first half: it has no `llm` and no `agentMining`
-   block (`08-phase-5-verify.ts:385-403`) — it runs test/lint/typecheck deterministically and emits
-   no prompt at all. `08a-browser-verify` satisfies both (an `llm` tester/fixer loop plus fixLoop +
-   restartLoop + fixLoopOnError), so it took the fourth slot. Capture sites are therefore
-   **07b / 08a / 08c / 08d**. On 07b the instruction rides BOTH validator prompts (pass 0 and the
-   re-validation pass) and neither fixer prompt; on 08a only the tester, not the fixer and not the
-   human-facing manual checklist.
-
-2. **Migration `0123`, not `0109`.** 0109 has been `cli_provider_model_limits.sql` since before this
-   plan was written; the series is at 0122.
-
-3. **Step index `11.8`, not `11.5`.** 11.5 is `11b-kb-commit` (11.4 is 11d, 11.7 is 11c). 11.8 puts
-   triage at the end of the learning phase, ahead of the 11a push gate at 12.
-
-4. **Two partial unique indexes, not one `coalesce()` expression index over a sentinel uuid.**
-   `repository_id` is genuinely NULL for a global item; a partial index says so without inventing a
-   magic value a future join could match. Drizzle expresses both directly, so `drizzle-kit push`
-   owns the schema and the `.sql` stays the idempotent parity record (verified: re-running it is a
-   clean no-op). The upsert names the matching predicate via `targetWhere`, which was probed
-   against the live database because a partial-index conflict target only fails at runtime (42P10).
-
-5. **An already-active candidate is a recurrence, not a re-decision — the plan's tombstone rule
-   would have destroyed approved guidance.** The plan says every unkept candidate becomes a
-   `rejected` tombstone. But a defect that is already `active` can be re-reported on a later run,
-   and under that rule leaving it unchecked deactivates guidance the user previously approved —
-   silently, and by DEFAULT, since an unticked multi-select is the resting state and an
-   auto-continued run submits exactly that empty payload. Candidates now carry a `disposition`:
-   `new` (the only class put to the user), `active` (not offered; the run only bumps
-   `occurrences`), `display_only` (`task_description_defect`, shown and never stored). `rejected`
-   still means never re-offer. The off-switch for an active item is the explicit Deactivate action
-   on the repo tooling page. Consequence, stated in the code: a run whose only candidates are
-   already active does not park a form, so its recurrences go uncounted — acceptable because
-   `occurrences` is a ranking hint, never a metric.
-
-Also worth knowing, and commented at `augmentPromptWithLearnedGuidance`: injection is wired to the
-step-runner's `llm` dispatch only. It reaches `07-phase-2-implement` (the sole guidance target) on a
-normal run and on every fix round, but NOT the DAG coder prompts (`dag-executor.ts` builds those)
-nor the agent-mining fan-outs. A DAG-mode run gets the guidance only once the fix loop routes back
-to 07.
-
-## Verified
-
-- `pnpm typecheck` and the full Vitest suite in each package's own container: 3717 tests pass
-  (worker 2941, shared 383, api 169, web 224), Prettier clean.
-- 33 new unit assertions across `prompt-defect-parse`, `guidance-context` and
-  `prompt-guidance-triage`, covering the parser, the fingerprint's id/path/digit normalisation, the
-  5-item / 1500-char caps, global facet overlap and non-overlap, and byte-identical output when the
-  switch is off, when the repo opted out, when nothing matches and when the query throws.
-- `workflow-smoke.ts` passes (`WORKFLOW_OK`) with `11e-prompt-guidance` correctly `skipped` under
-  the default-off switch.
-- End-to-end on the dev stack, worker stopped for the smoke rather than bounced mid-CLI: a seeded
-  `## PROMPT-DEFECT` block flows through 11e's shouldRun/detect/form/apply into an `active`
-  `step_guidance` row, appears in a LATER task's `07-phase-2-implement` prompt, leaves an unrelated
-  step untouched, and returns byte-identical the moment the admin switch is flipped off. A declined
-  new defect is never re-offered; an empty submit against an active item bumps `occurrences` to 2
-  and leaves it active.
-- Admin `GET`/`PUT /admin/config/step-guidance` round-trip and reject a bad body with 400. The
-  per-repo toggle round-trips through `tooling-config`/`PATCH tooling`, and
-  `POST /repositories/:id/step-guidance/:id/archive` archives rather than deletes, 404s on an
-  already-archived or unknown id.
-
-Note for anyone cleaning up after a probe: `step_guidance.source_task_id` is `ON DELETE SET NULL`
-by design — a lesson outlives the task that produced it — so deleting a task does NOT remove its
-guidance rows.
+- **`step_guidance.source_task_id` is `ON DELETE SET NULL` by design** — a lesson outlives the task
+  that produced it — so deleting a task does NOT remove its guidance rows. Worth knowing when
+  cleaning up after a probe.

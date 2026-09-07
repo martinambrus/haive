@@ -52,6 +52,272 @@ no destructive step.
 
 ---
 
+## Status — not started, and Phases 1-2 are BACKLOGGED
+
+`grep -r 'model_set|modelSet|ModelSet' packages/` returns zero hits — no columns, no shared types,
+no route, no UI. `consolidator` in code hits only unrelated strings (a sort comment in
+`08d-adversarial-qa.ts:394`, an onboarding hint). No feature branch exists; this plan has a single
+commit (`083a003`, the bulk plan archive).
+
+**Decision (2026-08-21): do not build Phase 1 or Phase 2 now.** Not cancelled — backlogged, on a
+measurement rather than a projection. The reasoning below is what a reader needs BEFORE the phase
+designs, and the sequencing carve-out is the one piece worth building.
+
+### Approach B already ships, and the cheapest win lives inside it
+
+The plan frames this as "fan out across models, then consolidate" (call it **A**). The alternative
+it never names is **B**: one main CLI drives the step, other CLIs check and complement it. B is not
+hypothetical here — Haive already implements it three ways:
+
+- **Different model per step**: `user_step_cli_preferences` (`packages/database/src/schema/cli-providers.ts:224`).
+- **Different model per ROLE inside a loop step**: `user_step_cli_role_preferences` (same file, 253),
+  resolved at `step-runner.ts:672` through `stepDef.loop.resolveRole`. Spec-quality's reviewer and
+  corrector can already be two different CLIs.
+- **Driver plus independent critics with an evidence bar**: 07 implements; `08c-code-review.ts` runs
+  peer and security reviewers in parallel via mining, then a second `MiningWaveError` wave of
+  refuters (three lenses, unanimity, fail-closed); `08d-adversarial-qa.ts` runs N adversaries that
+  must produce a non-destructive PoC before a finding counts.
+
+What is missing from B is exactly one line of variance: `dispatchMiningAgents` calls
+`resolvePreferredCli` ONCE and pins that provider for the whole fan-out, so every mining agent today
+is the same model wearing a different persona. Note also that when 08c needed diverse voters it
+bought diversity with prompt lenses rather than models (`08c-code-review.ts:319`) — a deliberate
+house choice, not an oversight.
+
+### What each shape optimises — decide per step KIND, not once for the product
+
+| | A: fan-out + consolidate | B: driver + critics |
+|---|---|---|
+| Optimises | recall — the union of what N models see | precision — killing a wrong claim |
+| Failure it fixes | one model missed a thing | one model asserted a wrong thing |
+| Failure it ADDS | unique-but-false additions get merged in | nobody looks where nobody was told to look |
+| Merge unit | prose or JSON drafts | a verdict plus cited evidence |
+| Marginal cost | (members + 1) new invocations | +0 on a fan-out that already exists |
+
+Both directions are evidenced by `benchmarks/README.md` (66 runs, 19 models):
+
+- **For A**: `grok-4.6` produced four findings appearing in no other run of 66; Opus 5 max alone
+  found the search stub; `muse-xhigh` alone found the inverted `in_array` guard. Models genuinely
+  see disjoint things.
+- **Against naive A**: two "only run in N" uniqueness claims inherited from the 8 August edition
+  were checked before reuse and both were wrong; `muse-high` emitted four citations naming a real
+  file and an in-range line belonging to a different function, "a defect no automated checker in
+  this benchmark can see"; `glm53-max` described its own sandbox by-products as project structure.
+  Unique does not mean true, and a consolidator reading only drafts cannot tell the two apart.
+
+### Sequencing
+
+1. **First, and cheapest by a wide margin: unpin the provider in the fan-out.** Give
+   `dispatchMiningAgents` a per-dispatch provider instead of one resolved for the whole set. Then
+   08c's peer reviewer runs on a different model from 07's implementer, and 08d's adversaries spread
+   across models. Zero extra invocations — those agents already run — and no new columns, no
+   barrier, no consolidator. This delivers the "different CLIs check each other" property on its own
+   and should land before Phase 1 is started.
+2. **Then Phase 1 (A), but ONLY for divergent, generative steps**: 03 discovery, 03b business
+   requirements, 04 pre-planning, 05 spec quality, `deep_scan`, KB mining. There the product IS a
+   union of observations, a missed requirement costs a whole re-run, and a wrong addition is cheap
+   because a human reads it at gate 1. Union-merge is the right primitive there.
+3. **Never A for verdict or code steps**: 08c, 08d, the gates, 07, 12. Consolidating N verdicts
+   averages away the one model that was right, and consolidating N code drafts means reconciling
+   file edits rather than text — Phase 2c already concedes this. B covers these correctly today.
+4. **Nothing for deterministic steps** (01 worktree, 06a db-migrate, env-replicate). No ground truth
+   to triangulate, pure cost.
+
+This makes Phase 2b optional rather than the goal: `kind-riding-dream.md` already declares it
+optional, and under this sequencing 2c should be dropped rather than deferred.
+
+### The consolidator needs the refuter's evidence bar
+
+Phase 1b says that for anything ONE model added, the consolidator should "validate before
+including". That is precisely the operation the benchmark shows failing — the wrong-function
+citations were invisible to every checker in the round, and two inherited uniqueness claims were
+simply false. A consolidator that reasons over drafts alone will promote one model's hallucination
+into the merged answer, which is worse than not running A at all.
+
+So `buildConsolidatorPrompt` must give the consolidator repo access and hold unique additions to
+08c's refuter bar: an addition present in only one draft survives only with a cited `file:line` that
+supports it; otherwise it is dropped, or demoted into the `<<CONSOLIDATION_REPORT>>` as advisory.
+Agreements across two or more drafts keep the cheap path. This raises the consolidator from a
+prose-merging call to a real tool-using sandbox invocation — cost it accordingly, and keep the
+existing caveat that reconciliation remains best-effort judgement.
+
+### Cost reality on the reference dev host
+
+`MAX_PARALLEL_AGENTS_PER_TASK` defaults to 5 (`config.service.ts:454`) but the real ceiling is the
+measured agent pool, floored at `DEFAULT_AGENT_FLOOR` 2 (`host-resources.ts:157`) with
+`agentWeightMb` 2048. On the WSL2 dev host the pool sits near that floor, so a 3-member step plus a
+consolidator is 4 invocations drained two at a time — roughly triple the wall clock for that step,
+before the consolidator's own tool use. Step 1 of the sequencing costs nothing extra. That gap is
+the whole argument for the ordering.
+
+### Measure before building Phase 1
+
+Nobody has yet measured whether a consolidator of N drafts beats the best single draft under the
+benchmark's own scoring; the uniqueness evidence is per-run anecdote. The drafts already exist —
+take three scored runs of one task, merge them by hand under the rules in 1b plus the evidence bar
+above, and score the merge. If the merge does not beat the best single run, Phase 1 is not worth its
+multiplier and step 1 of the sequencing is the entire feature.
+
+### What the projection says, per task type
+
+The extrapolation asked for above has been done, against the full published corpus rather than
+per-run anecdote: 60 full-workflow runs, 66 README-quality runs and 64 onboarding runs, 190
+single-model runs in total. There is still no multi-model data anywhere, so all of it is a
+projection from single-model runs, under three stated assumptions: a combination scores the
+per-dimension MAX of its members (a perfect consolidator, i.e. a ceiling and never an expectation),
+the cost axis is RECOMPUTED from combined cost rather than maxed, and Delivery does not merge.
+
+**Full workflow — shape A is negative.** Taking Delivery as the member mean (a text merge of N
+code drafts does not inherit the disciplined implementer's rejection count; Phase 2c already
+concedes this) and re-scoring Efficiency on summed tokens, EVERY 2- and 3-member set lands below
+the best single run of 78. Best 2-member 77.2, best 3-member 77.7. The Efficiency axis alone
+costs 6.1 and 7.5 composite points, and the dimensions a merge can actually improve — Artifact
+20%, Rigor 14%, Knowledge 10% — are worth less combined than Delivery's 28% on its own. The
+Efficiency reconstruction used here reproduces the published values exactly (r = 1.000, mean
+absolute error 0.8 points over 60 runs), so the cost side of that arithmetic is not an estimate.
+
+**Quick fix — no headroom exists.** The rubric's practical maximum is 98 (accuracy and
+completeness both reach 10; clarity has never scored above 9 in 66 runs) and THREE single runs
+already sit on it, one of them Opus 5 medium at 11.2k implement tokens. So the incumbent is
+simultaneously the best and among the cheapest. Worse, one hallucination costs 6.099 composite
+points (r = -0.760, n = 66) and almost exactly one accuracy point (slope -1.003, r = -0.833). A
+false claim is by construction unique to one draft, so it lands squarely in the consolidator's
+"validate before including" path — the operation flagged above as the
+one this benchmark shows failing. Maximum available gain is +3; one leaked invention costs twice
+that. Every member set that beats its own best member does so only because both members are
+mediocre (the largest, Sonnet 5 low + Sonnet 4.6 medium, goes 74 to 82 — sixteen points below
+what one Opus 5 medium delivers alone).
+
+**Onboarding — the only defensible case, and the rubric cannot see it.** Best 2-member oracle
+gain is +0.08 and best 3-member +0.15, against a 9.07 best single run. The composite is also nearly blind to landmine recall — regressing
+composite on confirmed recall across all 64 runs gives r = 0.093 — so the score says "negligible"
+about the one axis a fan-out could move. That is not an argument that Phase 1 pays; it is the reason
+the hand-merge below had to settle it instead of the leaderboard. (An earlier reading of this case
+claimed the merge takes landmine recall from 2 of 8 to 8 of 8. It does not — see the hand-merge
+below, which measured the artifacts rather than the audit prose and found two of the three members
+already at 8 of 8 alone.)
+
+### What IS worth building, and it is not per-step CLI assignment
+
+Sequencing step 1 above — give `dispatchMiningAgents` a per-dispatch provider
+instead of one resolved for the whole fan-out — is carved out of this plan and will be specified
+separately. It must not be conflated with the per-step and per-role CLI preferences that already
+ship (`user_step_cli_preferences`, `user_step_cli_role_preferences`): those choose the model for a
+STEP, while the pin is inside a step, so every mining agent in 08c, 08d and the KB mining steps is
+currently the same model wearing a different persona. No amount of per-step assignment reaches it.
+Zero extra invocations, no new columns, no barrier, no consolidator.
+
+It is also the only way to MEASURE the uncomfortable finding in this corpus: deeper review rounds
+go with MORE hands-on rejections, not fewer — r = 0.53 across all 60 runs, 0.57 excluding Codex
+and Haiku, and 0.73 within the Claude family alone, where only the effort setting varies. That
+cannot currently be read as "a foreign critic hurts", because today the reviewer IS the
+implementer and deep-reviewing models are also bad implementers. The pin is exactly what makes
+the two separable.
+
+For the record, the delivery constraint this corpus does identify is scope discipline, not review
+depth. Median application PHP files modified, by outcome: 1 for the three first-pass runs, 2
+shipped-after-rework, 3 heavy rework, 21 for the seven that never delivered.
+
+### Reopening conditions
+
+Phase 1 comes back off the backlog only if BOTH hold:
+
+1. The hand-merge experiment ("Measure before building Phase 1" above) shows a merge
+   of three onboarding runs beating the best single run — judged on defect recall and on the
+   survival rate of unique-to-one-model claims under the evidence bar, NOT on the published
+   composite, which r = 0.093 says cannot see the effect.
+2. The unpinned fan-out has shipped and shown that cross-model review actually converts into
+   fewer hands-on rejections.
+
+Phase 2b stays optional and 2c stays dropped, per the sequencing above.
+
+### Hand-merge experiment — RUN 2026-08-21. Reopening condition 1 FAILS.
+
+Done as specified: three scored onboarding runs of the same task, merged under the 1b rules plus
+the evidence bar, on the artifacts themselves rather than on the leaderboard. Members were
+`grok-4.6`, `sonnet-5 high` and `opus-5 medium` (task ids `7f65dbe6`, `f8f774c1`, `e0fe4ed6`),
+read at each repository's ROOT COMMIT via `git archive` — the benchmark's own methodology, because
+later README/DDEV tasks modified `.claude/knowledge_base/` in these same clones. Canonical
+`.claude/` copies only; the `.agents/`, `.codex/` and `.grok/` mirrors are the same bytes.
+
+**This corrects the headline claim for onboarding.** The 2-of-8-to-8-of-8 figure was read out of
+the published audit PROSE — what the auditors
+chose to praise in a run — and that is not what the run's knowledge base contains. Measured
+directly against the artifacts, the individual runs already cover:
+
+| landmine | grok-4.6 | sonnet-5 high | opus-5 medium |
+|---|---|---|---|
+| `Db::Update` inverted return | 4 files | **0** | 4 files |
+| `/e` preg_replace sites | 2 | 1 | 2 |
+| `elocks` / edit lock | 12 | 2 | 22 |
+| `History::Add` | 6 | 1 | 1 |
+| SECHASH | 5 | 1 | 4 |
+| `encryptPW` weak hash | 9 | 4 | 6 |
+| captcha `eval` | 2 | 2 | 1 |
+| FCKeditor guard | 2 | 4 | 5 |
+
+grok-4.6 covers 8 of 8 alone. opus-5 medium covers 8 of 8 alone. sonnet-5 high covers 7 (it never
+documents the `Db::Update` inversion). **The union's gain on landmine recall is therefore zero to
+one, not six.** The headline argument for shape A on onboarding does not survive contact with the
+artifacts.
+
+What the merge DOES add, measured over 1,568 distinct `file:line` citations in the union:
+
+- Breadth: 91 distinct application files cited, against 74 for the best single run — **+17 files**
+  of an 830-file tree.
+- Density: 1,568 citations against 1,013 for the best single run — **+55%**.
+- 74.1% of the union (1,162 citations) is unique to ONE run, i.e. the consolidator's expensive
+  path; only 25.9% is the cheap agreement path.
+- 99.7% of the union resolves structurally (file exists, line in range), consistent with the
+  published per-run figures.
+
+And the finding that genuinely cuts against the pessimism above: a hand-verified sample of **24
+unique-to-one-run claims, 8 per member, read against the source, was 24/24 semantically correct** —
+including the failure mode the structural checker cannot see (a real file and an in-range line
+belonging to a different function). At 24 of 1,162 that bounds the error rate at roughly 12% at 95%
+confidence, not at zero, but the union of these three members is substantially TRUE. The
+`muse-high` wrong-function citations and the two false uniqueness claims cited above came from
+WEAK members. So unique-but-false is a property of member selection, not of union-merging as such,
+and the hallucination counts already in the corpus (Muse 13 across 4 runs, Haiku 16 across 5) are
+the screen if Phase 1 ever ships.
+
+**Verdict: the merge does not beat the best single run.** It buys 23% more of the tree documented
+and 55% more citations, apparently truthful, on ground the best single member already covers at
+the level that decides the score. Nothing measured here justifies a 2-3x invocation multiplier.
+Two limits stated rather than hidden: the published composite could not be reproduced (it comes
+from a structured multi-agent source-verified audit, not from a script), and nothing here shows
+that a larger evidence base improves any downstream task outcome — which is the only thing that
+would actually justify the multiplier.
+
+Phase 1 stays backlogged, now on a measurement rather than a projection.
+
+## Line anchors — re-verified 2026-08-21
+
+The body was written against a ~1600-line `step-runner.ts` that is now 3269 lines. Re-verified
+2026-08-21; the body is left byte-identical per the plan-archive convention, so read the anchors
+through this table and grep the symbol rather than trusting either column later.
+
+| Body says | Actually (2026-08-21) |
+|---|---|
+| `resolvePreferredCli` step-runner.ts:117 | 145 |
+| `resolveLlmPhase` :370, `.limit(1)` readback :397 | 436, readback 475 |
+| failed-invocation arm :465 | 479 |
+| LLM call sites pre-form :1129 / post-form :1345 | 1571 / 1787 (inside `advanceStep`, 1438) |
+| `resolveAgentMiningPhase` :773 | 972 |
+| `dispatchMiningAgents` :863, pins one provider :873 | 1236, pin at 1246 |
+| `MiningWaveError` step-definition.ts:270, handled :1432 | 312, handled 1887 |
+| apply-throw retry block :1521 | 1974 |
+| loop re-enter :1614, `markLatestInvocationConsumed` :1589 | 2060, 2035 |
+| auto-continue form gate :1166-1299 | 1606-1639 |
+| `tasks.stepLoopLimits` / `preAnswers` schema :196,213 | 294, 311 |
+| `CliProviderMetadata.effortScale` catalog.ts:40 | 54 |
+| `createTaskRequestSchema` :64, `setCliProviderRequestSchema` :164 | 65, 205 |
+| `clampEffort` steps.ts:38, cli-provider handler :765 | 65, 1125 |
+| `enrichStepsWithCliPreferences` _helpers.ts:85 | 85 (unchanged) |
+| web `changeStepProvider` :853, `effortSelectFor` :2423 | 1069, 2720 |
+| task creation persist `index.ts:~230` | 313 (`createTaskRequestSchema.parse`), provider write 352 |
+| dag coder loop `dag-executor.ts:~1378` | per-level coder dispatch around 643 |
+
 ## Data model (shared + database)
 
 New shared types in `packages/shared/src/cli-providers/` (or alongside the task schemas):
@@ -226,274 +492,3 @@ just text. Flag explicitly as optional.
   default-set "lock" applies to every step until a per-step override is set.
 - Migration: `drizzle-kit push --force` on a clean DB, confirm the three columns exist and default
   correctly; confirm dropping them (rollback) leaves the single path working.
-
----
-
-# Amendment — 2026-08-21: status, re-verified anchors, sequencing, and an evidence bar
-
-**Status: none of this is built.** `grep -r 'model_set|modelSet|ModelSet' packages/` returns zero
-hits — no columns, no shared types, no route, no UI. `consolidator` in code hits only unrelated
-strings (a sort comment in `08d-adversarial-qa.ts:394`, an onboarding hint). No feature branch
-exists; the plan has a single commit (`083a003`, the bulk plan archive).
-
-## Every line anchor in the body above has drifted
-
-The body was written against a ~1600-line `step-runner.ts` that is now 3269 lines. Re-verified
-2026-08-21; the body is left byte-identical per the plan-archive convention, so read the anchors
-through this table and grep the symbol rather than trusting either column later.
-
-| Body says | Actually (2026-08-21) |
-|---|---|
-| `resolvePreferredCli` step-runner.ts:117 | 145 |
-| `resolveLlmPhase` :370, `.limit(1)` readback :397 | 436, readback 475 |
-| failed-invocation arm :465 | 479 |
-| LLM call sites pre-form :1129 / post-form :1345 | 1571 / 1787 (inside `advanceStep`, 1438) |
-| `resolveAgentMiningPhase` :773 | 972 |
-| `dispatchMiningAgents` :863, pins one provider :873 | 1236, pin at 1246 |
-| `MiningWaveError` step-definition.ts:270, handled :1432 | 312, handled 1887 |
-| apply-throw retry block :1521 | 1974 |
-| loop re-enter :1614, `markLatestInvocationConsumed` :1589 | 2060, 2035 |
-| auto-continue form gate :1166-1299 | 1606-1639 |
-| `tasks.stepLoopLimits` / `preAnswers` schema :196,213 | 294, 311 |
-| `CliProviderMetadata.effortScale` catalog.ts:40 | 54 |
-| `createTaskRequestSchema` :64, `setCliProviderRequestSchema` :164 | 65, 205 |
-| `clampEffort` steps.ts:38, cli-provider handler :765 | 65, 1125 |
-| `enrichStepsWithCliPreferences` _helpers.ts:85 | 85 (unchanged) |
-| web `changeStepProvider` :853, `effortSelectFor` :2423 | 1069, 2720 |
-| task creation persist `index.ts:~230` | 313 (`createTaskRequestSchema.parse`), provider write 352 |
-| dag coder loop `dag-executor.ts:~1378` | per-level coder dispatch around 643 |
-
-## Approach B already ships, and the cheapest win lives inside it
-
-The plan frames this as "fan out across models, then consolidate" (call it **A**). The alternative
-it never names is **B**: one main CLI drives the step, other CLIs check and complement it. B is not
-hypothetical here — Haive already implements it three ways:
-
-- **Different model per step**: `user_step_cli_preferences` (`packages/database/src/schema/cli-providers.ts:224`).
-- **Different model per ROLE inside a loop step**: `user_step_cli_role_preferences` (same file, 253),
-  resolved at `step-runner.ts:672` through `stepDef.loop.resolveRole`. Spec-quality's reviewer and
-  corrector can already be two different CLIs.
-- **Driver plus independent critics with an evidence bar**: 07 implements; `08c-code-review.ts` runs
-  peer and security reviewers in parallel via mining, then a second `MiningWaveError` wave of
-  refuters (three lenses, unanimity, fail-closed); `08d-adversarial-qa.ts` runs N adversaries that
-  must produce a non-destructive PoC before a finding counts.
-
-What is missing from B is exactly one line of variance: `dispatchMiningAgents` calls
-`resolvePreferredCli` ONCE and pins that provider for the whole fan-out, so every mining agent today
-is the same model wearing a different persona. Note also that when 08c needed diverse voters it
-bought diversity with prompt lenses rather than models (`08c-code-review.ts:319`) — a deliberate
-house choice, not an oversight.
-
-## What each shape optimises — decide per step KIND, not once for the product
-
-| | A: fan-out + consolidate | B: driver + critics |
-|---|---|---|
-| Optimises | recall — the union of what N models see | precision — killing a wrong claim |
-| Failure it fixes | one model missed a thing | one model asserted a wrong thing |
-| Failure it ADDS | unique-but-false additions get merged in | nobody looks where nobody was told to look |
-| Merge unit | prose or JSON drafts | a verdict plus cited evidence |
-| Marginal cost | (members + 1) new invocations | +0 on a fan-out that already exists |
-
-Both directions are evidenced by `benchmarks/README.md` (66 runs, 19 models):
-
-- **For A**: `grok-4.6` produced four findings appearing in no other run of 66; Opus 5 max alone
-  found the search stub; `muse-xhigh` alone found the inverted `in_array` guard. Models genuinely
-  see disjoint things.
-- **Against naive A**: two "only run in N" uniqueness claims inherited from the 8 August edition
-  were checked before reuse and both were wrong; `muse-high` emitted four citations naming a real
-  file and an in-range line belonging to a different function, "a defect no automated checker in
-  this benchmark can see"; `glm53-max` described its own sandbox by-products as project structure.
-  Unique does not mean true, and a consolidator reading only drafts cannot tell the two apart.
-
-## Sequencing
-
-1. **First, and cheapest by a wide margin: unpin the provider in the fan-out.** Give
-   `dispatchMiningAgents` a per-dispatch provider instead of one resolved for the whole set. Then
-   08c's peer reviewer runs on a different model from 07's implementer, and 08d's adversaries spread
-   across models. Zero extra invocations — those agents already run — and no new columns, no
-   barrier, no consolidator. This delivers the "different CLIs check each other" property on its own
-   and should land before Phase 1 is started.
-2. **Then Phase 1 (A), but ONLY for divergent, generative steps**: 03 discovery, 03b business
-   requirements, 04 pre-planning, 05 spec quality, `deep_scan`, KB mining. There the product IS a
-   union of observations, a missed requirement costs a whole re-run, and a wrong addition is cheap
-   because a human reads it at gate 1. Union-merge is the right primitive there.
-3. **Never A for verdict or code steps**: 08c, 08d, the gates, 07, 12. Consolidating N verdicts
-   averages away the one model that was right, and consolidating N code drafts means reconciling
-   file edits rather than text — Phase 2c already concedes this. B covers these correctly today.
-4. **Nothing for deterministic steps** (01 worktree, 06a db-migrate, env-replicate). No ground truth
-   to triangulate, pure cost.
-
-This makes Phase 2b optional rather than the goal: `kind-riding-dream.md` already declares it
-optional, and under this sequencing 2c should be dropped rather than deferred.
-
-## The consolidator needs the refuter's evidence bar
-
-Phase 1b says that for anything ONE model added, the consolidator should "validate before
-including". That is precisely the operation the benchmark shows failing — the wrong-function
-citations were invisible to every checker in the round, and two inherited uniqueness claims were
-simply false. A consolidator that reasons over drafts alone will promote one model's hallucination
-into the merged answer, which is worse than not running A at all.
-
-So `buildConsolidatorPrompt` must give the consolidator repo access and hold unique additions to
-08c's refuter bar: an addition present in only one draft survives only with a cited `file:line` that
-supports it; otherwise it is dropped, or demoted into the `<<CONSOLIDATION_REPORT>>` as advisory.
-Agreements across two or more drafts keep the cheap path. This raises the consolidator from a
-prose-merging call to a real tool-using sandbox invocation — cost it accordingly, and keep the
-existing caveat that reconciliation remains best-effort judgement.
-
-## Cost reality on the reference dev host
-
-`MAX_PARALLEL_AGENTS_PER_TASK` defaults to 5 (`config.service.ts:454`) but the real ceiling is the
-measured agent pool, floored at `DEFAULT_AGENT_FLOOR` 2 (`host-resources.ts:157`) with
-`agentWeightMb` 2048. On the WSL2 dev host the pool sits near that floor, so a 3-member step plus a
-consolidator is 4 invocations drained two at a time — roughly triple the wall clock for that step,
-before the consolidator's own tool use. Step 1 of the sequencing costs nothing extra. That gap is
-the whole argument for the ordering.
-
-## Measure before building Phase 1
-
-Nobody has yet measured whether a consolidator of N drafts beats the best single draft under the
-benchmark's own scoring; the uniqueness evidence is per-run anecdote. The drafts already exist —
-take three scored runs of one task, merge them by hand under the rules in 1b plus the evidence bar
-above, and score the merge. If the merge does not beat the best single run, Phase 1 is not worth its
-multiplier and step 1 of the sequencing is the entire feature.
-
----
-
-# Amendment — 2026-08-21 (later): Phases 1 and 2 are BACKLOGGED; the fan-out unpin is carved out
-
-**Decision: do not build Phase 1 or Phase 2 now.** Not cancelled — backlogged, because the
-measurement the previous amendment asked for is still the thing that would reopen them. What
-changed is that the extrapolation it called for has now been done, against the full published
-corpus rather than per-run anecdote: 60 full-workflow runs, 66 README-quality runs and 64
-onboarding runs, 190 single-model runs in total. There is still no multi-model data anywhere, so
-everything below is a projection from single-model runs, under three stated assumptions: a
-combination scores the per-dimension MAX of its members (a perfect consolidator, i.e. a ceiling
-and never an expectation), the cost axis is RECOMPUTED from combined cost rather than maxed, and
-Delivery does not merge.
-
-## What the projection says, per task type
-
-**Full workflow — shape A is negative.** Taking Delivery as the member mean (a text merge of N
-code drafts does not inherit the disciplined implementer's rejection count; Phase 2c already
-concedes this) and re-scoring Efficiency on summed tokens, EVERY 2- and 3-member set lands below
-the best single run of 78. Best 2-member 77.2, best 3-member 77.7. The Efficiency axis alone
-costs 6.1 and 7.5 composite points, and the dimensions a merge can actually improve — Artifact
-20%, Rigor 14%, Knowledge 10% — are worth less combined than Delivery's 28% on its own. The
-Efficiency reconstruction used here reproduces the published values exactly (r = 1.000, mean
-absolute error 0.8 points over 60 runs), so the cost side of that arithmetic is not an estimate.
-
-**Quick fix — no headroom exists.** The rubric's practical maximum is 98 (accuracy and
-completeness both reach 10; clarity has never scored above 9 in 66 runs) and THREE single runs
-already sit on it, one of them Opus 5 medium at 11.2k implement tokens. So the incumbent is
-simultaneously the best and among the cheapest. Worse, one hallucination costs 6.099 composite
-points (r = -0.760, n = 66) and almost exactly one accuracy point (slope -1.003, r = -0.833). A
-false claim is by construction unique to one draft, so it lands squarely in the consolidator's
-"validate before including" path — the operation the previous amendment already flagged as the
-one this benchmark shows failing. Maximum available gain is +3; one leaked invention costs twice
-that. Every member set that beats its own best member does so only because both members are
-mediocre (the largest, Sonnet 5 low + Sonnet 4.6 medium, goes 74 to 82 — sixteen points below
-what one Opus 5 medium delivers alone).
-
-**Onboarding — the only defensible case, and the rubric cannot see it.** Best 2-member oracle
-gain is +0.08 and best 3-member +0.15, against a 9.07 best single run. But confirmed landmine
-recall over the eight documented source defects goes from 2 of 8 (Opus 5 medium, the benchmark
-winner) to 8 of 8 for `Grok 4.6 + Sonnet 5 high + Opus 5 medium`. The composite is nearly blind
-to that: regressing composite on confirmed recall across all 64 runs gives r = 0.093. So the
-score says "negligible" about the one axis the fan-out actually moves. That is not an argument
-that Phase 1 pays — it is the reason the hand-merge below has to settle it instead of the
-leaderboard.
-
-## What IS worth building, and it is not per-step CLI assignment
-
-Sequencing step 1 of the previous amendment — give `dispatchMiningAgents` a per-dispatch provider
-instead of one resolved for the whole fan-out — is carved out of this plan and will be specified
-separately. It must not be conflated with the per-step and per-role CLI preferences that already
-ship (`user_step_cli_preferences`, `user_step_cli_role_preferences`): those choose the model for a
-STEP, while the pin is inside a step, so every mining agent in 08c, 08d and the KB mining steps is
-currently the same model wearing a different persona. No amount of per-step assignment reaches it.
-Zero extra invocations, no new columns, no barrier, no consolidator.
-
-It is also the only way to MEASURE the uncomfortable finding in this corpus: deeper review rounds
-go with MORE hands-on rejections, not fewer — r = 0.53 across all 60 runs, 0.57 excluding Codex
-and Haiku, and 0.73 within the Claude family alone, where only the effort setting varies. That
-cannot currently be read as "a foreign critic hurts", because today the reviewer IS the
-implementer and deep-reviewing models are also bad implementers. The pin is exactly what makes
-the two separable.
-
-For the record, the delivery constraint this corpus does identify is scope discipline, not review
-depth. Median application PHP files modified, by outcome: 1 for the three first-pass runs, 2
-shipped-after-rework, 3 heavy rework, 21 for the seven that never delivered.
-
-## Reopening conditions
-
-Phase 1 comes back off the backlog only if BOTH hold:
-
-1. The hand-merge experiment (previous amendment, "Measure before building Phase 1") shows a merge
-   of three onboarding runs beating the best single run — judged on defect recall and on the
-   survival rate of unique-to-one-model claims under the evidence bar, NOT on the published
-   composite, which r = 0.093 says cannot see the effect.
-2. The unpinned fan-out has shipped and shown that cross-model review actually converts into
-   fewer hands-on rejections.
-
-Phase 2b stays optional and 2c stays dropped, unchanged from the previous amendment.
-
-## Hand-merge experiment — RUN 2026-08-21. Reopening condition 1 FAILS.
-
-Done as specified: three scored onboarding runs of the same task, merged under the 1b rules plus
-the evidence bar, on the artifacts themselves rather than on the leaderboard. Members were
-`grok-4.6`, `sonnet-5 high` and `opus-5 medium` (task ids `7f65dbe6`, `f8f774c1`, `e0fe4ed6`),
-read at each repository's ROOT COMMIT via `git archive` — the benchmark's own methodology, because
-later README/DDEV tasks modified `.claude/knowledge_base/` in these same clones. Canonical
-`.claude/` copies only; the `.agents/`, `.codex/` and `.grok/` mirrors are the same bytes.
-
-**Corrects an error in the amendment above.** That section claims the merge takes landmine recall
-from "2 of 8" to "8 of 8". The 2/8 was read out of the published audit PROSE — what the auditors
-chose to praise in a run — and that is not what the run's knowledge base contains. Measured
-directly against the artifacts, the individual runs already cover:
-
-| landmine | grok-4.6 | sonnet-5 high | opus-5 medium |
-|---|---|---|---|
-| `Db::Update` inverted return | 4 files | **0** | 4 files |
-| `/e` preg_replace sites | 2 | 1 | 2 |
-| `elocks` / edit lock | 12 | 2 | 22 |
-| `History::Add` | 6 | 1 | 1 |
-| SECHASH | 5 | 1 | 4 |
-| `encryptPW` weak hash | 9 | 4 | 6 |
-| captcha `eval` | 2 | 2 | 1 |
-| FCKeditor guard | 2 | 4 | 5 |
-
-grok-4.6 covers 8 of 8 alone. opus-5 medium covers 8 of 8 alone. sonnet-5 high covers 7 (it never
-documents the `Db::Update` inversion). **The union's gain on landmine recall is therefore zero to
-one, not six.** The headline argument for shape A on onboarding does not survive contact with the
-artifacts.
-
-What the merge DOES add, measured over 1,568 distinct `file:line` citations in the union:
-
-- Breadth: 91 distinct application files cited, against 74 for the best single run — **+17 files**
-  of an 830-file tree.
-- Density: 1,568 citations against 1,013 for the best single run — **+55%**.
-- 74.1% of the union (1,162 citations) is unique to ONE run, i.e. the consolidator's expensive
-  path; only 25.9% is the cheap agreement path.
-- 99.7% of the union resolves structurally (file exists, line in range), consistent with the
-  published per-run figures.
-
-And the finding that genuinely cuts against the pessimism above: a hand-verified sample of **24
-unique-to-one-run claims, 8 per member, read against the source, was 24/24 semantically correct** —
-including the failure mode the structural checker cannot see (a real file and an in-range line
-belonging to a different function). At 24 of 1,162 that bounds the error rate at roughly 12% at 95%
-confidence, not at zero, but the union of these three members is substantially TRUE. The
-`muse-high` wrong-function citations and the two false uniqueness claims cited above came from
-WEAK members. So unique-but-false is a property of member selection, not of union-merging as such,
-and the hallucination counts already in the corpus (Muse 13 across 4 runs, Haiku 16 across 5) are
-the screen if Phase 1 ever ships.
-
-**Verdict: the merge does not beat the best single run.** It buys 23% more of the tree documented
-and 55% more citations, apparently truthful, on ground the best single member already covers at
-the level that decides the score. Nothing measured here justifies a 2-3x invocation multiplier.
-Two limits stated rather than hidden: the published composite could not be reproduced (it comes
-from a structured multi-agent source-verified audit, not from a script), and nothing here shows
-that a larger evidence base improves any downstream task outcome — which is the only thing that
-would actually justify the multiplier.
-
-Phase 1 stays backlogged, now on a measurement rather than a projection.

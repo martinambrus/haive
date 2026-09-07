@@ -1,5 +1,9 @@
 # Browser-verification screenshot gallery
 
+> **Shipped** `34df4ef` (`feat(worker,web): show browser-test screenshots at the gates`). A
+> historical record, not pending work — do not re-implement from it. Line numbers below are
+> as of writing and have since drifted; resolve any reference by symbol name.
+
 ## Context
 
 When a task involves a web app, `08a-browser-verify` in `mcp` mode already drives a real
@@ -232,11 +236,3 @@ Verified against the real binary (chrome-devtools-mcp 1.7.0, live Claude Code cl
 Not yet verified (needs a live browser-testing task in `mcp` mode, and the global pause is
 currently on): that the tester actually populates `.haive/screenshots/` during a real run, that
 the gallery renders at 08a and Gate 2, and that `git status` in the worktree stays clean.
-
----
-
-# Amendment — 2026-08-21: shipped
-
-Landed as `34df4ef` (`feat(worker,web): show browser-test screenshots at the gates`). This file is a historical record, not pending work — do not
-re-implement from it. Line numbers in the body are as of writing and have since drifted; resolve
-any reference by symbol name.

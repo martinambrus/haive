@@ -15,7 +15,7 @@ Splitting them into genuinely separate invocations, each seeing the previous out
 highest-value change here and may bring cheaper models into range.
 
 Ships as `@haive-module/translator`, distributed exactly like the deep-analysis module (private
-registry, BuildKit-secret token, `entitlementId`) per the 2026-08-20 amendments to
+registry, BuildKit-secret token, `entitlementId`) per the distribution and module-step rules in
 `serialized-chasing-thacker.md` and `rippling-wibbling-puffin.md`. **Executes only after both land.**
 
 ## Why it fits Haive better than it looks

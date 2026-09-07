@@ -1,14 +1,22 @@
 # Scope-fence the blocking reviewers
 
+> **Shipped** `3415278`, as written apart from the departures marked **As built** below. A
+> historical record, not pending work — do not re-implement from it. Line numbers below are as of
+> writing and have since drifted; resolve any reference by symbol name.
+
 ## Context
 
 Across 102 benchmark runs of the same task ("Add DDEV", 2026-06-14 → 2026-08-08) the gating
 reviewers spent most of their effort on legacy application code the task never touched —
 FCKeditor connectors, `functions.php`, `thememanager.php`, `mods/admin_class_db_backup.php`,
-`js/jquery-1.2.3.min.js`. This is not model overreach. `08c-code-review.ts:498-501` explicitly
-instructs it:
+`js/jquery-1.2.3.min.js`. This is not model overreach. `08c-code-review.ts:655-657` (`:498-501`
+when this was written; `:498` is now the refuter prompt builder) explicitly instructs it:
 
 > 'Report EVERY finding in full — **including pre-existing, low-severity, and dead-code ones**'
+
+08c has since gained a refutation wave over blocking findings, so some of this noise is already
+filtered — but refutation only disproves a finding, it never suppresses one for being out of scope,
+so it does not make this plan redundant.
 
 and the onboarded `.claude/agents/security-code-reviewer.md` (from `_agent-templates.ts:1379,
 1406,1428,1433`), which overrides the embedded persona via `agentDefinitionGuidance`, repeats it
@@ -66,6 +74,15 @@ change stops costing a fix round, a refuter, and a legacy-code rewrite.
   (round-≤1 data shows reviewers go off-scope with a clean file list). Fixing the cause should
   drain it; filtering the dirty list would risk hiding genuine edits. Re-measure after landing.
 
+Two more, decided during the build:
+
+- **`_task-history-digest.ts`** skips `refuted` findings but not fenced-out ones. A refuted finding
+  was disproved against the code; a pre-existing one is real, and the learning agent may
+  legitimately want it in the KB. Different questions, so the digest keeps the wider set.
+- **`adjustVerdict`** still counts fenced criticals as blocking-severity, so a `VULNERABLE` verdict
+  is not downgraded when only pre-existing findings remain — gate 2 stays off its approve default.
+  Conservative, and strictly better than today, where those same findings also block.
+
 ## Design
 
 One shared prompt fragment, two dispositions, following the `_qa-lenses.ts` precedent — a single
@@ -84,6 +101,19 @@ New `packages/worker/src/step-engine/steps/_scope-fence.ts` exporting:
   state plainly that `no` means advisory-only, not ignored. Reserve `yes` for code this change
   introduced or altered, and for a path this change makes newly reachable.
 
+**As built — three fence constants, not two.** The `SCOPE_FENCE_INSIGHTS` bullet above claims the
+validator too, on the grounds that `INSIGHTS_INSTRUCTION` is appended at every one of these call
+sites. That holds for the five 08c personas, which all route through `reviewAssignment` — but **not
+for 07b**, which is not one of `INSIGHTS_INSTRUCTION`'s call sites at all, and whose
+`outputContract()` requires the JSON to be "the FINAL thing in your response", directly
+contradicting the shared instruction's "after your main output". Pointing the validator at
+`## INSIGHTS` would have named a block whose line format it was never given, so `parseInsights`
+would have dropped every line silently. 07b therefore gets a third disposition,
+`SCOPE_FENCE_REPORT_ONLY`: the sink is its own markdown report (which reaches the human at gate 2)
+while `issues` — the only thing the fix agent receives — is fenced. It carves out Step 4 explicitly,
+since a stale caller of something this change renamed is in scope wherever it lives and the
+validator's protocol requires it to be fixed.
+
 Both fences state the boundary the same way: **in scope = the changed files, plus code whose
 contract this change alters** (the blast-radius rule 08c2 already uses).
 
@@ -93,7 +123,18 @@ In `08c-code-review.ts`:
 
 - Add `isOutOfScope(f)` — true only when the reviewer explicitly said so (`in_scope` normalises
   to `no`/`false`). Absent or unreadable ⇒ **in scope**, so a reviewer that ignores the field
-  keeps today's behaviour and nothing silently stops blocking.
+  keeps today's behaviour and nothing silently stops blocking. **As built it lives in
+  `_scope-fence.ts`, not here**: gate 2 needs the same predicate (below) and should not import it
+  from a step module, so the fence module owns both halves of one contract — the instruction and its
+  enforcement.
+- **As built, `in_scope` moved from `z.string().optional()` to `z.unknown().optional()`.** A
+  security reviewer answering `false` instead of `"no"` would have failed the whole `securitySchema`
+  parse — not one field, the entire review, which then degrades to a synthetic non-blocking finding
+  and loses every real one. Harmless while nothing read the field; not a landmine to leave under a
+  field that now decides whether a change is reimplemented. This matches the file's own convention
+  for `severity` and `cwe` ("a strict enum would fail the whole finding rather than the one field").
+  `isOutOfScope` normalizes instead, and the raw value is still stored verbatim so
+  `review_findings.raw` records what the reviewer actually said.
 - `computeBlocking` skips out-of-scope security findings.
 - `collectRefutable` skips them too — no refuter agent spent on a finding that cannot block.
 - The fix-loop diagnosis (`live(out.security.findings)`, ~`:745-765`) excludes them, so the
@@ -111,7 +152,8 @@ default, which is the existing de-silencing behaviour.
 |---|---|
 | `steps/_scope-fence.ts` | **new** — the two fence constants + the shared boundary definition |
 | `steps/workflow/08c-code-review.ts` | `SECURITY_PERSONA`: drop the "including pre-existing, low-severity, and dead-code ones" license, splice `SCOPE_FENCE_IN_SCOPE_FLAG`. `PEER_PERSONA` / `OPERATIONAL_PERSONA` / `PERFORMANCE_PERSONA` / `SIMPLICITY_PERSONA`: splice `SCOPE_FENCE_INSIGHTS`. Add `isOutOfScope`; wire into `computeBlocking`, `collectRefutable`, the fix-loop diagnosis, and the `blocking` flag passed to `recordReviewFindings` |
-| `steps/workflow/07b-phase-4-validate.ts` | `VALIDATOR_DEFINITION`: splice `SCOPE_FENCE_INSIGHTS` into the Step 3 / Step 7 reporting rules so the validator↔fixer loop stops editing unrelated legacy code. Steps 4 and 5 unchanged |
+| `steps/workflow/07b-phase-4-validate.ts` | `VALIDATOR_DEFINITION`: splice `SCOPE_FENCE_INSIGHTS` into the Step 3 / Step 7 reporting rules so the validator↔fixer loop stops editing unrelated legacy code. Steps 4 and 5 unchanged. **As built:** `SCOPE_FENCE_REPORT_ONLY`, spliced at the END of `VALIDATOR_DEFINITION` — immediately before the "You may fix what your protocol REQUIRES you to fix" paragraph, which is the paragraph about what may be edited, so the fence and its carve-out read as one rule rather than being buried mid-protocol |
+| `steps/workflow/09-gate-2-verify-approval.ts` | **as built, not in this table as approved** — render `[pre-existing]` beside `[refuted]`. The body's own claim is that fenced findings "stay visible at gate 2 as advisory", and without a marker a `[critical]` that did not block reads as an inconsistency rather than as the advisory it is. Same reason `refutedTag` exists; three lines, mirroring it. Also added: `securityOutOfScope` in the step's completion log, so the fence can be measured from the logs rather than only from `review_findings` |
 | `steps/onboarding/_agent-templates.ts` | `security-code-reviewer` (`:1374,1379,1406,1428,1433`), `peer-reviewer` (`:1294`), `operational-reviewer` (`:1439`), `performance-reviewer` (`:1504`): same fence text from the shared module, so the on-disk agent def agrees with the inline persona |
 | `steps/workflow/08c-code-review.test.ts` | new cases (below) |
 
@@ -141,6 +183,19 @@ agents as changed in upgrade-status. Expect that; it is the delivery mechanism.
 5. Compare against one **claude-code high** run (68% off-scope) to confirm the fix is not
    provider-specific.
 
+**What the shipped change actually covered.** Steps 1-3 done in the worker container (per-container
+node_modules): `tsc --noEmit` clean; 2904 tests across 235 files, 22 of them new; prettier clean;
+worker restarted twice with zero level-40+ logs, `haive-worker ready`, and
+`assertCliDispatchListInSync` passing. The rendered on-disk agent files were inspected, and a test
+asserts all five dispatched 08c reviewer prompts plus both 07b validator passes carry the fence —
+the delivery mechanism, not just the constant. Template `contentHash` recomputed on boot with
+`schemaVersion` still 2 for all four agents, as required.
+
+**Steps 4 and 5 were NOT executed, and they are the measurement this plan hangs on.** Until those
+live "Add DDEV" re-runs happen, every success criterion above is unmeasured. Separately, no
+repository on the dev install carries `onboarding_artifacts` rows, so the "upgrade-status reports
+these four agents as changed" path was verified only on the `template_manifest_cache` side.
+
 ## Rollback
 
 Pure prompt-text and predicate changes; no migration, no schema change, no config key. Revert the
@@ -148,100 +203,3 @@ commit and restart the worker — the next review round reverts to today's behav
 `review_findings` rows are unaffected either way (`blocking` is historical telemetry, never re-read
 as state). The one visible residue is upgrade-status reporting the four agent templates as changed;
 reverting flips their `contentHash` back on the next worker boot.
-
----
-
-# Amendment — 2026-08-21: unbuilt; premise intact, anchor moved
-
-Unbuilt — no `_scope-fence.ts` exists anywhere in the tree.
-
-The instruction the whole plan rests on is still present verbatim, but has moved: it is at
-`08c-code-review.ts:655-657`, not `:498-501` (which is now the refuter prompt builder added by the
-later refutation pass). The text is unchanged — "Report EVERY finding in full — including
-pre-existing, low-severity, and dead-code ones". `08c-code-review.ts:674` and
-`_agent-templates.ts:1379` still resolve as cited.
-
-Note the interaction the body predates: 08c now runs a refutation wave over blocking findings, so
-some of the noise this plan targets is already being filtered — but refutation only disproves a
-finding, it never suppresses one for being out of scope, so the plan is not made redundant.
-
----
-
-# Amendment — 2026-08-21: shipped (`3415278`)
-
-Shipped as written, with three departures from the body and two additions it did not list.
-Do not re-implement from this plan.
-
-## What differed, and why
-
-**Three fence constants, not two.** The body says `SCOPE_FENCE_INSIGHTS` covers "peer /
-operational / performance / simplicity / validator" on the grounds that "`INSIGHTS_INSTRUCTION`
-is already appended at every one of these call sites, so the sink exists". That holds for the
-five 08c personas — they all route through `reviewAssignment`, which appends it — but **not for
-07b**, which is not one of `INSIGHTS_INSTRUCTION`'s call sites at all, and whose
-`outputContract()` requires the JSON to be "the FINAL thing in your response", directly
-contradicting the shared instruction's "after your main output". Pointing the validator at
-`## INSIGHTS` would have named a block whose line format it was never given, so `parseInsights`
-would have dropped every line silently. 07b therefore gets a third disposition,
-`SCOPE_FENCE_REPORT_ONLY`: the sink is its own markdown report (which reaches the human at
-gate 2) while `issues` — the only thing the fix agent receives — is fenced. It carves out Step 4
-explicitly, since a stale caller of something this change renamed is in scope wherever it lives
-and the validator's protocol requires it to be fixed.
-
-**`isOutOfScope` lives in `_scope-fence.ts`, not `08c-code-review.ts`.** Gate 2 needs the same
-predicate (see below) and should not import it from a step module. The fence module now owns
-both halves of one contract — the instruction and its enforcement.
-
-**Spliced at the end of `VALIDATOR_DEFINITION`, not into "the Step 3 / Step 7 reporting rules".**
-It sits immediately before the "You may fix what your protocol REQUIRES you to fix" paragraph,
-which is the paragraph about what may be edited, so the fence and its carve-out read as one rule
-rather than being buried mid-protocol. Steps 4 and 5 are unchanged as the body requires.
-
-## Two changes the Files table did not list
-
-**`in_scope` moved from `z.string().optional()` to `z.unknown().optional()`.** A security
-reviewer answering `false` instead of `"no"` would have failed the whole `securitySchema` parse —
-not one field, the entire review, which then degrades to a synthetic non-blocking finding and
-loses every real one. Harmless while nothing read the field; not a landmine to leave under a
-field that now decides whether a change is reimplemented. This matches the file's own established
-convention for `severity` and `cwe` ("a strict enum would fail the whole finding rather than the
-one field"). `isOutOfScope` normalizes instead, and the raw value is still stored verbatim on the
-finding so `review_findings.raw` records what the reviewer actually said.
-
-**`09-gate-2-verify-approval.ts` renders `[pre-existing]` beside `[refuted]`.** Not in the Files
-table, but the body's own claim is that fenced findings "stay visible at gate 2 as advisory" — and
-without a marker a `[critical]` that did not block reads as an inconsistency rather than as the
-advisory it is. That is the same reason `refutedTag` exists. Three lines, mirroring it exactly.
-
-Also added: `securityOutOfScope` in the step's completion log, so the fence can be measured from
-the logs rather than only from `review_findings`.
-
-## Left alone deliberately
-
-- **`_task-history-digest.ts`** skips `refuted` findings but not fenced-out ones. A refuted
-  finding was disproved against the code; a pre-existing one is real, and the learning agent may
-  legitimately want it in the KB. Different questions, so the digest keeps the wider set.
-- **`adjustVerdict`** still counts fenced criticals as blocking-severity, so a `VULNERABLE`
-  verdict is not downgraded when only pre-existing findings remain — gate 2 stays off its approve
-  default. Conservative, and strictly better than today, where those same findings also block.
-- Everything in the body's "Explicitly NOT changing" list, including `_impl-changes.ts`.
-
-## Verification — what it did and did not cover
-
-Done, in the worker container (per-container node_modules): `tsc --noEmit` clean; 2904 tests pass
-across 235 files, 22 of them new; prettier clean; worker restarted twice with zero level-40+ logs,
-`haive-worker ready`, and `assertCliDispatchListInSync` passing. The rendered on-disk agent files
-were inspected, and a test asserts all five dispatched 08c reviewer prompts plus both 07b
-validator passes carry the fence — the delivery mechanism, not just the constant. Template
-`contentHash` recomputed on boot with `schemaVersion` still 2 for all four agents, as required.
-
-**Not done — this is the measurement the plan hangs on.** Verification steps 4 and 5, the
-end-to-end "Add DDEV" re-runs on codex xhigh (86% off-scope) and claude-code high (68%), are live
-benchmark runs and were not executed. Until they are, the success criteria — legacy-app blocking
-findings at round ≤1 near zero, max fix round well under 17-18, `git status --porcelain` close to
-the DAG's 23 rather than 71+, and the legacy vulnerabilities still present in `review_findings`
-with `blocking = false` rather than missing — are unmeasured.
-
-Separately, no repository on the dev install carries `onboarding_artifacts` rows, so the
-"upgrade-status reports these four agents as changed" path was verified only on the
-`template_manifest_cache` side.

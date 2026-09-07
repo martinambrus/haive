@@ -1,5 +1,9 @@
 # Mid-task CLI credential harvest
 
+> **Shipped** `56a9cc3`. A historical record, not pending work — do not re-implement from it.
+> Line numbers below are as of writing and have since drifted; resolve any reference by symbol
+> name. Two places below record where the shipped code deviated from the plan as approved.
+
 ## Context
 
 The subscription meter vanished on task `c91491f6` with no reconnect prompt. Traced end to end:
@@ -56,12 +60,14 @@ Pull the body of the `for (const { providerId } of used)` loop in
 
 ```ts
 export async function syncProviderAuthBack(
-  db: Database,
   taskId: string,
   provider: { id: string; userId: string; name: CliProviderName; authMode: AuthMode; isolateAuth: boolean },
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<boolean>
 ```
+
+**Shipped without the `db` parameter the approved plan showed.** The extracted body never touched
+`db` — only the caller's provider lookup did — so it would have been dead weight on every call site.
 
 `syncRefreshedAuthToUserVolumes` keeps its signature and just loops the invocation ledger
 calling it. No behaviour change at teardown. Reuses as-is: `CLI_CREDENTIAL_FILES`,
@@ -162,6 +168,13 @@ docker exec haive-postgres psql -U haive -d haive -tAc \
 Edit only after the drain finishes. Leave `globalPause` **on** afterwards; resume only for the
 verification below, then re-pause.
 
+**The drain cannot reach zero, and this window was taken anyway.** Step 0c counts QUEUED rows
+(`started_at` NULL), and global pause is exactly what keeps a queued row queued — so the counter it
+polls is held non-zero by the pause the window depends on. Taken on the user's call, accepting the
+orphan, and the outcome beat the plan's prediction: the boot reconciler logged `reconciled orphaned
+waiting_cli step` for `de2b313d` / `05-phase-0b5-spec-quality` and re-dispatched it, so the step
+stayed `waiting_cli` with its invocation intact rather than failing. No Retry was needed.
+
 ## Verification
 
 1. `docker exec haive-worker sh -lc 'cd /app/packages/worker && pnpm typecheck && pnpm vitest run src/usage-window src/sandbox/task-auth-volume.test.ts'`
@@ -177,6 +190,12 @@ verification below, then re-pause.
    - reload `/tasks/c91491f6-bf9f-4572-bf58-770b8d67ce35`; the meter is back in the fixed header.
 3. Grep the worker log for `synced CLI-refreshed credential back to the user auth volume` with
    the harvest call site, and confirm no `auth sync-back failed` lines.
+
+Measured on the run that shipped, all as written: `pnpm typecheck` clean, worker suite 245 files /
+3041 passed, prettier clean. One forced poll tick logged the sync-back line for task `c91491f6` /
+codex; the user volume's `auth.json` moved from Aug 11 to 21:17:32 carrying a token valid to
+`2026-08-31T20:57:58Z`; all ten codex snapshots flipped `error` to `ok` in that same tick, the
+task's own provider `623953b6` included.
 
 ## Rollback
 
@@ -197,29 +216,8 @@ write teardown already performs, just earlier, so there is nothing to undo.
   a separate web-only change with no worker restart.
 - Teardown's own isolated-row ambiguity in `syncRefreshedAuthToUserVolumes`. Pre-existing;
   flagged, not fixed here.
-- Copy this plan to `haive/docs/plans/` on implementation so it outlives the 30-day reap.
+- Copy this plan to `haive/docs/plans/` on implementation so it outlives the 30-day reap. Done —
+  this path is that copy.
 
-# Amendment — 2026-08-21: shipped
-
-Shipped as `56a9cc3`. Do not re-implement from the body above.
-
-Two deviations from the plan as approved:
-
-- `syncProviderAuthBack` takes `(taskId, provider, runner)`, **not** the `(db, taskId, provider,
-  runner)` the body shows. The extracted body never touched `db` — only the caller's provider
-  lookup did — so the parameter would have been dead weight on every call site.
-- The plan's deployment window assumed the drain would reach zero. It could not: the last
-  unfinished row was QUEUED (`started_at` NULL), and global pause is exactly what keeps a queued
-  row queued. The window was taken anyway on the user's call, accepting the orphan. Outcome was
-  better than the plan predicted — the boot reconciler logged `reconciled orphaned waiting_cli
-  step` for `de2b313d`/`05-phase-0b5-spec-quality` and re-dispatched it, so the step stayed
-  `waiting_cli` with its invocation intact rather than failing. No Retry was needed.
-
-Verification came out as written: `pnpm typecheck` clean, full worker suite 245 files / 3041
-passed, prettier clean. One forced poll tick logged `synced CLI-refreshed credential back to the
-user auth volume` for task `c91491f6` / codex; the user volume's `auth.json` moved from Aug 11 to
-21:17:32 carrying a token valid to `2026-08-31T20:57:58Z`; all ten codex snapshots flipped from
-`error` to `ok` in that same tick, including the task's own provider `623953b6`.
-
-Still out of scope, unchanged: the invisible `error` state in the header chip, and teardown's own
-isolated-row ambiguity in `syncRefreshedAuthToUserVolumes`.
+Both exclusions above survived the implementation unchanged: the invisible `error` state in the
+header chip and teardown's isolated-row ambiguity are still open.

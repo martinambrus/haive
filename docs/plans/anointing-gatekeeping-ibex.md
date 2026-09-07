@@ -18,6 +18,13 @@
   (`packages/api/src/routes/admin.ts:71,184`). But every one of those routes is behind
   `requireAdmin`.
 
+User management today is a `users.map` list with four per-user actions (deactivate / activate /
+reset_password / set_role) buried inline in the 2000-line `admin/page.tsx` (~line 2174), plus a
+summary "Users" card. There is `GET /admin/users` and `POST /admin/users/:id/action`, but NO
+create-user endpoint and nothing for invites — so an admin cannot add a user manually and cannot
+send an invite. Sections A-D below give the auth MODEL and the invite DATA/API; without E-G they
+give the admin no place to USE any of it, and the `user_invites` table from section C would be dead.
+
 ## The two problems
 
 1. **Chicken-and-egg: no first admin.** A fresh install has zero users. You register → you are a
@@ -101,6 +108,49 @@ no separate wizard endpoint.
   existing provider forms. Once a user exists, `/setup` redirects to `/login` and the register page
   honors `mode` (hidden/closed unless `open`/valid invite).
 
+### E. Dedicated user-management tab (move it out of the mega-page)
+
+The admin tab pattern already exists as sub-routes: `admin/audit/page.tsx`, `admin/pricing/page.tsx`.
+User management should be the same, not a section of the settings monolith.
+
+- New `packages/web/src/app/(app)/admin/users/page.tsx`, linked next to the existing `admin/audit`
+  and `admin/pricing` links. It OWNS the full user list — the `users.map` block and the four
+  existing actions migrate here VERBATIM (they already work; this is a move, not a rewrite). The
+  "Users" summary card on the main admin page stays as a KPI and links to the tab.
+- The tab has three regions: the user list (existing actions), a "Add user" action (F), and an
+  "Invites" panel (G). Load shape mirrors `admin/pricing` (fetch on mount, act, refetch).
+
+### F. Manual add-user (the missing endpoint)
+
+Admins need to create a user directly, not only send an invite — the common case of "make an account
+for this teammate now."
+
+- New `POST /admin/users` (requireAdmin, audited `user.create`): body `{ email, role }`. It creates
+  the user and, reusing the EXISTING temp-password mechanism (the `reset_password` action already
+  returns a one-time `temporaryPassword`), returns a temporary password shown once, which the user
+  changes on first login. No admin-chosen passwords — same one-time-secret discipline as
+  `reset_password`, so there is one place that mints and displays a temp credential.
+- Duplicate-email is the same 409 the register path throws (shared blind-index check). Role defaults
+  to `'user'`; creating an admin is allowed and audited.
+- UX: an "Add user" form in the tab (email + role select), rendering the returned temp password in
+  the same one-time reveal component the existing `reset_password` action already uses.
+
+### G. Invite UX (surface the section-C API)
+
+Section C defines `user_invites` and `POST/GET/DELETE /admin/invites`; this is the UI that makes it
+usable.
+
+- An "Invites" panel in the user tab: create (email optional + role + expiry) returns the one-time
+  link/token shown once; list outstanding (email, role, expiry, created-by); revoke. Same one-time
+  reveal component as F and reset_password.
+- The panel states which registration mode is active (from B): in `closed`/`invite` mode invites are
+  the way in; in `open` mode it notes that self-signup is also on.
+
+**Ordering within Design:** E is a refactor-move (low risk, do first — it gives F and G a home). F
+and G are additive endpoints plus forms in the new tab. All three are behind `requireAdmin` and
+audited, and none touches the first-run/bootstrap path (A) — an admin already exists by the time
+this tab is reachable.
+
 ## Migration / rollback (write the undo first)
 
 - Additive: `user_invites` table (idempotent numbered migration), `CONFIG_KEYS.REGISTRATION_MODE`
@@ -122,6 +172,13 @@ no separate wizard endpoint.
 5. Concurrent first-registers: exactly one becomes admin (the transactional guard holds).
 6. Existing install (users present) is unaffected until an admin changes the mode; every admin
    action stays audited.
+7. The `admin/users` tab renders the full list with the four existing actions working unchanged
+   (the move preserved behavior); the main-page summary card links to it.
+8. `POST /admin/users` creates a user, returns a one-time temp password, rejects a duplicate email
+   with 409, and audits `user.create`; the new user logs in with the temp password and is forced to
+   change it.
+9. An admin creates an invite, the token appears once, a stranger redeems it (once) and lands with
+   the invited role; revoke makes a pending token unusable; every action is audited.
 
 ## Cross-reference
 
@@ -130,69 +187,3 @@ flow above. The installer's job is to generate the `SETUP_TOKEN` (hardened path)
 before exposure (local-first path), and to open the browser at `/setup`. Keep the two plans in sync;
 this one owns the auth/user model, the installer owns getting the stack running to the point this
 flow can start.
-
----
-
-# Amendment — 2026-08-25: a real user-management tab, manual add, and invite UX
-
-*The sections above give the auth MODEL and the invite DATA/API. They do not give the admin a place
-to USE any of it. Verified against the tree: user management today is a `users.map` list with four
-per-user actions (deactivate / activate / reset_password / set_role) buried inline in the
-2000-line `admin/page.tsx` (~line 2174), plus a summary "Users" card. There is `GET /admin/users`
-and `POST /admin/users/:id/action`, but NO create-user endpoint, and nothing for invites. So an
-admin cannot add a user manually and cannot send an invite — the `user_invites` table from section C
-would be dead without this.*
-
-## E. Dedicated user-management tab (move it out of the mega-page)
-
-The admin tab pattern already exists as sub-routes: `admin/audit/page.tsx`, `admin/pricing/page.tsx`.
-User management should be the same, not a section of the settings monolith.
-
-- New `packages/web/src/app/(app)/admin/users/page.tsx`, linked next to the existing `admin/audit`
-  and `admin/pricing` links. It OWNS the full user list — the `users.map` block and the four
-  existing actions migrate here VERBATIM (they already work; this is a move, not a rewrite). The
-  "Users" summary card on the main admin page stays as a KPI and links to the tab.
-- The tab has three regions: the user list (existing actions), a "Add user" action (F), and an
-  "Invites" panel (G). Load shape mirrors `admin/pricing` (fetch on mount, act, refetch).
-
-## F. Manual add-user (the missing endpoint)
-
-Admins need to create a user directly, not only send an invite — the common case of "make an account
-for this teammate now."
-
-- New `POST /admin/users` (requireAdmin, audited `user.create`): body `{ email, role }`. It creates
-  the user and, reusing the EXISTING temp-password mechanism (the `reset_password` action already
-  returns a one-time `temporaryPassword`), returns a temporary password shown once, which the user
-  changes on first login. No admin-chosen passwords — same one-time-secret discipline as
-  `reset_password`, so there is one place that mints and displays a temp credential.
-- Duplicate-email is the same 409 the register path throws (shared blind-index check). Role defaults
-  to `'user'`; creating an admin is allowed and audited.
-- UX: an "Add user" form in the tab (email + role select), rendering the returned temp password in
-  the same one-time reveal component the existing `reset_password` action already uses.
-
-## G. Invite UX (surface the section-C API)
-
-Section C defines `user_invites` and `POST/GET/DELETE /admin/invites`; this is the UI that makes it
-usable.
-
-- An "Invites" panel in the user tab: create (email optional + role + expiry) returns the one-time
-  link/token shown once; list outstanding (email, role, expiry, created-by); revoke. Same one-time
-  reveal component as F and reset_password.
-- The panel states which registration mode is active (from B): in `closed`/`invite` mode invites are
-  the way in; in `open` mode it notes that self-signup is also on.
-
-## Ordering
-
-E is a refactor-move (low risk, do first — it gives F and G a home). F and G are additive endpoints
-plus forms in the new tab. All three are behind `requireAdmin` and audited, and none touches the
-first-run/bootstrap path (A) — an admin already exists by the time this tab is reachable.
-
-## Verification additions
-
-1. The `admin/users` tab renders the full list with the four existing actions working unchanged
-   (the move preserved behavior); the main-page summary card links to it.
-2. `POST /admin/users` creates a user, returns a one-time temp password, rejects a duplicate email
-   with 409, and audits `user.create`; the new user logs in with the temp password and is forced to
-   change it.
-3. An admin creates an invite, the token appears once, a stranger redeems it (once) and lands with
-   the invited role; revoke makes a pending token unusable; every action is audited.

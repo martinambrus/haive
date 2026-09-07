@@ -1,20 +1,28 @@
 # Agent memory + spec handoff optimization
 
+> **Not started**, re-verified 2026-08-21: no `task-ledger.ts`, `_doc-view.ts` or
+> `_spec-artifact.ts` exists, and all three defects below were re-checked and still hold. The
+> anchors in this file were corrected on that date; treat any line number as a hint and resolve
+> by symbol name.
+
 ## Context
 
 Haive's cross-step memory is Postgres re-rendered into the next prompt. Every CLI
 invocation is a fresh process — `sessionId` is declared at
 `packages/worker/src/cli-adapters/types.ts:12` and set nowhere, so there is no
-`--resume` and the CLI's own compaction dies with the process. That makes the
+`--resume` and the CLI's own compaction dies with the process. (Still true 2026-08-21. The
+`sessionId` in `terminal/terminal-session-manager.ts` is the terminal session's and is unrelated —
+do not mistake it for CLI resume support.) That makes the
 prompt-assembly layer our real context window, and today it has three defects:
 
-1. **The spec is re-sent whole, 19 times.** `=== Spec ===` blocks appear in 19
+1. **The spec is re-sent whole, 19 times.** (Re-counted 2026-08-21: 20 blocks across 12 step
+files. The count drifts; the conclusion does not.) `=== Spec ===` blocks appear in 19
    prompt builders across 13 workflow steps. Exactly one condenses
-   (`condenseSpecForReview`, `08c-code-review.ts:601`) and it sits behind
+   (`condenseSpecForReview`, `08c-code-review.ts:757`; `:601` when this was written) and it sits behind
    `CONFIG_KEYS.REVIEW_FANOUT_DISTILL`, which defaults to `false`
-   (`config.service.ts:394`) — so in practice it never runs.
+   (`config.service.ts:496`; `:394` when this was written) — so in practice it never runs.
 2. **DAG coders get no spec at all.** `DagCoderContext`
-   (`step-engine/step-definition.ts:172-181`) has no spec field; `coderContext()`
+   (`step-engine/step-definition.ts:183`; `:172-181` when this was written) has no spec field; `coderContext()`
    (`dag-executor.ts:200`) passes title, description, `specSections` (section
    *refs*, per the planner contract at `06b-sprint-planning.ts:146`),
    acceptance criteria and `provides`. The only on-disk spec artifacts are 05a's
@@ -98,7 +106,7 @@ spec. Force DAG mode at 06b and confirm each
 
 **Commit:** `feat(worker): send agents a spec index instead of the whole spec`
 
-- Move `condenseSpecForReview` (`08c-code-review.ts:601-621`) into a new
+- Move `condenseSpecForReview` (`08c-code-review.ts:757`, `:601-621` when this was written) into a new
   `packages/worker/src/step-engine/steps/_doc-view.ts`, renamed
   `condenseDocument(text, opts)` with the heading-lead budget as a parameter
   rather than the hardcoded `REVIEW_SPEC_HEAD_LINES = 8`. Keep the API
@@ -240,20 +248,3 @@ entries always survive.
   nothing here builds it.
 - Routing attachments/terseness through the DAG dispatch path (pre-existing gap,
   surfaced in slice 3, not fixed here).
-
----
-
-# Amendment — 2026-08-21: premises re-checked and hold; three anchors stale
-
-Unbuilt — no `task-ledger.ts`, `_doc-view.ts` or `_spec-artifact.ts` exists. All three defects in
-the body were re-verified and still hold; the citations behind two of them have moved.
-
-- **Defect 1 confirmed, anchors stale.** `condenseSpecForReview` is at `08c-code-review.ts:757`, not
-  `:601`. `CONFIG_KEYS.REVIEW_FANOUT_DISTILL` still defaults to `'false'`, but the default is at
-  `config.service.ts:496`, not `:394` — so "in practice it never runs" is still true.
-- **Count drifted, conclusion unchanged.** A `=== Spec` block now appears 20 times across 12 workflow
-  step files; the body says 19 across 13.
-- **Defect 2 confirmed.** `DagCoderContext` is `step-definition.ts:183`.
-- **The no-resume premise holds.** `sessionId` is still declared at `cli-adapters/types.ts:12` and
-  set nowhere on the adapter path. The `sessionId` in `terminal/terminal-session-manager.ts` is the
-  terminal session's and is unrelated — do not mistake it for CLI resume support.

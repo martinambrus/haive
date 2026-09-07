@@ -1,5 +1,10 @@
 # Global KB title digest at dispatch
 
+> **Shipped** `e9c2dfe` (`feat(worker,shared,api,web): list global KB titles in agent
+> prompts`). A
+> historical record, not pending work — do not re-implement from it. Line numbers below are
+> as of writing and have since drifted; resolve any reference by symbol name.
+
 ## Context
 
 The global KB is reachable by exactly one route: the `rag_search` MCP tool. `Bash grep`
@@ -217,11 +222,3 @@ default on.
 
 Plan mode restricts writes to this file. First implementation step is to copy this plan to
 `haive/docs/plans/` so it survives the 30-day reap of `~/.claude/plans/`.
-
----
-
-# Amendment — 2026-08-21: shipped
-
-Landed as `e9c2dfe` (`feat(worker,shared,api,web): list global KB titles in agent prompts`). This file is a historical record, not pending work — do not
-re-implement from it. Line numbers in the body are as of writing and have since drifted; resolve
-any reference by symbol name.

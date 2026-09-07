@@ -1,8 +1,13 @@
 # Vote scoring for the runtime (DDEV) pool
 
+> **Shipped** `8b6b3a9` (`feat(worker): extend vote scoring to the runtime (DDEV) pool`). A
+> historical record, not pending work — do not re-implement from it. Line numbers below are as of
+> writing and have since drifted; resolve any reference by symbol name.
+>
 > Third plan at this path. The two before it shipped (`c4d9acb` vote scoring, `19bf74e` agent
 > preemption) and are archived at `docs/plans/valiant-dancing-parrot.md` and
-> `docs/plans/yielding-preempting-dijkstra.md`. Archive this one under a new slug when it lands.
+> `docs/plans/yielding-preempting-dijkstra.md`. This path IS this one's archive — nothing further
+> is owed.
 
 ## Context
 
@@ -138,14 +143,3 @@ reaps in-flight CLIs, so it belongs inside the window:
 With the escape hatch at its default, a low-scored task can lose both its agent and its runner to a
 higher-scored one, then re-queue for both. That is the intended trade, and it is the runtime-pool
 counterpart of the no-starvation caveat already accepted for agent preemption.
-
----
-
-# Amendment — 2026-08-21: shipped
-
-Landed as `8b6b3a9` (`feat(worker): extend vote scoring to the runtime (DDEV) pool`). This file is a historical record, not pending work — do not
-re-implement from it. Line numbers in the body are as of writing and have since drifted; resolve
-any reference by symbol name.
-
-The header instruction "Archive this one under a new slug when it lands" has already been carried
-out — this path IS the archive. Nothing further is owed.

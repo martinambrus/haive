@@ -1,11 +1,20 @@
 # Modular / user-definable task types — implementation plan (half A: data model, buildRunList, pgEnum, migration, seed)
 
-Grounded against the current tree. All line refs verified read.
+> **Not started.** This file is **half A** of the feature designed in
+> `rippling-wibbling-puffin.md` — data model, `buildRunList`, pgEnum, migration, seed. It does not
+> supersede that plan and that plan does not supersede it; read both.
+
+Grounded against the current tree. All line refs were verified read when written and re-checked
+2026-08-21; two had drifted and are corrected in place below. Resolve any remaining number by symbol
+name.
 
 ## 0. Verified facts this plan stands on
 
-- `buildRunList` (worker/src/queues/task-queue.ts:112-130) is the single branch point.
-  - `run_app` -> `buildRunAppRunList` (:146-178): hand-assembles by `require(id)`, tail branches on
+- `buildRunList` (worker/src/queues/task-queue.ts:152; `112-130` when this was written) is the
+  single branch point. The `findIndex` invariant this section establishes is unaffected by the
+  drift — only the coordinates moved.
+  - `run_app` -> `buildRunAppRunList` (:186; `:146-178` when written): hand-assembles by
+    `require(id)`, tail branches on
     `envTemplate.declaredDeps.containerTool` — RUNTIME-DYNAMIC, input is task-pinned (env template).
   - `workflow` -> `orderWorkflowRunList(main, prelude, executionPath)` (execution-paths.ts:133-152):
     filters by `tasks.execution_path` — RUNTIME-DYNAMIC, input is task-pinned (set by 00-triage).
@@ -317,16 +326,3 @@ Enable/disable interaction with the New-Task form:
 - worker/src/step-engine/step-runner.ts:1791-1802 (document custom-slug offset gap; no code change required).
 ```
 ```
-
----
-
-# Amendment — 2026-08-21: still unbuilt; two of the verified refs have drifted
-
-This file is **half A** of the feature designed in `rippling-wibbling-puffin.md` — data model,
-`buildRunList`, pgEnum, migration, seed. It does not supersede that plan and that plan does not
-supersede it; read both.
-
-Section 0's "all line refs verified read" was true when written and is now partly stale:
-`buildRunList` is at `task-queue.ts:152` (body says 112-130) and `buildRunAppRunList` at `:186`
-(body says 146-178). The `execution-paths.ts:98` and `:133` refs still resolve as cited. The
-`findIndex` invariant the section establishes is unaffected — only the coordinates moved.

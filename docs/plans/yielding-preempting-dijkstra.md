@@ -1,8 +1,12 @@
 # Vote-driven agent-slot preemption
 
+> **Shipped** `19bf74e` (`feat(worker): let an up-voted task preempt a lower-voted running
+> agent`). A historical record, not pending work — do not re-implement from it. Line numbers below
+> are as of writing and have since drifted; resolve any reference by symbol name.
+>
 > Supersedes the vote-scoring plan previously at this path; that one shipped as `c4d9acb` and its
-> durable copy is committed at `docs/plans/valiant-dancing-parrot.md`. Archive THIS plan under a
-> new slug when it lands.
+> durable copy is committed at `docs/plans/valiant-dancing-parrot.md`. This path IS this plan's
+> archive — nothing further is owed.
 
 ## Context
 
@@ -142,14 +146,3 @@ No DB migration this time, so the migrate-before-libs ordering does not apply.
 6. **Starvation watch** — with the eviction cap deliberately absent, watch the victim across a few
    ticks and confirm it re-enters behind the booster's queue and eventually runs, rather than being
    evicted repeatedly.
-
----
-
-# Amendment — 2026-08-21: shipped
-
-Landed as `19bf74e` (`feat(worker): let an up-voted task preempt a lower-voted running agent`). This file is a historical record, not pending work — do not
-re-implement from it. Line numbers in the body are as of writing and have since drifted; resolve
-any reference by symbol name.
-
-The header instruction "Archive THIS plan under a new slug when it lands" has already been carried
-out — this path IS the archive. Nothing further is owed.
