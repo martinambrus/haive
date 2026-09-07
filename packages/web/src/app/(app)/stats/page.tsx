@@ -10,6 +10,7 @@ import {
   getStatsPlan,
   getStatsQuality,
   getStatsReliability,
+  getStatsSteps,
   getStatsSummary,
   getStatsTaskTime,
   getStatsTimeline,
@@ -21,6 +22,7 @@ import {
   type StatsQuality,
   type StatsQueryParams,
   type StatsReliability,
+  type StatsSteps,
   type StatsSummary,
   type StatsTaskClass,
   type StatsTaskTime,
@@ -81,11 +83,12 @@ const PlanVelocityChart = dynamic(
 const SELECT_CLASS =
   'h-9 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500';
 
-const TABS = ['money', 'time', 'plan', 'reliability', 'quality', 'estimates'] as const;
+const TABS = ['money', 'time', 'steps', 'plan', 'reliability', 'quality', 'estimates'] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABELS: Record<Tab, string> = {
   money: 'Money',
   time: 'Time & throughput',
+  steps: 'Steps & models',
   plan: 'Plan',
   reliability: 'Reliability',
   quality: 'Quality',
@@ -174,6 +177,7 @@ function StatsPageInner() {
   const [estimates, setEstimates] = useState<StatsEstimates | null>(null);
   const [plan, setPlan] = useState<StatsPlan | null>(null);
   const [taskTime, setTaskTime] = useState<StatsTaskTime | null>(null);
+  const [steps, setSteps] = useState<StatsSteps | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -296,10 +300,15 @@ function StatsPageInner() {
         .then((d) => !cancelled && setTaskTime(d))
         .catch(() => undefined);
     }
+    if (tab === 'steps' && !steps) {
+      getStatsSteps(params)
+        .then((d) => !cancelled && setSteps(d))
+        .catch(() => undefined);
+    }
     return () => {
       cancelled = true;
     };
-  }, [tab, params, reliability, quality, estimates, plan, taskTime]);
+  }, [tab, params, reliability, quality, estimates, plan, taskTime, steps]);
 
   // A filter change invalidates the lazily-loaded tabs, or switching back would show the
   // previous window's numbers under the new filter's heading.
@@ -309,6 +318,7 @@ function StatsPageInner() {
     setEstimates(null);
     setPlan(null);
     setTaskTime(null);
+    setSteps(null);
   }, [params]);
 
   const cd = summary?.costDisplay ?? null;
@@ -812,6 +822,153 @@ function StatsPageInner() {
               </>
             )}
           </Card>
+        </>
+      )}
+
+      {tab === 'steps' && (
+        <>
+          {!steps ? (
+            <div className="text-sm text-neutral-500">Loading...</div>
+          ) : (
+            <>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Where the time goes</CardTitle>
+                  <CardDescription>
+                    Agent-hours and spend per step of the engine, over the same window and filters
+                    as every other tab. Spend that a step&apos;s summary pass incurred is folded in
+                    with the step&apos;s own, so these figures reconcile with the per-step badges on
+                    a task page. Agent-hours are SUMMED here and never unioned — two steps running
+                    the same minute each own that minute, so these do not describe elapsed time.
+                  </CardDescription>
+                </CardHeader>
+                {steps.rows.length === 0 ? (
+                  <p className="text-sm text-neutral-500">No steps ran in this window.</p>
+                ) : (
+                  <>
+                    <RankedBars
+                      rows={steps.rows.map((r) => ({
+                        key: r.stepId,
+                        value: r.agentMs,
+                        hint: `· ${formatCount(r.invocations)} runs`,
+                      }))}
+                      formatValue={formatAgentHours}
+                      color={CHART_COLORS.agent}
+                      limit={12}
+                      elisionNote={(n) => `+${n.toLocaleString()} more in the table below`}
+                    />
+                    <div className="mt-6 overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                            <th className="pb-2 font-medium">Step</th>
+                            <th className="pb-2 text-right font-medium">Runs</th>
+                            <th className="pb-2 text-right font-medium">Tasks</th>
+                            <th className="pb-2 text-right font-medium">Agent-hours</th>
+                            <th className="pb-2 text-right font-medium">Spent</th>
+                            <th className="pb-2 text-right font-medium">Saved</th>
+                            <th className="pb-2 text-right font-medium">Unpriced</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {steps.rows.map((r) => (
+                            <tr key={r.stepId} className="border-t border-neutral-800">
+                              <td className="py-2 font-mono text-xs text-neutral-200">
+                                {r.stepId}
+                              </td>
+                              <td className="py-2 text-right font-mono text-neutral-400">
+                                {formatCount(r.invocations)}
+                              </td>
+                              <td className="py-2 text-right font-mono text-neutral-400">
+                                {formatCount(r.taskCount)}
+                              </td>
+                              <td className="py-2 text-right font-mono text-indigo-300">
+                                {formatAgentHours(r.agentMs)}
+                              </td>
+                              <td className="py-2 text-right font-mono text-emerald-300">
+                                {money(r.realUsd)}
+                              </td>
+                              <td className="py-2 text-right font-mono text-neutral-400">
+                                {money(r.notionalUsd)}
+                              </td>
+                              <td className="py-2 text-right font-mono text-amber-300">
+                                {r.unpricedInvocations || ''}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {steps.truncated && (
+                      <p className="mt-3 text-xs text-neutral-500">
+                        Showing the {formatCount(steps.rows.length)} steps with the most
+                        agent-hours, of {formatCount(steps.stepCount)} — the rows shown do not add
+                        up to the window total.
+                      </p>
+                    )}
+                  </>
+                )}
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Models that answered</CardTitle>
+                  <CardDescription>
+                    Which model actually replied, parsed from each CLI&apos;s own output rather than
+                    from what was configured — an endpoint can serve a different model with no
+                    config change here. Not every CLI reports one: codex and amp name no model at
+                    all, so their runs are counted as not recorded rather than as a model or as a
+                    zero.
+                  </CardDescription>
+                </CardHeader>
+                {steps.models.length === 0 ? (
+                  <p className="text-sm text-neutral-500">No invocations in this window.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                          <th className="pb-2 font-medium">Model</th>
+                          <th className="pb-2 text-right font-medium">Runs</th>
+                          <th className="pb-2 text-right font-medium">Agent-hours</th>
+                          <th className="pb-2 text-right font-medium">Differed from asked</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {steps.models.map((m) => (
+                          <tr
+                            key={m.served ?? '(not recorded)'}
+                            className="border-t border-neutral-800"
+                          >
+                            <td className="py-2 font-mono text-xs">
+                              {m.served === null ? (
+                                <span className="text-neutral-500">not recorded</span>
+                              ) : (
+                                <span className="text-neutral-200">{m.served}</span>
+                              )}
+                            </td>
+                            <td className="py-2 text-right font-mono text-neutral-400">
+                              {formatCount(m.invocations)}
+                            </td>
+                            <td className="py-2 text-right font-mono text-indigo-300">
+                              {formatAgentHours(m.agentMs)}
+                            </td>
+                            <td
+                              className={`py-2 text-right font-mono ${
+                                m.differs > 0 ? 'text-amber-300' : 'text-neutral-600'
+                              }`}
+                            >
+                              {m.differs || ''}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+            </>
+          )}
         </>
       )}
 

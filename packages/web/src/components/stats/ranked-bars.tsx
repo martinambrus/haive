@@ -31,6 +31,7 @@ export function RankedBars({
   order = 'value',
   limit = 12,
   emptyMessage = 'Nothing recorded in this window.',
+  elisionNote,
   className,
 }: {
   rows: RankedRow[];
@@ -41,6 +42,9 @@ export function RankedBars({
   order?: 'value' | 'given';
   limit?: number;
   emptyMessage?: string;
+  /** Overrides the cap notice. Use it wherever the cut rows are still reachable — "not shown"
+   *  is a lie next to a table that lists them. */
+  elisionNote?: (hidden: number) => string;
   className?: string;
 }) {
   if (rows.length === 0) {
@@ -91,7 +95,7 @@ export function RankedBars({
           the same failure the review scope's COVERAGE notice exists to prevent. */}
       {hidden > 0 && (
         <p className="pt-1 text-[11px] text-neutral-500">
-          +{hidden.toLocaleString()} more not shown
+          {elisionNote ? elisionNote(hidden) : `+${hidden.toLocaleString()} more not shown`}
         </p>
       )}
     </div>

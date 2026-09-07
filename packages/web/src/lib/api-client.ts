@@ -2256,3 +2256,38 @@ export interface StatsPlan {
 export async function getStatsPlan(params: StatsQueryParams = {}): Promise<StatsPlan> {
   return api.get<StatsPlan>(`/stats/plan${statsQueryString(params)}`);
 }
+
+/** One step id's share of the window. `agentMs` is summed and never unioned — the busy-span
+ *  union is per task and does not decompose by step. */
+export interface StatsStepRow {
+  stepId: string;
+  invocations: number;
+  agentMs: number;
+  realUsd: number;
+  notionalUsd: number;
+  unpricedInvocations: number;
+  taskCount: number;
+}
+
+/** Which model ANSWERED, per the CLI's own output. `served` is null for the invocations that
+ *  reported no model at all — codex and amp never do, by design — so it is rendered as "not
+ *  recorded" and never folded into a model or into a zero. */
+export interface StatsModelRow {
+  served: string | null;
+  invocations: number;
+  agentMs: number;
+  differs: number;
+}
+
+export interface StatsSteps {
+  range: { from: string; to: string; timeZone: string };
+  costDisplay: CostDisplay;
+  rows: StatsStepRow[];
+  stepCount: number;
+  truncated: boolean;
+  models: StatsModelRow[];
+}
+
+export async function getStatsSteps(params: StatsQueryParams = {}): Promise<StatsSteps> {
+  return api.get<StatsSteps>(`/stats/steps${statsQueryString(params)}`);
+}

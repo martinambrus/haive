@@ -740,6 +740,149 @@ statsRoutes.get('/tasks', async (c) => {
   });
 });
 
+/** How many step rows a single response ranks. Mirrors TASK_TIME_ROW_LIMIT's reasoning: the cap
+ *  is applied AFTER the sort so it drops the smallest consumers, and the caller is told it
+ *  happened — a partial sum presented as a total is worse than no table. There are ~60 step ids
+ *  in the engine, so this only binds if a future one fans out. */
+const STEP_ROW_LIMIT = 60;
+
+/**
+ * Per-step-id breakdown of the window's agent time and spend.
+ *
+ * The fact nobody could read before: which STEP the money and the hours go to. MEASURED on the
+ * dev install, four steps hold ~85% of all agent-hours.
+ *
+ * Attribution is `coalesce(task_step_id, summary_for_step_id)`, the same fold
+ * `enrichStepsWithCliStats` applies per task, so a window total equals the sum of the per-step
+ * badges the task pages already show. That expression yields the step's UUID, hence the extra
+ * join to reach the human `step_id` this groups by.
+ *
+ * `invocationAttributionFilter` APPLIES here, unlike on /reliability. That endpoint deliberately
+ * counts superseded and unattributed rows because those rows ARE the waste it measures; a spend
+ * rollup is the opposite case and has to reconcile.
+ *
+ * agentMs is summed from the timestamps rather than from `duration_ms`, matching how every other
+ * agent-hours figure in this file is defined — and MEASURED, 17 rows on this install carry both
+ * timestamps and a null `duration_ms`, which the column form would silently drop. It is summed
+ * and never unioned: the busy-span union is per task and does not decompose by step (agent-hours
+ * is partition-invariant, busy span is not — see task-time.ts).
+ *
+ * Step FAILURE counts stay out of this response. `task_steps` is windowed on its own created_at
+ * because a step has no started_at until it runs, while this rollup is windowed on the invocation
+ * clock; one row carrying both would report a "runs" and a "failed" that describe different sets.
+ * /reliability already ranks failing steps on the correct clock.
+ */
+statsRoutes.get('/steps', async (c) => {
+  const userId = c.get('userId');
+  const q = parseStatsQuery(c.req.query());
+  if (q.allUsers && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for install-wide statistics');
+  }
+  const db = getDb();
+
+  const from = new Date(q.fromMs);
+  const to = new Date(q.toMs);
+  const scope = taskScopeFilter(q, userId);
+  const providerTerm = q.cliProviderId
+    ? [eq(schema.cliInvocations.cliProviderId, q.cliProviderId)]
+    : [];
+  const window = and(
+    ...scope,
+    ...providerTerm,
+    invocationAttributionFilter(),
+    gte(schema.cliInvocations.startedAt, from),
+    lt(schema.cliInvocations.startedAt, to),
+  );
+
+  // Double precision rather than bigint: a millisecond sum is exact well past any window this
+  // API will serve, and it comes back as a number instead of a driver string.
+  const agentMsSql = sql<number>`coalesce(sum(
+    greatest(0, extract(epoch from (${schema.cliInvocations.endedAt} - ${schema.cliInvocations.startedAt})) * 1000)
+  ), 0)::double precision`;
+
+  const servedSql = sql<string | null>`${schema.cliInvocations.modelIdentity} ->> 'served'`;
+
+  const [stepRows, modelRows] = await Promise.all([
+    db
+      .select({
+        stepId: schema.taskSteps.stepId,
+        invocations: sql<number>`count(*)::int`,
+        agentMs: agentMsSql,
+        realUsd: realCostUsdSql(),
+        notionalUsd: notionalCostUsdSql(),
+        unpricedInvocations: sql<number>`count(*) filter (where ${schema.cliInvocations.cost} ->> 'source' = 'none')::int`,
+        taskCount: sql<number>`count(distinct ${schema.cliInvocations.taskId})::int`,
+      })
+      .from(schema.cliInvocations)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+      .innerJoin(
+        schema.taskSteps,
+        sql`${schema.taskSteps.id} = coalesce(${schema.cliInvocations.taskStepId}, ${schema.cliInvocations.summaryForStepId})`,
+      )
+      .leftJoin(
+        schema.cliProviders,
+        eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId),
+      )
+      .where(window)
+      .groupBy(schema.taskSteps.stepId),
+    db
+      .select({
+        served: servedSql,
+        invocations: sql<number>`count(*)::int`,
+        agentMs: agentMsSql,
+        differs: sql<number>`count(*) filter (where ${schema.cliInvocations.modelIdentity} ->> 'match' = 'differs')::int`,
+      })
+      .from(schema.cliInvocations)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+      .where(window)
+      .groupBy(servedSql),
+  ]);
+
+  const ranked = stepRows
+    .map((r) => ({
+      stepId: r.stepId,
+      invocations: Number(r.invocations) || 0,
+      agentMs: Number(r.agentMs) || 0,
+      realUsd: Number(r.realUsd) || 0,
+      notionalUsd: Number(r.notionalUsd) || 0,
+      unpricedInvocations: Number(r.unpricedInvocations) || 0,
+      taskCount: Number(r.taskCount) || 0,
+    }))
+    // Tie-broken on the step id so the cap always cuts the same rows — the same reason
+    // buildTaskTimeBreakdown breaks its own ties rather than leaving the order to the planner.
+    .sort(
+      (a, b) =>
+        b.agentMs - a.agentMs || b.invocations - a.invocations || a.stepId.localeCompare(b.stepId),
+    );
+
+  const currency = await configService.get(CONFIG_KEYS.COST_DISPLAY_CURRENCY);
+  const costDisplay = await resolveCostDisplay(
+    db,
+    isDisplayCurrency(currency) ? currency : 'USD',
+    to,
+  );
+
+  return c.json({
+    range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
+    costDisplay,
+    rows: ranked.slice(0, STEP_ROW_LIMIT),
+    stepCount: ranked.length,
+    truncated: ranked.length > STEP_ROW_LIMIT,
+    // `served` null covers two cases that are one fact for a reader: no identity was recorded at
+    // all, and an identity that names no model. codex and amp report NOTHING by design and are
+    // permanently match:'unknown', so this bucket is expected rather than a gap to chase — the
+    // client labels it, and nothing here folds it into a model or into a zero.
+    models: modelRows
+      .map((r) => ({
+        served: r.served,
+        invocations: Number(r.invocations) || 0,
+        agentMs: Number(r.agentMs) || 0,
+        differs: Number(r.differs) || 0,
+      }))
+      .sort((a, b) => b.invocations - a.invocations),
+  });
+});
+
 /**
  * Reliability: what wasted time, and where.
  *

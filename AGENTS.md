@@ -809,6 +809,41 @@ column double-counts cache reads for exactly the two providers the normalisation
 `@haive/shared` and web cannot import it, so the fix is normalised per-provider tokens on the
 endpoint, not a duplicated provider list in the browser.
 
+### Per-step spend and model identity
+
+`GET /stats/steps` (lazy, behind its own tab) answers the question nothing else could: which
+STEP the money and the hours go to. MEASURED on the dev install, `01-plan-build` alone is 38.3
+of ~82 agent-hours.
+
+Attribution is `coalesce(task_step_id, summary_for_step_id)` joined back to `task_steps` for the
+human `step_id` — the same fold `enrichStepsWithCliStats` applies per task, so the window
+reconciles with the per-step badges. VERIFIED live against `/summary` and `/tasks`: agent-ms
+295,679,567, notional $1,237.56 and 1,718 invocations, identical across all three.
+
+Three things this endpoint does differently from its neighbours, each for a reason:
+
+- **`invocationAttributionFilter` APPLIES**, unlike on `/reliability`, which deliberately counts
+  superseded and unattributed rows because those rows ARE the waste it measures. A spend rollup
+  is the opposite case and has to reconcile.
+- **agentMs is summed from the TIMESTAMPS, not from `duration_ms`.** That matches how every other
+  agent-hours figure here is defined, and MEASURED, 17 rows carry both timestamps and a null
+  `duration_ms` — the column form would silently drop them. Summed and never unioned: the
+  busy-span union is per task and does not decompose by step.
+- **Step failure counts stay OUT.** `task_steps` is windowed on its own `created_at` (a step has
+  no `started_at` until it runs) while this rollup is windowed on the invocation clock, so one
+  row carrying both would report a "runs" and a "failed" describing different sets.
+  `/reliability` already ranks failing steps on the correct clock.
+
+The model rollup groups on `model_identity ->> 'served'` — the same `->>` access `/reliability`
+already uses, so no new pattern. A NULL `served` is rendered as **not recorded**, never folded
+into a model or into a zero: codex and amp report no model at all and are permanently
+`match: 'unknown'` by design. That bucket is not small and not a gap to chase — MEASURED, 162 of
+1,718 invocations, and the LARGEST agent-hours of any row (34.3), because those are the long
+codex runs. `billed` is not exposed at all: grok bills `grok-4.6-build` while serving
+`grok-4.6`, so it is not an identity source. There is no index on `model_identity`, so this
+group-by is a filtered scan narrowed by `cli_invocations_started_at_idx`; if that ever matters
+the fix is an expression index on `(model_identity ->> 'served')`, not a denormalised column.
+
 **Mining-agent ranking was evaluated and dropped.** `task_step_agent_minings` holds 1,486 rows
 across 1,467 distinct `agent_id`s — 321 are generated `plan-expand-<nodeId>-p<N>` ids and the rest
 are near-unique too — so a "most used agents" list is ~1,400 entries tied at n=1-2. Grouping on
