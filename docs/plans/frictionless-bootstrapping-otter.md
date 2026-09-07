@@ -32,6 +32,16 @@ target is "one command, then a browser tab," not "one dependency."
 The split matters because RUN-IT has a hard prerequisite DEV-IT does not: **published, versioned
 images in a public registry**. That is the real cost of this feature, and most of the work.
 
+**RUN-IT's "no build" collides with the module system, and the collision is unresolved.** A module
+is rebuild-on-install by `serialized-chasing-thacker`'s locked decision — the customer adds a
+dependency and rebuilds api+worker — which a RUN-IT host, having no source and no toolchain, cannot
+do. So a RUN-IT install can currently run no modules at all, including the paid ones that plan's
+private-registry distribution exists to sell. The options (a `haive build` profile, per-customer
+images built in CI, or the already-rejected runtime loading) are set out in that plan under "OPEN —
+a published-image install cannot rebuild", where the decision belongs, since it is its constraint
+that creates the conflict. This plan does not need the answer to ship a module-free RUN-IT install,
+but the installer must not promise modules until it exists.
+
 ## Shape of the command
 
 `curl -fsSL https://get.haive.dev | sh` (and a `powershell -c "irm get.haive.dev/install.ps1 | iex"`

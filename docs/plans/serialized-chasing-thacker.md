@@ -191,6 +191,32 @@ failure this project keeps designing against.
 - The row flips to `active` on the **loader's boot report** of the module ids it actually registered,
   never on a successful `pnpm install`. That is the only evidence the rebuilt process loaded it.
 
+#### OPEN — a published-image install cannot rebuild, so it cannot install a module
+
+Rebuild-on-install assumes the customer has a source tree, a toolchain and a build. The two install
+plans say they will not: `frictionless-bootstrapping-otter`'s RUN-IT mode is "One command fetches a
+versioned compose bundle, generates secrets, pulls images ... **No source, no build**", and
+`steadfast-committing-gray` makes every upgrade after it an image-tag swap for the same reason. So
+the paying customer this plan's private-registry distribution exists FOR is precisely the customer
+who cannot run `pnpm module add`. Neither install plan noticed; this section is where the decision
+belongs, because it is this plan's constraint that creates it.
+
+Three ways out, none free:
+
+- **A build profile.** `haive build` fetches the compose bundle WITH build contexts and the customer
+  builds locally. Honest and cheap to specify, but it hands every module customer the toolchain
+  burden that RUN-IT exists to remove, and the registry token must then live on their machine.
+- **Per-customer images built in CI.** The vendor builds api+worker with that customer's entitled
+  modules and publishes to a private tag they pull. Keeps RUN-IT's "no build" promise intact and
+  keeps the registry token vendor-side — the strongest fit with the entitlement model, and the most
+  vendor infrastructure.
+- **Runtime module loading.** Already rejected in this plan for the Next.js `output: 'standalone'`
+  wall and for keeping closed source out of the OSS core. Named so nobody re-proposes it as new.
+
+Not decided here. Whichever is chosen, it changes what "install" MEANS on a RUN-IT host, so it must
+be settled before this plan's Slice 0 fixes the Dockerfile story — and `kind-riding-dream` and
+`translator-module` both inherit the answer, since both ship as registry dependencies of api+worker.
+
 ### How a user installs a module — UI first, folder-drop for power users
 
 Two entry paths feed the SAME discovery + rebuild; the plan's rebuild-on-install constraint is

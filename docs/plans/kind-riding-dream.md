@@ -36,6 +36,11 @@ Package `@haive-module/deep-analysis`, `files: ["dist"]`, published to GitHub Pa
 a dependency of api + worker (registry token via BuildKit secret — see "Distribution and
 entitlement" in `serialized-chasing-thacker.md`).
 
+That install path presumes the customer can REBUILD api+worker, which a published-image install
+cannot — see "OPEN — a published-image install cannot rebuild" in `serialized-chasing-thacker.md`.
+Unresolved there, and it decides who can buy this module, so it is a gate on selling it rather than
+on writing it.
+
 - `./manifest` — `hasSteps`, `composableSteps` (its steps, for the task-type composer),
   `taskTypes` (the `deep_scan` seed), `nav` + `pages` (a findings dashboard), `globalSettings`.
 - `./steps` — the pipeline below.

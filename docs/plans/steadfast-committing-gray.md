@@ -178,14 +178,15 @@ states:
   stay live.
 - **`normal`**.
 
-### The multi-user blocker
+### Admin task control — net-new, and it belongs here
 
 `POST /tasks/:id/action` (`api/src/routes/tasks/index.ts:1111`) resolves its task with
-`and(eq(tasks.id, id), eq(tasks.userId, userId))`; `POST /tasks/:id/cancel-active-cli` (`:1305`) has
-the same shape. Roles are `admin | user` (`database/src/schema/auth.ts:20`) and tasks are per-user,
-so **an admin acting on another user's task gets a 404 today.** A system-wide drain or force-stop
-cannot reuse these endpoints; admin-scoped equivalents that drop the ownership predicate are a
-required addition, not plumbing.
+`and(eq(tasks.id, id), eq(tasks.userId, userId))`; `POST /tasks/:id/cancel-active-cli` (`:1305`) and
+the task listing (`:141`) have the same shape. Roles are `admin | user`
+(`database/src/schema/auth.ts:20`) and tasks are per-user, so **an admin acting on — or even
+listing — another user's task gets nothing today.** Haive has never had cross-user task control, and
+nothing else plans it. It lands here because a drain is the first thing that needs it: an admin who
+cannot see or stop other people's work cannot run a maintenance window on a multi-user install.
 
 Precise about the primitives, because the names differ from the plans that discuss them: the task
 actions are `cancel | retry | pause | resume | start`
@@ -193,6 +194,34 @@ actions are `cancel | retry | pause | resume | start`
 `serialized-chasing-thacker` calls STOP is the separate `cancel-active-cli` endpoint,
 kill-the-CLI-keep-the-environment. That is the force-stop this plan wants; `cancel` is destructive
 by comparison and is not it.
+
+**Reads and writes take different routes, deliberately.**
+
+- **Read (the blocking set) rides the existing `allUsers` convention**, not a new endpoint. The
+  stats query parser already carries an `allUsers` flag (`api/src/routes/stats/_query.ts:32,42,111`)
+  that **each route re-checks against the caller's role**, because the parser has no access to it.
+  The task listing takes the same flag with the same per-route re-check. One convention for
+  cross-user reads, already established and already documented in AGENTS.md.
+- **Write goes to a separate admin-scoped route**, never to a predicate relaxed in place. Widening
+  `eq(tasks.userId, userId)` on the existing handler would silently broaden every read and write
+  sharing that path, turning any future role-check slip into cross-tenant access; a distinct route
+  behind `requireAdmin` is explicit and greppable. This is also the reasoning `routes/system.ts:6-11`
+  already writes down for `GLOBAL_PAUSE` — everyone may READ the system state, flipping it stays on
+  the admin route.
+
+**Scope is pause / resume / cancel-active-cli. NOT `cancel`.** A drain never needs to destroy
+someone's task — it needs the CLI stopped and the task held — and adding a destructive cross-user
+action for a use case that does not require one is scope creep with a permanent blast radius.
+
+**Two logs, because they have two audiences.** Every admin write appends BOTH:
+
+- an `audit_events` row (`database/src/schema/audit.ts`) — the append-only, FK-free trail whose
+  docstring already names "admin user actions" as its purpose. Actions namespaced
+  `task.admin_pause` / `task.admin_stop_cli`, `targetType: 'task'`, the maintenance window id in
+  `metadata`. No new table.
+- an ordinary task event via `appendTaskEvent`, naming the admin — so the OWNER opening their task
+  sees who paused it and why, rather than finding it mysteriously stopped. An audit row they cannot
+  read does not answer that question.
 
 ### Drain policy
 
@@ -287,10 +316,16 @@ behaving exactly as it does now.*
 
 - Maintenance state (`normal` / `draining` / `maintenance`), api middleware, web maintenance page,
   banner for `draining` reusing the existing `GET /system/pause` surface's shape.
-- Admin-scoped task control that drops the ownership predicate; blocking-set listing with owner,
-  task and step; drain deadline with an explicit force fallback.
-- Verify: a non-admin gets 503 under `maintenance` while an admin does not; an admin can force-stop
-  another user's task; a drained task resumes with its work intact.
+- Cross-user task READ via an `allUsers` flag on the task listing, re-checked against the caller's
+  role in the route (the `stats/_query.ts` convention); blocking-set view showing owner, task and
+  current step.
+- Admin-scoped WRITE routes behind `requireAdmin` for pause / resume / cancel-active-cli only, each
+  writing an `audit_events` row and an owner-visible task event.
+- Drain deadline with an explicit force fallback, chosen at the point of upgrade.
+- Verify: a non-admin gets 503 under `maintenance` while an admin does not; an admin can list and
+  force-stop another user's task and both logs are written; a non-admin passing `allUsers` still
+  sees only their own; no admin route can `cancel` another user's task; a drained task resumes with
+  its work intact.
 
 ### Slice 5 — Updater + `haive upgrade`
 *Rollback: the updater is a separate image nothing else depends on; not invoking it leaves the stack
