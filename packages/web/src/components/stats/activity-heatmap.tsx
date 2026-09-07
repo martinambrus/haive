@@ -1,3 +1,4 @@
+import { useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { cn } from '@/lib/cn';
 import { HEAT_EMPTY, HEAT_RAMP } from './palette';
@@ -26,6 +27,24 @@ import type { StatsTimelineDay } from '@/lib/api-client';
 
 const CELL = 'h-3.5 w-3.5 rounded-sm';
 
+/** Minimum width of a grid COLUMN, which is what decides how many columns there are.
+ *
+ *  Wider than a month block, which is 104px — 7 cells of 14px plus their 6 one-pixel gaps. The columns are `1fr`, so they share the full width
+ *  between them and each block is centred in its own — the grid reaches both edges instead of
+ *  packing left and leaving the remainder on the right. The number is chosen so a half-width
+ *  dashboard card lands on THREE columns, which is two rows for six months: MEASURED, that card
+ *  gives the grid 571px, and 571 wants a minimum above 144 to drop from four columns to three.
+ *  Cell size is deliberately untouched — the columns spread, the squares stay 14px. */
+const MIN_COL_PX = 150;
+
+/** Upper bound on the tooltip's width, used to decide which side it opens on.
+ *
+ *  An UPPER bound on purpose — MEASURED at 144px for the widest of these, so the extra is
+ *  headroom for a longer currency string. Over-estimating only makes a cell near the right edge
+ *  flip sooner than it strictly had to, which is invisible; under-estimating would let one
+ *  escape the panel, which is the thing this exists to prevent. */
+const TOOLTIP_MAX_PX = 176;
+
 function cellColor(step: 0 | 1 | 2 | 3 | 4): string {
   return step === 0 ? HEAT_EMPTY : HEAT_RAMP[step - 1]!;
 }
@@ -47,12 +66,36 @@ export function ActivityHeatmap({
    *  puts the slack between the grid and the legend instead of below everything. */
   className?: string;
 }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  /** Decide which side a cell's tooltip opens on, at hover, from the real layout.
+   *
+   *  This replaces a fixed right-hand strip that the grid was padded by so tooltips could not
+   *  leave the panel. That strip cost 176px of width wherever the panel is narrow — a third of
+   *  a half-width dashboard card — and it bought containment the layout can simply be asked
+   *  about instead. Position genuinely cannot be INFERRED here (the blocks are flex-wrapped, so
+   *  neither the month index nor the weekday column says where a block sits), but it can be
+   *  MEASURED, and one rect read per hover is nothing.
+   *
+   *  Only the cell is measured, never the tooltip: the tooltip is display:none until :hover and
+   *  would read back as a zero rect. */
+  const placeTooltip = useCallback((cell: HTMLElement) => {
+    const root = rootRef.current;
+    if (!root) return;
+    const c = cell.getBoundingClientRect();
+    const r = root.getBoundingClientRect();
+    // Flip only when opening rightwards would overflow AND opening leftwards would not, so a
+    // panel narrower than the tooltip is left alone rather than pushed off its other edge.
+    const flip = c.left + TOOLTIP_MAX_PX > r.right && c.right - TOOLTIP_MAX_PX >= r.left;
+    cell.dataset.flip = flip ? 'left' : '';
+  }, []);
+
   const byDay = new Map(days.map((d) => [d.bucket, d]));
   const thresholds = heatThresholds(days.map((d) => heatValue(d, metric)));
   const months = calendarMonths(days.map((d) => d.bucket));
 
   return (
-    <div className={cn('flex flex-col gap-4', className)}>
+    <div ref={rootRef} className={cn('flex flex-col gap-4', className)}>
       <div className="flex flex-wrap items-center gap-2">
         {HEAT_METRICS.map((m) => (
           <button
@@ -87,7 +130,10 @@ export function ActivityHeatmap({
            with a taller card) puts the slack BELOW the month blocks and keeps the legend at the
            foot. Inert everywhere else: an auto-height column has no free space to hand out, so
            /stats renders exactly as it did. */
-        <div className="flex flex-1 flex-wrap content-start gap-6 pr-44">
+        <div
+          className="grid flex-1 content-start justify-items-center gap-6"
+          style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${MIN_COL_PX}px, 1fr))` }}
+        >
           {months.map((month) => (
             <div key={month.key} className="flex flex-col gap-1">
               <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
@@ -112,7 +158,12 @@ export function ActivityHeatmap({
                     if (!cell.bucket || !day) return <div key={ci} className={CELL} />;
                     const step = heatStep(heatValue(day, metric), thresholds);
                     return (
-                      <div key={ci} className="group relative">
+                      <div
+                        key={ci}
+                        className="group relative"
+                        onMouseEnter={(e) => placeTooltip(e.currentTarget)}
+                        onFocus={(e) => placeTooltip(e.currentTarget)}
+                      >
                         <Link
                           href={dayHref(cell.bucket)}
                           className={cn(
@@ -125,20 +176,16 @@ export function ActivityHeatmap({
                         <div
                           className={cn(
                             'pointer-events-none absolute bottom-full z-10 mb-1 hidden whitespace-nowrap rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-[11px] shadow-lg group-hover:block group-focus-within:block',
-                            // Opens rightwards from the cell's left edge, always.
-                            //
-                            // A cell is 14px and the tooltip ~120px, so a centred one overhangs
-                            // by ~53px on both sides and can leave a narrow viewport. Anchoring
-                            // by month index or column index does NOT fix that, and the reason
-                            // is worth keeping: the blocks are flex-wrapped, so neither index
-                            // says where a block actually sits — MEASURED on a one-year window,
-                            // 15 blocks wrap and the LAST one starts a new row at the card's
-                            // left edge, where a right-anchored tooltip hung 105px outside it.
-                            // Position cannot be inferred here without reading layout, so this
-                            // picks the direction with the headroom instead: blocks fill
-                            // left-to-right, leaving the right edge the only side that can run
-                            // out, and only for the final block of a completely full row.
-                            'left-0',
+                            // Opens rightwards by default and leftwards for a cell near the
+                            // right edge, decided per hover by placeTooltip from the real
+                            // layout. Two cheaper rules were tried and BOTH were wrong, which
+                            // is why this reads the DOM: anchoring by month or weekday index
+                            // cannot work because the blocks wrap (on a one-year window the
+                            // last block starts a new row at the LEFT edge, where a
+                            // right-anchored tooltip hung 105px outside the card), and a fixed
+                            // right-hand strip on the grid worked but cost 176px of width
+                            // wherever the panel is narrow.
+                            'left-0 group-data-[flip=left]:left-auto group-data-[flip=left]:right-0',
                           )}
                         >
                           <div className="mb-0.5 font-medium text-neutral-200">
