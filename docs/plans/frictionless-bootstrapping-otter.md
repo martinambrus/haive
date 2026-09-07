@@ -4,6 +4,12 @@
 > install is `npx @deepseek-ai/dsh web` — a browser tab opens, asks for an API key, and a full
 > harness is running locally with no account and no cloud session. This plan asks what the
 > equivalent is for Haive, and is honest that Haive is a heavier thing than a single Node process.
+>
+> Extended 2026-09-07 with three sections the original did not have, each folded in place rather
+> than appended: the install-time CHANNEL (a module customer does not run the public images), macOS
+> as a first-class RUN-IT target with its arch and GPU limits, and the no-terminal path — a Docker
+> Desktop Extension, with a downloadable double-click installer rejected on evidence. The shape of
+> the command and the security rules are unchanged.
 
 ## The gap
 
@@ -59,13 +65,13 @@ steps "need no rebuild". Only a module contributing steps, routes or jobs does.
 `curl -fsSL https://get.haive.dev | sh` (and a `powershell -c "irm get.haive.dev/install.ps1 | iex"`
 sibling), or `npx create-haive`. All three do the same bootstrap:
 
-1. Preflight: Docker Engine + Compose v2 present and the daemon reachable; WSL2 when on Windows (the
-   project's only supported substrate); enough free RAM and disk for the stack's reserve budget.
-   Fail with a specific fix per missing prerequisite, never a stack trace.
+1. Preflight: Docker Engine + Compose v2 present and the daemon reachable; WSL2 when on Windows;
+   enough free RAM and disk for the stack's reserve budget. Fail with a specific fix per missing
+   prerequisite, never a stack trace.
 2. Pick an install dir (default `~/haive`), refuse to clobber a non-empty one without `--force`.
-3. Fetch the versioned compose bundle for a pinned release: `docker-compose.yml` plus a
-   `docker-compose.run.yml` overlay that references `image:` tags instead of `build:` contexts. NOT
-   the source tree.
+3. Fetch the versioned compose bundle for the pinned release **on this install's CHANNEL**:
+   `docker-compose.yml` plus a `docker-compose.run.yml` overlay that references `image:` tags
+   instead of `build:` contexts. NOT the source tree.
 4. Generate secrets into `.env`: `CONFIG_ENCRYPTION_KEY=$(openssl rand -hex 32)`, a random DB
    password, SMTP left at Mailpit. This is the security-critical step — see below.
 5. GPU detection: probe for an NVIDIA runtime and select the GPU overlay; otherwise default to
@@ -74,6 +80,77 @@ sibling), or `npx create-haive`. All three do the same bootstrap:
 6. `docker compose ... up -d`, pulling published images. Run the DB-migrate one-shot (the dev
    override already has this shape) before api/worker accept traffic.
 7. Wait for `/health`, then hand off to first-run setup (below) and open `http://localhost:3000`.
+
+### The channel is an install-time parameter, not a later setting
+
+Step 3 resolves a channel because a module customer does not run the public images:
+`serialized-chasing-thacker`'s delivery matrix gives a paid-module install per-customer prebuilt
+images and an own-module install a `haive-builder` it runs locally. An installer that always fetches
+the public manifest hands a paying customer a stack with none of their modules and no error — the
+same defect `steadfast-committing-gray` already closed on the UPGRADE side by making its release
+manifest per-channel, and it must be closed on the INSTALL side too or the first run is wrong before
+any upgrade happens.
+
+- `--channel <id>` (default `public`), with the customer's identifier and any credential the
+  per-customer registry needs. The one-liner keeps its shape: a module-free install types the
+  documented line unchanged.
+- An own-module install additionally pulls `haive-builder` and runs the one-shot build before step 6,
+  since there are no prebuilt images to bring up. That is the same build the upgrade's Phase 0 runs,
+  so it is one mechanism invoked at two moments, not two.
+- A channel that does not resolve FAILS at preflight, next to the other prerequisite checks. Falling
+  back to `public` would produce a stack that boots green and is silently the wrong one.
+
+## Platforms — macOS is first-class for RUN-IT
+
+RUN-IT and DEV-IT have different substrate rules and this section is about RUN-IT only. AGENTS.md's
+"WSL2 plus Docker is the only supported developer environment" scopes itself to the DEVELOPER
+environment; a published-image install builds nothing and needs no workspace, so it is not bound by
+that constraint. Windows-native (non-WSL2) stays out of scope regardless — see below.
+
+- **macOS needs no PowerShell.** It ships `curl` and `bash`, so the documented
+  `curl -fsSL https://get.haive.dev | sh` line is byte-identical to the Linux one. The
+  `irm | iex` sibling is Windows-only. Mac is the cheapest of the three targets for the installer,
+  and its risks are all downstream of it.
+- **No GPU on Apple Silicon.** Docker Desktop cannot pass the GPU to a container, so in-stack Ollama
+  is CPU-only there. Step 5 already handles this — the same CPU/cloud-Ollama fallback a laptop
+  without an NVIDIA runtime takes — so it costs no new branch, only accurate copy.
+- **arm64 must be verified per base image, not assumed.** What is already known: nothing in
+  `docker-compose*.yml` pins `platform:`, so images resolve to host arch rather than being forced to
+  amd64; the sandbox base is `node:24-bookworm-slim`, glibc rather than musl because antigravity's
+  `agy` is a dynamically linked glibc binary with no musl build; and
+  `packages/worker/sandbox-image/Dockerfile:49-59` already carries an arch switch, installing rtk
+  only on `x86_64` and stating that "aarch64 has no asset, so we skip cleanly on non-x86_64". clawker
+  is absent from the shipped image (no `CLAWKER_RELEASE_URL`), so it is not an arch blocker either.
+  The genuine unknown is the per-CLI binaries the image-composer layers on at compose time, which is
+  measurable per adapter and belongs in the verification below rather than in an assumption here.
+- **Bind-mount throughput is lower on macOS** (VirtioFS) for the repo volume and node_modules. A
+  documented expectation, not a blocker.
+
+## The no-terminal path — a Docker Desktop Extension, not a double-click script
+
+The audience for a one-line install already has Docker, because preflight requires it. Someone who
+has never opened a terminal has not installed Docker Engine, but very plausibly HAS installed Docker
+Desktop, which is a GUI installer. That is the opening, and it decides the shape of the answer.
+
+- **A downloadable double-click script is rejected.** Unsigned, macOS Gatekeeper refuses a
+  `.command` and Windows blocks a `.ps1` by execution policy while SmartScreen flags an unsigned
+  binary — so the user meets a security scare dialog instead of a command, which is WORSE than
+  typing one line, not better. Signing removes the dialog and costs an Apple Developer ID plus a
+  Windows certificate, annually, for a path the one-liner already serves. Reconsider only if code
+  signing is being paid for anyway.
+- **A Docker Desktop Extension is the real no-terminal path.** It installs in one click from inside
+  the application the user already has, runs the compose stack, and needs no shell at all. Its
+  limits are honest: Docker Desktop only, so it does not serve a Linux server install, and it adds a
+  packaging and publishing surface. Treat its capabilities as needing confirmation against the
+  current Extensions SDK before committing — nothing here has been verified against it.
+- The trust argument points the same way. This plan already requires the installer to state that the
+  worker mounts the Docker socket and that this is host-root-equivalent. A user who cannot open a
+  terminal is exactly the user least able to weigh that, and an Extension at least frames the
+  decision inside Docker's own install flow rather than a piped shell script.
+
+Sequencing: the one-liner ships first and is the documented path. The Extension is a separate,
+later piece of work that reuses the same compose bundle and the same first-run setup, adding a
+surface rather than a second installer.
 
 ## First-run setup — the part that does not exist yet
 
@@ -119,6 +196,10 @@ installer's UX hinges on closing this:
   public scope. Without it, RUN-IT has nothing to pull.
 - The compose `run` overlay that swaps `build:` for `image:` at pinned tags.
 - The first-run setup flow above.
+- **Only for a non-public channel:** the per-channel release manifest (`steadfast-committing-gray`)
+  and, for an own-module install, the `haive-builder` image (`serialized-chasing-thacker`). A
+  `public`-channel install — the default and the one this plan is written for — needs neither, so
+  neither gates shipping the one-liner.
 
 ## Rollback / uninstall (write the undo before the change)
 
@@ -141,10 +222,26 @@ system-wide; there is no package to purge and no host path outside the install d
    the install dir).
 6. `docker history` on the published images reveals no baked secret (the key is generated at install
    time, never in an image).
+7. macOS (Apple Silicon): the same `curl | sh` line boots the stack green with no PowerShell and no
+   NVIDIA runtime, on CPU Ollama. Every base image resolves an arm64 manifest — enumerated per image,
+   since nothing pins `platform:` and an amd64-only base would silently emulate or fail to pull.
+8. macOS: each CLI adapter the image-composer can layer either installs and runs on arm64 or is
+   reported as unavailable there with a named reason. rtk is the known-good precedent — it skips
+   cleanly on non-x86_64 today — so the check is whether the others behave that way or break.
+9. Channel: `--channel <id>` for a paid-module customer installs their per-customer images and their
+   modules load (`GET /admin/modules/loaded` lists them); an own-module install pulls
+   `haive-builder`, builds locally and boots those images; a channel that does not resolve fails at
+   preflight and never falls back to `public`.
 
 ## Out of scope
 
 - A hosted/cloud Haive (this is local-first, matching dsh's "no account, no cloud session").
-- Auto-update of a running install (name it as a follow-up: the pinned-tag compose bundle makes
-  `haive upgrade` a later, well-defined step, but it is not this plan).
-- Windows-native (non-WSL2) install — the project's supported substrate is WSL2 + Docker only.
+- Auto-update of a running install. The follow-up this named now exists as its own plan:
+  `steadfast-committing-gray` owns `haive upgrade`, the transactional apply, maintenance mode and
+  the per-channel release manifest. Still not this plan; the pinned-tag compose bundle is the shared
+  prerequisite.
+- Windows-native (non-WSL2) install. Unchanged: WSL2 is the Windows substrate. macOS and Linux are
+  first-class for RUN-IT — see Platforms — and that is not a widening of AGENTS.md's constraint,
+  which scopes itself to the DEVELOPER environment.
+- The Docker Desktop Extension itself. Chosen as the no-terminal path above, sequenced after the
+  one-liner, and reusing this plan's compose bundle and first-run setup rather than forking them.

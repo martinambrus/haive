@@ -34,6 +34,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `tidal-yielding-hoare` | Vote scoring for the runtime (DDEV) pool | **Shipped** `8b6b3a9` |
 | `valiant-dancing-parrot` | Task up/down vote scoring | **Shipped** `c4d9acb` |
 | `yielding-preempting-dijkstra` | Vote-driven agent-slot preemption | **Shipped** `19bf74e` |
+| `frictionless-bootstrapping-otter` | One-line install (RUN-IT) | Not started; extended 2026-09-07 with the install-time channel, macOS as a first-class RUN-IT target, and a Docker Desktop Extension as the no-terminal path |
 | `kind-riding-dream` | Deep project analysis — resellable module | Not started; depends optionally on `purring-marinating-peacock` phase 2b |
 | `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | Not started |
 | `parsed-churning-yeti` | Project plan canvas | Not started |
@@ -60,7 +61,10 @@ Verified against the tree on this date, not taken from the plan bodies.
 - `steadfast-committing-gray` and `frictionless-bootstrapping-otter` share one slice exactly:
   published images plus the compose `run` overlay are otter's RUN-IT prerequisite and gray's Phase 0
   prerequisite. Whichever ships first builds them. Otter owns the FIRST install; gray owns every
-  install after it, which is the follow-up otter names and defers.
+  install after it, which is the follow-up otter names and defers. They also share the CHANNEL: gray
+  made the release manifest per-channel for upgrades, and otter resolves the same channel at install
+  time — an installer that always fetched the public manifest would hand a module customer the wrong
+  stack before any upgrade happened.
 - `steadfast-committing-gray` generalises `serialized-chasing-thacker`'s urgent/graceful drain
   choice from module scope to system scope.
 - **Decided 2026-09-07, spanning four plans:** a published-image install has no source and no build,
