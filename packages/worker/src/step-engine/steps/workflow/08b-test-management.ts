@@ -17,6 +17,7 @@ import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { runnerHandleForTask, ddevExec, DDEV_PROJECT_MOUNT } from '../../../sandbox/ddev-runner.js';
+import { ensureDdevPlaywrightBrowsers } from '../../../sandbox/ddev-playwright.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import { cleanText, contentFingerprint } from '../../task-ledger.js';
@@ -879,6 +880,21 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         };
         testsPassed = null;
       } else {
+        // The DDEV web image carries neither the browser binaries nor the libraries they
+        // link against, and nothing in the sandbox can add them. Idempotent, so it runs
+        // before every pass rather than being guessed at once; a failure is left to the
+        // classifier below to NAME rather than raised, since a browser we could not install
+        // is precisely the gap that classifier reports.
+        let provisionNote: string | null = null;
+        if (cmd.kind === 'ddev' && d.primary === 'playwright') {
+          await ctx.emitProgress('Preparing the browser runtime in the DDEV environment…');
+          const provisioned = await ensureDdevPlaywrightBrowsers(
+            runnerHandleForTask(ctx.taskId, d.repoSubpath!),
+            primaryFrameworkRoot(d) ?? '',
+          );
+          if (provisioned.attempted && !provisioned.ok) provisionNote = provisioned.note;
+        }
+
         await ctx.emitProgress(
           cmd.kind === 'ddev'
             ? 'Running related tests in the DDEV environment…'
@@ -907,7 +923,10 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
             `The related tests could not be run: ${blocked.reason}. They were written but never ` +
             `executed, and the suite is NOT known to be green. No fix pass can repair this from ` +
             `inside the sandbox.\n\nRun: ${testRun.command}\n\nRepair with:\n` +
-            `${repairInvocation(d, blocked.repair)}\n\n${run.output}`;
+            `${repairInvocation(d, blocked.repair)}\n\n${run.output}` +
+            (provisionNote
+              ? `\n\nProvisioning it automatically also failed:\n${provisionNote}`
+              : '');
         }
 
         // A failed run is only worth a fix agent if the runner actually ran something. Ask it to

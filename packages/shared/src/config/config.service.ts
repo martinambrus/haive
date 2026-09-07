@@ -118,6 +118,11 @@ export const CONFIG_KEYS = {
   // CLI agents in the cli-exec sandbox). Default true; set 'false' to disable
   // masking for every repo without per-repo edits or a redeploy.
   SECRET_MASK_ENABLED: 'config:sandbox:secretMaskEnabled',
+  // Global kill-switch for provisioning a test framework's browser runtime inside the
+  // per-task DDEV web container (08b's selective run). Default true; 'false' leaves the
+  // container untouched, so a repo whose suite needs a browser reports the gap through
+  // 08b's degradedNote instead of having it repaired.
+  TEST_BROWSER_PROVISION_ENABLED: 'config:worker:testBrowserProvisionEnabled',
   // Global kill-switch for direct browser access: when 'true' (default), each
   // per-task runner publishes its app port to 127.0.0.1 at startup so the user
   // can open the app in their own browser (localhost + *.ddev.site URLs), a fast
@@ -581,6 +586,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SANDBOX_NETWORK]: 'haive-network',
   [CONFIG_KEYS.PLAN_CANVAS_ENABLED]: 'true',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
+  [CONFIG_KEYS.TEST_BROWSER_PROVISION_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
   [CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED]: 'true',
   [CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT]: '80',
