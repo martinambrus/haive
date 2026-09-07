@@ -663,6 +663,11 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
         const checked = current.includes(opt.value);
         return (
           <div key={opt.value} className="flex flex-col">
+            {/* Option labels are markdown, like their descriptions: several steps
+                already write inline code into them to set an identifier apart from
+                the prose around it. The two native <select> renderers below keep
+                theirs plain — an <option> can hold text and nothing else — so a
+                label written for a dropdown must stay readable unrendered. */}
             <label className="flex items-center gap-2 text-sm text-neutral-200">
               <input
                 type="checkbox"
@@ -676,7 +681,7 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
                   }
                 }}
               />
-              <span>{opt.label}</span>
+              <InlineMarkdown body={opt.label} />
               {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
             </label>
             {opt.details?.kind === 'diff' && <DiffDisclosure details={opt.details} />}
@@ -774,7 +779,7 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
                   disabled={disabled}
                   onChange={(e) => onChange(e.target.value)}
                 />
-                <span>{opt.label}</span>
+                <InlineMarkdown body={opt.label} />
                 {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
                 {opt.info && <InfoTooltip content={opt.info} />}
               </span>
@@ -957,7 +962,7 @@ function RadioWithTextareaControl({
               onChange(opt.value);
             }}
           />
-          <span>{opt.label}</span>
+          <InlineMarkdown body={opt.label} />
           {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
         </label>
       ))}
