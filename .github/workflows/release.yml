@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api, worker, web]
+        service: [api, worker, web, updater, ollama-thinking-proxy, openrouter-compat-proxy]
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,13 +62,33 @@ jobs:
         # Token via env, never interpolated into the command line, where `ps` would show it.
         run: printf '%s' "$GH_TOKEN" | docker login "$REGISTRY" -u "$GH_ACTOR" --password-stdin
 
+      # Two shapes of image live in this repo: workspace packages, which build the whole monorepo
+      # from the root context, and the standalone sidecars under docker/, which are single-stage
+      # and build from their own directory. Resolved here rather than expressed as ten explicit
+      # matrix entries, which would say the same thing six times.
+      - name: Resolve build inputs
+        id: cfg
+        run: |
+          case "${{ matrix.service }}" in
+            api|worker|web|updater)
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "file=packages/${{ matrix.service }}/Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "target=production" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "context=docker/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+              echo "file=docker/${{ matrix.service }}/Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "target=" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          context: .
-          file: packages/${{ matrix.service }}/Dockerfile
-          target: production
+          context: ${{ steps.cfg.outputs.context }}
+          file: ${{ steps.cfg.outputs.file }}
+          target: ${{ steps.cfg.outputs.target }}
           platforms: linux/${{ matrix.arch }}
           # HAIVE_VERSION is what getHaiveVersion() reports and what an upgrade compares against.
           # web is deliberately NOT stamped: it renders the API's version, never its own.
@@ -110,7 +130,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api, worker, web]
+        service: [api, worker, web, updater, ollama-thinking-proxy, openrouter-compat-proxy]
     steps:
       - name: Download digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

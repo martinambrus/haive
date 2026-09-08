@@ -35,25 +35,27 @@ services:
       - haive-network
     restart: 'no'
 
-  # THREE services in docker-compose.yml build from a local context, and a published install has no
-  # source tree. MEASURED: `up -d` on a published install failed with
+  # Three services in docker-compose.yml build from a local context, which a published install does
+  # not have. MEASURED before this was handled: `up -d` failed with
   # `unable to prepare context: path "/install/docker/openrouter-compat-proxy" not found`, and the
-  # same failure broke the ROLLBACK path, which brings the whole stack up. So they are given a
-  # profile and are simply not started here.
+  # same failure broke the ROLLBACK, which brings the whole stack up — a failed upgrade could not
+  # undo itself.
   #
-  # `cli-sandbox` is build-only and losing nothing: the worker builds that image itself at boot
-  # (`ensureSandboxCoreImage`), which is also what heals a pruned host.
-  #
-  # The two proxies ARE runtime features, and profiling them out is a KNOWN GAP rather than a
-  # design: a published install cannot currently use the ollama-thinking or openrouter providers,
-  # because their traffic is routed through these sidecars. Publishing them alongside api/worker/web
-  # is the fix; until then this is honest rather than silently broken.
+  # The two proxies are real runtime features — openrouter traffic is rewritten by one and ollama's
+  # thinking control by the other — so they are PUBLISHED and pulled, exactly like api/worker/web.
   cli-sandbox:
+    # The exception, and it loses nothing: this service exists only to build an image the worker
+    # builds for itself at boot (`ensureSandboxCoreImage`), which is also what heals a pruned host.
+    # Publishing it would ship a second copy of something already self-healing.
     profiles: ['build-only']
+
   ollama-thinking-proxy:
-    profiles: ['not-published-yet']
+    build: !reset null
+    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-ollama-thinking-proxy:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+
   openrouter-compat-proxy:
-    profiles: ['not-published-yet']
+    build: !reset null
+    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-openrouter-compat-proxy:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
 
   api:
     build: !reset null
@@ -67,6 +69,24 @@ services:
     # surface to get it.
     ports:
       - '${HAIVE_API_PORT:-3001}:3001'
+    # Everything the in-app "Upgrade" button needs, and nothing it does not.
+    #
+    # HAIVE_INSTALL_DIR_HOST is the only one with no sane default, so it is the one that gates the
+    # feature: the api hands it to `docker run -v`, which the DAEMON resolves on the HOST, so a
+    # guess (`$PWD`, `process.cwd()`) silently bind-mounts the wrong directory. That is exactly how
+    # the first real upgrade wrote its snapshot to a `/snapshots` nobody owned. Unset, the endpoint
+    # refuses and says so; it never infers.
+    #
+    # `HAIVE_VERSION` is deliberately NOT passed: it is stamped into the image at build time, and a
+    # compose-level copy would be a second source of truth that disagrees during a rollback — the
+    # moment `.env` is re-pinned but the containers have not been recreated yet.
+    environment:
+      HAIVE_INSTALL_DIR_HOST: ${HAIVE_INSTALL_DIR_HOST:-}
+      HAIVE_REGISTRY: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-haive}
+      HAIVE_POSTGRES_VOLUME: ${HAIVE_POSTGRES_VOLUME:-}
+      HAIVE_SNAPSHOT_HOST_DIR: ${HAIVE_SNAPSHOT_HOST_DIR:-}
+      HAIVE_RELEASE_MANIFEST_URL: ${HAIVE_RELEASE_MANIFEST_URL:-}
     depends_on:
       db-migrate:
         condition: service_completed_successfully
