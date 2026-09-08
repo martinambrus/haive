@@ -293,8 +293,11 @@ Containers and networks would collide, which is loud. The volumes would SILENTLY
 not: a second install would mount the first one's cloned repositories and its worker would act on
 them. That is the part that makes "just try it" a bad idea.
 
-The fix, when it is wanted, is a per-INSTALL prefix (`${HAIVE_CONTAINER_PREFIX:-haive}`) across all
-three, defaulting to today's names so an existing install is byte-identical. **Not a version in the
+The fix has its own plan — `solitary-partitioning-lampson`, the next priority after
+`steadfast-committing-gray` — because it is wider than these three: the worker also constructs
+sandbox containers, auth and IDE volumes, runtime runners and the RAG/global-KB DATABASE names in
+code, and several reapers select what to delete by matching those same prefixes. A per-INSTALL id
+defaulting to today's names keeps an existing install byte-identical. **Not a version in the
 name** — the name must identify the install, not what it currently runs, or every upgrade renames
 every container and a rollback renames them back, breaking anything holding a name and cutting logs
 and monitoring in half at each release. The version already lives in the image tag and at
