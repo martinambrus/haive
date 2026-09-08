@@ -16,6 +16,12 @@
 > instructed, never installed. Also records why two installs cannot yet share a machine. Images are
 > now real: `ghcr.io/<owner>/haive-{api,worker,web}`, public and multi-arch, first published as
 > v0.1.0 on 2026-09-08.
+>
+> **Corrected 2026-09-08:** this plan claimed WSL2 was required on Windows and put Windows-native
+> out of scope. Wrong for RUN-IT — WSL2 is Docker Desktop's ENGINE, not a requirement on the user's
+> shell, and nothing in a published-image install needs a WSL distro. That claim was inherited from
+> AGENTS.md's DEVELOPER-environment constraint, where it is true and stays. See Platforms; the
+> Windows path is in scope and UNVERIFIED, which is not the same as supported.
 
 ## The gap
 
@@ -71,9 +77,9 @@ steps "need no rebuild". Only a module contributing steps, routes or jobs does.
 `curl -fsSL https://get.haive.dev | sh` (and a `powershell -c "irm get.haive.dev/install.ps1 | iex"`
 sibling), or `npx create-haive`. All three do the same bootstrap:
 
-1. Preflight: Docker Engine + Compose v2 present and the daemon reachable; WSL2 when on Windows;
-   enough free RAM and disk for the stack's reserve budget; and the REQUESTED VERSION actually
-   exists. Fail with a specific fix per missing prerequisite, never a stack trace — and fail here,
+1. Preflight: Docker Engine + Compose v2 present and the daemon reachable (on Windows that means
+   Docker Desktop — see Platforms); enough free RAM and disk for the stack's reserve budget; and the
+   REQUESTED VERSION actually exists. Fail with a specific fix per missing prerequisite, never a stack trace — and fail here,
    before any secret is generated or any image pulled, so a typo costs nothing.
 2. Pick an install dir (default `~/haive`), refuse to clobber a non-empty one without `--force`.
 3. Fetch the versioned compose bundle for the pinned release **on this install's CHANNEL**:
@@ -182,6 +188,32 @@ that constraint. Windows-native (non-WSL2) stays out of scope regardless — see
   is absent from the shipped image (no `CLAWKER_RELEASE_URL`), so it is not an arch blocker either.
   The genuine unknown is the per-CLI binaries the image-composer layers on at compose time, which is
   measurable per adapter and belongs in the verification below rather than in an assumption here.
+- **Windows needs Docker Desktop, NOT a WSL2 shell.** This corrects the plan's original claim.
+  Docker Desktop uses WSL2 as its ENGINE, but that is its plumbing, not a requirement on how the
+  user works: `docker` and `docker compose` run from PowerShell, no WSL distro is needed, and
+  nothing is typed inside one. That is what makes the `irm | iex` installer coherent rather than a
+  contradiction. AGENTS.md's "WSL2 plus Docker is the only supported developer environment" is
+  about DEV-IT — bash `scripts/dev.sh`, the `.:/app` bind mount and its uid/chown dance, pnpm on
+  the host — none of which a published-image install performs.
+
+  Two things the installer must handle there, both from `docker-compose.yml`'s only two host binds:
+
+  - **`${HOST_REPO_ROOT:-${HOME}}:/host-fs:ro`.** PowerShell does not set `HOME` (it sets
+    `USERPROFILE`), so the default resolves to EMPTY and compose fails on a malformed mount. The
+    installer writes `HOST_REPO_ROOT` explicitly, in a form Docker Desktop accepts, and the path
+    must be one Docker Desktop is permitted to share. This mount is a convenience — a read-only
+    view used to import a repository that already exists on disk — so an install that cannot share
+    a path is degraded, not broken, and should say which feature it loses rather than refusing.
+  - **`/var/run/docker.sock`.** Docker Desktop does expose it to Linux containers, so the worker's
+    container spawning works unchanged; `DOCKER_SOCKET` is already parameterised if a given setup
+    needs another path. The host-root disclosure this plan owes the user applies identically here.
+
+  **UNVERIFIED.** Nobody has run this on a real Windows host — the reasoning is from the compose
+  files and Docker Desktop's documented behaviour, not from a measurement, and this plan does not
+  get to call something supported on that basis. What to check, in order: the stack boots from
+  PowerShell with no WSL distro installed; `/host-fs` mounts or degrades with a named reason; the
+  worker spawns a sandbox container through the socket; and a local-path repository imports.
+
 - **Bind-mount throughput is lower on macOS** (VirtioFS) for the repo volume and node_modules. A
   documented expectation, not a blocker.
 
@@ -329,8 +361,9 @@ system-wide; there is no package to purge and no host path outside the install d
   `steadfast-committing-gray` owns `haive upgrade`, the transactional apply, maintenance mode and
   the per-channel release manifest. Still not this plan; the pinned-tag compose bundle is the shared
   prerequisite.
-- Windows-native (non-WSL2) install. Unchanged: WSL2 is the Windows substrate. macOS and Linux are
-  first-class for RUN-IT — see Platforms — and that is not a widening of AGENTS.md's constraint,
-  which scopes itself to the DEVELOPER environment.
+- Windows without Docker Desktop. Windows-native RUN-IT via Docker Desktop is IN scope — see
+  Platforms, which corrects the earlier claim that WSL2 was required of the user. macOS and Linux
+  are first-class too. None of this widens AGENTS.md's constraint, which scopes itself to the
+  DEVELOPER environment, where WSL2 genuinely is required.
 - The Docker Desktop Extension itself. Chosen as the no-terminal path above, sequenced after the
   one-liner, and reusing this plan's compose bundle and first-run setup rather than forking them.
