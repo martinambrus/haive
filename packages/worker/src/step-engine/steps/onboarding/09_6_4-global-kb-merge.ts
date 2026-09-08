@@ -7,6 +7,7 @@ import type {
   StepContext,
   StepDefinition,
 } from '../../step-definition.js';
+import { miningLossNote, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 
 // Onboarding merge step. Step 08 keeps a newly-promoted global-KB article whose topic
 // already exists as a DRAFT linked (supersedes_entry_id) to that existing entry instead
@@ -33,6 +34,9 @@ interface MergeDetect {
 interface MergeApply {
   merged: number;
   skipped: number;
+  /** Set when a draft this step set out to merge was left unmerged. Lifted verbatim by
+   *  computeDegradedNote. Optional: apply outputs are persisted. */
+  degradedNote?: string;
 }
 
 const MERGE_BEGIN = '<<<MERGED';
@@ -148,6 +152,9 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
     // SIGKILLed almost at spawn and its draft counted as "skipped". One hour, matching
     // the other agent-backed mining steps (09_5, 09_5b, 11d, 03).
     timeoutMs: 60 * 60 * 1000,
+    // One agent per draft pair, and an unmerged pair costs the cross-repo KB the extra
+    // knowledge the draft carries. Same budget and classifier as 08c/08d.
+    retry: { maxAttempts: 2, retryOnInvocationFailure: shouldRetryMiningTerminalFailure },
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       // Mining has no bypass stub; under test bypass return [] so the smoke pipeline
       // runs without a real CLI provider (the drafts stay linked, unmerged).
@@ -165,6 +172,7 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
     const { pairs } = args.detected as MergeDetect;
     const results = (args.agentMiningResults ?? []) as AgentMiningResult[];
     const byDraft = new Map<string, MergePair>(pairs.map((p) => [`merge:${p.draftId}`, p]));
+    const mergedDrafts = new Set<string>();
     let merged = 0;
     try {
       const settings = await resolveGlobalKbSettings();
@@ -180,6 +188,7 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
               .update(globalKbEntries)
               .set({ body, embedStatus: 'pending', updatedAt: new Date() })
               .where(eq(globalKbEntries.id, p.draftId));
+            mergedDrafts.add(p.draftId);
             merged += 1;
           }
         });
@@ -190,6 +199,30 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
     // Unmerged drafts stay linked for manual review/merge at 09_6_5.
     const skipped = pairs.length - merged;
     ctx.logger.info({ merged, skipped, pairs: pairs.length }, 'global KB merge complete');
-    return { merged, skipped };
+    // Per-draft view for the loss note. A draft is lost whether its agent DIED, returned no
+    // article, or returned one too short to trust — all three leave the pair unmerged, and
+    // `skipped` is a bare count on an output nobody reads back.
+    const degradedNote = miningLossNote(
+      'knowledge-base merge',
+      pairs.map((p) => {
+        const r = results.find((x) => x.agentId === `merge:${p.draftId}`);
+        if (mergedDrafts.has(p.draftId)) {
+          return {
+            agentId: p.draftTitle,
+            agentTitle: null,
+            status: 'done' as const,
+            errorMessage: null,
+          };
+        }
+        return {
+          agentId: p.draftTitle,
+          agentTitle: null,
+          status: 'failed' as const,
+          errorMessage:
+            r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged'),
+        };
+      }),
+    );
+    return { merged, skipped, ...(degradedNote ? { degradedNote } : {}) };
   },
 };

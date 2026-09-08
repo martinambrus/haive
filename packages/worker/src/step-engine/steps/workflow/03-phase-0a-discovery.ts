@@ -8,7 +8,7 @@ import type {
   StepContext,
   StepDefinition,
 } from '../../step-definition.js';
-import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
+import { miningLossNote, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { pathExists } from '../onboarding/_helpers.js';
@@ -82,6 +82,10 @@ interface DiscoveryApply {
   relevantKbIds: string[];
   source: 'agents' | 'stub';
   agentMinings: AgentMiningSummary[];
+  /** Set when a selected persona produced nothing. Lifted verbatim by computeDegradedNote,
+   *  which supports a step STATING it degraded. Optional: this output is PERSISTED, so a
+   *  task parked on a payload written before the field existed must still render. */
+  degradedNote?: string;
 }
 
 const MAX_SELECTED_AGENTS = 7;
@@ -251,6 +255,19 @@ function buildAggregatedSummary(minings: AgentMiningSummary[]): string {
     const heading = m.agentTitle ?? m.agentId;
     sections.push(`## ${heading} (${m.agentId})\n\n${m.summary}`);
   }
+  // A persona that produced nothing has to be named IN the summary, not only on the step:
+  // 04-phase-0b-pre-planning is handed `summary` and `relevantKbIds` and never sees
+  // `agentMinings`, so an undisclosed hole reaches the spec writer as if discovery had been
+  // complete. Same rule as gate 2's "## Not reviewed" — an unrun reviewer and a reviewer who
+  // found nothing produce identical silence.
+  const lost = minings.filter((m) => m.status !== 'done');
+  if (lost.length > 0) {
+    const names = lost.map((m) => `${m.agentTitle ?? m.agentId} (${m.agentId})`).join(', ');
+    sections.push(
+      `## Not covered\n\n${lost.length} of ${minings.length} specialists produced no analysis: ` +
+        `${names}. Treat their areas as unresearched rather than clear.`,
+    );
+  }
   return sections.join('\n\n');
 }
 
@@ -411,11 +428,16 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
         },
         'discovery aggregated from agent minings',
       );
+      // Built from `minings`, not the raw batch: aggregateMinings is what knows an agent
+      // RAN and emitted prose the parser could not read, which is a lost specialist exactly
+      // as a dead terminal is.
+      const degradedNote = miningLossNote('knowledge-mining specialist', minings);
       return {
         summary,
         relevantKbIds,
         source: 'agents',
         agentMinings: minings,
+        ...(degradedNote ? { degradedNote } : {}),
       };
     }
     const stub = stubDiscoverySummary(args.detected);

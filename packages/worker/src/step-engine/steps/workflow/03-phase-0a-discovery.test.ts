@@ -67,6 +67,68 @@ describe('phase0aDiscoveryStep terminal retry policy', () => {
     expect(output.relevantKbIds).toEqual(['architecture']);
     expect(output.agentMinings).toHaveLength(2);
     expect(output.agentMinings[0]?.status).toBe('failed');
+    // A lost specialist is disclosed, never absorbed into a green step: the note goes on
+    // the step (computeDegradedNote lifts it verbatim)...
+    expect(output.degradedNote).toContain('Config Manager');
+    expect(output.degradedNote).toContain('Connection closed mid-response');
+    // ...and into the summary, because 04-phase-0b is handed `summary` and never sees
+    // `agentMinings`.
+    expect(output.summary).toContain('## Not covered');
+    expect(output.summary).toContain('config-manager');
+  });
+
+  it('reports an agent whose output could not be parsed as lost, not as silent', async () => {
+    // It RAN, so nothing here is `failed` — but its analysis is just as missing, and the
+    // aggregate view is the one that knows.
+    const output = await phase0aDiscoveryStep.apply(ctx, {
+      detected,
+      formValues: {},
+      llmOutput: { selected: ['config-manager', 'frontend-specialist'] },
+      agentMiningResults: [
+        {
+          agentId: 'config-manager',
+          agentTitle: 'Config Manager',
+          status: 'done',
+          output: null,
+          rawOutput: 'I had a look around and it all seems fine to me.',
+          errorMessage: null,
+        },
+        {
+          agentId: 'frontend-specialist',
+          agentTitle: 'Frontend Specialist',
+          status: 'done',
+          output: { summary: 'Use the existing filter state.', relevantKbIds: ['architecture'] },
+          rawOutput: null,
+          errorMessage: null,
+        },
+      ],
+      isFinalMiningAttempt: true,
+    });
+
+    expect(output.degradedNote).toContain('no parseable mining JSON');
+    expect(output.summary).toContain('## Not covered');
+  });
+
+  it('says nothing when every specialist answered', async () => {
+    const output = await phase0aDiscoveryStep.apply(ctx, {
+      detected,
+      formValues: {},
+      llmOutput: { selected: ['frontend-specialist'] },
+      agentMiningResults: [
+        {
+          agentId: 'frontend-specialist',
+          agentTitle: 'Frontend Specialist',
+          status: 'done',
+          output: { summary: 'Use the existing filter state.', relevantKbIds: ['architecture'] },
+          rawOutput: null,
+          errorMessage: null,
+        },
+      ],
+      isFinalMiningAttempt: true,
+    });
+
+    expect(output.degradedNote).toBeUndefined();
+    expect(output.summary).not.toContain('Not covered');
   });
 
   it('uses the deterministic stub after every miner has exhausted its retry budget', async () => {

@@ -6,6 +6,11 @@ import type { DetectResult, SkillEntry } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
+import {
+  miningLossNote,
+  shouldRetryMiningTerminalFailure,
+  type MinedAgentOutcome,
+} from '../../mining-failure.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import type { KbFileSummary } from '../onboarding/09-qa.js';
 import {
@@ -91,6 +96,10 @@ interface SkillSyncApply {
   skipped: string[];
   committed: boolean;
   commitSha: string | null;
+  /** Set when a skill this step set out to write was not written. Lifted verbatim by
+   *  computeDegradedNote. Optional: apply outputs are persisted, so a payload written
+   *  before the field existed must still render. */
+  degradedNote?: string;
 }
 
 /** The learning step's persisted skill-sync decisions (11-phase-8-learning output). */
@@ -397,6 +406,9 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     // Writes skill files from what the task already learned; never exercises the app.
     toolProfile: 'rag_only',
     timeoutMs: 60 * 60 * 1000,
+    // One agent per skill, so a terminal killed by infrastructure loses that skill for the
+    // whole run — the step has no second pass. Same budget and classifier as 08c/08d.
+    retry: { maxAttempts: 2, retryOnInvocationFailure: shouldRetryMiningTerminalFailure },
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillSyncDetect;
@@ -427,6 +439,10 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
 
     const generated: string[] = [];
     const skipped: string[] = [];
+    // Per-target view for the loss note: a target is lost whether its agent DIED or ran and
+    // returned nothing usable — both leave the skill unwritten, and `skipped` alone is a
+    // list on an output nobody reads back.
+    const outcomes: MinedAgentOutcome[] = [];
 
     for (const target of detected.targets) {
       const res = results.find((r) => r.agentId === target.skillId.slice(0, 120));
@@ -438,8 +454,21 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
       // a new one is simply not created). We only touch disk once we have a good skill.
       if (!match || !hasSubSkills(match)) {
         skipped.push(target.skillId);
+        outcomes.push({
+          agentId: target.skillId,
+          agentTitle: null,
+          status: 'failed',
+          errorMessage:
+            res?.errorMessage ?? (res ? 'no usable skill in the reply' : 'not dispatched'),
+        });
         continue;
       }
+      outcomes.push({
+        agentId: target.skillId,
+        agentTitle: null,
+        status: 'done',
+        errorMessage: null,
+      });
       const entry: SkillEntry = { ...match, id: target.skillId };
       await writeSkillTree(worktree, targetDirs, entry);
       generated.push(target.skillId);
@@ -507,6 +536,14 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
       { generated: generated.length, removed: removed.length, skipped: skipped.length, committed },
       'skill sync apply complete',
     );
-    return { generated, removed, skipped, committed, commitSha };
+    const degradedNote = miningLossNote('skill', outcomes);
+    return {
+      generated,
+      removed,
+      skipped,
+      committed,
+      commitSha,
+      ...(degradedNote ? { degradedNote } : {}),
+    };
   },
 };

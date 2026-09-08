@@ -91,6 +91,9 @@ interface SkillGenApply {
   llmSkillCount: number;
   /** Consecutive dry passes. Bounds in-loop re-rolls before the loop gives up. */
   consecutiveEmpty: number;
+  /** Set when the loop gives up short of `targetCount` but above the failure floor.
+   *  Lifted verbatim by computeDegradedNote. Optional: apply outputs are persisted. */
+  degradedNote?: string;
 }
 
 // Skill IR types (SkillEntry, SkillSubSkill, supporting shapes) live in
@@ -1366,7 +1369,21 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // terminal outcome) only when nothing usable was produced, or the
     // BUSINESS_LOGIC.md coverage floor (>=3 capabilities -> >=3 skills) is unmet.
     // Otherwise return the cumulative library and let shouldContinue stop the loop.
+    //
+    // "Otherwise" is where the silence was. A run that clears the floor of 3 but stops well
+    // short of the capability list ends `done` with nothing said, and the shortfall was
+    // readable only by comparing two numbers in the persisted output that nothing compares.
+    // The note is computed only on this terminal branch, never mid-loop, because a pass that
+    // is merely not finished yet is not a degradation.
+    let degradedNote: string | undefined;
     if (lastBatchCount === 0 && consecutiveEmpty >= MAX_EMPTY_PASSES) {
+      const targetCount = plan.mode === 'deterministic' ? plan.domains.length : 0;
+      if (targetCount > 0 && llmSkillCount < targetCount) {
+        degradedNote =
+          `Skill generation stopped after ${consecutiveEmpty} empty passes with ` +
+          `${llmSkillCount} of ${targetCount} business capabilities covered. The uncovered ` +
+          `ones have no skill — treat them as un-documented rather than simple.`;
+      }
       if (written.length === 0) {
         throw new SkillGenParseError(
           'Skill generation produced no skills after repeated empty passes — surface failure.',
@@ -1408,6 +1425,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       lastBatchCount,
       llmSkillCount,
       consecutiveEmpty,
+      ...(degradedNote ? { degradedNote } : {}),
     };
   },
 };

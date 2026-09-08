@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   didNotCompleteIssue,
   miningInvocationId,
+  miningLossNote,
   miningOutcome,
   shouldRerollMiningAgent,
   shouldRetryMiningTerminalFailure,
@@ -24,6 +25,38 @@ const failed = (agentId: string, errorMessage: string | null): AgentMiningResult
   output: null,
   rawOutput: null,
   errorMessage,
+});
+
+describe('miningLossNote', () => {
+  it('says nothing when every agent answered', () => {
+    expect(miningLossNote('specialist', [done('a', '{}'), done('b', '{}')])).toBeUndefined();
+  });
+
+  it('names the lost agents and why, with the count of what was asked for', () => {
+    const note = miningLossNote('specialist', [
+      done('kept', '{}'),
+      failed('gone', 'CLI process exceeded its time budget (30m).'),
+    ]);
+    expect(note).toContain('1 of 2 specialists');
+    expect(note).toContain('gone');
+    expect(note).toContain('exceeded its time budget');
+  });
+
+  it('says "no output" rather than nothing when the failure carried no diagnosis', () => {
+    expect(miningLossNote('specialist', [failed('gone', null)])).toContain('gone (no output)');
+  });
+
+  it('is a banner, not a log: a huge stderr cannot push the sentence off the page', () => {
+    const note = miningLossNote('specialist', [failed('gone', 'x'.repeat(5000))])!;
+    expect(note.length).toBeLessThan(400);
+  });
+
+  it('elides past the first few agents rather than listing a whole fan-out', () => {
+    const lost = Array.from({ length: 12 }, (_, i) => failed(`a${i}`, 'died'));
+    const note = miningLossNote('specialist', lost)!;
+    expect(note).toContain('12 of 12 specialists');
+    expect(note).toContain('and 4 more');
+  });
 });
 
 describe('miningOutcome', () => {
@@ -86,6 +119,43 @@ describe('shouldRetryMiningTerminalFailure', () => {
     ]) {
       expect(shouldRetryMiningTerminalFailure(failed('a', msg))).toBe(false);
     }
+  });
+
+  it('retries a CLI that could not read its own config — the auth-volume race', () => {
+    // The exact string from the incident: a mining agent booted while a sibling's root
+    // helper held ~/.codex, died, and burned none of its 3-attempt budget because no
+    // vocabulary here covered it.
+    expect(
+      shouldRetryMiningTerminalFailure(
+        failed(
+          'knowledge-miner',
+          'Error: thread/start: thread/start failed: failed to load configuration: Failed to read config file /home/node/.codex/config.toml: Permission denied (os error 13) (code -32600)',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRetryMiningTerminalFailure(failed('a', "EACCES: permission denied, open '/x'")),
+    ).toBe(true);
+  });
+
+  it('does not read a plain "permission denied" in an agent\'s own output as its own death', () => {
+    // The diagnostic is errorMessage + rawOutput, so the narrow markers are what keep an
+    // agent REPORTING a permission problem apart from an agent KILLED by one.
+    expect(
+      shouldRetryMiningTerminalFailure({
+        ...failed('a', 'the agent produced no parseable output'),
+        rawOutput: 'I tried to open /etc/shadow and got permission denied, so I moved on.',
+      }),
+    ).toBe(false);
+  });
+
+  it('still vetoes a cancel that also mentions a config read', () => {
+    // The veto list is checked before any transient vocabulary, this one included.
+    expect(
+      shouldRetryMiningTerminalFailure(
+        failed('a', 'CLI process was stopped before it finished: failed to read config file'),
+      ),
+    ).toBe(false);
   });
 
   it('does not retry a successful agent or an unclassifiable failure', () => {

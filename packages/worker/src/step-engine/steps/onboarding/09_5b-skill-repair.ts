@@ -7,6 +7,11 @@ import { mapWithConcurrency } from '@haive/shared';
 import type { KbFileSummary } from './09-qa.js';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
+import {
+  miningLossNote,
+  shouldRetryMiningTerminalFailure,
+  type MinedAgentOutcome,
+} from '../../mining-failure.js';
 import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
 import {
@@ -107,6 +112,9 @@ interface SkillRepairApply {
   stillFailing: string[];
   /** Total failing skills this pass attempted to repair. */
   attempted: number;
+  /** Set when a repair this step attempted did not land. Lifted verbatim by
+   *  computeDegradedNote. Optional: apply outputs are persisted. */
+  degradedNote?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -372,6 +380,9 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     // Repairs skill files in place from their own content; no runtime involved.
     toolProfile: 'rag_only',
     timeoutMs: 60 * 60 * 1000,
+    // One agent per failing skill; a terminal killed by infrastructure leaves that skill
+    // broken for the rest of onboarding. Same budget and classifier as 08c/08d.
+    retry: { maxAttempts: 2, retryOnInvocationFailure: shouldRetryMiningTerminalFailure },
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillRepairDetect;
@@ -408,6 +419,9 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
 
     const repaired: string[] = [];
     const stillFailing: string[] = [];
+    // Per-skill view for the loss note. `stillFailing` is carried to 09_6 for the user to
+    // act on, but the step itself still ends green — the note is what says so on the step.
+    const outcomes: MinedAgentOutcome[] = [];
 
     for (const failing of detected.failingSkills) {
       const res = results.find((r) => r.agentId === failing.skillId.slice(0, 120));
@@ -419,8 +433,21 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       // No valid, sub-skill-bearing repair → leave the broken skill in place for 09_6.
       if (!match || !hasSubSkills(match)) {
         stillFailing.push(failing.skillId);
+        outcomes.push({
+          agentId: failing.skillId,
+          agentTitle: null,
+          status: 'failed',
+          errorMessage:
+            res?.errorMessage ?? (res ? 'no usable repair in the reply' : 'not dispatched'),
+        });
         continue;
       }
+      outcomes.push({
+        agentId: failing.skillId,
+        agentTitle: null,
+        status: 'done',
+        errorMessage: null,
+      });
       // Force the id to the on-disk dir name so a stray agent rename can't misplace the write.
       const entry: SkillEntry = { ...match, id: failing.skillId };
       const skillMd = skillToMarkdown(entry);
@@ -469,6 +496,12 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       },
       'skill repair apply complete',
     );
-    return { repaired, stillFailing, attempted: detected.failingSkills.length };
+    const degradedNote = miningLossNote('skill repair', outcomes);
+    return {
+      repaired,
+      stillFailing,
+      attempted: detected.failingSkills.length,
+      ...(degradedNote ? { degradedNote } : {}),
+    };
   },
 };

@@ -50,6 +50,56 @@ export function didNotCompleteIssue(what: string, errorMessage: string | null): 
     : `${what} did not complete (the agent produced no output). Re-run this step.`;
 }
 
+/** Per-agent reason text in a loss note, and the note as a whole. `degraded_note` is display
+ *  copy in a banner, not a log: an agent that died with a 40 KB stderr must not push the rest
+ *  of the sentence off the page. */
+const LOSS_NOTE_REASON_CHARS = 200;
+const LOSS_NOTE_AGENTS = 8;
+
+/** The part of a mining outcome a loss note needs. Structural rather than
+ *  `AgentMiningResult`, because several steps first fold the raw batch into their own
+ *  per-agent shape — and it is that fold, not the batch, which knows an agent RAN and
+ *  returned something its parser could not use. Naming only what is read lets each step
+ *  pass whichever view is the honest one. */
+export interface MinedAgentOutcome {
+  agentId: string;
+  agentTitle: string | null;
+  status: 'done' | 'failed';
+  errorMessage: string | null;
+}
+
+/** One line naming the fan-out agents that produced nothing, or undefined when none did.
+ *
+ *  A step whose apply() folds only the `done` results reports the same clean `done` whether
+ *  every agent answered or half of them died — and for a discovery fan-out that is a whole
+ *  persona's coverage removed from the spec writer's input with nothing anywhere saying so.
+ *  MEASURED: `03-phase-0a-discovery` lost `knowledge-miner` and finished green, with
+ *  degraded_note, warning_message, the task events and the ledger all empty.
+ *
+ *  Returned rather than written: the caller puts it on its apply output as `degradedNote`,
+ *  which `computeDegradedNote` lifts verbatim (the branch for a step STATING it degraded).
+ *  That already renders as a caveat banner on a step that ended well and already counts on
+ *  the stats reliability tab, so no new plumbing is involved. */
+export function miningLossNote(
+  what: string,
+  results: readonly MinedAgentOutcome[],
+): string | undefined {
+  const lost = results.filter((r) => r.status !== 'done');
+  if (lost.length === 0) return undefined;
+  const named = lost.slice(0, LOSS_NOTE_AGENTS).map((r) => {
+    const reason = r.errorMessage?.trim().replace(/\s+/g, ' ');
+    const id = r.agentTitle?.trim() || r.agentId;
+    return reason ? `${id} (${reason.slice(0, LOSS_NOTE_REASON_CHARS)})` : `${id} (no output)`;
+  });
+  const elided = lost.length - named.length;
+  const tail = elided > 0 ? `, and ${elided} more` : '';
+  return (
+    `${lost.length} of ${results.length} ${what}${results.length === 1 ? '' : 's'} produced ` +
+    `nothing: ${named.join('; ')}${tail}. The step continued with the rest, so its coverage ` +
+    `is incomplete.`
+  );
+}
+
 // A fan-out agent is bounded, re-runnable work, so a dropped provider connection or a killed
 // terminal is worth a fresh run. Do NOT burn retries on a known persistent provider failure,
 // an intentional stop, or an unavailable provider — those need a user action, not another
@@ -61,6 +111,20 @@ const NON_RETRYABLE_MINING_TERMINAL_ERROR_RE =
 // raw agent output rather than as a Haive-stamped error.
 const TRANSIENT_MINING_TERMINAL_ERROR_RE =
   /\b(?:connection (?:closed|reset|aborted|dropped|lost|interrupted)|socket hang up|econn(?:reset|refused)|network (?:error|failure)|fetch failed|stream ended prematurely|unexpected end of (?:stream|response)|timed? out|timeout)\b/i;
+// A CLI that died reading its OWN config or credentials. Haive's own auth-volume helpers
+// write those files, so this is usually a race Haive lost against itself rather than a
+// broken mount — MEASURED, a mining agent died on
+// `Failed to read config file /home/node/.codex/config.toml: Permission denied (os error 13)`
+// while a sibling's root helper held the file, and every other agent on the same volume
+// seconds later was fine.
+//
+// Narrow ON PURPOSE. The diagnostic is errorMessage + rawOutput, so a bare `permission
+// denied` would also match an agent quoting a file it failed to read during its own work.
+// `os error 13` is Rust std::io::Error's Display for EACCES and `EACCES` is the POSIX symbol
+// — both are stable where the sentence around them is not. A mount that is genuinely broken
+// burns its bounded budget and lands on the same degrade path it lands on today.
+const CONFIG_ACCESS_MINING_TERMINAL_ERROR_RE =
+  /\bos error 13\b|\bEACCES\b|failed to (?:read|load) (?:config|configuration)/i;
 
 /** True when a failed fan-out agent deserves a fresh terminal, within its attempts budget.
  *
@@ -98,7 +162,8 @@ export function shouldRetryMiningTerminalFailure(result: AgentMiningResult): boo
     fatal === 'server_error' ||
     isTransientProviderApiError(diagnostic) ||
     isTransientCliFailure({ errorMessage: diagnostic }) ||
-    TRANSIENT_MINING_TERMINAL_ERROR_RE.test(diagnostic)
+    TRANSIENT_MINING_TERMINAL_ERROR_RE.test(diagnostic) ||
+    CONFIG_ACCESS_MINING_TERMINAL_ERROR_RE.test(diagnostic)
   );
 }
 
