@@ -1,3 +1,4 @@
+import { isDevVersion } from '@haive/shared';
 import { canUpgradeFrom, type ReleaseManifest } from '@haive/shared/release';
 
 /**
@@ -24,7 +25,12 @@ export interface PreflightInput {
 }
 
 export type PreflightRefusal =
-  'same-version' | 'downgrade' | 'illegal-jump' | 'rollback-images-missing' | 'insufficient-disk';
+  | 'dev-build'
+  | 'same-version'
+  | 'downgrade'
+  | 'illegal-jump'
+  | 'rollback-images-missing'
+  | 'insufficient-disk';
 
 export interface PreflightResult {
   ok: boolean;
@@ -52,6 +58,20 @@ export function compareVersions(a: string, b: string): number | null {
 }
 
 export function preflight(input: PreflightInput): PreflightResult {
+  // A source checkout is not a thing that can be upgraded. An upgrade swaps published images for
+  // other published images; a dev build runs none. Reported before the version arithmetic, because
+  // `0.0.0-dev` would otherwise fall out of the ordering as an "illegal jump" — true, but a
+  // confusing way to tell someone they are in the wrong tool.
+  if (isDevVersion(input.currentVersion)) {
+    return {
+      ok: false,
+      refusal: 'dev-build',
+      message:
+        `this install runs a development build (${input.currentVersion}), which has no published ` +
+        `images to replace. Upgrades apply to installs created from a release.`,
+    };
+  }
+
   const cmp = compareVersions(input.currentVersion, input.target.version);
 
   // Re-running must be safe. An error here punishes exactly the reflex that follows a window

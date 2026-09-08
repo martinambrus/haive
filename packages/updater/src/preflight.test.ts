@@ -27,6 +27,14 @@ describe('preflight', () => {
     expect(preflight(input())).toEqual({ ok: true });
   });
 
+  // A source checkout is not upgradable, and saying so beats reporting it as an illegal jump —
+  // which is what the version ordering would otherwise conclude about 0.0.0-dev.
+  it('refuses a dev build in its own words', () => {
+    const r = preflight(input({ currentVersion: '0.0.0-dev' }));
+    expect(r.refusal).toBe('dev-build');
+    expect(r.message).toMatch(/development build/);
+  });
+
   // Re-running must be safe: this is the reflex that follows a window nobody is sure finished.
   it('refuses the same version as a no-op rather than an error condition', () => {
     const r = preflight(input({ currentVersion: '0.2.0' }));
