@@ -403,7 +403,7 @@ shell logic simulated locally, the overlay refuses without a pinned version and 
 pull-only with correct gating, and the generator's output parses against the schema it will be read
 with. The workflow fires ONLY on a `v*` tag, so nothing is published until someone pushes one.
 
-### Slice 4 — Maintenance mode + admin task control
+### Slice 4 — Maintenance mode + admin task control — **SHIPPED**
 *Rollback: the middleware is a no-op when the state is `normal`; revert leaves `GLOBAL_PAUSE`
 behaving exactly as it does now.*
 
@@ -415,10 +415,30 @@ behaving exactly as it does now.*
 - Admin-scoped WRITE routes behind `requireAdmin` for pause / resume / cancel-active-cli only, each
   writing an `audit_events` row and an owner-visible task event.
 - Drain deadline with an explicit force fallback, chosen at the point of upgrade.
-- Verify: a non-admin gets 503 under `maintenance` while an admin does not; an admin can list and
-  force-stop another user's task and both logs are written; a non-admin passing `allUsers` still
-  sees only their own; no admin route can `cancel` another user's task; a drained task resumes with
-  its work intact.
+
+**As built.** Two departures worth keeping:
+
+- **A non-admin passing `allUsers` gets a 403, it does not silently see only its own.** The plan
+  said the latter; the statistics routes already throw, and a silently ignored parameter is worse
+  — it lets a caller believe it is seeing everything when it is not.
+- **The gate is global, not per-router, and it fails OPEN.** Mounted once in `createApiApp`
+  rather than composed into ~25 routers, because a gate that must be remembered at every mount
+  point will be missed at one. It reads its (cached) config first and resolves a role only when
+  the system is actually locked, so the normal path costs no database work. An unreadable state
+  falls back to `normal`: a wrong guess towards "locked" is a lockout clearable only through an
+  admin route the gate itself would be refusing.
+
+`stopActiveCliInvocations` and `clearTaskPause` moved to `lib/task-control.ts` beside
+`lib/cancel-task.ts` so both the owner route and the admin route share one copy of the careful
+supersede-before-kill ordering rather than duplicating 128 lines.
+
+Verified against the running stack: unauthenticated `/tasks` goes 401 to 503 under maintenance
+while `/health`, `/version` and `/auth/login` stay reachable; a real throwaway non-admin account
+got 403 on `allUsers` and on the admin routes and saw none of the admin's 34 tasks; draining
+refused task creation with a reason while GET still served; admin pause/resume wrote both the
+audit row and the owner-visible task event and restored the task to `waiting_user`. Browser-checked
+both halves — the draining banner over a working dashboard, and the non-admin lockout replacing the
+page — each appearing and clearing on the 15s poll with no reload.
 
 ### Slice 5 — Updater + `haive upgrade`
 *Rollback: the updater is a separate image nothing else depends on; not invoking it leaves the stack
