@@ -471,7 +471,7 @@ audit row and the owner-visible task event and restored the task to `waiting_use
 both halves — the draining banner over a working dashboard, and the non-admin lockout replacing the
 page — each appearing and clearing on the 15s poll with no reload.
 
-### Slice 5 — Updater + `haive upgrade`
+### Slice 5 — Updater + `haive upgrade` — **SHIPPED**
 *Rollback: the updater is a separate image nothing else depends on; not invoking it leaves the stack
 exactly as before.*
 
@@ -486,6 +486,41 @@ exactly as before.*
   case that makes a Phase 4 rollback restore old images onto data the new version already destroyed.
 - Verify: the end-to-end matrix below, plus — a rollback at Phase 4 leaves the destructive set
   UNRUN, and a successful upgrade runs it exactly once.
+
+**As built, and it was exercised for real.** A published v0.1.0 install was upgraded to v0.1.2 on
+2026-09-08. All six phases ran and the upgrade delivered a genuine change rather than a synthetic
+one: `web /login` went from `000` (the v0.1.0 crash-loop) to `HTTP 200`. Then the health gate was
+deliberately failed with a manifest carrying an impossible `migrationHead`; it caught the mismatch —
+reporting that it SAW `0.1.2` but head `0000_baseline`, which is what proves the gate checks both —
+rolled back, and both services returned reporting `0.1.0` with maintenance lifted.
+
+**Four defects, none of them visible from reading the code.** Every one came from running it:
+
+- **The snapshot severs the updater's own database connection.** It stops Postgres, and the journal
+  lives in Postgres, so the next write got `connect ECONNREFUSED` and rolled back a perfectly good
+  upgrade. It waits for the database to answer now.
+- **The snapshot was written to the wrong machine's filesystem.** Paths in `docker run -v` are
+  resolved by the DAEMON on the host, not inside the calling container, so a 9.9 MB dump landed at
+  `/snapshots` on the host while the operator's install directory stayed empty — after a
+  `snapshot-done` log line. The daemon's view is a separate input now, the same distinction the
+  worker already names `HOST_REPO_ROOT_REAL`.
+- **Three services in `docker-compose.yml` build from a local context**, which a published install
+  does not have, so `up -d` failed — and that broke the ROLLBACK too, since it brings the whole
+  stack up. A failed upgrade could not undo itself.
+- **The failure message leaked the database password.** Node puts the whole command line into a
+  failed exec's message and one-shot containers take credentials as `-e` arguments. Redacted at the
+  single place every command goes through.
+
+**Three operating requirements the plan did not anticipate**, all of which will bite an installer:
+
+- `COMPOSE_PROJECT_NAME` MUST be passed to the updater. Compose derives it from the directory, and
+  the updater sees the install at its own mount path — so without it the upgrade creates a SECOND
+  stack instead of replacing the first.
+- The run overlay's default mailpit port self-collides: Haive pins DDEV's global mailpit to
+  8025-8026, so any machine running Haive-managed DDEV already holds it.
+- The two proxy sidecars are profiled out of a published install until their images are published,
+  so the ollama-thinking and openrouter providers do not work there yet. A known gap, recorded in
+  the overlay itself rather than left to be discovered.
 
 ## Verification
 

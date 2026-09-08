@@ -48,7 +48,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; companion to the above, neither supersedes the other |
 | `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started. Delivery to a published-image install DECIDED 2026-09-07: per-customer api+worker images built by the vendor; `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` inherit it |
 | `solitary-partitioning-lampson` | Per-install namespacing (two installs on one machine) | Not started; **next priority after `steadfast-committing-gray`**. Containers, networks, six volumes AND the RAG/global-KB databases all carry global names today, so a second install shares them SILENTLY |
-| `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | **Slices 1-4 shipped** 2026-09-08 (migration runner, frozen baseline, adoption, data-migration split; version stamping, `/version`, release manifest; tag-triggered multi-arch publish + compose run overlay, inert until a tag is pushed; maintenance mode + admin task control). Slice 5 — the updater — not started |
+| `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | **SHIPPED** 2026-09-08, all five slices. Exercised for real: a published v0.1.0 install was upgraded to v0.1.2, and a deliberately failed health gate rolled back to v0.1.0 with service restored. Four defects were found by running it that reading it did not surface |
 | `translator-module` | Translator — resellable module | Not started |
 
 ## Cross-plan dependencies
