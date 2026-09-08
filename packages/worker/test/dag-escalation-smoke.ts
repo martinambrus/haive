@@ -162,7 +162,7 @@ async function main(): Promise<void> {
         output: { mode: 'dag' },
       })
       .returning();
-    const levels = [['ISSUE-001', 'ISSUE-002']];
+    const levels = [['ISSUE-001', 'ISSUE-002', 'ISSUE-003']];
     const [plan] = await db
       .insert(schema.taskDagPlans)
       .values({
@@ -181,7 +181,7 @@ async function main(): Promise<void> {
       issueKeys: levels[0],
       phase: 'pending',
     });
-    for (const key of ['ISSUE-001', 'ISSUE-002']) {
+    for (const key of ['ISSUE-001', 'ISSUE-002', 'ISSUE-003']) {
       await db.insert(schema.taskDagIssues).values({
         dagPlanId: plan!.id,
         taskId: task!.id,
@@ -214,6 +214,20 @@ async function main(): Promise<void> {
         where: eq(schema.taskDagIssues.cliInvocationId, payload.invocationId),
       });
       if (issue?.worktreePath) {
+        // ISSUE-003's own coder FAILS. That is the route to the advisor this smoke exists
+        // to cover: the issue reaches it with `outcome: 'failed_unrecoverable'`, unlike
+        // ISSUE-001/002, which reach it from the REVIEW loop with `outcome: 'completed'`.
+        // The advisor's fix pass (innerIteration 1) then succeeds.
+        if (issue.issueKey === 'ISSUE-003' && issue.innerIteration === 0) {
+          await finish({
+            issue_id: issue.issueKey,
+            outcome: 'failed_unrecoverable',
+            files_modified: [],
+            debt_items: [],
+            concerns: 'the approach does not work',
+          });
+          return;
+        }
         await writeFile(
           path.join(issue.worktreePath, `${issue.issueKey}.txt`),
           `impl ${issue.issueKey}\n`,
@@ -232,6 +246,18 @@ async function main(): Promise<void> {
       });
       if (run) {
         if (run.role === 'reviewer') {
+          const issRow = await db.query.taskDagIssues.findFirst({
+            where: eq(schema.taskDagIssues.id, run.dagIssueId),
+          });
+          // ISSUE-003 only ever reaches a reviewer AFTER the advisor's fix coder produced
+          // something, so approving it here is the assertion that the fix pass was
+          // ingested at all. Before it was, the issue sat at `failed_unrecoverable` where
+          // no consumer matched it, the fix coder's result was discarded, and the next
+          // resolveDagPhase pass simply re-stamped the failure.
+          if (issRow?.issueKey === 'ISSUE-003') {
+            await finish({ verdict: 'approve', criteria_results: [], issues: [] });
+            return;
+          }
           await finish({
             verdict: 'block',
             criteria_results: [],
@@ -246,7 +272,13 @@ async function main(): Promise<void> {
           await finish(
             issRow?.issueKey === 'ISSUE-001'
               ? { action: 'ACCEPT_WITH_DEBT', reasoning: 'good enough' }
-              : { action: 'ESCALATE_TO_REPLAN', reasoning: 'plan is wrong' },
+              : issRow?.issueKey === 'ISSUE-003'
+                ? {
+                    action: 'RETRY_APPROACH',
+                    reasoning: 'one more try',
+                    retry_context: 'use the other API',
+                  }
+                : { action: 'ESCALATE_TO_REPLAN', reasoning: 'plan is wrong' },
           );
           return;
         }
@@ -334,6 +366,17 @@ async function main(): Promise<void> {
     if (i1.advisorInvocations !== 1 || i2.advisorInvocations !== 1) {
       throw new Error('expected one advisor invocation per issue');
     }
+    // The advisor's RETRY_APPROACH must actually reach a coder AND have that coder's result
+    // consumed. Before, the issue kept `outcome: 'failed_unrecoverable'` through the retry,
+    // which section (C) does not ingest, `needReview` does not admit and the escalation
+    // phase does not read — so the fix pass was spent, discarded, and the issue re-stamped
+    // failed on the next pass. Approval here is only reachable through that ingest.
+    const i3 = issues.find((i) => i.issueKey === 'ISSUE-003')!;
+    if (i3.resolution !== 'approved') {
+      throw new Error(`ISSUE-003 expected approved after the advisor retry, got ${i3.resolution}`);
+    }
+    if (i3.innerIteration < 1) throw new Error('ISSUE-003 should have run a fix-coder pass');
+    if (i3.mergeStatus !== 'clean') throw new Error('ISSUE-003 should be merged');
     const finalPlan = await db.query.taskDagPlans.findFirst({
       where: eq(schema.taskDagPlans.id, plan!.id),
     });
@@ -350,6 +393,7 @@ async function main(): Promise<void> {
         smoke: 'DAG_ESCALATION_OK',
         i1: i1.resolution,
         i2: i2.resolution,
+        i3: i3.resolution,
         replanner: finalPlan!.lastReplannerAction,
         debt: finalPlan!.debtAggregate,
       }),

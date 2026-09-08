@@ -820,8 +820,17 @@ const REVIEW_ROLE_LABEL: Record<'reviewer' | 'coder' | 'issue_advisor', string> 
   issue_advisor: 'Advisor',
 };
 
-/** Dispatch one review-loop agent (reviewer or fix-coder) into the issue
- *  worktree, recording a dag_agent_runs row. Returns false if no provider. */
+/** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
+ *  worktree, recording a dag_agent_runs row. Returns the cli_invocations id it created, or
+ *  null when no provider would take it — every caller's truthiness check reads the same
+ *  either way, and the one caller that must ROUTE the run's result back to the issue
+ *  (ingestAdvisor's fix coder) needs the id.
+ *
+ *  `claim` runs after both rows exist and BEFORE the job is enqueued. That order is
+ *  load-bearing rather than tidy: the moment the job is on the queue the run can start and
+ *  resolveDagPhase can re-enter, so an issue claimed afterwards is briefly in whatever state
+ *  the caller was trying to leave — which for the advisor's fix coder is exactly the
+ *  `failed_unrecoverable` that section (D) re-stamps. */
 async function spawnReviewAgent(
   ra: ReviewArgs,
   issue: DagIssueRow,
@@ -829,7 +838,8 @@ async function spawnReviewAgent(
   iteration: number,
   prompt: string,
   capabilities: StepCapability[],
-): Promise<boolean> {
+  claim?: (invocationId: string) => Promise<void>,
+): Promise<string | null> {
   const worktreeRel = issueWorktreeRel(issue);
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ra.db,
@@ -851,7 +861,7 @@ async function spawnReviewAgent(
       effortLevel: preferredEffort ?? undefined,
     },
   });
-  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return false;
+  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return null;
   const inv = await ra.db
     .insert(schema.cliInvocations)
     .values({
@@ -871,7 +881,7 @@ async function spawnReviewAgent(
     })
     .returning({ id: schema.cliInvocations.id });
   const invId = inv[0]?.id;
-  if (!invId) return false;
+  if (!invId) return null;
   await ra.db.insert(schema.dagAgentRuns).values({
     dagIssueId: issue.id,
     taskId: ra.taskId,
@@ -881,6 +891,7 @@ async function spawnReviewAgent(
     cliInvocationId: invId,
     startedAt: new Date(),
   });
+  if (claim) await claim(invId);
   await ra.deps.enqueueCliInvocation({
     invocationId: invId,
     taskId: ra.taskId,
@@ -893,7 +904,7 @@ async function spawnReviewAgent(
     spec: plan.invocation.spec,
     timeoutMs: overrideOr(ra.current, REVIEW_TIMEOUT_MS),
   });
-  return true;
+  return invId;
 }
 
 async function setResolution(
@@ -1357,7 +1368,7 @@ async function ingestAdvisor(
       updatedAt: new Date(),
     })
     .where(eq(schema.taskDagIssues.id, issue.id));
-  const ok = await spawnReviewAgent(
+  const invId = await spawnReviewAgent(
     ea,
     { ...issue, acceptanceCriteria: criteria },
     'coder',
@@ -1368,8 +1379,32 @@ async function ingestAdvisor(
       (await issueSpecText(ea.specView, issue)).text,
     ),
     ['tool_use', 'file_write'],
+    // Put the issue into the state whose ingest can READ this run, before the job can start.
+    // Clearing `resolution` alone was not enough and made the whole advisor retry a no-op for
+    // an issue that reached it from a FAILED CODER: `outcome` stayed `failed_unrecoverable`,
+    // so section (C) (which ingests `outcome === 'running'`) never saw the fix coder,
+    // `needReview` (which wants completed/completed_with_debt) never saw it either, and the
+    // escalation phase reads only `issue_advisor` runs. Nothing consumed it — the fix coder's
+    // real edits sat in the issue worktree while section (D) re-stamped `failed_unrecoverable`
+    // on the next pass and a second advisor was spent.
+    //
+    // `running` + the invocation id is exactly what a LEVEL coder carries, so the ingest that
+    // already handles a coder — parseCoderResult, the transient/genuine split, the timeout
+    // ladder, the concerns ledger entry — handles this one too.
+    async (id) => {
+      await ea.db
+        .update(schema.taskDagIssues)
+        .set({
+          outcome: 'running',
+          cliInvocationId: id,
+          errorMessage: null,
+          endedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskDagIssues.id, issue.id));
+    },
   );
-  if (!ok) await setResolution(ea.db, issue, 'failed_unrecoverable');
+  if (!invId) await setResolution(ea.db, issue, 'failed_unrecoverable');
   return 'retry';
 }
 
