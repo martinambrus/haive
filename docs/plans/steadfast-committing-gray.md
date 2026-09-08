@@ -88,6 +88,37 @@ merge-to-main the release trigger would mean either 39 releases a day or a secon
 - `release/0.2.x` maintenance branches are NOT created now. They are the answer to "patch an old
   version while main moves on", a problem that does not exist yet.
 
+## Choosing what to upgrade TO
+
+`install` and `upgrade` are separate verbs and must stay that way. The installer refuses a
+non-empty install directory (`frictionless-bootstrapping-otter`) rather than quietly doing an
+upgrade instead: re-running an install one-liner is not consent to migrate a database, and an
+upgrade that skipped the drain, the snapshot and the health gate would be the silent unrequested
+upgrade this whole plan exists to prevent. It detects the existing install and points at
+`haive upgrade`.
+
+- **`haive upgrade`** with no version targets the newest STABLE release that is legally reachable
+  from here. Prereleases are never selected implicitly; `--version next` asks for one on purpose.
+- **`haive upgrade --version 0.3.0`** targets exactly that, subject to the same `minFrom` check.
+  Pinning the target is not a lesser form of upgrading — it is the SAFER one, because "whatever
+  latest happens to be right now" is the version nobody chose. Forbidding an explicit target would
+  ban the careful case and leave only the loose one.
+- **Same version is a no-op**, reported and exit 0. Re-running must be safe; making it an error
+  punishes the reflex that follows a half-finished window.
+- **Downgrade is REFUSED**, and this one is a hard rule rather than a default. A release that
+  CONTRACTED the schema cannot be un-run, and older code against a newer schema is undefined
+  behaviour, not a slow path. `contracts` in the manifest says whether it is even theoretically
+  reversible; the supported way back is the Phase 2 snapshot, taken by the upgrade that moved you.
+
+**A jump that is too far is NAMED, not merely rejected.** This is the real answer to "the target
+might be several versions ahead". When `minFrom` refuses a direct hop, the upgrade resolves the
+chain of required stops from the intervening manifests and says so — *"0.1.0 to 0.5.0 requires
+passing through 0.3.0"* — and can walk it, running the full phase sequence at each stop with its own
+gate. A required stop exists because something in it must actually RUN (a destructive migration, a
+data conversion that only happens on the way through), so skipping it is not an optimisation and
+walking it is not optional. What must never happen is the third option: refusing with "not allowed"
+and leaving the operator to work out the path from release notes.
+
 ## Distribution — image-tag swap
 
 The upgrade unit is a published image tag, not source. `haive upgrade` re-pins the tag in `.env`

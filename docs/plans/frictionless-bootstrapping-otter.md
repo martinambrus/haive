@@ -103,7 +103,14 @@ with no migration gate, no snapshot and no health check, which is precisely what
 
 Installing an OLDER version is allowed and useful — reproducing a bug, or standing up a known-good
 baseline to upgrade FROM. `minFrom` governs upgrades between versions; it has nothing to say about
-which version a fresh install starts at.
+which version a FRESH install starts at.
+
+**The installer never upgrades.** Re-running it against an existing install is refused (the
+non-empty-directory guard above) with a pointer to `haive upgrade`, whatever `--version` says.
+Running an install command is not consent to migrate a live database, and the installer performs
+none of the drain, snapshot or health-gate steps that make an upgrade safe. Which version an
+existing install may move to, whether a jump needs intermediate stops, and why a downgrade is
+refused are all `steadfast-committing-gray`'s to answer — see "Choosing what to upgrade TO".
 
 The requested version is verified to exist during preflight by fetching its release manifest. A
 version that does not resolve fails before secrets are generated or images pulled, rather than
