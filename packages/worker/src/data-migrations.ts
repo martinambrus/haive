@@ -10,19 +10,86 @@ import { describePlanOp, proposedOps } from './step-engine/steps/workflow/_plan-
 
 const log = logger.child({ module: 'data-migrations' });
 
+/** What a data migration does to data that cannot be got back.
+ *
+ *  `convergent` — idempotent and non-destructive: a soft-delete via a `superseded_at` column, a
+ *  status flip, a flag, an in-place relabel. Re-running is a no-op and rolling the code back
+ *  costs nothing, so these run at every boot as they always have.
+ *
+ *  `destructive` — removes data with no tombstone. These must NOT run at boot, because boot is
+ *  BEFORE an upgrade has been verified: `steadfast-committing-gray` rolls back to the previous
+ *  images when the health gate fails, and a destructive fix that already ran would have deleted
+ *  rows the restored version expects. They run after the upgrade is committed. */
+type DataMigrationKind = 'convergent' | 'destructive';
+
+interface DataMigration {
+  id: string;
+  kind: DataMigrationKind;
+  run: (db: Database) => Promise<void>;
+}
+
+/** Every data fix, each declaring its own kind. There is deliberately NO default: a new entry
+ *  cannot be added without someone deciding whether it destroys anything, which is exactly the
+ *  question that was previously answered by whichever function happened to hold a raw DELETE. */
+const DATA_MIGRATIONS: DataMigration[] = [
+  { id: 'supersedeRemovedRtkArtifacts', kind: 'convergent', run: supersedeRemovedRtkArtifacts },
+  { id: 'skipRemovedSteps', kind: 'convergent', run: skipRemovedSteps },
+  { id: 'supersedePhantomAgentArtifacts', kind: 'convergent', run: supersedePhantomAgentArtifacts },
+  { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
+  { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
+  { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
+  // The only one. It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
+  // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.
+  // Nothing can undo it.
+  { id: 'dropHeadingOnlyGlobalKbChunks', kind: 'destructive', run: dropHeadingOnlyGlobalKbChunks },
+];
+
+/** Run one, and never let it take the process down with it.
+ *
+ *  Uniform on purpose. Before this, three helpers had no error handling at all and were
+ *  therefore boot-fatal while the other four swallowed their errors — an inconsistency nobody
+ *  chose, decided by which function happened to have a try/catch. These are convergent fixes,
+ *  not correctness prerequisites: the connection is already proven by `waitForDatabaseReady`
+ *  earlier in bootstrap, a failure here converges on the next boot, and stopping the whole
+ *  worker because a cosmetic form relabel failed is the wrong trade. Logged at `error` so a
+ *  persistent failure is still visible rather than merely swallowed.
+ *
+ *  A backstop, not a replacement: the four helpers that already catch their own errors keep
+ *  doing so, because they log context this cannot see. */
+async function runOne(db: Database, migration: DataMigration): Promise<void> {
+  try {
+    await migration.run(db);
+  } catch (err) {
+    log.error({ err, migration: migration.id, kind: migration.kind }, 'data migration failed');
+  }
+}
+
 /**
  * Idempotent data fixes applied on every worker boot. Each helper must be
  * narrow, fast, and a no-op on a clean DB so that re-running on every restart
  * costs nothing.
+ *
+ * CONVERGENT ONLY. Anything that destroys data waits for `runDestructiveDataMigrations`.
  */
 export async function runDataMigrations(db: Database): Promise<void> {
-  await supersedeRemovedRtkArtifacts(db);
-  await skipRemovedSteps(db);
-  await supersedePhantomAgentArtifacts(db);
-  await dropHeadingOnlyGlobalKbChunks(db);
-  await clearPrunedSandboxImageState(db);
-  await flagHashIndexedRestoredRepos(db);
-  await relabelPlanReconcileForms(db);
+  for (const migration of DATA_MIGRATIONS.filter((m) => m.kind === 'convergent')) {
+    await runOne(db, migration);
+  }
+}
+
+/**
+ * The data fixes that remove data for good.
+ *
+ * Called once an upgrade has been verified and committed — never at boot, and never before the
+ * health gate, because the whole point of that gate is that the previous images can still be
+ * restored. Exported and currently called by nothing: `steadfast-committing-gray`'s updater is
+ * what invokes it at its Phase 5.
+ */
+export async function runDestructiveDataMigrations(db: Database): Promise<void> {
+  for (const migration of DATA_MIGRATIONS.filter((m) => m.kind === 'destructive')) {
+    log.info({ migration: migration.id }, 'running destructive data migration');
+    await runOne(db, migration);
+  }
 }
 
 /** Flag repos whose RAG index was built with no embedding endpoint, so the query side
@@ -295,6 +362,11 @@ const HEADING_ONLY_PREFILTER_CHARS = 1024;
  *  disabled one must not be connected to (that would create its database). */
 async function dropHeadingOnlyGlobalKbChunks(db: Database): Promise<void> {
   try {
+    // The `false` here is the UNSET fallback only, and reads more cautiously than it behaves:
+    // `DEFAULT_CONFIG` seeds this key `'true'` and `configService.initialize()` runs before
+    // any caller, so on a default install the gate is OPEN and the DELETE below does run.
+    // Left as-is deliberately — the protection that matters is that this is now declared
+    // `destructive` and therefore never runs at boot.
     if (!(await configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, false))) return;
     await withGlobalKb(db, async ({ conn, settings }) => {
       const rows = (await conn.pg.unsafe(
