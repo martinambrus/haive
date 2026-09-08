@@ -13,8 +13,14 @@ export interface UpgradeContext {
   compose: dk.ComposeContext;
   /** Absolute path of the install's `.env`, the file that PINS the running version. */
   envFile: string;
-  /** Where snapshots are written. Must be a host path the daemon can mount. */
-  snapshotDir: string;
+  /** Where snapshots are written, as the DAEMON sees it.
+   *
+   *  Not as this container sees it. Paths in `docker run -v` are resolved by the daemon on the
+   *  HOST, so passing the updater's own mount point silently writes the snapshot to a same-named
+   *  host directory the daemon creates — MEASURED: a 9.9 MB dump landed at `/snapshots` on the
+   *  host while the operator's install directory stayed empty, after a `snapshot-done` log line.
+   *  Same daemon's-view-vs-container's-view problem the worker already names HOST_REPO_ROOT_REAL. */
+  snapshotHostDir: string;
   fromVersion: string;
   target: ReleaseManifest;
   registry: string;
@@ -91,6 +97,25 @@ async function awaitVersion(
 }
 
 /** Live work that still holds a maintenance window open. */
+/** Wait for Postgres to accept queries again.
+ *
+ *  The snapshot STOPS Postgres, which severs this process's own connection — and the journal lives
+ *  in Postgres, so the very next write fails. MEASURED: `connect ECONNREFUSED` immediately after a
+ *  successful snapshot, which rolled back a perfectly good upgrade. postgres.js reconnects on its
+ *  own but not instantly, and the server needs a moment after the container starts. */
+async function awaitDatabase(sql: Sql, timeoutMs = 120_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await sql`SELECT 1`;
+      return;
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+}
+
 async function liveTaskCount(sql: Sql): Promise<number> {
   const rows = await sql<{ n: string }[]>`
     SELECT count(*)::text AS n FROM tasks
@@ -142,11 +167,14 @@ export async function phaseSnapshot(ctx: UpgradeContext): Promise<string> {
 
   await dk.composeStop(ctx.compose, composeEnv(ctx.fromVersion), ['postgres']);
   try {
-    await dk.snapshotVolume(ctx.postgresVolume, ctx.snapshotDir, file);
+    await dk.snapshotVolume(ctx.postgresVolume, ctx.snapshotHostDir, file);
   } finally {
     // Always bring it back, even on a failed snapshot: everything after this needs a database, and
     // leaving it stopped turns a recoverable failure into an outage.
     await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion), ['postgres']);
+    // And WAIT for it. The journal is in this database; without this the next write races the
+    // restart and loses.
+    await awaitDatabase(ctx.sql);
   }
   ctx.log('snapshot-done', { file });
   return file;
@@ -229,6 +257,7 @@ export async function resume(ctx: UpgradeContext, phase: UpgradePhase): Promise<
 }
 
 export async function recordSnapshot(ctx: UpgradeContext, file: string): Promise<void> {
-  const patch: RunMetadata = { snapshot: join(ctx.snapshotDir, file) };
+  // The HOST path, because that is where an operator will actually find it.
+  const patch: RunMetadata = { snapshot: join(ctx.snapshotHostDir, file) };
   await mergeMetadata(ctx.sql, ctx.runId, patch);
 }

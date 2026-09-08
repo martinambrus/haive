@@ -35,6 +35,26 @@ services:
       - haive-network
     restart: 'no'
 
+  # THREE services in docker-compose.yml build from a local context, and a published install has no
+  # source tree. MEASURED: `up -d` on a published install failed with
+  # `unable to prepare context: path "/install/docker/openrouter-compat-proxy" not found`, and the
+  # same failure broke the ROLLBACK path, which brings the whole stack up. So they are given a
+  # profile and are simply not started here.
+  #
+  # `cli-sandbox` is build-only and losing nothing: the worker builds that image itself at boot
+  # (`ensureSandboxCoreImage`), which is also what heals a pruned host.
+  #
+  # The two proxies ARE runtime features, and profiling them out is a KNOWN GAP rather than a
+  # design: a published install cannot currently use the ollama-thinking or openrouter providers,
+  # because their traffic is routed through these sidecars. Publishing them alongside api/worker/web
+  # is the fix; until then this is honest rather than silently broken.
+  cli-sandbox:
+    profiles: ['build-only']
+  ollama-thinking-proxy:
+    profiles: ['not-published-yet']
+  openrouter-compat-proxy:
+    profiles: ['not-published-yet']
+
   api:
     build: !reset null
     image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-api:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}

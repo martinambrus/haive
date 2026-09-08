@@ -20,18 +20,33 @@ export interface ComposeContext {
   files: string[];
 }
 
+/** Node puts the whole command line into a failed exec's message, and one-shot containers are
+ *  handed DATABASE_URL and CONFIG_ENCRYPTION_KEY as `-e` arguments. MEASURED during the first real
+ *  upgrade: a failing commit phase printed the Postgres password into the log — and therefore into
+ *  the journal and anything shipping those logs. Redacted at the ONE place every command goes
+ *  through, rather than at each call site, so a new caller cannot forget. */
+const SECRET_ARG = /(-e [A-Z_]*(?:URL|KEY|SECRET|PASSWORD|TOKEN)=)\S+/g;
+
+export function redactSecrets(text: string): string {
+  return text.replace(SECRET_ARG, '$1<redacted>');
+}
+
 async function run(
   cmd: string,
   args: string[],
   cwd?: string,
   timeoutMs = 600_000,
 ): Promise<string> {
-  const { stdout } = await exec(cmd, args, {
-    cwd,
-    timeout: timeoutMs,
-    maxBuffer: 32 * 1024 * 1024,
-  });
-  return stdout.trim();
+  try {
+    const { stdout } = await exec(cmd, args, {
+      cwd,
+      timeout: timeoutMs,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    return stdout.trim();
+  } catch (err) {
+    throw new Error(redactSecrets(err instanceof Error ? err.message : String(err)));
+  }
 }
 
 function composeArgs(ctx: ComposeContext, rest: string[]): string[] {

@@ -62,7 +62,12 @@ async function main(): Promise<number> {
   const registry = arg('registry', process.env.HAIVE_REGISTRY ?? 'ghcr.io/martinambrus')!;
   const apiUrl = arg('api-url', process.env.HAIVE_API_URL ?? 'http://api:3001')!;
   const network = arg('network', process.env.HAIVE_NETWORK ?? 'haive-network')!;
-  const snapshotDir = arg('snapshot-dir', process.env.HAIVE_SNAPSHOT_DIR ?? '/snapshots')!;
+  // As the DAEMON sees it. Defaults to the container-side path only because a host-run updater has
+  // one view; a containerised one must be told, or the snapshot lands somewhere nobody looks.
+  const snapshotDir = arg(
+    'snapshot-host-dir',
+    process.env.HAIVE_SNAPSHOT_HOST_DIR ?? arg('snapshot-dir', '/snapshots'),
+  )!;
   const pgVolume = arg('postgres-volume', process.env.HAIVE_POSTGRES_VOLUME ?? '')!;
   const envFile = `${installDir}/.env`;
 
@@ -94,7 +99,7 @@ async function main(): Promise<number> {
         runId: live.id,
         compose,
         envFile,
-        snapshotDir,
+        snapshotHostDir: snapshotDir,
         fromVersion: live.fromVersion,
         target: parseReleaseManifest({
           manifestVersion: 1,
@@ -159,7 +164,7 @@ async function main(): Promise<number> {
       runId,
       compose,
       envFile,
-      snapshotDir,
+      snapshotHostDir: snapshotDir,
       fromVersion,
       target,
       registry,
