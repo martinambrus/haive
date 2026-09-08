@@ -6,6 +6,7 @@ import {
   mergeCliMcpIntoTaskVolume,
   mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
+  RTK_HELPER_INIT_FAILED_EXIT,
   RTK_HELPER_MISSING_BINARY_EXIT,
   seedRtkInTaskVolume,
   userAuthVolumeExists,
@@ -413,27 +414,51 @@ describe('seedRtkInTaskVolume', () => {
     expect(runner.runCalls).toHaveLength(1);
   });
 
-  it('uses the rtk init flag mapping for gemini', async () => {
+  it('asks gemini for the auto-patch, which is what answers its settings.json prompt', async () => {
+    // MEASURED on rtk 0.37.2: `-g --gemini` alone stops at "Patch settings.json? [y/N]" and
+    // the helper has no tty, so the hook is never registered.
     const runner = makeRunner();
     await seedRtkInTaskVolume('task-rtk-3', 'gemini', runner);
     const helper = runner.runCalls.find((c) => c.cmd[0] === 'sh');
-    expect(helper?.cmd[2]).toContain('--gemini');
+    expect(helper?.cmd[2]).toContain(`rtk init -g '--gemini' '--auto-patch'`);
   });
 
-  it('uses the rtk init flag mapping for codex', async () => {
+  it('never asks codex for the auto-patch — rtk rejects the pair outright', async () => {
+    // MEASURED: `-g --auto-patch --codex` exits 1 with "--codex cannot be combined with
+    // --auto-patch", which is what rtk had been asked for since this was written, so rtk
+    // never ran for codex at all.
     const runner = makeRunner();
     await seedRtkInTaskVolume('task-rtk-4', 'codex', runner);
     const helper = runner.runCalls.find((c) => c.cmd[0] === 'sh');
-    expect(helper?.cmd[2]).toContain('--codex');
+    expect(helper?.cmd[2]).toContain(`rtk init -g '--codex'`);
+    expect(helper?.cmd[2]).not.toContain('--auto-patch');
   });
 
-  it('omits the flag suffix for the bare claude path (claude-code, zai)', async () => {
+  it('uses the bare claude path for every claude-binary provider, ollama included', async () => {
+    for (const [i, provider] of (
+      ['claude-code', 'zai', 'ollama', 'muse', 'openrouter'] as const
+    ).entries()) {
+      const runner = makeRunner();
+      await seedRtkInTaskVolume(`task-rtk-fam-${i}`, provider, runner);
+      const helper = runner.runCalls.find((c) => c.cmd[0] === 'sh');
+      expect(helper?.cmd[2], provider).toContain(`rtk init -g '--auto-patch'`);
+      expect(helper?.cmd[2], provider).not.toContain('--gemini');
+      expect(helper?.cmd[2], provider).not.toContain('--codex');
+    }
+  });
+
+  it('reports a failed rtk init instead of logging a seed that never happened', async () => {
+    // The helper used to swallow it (`rtk init … || echo …`) and exit on the trailing
+    // chown, so a rejected flag combination was recorded as a successful seed.
     const runner = makeRunner();
-    await seedRtkInTaskVolume('task-rtk-5', 'claude-code', runner);
-    const helper = runner.runCalls.find((c) => c.cmd[0] === 'sh');
-    expect(helper?.cmd[2]).toContain('rtk init -g --auto-patch');
-    expect(helper?.cmd[2]).not.toContain('--gemini');
-    expect(helper?.cmd[2]).not.toContain('--codex');
+    await seedRtkInTaskVolume('task-rtk-fail-exit', 'codex', runner);
+    const script = runner.runCalls[0]!.cmd[2]!;
+    expect(script).toContain(`exit ${RTK_HELPER_INIT_FAILED_EXIT}`);
+    // The ownership repair still runs first — a half-done seed must not leave root-owned
+    // files behind — so the status is carried rather than exited on the spot.
+    expect(script.indexOf('chown -R 1000:1000')).toBeLessThan(
+      script.indexOf(`exit ${RTK_HELPER_INIT_FAILED_EXIT}`),
+    );
   });
 
   it('skips entirely for amp (no rtk-native flag)', async () => {
@@ -462,7 +487,7 @@ describe('seedRtkInTaskVolume', () => {
     const runner = makeRunner();
     await seedRtkInTaskVolume('task-rtk-user', 'codex', runner);
     const script = runner.runCalls[0]!.cmd[2]!;
-    expect(script).toContain(`$AS_NODE env HOME='/home/node' rtk init -g --auto-patch`);
+    expect(script).toContain(`$AS_NODE env HOME='/home/node' rtk init -g '--codex'`);
     expect(script).toContain('AS_NODE="runuser -u node --"');
     // An image without runuser falls back to the previous all-as-root behaviour rather than
     // failing the seed.

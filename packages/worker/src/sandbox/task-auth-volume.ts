@@ -32,22 +32,44 @@ function userVolumeForCtx(ctx: ProviderAuthCtx, idx: number): string {
   return resolveCliAuthUserVolumeName(ctx, idx);
 }
 
-/** Map our CLI provider names to the corresponding `rtk init` flag. Returns
- *  `undefined` when the provider has no rtk-native init mode (amp today —
- *  not in rtk's supported agent list, so the project-level RTK.md +
- *  AGENTS.md @-ref written by step 07 is the only integration). Empty string
- *  is the bare `rtk init -g` (claude-family). */
-function rtkInitFlagFor(providerName: CliProviderName): string | undefined {
+/** The `rtk init -g` arguments for one provider, or `undefined` when rtk has no mode for it
+ *  (amp is not in rtk's agent list, so the project-level RTK.md + AGENTS.md @-ref written by
+ *  step 07 is its only integration).
+ *
+ *  Whole argument lists rather than one mode flag, because `--auto-patch` is NOT universal
+ *  and pretending it was is what broke this. MEASURED against rtk 0.37.2 in the sandbox
+ *  image, each combination run against a scratch HOME:
+ *
+ *    `-g --auto-patch`            exit 0  writes ~/.claude/{RTK.md,settings.json,CLAUDE.md}
+ *    `-g --auto-patch --gemini`   exit 0  writes ~/.gemini/{GEMINI.md,hooks/,settings.json}
+ *    `-g --gemini`                exit 0  but PROMPTS for the settings.json patch, and the
+ *                                        helper has no tty, so the hook is never registered
+ *    `-g --auto-patch --codex`    exit 1  "--codex cannot be combined with --auto-patch"
+ *    `-g --codex`                 exit 0  writes ~/.codex/{RTK.md,AGENTS.md}
+ *
+ *  `--auto-patch` patches Claude Code's settings.json, and `--codex` is documented as "no
+ *  Claude hook patching", so rtk rejects the pair outright — codex had been asking for both
+ *  since this was written and rtk never ran for it. It is REQUIRED for the other two, which
+ *  otherwise stop at an interactive prompt nothing can answer.
+ *
+ *  `ollama` sits with the claude family because it IS the claude binary pointed at another
+ *  endpoint (see AGENTS.md) and its authConfigPaths are `~/.claude`, the same mount rtk
+ *  writes into for the rest of them. It was the one family member missing here, so it had
+ *  been silently skipped. `grok` and `antigravity` stay out: rtk has an `--agent antigravity`
+ *  mode, but where it writes has not been measured against antigravity's own
+ *  `~/.gemini/antigravity-cli` mount, and a guess here writes into a live auth volume. */
+function rtkInitArgsFor(providerName: CliProviderName): string[] | undefined {
   switch (providerName) {
     case 'claude-code':
     case 'zai':
+    case 'ollama':
     case 'muse':
     case 'openrouter':
-      return '';
+      return ['--auto-patch'];
     case 'gemini':
-      return '--gemini';
+      return ['--gemini', '--auto-patch'];
     case 'codex':
-      return '--codex';
+      return ['--codex'];
     case 'amp':
       return undefined;
     default:
@@ -180,6 +202,12 @@ function contentKey(...parts: string[]): string {
 /** Distinct exit code from the rtk seed helper script when the sandbox image
  *  has no rtk binary on PATH. Exported so tests can assert on the boundary. */
 export const RTK_HELPER_MISSING_BINARY_EXIT = 2;
+
+/** Distinct exit code for `rtk init` itself failing. The helper used to swallow it
+ *  (`rtk init … || echo "rtk init exit=$?" >&2`) and then exit on the trailing chown, so a
+ *  seed that did nothing was logged as "rtk seeded in task auth volume" — which is how a
+ *  flag combination rtk rejects outright survived unnoticed. Exported for the test. */
+export const RTK_HELPER_INIT_FAILED_EXIT = 3;
 
 // Worker bind-mounts user HOME read-only at /host-fs. HOST_REPO_ROOT_REAL is
 // the same directory as seen by the docker daemon (i.e. the absolute host path)
@@ -430,9 +458,9 @@ async function seedRtkInTaskVolumeUnlocked(
   providerName: CliProviderName,
   runner: DockerRunner,
 ): Promise<boolean> {
-  const flag = rtkInitFlagFor(providerName);
-  if (flag === undefined) {
-    log.debug({ providerName }, 'rtk seed skipped: provider has no rtk-native flag');
+  const initArgs = rtkInitArgsFor(providerName);
+  if (initArgs === undefined) {
+    log.debug({ providerName }, 'rtk seed skipped: provider has no rtk-native mode');
     // Nothing to do for this provider, ever — record it so siblings do not re-derive it.
     return true;
   }
@@ -450,17 +478,24 @@ async function seedRtkInTaskVolumeUnlocked(
 
   // The container is root so it can repair a volume an older task left root-owned, but the
   // seed itself runs as the sandbox user — `rtk init` takes seconds and a sibling agent
-  // booting against root-owned config in that window dies on it (see asSandboxUser). The
-  // missing-binary branch exits with a distinct code (RTK_HELPER_MISSING_BINARY_EXIT) so the
-  // worker can log "rtk binary missing" instead of falsely claiming success — that mistake
-  // hid stale per-CLI sandbox images during rtk integration testing.
-  const flagArg = flag.length > 0 ? ` ${flag}` : '';
+  // booting against root-owned config in that window dies on it (see asSandboxUser).
+  //
+  // Both failure modes exit with their own code so the worker can tell them apart from
+  // success, which is the whole point: the missing-binary one (that mistake hid stale
+  // per-CLI sandbox images during rtk integration testing) and rtk init's own. The chown
+  // still runs in between — a seed that failed halfway must not leave root-owned files
+  // behind — so the status is carried in a variable rather than exiting on the spot.
+  const initCommand = `rtk init -g ${initArgs.map(shellQuote).join(' ')}`;
   const script =
     `${SANDBOX_USER_PREFIX_INIT}; ` +
     `${repairOwnership(SANDBOX_USER_HOME)}; ` +
     `command -v rtk >/dev/null 2>&1 || { echo "rtk: binary missing in sandbox image" >&2; exit ${RTK_HELPER_MISSING_BINARY_EXIT}; }; ` +
-    `${asSandboxUser(`env HOME=${shellQuote(SANDBOX_USER_HOME)} rtk init -g --auto-patch${flagArg}`)} || echo "rtk init exit=$?" >&2; ` +
-    `${repairOwnership(SANDBOX_USER_HOME)}`;
+    // `rtk_code=$?` must be the FIRST statement of the else branch: `$?` there is rtk's own
+    // status, and any command in front of it — an assignment included — overwrites it with 0.
+    `if ${asSandboxUser(`env HOME=${shellQuote(SANDBOX_USER_HOME)} ${initCommand}`)}; then rtk_failed=0; else rtk_code=$?; rtk_failed=1; echo "rtk init exit=$rtk_code" >&2; fi; ` +
+    `${repairOwnership(SANDBOX_USER_HOME)}; ` +
+    `[ "$rtk_failed" = 0 ] || exit ${RTK_HELPER_INIT_FAILED_EXIT}; ` +
+    `exit 0`;
 
   const result = await runner.run({
     image: HELPER_IMAGE,
@@ -479,6 +514,15 @@ async function seedRtkInTaskVolumeUnlocked(
     // rather than once per invocation of the fan-out.
     return true;
   }
+  if (result.exitCode === RTK_HELPER_INIT_FAILED_EXIT) {
+    log.warn(
+      { taskId, providerName, args: initArgs, stderr: result.stderr.slice(-500) },
+      'rtk init failed — this CLI runs without rtk for the rest of the task',
+    );
+    // A rejected flag combination or a broken rtk will not repair itself mid-task, so record
+    // it: one warning per task rather than one per invocation of a fan-out.
+    return true;
+  }
   if (result.exitCode !== 0) {
     log.warn(
       { taskId, providerName, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
@@ -486,10 +530,7 @@ async function seedRtkInTaskVolumeUnlocked(
     );
     return false;
   }
-  log.info(
-    { taskId, providerName, flag: flag.length > 0 ? flag : '<claude>' },
-    'rtk seeded in task auth volume',
-  );
+  log.info({ taskId, providerName, args: initArgs }, 'rtk seeded in task auth volume');
   return true;
 }
 
