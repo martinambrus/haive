@@ -72,10 +72,17 @@ jobs:
           # user could pull by accident. The merge job below is what gives them a name.
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
 
+      # The digest goes in the file's CONTENTS, never its NAME. MEASURED on the first run of this
+      # workflow: `actions/upload-artifact` rejects `:` in a filename for NTFS compatibility, and a
+      # digest is always `sha256:<hex>` — so a name-encoded digest can never upload. (Docker's own
+      # example strips the prefix with `${digest#sha256:}`; carrying the whole value is simpler and
+      # removes the filename parsing on the other side.)
       - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ matrix.service }}__${{ matrix.arch }}__${{ steps.build.outputs.digest }}"
+          printf '%s' "$DIGEST" > "/tmp/digests/${{ matrix.service }}__${{ matrix.arch }}"
 
       - name: Upload digest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -126,7 +133,7 @@ jobs:
           esac
           SOURCES=""
           for f in /tmp/digests/${{ matrix.service }}__*; do
-            SOURCES="$SOURCES ${IMAGE}@$(basename "$f" | awk -F'__' '{print $3}')"
+            SOURCES="$SOURCES ${IMAGE}@$(cat "$f")"
           done
           echo "sources:$SOURCES"
           # shellcheck disable=SC2086
