@@ -131,6 +131,60 @@ jobs:
       - name: Run worker smokes
         run: pnpm --filter @haive/worker smoke:ci
 
+  schema-parity:
+    name: Schema parity (migrations == push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The check that lets 0000_baseline.sql stay FROZEN. The baseline legitimately falls behind
+    # the Drizzle barrel the moment the next numbered migration lands, so "regenerate and diff
+    # the file" would fail by design; what must hold is END-STATE equivalence. It is also the
+    # guard that makes the dev loop safe -- a schema change pushed but committed without its
+    # migration turns this job red instead of diverging every other install in silence.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: haive
+          POSTGRES_PASSWORD: haive_dev_password
+          POSTGRES_DB: haive
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U haive -d haive"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.34.5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Build shared + database
+        run: |
+          pnpm --filter @haive/database build
+          pnpm --filter @haive/shared build
+
+      # PG_CONTAINER is the service container id: the script runs psql and pg_dump INSIDE it,
+      # because ubuntu-latest ships a client older than PG18 and pg_dump refuses a newer server.
+      # Same reason the smokes job reaches redis through `docker exec <service id>`.
+      - name: Compare migration corpus against push --force
+        run: bash packages/database/scripts/schema-parity.sh
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          PG_PASSWORD: haive_dev_password
+
   compose-boot:
     name: docker compose up (fresh-host boot)
     runs-on: ubuntu-latest

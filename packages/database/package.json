@@ -21,6 +21,7 @@
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "push": "drizzle-kit push",
+    "baseline:generate": "node scripts/generate-baseline.mjs",
     "studio": "drizzle-kit studio",
     "test": "vitest run --passWithNoTests",
     "clean": "rm -rf dist *.tsbuildinfo"
