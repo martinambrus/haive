@@ -77,6 +77,10 @@ COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
 COPY --from=builder /app/packages/database/package.json ./packages/database/
 COPY --from=builder /app/packages/database/dist ./packages/database/dist
+# The migration corpus is runtime data, not build output: tsc emits only .js, so the .sql
+# files never reach dist and the runner resolves them relative to the package root. Same
+# reason the worker image already copies sandbox-image/ and docker/.
+COPY --from=builder /app/packages/database/migrations ./packages/database/migrations
 COPY --from=builder /app/packages/database/node_modules ./packages/database/node_modules
 COPY --from=builder /app/packages/worker/package.json ./packages/worker/
 COPY --from=builder /app/packages/worker/dist ./packages/worker/dist

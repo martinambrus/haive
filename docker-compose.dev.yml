@@ -59,7 +59,7 @@ services:
              corepack enable &&
              pnpm install --frozen-lockfile=false &&
              ( chown -R $$(stat -c '%u:%g' /app) /app/node_modules 2>/dev/null || true ) &&
-             pnpm --filter @haive/database push --force"
+             pnpm --filter @haive/database migrate:tsx"
     networks:
       - haive-network
     restart: "no"
@@ -94,6 +94,8 @@ services:
     depends_on:
       dev-libs:
         condition: service_completed_successfully
+      db-migrate:
+        condition: service_completed_successfully
     ports:
       - "3001:3001"
     volumes:
@@ -120,6 +122,8 @@ services:
       target: deps
     depends_on:
       dev-libs:
+        condition: service_completed_successfully
+      db-migrate:
         condition: service_completed_successfully
     volumes:
       - .:/app
@@ -150,6 +154,8 @@ services:
       api:
         condition: service_started
       dev-libs:
+        condition: service_completed_successfully
+      db-migrate:
         condition: service_completed_successfully
     ports:
       - "3000:3000"

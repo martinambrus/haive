@@ -118,8 +118,10 @@ jobs:
         run: |
           docker exec ${{ job.services.redis.id }} redis-cli CONFIG SET maxmemory-policy noeviction
 
-      - name: Push database schema
-        run: pnpm --filter @haive/database push --force
+      # The same applier every install uses. On CI's empty database this exercises the FRESH
+      # path — baseline plus every later migration — on every run.
+      - name: Apply database migrations
+        run: pnpm --filter @haive/database migrate
 
       # api smokes first: they are seconds each, so a broken route surfaces before the
       # worker suite spends most of the job's 30-minute budget. smoke:terminal is
@@ -190,6 +192,20 @@ jobs:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PG_PASSWORD: haive_dev_password
 
+      # The production stage is never built by compose-boot (the dev override pins
+      # `target: deps`), so without this nothing exercises the COPY that puts the migration
+      # corpus into a shipped image — and the updater in steadfast-committing-gray runs the
+      # runner from exactly that image, with no source tree to fall back on.
+      - name: Migration corpus reaches the production image
+        run: |
+          docker build --target production -f packages/api/Dockerfile -t haive-api-prod-check .
+          docker run --rm haive-api-prod-check \
+            node -e "const {readdirSync}=require('fs');
+                     const d='packages/database/migrations';
+                     const f=readdirSync(d);
+                     if(!f.includes('0000_baseline.sql')) throw new Error('baseline missing from image: '+f.join(','));
+                     console.log('ok: '+f.length+' entries in '+d);"
+
   compose-boot:
     name: docker compose up (fresh-host boot)
     runs-on: ubuntu-latest
@@ -251,7 +267,11 @@ jobs:
             done
           done
 
-      - name: Push database schema
+      # `run --rm` starts a one-off container, which does NOT satisfy
+      # `depends_on: service_completed_successfully`. So the `up -d api` below starts the
+      # db-migrate SERVICE as well and the migrations run a second time — deliberately kept,
+      # because that second run is a free idempotence check on every CI boot.
+      - name: Apply database migrations (runs again under `up`, proving idempotence)
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm db-migrate
 
       - name: Start api (populates shared node_modules volume)

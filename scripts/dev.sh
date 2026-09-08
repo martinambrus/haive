@@ -174,7 +174,7 @@ Commands:
                      dependency needs the full rebuild (those node_modules are shared).
   reset              Full rebuild + wipe compiled dist (recover a stale/corrupt build).
   sandbox-build      Build the cli-sandbox image (the worker also builds it when missing).
-  migrate            Push the DB schema (drizzle-kit push --force).
+  migrate            Apply pending SQL migrations (packages/database/migrations).
   help               This text.
 
 HAIVE_GPU=cpu <cmd>  Skip the GPU probes and boot Ollama on CPU on purpose.
