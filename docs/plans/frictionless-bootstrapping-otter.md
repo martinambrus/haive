@@ -226,10 +226,29 @@ that constraint. Windows-native (non-WSL2) stays out of scope regardless — see
     `-v /var/run/docker.sock:/var/run/docker.sock` reached the daemon and reported its server
     version, exit 0. The worker's container spawning needs nothing special here.
 
-  Still untested, and it is the interesting half: the FULL stack booting from PowerShell, and a
-  local-path repository importing end to end. Both need the machine's dev stack stopped first,
-  because container names, networks and six volume names are global (see "Two installs on one
-  machine"). Nothing measured so far contradicts them working.
+  **The full stack was then booted on Windows, 2026-09-08, from published v0.1.0/v0.1.1 images.**
+  It works. With the dev stack stopped, `docker compose -f docker-compose.yml -f
+  docker-compose.run.yml up -d web` from PowerShell brought up postgres, redis, db-migrate, api and
+  web (the worker was deliberately left out — see below):
+
+  - `db-migrate` ran BEFORE api started, exactly as the gate intends, classified the database
+    `fresh` and applied the baseline in 139 ms. That is the fresh-install path proven from a
+    published image rather than from source, which nothing had done before.
+  - Re-pointing `HAIVE_VERSION` at the next release and bringing it up again classified `managed`
+    and applied nothing — idempotent on Windows too.
+  - `GET /version` reported the release version with `devBuild: false`; `/login` served HTTP 200;
+    register, login and an authenticated read all succeeded, which exercises the database, the
+    envelope encryption under a freshly generated `CONFIG_ENCRYPTION_KEY`, and JWT signing.
+
+  Two things worth carrying forward. The WORKER was excluded on purpose: its boot reapers are
+  database-driven, so a second install with an empty database sees every existing per-task auth
+  volume as an orphan. Verified the blast radius first — the reaper filters strictly on
+  `haive_cli_auth_task_`, so persistent per-user login volumes are never at risk — but an install
+  test does not need the worker to prove the install. And teardown must NEVER use `down -v`: the
+  project-scoped volumes are safe to drop, while `haive_repos` and four siblings are globally named
+  and shared with the dev stack, so `-v` would take the machine's cloned repositories with it.
+
+  Still untested: a local-path repository importing end to end through `/host-fs`.
 
 - **Bind-mount throughput is lower on macOS** (VirtioFS) for the repo volume and node_modules. A
   documented expectation, not a blocker.
