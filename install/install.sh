@@ -441,33 +441,42 @@ cat > uninstall.sh <<'EOF'
 set -eu
 cd "$(dirname "$0")"
 DC="docker compose -f docker-compose.yml -f docker-compose.run.yml"
-PROJECT="$(. ./.env 2>/dev/null && printf '%s' "${COMPOSE_PROJECT_NAME:-haive}")"
+ID="$(sed -n 's/^HAIVE_INSTALL_ID=//p' .env | head -1)"; : "${ID:=haive}"
+PROJECT="$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env | head -1)"; : "${PROJECT:=$ID}"
 
-echo "Removing the Haive stack and THIS install's data volumes."
-echo "Project: $PROJECT"
-printf 'Type the project name to confirm: '
+echo "Removing the Haive stack and THIS install's runtime data."
+echo "Install: $ID   Project: $PROJECT"
+printf 'Type the install id to confirm: '
 read -r reply
-[ "$reply" = "$PROJECT" ] || { echo "aborted."; exit 1; }
+[ "$reply" = "$ID" ] || { echo "aborted."; exit 1; }
 
 $DC down || true
+# Containers the WORKER creates are outside the compose project, so `down` does not reach them.
+for c in $(docker ps -aq --filter "name=^${ID}-" 2>/dev/null); do docker rm -f "$c" >/dev/null 2>&1 || true; done
 for v in postgres_data redis_data mailpit_data ollama_data; do
   docker volume rm "${PROJECT}_${v}" >/dev/null 2>&1 && echo "  removed ${PROJECT}_${v}" || true
 done
 
-cat <<'NOTE'
-
-These volumes are NOT removed, because they are named globally and shared with any
-other Haive install on this machine:
-
-  haive_repos  haive_bundles  haive_wrappers  haive_squid_configs  haive_ddev_ca
-  haive_npm_cache  haive_ddev_registry_cache
-
-haive_repos holds your cloned repositories. If this was the only install, remove them with:
-
-  docker volume rm haive_repos haive_bundles haive_wrappers haive_squid_configs haive_ddev_ca
-
-Then delete this directory.
-NOTE
+# These hold WORK, not runtime state: cloned repositories, uploaded bundles, CLI credentials and
+# the shared DDEV CA. Never removed without being asked for, because "uninstall the app" and
+# "delete my repositories" are different intentions and only one of them is reversible.
+#
+# They are named per-install, so on an install whose id is not `haive` nothing else can be using
+# them. An install using the DEFAULT id may still share them with one created before per-install
+# naming existed, which is the case worth pausing over.
+echo ""
+echo "Left in place, because they hold your work rather than this install's runtime state:"
+for v in repos bundles wrappers squid_configs ddev_ca npm_cache ddev_registry_cache; do
+  docker volume inspect "${ID}_${v}" >/dev/null 2>&1 && echo "  ${ID}_${v}"
+done
+for v in $(docker volume ls -q --filter "name=^${ID}_cli_auth_" --filter "name=^${ID}_ide_" 2>/dev/null); do
+  echo "  $v"
+done
+echo ""
+echo "${ID}_repos holds your cloned repositories. To remove all of the above:"
+echo "  docker volume ls -q --filter name=^${ID}_ | xargs -r docker volume rm"
+echo ""
+echo "Then delete this directory."
 EOF
 chmod +x uninstall.sh
 say "  helpers           ./haive, ./uninstall.sh"

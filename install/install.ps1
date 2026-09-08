@@ -372,24 +372,42 @@ switch ($Command) {
 $uninstall = @'
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
-$project = (Get-Content .env | Where-Object { $_ -match '^COMPOSE_PROJECT_NAME=' }) -replace '^COMPOSE_PROJECT_NAME=',''
-if (-not $project) { $project = 'haive' }
-Write-Host "Removing the Haive stack and THIS install's data volumes."
-Write-Host "Project: $project"
-$reply = Read-Host "Type the project name to confirm"
-if ($reply -ne $project) { Write-Host "aborted."; exit 1 }
-docker compose -f docker-compose.yml -f docker-compose.run.yml down
-foreach ($v in @('postgres_data','redis_data','mailpit_data','ollama_data')) {
-  docker volume rm "${project}_$v" 2>$null | Out-Null
+function Get-DotEnv {
+  $h = @{}
+  Get-Content .env | Where-Object { $_ -match '^\s*[^#].*=' } | ForEach-Object {
+    $k,$v = $_ -split '=', 2; $h[$k.Trim()] = $v.Trim()
+  }
+  $h
 }
+$e = Get-DotEnv
+$id = if ($e['HAIVE_INSTALL_ID']) { $e['HAIVE_INSTALL_ID'] } else { 'haive' }
+$project = if ($e['COMPOSE_PROJECT_NAME']) { $e['COMPOSE_PROJECT_NAME'] } else { $id }
+
+Write-Host "Removing the Haive stack and THIS install's runtime data."
+Write-Host "Install: $id   Project: $project"
+$reply = Read-Host "Type the install id to confirm"
+if ($reply -ne $id) { Write-Host "aborted."; exit 1 }
+
+docker compose -f docker-compose.yml -f docker-compose.run.yml down 2>&1 | Out-Null
+# Containers the WORKER creates are outside the compose project, so `down` does not reach them.
+$stray = docker ps -aq --filter "name=^$id-" 2>$null
+foreach ($c in $stray) { docker rm -f $c 2>&1 | Out-Null }
+foreach ($v in @('postgres_data','redis_data','mailpit_data','ollama_data')) {
+  docker volume rm "${project}_$v" 2>&1 | Out-Null
+  Write-Host "  removed ${project}_$v"
+}
+
+# These hold WORK, not runtime state: cloned repositories, uploaded bundles, CLI credentials and
+# the shared DDEV CA. Never removed without being asked for, because "uninstall the app" and
+# "delete my repositories" are different intentions and only one of them is reversible.
 Write-Host ""
-Write-Host "These volumes are NOT removed, because they are named globally and shared with any"
-Write-Host "other Haive install on this machine:"
-Write-Host "  haive_repos  haive_bundles  haive_wrappers  haive_squid_configs  haive_ddev_ca"
-Write-Host "  haive_npm_cache  haive_ddev_registry_cache"
+Write-Host "Left in place, because they hold your work rather than this install's runtime state:"
+docker volume ls -q --filter "name=^${id}_" 2>$null | Where-Object { $_ -notmatch "_(postgres|redis|mailpit|ollama)_data$" } | ForEach-Object { Write-Host "  $_" }
 Write-Host ""
-Write-Host "haive_repos holds your cloned repositories. If this was the only install, remove them:"
-Write-Host "  docker volume rm haive_repos haive_bundles haive_wrappers haive_squid_configs haive_ddev_ca"
+Write-Host "${id}_repos holds your cloned repositories. To remove all of the above:"
+Write-Host "  docker volume ls -q --filter name=^${id}_ | ForEach-Object { docker volume rm `$_ }"
+Write-Host ""
+Write-Host "Then delete this directory."
 '@
 [System.IO.File]::WriteAllText((Join-Path $Dir 'uninstall.ps1'), $uninstall, (New-Object System.Text.UTF8Encoding($false)))
 Write-Note "helpers           .\haive.ps1, .\uninstall.ps1"
