@@ -94,6 +94,30 @@ export const repositories = pgTable(
      *  Not sufficient on its own: the verdict still requires the markers to be present,
      *  so a hand-deleted `.claude/` reads as not onboarded however this column is set. */
     onboardedAt: timestamp('onboarded_at'),
+    /** The last commit whose code has been folded into this repository's KNOWLEDGE BASE,
+     *  and the same for its PLAN. NULL means the repository has never been tracked — the
+     *  legacy state for every repository that existed before this column, and a state that
+     *  stays legal forever (the first run stamps the branch point and reviews nothing, the
+     *  same no-backfill stance as `onboarded_at`).
+     *
+     *  Code reaches a repository from outside Haive — a teammate pushes, the user commits
+     *  from their own editor, a plan-mirror PULL merges origin into the checkout. The
+     *  working tree sees it (00a-sync-base fetches and fast-forwards) and the RAG index
+     *  sees it (02-pre-rag-sync re-collects every file and dedupes on chunk_hash, so it
+     *  never asks what changed). Nothing else did: the KB prompt is built from the task's
+     *  own `filesTouched` and the plan reconcile from the task's own merge-base diff.
+     *
+     *  TWO columns rather than one because the two catch-up steps are independently
+     *  skippable, declinable and failable, and stamping both when only one reached a
+     *  decision would silently swallow the other's gap.
+     *
+     *  Each holds the branch point the step actually REVIEWED THROUGH, never the base tip
+     *  at completion: 12-worktree-cleanup can merge commits that landed after the step ran,
+     *  and claiming those as reviewed is the one direction this must never fail in. The
+     *  cost is that the task's OWN commits then fall inside the next task's range, which is
+     *  why the range subtracts the shas Haive recorded (see `_external-drift.ts`). */
+    kbSyncedCommit: varchar('kb_synced_commit', { length: 40 }),
+    planSyncedCommit: varchar('plan_synced_commit', { length: 40 }),
     storagePath: text('storage_path'),
     sizeBytes: integer('size_bytes'),
     credentialsSecretId: uuid('credentials_secret_id').references(() => repoCredentials.id, {

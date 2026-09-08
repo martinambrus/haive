@@ -1,0 +1,48 @@
+-- How far the knowledge base and the plan have been brought in line with commits Haive
+-- did not make.
+--
+-- Code arrives from outside the workflow constantly: a teammate pushes, the user commits
+-- from their own editor, the plan-mirror PULL job merges origin into the checkout. Two
+-- layers already see it and one of them only by accident — 00a-sync-base fetches and
+-- fast-forwards the base before the branch is cut, and 02-pre-rag-sync re-collects EVERY
+-- file and dedupes on chunk_hash, so it never asks what changed and therefore cannot miss
+-- anything. Everything derived from the code was scoped to the current task:
+-- 11-phase-8-learning builds its KB prompt from the task's own filesTouched,
+-- 11f-plan-reconcile from the task's own merge-base diff, and markPlanCodeLinksStale from
+-- tasks.changed_paths.
+--
+-- Stale KB is worse than absent KB here, and structurally so: 03-phase-0a-discovery and
+-- 04-phase-0b-pre-planning read KB_DIR/*.md straight into their prompts, and
+-- applyKnowledgeReserve reserves two slots of every RAG page for KB chunks — so prose
+-- describing code that no longer exists is GUARANTEED promotion into every agent's context.
+--
+-- There was no watermark to repair: no last_synced_commit existed anywhere, and
+-- tasks.commit_sha (written by 10-gate-3-commit) is read by nothing.
+--
+-- TWO columns, not one. The KB step and the plan step are independently skippable,
+-- declinable and failable, so one value would let a stamped plan swallow an unreviewed KB.
+--
+-- Each stores the branch point its step actually REVIEWED THROUGH, never the base tip at
+-- completion: 12-worktree-cleanup can merge commits that landed after the step ran, and
+-- marking those reviewed is the one direction this must never fail in. The consequence is
+-- that a task's own commits fall inside the NEXT task's range, which _external-drift.ts
+-- subtracts by sha (tasks.commit_sha, plus the squash sha in
+-- task_steps.merge_resolve_state when a cleanup collapsed the branch).
+--
+-- NULL means never tracked. That is the legacy state for every existing repository and it
+-- stays legal forever: the first run stamps the branch point and reviews nothing, so there
+-- is NO backfill here and no boot-time data migration. Reaching back to the onboarding
+-- commit was rejected — thousands of commits through one agent pass produces a confident,
+-- truncated, partial KB rewrite, which is the failure this feature exists to prevent.
+--
+-- No index: both are read for a single repository row inside a step that is already doing
+-- git work, and neither is ever filtered on.
+--
+-- Additive and idempotent. Rollback: set CONFIG_KEYS.EXTERNAL_SYNC_ENABLED to false (which
+-- makes both steps self-skip and restores byte-identical prior behaviour), then revert
+-- `schema/repos.ts` and
+--   ALTER TABLE "repositories" DROP COLUMN IF EXISTS "kb_synced_commit";
+--   ALTER TABLE "repositories" DROP COLUMN IF EXISTS "plan_synced_commit";
+-- Nothing is lost: every repository returns to the untracked state that is already legal.
+ALTER TABLE "repositories" ADD COLUMN IF NOT EXISTS "kb_synced_commit" varchar(40);
+ALTER TABLE "repositories" ADD COLUMN IF NOT EXISTS "plan_synced_commit" varchar(40);
