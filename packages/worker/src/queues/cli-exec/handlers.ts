@@ -46,6 +46,7 @@ import {
   refreshRubyVersions,
 } from '../../cli-versions/index.js';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
+import { SANDBOX_CORE_IMAGE } from '../../sandbox/image-composer.js';
 import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js';
 import { ensureSandboxCoreImage } from '../../sandbox/sandbox-core-image.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
@@ -670,7 +671,7 @@ export async function handleLoginCreateJob(
   // such as agy from writing their credential files on first login. Mirrors the
   // chown ensureTaskAuthVolumes performs for per-task volumes; creates the empty
   // volume node-owned if it does not exist yet. Best-effort: failures are logged.
-  const authHelperImage = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
+  const authHelperImage = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
   const authMeta = getCliProviderMetadata(provider.name);
   for (let idx = 0; idx < authMeta.authConfigPaths.length; idx += 1) {
     const vol = authVolumeFor(provider, idx);

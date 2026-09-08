@@ -1,3 +1,4 @@
+import { CONTAINER_FAMILY, containerPrefix } from '@haive/shared';
 import { spawn } from 'node:child_process';
 
 /** Run a docker command, collecting stdout. Best-effort: spawn/non-zero errors
@@ -31,7 +32,14 @@ function runDocker(args: string[], timeoutMs: number): Promise<string> {
  *  docker errors are swallowed. Returns the number of containers removed. */
 export async function killCliSandboxesForTask(taskId: string): Promise<number> {
   const list = await runDocker(
-    ['ps', '-q', '--filter', `label=haive.task.id=${taskId}`, '--filter', 'name=^haive-cli-'],
+    [
+      'ps',
+      '-q',
+      '--filter',
+      `label=haive.task.id=${taskId}`,
+      '--filter',
+      `name=^${containerPrefix(CONTAINER_FAMILY.cli)}`,
+    ],
     10_000,
   );
   const ids = list.split(/\s+/).filter((s) => s.length > 0);

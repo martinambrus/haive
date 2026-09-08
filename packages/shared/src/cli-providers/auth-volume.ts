@@ -1,6 +1,10 @@
+import { volumeName, volumePrefix } from '../naming/index.js';
 import type { AuthMode, CliProviderName } from '../types/index.js';
 
-const VOLUME_PREFIX = 'haive_cli_auth';
+/** The family name, not the whole prefix: the install id in front of it comes from the naming
+ *  module, so two installs' auth volumes are disjoint and neither's reaper matches the other's.
+ *  At the default id every name below is byte-identical to what shipped. */
+const VOLUME_FAMILY = 'cli_auth';
 const TASK_SEGMENT = 'task';
 const PROVIDER_SEGMENT = 'p';
 /** Auth-mode segment for the per-user volume of an API-KEY row. Unambiguous because every
@@ -17,7 +21,7 @@ export function cliAuthVolumeName(
   providerName: CliProviderName,
   pathIndex: number,
 ): string {
-  return `${VOLUME_PREFIX}_${idSlug(userId)}_${providerName}_${pathIndex}`;
+  return volumeName(VOLUME_FAMILY, idSlug(userId), providerName, pathIndex);
 }
 
 /** Per-user volume for an API-KEY row, kept apart from the subscription one above.
@@ -33,7 +37,7 @@ export function cliAuthApiKeyVolumeName(
   providerName: CliProviderName,
   pathIndex: number,
 ): string {
-  return `${VOLUME_PREFIX}_${idSlug(userId)}_${providerName}_${API_KEY_SEGMENT}_${pathIndex}`;
+  return volumeName(VOLUME_FAMILY, idSlug(userId), providerName, API_KEY_SEGMENT, pathIndex);
 }
 
 /** The auth volume a provider row mounts. THE single place that decision is made.
@@ -77,7 +81,7 @@ export function cliAuthProviderVolumeName(
   pathIndex: number,
 ): string {
   const providerSlug = providerId.replace(/-/g, '').slice(0, 12);
-  return `${VOLUME_PREFIX}_${PROVIDER_SEGMENT}_${providerSlug}_${providerName}_${pathIndex}`;
+  return volumeName(VOLUME_FAMILY, PROVIDER_SEGMENT, providerSlug, providerName, pathIndex);
 }
 
 export function cliAuthTaskVolumeName(
@@ -86,17 +90,25 @@ export function cliAuthTaskVolumeName(
   pathIndex: number,
 ): string {
   const taskSlug = taskId.replace(/-/g, '').slice(0, 12);
-  return `${VOLUME_PREFIX}_${TASK_SEGMENT}_${taskSlug}_${providerName}_${pathIndex}`;
+  return volumeName(VOLUME_FAMILY, TASK_SEGMENT, taskSlug, providerName, pathIndex);
 }
 
 export function isCliAuthVolume(name: string): boolean {
-  return name.startsWith(`${VOLUME_PREFIX}_`);
+  return name.startsWith(volumePrefix(VOLUME_FAMILY));
+}
+
+/** The prefix a per-TASK auth volume starts with. Exported so the reaper's docker `name=` filter
+ *  and the slug arithmetic that reads a task id back out of a volume name derive from the same
+ *  place this module builds the name — a filter typed separately is how one install ends up
+ *  deleting another's volumes. */
+export function cliAuthTaskVolumePrefix(): string {
+  return `${volumePrefix(VOLUME_FAMILY)}${TASK_SEGMENT}_`;
 }
 
 export function isCliAuthTaskVolume(name: string): boolean {
-  return name.startsWith(`${VOLUME_PREFIX}_${TASK_SEGMENT}_`);
+  return name.startsWith(cliAuthTaskVolumePrefix());
 }
 
 export function isCliAuthProviderVolume(name: string): boolean {
-  return name.startsWith(`${VOLUME_PREFIX}_${PROVIDER_SEGMENT}_`);
+  return name.startsWith(`${volumePrefix(VOLUME_FAMILY)}${PROVIDER_SEGMENT}_`);
 }

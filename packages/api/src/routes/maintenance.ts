@@ -5,12 +5,15 @@ import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
+  CONTAINER_FAMILY,
   configService,
+  containerName,
   decryptEmail,
   getHaiveVersion,
   isDevVersion,
   logger,
   maintenanceStateSchema,
+  networkName,
   parseMaintenanceState,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -348,9 +351,9 @@ maintenanceRoutes.post('/upgrade', async (c) => {
     // narrative an operator has when an upgrade goes wrong; a self-deleting container takes it
     // with it. One stopped container per upgrade is a price worth paying for `docker logs`.
     '--name',
-    `haive-upgrade-${version}-${Date.now()}`,
+    containerName(CONTAINER_FAMILY.upgrade, version, Date.now()),
     '--network',
-    process.env.HAIVE_NETWORK || 'haive-network',
+    process.env.HAIVE_NETWORK || networkName('network'),
     '-v',
     '/var/run/docker.sock:/var/run/docker.sock',
     '-v',

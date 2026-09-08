@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { CONTAINER_FAMILY, containerPrefix } from '@haive/shared';
 
 /** Force-removes the per-task cli-exec sandbox containers (named `haive-cli-…`)
  *  for the given task, WITHOUT touching the DDEV runtime (`haive-ddev-…`) or the
@@ -26,7 +27,7 @@ function listIds(taskId: string): Promise<string[]> {
       '--filter',
       `label=haive.task.id=${taskId}`,
       '--filter',
-      'name=^haive-cli-',
+      `name=^${containerPrefix(CONTAINER_FAMILY.cli)}`,
     ]);
     child.stdout.on('data', (b: Buffer) => {
       stdout += b.toString('utf8');

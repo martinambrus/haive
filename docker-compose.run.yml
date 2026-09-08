@@ -24,7 +24,7 @@ services:
   # runner from the same api image — the corpus ships inside it — and api/worker/web wait for it.
   db-migrate:
     image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-api:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
-    container_name: haive-db-migrate
+    container_name: ${HAIVE_INSTALL_ID:-haive}-db-migrate
     depends_on:
       postgres:
         condition: service_healthy

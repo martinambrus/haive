@@ -1,5 +1,13 @@
 import { spawn } from 'node:child_process';
-import { APP_RUNNER_LABEL, IDE_RUNNER_LABEL, logger } from '@haive/shared';
+import {
+  APP_RUNNER_LABEL,
+  CONTAINER_FAMILY,
+  IDE_RUNNER_LABEL,
+  INSTALL_LABEL,
+  containerPrefix,
+  logger,
+  ownsLabelValue,
+} from '@haive/shared';
 
 const log = logger.child({ module: 'cli-container-reaper' });
 
@@ -16,7 +24,7 @@ const log = logger.child({ module: 'cli-container-reaper' });
 export async function reapAllCliSandboxes(reason: string): Promise<number> {
   const [labelIds, shellIds, ddevIds, appRunnerIds, ideIds] = await Promise.all([
     listSandboxIdsByFilter('label=haive.task.id'),
-    listSandboxIdsByFilter('name=haive-shell-'),
+    listSandboxIdsByFilter(`name=${containerPrefix(CONTAINER_FAMILY.shell)}`),
     listSandboxIdsByFilter('label=haive.ddev'),
     listSandboxIdsByFilter(`label=${APP_RUNNER_LABEL}`),
     listSandboxIdsByFilter(`label=${IDE_RUNNER_LABEL}`),
@@ -39,15 +47,37 @@ export async function reapAllCliSandboxes(reason: string): Promise<number> {
   return ids.length;
 }
 
+/**
+ * Containers matching `filter` that THIS install owns.
+ *
+ * The ownership test is the whole reason this does not use `docker ps -q`. Every filter above is
+ * a label (`haive.task.id`, `haive.ddev`, …) whose key and value shape are identical in every
+ * Haive install, so on a machine running two of them this sweep would force-remove the other
+ * one's live agent sandboxes on every worker boot. The install label separates them — and it is
+ * read out with `--format` rather than added to `--filter` because a docker filter cannot express
+ * "this value OR absent", and absent is exactly what every container predating the label is.
+ */
 function listSandboxIdsByFilter(filter: string): Promise<string[]> {
   return new Promise((resolve) => {
     let stdout = '';
-    const child = spawn('docker', ['ps', '-q', '--filter', filter]);
+    const child = spawn('docker', [
+      'ps',
+      '--filter',
+      filter,
+      '--format',
+      `{{.ID}}\t{{.Label "${INSTALL_LABEL}"}}`,
+    ]);
     child.stdout.on('data', (b: Buffer) => {
       stdout += b.toString('utf8');
     });
     child.on('close', () => {
-      resolve(stdout.split(/\s+/).filter((s) => s.length > 0));
+      const ids: string[] = [];
+      for (const line of stdout.split('\n')) {
+        if (line.trim().length === 0) continue;
+        const [id, label] = line.split('\t');
+        if (id && ownsLabelValue(label)) ids.push(id.trim());
+      }
+      resolve(ids);
     });
     child.on('error', () => resolve([]));
     setTimeout(() => {

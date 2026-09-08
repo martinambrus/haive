@@ -1,3 +1,4 @@
+import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
@@ -6,12 +7,14 @@ import {
   CODE_SERVER_IMAGE,
   IDE_INTERNAL_PORT,
   IDE_RUNNER_LABEL,
+  SHARED_VOLUME,
   appRunnerName,
   ddevRunnerName,
   ideExtensionsVolumeName,
   ideRunnerName,
   ideUserDataVolumeName,
   logger,
+  volumeName,
 } from '@haive/shared';
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
 import { defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
@@ -29,14 +32,14 @@ import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 const exec = promisify(execFile);
 const log = logger.child({ module: 'ide-runner' });
 
-const REPO_VOLUME = 'haive_repos';
+const REPO_VOLUME = volumeName(SHARED_VOLUME.repos);
 const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
 // code-server (codercom image) runs as uid:gid 1000:1000 — the same `node` user
 // the repo volume is already chowned to for the CLI sandbox.
 const IDE_UID = '1000:1000';
 // Reuse the CLI sandbox image as the throwaway chown/seed helper (it has bash +
 // coreutils), exactly as task-auth-volume does.
-const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
+const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const HELPER_TIMEOUT_MS = 60_000;
 
 export interface IdeRunnerHandle {

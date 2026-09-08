@@ -1,5 +1,10 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { logger, resolveCliAuthUserVolumeName, type CliProviderName } from '@haive/shared';
+import {
+  cliAuthTaskVolumePrefix,
+  logger,
+  resolveCliAuthUserVolumeName,
+  type CliProviderName,
+} from '@haive/shared';
 import { schema, type Database } from '@haive/database';
 import {
   applyGrokRefresh,
@@ -45,7 +50,7 @@ export function taskVolumesHoldProvider(
   providerName: CliProviderName,
 ): boolean {
   return volumeNames.some(
-    (name) => name.startsWith('haive_cli_auth_task_') && name.includes(`_${providerName}_`),
+    (name) => name.startsWith(cliAuthTaskVolumePrefix()) && name.includes(`_${providerName}_`),
   );
 }
 

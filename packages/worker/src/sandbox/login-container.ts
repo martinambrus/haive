@@ -1,7 +1,7 @@
 import Docker from 'dockerode';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger } from '@haive/shared';
+import { CONTAINER_FAMILY, containerName, logger } from '@haive/shared';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { CliCommandSpec, CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveCliAuthMounts } from './cli-auth-volume.js';
@@ -100,7 +100,7 @@ export async function createSandboxLoginContainer(
         cliProviderId: provider.id,
         runtime: 'dockerode',
         dockerContainerId: dockerContainer.id,
-        name: `haive-login-${provider.name}-${provider.id.slice(0, 8)}`,
+        name: containerName(CONTAINER_FAMILY.login, provider.name, provider.id.slice(0, 8)),
         status: 'running',
         envVars: mergedEnv,
       })

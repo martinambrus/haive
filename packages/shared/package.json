@@ -27,6 +27,10 @@
       "types": "./dist/config/index.d.ts",
       "import": "./dist/config/index.js"
     },
+    "./naming": {
+      "types": "./dist/naming/index.d.ts",
+      "import": "./dist/naming/index.js"
+    },
     "./logger": {
       "types": "./dist/logger/index.d.ts",
       "import": "./dist/logger/index.js"

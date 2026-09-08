@@ -7,12 +7,16 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import {
-  ddevRunnerName,
-  logger,
   CONFIG_KEYS,
+  SHARED_VOLUME,
   configService,
+  dashPrefix,
+  ddevRunnerName,
+  imageRepo,
+  logger,
   taskHostPort,
   type TaskAccessEndpoint,
+  volumeName,
 } from '@haive/shared';
 import {
   relaxCappedDdevConstraintForRunner,
@@ -54,7 +58,10 @@ import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 const exec = promisify(execFile);
 const log = logger.child({ module: 'ddev-runner' });
 
-const REPO_VOLUME = 'haive_repos';
+const REPO_VOLUME = volumeName(SHARED_VOLUME.repos);
+/** Image repository for the DDEV runner. Namespaced so two installs building the same content
+ *  do not overwrite one tag, and neither one's stale-tag prune deletes the other's cache. */
+const DDEV_RUNNER_IMAGE = imageRepo('ddev-runner');
 
 /** Where DDEV mounts the PROJECT ROOT inside its own containers, whatever the project's
  *  type or docroot — the same path `sandbox/ide-settings.ts` maps to /workspace. Exported
@@ -129,7 +136,7 @@ async function resolveImageTag(): Promise<string> {
     .update(desktopSh)
     .digest('hex')
     .slice(0, 12);
-  cachedTag = `haive-ddev-runner:${hash}`;
+  cachedTag = `${DDEV_RUNNER_IMAGE}:${hash}`;
   return cachedTag;
 }
 
@@ -152,7 +159,7 @@ export async function ensureDdevRunnerImage(): Promise<string> {
     timeout: 900_000,
     maxBuffer: 50 * 1024 * 1024,
   });
-  log.info({ tag }, 'haive-ddev-runner image built');
+  log.info({ tag }, 'ddev runner image built');
   await pruneOldRunnerImages(tag);
   return tag;
 }
@@ -165,12 +172,12 @@ async function pruneOldRunnerImages(currentTag: string): Promise<void> {
   try {
     const { stdout } = await exec(
       'docker',
-      ['images', 'haive-ddev-runner', '--format', '{{.Repository}}:{{.Tag}}'],
+      ['images', DDEV_RUNNER_IMAGE, '--format', '{{.Repository}}:{{.Tag}}'],
       { timeout: 15_000 },
     );
     const stale = stdout
       .split(/\s+/)
-      .filter((t) => t.length > 0 && t !== currentTag && t.startsWith('haive-ddev-runner:'));
+      .filter((t) => t.length > 0 && t !== currentTag && t.startsWith(`${DDEV_RUNNER_IMAGE}:`));
     for (const t of stale) {
       await exec('docker', ['image', 'rm', '-f', t], { timeout: 30_000 }).catch((err) => {
         log.warn(
@@ -630,7 +637,7 @@ function ddevVersionConstraintError(output: string): Error {
 /** Shared mkcert CA volume (generated once on worker boot) mounted RO into every
  *  runner so all per-task DDEV certs share ONE CA the user trusts once, instead of
  *  a per-runner throwaway. The api also mounts it (read-only) to serve rootCA.pem. */
-const DDEV_CA_VOLUME = process.env.DDEV_CA_VOLUME || 'haive_ddev_ca';
+const DDEV_CA_VOLUME = process.env.DDEV_CA_VOLUME || volumeName(SHARED_VOLUME.ddevCa);
 const DDEV_CA_MOUNT_PATH = '/home/ddev/.local/share/mkcert';
 let ddevCaReady = false;
 
@@ -690,8 +697,8 @@ export async function ensureDdevCa(): Promise<void> {
  *  serves it locally to every later runner. Backed by a NAMED volume so the cache
  *  survives task teardown, worker restart, and host reboot. Reaper-safe: no
  *  haive.task.id label and no name-prefix sweep matches it, so nothing reaps it. */
-const DDEV_REGISTRY_CONTAINER = 'haive-ddev-registry';
-const DDEV_REGISTRY_VOLUME = 'haive_ddev_registry_cache';
+const DDEV_REGISTRY_CONTAINER = `${dashPrefix()}ddev-registry`;
+const DDEV_REGISTRY_VOLUME = volumeName(SHARED_VOLUME.ddevRegistryCache);
 const DDEV_REGISTRY_PORT = 5000;
 let registryCacheReady = false;
 

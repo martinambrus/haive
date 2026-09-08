@@ -2,13 +2,14 @@ import { spawn } from 'node:child_process';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { logger } from '@haive/shared';
+import { CONTAINER_FAMILY, SHARED_VOLUME, containerName, logger, volumeName } from '@haive/shared';
 import { renderSquidConfig } from './squid-config.js';
 
 const log = logger.child({ module: 'egress-gateway' });
 
 const SQUID_IMAGE = process.env.SANDBOX_SQUID_IMAGE ?? 'ubuntu/squid:latest';
-const CONFIG_VOLUME = process.env.SANDBOX_SQUID_CONFIG_VOLUME ?? 'haive_squid_configs';
+const CONFIG_VOLUME =
+  process.env.SANDBOX_SQUID_CONFIG_VOLUME ?? volumeName(SHARED_VOLUME.squidConfigs);
 const CONFIG_WORKER_ROOT =
   process.env.SANDBOX_SQUID_CONFIG_WORKER_PATH ?? '/var/lib/haive/squid-configs';
 const CONFIG_SANDBOX_ROOT = '/haive/squid-config';
@@ -39,8 +40,8 @@ type LifecycleStage =
 
 export async function createEgressGateway(opts: EgressGatewayOptions): Promise<EgressGateway> {
   const id = randomUUID();
-  const networkName = `haive-egress-${id}`;
-  const squidName = `haive-squid-${id}`;
+  const networkName = containerName(CONTAINER_FAMILY.egress, id);
+  const squidName = containerName(CONTAINER_FAMILY.squid, id);
   const configWorkerDir = join(CONFIG_WORKER_ROOT, id);
   const configWorkerPath = join(configWorkerDir, 'squid.conf');
   const configSandboxPath = `${CONFIG_SANDBOX_ROOT}/squid.conf`;

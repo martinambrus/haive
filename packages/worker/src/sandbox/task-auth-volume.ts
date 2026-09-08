@@ -1,3 +1,4 @@
+import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
@@ -79,7 +80,7 @@ function rtkInitArgsFor(providerName: CliProviderName): string[] | undefined {
 
 const log = logger.child({ module: 'task-auth-volume' });
 
-const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
+const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const READY_MARKER = '.haive-ready';
 const HELPER_TIMEOUT_MS = 60_000;
 const VOLUME_READY_POLL_MS = 1_500;

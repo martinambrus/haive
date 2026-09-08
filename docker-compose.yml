@@ -1,7 +1,20 @@
+# HAIVE_INSTALL_ID names every resource this install OWNS: containers, networks, the six globally
+# named volumes, and (in api/worker code) sandbox containers, auth volumes, images and the RAG /
+# global-KB databases. It defaults to `haive`, which reproduces the names that shipped before it
+# existed, so an existing install is unchanged and nothing has to be renamed or migrated.
+#
+# Set it to run a second Haive on this machine. It identifies the INSTALL, never the version — a
+# version in the name would rename every container on every upgrade and rename them back on a
+# rollback. Changing it on a populated install ORPHANS that install's volumes and databases rather
+# than renaming them, so pick it once, at install time.
+#
+# Only [a-z0-9_], because it is interpolated into both `<id>-api` and `<id>_repos` here and
+# compose cannot convert between the two conventions.
+
 services:
   postgres:
     image: pgvector/pgvector:pg18
-    container_name: haive-postgres
+    container_name: ${HAIVE_INSTALL_ID:-haive}-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-haive}
@@ -20,7 +33,7 @@ services:
 
   redis:
     image: redis:8.4-alpine
-    container_name: haive-redis
+    container_name: ${HAIVE_INSTALL_ID:-haive}-redis
     restart: unless-stopped
     command:
       - redis-server
@@ -42,7 +55,7 @@ services:
 
   mailpit:
     image: axllent/mailpit:latest
-    container_name: haive-mailpit
+    container_name: ${HAIVE_INSTALL_ID:-haive}-mailpit
     restart: unless-stopped
     environment:
       MP_MAX_MESSAGES: 5000
@@ -54,7 +67,7 @@ services:
 
   ollama:
     image: ollama/ollama:latest
-    container_name: haive-ollama
+    container_name: ${HAIVE_INSTALL_ID:-haive}-ollama
     restart: unless-stopped
     volumes:
       - ollama_data:/root/.ollama
@@ -74,7 +87,7 @@ services:
     build:
       context: .
       dockerfile: packages/api/Dockerfile
-    container_name: haive-api
+    container_name: ${HAIVE_INSTALL_ID:-haive}-api
     restart: unless-stopped
     depends_on:
       postgres:
@@ -83,6 +96,10 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: ${NODE_ENV:-production}
+      # Which install this is. The api and worker build Docker container, volume, network and
+      # image names — and Postgres database names — in code, and compose builds the same names
+      # above; they have to agree or one install's reapers act on another's resources.
+      HAIVE_INSTALL_ID: ${HAIVE_INSTALL_ID:-haive}
       API_PORT: 3001
       DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
       REDIS_URL: redis://redis:6379
@@ -116,7 +133,7 @@ services:
     build:
       context: .
       dockerfile: packages/worker/Dockerfile
-    container_name: haive-worker
+    container_name: ${HAIVE_INSTALL_ID:-haive}-worker
     restart: unless-stopped
     # Run tini as PID 1 so orphaned children get reaped. Without it PID 1 is the package
     # manager, which never calls wait(), so every child re-parented to it becomes a
@@ -132,6 +149,7 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: ${NODE_ENV:-production}
+      HAIVE_INSTALL_ID: ${HAIVE_INSTALL_ID:-haive}
       DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
       REDIS_URL: redis://redis:6379
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
@@ -160,7 +178,7 @@ services:
       args:
         RTK_RELEASE_VERSION: ${RTK_RELEASE_VERSION:-v0.37.2}
         RTK_X86_64_MUSL_SHA256: ${RTK_X86_64_MUSL_SHA256:-3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9eb8b88b7100a37c6}
-    image: haive-cli-sandbox:latest
+    image: ${HAIVE_INSTALL_ID:-haive}-cli-sandbox:latest
     profiles: ["sandbox"]
     command: ["true"]
 
@@ -170,7 +188,7 @@ services:
       dockerfile: packages/web/Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
-    container_name: haive-web
+    container_name: ${HAIVE_INSTALL_ID:-haive}-web
     restart: unless-stopped
     depends_on:
       - api
@@ -189,7 +207,7 @@ services:
     build:
       context: ./docker/ollama-thinking-proxy
       dockerfile: Dockerfile
-    container_name: haive-ollama-thinking-proxy
+    container_name: ${HAIVE_INSTALL_ID:-haive}-ollama-thinking-proxy
     restart: unless-stopped
     networks:
       - haive-network
@@ -206,7 +224,7 @@ services:
     build:
       context: ./docker/openrouter-compat-proxy
       dockerfile: Dockerfile
-    container_name: haive-openrouter-compat-proxy
+    container_name: ${HAIVE_INSTALL_ID:-haive}-openrouter-compat-proxy
     restart: unless-stopped
     networks:
       - haive-network
@@ -215,14 +233,14 @@ services:
 networks:
   haive-network:
     driver: bridge
-    name: haive-network
+    name: ${HAIVE_INSTALL_ID:-haive}-network
   # Sandbox<->API only: the api and the per-task sandboxes join this; postgres,
   # redis, etc. do NOT, so agent code can reach rag_search but not the queues/DB.
   # internal = no NAT/internet, so it provides ONLY api access — internet is
   # governed by the sandbox's policy network (default bridge / squid / none).
   haive-sandbox:
     driver: bridge
-    name: haive-sandbox
+    name: ${HAIVE_INSTALL_ID:-haive}-sandbox
     internal: true
   # Sandbox<->Ollama only: the ollama service and the per-task sandboxes join
   # this; postgres/redis do NOT, so a local Ollama-backed CLI reaches the daemon
@@ -230,7 +248,7 @@ networks:
   # NAT/internet (the model is in-stack).
   haive-models:
     driver: bridge
-    name: haive-models
+    name: ${HAIVE_INSTALL_ID:-haive}-models
     internal: true
 
 volumes:
@@ -239,21 +257,21 @@ volumes:
   mailpit_data:
   ollama_data:
   haive_repos:
-    name: haive_repos
+    name: ${HAIVE_INSTALL_ID:-haive}_repos
   haive_bundles:
-    name: haive_bundles
+    name: ${HAIVE_INSTALL_ID:-haive}_bundles
   haive_wrappers:
-    name: haive_wrappers
+    name: ${HAIVE_INSTALL_ID:-haive}_wrappers
   # Shared npm cache for per-invocation sandboxes. A sandbox is --rm, so an `npx`-launched
   # MCP server would re-download on every run; a cold chrome-devtools-mcp fetch (measured
   # 111-146s) outran the agent's wait for its tools. Cached, not pinned — the version stays
   # per-repository selectable.
   haive_npm_cache:
-    name: haive_npm_cache
+    name: ${HAIVE_INSTALL_ID:-haive}_npm_cache
   haive_squid_configs:
-    name: haive_squid_configs
+    name: ${HAIVE_INSTALL_ID:-haive}_squid_configs
   # Shared mkcert CA for direct browser access: one CA signs every per-task DDEV
   # cert so the user trusts it once. Generated by the worker (ensureDdevCa), mounted
   # read-only into the api (serve rootCA.pem) and into each ddev-runner (sign with it).
   haive_ddev_ca:
-    name: haive_ddev_ca
+    name: ${HAIVE_INSTALL_ID:-haive}_ddev_ca

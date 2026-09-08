@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto';
-import { DEFAULT_RTK_VERSION, type CliProviderName } from '@haive/shared';
+import { DEFAULT_RTK_VERSION, imageRepo, type CliProviderName } from '@haive/shared';
 import { buildProviderInstallLines } from '../cli-versions/codegen.js';
 
-export const SANDBOX_CORE_IMAGE = 'haive-cli-sandbox:latest';
+export const SANDBOX_CORE_IMAGE = `${imageRepo('cli-sandbox')}:latest`;
 
 /** Docker repository for per-task COMPOSED sandbox images (`haive-sandbox:<hash>`),
  *  distinct from the SANDBOX_CORE_IMAGE base. Each unique (env-template, provider,
  *  rtk) combination yields one hash-tagged image, reused across tasks. The
  *  composed-image reaper filters on this repo to evict stale tags. */
-export const COMPOSED_IMAGE_REPO = 'haive-sandbox';
+export const COMPOSED_IMAGE_REPO = imageRepo('sandbox');
 
 export interface SandboxImageComposition {
   tag: string;

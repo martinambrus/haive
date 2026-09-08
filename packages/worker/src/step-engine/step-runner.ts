@@ -15,13 +15,14 @@ import type { Database } from '@haive/database';
 import { schema, isUniqueViolation, type StepIterationEntry } from '@haive/database';
 import {
   CONFIG_KEYS,
-  configService,
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+  IN_STACK_OLLAMA_HOSTS,
+  IN_STACK_OLLAMA_URL,
+  configService,
   escalatedFromDeclaredMs,
   escalatedTimeoutMs,
   extractFormDefaults,
   isOllamaCloudModel,
-  IN_STACK_OLLAMA_URL,
   logger,
   parseTimeoutLadder,
   validateFormValues,
@@ -283,7 +284,7 @@ type LlmResolved =
 // here: that set answers "is this the bundled daemon the worker can pull models into",
 // this one answers "is this a weak LOCAL model to keep away from scaffolding steps",
 // and a user's own localhost is the second but not the first.
-const LOCAL_OLLAMA_HOSTS = new Set(['ollama', 'haive-ollama', 'localhost', '127.0.0.1']);
+const LOCAL_OLLAMA_HOSTS = new Set([...IN_STACK_OLLAMA_HOSTS, 'localhost', '127.0.0.1']);
 
 /** True when the resolved provider is an in-stack (local) Ollama model. Cloud
  *  models (tag suffix -cloud/:cloud) run on ollama.com via the local daemon as a

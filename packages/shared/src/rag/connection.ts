@@ -1,3 +1,4 @@
+import { databaseName } from '../naming/index.js';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
 import { type Database } from '@haive/database';
@@ -95,7 +96,7 @@ function sanitizeDbName(raw: string): string {
 }
 
 export function ragDatabaseName(projectName: string): string {
-  return `haive_rag_${sanitizeDbName(projectName || 'default')}`;
+  return databaseName('rag', sanitizeDbName(projectName || 'default'));
 }
 
 /* ------------------------------------------------------------------ */

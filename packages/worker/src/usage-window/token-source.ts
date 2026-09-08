@@ -1,3 +1,4 @@
+import { SANDBOX_CORE_IMAGE } from '../sandbox/image-composer.js';
 import type { AuthMode, CliProviderName } from '@haive/shared';
 import {
   computeKeyFingerprint,
@@ -9,7 +10,7 @@ import { schema, type Database } from '@haive/database';
 import { resolveProviderSecrets } from '../secrets/provider-secrets.js';
 import { defaultDockerRunner, type DockerRunner } from '../sandbox/docker-runner.js';
 
-const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
+const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const READ_TIMEOUT_MS = 15_000;
 const WRITE_TIMEOUT_MS = 15_000;
 

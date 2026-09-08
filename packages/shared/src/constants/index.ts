@@ -1,3 +1,10 @@
+import {
+  CONTAINER_FAMILY,
+  composeContainerName,
+  containerName,
+  volumeName,
+  volumePrefix,
+} from '../naming/index.js';
 export * from './default-agent-rules.js';
 
 export const APP_NAME = 'Haive';
@@ -74,7 +81,10 @@ export const IN_STACK_OLLAMA_URL = 'http://ollama:11434';
  *  steps", where a user's own host still counts; this one asks "is this the daemon the
  *  worker can pull models into and reach over the models network", where localhost is
  *  emphatically not. Same-looking sets, opposite answers for the same input. */
-export const IN_STACK_OLLAMA_HOSTS: ReadonlySet<string> = new Set(['ollama', 'haive-ollama']);
+export const IN_STACK_OLLAMA_HOSTS: ReadonlySet<string> = new Set([
+  'ollama',
+  composeContainerName('ollama'),
+]);
 
 /** What "external Ollama server" pre-fills with: an Ollama on the developer's own
  *  machine, reached from a container. A default for a field the user is expected to
@@ -667,7 +677,7 @@ export const CONFIG_RUNTIME_LIMITS_CHANNEL = 'config:runtimeLimits:changed';
  *  this DNS name on the internal sandbox network (browser-VNC bridge) while the
  *  worker creates/destroys it. */
 export function ddevRunnerName(taskId: string): string {
-  return `haive-ddev-${taskId.slice(0, 8)}`;
+  return containerName(CONTAINER_FAMILY.ddev, taskId.slice(0, 8));
 }
 /** VNC (RFB) port of the headed-browser desktop inside the DDEV runner. */
 export const DDEV_RUNNER_VNC_PORT = 5900;
@@ -677,7 +687,7 @@ export const DDEV_RUNNER_VNC_PORT = 5900;
  *  internal sandbox network (browser-VNC bridge) while the worker creates and
  *  destroys it. */
 export function appRunnerName(taskId: string): string {
-  return `haive-app-${taskId.slice(0, 8)}`;
+  return containerName(CONTAINER_FAMILY.app, taskId.slice(0, 8));
 }
 /** Docker label marking a container as a per-task app-runner, so task-end
  *  cleanup can find and remove it (mirrors the DDEV runner's haive.ddev label). */
@@ -687,7 +697,7 @@ export const APP_RUNNER_LABEL = 'haive.apprunner';
  *  the api reverse-proxies the editor by this DNS name on the internal sandbox
  *  network (the /ide HTTP+WS proxy) while the worker creates and destroys it. */
 export function ideRunnerName(taskId: string): string {
-  return `haive-ide-${taskId.slice(0, 8)}`;
+  return containerName(CONTAINER_FAMILY.ide, taskId.slice(0, 8));
 }
 /** Docker label marking a container as a per-task browser-IDE, so task-end
  *  cleanup finds it and the worker-boot reaper spares it while a session is live
@@ -704,23 +714,29 @@ export const CODE_SERVER_IMAGE = 'codercom/code-server:4.126.0';
  *  must never be reaped and a brief nav-away should survive; the per-task
  *  user-data volume persists across the reap so unsaved (hot-exit) buffers live. */
 export const IDE_IDLE_GRACE_MS = 30 * 60_000;
+/** Volume families for the IDE. The install id in front of them comes from the naming module,
+ *  so `isIdeVolume` cannot match another install's volumes. */
+const IDE_EXT_FAMILY = 'ide_ext';
+const IDE_UDATA_FAMILY = 'ide_udata';
 /** Per-USER volume holding code-server extensions: install once, mounted into
  *  every task's IDE for that user. userSlug mirrors the cli-auth volume slug. */
 export function ideExtensionsVolumeName(userId: string): string {
   const userSlug = userId.replace(/-/g, '').slice(0, 12);
-  return `haive_ide_ext_${userSlug}`;
+  return volumeName(IDE_EXT_FAMILY, userSlug);
 }
 /** Per-TASK volume holding code-server user-data: the global settings.json seeded
  *  at launch, workbench state, and hot-exit backups. Persists across the idle-grace
  *  container reap so reopening restores unsaved work; destroyed only at task end. */
 export function ideUserDataVolumeName(taskId: string): string {
   const taskSlug = taskId.replace(/-/g, '').slice(0, 12);
-  return `haive_ide_udata_${taskSlug}`;
+  return volumeName(IDE_UDATA_FAMILY, taskSlug);
 }
 /** True for any IDE-owned Docker volume (extensions or user-data), so cleanup can
  *  target them precisely without touching unrelated volumes. */
 export function isIdeVolume(name: string): boolean {
-  return name.startsWith('haive_ide_ext_') || name.startsWith('haive_ide_udata_');
+  return (
+    name.startsWith(volumePrefix(IDE_EXT_FAMILY)) || name.startsWith(volumePrefix(IDE_UDATA_FAMILY))
+  );
 }
 /** Redis hash key for a task's IDE session. The api owns refcount + lastSeenAt as
  *  proxied connections open/close; the worker's idle reaper reads them to grace-

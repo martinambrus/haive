@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { CLI_INSTALL_METADATA, type CliProviderName } from '@haive/shared';
+import { CLI_INSTALL_METADATA, imageRepo, type CliProviderName } from '@haive/shared';
+import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { buildProviderInstallLines } from '../cli-versions/codegen.js';
 
 export interface ImageTagResolution {
@@ -8,7 +9,7 @@ export interface ImageTagResolution {
   dockerfileLines: string[];
 }
 
-const BASE_IMAGE = 'haive-cli-sandbox:latest';
+const BASE_IMAGE = SANDBOX_CORE_IMAGE;
 
 export function resolveImageTag(params: {
   name: CliProviderName;
@@ -58,14 +59,14 @@ export function resolveImageTag(params: {
     // is what correctness rests on. Nothing parses this string — every consumer stores it,
     // compares it for equality, or hands it to docker — so appending a segment is safe.
     return {
-      tag: `haive-cli-sandbox:${effectiveName}-${versionSegment}-${contentHash}`,
+      tag: `${imageRepo('cli-sandbox')}:${effectiveName}-${versionSegment}-${contentHash}`,
       shared: true,
       dockerfileLines,
     };
   }
 
   return {
-    tag: `haive-cli-sandbox:provider-${params.providerId}-${contentHash}`,
+    tag: `${imageRepo('cli-sandbox')}:provider-${params.providerId}-${contentHash}`,
     shared: false,
     dockerfileLines,
   };

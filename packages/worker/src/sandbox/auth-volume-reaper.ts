@@ -1,15 +1,15 @@
 import { spawn } from 'node:child_process';
 import { notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { isCliAuthTaskVolume, logger } from '@haive/shared';
+import { cliAuthTaskVolumePrefix, isCliAuthTaskVolume, logger } from '@haive/shared';
 import { defaultDockerRunner } from './docker-runner.js';
 
 const log = logger.child({ module: 'auth-volume-reaper' });
 
 /** Substring the docker `name=` filter narrows on; `isCliAuthTaskVolume` then
  *  re-checks the exact prefix (docker name filters are substring, not prefix). */
-const TASK_VOL_FILTER = 'haive_cli_auth_task_';
-const TASK_VOL_PREFIX = 'haive_cli_auth_task_';
+const TASK_VOL_FILTER = cliAuthTaskVolumePrefix();
+const TASK_VOL_PREFIX = cliAuthTaskVolumePrefix();
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'] as const;
 
 /** The task-id slug a per-task auth volume embeds: first 12 hex of the task uuid

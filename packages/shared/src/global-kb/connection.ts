@@ -1,3 +1,4 @@
+import { databaseName } from '../naming/index.js';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
 import { type Database } from '@haive/database';
@@ -14,7 +15,7 @@ export type GlobalKbMode = 'internal' | 'external';
 
 /** Dedicated DB name when `mode='internal'` (Haive is the provider), created on
  *  the main Postgres host just like a per-project `haive_rag_<project>` DB. */
-export const GLOBAL_KB_DB_NAME = 'haive_kb_global';
+export const GLOBAL_KB_DB_NAME = databaseName('kb_global');
 
 /** Default embedding model + dimensions when unset, matching the per-repo RAG
  *  defaults in onboarding step 04 so a global KB embeds with the same model. */

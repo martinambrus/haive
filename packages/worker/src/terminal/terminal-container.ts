@@ -13,7 +13,14 @@ import { resolveCliAuthMounts } from '../sandbox/cli-auth-volume.js';
 import type { DockerVolumeMount } from '../sandbox/docker-runner.js';
 import { resolveSandboxImageTag } from '../queues/cli-exec-queue.js';
 import { SANDBOX_USER, SANDBOX_USER_HOME, SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
-import { getCliProviderMetadata, logger, signRepoGitCredToken } from '@haive/shared';
+import {
+  CONTAINER_FAMILY,
+  containerPrefix,
+  getCliProviderMetadata,
+  logger,
+  networkName,
+  signRepoGitCredToken,
+} from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 
 const log = logger.child({ module: 'terminal-container' });
@@ -96,7 +103,7 @@ export function buildShellContainerName(
   providerId: string,
 ): string {
   const infix = scope === 'repo' ? 'repo-' : '';
-  return `haive-shell-${infix}${scopeId.slice(0, 8)}-${providerId.slice(0, 8)}-${userId.slice(0, 8)}`;
+  return `${containerPrefix(CONTAINER_FAMILY.shell)}${infix}${scopeId.slice(0, 8)}-${providerId.slice(0, 8)}-${userId.slice(0, 8)}`;
 }
 
 export interface EnsureShellContainerOpts {
@@ -629,7 +636,7 @@ async function mergeMcpServersIntoJson(
 }
 
 async function connectSandboxNetwork(docker: Docker, containerName: string): Promise<void> {
-  const network = process.env.SANDBOX_NETWORK || 'haive-sandbox';
+  const network = process.env.SANDBOX_NETWORK || networkName('sandbox');
   await docker.getNetwork(network).connect({ Container: containerName });
 }
 

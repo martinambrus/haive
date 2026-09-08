@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { logger } from '@haive/shared';
+import { SHARED_VOLUME, logger, volumeName } from '@haive/shared';
 import type { DockerVolumeMount } from './docker-runner.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 
@@ -19,7 +19,7 @@ const log = logger.child({ module: 'npm-cache' });
  *  per repository (`repositories.chrome_devtools_mcp_version`), so pinning one into the
  *  image would take that choice away. Caching keeps every version selectable and makes
  *  each one fast after its first fetch — MEASURED 146s cold, 4s warm. */
-export const NPM_CACHE_VOLUME = 'haive_npm_cache';
+export const NPM_CACHE_VOLUME = volumeName(SHARED_VOLUME.npmCache);
 
 /** Where the volume is mounted inside a sandbox. Not under the sandbox user's home: the
  *  auth-volume machinery already owns paths there, and a bind over part of it is

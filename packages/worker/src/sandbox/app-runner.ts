@@ -3,7 +3,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
-import { APP_RUNNER_LABEL, appRunnerName, logger, type TaskAccessEndpoint } from '@haive/shared';
+import {
+  APP_RUNNER_LABEL,
+  SHARED_VOLUME,
+  appRunnerName,
+  logger,
+  type TaskAccessEndpoint,
+  volumeName,
+} from '@haive/shared';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
 import {
@@ -35,7 +42,7 @@ import {
 const exec = promisify(execFile);
 const log = logger.child({ module: 'app-runner' });
 
-const REPO_VOLUME = 'haive_repos';
+const REPO_VOLUME = volumeName(SHARED_VOLUME.repos);
 
 export interface AppRunnerHandle {
   /** The app-runner container name. */

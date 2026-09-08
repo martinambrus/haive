@@ -13,4 +13,5 @@ export * from './tooling/index.js';
 export * from './sandbox/index.js';
 export * from './step-engine/index.js';
 export * from './templates/index.js';
+export * from './naming/index.js';
 export * from './knowledge-paths.js';

@@ -3,6 +3,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { mkdirSync, createWriteStream, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { CONTAINER_FAMILY, containerName, installLabel } from '@haive/shared';
 
 export interface DockerBuildOpts {
   contextDir: string;
@@ -347,8 +348,10 @@ export const defaultDockerRunner: DockerRunner = {
   },
 
   async run(opts) {
-    const containerName = `haive-cli-${randomUUID()}`;
-    const flagArgs: string[] = [];
+    const name = containerName(CONTAINER_FAMILY.cli, randomUUID());
+    // Every container this install creates carries its install label, because the reapers select
+    // by LABEL far more often than by name — and `haive.task.id` is identical in every install.
+    const flagArgs: string[] = ['--label', installLabel()];
     if (opts.labels) {
       for (const [k, v] of Object.entries(opts.labels)) {
         flagArgs.push('--label', `${k}=${v}`);
@@ -406,9 +409,7 @@ export const defaultDockerRunner: DockerRunner = {
     // Force-remove by name when our wrapper killed the client (timedOut) or the
     // run returned no exit code (signal abort), or a setup step failed.
     const forceRemove = () =>
-      spawnAndCollect('docker', ['rm', '-f', containerName], { timeoutMs: 15_000 }).catch(
-        () => undefined,
-      );
+      spawnAndCollect('docker', ['rm', '-f', name], { timeoutMs: 15_000 }).catch(() => undefined);
 
     // Attaching the container's stdin is needed by BOTH stdin users, not just
     // steering: `stdinPrompt` writes the prompt once and closes. Gating this on
@@ -423,7 +424,7 @@ export const defaultDockerRunner: DockerRunner = {
     if (!opts.connectNetworks?.length) {
       const runArgs = ['run', '--rm'];
       if (attachStdin) runArgs.push('-i');
-      runArgs.push('--name', containerName, ...flagArgs, opts.image, ...opts.cmd);
+      runArgs.push('--name', name, ...flagArgs, opts.image, ...opts.cmd);
       const result = await spawnAndCollect('docker', runArgs, {
         timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
         onStdoutChunk: opts.onStdoutChunk,
@@ -445,18 +446,16 @@ export const defaultDockerRunner: DockerRunner = {
     // attach stdin to a container created without OpenStdin (Hole A).
     const createArgs = ['create', '--rm'];
     if (attachStdin) createArgs.push('-i');
-    createArgs.push('--name', containerName, ...flagArgs, opts.image, ...opts.cmd);
+    createArgs.push('--name', name, ...flagArgs, opts.image, ...opts.cmd);
     const created = await spawnAndCollect('docker', createArgs, { timeoutMs: 30_000 });
     if (created.exitCode !== 0) {
       await forceRemove();
       return created;
     }
     for (const net of opts.connectNetworks) {
-      const connected = await spawnAndCollect(
-        'docker',
-        ['network', 'connect', net, containerName],
-        { timeoutMs: 15_000 },
-      );
+      const connected = await spawnAndCollect('docker', ['network', 'connect', net, name], {
+        timeoutMs: 15_000,
+      });
       if (connected.exitCode !== 0) {
         await forceRemove();
         return connected;
@@ -464,7 +463,7 @@ export const defaultDockerRunner: DockerRunner = {
     }
     const startArgs = ['start', '--attach'];
     if (attachStdin) startArgs.push('--interactive');
-    startArgs.push(containerName);
+    startArgs.push(name);
     const result = await spawnAndCollect('docker', startArgs, {
       timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       onStdoutChunk: opts.onStdoutChunk,

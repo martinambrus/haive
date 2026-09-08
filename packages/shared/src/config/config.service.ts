@@ -1,3 +1,4 @@
+import { networkName } from '../naming/index.js';
 import { Redis } from 'ioredis';
 import { randomBytes } from 'node:crypto';
 import { createRedisConnection } from '../utils/redis-factory.js';
@@ -603,7 +604,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',
-  [CONFIG_KEYS.SANDBOX_NETWORK]: 'haive-network',
+  [CONFIG_KEYS.SANDBOX_NETWORK]: networkName('network'),
   [CONFIG_KEYS.PLAN_CANVAS_ENABLED]: 'true',
   [CONFIG_KEYS.EXTERNAL_SYNC_ENABLED]: 'true',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',

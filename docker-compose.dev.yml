@@ -29,7 +29,7 @@ services:
     # dep resolved correctly, for the wrong libc. bookworm-slim matches the supported host
     # (WSL2 + Ubuntu) and is already what docker/*/Dockerfile use.
     image: node:26-bookworm-slim
-    container_name: haive-db-migrate
+    container_name: ${HAIVE_INSTALL_ID:-haive}-db-migrate
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,7 +73,7 @@ services:
       context: .
       dockerfile: packages/api/Dockerfile
       target: deps
-    container_name: haive-dev-libs
+    container_name: ${HAIVE_INSTALL_ID:-haive}-dev-libs
     working_dir: /app
     volumes:
       - .:/app

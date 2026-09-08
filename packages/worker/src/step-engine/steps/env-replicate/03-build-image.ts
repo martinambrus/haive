@@ -1,3 +1,4 @@
+import { imageRepo } from '@haive/shared';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,7 +26,7 @@ export interface BuildImageApply {
   durationMs: number;
 }
 
-const DEFAULT_TAG_PREFIX = 'haive-env';
+const DEFAULT_TAG_PREFIX = imageRepo('env');
 
 function slugifyName(name: string): string {
   return name

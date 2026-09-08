@@ -1,7 +1,14 @@
+import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, chown, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { logger, IN_STACK_OLLAMA_HOSTS, type CliNetworkPolicy } from '@haive/shared';
+import {
+  IN_STACK_OLLAMA_HOSTS,
+  SHARED_VOLUME,
+  logger,
+  type CliNetworkPolicy,
+  volumeName,
+} from '@haive/shared';
 import {
   defaultDockerRunner,
   type DockerRunner,
@@ -19,8 +26,9 @@ export { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 
 const log = logger.child({ module: 'sandbox-runner' });
 
-const DEFAULT_SANDBOX_IMAGE = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
-const DEFAULT_WRAPPER_VOLUME = process.env.SANDBOX_WRAPPER_HOST_VOLUME ?? 'haive_wrappers';
+const DEFAULT_SANDBOX_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
+const DEFAULT_WRAPPER_VOLUME =
+  process.env.SANDBOX_WRAPPER_HOST_VOLUME ?? volumeName(SHARED_VOLUME.wrappers);
 const DEFAULT_WRAPPER_WORKER_PATH =
   process.env.SANDBOX_WRAPPER_WORKER_PATH ?? '/var/lib/haive/wrappers';
 const DEFAULT_WRAPPER_SANDBOX_PATH = '/haive/wrappers';

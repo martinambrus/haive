@@ -3,15 +3,17 @@ import { join, posix } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  CONFIG_KEYS,
+  DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
+  SHARED_VOLUME,
+  TASK_JOB_NAMES,
+  configService,
+  isReadOnlyLocalRepo,
   type CliExecJobPayload,
   type CliNetworkPolicy,
   type CliProviderName,
   type TaskJobPayload,
-  CONFIG_KEYS,
-  configService,
-  DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
-  TASK_JOB_NAMES,
-  isReadOnlyLocalRepo,
+  volumeName,
 } from '@haive/shared';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import {
@@ -322,7 +324,7 @@ export async function resolveMcpExtraFiles(
   }
 }
 
-const REPO_VOLUME_NAME = 'haive_repos';
+const REPO_VOLUME_NAME = volumeName(SHARED_VOLUME.repos);
 const REPO_MOUNT_TARGET = SANDBOX_WORKDIR;
 const HOST_REPO_ROOT_REAL = process.env.HOST_REPO_ROOT_REAL ?? process.env.HOME ?? '/';
 
