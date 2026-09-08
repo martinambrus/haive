@@ -22,6 +22,9 @@
     "typecheck": "tsc --noEmit",
     "push": "drizzle-kit push",
     "baseline:generate": "node scripts/generate-baseline.mjs",
+    "migrate": "node dist/migrate/index.js",
+    "migrate:tsx": "tsx src/migrate/index.ts",
+    "smoke:migrate": "tsx test/migrate-smoke.ts",
     "studio": "drizzle-kit studio",
     "test": "vitest run --passWithNoTests",
     "clean": "rm -rf dist *.tsbuildinfo"

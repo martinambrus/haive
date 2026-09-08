@@ -43,20 +43,10 @@ DATABASE_URL="postgres://$PG_USER:$PG_PASSWORD@$PG_HOST:$PG_PORT/$PUSH_DB" \
   pnpm --filter @haive/database push --force >"$WORK/push.log" 2>&1 ||
   { echo "[parity] push failed:"; tail -30 "$WORK/push.log"; exit 1; }
 
-echo "[parity] building $MIG_DB from the migration corpus"
-docker cp "$PKG_DIR/migrations/0000_baseline.sql" "$PG_CONTAINER:/tmp/parity_baseline.sql" >/dev/null
-docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$MIG_DB" -q -v ON_ERROR_STOP=1 \
-  -f /tmp/parity_baseline.sql >"$WORK/baseline.log" 2>&1 ||
-  { echo "[parity] baseline failed:"; tail -30 "$WORK/baseline.log"; exit 1; }
-# Every migration after the baseline, in byte order. None exist yet; this loop is what keeps the
-# check honest once they do.
-for f in "$PKG_DIR"/migrations/[0-9]*.sql; do
-  base="$(basename "$f")"
-  [ "$base" = "0000_baseline.sql" ] && continue
-  echo "[parity]   + $base"
-  docker cp "$f" "$PG_CONTAINER:/tmp/parity_next.sql" >/dev/null
-  docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$MIG_DB" -q -v ON_ERROR_STOP=1 -f /tmp/parity_next.sql
-done
+echo "[parity] building $MIG_DB with the migration runner"
+DATABASE_URL="postgres://$PG_USER:$PG_PASSWORD@$PG_HOST:$PG_PORT/$MIG_DB" \
+  pnpm --filter @haive/database migrate >"$WORK/migrate.log" 2>&1 ||
+  { echo "[parity] migrate failed:"; tail -30 "$WORK/migrate.log"; exit 1; }
 
 # Two lines of dump noise, both unrelated to schema:
 #   `-- Dumped from/by`  — server and client version banner.

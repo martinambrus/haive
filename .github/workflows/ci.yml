@@ -131,6 +131,11 @@ jobs:
       - name: Run worker smokes
         run: pnpm --filter @haive/worker smoke:ci
 
+      # The migration runner's live-database coverage. Not part of smoke:ci, which is
+      # worker-scoped; this package had no smoke of its own before.
+      - name: Run migration smokes
+        run: pnpm --filter @haive/database smoke:migrate
+
   schema-parity:
     name: Schema parity (migrations == push)
     runs-on: ubuntu-latest

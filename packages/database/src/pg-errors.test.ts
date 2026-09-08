@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isUniqueViolation, isUndefinedTable } from './pg-errors.js';
+import { isUniqueViolation, isUndefinedTable, isActiveSqlTransaction } from './pg-errors.js';
 
 /** The EXACT shape drizzle-orm throws, captured from a live duplicate insert:
  *  ctor=DrizzleQueryError code=undefined causeCtor=PostgresError causeCode=23505.
@@ -80,5 +80,30 @@ describe('isUndefinedTable', () => {
     expect(isUndefinedTable({})).toBe(false);
     expect(isUndefinedTable(null)).toBe(false);
     expect(isUndefinedTable(undefined)).toBe(false);
+  });
+});
+
+describe('isActiveSqlTransaction', () => {
+  // Same captured-shape convention as the tests above: a raw postgres.js error carries the
+  // SQLSTATE directly, a drizzle-wrapped one carries it on `.cause`.
+  it('matches a raw driver error', () => {
+    expect(
+      isActiveSqlTransaction({ code: '25001', message: 'cannot run inside a transaction block' }),
+    ).toBe(true);
+  });
+
+  it('matches through a wrapper', () => {
+    const wrapped = Object.assign(new Error('Failed query'), {
+      cause: {
+        code: '25001',
+        message: 'CREATE INDEX CONCURRENTLY cannot run inside a transaction block',
+      },
+    });
+    expect(isActiveSqlTransaction(wrapped)).toBe(true);
+  });
+
+  it('does not match a different SQLSTATE', () => {
+    expect(isActiveSqlTransaction({ code: '23505' })).toBe(false);
+    expect(isActiveSqlTransaction(null)).toBe(false);
   });
 });

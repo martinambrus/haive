@@ -2,6 +2,8 @@
 const UNIQUE_VIOLATION = '23505';
 /** Postgres SQLSTATE for undefined_table. */
 const UNDEFINED_TABLE = '42P01';
+/** Postgres SQLSTATE for active_sql_transaction. */
+const ACTIVE_SQL_TRANSACTION = '25001';
 
 /**
  * True when an error — or anything it wraps — carries the given Postgres SQLSTATE.
@@ -44,4 +46,18 @@ export function isUniqueViolation(err: unknown): boolean {
  */
 export function isUndefinedTable(err: unknown): boolean {
   return hasPgCode(err, UNDEFINED_TABLE);
+}
+
+/**
+ * True when an error — or anything it wraps — is `25001 active_sql_transaction`, i.e. the
+ * statement refuses to run inside a transaction block. `CREATE INDEX CONCURRENTLY` is the one
+ * that matters in practice.
+ *
+ * The migration runner wraps every file in a transaction, so this is what turns an opaque
+ * Postgres error into the fix: add `-- haive:no-transaction` to that file's header. Same
+ * cause-chain walk as its siblings, for the same reason — a raw postgres.js caller sees the
+ * SQLSTATE on `err`, a drizzle caller on `err.cause`.
+ */
+export function isActiveSqlTransaction(err: unknown): boolean {
+  return hasPgCode(err, ACTIVE_SQL_TRANSACTION);
 }
