@@ -628,7 +628,10 @@ describe('loadPriorFixContext', () => {
     ).toBe('');
   });
 
-  it('aggregates prior ledger changes, findings, and prior diagnoses', async () => {
+  it('carries prior diagnoses and does NOT duplicate the ledger', async () => {
+    // Ledger facts reach the same prompt through augmentPromptWithLedger, which budgets
+    // them by dropping whole entries. Rendering them here too is what starved the
+    // diagnoses (see loadPriorFixContext's own note).
     const block = await loadPriorFixContext(
       priorCtx({
         round: 2,
@@ -639,18 +642,31 @@ describe('loadPriorFixContext', () => {
         events: [ev('07b-phase-4-validate', 1, 'missing error handling in foo')],
       }),
     );
-    expect(block).toContain('WHAT EARLIER FIX ROUNDS');
-    expect(block).toContain('Changes already made:');
-    expect(block).toContain('added init.php guard');
-    expect(block).toContain('Environment / investigation already established:');
-    expect(block).toContain('ddev not on PATH in sandbox');
+    expect(block).toContain('Defects addressed in earlier rounds');
     expect(block).toContain('missing error handling in foo');
+    expect(block).not.toContain('added init.php guard');
+    expect(block).not.toContain('ddev not on PATH in sandbox');
   });
 
-  it('reads findings the step reset would have destroyed on task_steps.output', async () => {
-    // The mock's task_steps is empty — as it is after a reset. The facts still arrive.
+  it('a ledger big enough to blow the budget cannot starve the diagnoses', async () => {
+    // The regression: 44 ledger entries (48,523 chars) ahead of the diagnoses in one
+    // head-sliced block meant NO diagnosis reached 07 on task 681f0f99.
     const block = await loadPriorFixContext(
-      priorCtx({ round: 2, ledger: [led('08-phase-5-verify', 1, 'no lint runner detected')] }),
+      priorCtx({
+        round: 2,
+        ledger: Array.from({ length: 44 }, (_, i) =>
+          led('07-phase-2-implement', 1, `established fact ${i} ${'x'.repeat(1100)}`),
+        ),
+        events: [ev('08b-test-management', 1, 'playwright browsers missing in the web container')],
+      }),
+    );
+    expect(block).toContain('playwright browsers missing in the web container');
+  });
+
+  it('reads diagnoses the step reset would have destroyed on task_steps.output', async () => {
+    // The mock's task_steps is empty — as it is after a reset. task_events survive it.
+    const block = await loadPriorFixContext(
+      priorCtx({ round: 2, events: [ev('08-phase-5-verify', 1, 'no lint runner detected')] }),
     );
     expect(block).toContain('no lint runner detected');
   });
@@ -682,14 +698,45 @@ describe('loadPriorFixContext', () => {
     expect(block).toBe('');
   });
 
+  // contentFingerprint strips DIGITS (line numbers, round counters), so seeds that differ
+  // only by a number dedupe to one entry. Distinctness here has to be alphabetic.
+  const distinct = (n: number): { payload: Record<string, unknown> }[] =>
+    Array.from({ length: n }, (_, i) =>
+      ev('07b-phase-4-validate', i + 1, `defect ${'q'.repeat(i + 1)} ${'x'.repeat(600)}`),
+    );
+
   it('caps an overlong block', async () => {
+    const block = await loadPriorFixContext(priorCtx({ round: 40, events: distinct(30) }));
+    expect(block.length).toBeLessThanOrEqual(4000);
+  });
+
+  it('drops WHOLE oldest entries over budget, keeping the newest intact', async () => {
+    // Rows arrive newest-first, so the tail is the oldest. A truncated diagnosis reads as a
+    // complete one, so entries are dropped whole rather than the joined block being sliced.
     const block = await loadPriorFixContext(
       priorCtx({
-        round: 2,
-        ledger: [led('07-phase-2-implement', 1, 'x'.repeat(8000), 'change')],
+        round: 40,
+        events: [
+          ev('07b-phase-4-validate', 30, `KEEPME ${'n'.repeat(300)}`),
+          ...Array.from({ length: 20 }, (_, i) =>
+            ev('08-phase-5-verify', i + 1, `DROP${'z'.repeat(i + 1)} ${'o'.repeat(300)}`),
+          ),
+        ],
       }),
     );
-    expect(block.length).toBeLessThanOrEqual(4000);
+    expect(block).toContain(`KEEPME ${'n'.repeat(300)}`);
+    expect(block).not.toContain(`DROP${'z'.repeat(20)}`);
+    // No entry survives half-written: every rendered line ends where its diagnosis does.
+    for (const line of block
+      .split('\n')
+      .filter((l) => l.startsWith('- ') && !l.includes(' omitted'))) {
+      expect(line).toMatch(/(?:n{300}|o{300})$/);
+    }
+  });
+
+  it('states how many earlier diagnoses were omitted', async () => {
+    const block = await loadPriorFixContext(priorCtx({ round: 40, events: distinct(30) }));
+    expect(block).toMatch(/- \(\d+ earlier diagnoses omitted for length\)/);
   });
 });
 

@@ -124,6 +124,19 @@ explicitly.** `priorPassNotes` (08b) does it inside one step's loop and `loadPri
 share the same budget (400 chars per entry, 4000 per block). That dedupe collapses a verbatim
 repeat but NOT two rewordings of one finding — the same limit `review_findings` measured for
 prose keys — so the cap, not the dedupe, is what bounds a loop that keeps re-deriving itself.
+It also strips DIGITS, so two defects that differ only by a number are ONE entry.
+
+**Two background blocks reach the fix prompt, and they carry different things on purpose.**
+`loadPriorFixContext` carries the DIAGNOSES; the workspace/tooling facts earlier rounds
+established arrive separately through `augmentPromptWithLedger` (`step-runner.ts`, ahead of
+the dispatch). It used to render both in one block, ordered changes → findings → diagnoses
+and head-sliced at the cap, so the diagnoses were always the part cut — MEASURED on task
+681f0f99, 44 ledger entries totalling 48,523 chars against a 4000-char cap, and not one
+diagnosis reached 07, the only step that reads one. The slice also defeated the ledger's own
+dedupe, which suppresses an entry only on an exact text match and so missed every entry the
+block had cut mid-string. Both blocks now drop WHOLE oldest entries and state the omission:
+a truncated fact reads as a complete one, and the newest rounds are what the pass is
+downstream of.
 
 ### Step summaries
 

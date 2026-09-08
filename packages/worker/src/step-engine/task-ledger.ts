@@ -182,11 +182,14 @@ export async function augmentPromptWithLedger(
     log.warn({ err, taskId }, 'failed to load the task ledger for prompt context');
     return prompt;
   }
-  // A step that renders a ledger fact in its OWN prompt body (07's fix-round context
-  // block) must not be handed the same text again here. Exact identity on strings this
-  // module produced, so there is nothing to drift. The length floor is what keeps this
-  // honest: a one-word entry ("apache") occurs incidentally in half the prompts in this
-  // codebase, and suppressing a fact on an accidental match is worse than repeating it.
+  // A step that renders a ledger fact in its OWN prompt body must not be handed the same
+  // text again here. Exact identity, so there is nothing to drift — which is also why the
+  // suppression only works on a WHOLE entry: 07's fix-round block used to render these and
+  // truncate them, and a cut entry matched nothing and was re-added in full. It carries
+  // diagnoses only now (loadPriorFixContext), so no caller renders a ledger fact today; the
+  // filter stays for the next one that does. The length floor keeps it honest: a one-word
+  // entry ("apache") occurs incidentally in half the prompts in this codebase, and
+  // suppressing a fact on an accidental match is worse than repeating it.
   let kept = entries.filter((e) => e.text.length < DEDUPE_MIN_CHARS || !prompt.includes(e.text));
   if (kept.length === 0) return prompt;
 

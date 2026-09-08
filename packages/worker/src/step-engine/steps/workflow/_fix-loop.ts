@@ -2,7 +2,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
-import { cleanText, contentFingerprint, loadLedgerEntries } from '../../task-ledger.js';
+import { cleanText, contentFingerprint } from '../../task-ledger.js';
 
 // Durable channel for the fix-loop diagnosis. When a downstream step finds a blocking
 // defect it returns `loop_back`; handleResult records the diagnosis here and re-enters
@@ -486,28 +486,31 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
   return [header, ...entries].join('\n');
 }
 
-/** Background ledger for the implementation fix pass: what earlier fix rounds already
- *  changed, what the prior agents recorded as established/ruled out, and the defects
- *  earlier rounds were asked to fix. Each fix round is a fresh CLI process with no memory
- *  of prior rounds, so without this it re-derives the same discoveries (e.g. probing for a
- *  tool that is not in the sandbox). Returns '' on the original pass (round 0). Distinct
- *  from loadHonoredConstraints (a "do not revert" guard for the validator); this is
- *  "already done / already ruled out" context for the implementer. */
+/** Per-entry and whole-block budgets for the prior-diagnosis block. Mirrors 08b's
+ *  PRIOR_PASS_* pair, and the block figure matches task-ledger's LEDGER_BLOCK_TARGET so the
+ *  two background blocks in one prompt are sized alike. */
+const PRIOR_FIX_ENTRY_LIMIT = 400;
+const PRIOR_FIX_BLOCK_LIMIT = 4000;
+
+/** Background for the implementation fix pass: the defects earlier rounds were asked to fix.
+ *  Each fix round is a fresh CLI process with no memory of prior rounds, so without this it
+ *  re-derives the same diagnosis work. Read from task_events rather than prior-round
+ *  `task_steps.output`: _step-reset.ts nulls that column, and the events survive the reset.
+ *  Returns '' on the original pass (round 0).
+ *
+ *  DIAGNOSES ONLY. The workspace/tooling facts earlier rounds established reach this same
+ *  prompt through augmentPromptWithLedger (step-runner.ts, ahead of the dispatch), which
+ *  budgets them by dropping whole entries. Rendering them here as well put tens of kB of
+ *  ledger AHEAD of a ~1 kB diagnoses section in one block that was then head-sliced, so the
+ *  diagnoses were always the part cut — MEASURED on task 681f0f99, 44 ledger entries totalling
+ *  48,523 chars against a 4000-char cap, and no diagnosis at all reached the only step that
+ *  reads one. The slice also defeated the ledger's own dedupe, which suppresses an entry only
+ *  on an exact text match and therefore missed every entry this block had cut mid-string.
+ *
+ *  Distinct from loadHonoredConstraints (a "do not revert" guard for the validator); this is
+ *  "already ruled out" context for the implementer. */
 export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
   if (ctx.round <= 0) return '';
-
-  // What earlier rounds established, read from the task ledger rather than from
-  // prior-round `task_steps.output`: _step-reset.ts nulls that column, so a task that
-  // was reset once lost every prior finding here. task_events survive the reset.
-  // Unchanged when no reset happened; strictly better after one.
-  const findingLines: string[] = [];
-  const changeLines: string[] = [];
-  for (const e of await loadLedgerEntries(ctx.db, ctx.taskId)) {
-    if (e.round >= ctx.round) continue;
-    const line = `- round ${e.round} (${e.stepId}): ${e.text}`;
-    if (e.kind === 'change') changeLines.push(line);
-    else findingLines.push(line);
-  }
 
   // Prior diagnoses (the defects earlier rounds were asked to fix), deduped by fingerprint
   // so a recurring complaint shows once. Earlier rounds only — the current round's defect
@@ -537,27 +540,32 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
     const fp = p.fingerprint ?? fixLoopFingerprint(p.sourceStepId ?? '', p.diagnosis ?? '');
     if (seenFp.has(fp)) continue;
     seenFp.add(fp);
-    const short = diag.length > 400 ? diag.slice(-400) : diag;
+    const short = diag.length > PRIOR_FIX_ENTRY_LIMIT ? diag.slice(-PRIOR_FIX_ENTRY_LIMIT) : diag;
     diagnosisLines.push(`- ${p.sourceStepId ?? 'downstream'} (round ${p.round}): ${short}`);
   }
 
-  if (changeLines.length === 0 && findingLines.length === 0 && diagnosisLines.length === 0) {
-    return '';
+  if (diagnosisLines.length === 0) return '';
+
+  const header = [
+    'Defects addressed in earlier rounds (background only — the current defect to fix is',
+    'stated above; do not repeat this diagnosis work, build on it):',
+  ].join('\n');
+
+  // Over budget: drop WHOLE oldest entries rather than slicing the joined block — a truncated
+  // diagnosis reads as a complete one, and the newest rounds are what this pass is downstream
+  // of. Rows arrive newest-first, so the tail is the oldest. Same shape, and the same reason,
+  // as augmentPromptWithLedger's budget loop.
+  const elision = (n: number): string =>
+    `- (${n} earlier diagnos${n === 1 ? 'is' : 'es'} omitted for length)`;
+  let kept = diagnosisLines;
+  let omitted = 0;
+  const size = (): number =>
+    header.length +
+    (omitted > 0 ? [...kept, elision(omitted)] : kept).reduce((n, l) => n + l.length + 1, 0);
+  while (kept.length > 1 && size() > PRIOR_FIX_BLOCK_LIMIT) {
+    kept = kept.slice(0, -1);
+    omitted++;
   }
 
-  const block = [
-    'WHAT EARLIER FIX ROUNDS ALREADY DID / RULED OUT (background only — the current defect to',
-    'fix is stated above; do not repeat this discovery work, build on it):',
-    changeLines.length > 0 ? ['Changes already made:', ...changeLines].join('\n') : '',
-    findingLines.length > 0
-      ? ['Environment / investigation already established:', ...findingLines].join('\n')
-      : '',
-    diagnosisLines.length > 0
-      ? ['Defects addressed in earlier rounds:', ...diagnosisLines].join('\n')
-      : '',
-  ]
-    .filter((s) => s.length > 0)
-    .join('\n\n');
-
-  return block.length > 4000 ? block.slice(0, 4000) : block;
+  return [header, ...(omitted > 0 ? [...kept, elision(omitted)] : kept)].join('\n');
 }
