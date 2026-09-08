@@ -34,6 +34,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `tidal-yielding-hoare` | Vote scoring for the runtime (DDEV) pool | **Shipped** `8b6b3a9` |
 | `valiant-dancing-parrot` | Task up/down vote scoring | **Shipped** `c4d9acb` |
 | `yielding-preempting-dijkstra` | Vote-driven agent-slot preemption | **Shipped** `19bf74e` |
+| `external-change-catchup` | KB + plan catch-up for commits made outside Haive | Not started; verified 2026-09-08 — KB, plan nodes and plan code links are all scoped to the current task, and no commit watermark exists anywhere in the tree |
 | `frictionless-bootstrapping-otter` | One-line install (RUN-IT) | Not started; extended 2026-09-07 with the install-time channel, macOS as a first-class RUN-IT target, and a Docker Desktop Extension as the no-terminal path |
 | `kind-riding-dream` | Deep project analysis — resellable module | Not started; depends optionally on `purring-marinating-peacock` phase 2b |
 | `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | Not started |
