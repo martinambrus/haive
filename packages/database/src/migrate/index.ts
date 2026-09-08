@@ -220,7 +220,11 @@ async function main(): Promise<number> {
       }
     }
 
-    await ensureJournal(sql);
+    // Only when it is actually absent. Re-running the CREATE ... IF NOT EXISTS is harmless but
+    // emits two `already exists, skipping` notices on every boot of every install, forever.
+    // Gated on the structural fact we already have — the classifier just read its columns —
+    // rather than by filtering the notice text, which is Postgres wording we do not own.
+    if (existingJournalColumns === null) await ensureJournal(sql);
 
     if (classification.kind === 'legacy') {
       const started = Date.now();
