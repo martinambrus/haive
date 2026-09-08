@@ -140,7 +140,6 @@ never touched. Never run `down -v` or `docker volume prune` against this stack.
 
 ```bash
 # Database
-pnpm db:generate    # drizzle-kit generate (writes new migration files)
 pnpm db:push        # drizzle-kit push (apply schema directly, dev only)
 pnpm db:studio      # drizzle-kit studio
 

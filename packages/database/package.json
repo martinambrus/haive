@@ -20,8 +20,6 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "generate": "drizzle-kit generate",
-    "migrate": "drizzle-kit migrate",
     "push": "drizzle-kit push",
     "studio": "drizzle-kit studio",
     "test": "vitest run --passWithNoTests",
