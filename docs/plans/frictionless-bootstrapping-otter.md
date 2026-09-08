@@ -87,7 +87,12 @@ sibling), or `npx create-haive`. All three do the same bootstrap:
    `docker-compose.yml` plus a `docker-compose.run.yml` overlay that references `image:` tags
    instead of `build:` contexts. NOT the source tree.
 4. Generate secrets into `.env`: `CONFIG_ENCRYPTION_KEY=$(openssl rand -hex 32)`, a random DB
-   password, SMTP left at Mailpit. This is the security-critical step — see below.
+   password, SMTP left at Mailpit. This is the security-critical step — see below. Write
+   `HAIVE_INSTALL_DIR_HOST=<the absolute install dir>` in the same file: the api hands that path to
+   `docker run -v` when it launches the updater, and the daemon resolves it on the HOST, so nothing
+   inside a container can work it out. Omitting it is not fatal — the in-app Upgrade button is
+   simply not offered and the admin page says which line is missing — but it is the difference
+   between an owner who can upgrade from the UI and one who needs a shell.
 5. GPU detection: probe for an NVIDIA runtime and select the GPU overlay; otherwise default to
    CPU, and default Ollama to a small local model or to cloud Ollama, so a laptop without a GPU
    still boots. (Mirror the GPU layering `scripts/dev.sh` already does.)

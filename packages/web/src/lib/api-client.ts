@@ -2312,3 +2312,68 @@ export interface StatsSteps {
 export async function getStatsSteps(params: StatsQueryParams = {}): Promise<StatsSteps> {
   return api.get<StatsSteps>(`/stats/steps${statsQueryString(params)}`);
 }
+
+/* ── Maintenance and upgrade (admin) ───────────────────────────────────────── */
+
+export type MaintenanceState = 'normal' | 'draining' | 'maintenance';
+
+/** A task still holding a maintenance window open. `hasLiveCli` is the distinction that decides
+ *  whether an operator waits or acts: a task with a running CLI is doing work, a parked one is
+ *  only holding its place. */
+export interface BlockingTask {
+  id: string;
+  title: string | null;
+  type: string;
+  status: string;
+  pausedAt: string | null;
+  currentStepId: string | null;
+  updatedAt: string;
+  ownerId: string | null;
+  ownerName: string | null;
+  ownerEmail: string | null;
+  hasLiveCli: boolean;
+}
+
+export interface BlockingResponse {
+  tasks: BlockingTask[];
+  total: number;
+  /** The listing is capped server-side. Rendered, because reading a truncated list as the whole
+   *  picture is how a drain gets forced with work still behind it. */
+  capped: boolean;
+}
+
+export interface UpgradeRun {
+  id: string;
+  from_version: string;
+  to_version: string;
+  phase: string;
+  status: string;
+  error: string | null;
+  started_at: string;
+  ended_at: string | null;
+}
+
+export interface UpgradeStatusResponse {
+  version: string;
+  canUpgrade: boolean;
+  devBuild: boolean;
+  installDirConfigured: boolean;
+  runs: UpgradeRun[];
+}
+
+export const maintenanceApi = {
+  get: () => api.get<{ state: MaintenanceState }>('/admin/maintenance'),
+  set: (state: MaintenanceState) =>
+    api.put<{ state: MaintenanceState; previous: MaintenanceState }>('/admin/maintenance', {
+      state,
+    }),
+  blocking: () => api.get<BlockingResponse>('/admin/maintenance/blocking'),
+  taskAction: (taskId: string, action: 'pause' | 'resume' | 'stop') =>
+    api.post<{ ok: boolean }>(`/admin/maintenance/tasks/${taskId}/action`, { action }),
+  upgradeStatus: () => api.get<UpgradeStatusResponse>('/admin/maintenance/upgrade'),
+  startUpgrade: (body: { version: string; force?: boolean; drainTimeoutSeconds?: number }) =>
+    api.post<{ started: boolean; from: string; to: string; container: string }>(
+      '/admin/maintenance/upgrade',
+      body,
+    ),
+};

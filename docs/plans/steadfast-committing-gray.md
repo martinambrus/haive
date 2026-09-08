@@ -1,10 +1,11 @@
 # steadfast-committing-gray — Core upgrade: release, transactional apply, maintenance mode
 
-> **PROPOSED, 2026-09-07. Slice 1 SHIPPED 2026-09-08; Slices 2-5 not started.** The migration
-> runner, the frozen baseline, the adoption classifier and the `data-migrations.ts` split are in the
-> tree and are the applier everywhere. Still absent: `git tag` returns zero tags,
-> `.github/workflows/ci.yml` publishes no images, `docker-compose.yml` gives api/worker/web no
-> `image:` tag, and there is no maintenance mode, no updater and no version stamp.
+> **PROPOSED, 2026-09-07. Slices 1-5 SHIPPED 2026-09-08.** The migration runner, the frozen
+> baseline, the adoption classifier and the `data-migrations.ts` split are the applier everywhere;
+> tagging a release publishes six multi-arch images and a manifest; maintenance mode, admin task
+> control, the updater and the version stamp are in the tree. An upgrade was exercised end to end
+> against a published install, in both directions — see Slice 5's As-built. The `.env` key
+> `HAIVE_INSTALL_DIR_HOST` is what an installer must write for the in-app trigger to be offered.
 >
 > Owns the follow-up `frictionless-bootstrapping-otter` named and deferred — "Auto-update of a
 > running install ... the pinned-tag compose bundle makes `haive upgrade` a later, well-defined
@@ -476,7 +477,7 @@ page — each appearing and clearing on the 15s poll with no reload.
 exactly as before.*
 
 - Updater image, journal table, advisory lock, the six phases, resume-or-reverse on restart.
-- Worker-spawn entry point and the host CLI entry point.
+- Host CLI entry point, and an in-app one so an upgrade does not require shell access.
 - **Call `runDestructiveDataMigrations(db)` at Phase 5**, after the health gate has passed and the
   upgrade is committed. It was exported by Slice 1 (`packages/worker/src/data-migrations.ts`) and is
   deliberately called by NOTHING until this slice — it reads as dead code in the meantime, so do not
@@ -518,9 +519,46 @@ rolled back, and both services returned reporting `0.1.0` with maintenance lifte
   stack instead of replacing the first.
 - The run overlay's default mailpit port self-collides: Haive pins DDEV's global mailpit to
   8025-8026, so any machine running Haive-managed DDEV already holds it.
-- The two proxy sidecars are profiled out of a published install until their images are published,
-  so the ollama-thinking and openrouter providers do not work there yet. A known gap, recorded in
-  the overlay itself rather than left to be discovered.
+- The proxy sidecars have to be PUBLISHED, not profiled out. They are runtime features — openrouter
+  traffic is rewritten by one, ollama's thinking control by the other — so an install without them
+  silently loses two providers. Both are in the release matrix and pulled by the overlay.
+  `cli-sandbox` is the one service that stays profiled out, and it loses nothing: the worker builds
+  that image for itself at boot (`ensureSandboxCoreImage`), which is also what heals a pruned host.
+
+**The in-app trigger is on the API, not the worker, and the plan had that wrong.** Routing it
+through a BullMQ job would have put the trigger inside one of the processes the upgrade replaces:
+the worker is stopped and recreated in the same swap, so the job holding the upgrade would be
+killed partway through it. The api is replaced too, which is exactly why what it does is spawn a
+DETACHED container the daemon owns and then get out of the way — `POST /admin/maintenance/upgrade`
+awaits only the `docker run -d` CLIENT, so a bad tag, an unreachable registry or a missing socket
+comes back as a 502 instead of vanishing. Shelling out to docker from the api is the seam
+`lib/sandbox-kill.ts` already established against the same mounted socket.
+
+Four details that are load-bearing rather than stylistic:
+
+- **Secrets go by NAME, never by value.** `docker run -e DATABASE_URL` (no `=`) takes the value from
+  the CLIENT's environment — MEASURED — so the password and the master KEK never enter an argv that
+  `ps` and every failure message can read. That is the same leak Slice 5 already had to fix once
+  inside the updater; passing them as `-e KEY=value` here would have reintroduced it one layer up.
+- **The updater image is the TARGET release's**, not the running one's: the new release is what
+  knows how to reach itself. `docker run` pulls it, so a version with no published updater fails
+  before anything is held.
+- **No `--rm`.** The api is replaced mid-run, so the container's own log is the only narrative an
+  operator has when an upgrade goes wrong, and a self-deleting container takes it with it. One
+  stopped container per upgrade is a cheap price for `docker logs`.
+- **`HAIVE_INSTALL_DIR_HOST` gates the feature and is never inferred.** The api hands that path to
+  `docker run -v`, which the daemon resolves on the HOST, so `process.cwd()` or `$PWD` would
+  silently bind-mount the wrong directory — the identical mistake that put the first snapshot on the
+  wrong filesystem. Unset, `GET /admin/maintenance/upgrade` reports `canUpgrade: false` and the page
+  says which line to add; a dev checkout is reported separately, because "there is no release to
+  swap to" and "this install was not told where it lives" have different fixes.
+
+The admin surface is its own page (`/admin/maintenance`) rather than another card on `/admin`,
+which is already 2,500 lines: state control, the blocking-work list with per-task pause/resume/stop,
+the version field, and the `upgrade_runs` history. It stays reachable under full maintenance because
+`maintenanceGate` lets admins through — locking the door with the key inside is the failure that
+list exists to prevent. The drain banner points here rather than at `/admin`, since this is where
+the controls now are.
 
 ## Verification
 

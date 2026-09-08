@@ -58,8 +58,8 @@ export function MaintenanceNotice({
             New tasks cannot be started. Work already running will finish normally.
           </span>
           {role === 'admin' && (
-            <Link href="/admin" className="font-semibold text-amber-100 underline">
-              Manage in admin settings
+            <Link href="/admin/maintenance" className="font-semibold text-amber-100 underline">
+              Manage maintenance
             </Link>
           )}
         </div>

@@ -1052,11 +1052,18 @@ export default function AdminPage() {
             User management and system health. Requires an admin role.
           </p>
         </div>
-        <Link href="/admin/audit">
-          <Button variant="secondary" size="sm">
-            Audit log
-          </Button>
-        </Link>
+        <div className="flex gap-2">
+          <Link href="/admin/maintenance">
+            <Button variant="secondary" size="sm">
+              Maintenance &amp; upgrade
+            </Button>
+          </Link>
+          <Link href="/admin/audit">
+            <Button variant="secondary" size="sm">
+              Audit log
+            </Button>
+          </Link>
+        </div>
       </div>
 
       <FormError message={error} />
