@@ -10,6 +10,12 @@
 > as a first-class RUN-IT target with its arch and GPU limits, and the no-terminal path — a Docker
 > Desktop Extension, with a downloadable double-click installer rejected on evidence. The shape of
 > the command and the security rules are unchanged.
+>
+> Extended again 2026-09-08: `--version` (install ANY published release, alias resolved then PINNED
+> so an install cannot drift onto a moving tag), and the prerequisites policy — checked and
+> instructed, never installed. Also records why two installs cannot yet share a machine. Images are
+> now real: `ghcr.io/<owner>/haive-{api,worker,web}`, public and multi-arch, first published as
+> v0.1.0 on 2026-09-08.
 
 ## The gap
 
@@ -66,8 +72,9 @@ steps "need no rebuild". Only a module contributing steps, routes or jobs does.
 sibling), or `npx create-haive`. All three do the same bootstrap:
 
 1. Preflight: Docker Engine + Compose v2 present and the daemon reachable; WSL2 when on Windows;
-   enough free RAM and disk for the stack's reserve budget. Fail with a specific fix per missing
-   prerequisite, never a stack trace.
+   enough free RAM and disk for the stack's reserve budget; and the REQUESTED VERSION actually
+   exists. Fail with a specific fix per missing prerequisite, never a stack trace — and fail here,
+   before any secret is generated or any image pulled, so a typo costs nothing.
 2. Pick an install dir (default `~/haive`), refuse to clobber a non-empty one without `--force`.
 3. Fetch the versioned compose bundle for the pinned release **on this install's CHANNEL**:
    `docker-compose.yml` plus a `docker-compose.run.yml` overlay that references `image:` tags
@@ -80,6 +87,51 @@ sibling), or `npx create-haive`. All three do the same bootstrap:
 6. `docker compose ... up -d`, pulling published images. Run the DB-migrate one-shot (the dev
    override already has this shape) before api/worker accept traffic.
 7. Wait for `/health`, then hand off to first-run setup (below) and open `http://localhost:3000`.
+
+### `--version` — any published release, resolved then PINNED
+
+`--version <v>` installs a specific release; without it the installer takes the newest stable one.
+It accepts an exact version (`0.1.0`) or an alias (`latest`, `next` for prereleases), and **an alias
+is resolved to a concrete version before anything is written**. What lands in `.env` is always
+`HAIVE_VERSION=0.1.0`, never `HAIVE_VERSION=latest`.
+
+That resolve-then-pin step is the whole point, not a detail. An install left pointing at a moving
+tag changes underneath its owner on the next `docker compose up` — a silent, unrequested upgrade
+with no migration gate, no snapshot and no health check, which is precisely what
+`steadfast-committing-gray` exists to prevent. It is also why `docker-compose.run.yml` gives
+`HAIVE_VERSION` no default and fails the command outright when it is unset.
+
+Installing an OLDER version is allowed and useful — reproducing a bug, or standing up a known-good
+baseline to upgrade FROM. `minFrom` governs upgrades between versions; it has nothing to say about
+which version a fresh install starts at.
+
+The requested version is verified to exist during preflight by fetching its release manifest. A
+version that does not resolve fails before secrets are generated or images pulled, rather than
+after — and the manifest is needed anyway, since it carries the image digests.
+
+### Prerequisites are CHECKED, never installed
+
+The installer does not install Docker, and that is a decision rather than an omission:
+
+- It is privileged and OS-specific — adding a package repository, `sudo`, and group membership that
+  needs a re-login before it takes effect.
+- On macOS and Windows it is Docker **Desktop**: a GUI application with a licence agreement that is
+  commercial above a company-size threshold. Nobody can accept that on the user's behalf, and a
+  script that tried would be doing something worse than failing.
+- A `curl | sh` that also installs a root-equivalent daemon is a far larger trust ask than one that
+  boots containers, and this plan already owes the user an honest disclosure about the Docker
+  socket. Silently installing the socket's daemon too is the wrong direction.
+- Docker publishes its own installer. Pointing at `https://get.docker.com` (or Docker Desktop for
+  macOS/Windows) hands the user the vendor's supported path instead of our approximation of it.
+
+So preflight detects and instructs: name the missing piece, the exact command or download for THIS
+platform, and stop. `--check` runs preflight alone and changes nothing, which is also what a support
+conversation should start with.
+
+**What is actually required is short, and worth stating positively:** Docker Engine and Compose v2,
+plus WSL2 on Windows. That is the entire list. No Node, no pnpm, no Postgres, no Redis — a RUN-IT
+install pulls images and runs them; every runtime dependency is inside one. A GPU is optional and
+its absence is a supported configuration, not a degraded one.
 
 ### The channel is an install-time parameter, not a later setting
 
@@ -256,6 +308,12 @@ system-wide; there is no package to purge and no host path outside the install d
    modules load (`GET /admin/modules/loaded` lists them); an own-module install pulls
    `haive-builder`, builds locally and boots those images; a channel that does not resolve fails at
    preflight and never falls back to `public`.
+10. Version: `--version 0.1.0` installs exactly that release and `.env` ends up holding `0.1.0`, not
+    an alias; `--version next` resolves a prerelease and still pins the concrete version it found; a
+    version that does not exist fails at preflight with nothing written and nothing pulled.
+11. Prerequisites: on a machine with no Docker, the installer names the missing piece and the exact
+    fix for that platform and stops, having changed nothing. `--check` does the same on a healthy
+    machine and reports it is ready.
 
 ## Out of scope
 
