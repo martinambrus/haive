@@ -124,7 +124,16 @@ explicitly.** `priorPassNotes` (08b) does it inside one step's loop and `loadPri
 share the same budget (400 chars per entry, 4000 per block). That dedupe collapses a verbatim
 repeat but NOT two rewordings of one finding — the same limit `review_findings` measured for
 prose keys — so the cap, not the dedupe, is what bounds a loop that keeps re-deriving itself.
-It also strips DIGITS, so two defects that differ only by a number are ONE entry.
+
+`contentFingerprint` normalises before hashing — uuids, PATHS (everything from the first
+slash) and all digits — so texts differing only in those are ONE entry. That is the intended
+behaviour and MEASURED it is not over-collapsing: across all 170 real ledger entries and
+diagnoses on the dev install it yields 148 fingerprints, 21 of the dupes byte-identical (the
+case it exists for) and exactly ONE pair with differing text — two 08b diagnoses identical
+apart from one filename in a "tests written" list, which is the same complaint. NO collision
+came from the digit rule. Write test seeds accordingly: short strings differing only by a
+number (`defect 1`, `defect 2`) all collapse to one entry, which real ~3000-char diagnosis
+prose does not do.
 
 **Two background blocks reach the fix prompt, and they carry different things on purpose.**
 `loadPriorFixContext` carries the DIAGNOSES; the workspace/tooling facts earlier rounds
