@@ -47,7 +47,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `rippling-wibbling-puffin` | Modular (user-definable) task types | Not started |
 | `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; companion to the above, neither supersedes the other |
 | `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started. Delivery to a published-image install DECIDED 2026-09-07: per-customer api+worker images built by the vendor; `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` inherit it |
-| `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | Not started; row verified against the tree 2026-09-07, later than this table's header date |
+| `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | **Slice 1 shipped** 2026-09-08 (migration runner, frozen baseline, adoption, data-migration split); Slices 2-5 not started |
 | `translator-module` | Translator — resellable module | Not started |
 
 ## Cross-plan dependencies

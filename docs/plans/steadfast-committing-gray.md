@@ -1,8 +1,10 @@
 # steadfast-committing-gray — Core upgrade: release, transactional apply, maintenance mode
 
-> **PROPOSED, 2026-09-07. Not started.** Nothing in this plan exists: `git tag` returns zero tags,
+> **PROPOSED, 2026-09-07. Slice 1 SHIPPED 2026-09-08; Slices 2-5 not started.** The migration
+> runner, the frozen baseline, the adoption classifier and the `data-migrations.ts` split are in the
+> tree and are the applier everywhere. Still absent: `git tag` returns zero tags,
 > `.github/workflows/ci.yml` publishes no images, `docker-compose.yml` gives api/worker/web no
-> `image:` tag, and no maintenance mode or migration runner is in the tree.
+> `image:` tag, and there is no maintenance mode, no updater and no version stamp.
 >
 > Owns the follow-up `frictionless-bootstrapping-otter` named and deferred — "Auto-update of a
 > running install ... the pinned-tag compose bundle makes `haive upgrade` a later, well-defined
@@ -22,9 +24,9 @@ upgrades Haive itself. Measured on the tree, 2026-09-07:
 | No published images | `ci.yml` has three jobs — `lint-typecheck-test:27`, `smokes:62`, `compose-boot:134`. Zero occurrences of `publish`, `ghcr`, `registry`, `build-push`. |
 | No image tags to swap | `docker-compose.yml:74,116,168` — api/worker/web are `build:` contexts only. `docker compose pull` has no target; no `docker-compose.run.yml` exists. |
 | No real version | `packages/shared/src/constants/index.ts:4` hardcodes `APP_VERSION = '0.1.0'`; all five package.json files say the same. `getHaiveVersion()` (`:12`) prefers a `HAIVE_VERSION` env whose comment says "CI release builds stamp this" — no job stamps it. `/health` (`api/src/index.ts:59`) returns `{status, service}` with no version. |
-| Schema applier is `push --force` | `docker-compose.dev.yml:62` and `ci.yml:122`: `pnpm --filter @haive/database push --force`. It synchronises the live DB to the schema barrel and will DROP a column removed from `packages/database/src/schema/`. |
-| The SQL files are not wired | 151 hand-written guarded migrations exist in `packages/database/src/migrations/`, but there is no `meta/_journal.json`, so the `migrate` script (`packages/database/package.json:24`) cannot run them. AGENTS.md calls them "a parity record". |
-| Migrator needs a source tree | the `db-migrate` service runs `pnpm install` into the bind-mounted repo. A published-image install has no source tree. |
+| Schema applier is `push --force` | `docker-compose.dev.yml:62` and `ci.yml:122`: `pnpm --filter @haive/database push --force`. It synchronises the live DB to the schema barrel and will DROP a column removed from `packages/database/src/schema/`. **As built (Slice 1):** fixed — the runner is the applier at both sites; `push` survives only as the interactive dev escape hatch. |
+| The SQL files are not wired | 151 hand-written guarded migrations exist in `packages/database/src/migrations/`, but there is no `meta/_journal.json`, so the `migrate` script (`packages/database/package.json:24`) cannot run them. AGENTS.md calls them "a parity record". **As built (Slice 1):** they never became the input — there is no genesis migration and 19 are unsafe to replay, so they moved to `migrations/pre-baseline/` and a generated `0000_baseline.sql` is the genesis. See Slice 1. |
+| Migrator needs a source tree | the `db-migrate` service runs `pnpm install` into the bind-mounted repo. A published-image install has no source tree. **As built (Slice 1):** the runner ships in the api and worker images and was verified building a database from inside one; the dev `db-migrate` service still installs, which is a dev-path cost only. |
 | No maintenance mode | `CONFIG_KEYS.GLOBAL_PAUSE` (`config.service.ts:95`, gate at `orchestrator/pause.ts:28`, read at `routes/system.ts:16`) is a queue hold plus a banner. It does not refuse task creation, does not 503, and does not stop anyone using the app. The four 503s in `api/src/routes/` are IDE start, VNC start and GitHub-OAuth-unconfigured. |
 
 ## The migration corpus is already transaction-clean
@@ -296,17 +298,42 @@ If the updater dies mid-swap, nothing else is alive to fix it.
 
 Each is independently reviewable, and each states its undo first.
 
-### Slice 1 — Migration runner + `data-migrations.ts` split
-*Rollback: delete the runner; `push --force` is untouched and still the applier. The split is a pure
-refactor with no behaviour change until Slice 4 calls the destructive half separately.*
+### Slice 1 — Migration runner + `data-migrations.ts` split — **SHIPPED**
+*Rollback: delete the runner and restore the two `push --force` command strings.*
 
-- `schema_migrations` table; runner applying `packages/database/src/migrations/*.sql` in order, one
+- `schema_migrations` table; runner applying `packages/database/migrations/*.sql` in order, one
   transaction per file, checksum-recorded, with the `-- haive:no-transaction` escape and its
   fail-loud guard.
 - Split `runDataMigrations` into convergent (boot) and destructive (post-commit), with a declared
   kind per entry and no default.
-- Verify: the runner applies all 151 files to an empty DB and produces a schema byte-identical to
-  `push --force` output; a re-run applies nothing; an edited applied file fails hard.
+
+**As built.** The original verification here was impossible and is corrected rather than left to
+mislead: *"the runner applies all 151 files to an empty DB and produces a schema byte-identical to
+`push --force`"*. Those files cannot build a database — **there is no genesis migration**. Nothing
+in the corpus creates `users`, `tasks`, `repositories`, `cli_providers`, `task_steps` or
+`cli_invocations`; only 17 tables are ever `CREATE TABLE`'d, and `0001` opens with `UPDATE tasks`.
+Replaying them is also unsafe: 19 of the (now 152) files are not re-runnable, `0006` would delete
+the live `grok` provider that `0116` re-added and narrow the enum back to five labels, and `0094`
+declares its own `UPDATE` a one-time backfill.
+
+So the runner starts from a **baseline squash**. `0000_baseline.sql` is generated by `drizzle-kit
+export --sql` — structurally the same differ `push` uses, against the same empty prior state — and
+the corpus moved to `migrations/pre-baseline/`, where nothing executes it. The proof is END-STATE
+equivalence (`scripts/schema-parity.sh`, a CI job), not a byte comparison of files, because the
+baseline legitimately falls behind the barrel as later migrations land. MEASURED: both paths produce
+identical 3512-line dumps.
+
+Existing databases are **adopted**, not replayed: a quorum over every table the baseline creates,
+with `legacy` also checked for column drift. Only the extremes are safe verdicts — a partial schema
+is what an interrupted `push` leaves behind and is refused outright.
+
+Two things the plan did not anticipate, both now handled: `drizzle-kit export` swallows its own
+errors and exits 0 with empty stdout, so the generator validates its output against the barrel's
+table and enum counts; and PG18's `pg_dump` emits a fresh random `\restrict` token per dump, which
+the parity filter must strip alongside the version banner.
+
+Verified: 53 unit tests, a 28-check live-Postgres smoke, and the runner building a database from
+inside the shipped api image with no source tree.
 
 ### Slice 2 — Version stamping + release manifest
 *Rollback: revert the constant and the CI step; images simply stop carrying a version, as today.*
