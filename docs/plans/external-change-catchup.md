@@ -1,7 +1,10 @@
 # External-change catch-up: KB and plan for commits Haive did not make
 
-> **Status — not started.** Verified against the tree on 2026-09-08. The gap is real and
-> the verification below is evidence-complete; nothing here is built.
+> **Status — shipped** `f177e2f` (slice 1), `e799f08` (slice 2), `7a01345` (slice 3),
+> `ca4b64b` (a defect found reviewing slice 2). Slice 4's per-step summary rides the
+> `summary` key on both apply outputs, which `resolveCuratedSummary` already lifts with no
+> CLI call; the repo-page drift badge is deferred as planned. Verified against the tree on
+> 2026-09-08.
 
 ## Context
 
@@ -70,8 +73,16 @@ prompt and running no agent. Slices 2 and 3 are each independently revertible.
 
 Two columns on `repositories`, both `varchar(40)` NULL, NULL meaning "never tracked":
 
-- `kb_synced_commit` — the last commit whose code has been folded into the knowledge base.
+- `kb_synced_commit` — the last commit whose code has been REVIEWED into the knowledge base.
 - `plan_synced_commit` — the same for the plan.
+
+**As built:** "reviewed", not "folded in", and the difference is a decline. A developer who
+is shown the commits and unticks the proposal has ruled on them, so the watermark advances;
+re-asking every future task about the same range is the nagging failure mode, and the step's
+own Retry is the escape hatch for the other reading ("the agent got it wrong"). What must
+never advance the watermark is a range that could not be MEASURED — `ExternalDrift.measured`
+carries that, because "nothing changed" and "we could not tell what changed" produce the same
+empty commit list and only one of them means the commits were seen.
 
 **Two columns rather than one, because they become true at different moments.**
 `plan_synced_commit` is stamped by the plan step's own `apply`: plan ops are database
@@ -92,8 +103,12 @@ HEAD: this task's own commits are not external, and merge-base is the ref
 paths, where HEAD does not.
 
 **Haive's own commits are excluded by sha**, as a guard behind the watermark rather than
-instead of it. `git rev-list <range>` minus the `tasks.commit_sha` and `tasks.squash_sha`
-recorded for this repository. The watermark alone handles the normal case; the exclusion
+instead of it. **As built:** three cleanup outcomes need three covers, and `--no-merges` on
+the log supplies one of them for free — an ordinary merge commit carries a sha nothing here
+records, and dropping merges removes it while leaving the feature commits beneath it, which
+`tasks.commit_sha` then catches. A squash is caught by `squashCommitSha`, which lives in
+`task_steps.merge_resolve_state` (jsonb) rather than the top-level `tasks.squash_sha` this
+plan assumed. A fast-forward is caught by `tasks.commit_sha`. The watermark alone handles the normal case; the exclusion
 covers the gaps it cannot — an abandoned task, a run with the switch off, a squash-merge
 that rewrote the shas. Keyed on recorded shas, never on the committer name, which is
 user-configurable and therefore ephemeral.
@@ -140,7 +155,17 @@ collapsed state stays per-gate). One checkbox, ticked by default, plus the edita
 
 - Declined → revert KB edits scoped to `KB_DIR` and do not stamp.
 - Accepted → **commit the KB edits immediately**, reusing a helper extracted from
-  `11b-kb-commit`'s staging path.
+  `11b-kb-commit`'s staging path (`_kb-commit.ts`, which also took ownership of the KB
+  revert so there is one destructive git path rather than two copies).
+
+**As built — a defect worth keeping:** the first version read and committed
+`ctx.workspacePath`, which is only the FALLBACK for a task with no worktree; `11b` and `11c`
+both resolve the worktree the long way from `01-worktree-setup`. Drift was therefore measured
+in the worktree while the commit looked at the parent checkout, so `git add` would find
+nothing and the agent's edits would sit uncommitted until `revertKbSync` destroyed them at
+index 11 — the exact failure this commit exists to prevent. Fixed by having
+`resolveExternalDrift` RETURN the tree it measured, so the range and the writes cannot refer
+to different trees.
 
 That commit is not tidiness. `11-phase-8-learning`'s `revertKbSync` runs
 `git checkout HEAD -- KB_DIR` plus `git clean -fdq -- KB_DIR` on the worktree when a user
@@ -167,6 +192,12 @@ detect, `preForm` proposal, a per-op tick list, `applyPlanPatch` with `origin: '
    cannot express this). That runs whether or not the agent runs or the user approves: link
    rot is a fact about the code, not a proposal about the plan.
 
+**As built:** `MAX_PROPOSED_OPS`, `proposedOps` and `describePlanOp` moved out of
+`11f-plan-reconcile` into `_plan-ops.ts`. Both steps put the same tick list in front of a
+person, and a second copy of `describePlanOp` is a second chance to label an op as something
+other than what ticking it does. `data-migrations.ts` imported both symbols from the step
+module and was repointed.
+
 `apply` stamps `plan_synced_commit`. It keeps `11f`'s decision not to set `marksReviewed` —
 an agent proposing a change is not an agent having reviewed the node against the code, and
 claiming otherwise clears the very drift warning this feature exists to raise.
@@ -174,7 +205,17 @@ claiming otherwise clears the very drift warning this feature exists to raise.
 ### Kill switch
 
 `CONFIG_KEYS.EXTERNAL_SYNC_ENABLED: 'config:workflow:externalSyncEnabled'`, `'true'` in
-`DEFAULT_CONFIG`, checked in both steps' `shouldRun`. Global only, no per-repository column:
+`DEFAULT_CONFIG`, checked in both steps' `shouldRun` (`01f` also honours
+`PLAN_CANVAS_ENABLED`, as `11f` does).
+
+**As built — registration is four surfaces, not one.** Beyond `registerWorkflowSteps`, both
+steps join `PLAN_TASKLIST_EXTRA` rather than the `SPINE`: the spine does no knowledge-base or
+plan work at all, so `quick_bugfix` carries the drift to the next task that can act on it
+instead of marking it reviewed. In `@haive/shared`, `CLI_DISPATCH_STEPS` is asserted at BOOT
+(`assertCliDispatchListInSync` throws inside `registerAllSteps`), so omitting an entry fails
+the worker at startup rather than in review; `SKIPPABLE_STEP_IDS` is not asserted, and
+omitting it there would have made `allowSkip: true` a lie, since that list is what renders the
+Skip button. Global only, no per-repository column:
 a repository nobody else touches produces an empty range and skips for free, so a per-repo
 switch would gate something that already costs nothing.
 
