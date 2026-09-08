@@ -38,6 +38,15 @@ services:
   api:
     build: !reset null
     image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-api:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    # docker-compose.yml publishes NOTHING — every port the dev stack exposes comes from the dev
+    # override, which a published-image install does not use. Without these the stack boots
+    # healthy and is completely unreachable, which is the worst kind of working.
+    #
+    # Only web, api and the mail sink. Postgres, Redis and Ollama stay internal: the dev override
+    # publishes them for host tooling, and an install that does not need that should not widen its
+    # surface to get it.
+    ports:
+      - '${HAIVE_API_PORT:-3001}:3001'
     depends_on:
       db-migrate:
         condition: service_completed_successfully
@@ -52,6 +61,19 @@ services:
   web:
     build: !reset null
     image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-web:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    # The browser runs on the HOST and calls the api directly, at the URL baked into the web image
+    # at build time (NEXT_PUBLIC_API_URL, default http://localhost:3001). So changing
+    # HAIVE_API_PORT away from 3001 needs a web image built for that port — the published one
+    # assumes the default. Documented rather than solved; a per-install web build is the fix, and
+    # it is the same constraint frictionless-bootstrapping-otter records.
+    ports:
+      - '${HAIVE_WEB_PORT:-3000}:3000'
     depends_on:
       db-migrate:
         condition: service_completed_successfully
+
+  # The install's own mail sink — password resets and notifications land here, so a self-hosted
+  # user needs to be able to read it.
+  mailpit:
+    ports:
+      - '${HAIVE_MAILPIT_PORT:-8025}:8025'

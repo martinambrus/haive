@@ -152,6 +152,30 @@ Sequencing: the one-liner ships first and is the documented path. The Extension 
 later piece of work that reuses the same compose bundle and the same first-run setup, adding a
 surface rather than a second installer.
 
+## Two installs on one machine — NOT possible today
+
+Worth stating before someone tries it, because the failure is not a clean refusal. Compose gives
+each project its own namespace, but this stack overrides that in three places, all of which are
+GLOBAL to the daemon:
+
+- every service sets an explicit `container_name` (`haive-api`, `haive-postgres`, …);
+- all three networks set an explicit `name:`;
+- six volumes set an explicit `name:` — including `haive_repos`.
+
+Containers and networks would collide, which is loud. The volumes would SILENTLY SHARE, which is
+not: a second install would mount the first one's cloned repositories and its worker would act on
+them. That is the part that makes "just try it" a bad idea.
+
+The fix, when it is wanted, is a per-INSTALL prefix (`${HAIVE_CONTAINER_PREFIX:-haive}`) across all
+three, defaulting to today's names so an existing install is byte-identical. **Not a version in the
+name** — the name must identify the install, not what it currently runs, or every upgrade renames
+every container and a rollback renames them back, breaking anything holding a name and cutting logs
+and monitoring in half at each release. The version already lives in the image tag and at
+`/version`, which is where a changing value belongs.
+
+Until then: to run a published install on a machine that has a dev stack, stop the dev stack first.
+Volumes survive `docker compose down`, so nothing is lost.
+
 ## First-run setup — the part that does not exist yet
 
 > Detailed in its own plan: `anointing-gatekeeping-ibex` (first-admin onboarding + registration
