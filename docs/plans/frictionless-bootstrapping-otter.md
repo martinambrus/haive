@@ -308,8 +308,17 @@ every container and a rollback renames them back, breaking anything holding a na
 and monitoring in half at each release. The version already lives in the image tag and at
 `/version`, which is where a changing value belongs.
 
-Until then: to run a published install on a machine that has a dev stack, stop the dev stack first.
-Volumes survive `docker compose down`, so nothing is lost.
+**RESOLVED 2026-09-08.** `lampson` S0-S3 shipped, so this is no longer a limitation: pass
+`--install-id <id>` (`-InstallId` on Windows) and the second install names its own containers,
+volumes, networks, images and databases. The installer writes it to `.env` as `HAIVE_INSTALL_ID`
+and uses it for `COMPOSE_PROJECT_NAME` too. Omitting it gives `haive`, which is byte-identical to
+what shipped — so an existing install is unchanged.
+
+One correction to the uninstall section below, forced by the same facts: `docker compose down -v`
+is WRONG while any install shares this machine. Five volumes carry an explicit global `name:`, so
+`-v` from one install takes the other's cloned repositories with it. The generated `uninstall.sh` /
+`uninstall.ps1` removes only the project-scoped volumes and NAMES the shared ones rather than
+touching them.
 
 ## First-run setup — the part that does not exist yet
 
