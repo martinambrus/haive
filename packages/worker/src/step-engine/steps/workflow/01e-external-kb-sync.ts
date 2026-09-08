@@ -174,7 +174,10 @@ export const externalKbSyncStep: StepDefinition<ExternalKbSyncDetect, ExternalKb
   async detect(ctx: StepContext): Promise<ExternalKbSyncDetect> {
     await ctx.emitProgress('Looking for commits made outside the workflow...');
     const drift = await resolveExternalDrift(ctx, 'kb');
-    const worktreePath = ctx.workspacePath;
+    // The tree the drift was MEASURED in, never ctx.workspacePath — that is only the
+    // fallback for a task with no worktree, and using it here would read and commit a
+    // different tree than the one the sandboxed agent edits.
+    const worktreePath = drift.worktreePath;
     const hasKbDir = await pathExists(path.join(worktreePath, KB_DIR));
     return {
       repositoryId: drift.repositoryId,

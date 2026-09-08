@@ -40,6 +40,13 @@ export interface ExternalCommit {
 
 export interface ExternalDrift {
   repositoryId: string | null;
+  /** The tree the range was measured in, and therefore the tree a caller must read and
+   *  write. Returned rather than re-resolved by each caller: `ctx.workspacePath` is only
+   *  the FALLBACK for a task with no worktree (11b and 11c both resolve it the long way),
+   *  so a step that used it directly would measure drift in the worktree and then commit
+   *  the parent checkout — finding nothing to commit and leaving the agent's edits for
+   *  `revertKbSync` to destroy at index 11. */
+  worktreePath: string;
   /** The commit this task branched from — the point drift is measured UP TO, and the
    *  value a step stamps once it has reviewed through it. Null when the range could not
    *  be resolved at all, which is the only state that means "this step cannot run". */
@@ -65,8 +72,9 @@ export interface ExternalDrift {
   measured: boolean;
 }
 
-const NOTHING: ExternalDrift = {
+const NOTHING: Omit<ExternalDrift, 'worktreePath'> & { worktreePath: string } = {
   repositoryId: null,
+  worktreePath: '',
   branchPoint: null,
   since: null,
   firstRun: false,
@@ -198,7 +206,11 @@ export async function resolveExternalDrift(
     where: eq(schema.tasks.id, ctx.taskId),
     columns: { repositoryId: true, worktreePath: true },
   });
-  if (!task?.repositoryId) return NOTHING;
+  // Resolved before the early return so every path reports the tree it looked at.
+  const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+  const wt = prev?.output as { worktreePath?: string; baseBranch?: string } | null;
+  const worktreePath = wt?.worktreePath ?? task?.worktreePath ?? ctx.workspacePath;
+  if (!task?.repositoryId) return { ...NOTHING, worktreePath };
   const repositoryId = task.repositoryId;
 
   const repo = await ctx.db.query.repositories.findFirst({
@@ -208,14 +220,12 @@ export async function resolveExternalDrift(
   const empty = (reason: string): ExternalDrift => ({
     ...NOTHING,
     repositoryId,
+    worktreePath,
     reason,
   });
 
   // 01-worktree-setup's own output carries the base branch; `tasks.worktree_path` is the
   // durable half and survives a Retry that nulls step output.
-  const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
-  const wt = prev?.output as { worktreePath?: string; baseBranch?: string } | null;
-  const worktreePath = wt?.worktreePath ?? task.worktreePath ?? ctx.workspacePath;
   const baseBranch = wt?.baseBranch ?? repo?.branch ?? null;
 
   const branchPoint = await resolveBranchPoint(worktreePath, baseBranch);
@@ -232,6 +242,7 @@ export async function resolveExternalDrift(
     return {
       ...NOTHING,
       repositoryId,
+      worktreePath,
       branchPoint,
       since: null,
       firstRun: true,
@@ -268,6 +279,7 @@ export async function resolveExternalDrift(
   const paths = [...new Set(kept.flatMap((c) => c.paths))];
   return {
     repositoryId,
+    worktreePath,
     branchPoint,
     since,
     firstRun: false,
@@ -298,7 +310,10 @@ export async function stampExternalWatermark(
 
 /** The commit list as prompt lines, with the omission stated the way `changedFilesBlock`
  *  states its own — a reader who is not told about a cap will assume there was none. */
-export function externalCommitBlock(drift: ExternalDrift): string {
+export function externalCommitBlock(drift: {
+  commits: readonly ExternalCommit[];
+  commitsOmitted: number;
+}): string {
   const lines = drift.commits.map((c) => `- ${c.sha.slice(0, 8)} ${c.subject}`);
   if (drift.commitsOmitted > 0) {
     lines.push(

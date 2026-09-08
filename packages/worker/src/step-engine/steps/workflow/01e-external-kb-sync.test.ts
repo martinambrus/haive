@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 import {
@@ -9,6 +9,26 @@ import {
   parseKbChanges,
   type ExternalKbSyncDetect,
 } from './01e-external-kb-sync.js';
+
+vi.mock('./_external-drift.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./_external-drift.js')>();
+  return {
+    ...actual,
+    resolveExternalDrift: vi.fn(async () => ({
+      repositoryId: 'r',
+      worktreePath: '/sentinel/worktree',
+      branchPoint: 'a'.repeat(40),
+      since: 'b'.repeat(40),
+      firstRun: false,
+      measured: true,
+      commits: [{ sha: 'cccccccc11', subject: 'teammate: add billing export' }],
+      changedPaths: ['src/billing/export.ts'],
+      commitsOmitted: 0,
+      pathsOmitted: 0,
+      reason: null,
+    })),
+  };
+});
 
 const made: string[] = [];
 afterEach(async () => {
@@ -180,5 +200,18 @@ describe('apply', () => {
     expect(out.decision).toBe('applied');
     expect(out.committed).toBe(false);
     expect(stamps).toHaveLength(1);
+  });
+});
+
+describe('detect', () => {
+  it('reads and writes the tree the drift was MEASURED in, not ctx.workspacePath', async () => {
+    // `ctx.workspacePath` is only the fallback for a task with no worktree (11b and 11c
+    // both resolve it the long way). Using it here would measure drift in the worktree and
+    // then commit the parent checkout — finding nothing to commit and leaving the agent's
+    // edits for 11-phase-8-learning's revertKbSync to destroy at index 11, which is the
+    // exact failure this step exists to prevent.
+    const out = await externalKbSyncStep.detect(ctx(fakeDb().db));
+    expect(out.worktreePath).toBe('/sentinel/worktree');
+    expect(out.worktreePath).not.toBe('/tmp');
   });
 });

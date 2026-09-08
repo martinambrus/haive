@@ -8,7 +8,7 @@ import {
   externalCommitBlock,
   parseCommitLog,
   resolveBranchPoint,
-  type ExternalDrift,
+  type ExternalCommit,
 } from './_external-drift.js';
 
 const exec = promisify(execFile);
@@ -128,16 +128,9 @@ describe('resolveBranchPoint', () => {
 });
 
 describe('externalCommitBlock', () => {
-  const drift = (over: Partial<ExternalDrift>): ExternalDrift => ({
-    repositoryId: 'r',
-    branchPoint: 'b',
-    since: 's',
-    firstRun: false,
+  const drift = (over: { commits?: ExternalCommit[]; commitsOmitted?: number }) => ({
     commits: [],
-    changedPaths: [],
     commitsOmitted: 0,
-    pathsOmitted: 0,
-    reason: null,
     ...over,
   });
 
