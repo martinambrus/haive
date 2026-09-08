@@ -818,6 +818,13 @@ export interface TaskListResponse {
   globalPause?: boolean;
 }
 
+/** GET /system/state — both system-wide holds in one read: the orchestrator pause and the
+ *  maintenance state. Readable by any signed-in user, for the same reason `/system/pause` is. */
+export interface SystemStateResponse {
+  globalPause: boolean;
+  maintenance: 'normal' | 'draining' | 'maintenance';
+}
+
 /** GET /system/pause — the global switch, readable by any signed-in user (the admin config
  *  route is admin-gated, and the app-wide banner has to render for everyone). */
 export interface SystemPauseResponse {

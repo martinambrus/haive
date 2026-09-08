@@ -93,6 +93,16 @@ export const CONFIG_KEYS = {
   // stays debuggable. Read per advance and per cli-exec pickup (~30s config cache), so a
   // flip needs no redeploy and no live-retune channel.
   GLOBAL_PAUSE: 'config:orchestrator:globalPause',
+  // System-wide maintenance state: 'normal' | 'draining' | 'maintenance'.
+  //
+  // DISTINCT from GLOBAL_PAUSE, which holds the orchestrator and shows a banner while everyone
+  // keeps using the app. This one is about people, not jobs:
+  //   draining     — everyone is told, new tasks are refused, in-flight work continues.
+  //   maintenance  — non-admin requests are refused outright; admin and the version endpoint the
+  //                  upgrade reads stay up, or nobody could lift it or verify the swap.
+  // Read on every api request through a ~30s config cache, so the normal state costs one cached
+  // read and no database work at all.
+  MAINTENANCE_STATE: 'config:system:maintenanceState',
   // Global opt-in (default OFF) for the 1-hour prompt-cache TTL on Claude-family CLI
   // steps. When 'true', cli-exec sets ENABLE_PROMPT_CACHING_1H=1 so API-key / Bedrock /
   // Vertex claude runs use the 1h cache TTL (subscription auth is already 1h
@@ -588,6 +598,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.MODEL_IDENTITY_STRICT]: 'false',
   [CONFIG_KEYS.FAIR_SCHEDULING_ENABLED]: 'true',
   [CONFIG_KEYS.GLOBAL_PAUSE]: 'false',
+  [CONFIG_KEYS.MAINTENANCE_STATE]: 'normal',
   [CONFIG_KEYS.PROMPT_CACHING_1H]: 'false',
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',

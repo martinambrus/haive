@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { SidebarNav } from '@/components/sidebar-nav';
 import { GlobalPauseBanner } from '@/components/global-pause-banner';
+import { MaintenanceNotice } from '@/components/maintenance-notice';
 import { StaleBuildBanner } from '@/components/stale-build-banner';
 import { CliLoginProvider } from '@/components/cli-login-provider';
 import { NotificationProvider } from '@/components/notifications/notification-provider';
@@ -81,7 +82,10 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
               banner included — out from under that bar. */}
           <StaleBuildBanner />
           <GlobalPauseBanner role={data.user.role} />
-          {children}
+          {/* Wraps rather than sits beside the others: under full maintenance a non-admin's
+              requests are being refused, so their page is REPLACED with an explanation instead
+              of left to fail every fetch behind a banner. Draining renders as a banner. */}
+          <MaintenanceNotice role={data.user.role}>{children}</MaintenanceNotice>
         </main>
       </div>
       <NotificationProvider />

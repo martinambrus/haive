@@ -86,6 +86,10 @@
     "./release": {
       "types": "./dist/release/index.d.ts",
       "import": "./dist/release/index.js"
+    },
+    "./system": {
+      "types": "./dist/system/index.d.ts",
+      "import": "./dist/system/index.js"
     }
   },
   "scripts": {

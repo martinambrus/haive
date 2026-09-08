@@ -1,6 +1,11 @@
+import type { MaintenanceState } from '@haive/shared';
+
 export type AppVariables = {
   userId: string;
   userRole: 'admin' | 'user';
+  /** Set by the maintenance gate on every request, so a handler can refuse new work while
+   *  draining without re-reading the config. */
+  maintenanceState: MaintenanceState;
 };
 
 export type AppEnv = {

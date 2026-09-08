@@ -40,6 +40,8 @@ import { installTerminalShellWebSocket } from './routes/terminal-shell.js';
 import { terminalSessionRoutes } from './routes/terminal-sessions.js';
 import { toolingRoutes } from './routes/tooling.js';
 import { versionRoutes } from './routes/version.js';
+import { maintenanceGate } from './middleware/maintenance.js';
+import { maintenanceRoutes } from './routes/maintenance.js';
 
 export function createApiApp(webOrigin: string): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -54,6 +56,11 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
       allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     }),
   );
+
+  // Before every route, and mounted ONCE rather than composed into each of the ~25 routers — a
+  // gate that must be remembered at every mount point is one that will be missed at one. In the
+  // normal state it costs a single cached config read and no database work.
+  app.use('*', maintenanceGate);
 
   app.onError(errorHandler);
 
@@ -84,6 +91,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/global-kb', globalKbRoutes);
   app.route('/terminal-sessions', terminalSessionRoutes);
   app.route('/admin', adminRoutes);
+  app.route('/admin/maintenance', maintenanceRoutes);
   app.route('/tooling', toolingRoutes);
   app.route('/repositories', upgradeRoutes);
   app.route('/repositories', toolingUpgradeRoutes);
