@@ -6,7 +6,7 @@ import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { defaultDockerRunner } from './sandbox/docker-runner.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
-import { describePlanOp, proposedOps } from './step-engine/steps/workflow/11f-plan-reconcile.js';
+import { describePlanOp, proposedOps } from './step-engine/steps/workflow/_plan-ops.js';
 
 const log = logger.child({ module: 'data-migrations' });
 

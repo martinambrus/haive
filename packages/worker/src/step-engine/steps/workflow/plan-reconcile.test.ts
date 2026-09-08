@@ -1,11 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import {
-  MAX_PROPOSED_OPS,
-  describePlanOp,
-  planReconcileStep,
-  proposedOps,
-  type PlanReconcileDetect,
-} from './11f-plan-reconcile.js';
+import { planReconcileStep, type PlanReconcileDetect } from './11f-plan-reconcile.js';
+import { MAX_PROPOSED_OPS, describePlanOp, proposedOps } from './_plan-ops.js';
 
 const KNOWN = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const titles = new Map([[KNOWN, 'Auth service']]);

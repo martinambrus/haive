@@ -37,38 +37,66 @@ export async function markPlanCodeLinksStale(
 
     const paths = task?.changedPaths ?? [];
     if (!task?.repositoryId || paths.length === 0) return { marked: 0 };
+    return markPlanCodeLinksStaleForPaths(db, task.repositoryId, paths);
+  } catch (err) {
+    logger.warn({ err, taskId }, 'plan code-link staleness pass failed (non-fatal)');
+    return { marked: 0 };
+  }
+}
 
-    // Scoped to paths this task actually touched, and to links that are not
-    // already flagged — re-flagging an old one would reset nothing and write for
-    // no reason.
+/**
+ * The same flagging, keyed on PATHS rather than on a task.
+ *
+ * The task-keyed form above cannot express the external case: commits that reached the
+ * repository without Haive making them belong to no task, so there is no `changedPaths`
+ * to read. Link rot does not care who wrote the commit — a file that moved, split, or
+ * stopped doing the thing invalidates the evidence either way — so 01f-external-plan-sync
+ * flags from the external diff before it proposes anything.
+ *
+ * Deliberately runs whether or not the agent runs and whether or not the developer
+ * approves a single proposal: staleness is a FACT about the code, while a plan patch is a
+ * proposal about the plan. The flag is still cleared only by re-assertion, never by time.
+ *
+ * Best-effort, for the same reason: this is telemetry about confidence and must never fail
+ * the step that triggered it.
+ */
+export async function markPlanCodeLinksStaleForPaths(
+  db: Database,
+  repositoryId: string,
+  paths: readonly string[],
+): Promise<{ marked: number }> {
+  if (paths.length === 0) return { marked: 0 };
+  try {
+    // Scoped to the paths that actually changed, and to links that are not already
+    // flagged — re-flagging an old one would reset nothing and write for no reason.
     const marked = await db.transaction(async (tx) => {
       const rows = await tx
         .update(schema.planNodeCodeLinks)
         .set({ stale: true, updatedAt: new Date() })
         .where(
           and(
-            eq(schema.planNodeCodeLinks.repositoryId, task.repositoryId!),
-            inArray(schema.planNodeCodeLinks.repoPath, paths),
+            eq(schema.planNodeCodeLinks.repositoryId, repositoryId),
+            inArray(schema.planNodeCodeLinks.repoPath, [...paths]),
             eq(schema.planNodeCodeLinks.stale, false),
           ),
         )
         .returning({ id: schema.planNodeCodeLinks.id });
-      if (rows.length > 0) await markPlanMirrorDirty(tx, task.repositoryId!);
+      if (rows.length > 0) await markPlanMirrorDirty(tx, repositoryId);
       return rows;
     });
 
     if (marked.length > 0) {
       logger.info(
-        { taskId, repositoryId: task.repositoryId, marked: marked.length },
-        'plan code links marked stale for paths this task changed',
+        { repositoryId, marked: marked.length },
+        'plan code links marked stale for changed paths',
       );
-      await flushPlanMirrorForRepository(db, task.repositoryId).catch((err) => {
-        logger.warn({ err, repositoryId: task.repositoryId }, 'stale-link mirror refresh failed');
+      await flushPlanMirrorForRepository(db, repositoryId).catch((err) => {
+        logger.warn({ err, repositoryId }, 'stale-link mirror refresh failed');
       });
     }
     return { marked: marked.length };
   } catch (err) {
-    logger.warn({ err, taskId }, 'plan code-link staleness pass failed (non-fatal)');
+    logger.warn({ err, repositoryId }, 'plan code-link staleness pass failed (non-fatal)');
     return { marked: 0 };
   }
 }

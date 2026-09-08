@@ -69,6 +69,9 @@ const PLAN_TASKLIST_EXTRA: readonly string[] = [
   // simply absent and the watermark does not move, so the drift is carried to the next
   // task that can act on it rather than silently marked reviewed.
   '01e-external-kb-sync',
+  // Same membership as 11f-plan-reconcile, whose plan and node set it shares. quick_bugfix
+  // reconciles no plan at all, and spending an agent there is not worth it.
+  '01f-external-plan-sync',
   '03-phase-0a-discovery',
   '04-phase-0b-pre-planning',
   '04a-spec-audit',

@@ -172,6 +172,7 @@ export const STEP_MINING_SEATS: Record<string, readonly CliRoleDescriptor[]> = {
  *  `allowSkip: true` flags on StepDefinition metadata. */
 export const SKIPPABLE_STEP_IDS: readonly string[] = [
   '01e-external-kb-sync',
+  '01f-external-plan-sync',
   '03b-business-requirements',
   '06a-db-migrate',
   '11a-gate-4-push',
@@ -273,6 +274,7 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   { id: '00b-estimate', workflowType: 'workflow', title: 'Estimate effort' },
   { id: '01a-app-boot', workflowType: 'workflow', title: 'App boot' },
   { id: '01e-external-kb-sync', workflowType: 'workflow', title: 'Knowledge base catch-up' },
+  { id: '01f-external-plan-sync', workflowType: 'workflow', title: 'Plan catch-up' },
   {
     id: '03-phase-0a-discovery',
     workflowType: 'workflow',
