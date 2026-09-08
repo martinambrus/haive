@@ -369,14 +369,39 @@ Verified: an image built with `--build-arg HAIVE_VERSION=0.2.0-test` reports it 
 `isDevVersion()` is false; one built without reports `0.0.0-dev`. `/version` answers live with both
 services' versions and the migration head.
 
-### Slice 3 — CI publish + compose run overlay
+### Slice 3 — CI publish + compose run overlay — **SHIPPED (inert until a tag is pushed)**
 *Rollback: delete the release workflow and the overlay. Neither is referenced by the dev path.*
 
-- Tag-triggered workflow building and pushing multi-arch `ghcr.io/<org>/haive-{api,worker,web}` and
-  `haive-updater`, stamping `HAIVE_VERSION`, publishing the manifest, `next` channel for `-rc`.
+- Tag-triggered workflow building and pushing multi-arch `ghcr.io/<owner>/haive-{api,worker,web}`,
+  stamping `HAIVE_VERSION`, publishing the manifest, `next` channel for `-rc`.
 - `docker-compose.run.yml`: `image:` at pinned tags instead of `build:`.
-- Verify: a `v0.0.1-rc.1` tag publishes four images; the run overlay boots a stack from them with no
-  source tree; `docker history` shows no baked secret.
+
+**As built.** `haive-updater` is NOT built here — it does not exist until Slice 5, and publishing an
+empty image would be worse than not publishing one. Three things the plan did not specify:
+
+- **Native arm64 runners, not QEMU.** The repo is public, so GitHub's arm64 runners are free, and
+  emulating an arm64 pnpm install plus a Next build costs tens of minutes. arm64 is a requirement
+  rather than a nicety because `frictionless-bootstrapping-otter` made macOS first-class.
+- **The run overlay ADDS `db-migrate`.** `docker-compose.yml` has no migration step at all — the dev
+  stack gets one from the dev override — so a published-image install would have booted against an
+  unmigrated database. It runs the same runner from the api image, which already ships the corpus.
+  That closes the gap this plan lists under its own risks. `build: !reset null` is required, since
+  compose MERGES and an `image:` beside the base's `build:` would still build from a source tree the
+  install does not have.
+- **`HAIVE_VERSION` has no default in the overlay.** `${VAR:?message}` fails the command rather than
+  resolving `latest`, because which version an install runs is what every upgrade and rollback turns
+  on.
+
+**A bug caught by testing, worth keeping.** `minFrom` originally defaulted to the release version,
+which means only that release may upgrade to itself — every real upgrade refused, and it would have
+surfaced at the first one. The floor now defaults permissive (`0.0.0`) in the zod schema, with a
+regression test; safety against a destructive release comes from `contracts` and the snapshot, not
+from this field.
+
+Verified without publishing: actionlint clean on the workflow, the digest-merge and channel-tag
+shell logic simulated locally, the overlay refuses without a pinned version and resolves to
+pull-only with correct gating, and the generator's output parses against the schema it will be read
+with. The workflow fires ONLY on a `v*` tag, so nothing is published until someone pushes one.
 
 ### Slice 4 — Maintenance mode + admin task control
 *Rollback: the middleware is a no-op when the state is `normal`; revert leaves `GLOBAL_PAUSE`

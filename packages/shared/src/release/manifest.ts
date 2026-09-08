@@ -36,8 +36,15 @@ export const releaseManifestSchema = z.object({
    * a migration was destructive, or a data migration only runs on the way through. An upgrade that
    * skips a required stop is the failure this field exists to refuse, and it must be refused in
    * pre-flight where nothing has been touched yet.
+   *
+   * The default is PERMISSIVE, and that direction is deliberate. Refusing is usually the safe way
+   * to fail, but not here: a floor equal to the release itself means only that release may upgrade
+   * to itself, i.e. every real upgrade is refused. MEASURED — the generator originally defaulted
+   * this to the release version and a 0.1.0 install could not reach 0.2.0. Safety against a
+   * destructive release comes from `contracts` and the pre-flight snapshot, not from this field;
+   * this field only enforces stops a release has actually declared.
    */
-  minFrom: z.string().min(1),
+  minFrom: z.string().min(1).default('0.0.0'),
   /**
    * The highest migration id this release ships.
    *

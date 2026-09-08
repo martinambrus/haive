@@ -17,6 +17,18 @@ describe('parseReleaseManifest', () => {
     expect(m.images).toEqual({});
   });
 
+  // The floor defaults PERMISSIVE, and this is a regression test, not a preference. A floor equal
+  // to the release means only that release may upgrade to itself — every real upgrade refused. The
+  // generator shipped that default once and a 0.1.0 install could not reach 0.2.0.
+  it('defaults minFrom to a floor that does not block every upgrade', () => {
+    const { minFrom, ...withoutFloor } = { ...base, minFrom: undefined };
+    void minFrom;
+    const m = parseReleaseManifest(withoutFloor);
+    expect(m.minFrom).toBe('0.0.0');
+    expect(canUpgradeFrom('0.1.0', m)).toBe(true);
+    expect(canUpgradeFrom(m.version, m)).toBe(true);
+  });
+
   it('keeps per-customer channel and digests', () => {
     const m = parseReleaseManifest({
       ...base,

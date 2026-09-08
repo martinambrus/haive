@@ -1,0 +1,196 @@
+name: Release
+
+# The release event is a TAG, never a merge. Main takes dozens of commits a day against a single
+# branch, so making merge-to-main publish would mean either a release per commit or a second
+# long-lived branch nobody wants. Every push to main stays CI-gated and publishes nothing; pushing
+# `v0.2.0` is the whole release.
+#
+# The tag IS the version. Nothing in the tree carries a release number — `APP_VERSION` is the dev
+# sentinel — so there is no version-bump commit and no drift between five package.json files.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege at the top; the two jobs that need more opt in explicitly.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/haive
+
+jobs:
+  build:
+    name: Build ${{ matrix.service }} (${{ matrix.arch }})
+    # NATIVE runners per architecture, not QEMU. This repo is public, so GitHub's arm64 runners are
+    # free — and emulating an arm64 pnpm install and Next build costs tens of minutes where a native
+    # runner costs the same as amd64. macOS is a first-class RUN-IT target
+    # (frictionless-bootstrapping-otter), so arm64 is a requirement rather than a nicety.
+    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, worker, web]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # No login action: the CLI does it in one line with the token the job already has.
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        # Token via env, never interpolated into the command line, where `ps` would show it.
+        run: printf '%s' "$GH_TOKEN" | docker login "$REGISTRY" -u "$GH_ACTOR" --password-stdin
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: packages/${{ matrix.service }}/Dockerfile
+          target: production
+          platforms: linux/${{ matrix.arch }}
+          # HAIVE_VERSION is what getHaiveVersion() reports and what an upgrade compares against.
+          # web is deliberately NOT stamped: it renders the API's version, never its own.
+          build-args: |
+            HAIVE_VERSION=${{ github.ref_name }}
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.arch }}
+          # Pushed by digest with no tag, so the per-architecture images never appear as tags a
+          # user could pull by accident. The merge job below is what gives them a name.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Record the digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ matrix.service }}__${{ matrix.arch }}__${{ steps.build.outputs.digest }}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.service }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  merge:
+    name: Publish ${{ matrix.service }} manifest
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, worker, web]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-${{ matrix.service }}-*
+          merge-multiple: true
+          path: /tmp/digests
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        # Token via env, never interpolated into the command line, where `ps` would show it.
+        run: printf '%s' "$GH_TOKEN" | docker login "$REGISTRY" -u "$GH_ACTOR" --password-stdin
+
+      # A prerelease tag also gets `next`, a final one also gets `latest`. That is the RELEASE
+      # channel and is a different axis from the manifest's `channel` field, which names a
+      # per-customer image set (serialized-chasing-thacker). Do not conflate them.
+      - name: Create the manifest list
+        id: create
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          IMAGE="${REGISTRY}/${IMAGE_PREFIX}-${{ matrix.service }}"
+          case "$VERSION" in
+            *-*) CHANNEL_TAG=next ;;
+            *)   CHANNEL_TAG=latest ;;
+          esac
+          SOURCES=""
+          for f in /tmp/digests/${{ matrix.service }}__*; do
+            SOURCES="$SOURCES ${IMAGE}@$(basename "$f" | awk -F'__' '{print $3}')"
+          done
+          echo "sources:$SOURCES"
+          # shellcheck disable=SC2086
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VERSION}" \
+            --tag "${IMAGE}:${CHANNEL_TAG}" \
+            $SOURCES
+
+      # Log what landed. NOT a job output: a matrix job's outputs are overwritten by whichever leg
+      # finishes last, so only one of the three services would survive. The release job reads the
+      # digests back from the registry instead, which is the source of truth for what was published.
+      - name: Report the published digest
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          IMAGE="${REGISTRY}/${IMAGE_PREFIX}-${{ matrix.service }}"
+          DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{println .Manifest.Digest}}' | head -1)
+          echo "published ${IMAGE}:${VERSION} -> ${DIGEST}"
+
+  release:
+    name: Publish the release manifest
+    needs: merge
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creates the GitHub Release
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        # Token via env, never interpolated into the command line, where `ps` would show it.
+        run: printf '%s' "$GH_TOKEN" | docker login "$REGISTRY" -u "$GH_ACTOR" --password-stdin
+
+      - name: Build the release manifest
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          args=()
+          for svc in api worker web; do
+            IMAGE="${REGISTRY}/${IMAGE_PREFIX}-${svc}"
+            DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{println .Manifest.Digest}}' | head -1)
+            args+=("--${svc}" "${DIGEST}")
+          done
+          node scripts/build-release-manifest.mjs --version "${GITHUB_REF_NAME}" "${args[@]}" > release.json
+          cat release.json
+
+      # Attached to the Release rather than committed: the manifest describes a build, so it cannot
+      # exist before the tag it describes, and a release asset is immutable and fetchable at a
+      # stable URL — which is what `haive upgrade` needs.
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$VERSION" in
+            *-*) PRERELEASE=--prerelease ;;
+            *)   PRERELEASE= ;;
+          esac
+          # shellcheck disable=SC2086
+          gh release create "${GITHUB_REF_NAME}" release.json \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            $PRERELEASE

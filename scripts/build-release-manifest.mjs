@@ -63,9 +63,11 @@ const manifest = {
   version,
   channel: arg('channel', 'public'),
   builtAt: new Date().toISOString(),
-  // Declared, not inferred — see the schema. Defaults to this release, i.e. "no floor beyond the
-  // previous one", and a release that needs a stop bumps it explicitly.
-  minFrom: normalizeVersion(arg('min-from', version)),
+  // Declared, not inferred — see the schema. The default must be PERMISSIVE: `minFrom` is the
+  // lowest version that may upgrade directly to this one, so defaulting it to this release would
+  // mean only this release can upgrade to itself and every real upgrade is refused. A release that
+  // needs a required stop passes --min-from explicitly.
+  minFrom: normalizeVersion(arg('min-from', '0.0.0')),
   migrationHead,
   contracts: contracting.length > 0,
   images: Object.fromEntries(

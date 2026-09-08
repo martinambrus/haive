@@ -1,0 +1,57 @@
+# RUN-IT: boot Haive from PUBLISHED images, with no source tree and no build.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.run.yml up -d
+#
+# Layered over docker-compose.yml, which defines every service, its environment and its volumes.
+# This file changes exactly two things: where api/worker/web come from, and the fact that a
+# published-image install has to migrate its database before those three start.
+#
+# `build: !reset null` is required, not cosmetic. Compose MERGES overlays, so an `image:` alongside
+# the base's `build:` would still build from a source tree this install does not have. `!reset`
+# removes the key outright.
+#
+# HAIVE_VERSION pins the release and has no default on purpose: `${VAR:?message}` fails the command
+# with that message rather than silently resolving to `latest`, because "which version is this
+# install running" is the question every upgrade and rollback turns on. `haive upgrade` re-pins it
+# in `.env`, and rolling back is re-pinning the previous value.
+#
+# HAIVE_REGISTRY is overridable so a per-customer channel (see serialized-chasing-thacker) can point
+# at its own images without editing this file.
+
+services:
+  # Not in docker-compose.yml at all: the dev stack gets db-migrate from the dev override, so a
+  # published-image install would otherwise boot against an unmigrated database. It runs the same
+  # runner from the same api image — the corpus ships inside it — and api/worker/web wait for it.
+  db-migrate:
+    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-api:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    container_name: haive-db-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
+    command: ['node', 'packages/database/dist/migrate/index.js']
+    networks:
+      - haive-network
+    restart: 'no'
+
+  api:
+    build: !reset null
+    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-api:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: !reset null
+    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-worker:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+
+  web:
+    build: !reset null
+    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-web:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
