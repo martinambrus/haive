@@ -1250,6 +1250,22 @@ async function skipIssue(db: Database, issue: DagIssueRow): Promise<void> {
       updatedAt: new Date(),
     })
     .where(eq(schema.taskDagIssues.id, issue.id));
+  // The issue's code is now permanently out of the branch, and `resolution: 'skipped'` is
+  // read by nothing — not the merge filter (which tests for approved/completed instead), not
+  // the api, not the web app. Without a durable event, a spec delivered minus one issue
+  // leaves no trace a human can find after the run. 06c's degradedNote reports the set; this
+  // records WHEN each one was dropped.
+  await db.insert(schema.taskEvents).values({
+    taskId: issue.taskId,
+    taskStepId: null,
+    eventType: 'dag_issue.skipped',
+    payload: {
+      issueKey: issue.issueKey,
+      level: issue.level,
+      errorMessage: issue.errorMessage,
+      lastAdvisorAction: issue.lastAdvisorAction,
+    },
+  });
 }
 
 /** Fold one finished issue-advisor run into the issue + return the action taken

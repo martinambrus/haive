@@ -40,6 +40,7 @@ import {
   computeGlobalStepIndex,
   stepRegistry,
   registerAllSteps,
+  dagTimeoutInfo,
   miningTimeoutInfo,
   trailingTimeoutInfo,
   upsertRow,
@@ -941,8 +942,15 @@ async function handleResult(
       // trace the UI can act on: the hint below is written only on the failed branch, and
       // the "Retry with longer timeout" button is the only way to set an override. Record
       // it here so a step that finished incomplete can still be re-run with more time.
-      if (result.status === 'done' && stepDef.agentMining) {
-        const mined = await miningTimeoutInfo(db, result.row.id);
+      //
+      // `dagExecute` belongs here for the same reason and had been left out: with review on
+      // it skips an issue its coder could not finish and checkpoints the level, so a
+      // budget-killed coder also ends on this branch — same symptom, same remedy, and its
+      // own reader because the two fan-outs live in different tables.
+      if (result.status === 'done' && (stepDef.agentMining || stepDef.dagExecute)) {
+        const mined = stepDef.agentMining
+          ? await miningTimeoutInfo(db, result.row.id)
+          : await dagTimeoutInfo(db, result.row.id);
         if (mined.attempts > 0) {
           await db
             .update(schema.taskSteps)

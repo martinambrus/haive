@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
+import { logger } from '@haive/shared';
 import {
   parseCoderResult,
   issuePaths,
@@ -379,5 +380,76 @@ describe('review-loop prompts carry the spec', () => {
       expect(p).not.toContain('drop_criteria — dropping one');
       expect(p).not.toContain('The criteria are a summary');
     }
+  });
+});
+
+describe('06c-dag-execute apply: an issue dropped from the merge is disclosed', () => {
+  const applyCtx = (
+    plan: { id: string } | undefined,
+    issues: {
+      issueKey: string;
+      resolution: string | null;
+      errorMessage: string | null;
+      concerns: string | null;
+    }[],
+  ): StepContext =>
+    ({
+      taskId: 'task-1',
+      logger: logger.child({ test: '06c' }),
+      db: {
+        query: { taskDagPlans: { findFirst: async () => plan } },
+        select: () => ({ from: () => ({ where: async () => issues }) }),
+      },
+    }) as unknown as StepContext;
+
+  const detected = { mode: 'dag', issueCount: 3, levelCount: 2 };
+
+  it('reports nothing when every issue was merged', async () => {
+    const out = await dagExecuteStep.apply(
+      applyCtx({ id: 'p1' }, [
+        { issueKey: 'ISSUE-001', resolution: 'approved', errorMessage: null, concerns: null },
+      ]),
+      { detected } as Parameters<typeof dagExecuteStep.apply>[1],
+    );
+    expect(out.degradedNote).toBeUndefined();
+    expect(out.dropped).toBeUndefined();
+  });
+
+  it('names a skipped issue — the replanner path that used to finish green', async () => {
+    // skipIssue writes `resolution: 'skipped'`, which nothing reads back, and the issue is
+    // then excluded from acceptedForMerge. Its code is not in the branch.
+    const out = await dagExecuteStep.apply(
+      applyCtx({ id: 'p1' }, [
+        { issueKey: 'ISSUE-001', resolution: 'approved', errorMessage: null, concerns: null },
+        {
+          issueKey: 'ISSUE-002',
+          resolution: 'skipped',
+          errorMessage: 'coder exhausted its infra retries',
+          concerns: null,
+        },
+        {
+          issueKey: 'ISSUE-003',
+          resolution: 'failed_unrecoverable',
+          errorMessage: null,
+          concerns: 'the API it needs does not exist yet',
+        },
+      ]),
+      { detected } as Parameters<typeof dagExecuteStep.apply>[1],
+    );
+    expect(out.dropped).toHaveLength(2);
+    expect(out.degradedNote).toContain('2 of 3 issue(s) were not implemented');
+    expect(out.degradedNote).toContain('ISSUE-002');
+    expect(out.degradedNote).toContain('exhausted its infra retries');
+    // `concerns` stands in when the row carries no error text.
+    expect(out.degradedNote).toContain('the API it needs does not exist yet');
+    expect(out.degradedNote).not.toContain('ISSUE-001');
+  });
+
+  it('reports the plain counts when the plan row is gone', async () => {
+    const out = await dagExecuteStep.apply(applyCtx(undefined, []), {
+      detected,
+    } as Parameters<typeof dagExecuteStep.apply>[1]);
+    expect(out.ran).toBe(true);
+    expect(out.degradedNote).toBeUndefined();
   });
 });

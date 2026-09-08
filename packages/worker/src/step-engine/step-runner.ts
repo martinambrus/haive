@@ -3433,6 +3433,46 @@ export async function miningTimeoutInfo(
   return { attempts, lastBudgetMinutes };
 }
 
+/** The same signal again, read from a step's DAG coder fan-out.
+ *
+ *  Neither sibling can answer this. `miningTimeoutInfo` reads `task_step_agent_minings`,
+ *  which a `dagExecute` step has no rows in; `trailingTimeoutInfo` does include
+ *  `dag_parallel` rows but reads them as a trailing CHAIN and `break`s at the first row that
+ *  is not a timeout — and a level runs N concurrent coders, reviewers and advisors whose
+ *  rows interleave, so one non-timeout among the newest ten reports zero. 06c has exactly
+ *  the budget-kill mode the fan-out steps have (a coder SIGKILLed at 30m, measured three
+ *  times on one issue) and was the only one with no route to the "Retry with longer
+ *  timeout" control.
+ *
+ *  Counted rather than chained, for the same reason as the mining version: these are
+ *  concurrent runs, not re-dispatches of one. The budget reported is the LARGEST any of them
+ *  died at, since that is the one the next run has to clear. */
+export async function dagTimeoutInfo(
+  db: Database,
+  taskStepId: string,
+): Promise<{ attempts: number; lastBudgetMinutes: number | null }> {
+  const rows = await db
+    .select({ errorMessage: schema.cliInvocations.errorMessage })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        eq(schema.cliInvocations.mode, 'dag_parallel'),
+      ),
+    );
+  let attempts = 0;
+  let lastBudgetMinutes: number | null = null;
+  for (const r of rows) {
+    if (!isCliTimeoutFailure({ errorMessage: r.errorMessage })) continue;
+    attempts += 1;
+    const minutes = cliTimeoutBudgetMinutes(r.errorMessage);
+    if (minutes !== null && (lastBudgetMinutes === null || minutes > lastBudgetMinutes)) {
+      lastBudgetMinutes = minutes;
+    }
+  }
+  return { attempts, lastBudgetMinutes };
+}
+
 /** The largest budget any EARLIER round of this (task, step) already proved it needed.
  *
  *  Reads both columns: a pin the user set on an earlier round is evidence just as much as a
