@@ -207,6 +207,30 @@ jobs:
           fi
           echo "ok: the published image reports $REPORTED"
 
+      # The web image must actually START. MEASURED on v0.1.0: it crash-looped with
+      # MODULE_NOT_FOUND because Next's standalone trace copied only the CJS half of
+      # @swc/helpers, and nothing had ever run the production stage — compose-boot builds
+      # `target: deps` and the dev stack bind-mounts full node_modules. A release that publishes a
+      # UI which cannot boot is worse than a release that fails.
+      - name: The published web image serves
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          docker run -d --name web-check -p 3999:3000 "${REGISTRY}/${IMAGE_PREFIX}-web:${VERSION}"
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://localhost:3999/login; then ok=1; break; fi
+            sleep 2
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::the published web image never served /login"
+            docker logs web-check 2>&1 | tail -40
+            docker rm -f web-check >/dev/null 2>&1 || true
+            exit 1
+          fi
+          docker rm -f web-check >/dev/null 2>&1 || true
+          echo "ok: the published web image serves /login"
+
       # Attached to the Release rather than committed: the manifest describes a build, so it cannot
       # exist before the tag it describes, and a release asset is immutable and fetchable at a
       # stable URL — which is what `haive upgrade` needs.
