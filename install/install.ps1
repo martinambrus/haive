@@ -30,6 +30,28 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+<#
+Run a native command without letting its stderr become a terminating error.
+
+Under `$ErrorActionPreference = 'Stop'` PowerShell turns ANY stderr output from a native
+executable into a NativeCommandError and aborts the script - even when the command succeeds.
+MEASURED: `docker info` prints "WARNING: No blkio throttle.read_bps_device support" on this
+machine and exit 0, and the installer died in preflight on a healthy Docker Desktop.
+
+Returns the exit code and leaves output on the caller's terms. Every native call in this script
+goes through here; `$ErrorActionPreference` stays Stop for real PowerShell errors.
+#>
+function Invoke-Native {
+  param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [switch]$Capture)
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    if ($Capture) { $out = & $Exe @Arguments 2>&1 | Out-String }
+    else          { & $Exe @Arguments 2>&1 | Out-Null; $out = '' }
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $out }
+  } finally { $ErrorActionPreference = $prev }
+}
+
 # Piped through `iex` there are no parameters, so the same options are readable from the
 # environment. `$env:HAIVE_INSTALL_VERSION='0.1.4'; irm ... | iex` works exactly like -Version.
 if (-not $Version -and $env:HAIVE_INSTALL_VERSION) { $Version = $env:HAIVE_INSTALL_VERSION }
@@ -65,8 +87,7 @@ function Test-Preflight {
     Write-Note "docker            found"
     # `docker info` is the only check that proves the ENGINE is up. Docker Desktop installs the
     # CLI whether or not the VM is running, so presence of the binary proves nothing.
-    docker info *> $null
-    if ($LASTEXITCODE -ne 0) {
+    if ((Invoke-Native docker @('info')).ExitCode -ne 0) {
       Write-Host "Missing: a reachable Docker daemon"
       Write-Host "  Docker Desktop is installed but not running. Start it from the Start menu and"
       Write-Host "  wait for the whale icon to stop animating, then re-run this."
@@ -77,20 +98,19 @@ function Test-Preflight {
   }
 
   if ($ok) {
-    docker compose version *> $null
-    if ($LASTEXITCODE -ne 0) {
+    if ((Invoke-Native docker @('compose','version')).ExitCode -ne 0) {
       Write-Host "Missing: Docker Compose v2"
       Write-Host "  'docker compose' (with a space) is required. Update Docker Desktop."
       $ok = $false
     } else {
-      Write-Note "docker compose    $(docker compose version --short 2>$null)"
+      Write-Note "docker compose    $((Invoke-Native docker @('compose','version','--short') -Capture).Output.Trim())"
     }
   }
 
   # Linux containers, not Windows containers: every image in the stack is a Linux image, and in
   # Windows-container mode the pull fails with a manifest error that names no cause.
   if ($ok) {
-    $os = (docker version --format '{{.Server.Os}}' 2>$null)
+    $os = (Invoke-Native docker @('version','--format','{{.Server.Os}}') -Capture).Output.Trim()
     if ($os -and $os -ne 'linux') {
       Write-Host "Docker Desktop is in $os-container mode."
       Write-Host "  Haive's images are Linux images. Right-click the Docker tray icon and choose"
@@ -132,6 +152,30 @@ function Resolve-HaiveVersion([string]$want) {
   return "v$want"
 }
 
+# ── Host ports ───────────────────────────────────────────────────────────────
+# Probed, not assumed. The defaults collide in practice rather than in theory: Haive pins DDEV's
+# global mailpit to 8025-8026, so a machine that has run a Haive-managed DDEV project already
+# holds the default mailpit port, and a second Haive install collides on all three.
+function Test-PortInUse([int]$port) {
+  try {
+    # The authority on Windows: it sees every listener, not only the containerised ones.
+    if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+      return [bool](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+    }
+  } catch { }
+  # Fallback for a stripped-down host: the collisions that actually happen here are with other
+  # containers, so docker's own published-port list catches them.
+  $ports = (Invoke-Native docker @('ps','--format','{{.Ports}}') -Capture).Output
+  return [bool]($ports -match "(^|[^0-9])$port->")
+}
+
+function Get-FreePort([int]$start) {
+  for ($p = $start; $p -lt ($start + 50); $p++) {
+    if (-not (Test-PortInUse $p)) { return $p }
+  }
+  Die "could not find a free port at or after $start after 50 tries. Free one, or install with -NoStart and set the port in .env."
+}
+
 function New-HexSecret([int]$bytes) {
   $b = New-Object byte[] $bytes
   [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
@@ -149,6 +193,27 @@ function Get-Bundle([string]$url, [string]$dest) {
 if (-not $InstallId) { $InstallId = 'haive' }
 if ($InstallId -notmatch '^[a-z0-9][a-z0-9_]*$') {
   Die "-InstallId must be [a-z0-9_] starting with a letter or digit, and was '$InstallId'."
+}
+
+# An install id that already owns state on this machine is refused, and this is the guard that
+# matters most. Postgres applies POSTGRES_PASSWORD only when it INITIALISES an empty data
+# directory, so a fresh install pointed at an existing volume does not re-key it - MEASURED on
+# Linux, the install failed with `password authentication failed` after silently adopting a
+# postgres volume created months earlier by another stack. The failure is the lucky outcome: had
+# the passwords matched, a "fresh install" would have come up on someone else's live database.
+$volumeNames = (Invoke-Native docker @('volume','ls','--format','{{.Name}}') -Capture).Output -split "`r?`n"
+$containerNames = (Invoke-Native docker @('ps','-a','--format','{{.Names}}') -Capture).Output -split "`r?`n"
+$existingVolume = $volumeNames -contains "${InstallId}_postgres_data"
+$existingApi    = $containerNames -contains "$InstallId-api"
+if ($existingVolume -or $existingApi) {
+  Die @"
+an install named '$InstallId' already has data on this machine.
+       Its Postgres volume (${InstallId}_postgres_data) or containers are still here, and a new
+       install would come up on that existing database rather than a fresh one.
+         - to run a SECOND Haive alongside it:   -InstallId <another-name>
+         - to reinstall this one from scratch:   remove its volumes first (see uninstall.ps1)
+         - to keep it and upgrade instead:       use the admin console's Maintenance page
+"@
 }
 
 Test-Preflight
@@ -197,6 +262,11 @@ Write-Note "compose bundle    docker-compose.yml + docker-compose.run.yml"
 # measured. Ollama runs on CPU; that is a supported configuration, not a degraded one.
 Write-Note "ollama            CPU"
 
+$webPort     = Get-FreePort 3000
+$apiPort     = Get-FreePort ($webPort + 1)
+$mailpitPort = Get-FreePort 8025
+Write-Note "ports             web $webPort, api $apiPort, mail $mailpitPort"
+
 $envPath = Join-Path $Dir '.env'
 if (-not (Test-Path $envPath)) {
   $key  = New-HexSecret 32
@@ -229,9 +299,9 @@ if (-not (Test-Path $envPath)) {
     "JWT_SECRET=$jwt"
     "POSTGRES_PASSWORD=$pgpw"
     ""
-    "HAIVE_WEB_PORT=3000"
-    "HAIVE_API_PORT=3001"
-    "HAIVE_MAILPIT_PORT=8025"
+    "HAIVE_WEB_PORT=$webPort"
+    "HAIVE_API_PORT=$apiPort"
+    "HAIVE_MAILPIT_PORT=$mailpitPort"
     ""
     "HOST_REPO_ROOT=$env:USERPROFILE"
     "HAIVE_INSTALL_DIR_HOST=$Dir"
@@ -332,15 +402,19 @@ if ($NoStart) {
 }
 
 Write-Step "Pulling images (this is the slow part)"
-docker compose -f docker-compose.yml -f docker-compose.run.yml pull --quiet
-if ($LASTEXITCODE -ne 0) { Pop-Location; Die "could not pull the images. Check your network and that the release exists." }
+$pull = Invoke-Native docker @('compose','-f','docker-compose.yml','-f','docker-compose.run.yml','pull','--quiet')
+if ($pull.ExitCode -ne 0) { Pop-Location; Die "could not pull the images. Check your network and that the release exists." }
 
 Write-Step "Starting Haive"
-docker compose -f docker-compose.yml -f docker-compose.run.yml up -d
-if ($LASTEXITCODE -ne 0) { Pop-Location; Die "the stack did not start. Look at the logs:  cd $Dir; .\haive.ps1 logs" }
+$up = Invoke-Native docker @('compose','-f','docker-compose.yml','-f','docker-compose.run.yml','up','-d') -Capture
+if ($up.ExitCode -ne 0) {
+  Write-Host $up.Output
+  Pop-Location
+  Die "the stack did not start. Look at the logs:  cd $Dir; .\haive.ps1 logs"
+}
 
 Write-Step "Waiting for the API"
-$port = 3001
+$port = $apiPort
 $healthy = $false
 for ($i = 0; $i -lt 120; $i++) {
   try {
@@ -355,9 +429,9 @@ Pop-Location
 Write-Host ""
 Write-Host "  Haive $pinned is running." -ForegroundColor Green
 Write-Host ""
-Write-Host "    Web       http://localhost:3000"
-Write-Host "    API       http://localhost:3001"
-Write-Host "    Mail      http://localhost:8025"
+Write-Host "    Web       http://localhost:$webPort"
+Write-Host "    API       http://localhost:$apiPort"
+Write-Host "    Mail      http://localhost:$mailpitPort"
 Write-Host "    Directory $Dir"
 Write-Host "    Install   $InstallId"
 Write-Host ""

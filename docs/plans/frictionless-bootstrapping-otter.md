@@ -1,5 +1,9 @@
 # One-line install for Haive
 
+> **The installer SHIPPED 2026-09-08** as `install/install.sh` and `install/install.ps1`, and was
+> exercised on both platforms against published images — see "As built" below. Still absent from
+> it: first-admin bootstrap (owned by `anointing-gatekeeping-ibex`) and non-public channels.
+>
 > Status: PROPOSED, 2026-08-25. Prompted by the DeepSeek `dsh` harness (harness.pdf), whose entire
 > install is `npx @deepseek-ai/dsh web` — a browser tab opens, asks for an API key, and a full
 > harness is running locally with no account and no cloud session. This plan asks what the
@@ -406,6 +410,48 @@ system-wide; there is no package to purge and no host path outside the install d
 11. Prerequisites: on a machine with no Docker, the installer names the missing piece and the exact
     fix for that platform and stops, having changed nothing. `--check` does the same on a healthy
     machine and reports it is ready.
+
+## As built — what running it on two platforms changed
+
+Verified 2026-09-08 against published v0.1.3/v0.1.4/v0.1.5 images: a Linux/WSL install, a
+PowerShell install on Windows, and a second Linux install running BESIDE a dev checkout. Three
+Haive installs coexisted on one machine, and the same daemon served all three — Docker Desktop's
+WSL2 integration means PowerShell and WSL drive ONE daemon (identical `docker info --format
+'{{.ID}}'`), so "a Windows install and a WSL install" are two installs on one daemon and it is
+`--install-id`, not the shell, that separates them.
+
+Three defects, none visible from reading the plan and each found by running it:
+
+- **The installer silently adopted another install's database.** Postgres applies
+  `POSTGRES_PASSWORD` only when it INITIALISES an empty data directory, so a fresh install pointed
+  at an existing `haive_postgres_data` does not re-key it. MEASURED: the install failed with
+  `password authentication failed for user "haive"` after adopting a volume created months earlier
+  by a dev stack — and the failure was the LUCKY outcome. Had the passwords matched, a "fresh
+  install" would have come up on someone else's live database, with their tasks, repositories and
+  secrets in it, and said nothing. Preflight now refuses an install id that already owns a Postgres
+  volume or an api container on this machine, and names `--install-id` as the fix.
+- **The default ports collide in practice, not in theory.** Haive pins DDEV's global mailpit to
+  8025-8026, so any machine that has run a Haive-managed DDEV project already holds the default
+  mailpit port — MEASURED, `ddev-router` publishing `127.0.0.1:8025-8026`, and the first install
+  attempt died on it. All three ports are probed now (`ss` where present, docker's published-port
+  list otherwise; `Get-NetTCPConnection` on Windows). The three installs took 3000/3001,
+  3002/3003 and 3004/3005 without being told to.
+- **PowerShell turns a native command's stderr into a terminating error** under
+  `$ErrorActionPreference = 'Stop'`, even when the command succeeds. MEASURED: `docker info` prints
+  `WARNING: No blkio throttle.read_bps_device support` and exits 0, and the installer died in
+  preflight on a perfectly healthy Docker Desktop. Every native call now goes through one
+  `Invoke-Native` helper that relaxes the preference and returns the exit code.
+
+Two things the plan flagged as unknown are now measured. `HOST_REPO_ROOT=C:\Users\<user>` works:
+`/host-fs` inside the container lists the real user profile, so the native Windows path form needs
+no translation for this mount. And a `C:\` install directory resolves correctly as a `docker run
+-v` bind mount, which is what the in-app updater hands the daemon — so the Windows upgrade
+plumbing is sound (`canUpgrade: true`, and the mount was verified directly).
+
+Verification items 1, 3, 5, 10 and 11 are met; 2 waits on first-admin bootstrap, 4 and 7-9 are
+untested (no non-NVIDIA-less host, no Mac, no non-public channel). One gap worth naming: a fresh
+install still opens to a login wall, because `POST /auth/setup` does not exist yet — every test
+above had to promote its first user with SQL.
 
 ## Out of scope
 

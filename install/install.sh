@@ -192,6 +192,39 @@ resolve_version() {
 
 # ── Install ──────────────────────────────────────────────────────────────────
 
+# ── Host ports ───────────────────────────────────────────────────────────────
+# Probed, not assumed. The defaults collide in practice rather than in theory: Haive pins
+# DDEV's global mailpit to 8025-8026, so any machine that has ever run a Haive-managed DDEV
+# project already holds this installer's default mailpit port — MEASURED, `ddev-router`
+# publishing 127.0.0.1:8025-8026. A second Haive install collides on all three.
+#
+# `ss` sees every listener, including non-docker ones, and is the authority where present.
+# Docker's own published-port list is the fallback, because the collisions that actually
+# happen here are with other containers. Neither present means no probe: compose then reports
+# the bind failure itself, which is a worse message but not a wrong outcome.
+port_in_use() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$" && return 0
+    return 1
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    docker ps --format '{{.Ports}}' 2>/dev/null | grep -qE "(^|[^0-9])$1->" && return 0
+  fi
+  return 1
+}
+
+# First free port at or after $1. Bounded so a pathological host fails loudly instead of looping.
+free_port() {
+  p=$1
+  n=0
+  while [ "$n" -lt 50 ]; do
+    port_in_use "$p" || { printf '%s' "$p"; return 0; }
+    p=$((p + 1))
+    n=$((n + 1))
+  done
+  die "could not find a free port at or after $1 after 50 tries. Free one, or pass the port explicitly in .env after installing with --no-start."
+}
+
 rand_hex() {
   # $1 = bytes
   if command -v openssl >/dev/null 2>&1; then
@@ -213,6 +246,27 @@ fetch() {
 case "$INSTALL_ID" in
   *[!a-z0-9_]*|[!a-z0-9]*|"") die "--install-id must be [a-z0-9_] starting with a letter or digit, and was '$INSTALL_ID'." ;;
 esac
+
+# An install id that already owns state on this machine is refused, and this is the guard that
+# matters most. Postgres applies POSTGRES_PASSWORD only when it INITIALISES an empty data
+# directory, so pointing a fresh install at an existing volume does not re-key it — MEASURED, the
+# install failed with `password authentication failed for user "haive"` after silently adopting a
+# `haive_postgres_data` created months earlier by a dev stack. The failure is the lucky outcome:
+# had the passwords matched, a "fresh install" would have come up on someone else's live database
+# with their tasks, repositories and secrets in it, and said nothing.
+existing_state() {
+  docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "${INSTALL_ID}_postgres_data" && return 0
+  docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${INSTALL_ID}-api" && return 0
+  return 1
+}
+if existing_state; then
+  die "an install named '${INSTALL_ID}' already has data on this machine.
+       Its Postgres volume (${INSTALL_ID}_postgres_data) or containers are still here, and a new
+       install would come up on that existing database rather than a fresh one.
+         - to run a SECOND Haive alongside it:   --install-id <another-name>
+         - to reinstall this one from scratch:   remove its volumes first (see its uninstall script)
+         - to keep it and upgrade instead:       use the admin console's Maintenance page"
+fi
 
 preflight
 [ "$CHECK_ONLY" -eq 0 ] || { say ""; say "--check: nothing was installed."; exit 0; }
@@ -281,6 +335,11 @@ elif [ -e /dev/dri/renderD128 ]; then
 fi
 say "  ollama            ${GPU_MODE}"
 
+WEB_PORT=$(free_port 3000)
+API_PORT=$(free_port "$((WEB_PORT + 1))")
+MAILPIT_PORT=$(free_port 8025)
+say "  ports             web ${WEB_PORT}, api ${API_PORT}, mail ${MAILPIT_PORT}"
+
 # Secrets. Generated per install and stored only here — a shipped default would mean every install
 # shared one encryption key and any user could decrypt any other's secrets.
 if [ ! -f .env ]; then
@@ -308,9 +367,9 @@ JWT_SECRET=${JWT}
 POSTGRES_PASSWORD=${PGPW}
 
 # Ports on the host. Change these if something already holds them.
-HAIVE_WEB_PORT=3000
-HAIVE_API_PORT=3001
-HAIVE_MAILPIT_PORT=8025
+HAIVE_WEB_PORT=${WEB_PORT}
+HAIVE_API_PORT=${API_PORT}
+HAIVE_MAILPIT_PORT=${MAILPIT_PORT}
 
 # Read-only view of your filesystem, used to import a repository that already exists on disk.
 # Written explicitly rather than defaulted: compose expands \${HOME}, which PowerShell does not
