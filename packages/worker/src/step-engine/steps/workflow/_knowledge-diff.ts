@@ -20,6 +20,11 @@ export const KNOWLEDGE_DIFF_ARTIFACT_NAME = 'learning-knowledge-diff.json';
  *  state, keyed on the basename, is per-gate. */
 export const KB_COMMIT_DIFF_ARTIFACT_NAME = 'kb-commit-diff.json';
 
+/** The same artifact for the external catch-up gate (01e-external-kb-sync). Its own name
+ *  for the same two reasons the commit gate has one: the three gates must not overwrite
+ *  each other's diff, and the web viewer's collapsed state is keyed on the basename. */
+export const EXTERNAL_KB_DIFF_ARTIFACT_NAME = 'external-kb-diff.json';
+
 /** Builds the knowledge diff and writes it to
  *  `<workspacePath>/.haive/learning-knowledge-diff.json`.
  *

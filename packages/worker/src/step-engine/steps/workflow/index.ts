@@ -9,6 +9,7 @@ import { installPluginsStep } from './01b-install-plugins.js';
 import { browserAccessStep } from './01d-browser-access.js';
 import { appBootStep } from './01a-app-boot.js';
 import { ddevEnvStep } from './01c-ddev-env.js';
+import { externalKbSyncStep } from './01e-external-kb-sync.js';
 import { preRagSyncStep } from './02-pre-rag-sync.js';
 import { phase0aDiscoveryStep } from './03-phase-0a-discovery.js';
 import { businessRequirementsStep } from './03b-business-requirements.js';
@@ -58,6 +59,7 @@ export {
   browserAccessStep,
   appBootStep,
   ddevEnvStep,
+  externalKbSyncStep,
   preRagSyncStep,
   phase0aDiscoveryStep,
   businessRequirementsStep,
@@ -108,6 +110,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(browserAccessStep);
   registry.register(appBootStep);
   registry.register(ddevEnvStep);
+  registry.register(externalKbSyncStep);
   registry.register(preRagSyncStep);
   registry.register(phase0aDiscoveryStep);
   registry.register(businessRequirementsStep);

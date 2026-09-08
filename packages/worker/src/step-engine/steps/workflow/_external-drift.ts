@@ -58,6 +58,11 @@ export interface ExternalDrift {
   pathsOmitted: number;
   /** Why there is nothing to review, for the step's own output. Null when there is. */
   reason: string | null;
+  /** The range was resolved AND read. False only where git could not answer at all, which
+   *  is the one outcome that must not advance a watermark: "nothing changed" and "we could
+   *  not tell what changed" produce the same empty commit list, and stamping the second
+   *  would mark commits reviewed that nobody ever saw. */
+  measured: boolean;
 }
 
 const NOTHING: ExternalDrift = {
@@ -70,6 +75,7 @@ const NOTHING: ExternalDrift = {
   commitsOmitted: 0,
   pathsOmitted: 0,
   reason: 'no repository',
+  measured: false,
 };
 
 async function git(cwd: string, args: string[]): Promise<string | null> {
@@ -230,9 +236,11 @@ export async function resolveExternalDrift(
       since: null,
       firstRun: true,
       reason: since ? 'the recorded watermark is no longer in this history' : null,
+      measured: true,
     };
   }
-  if (since === branchPoint) return { ...empty('no new commits'), branchPoint, since };
+  if (since === branchPoint)
+    return { ...empty('no new commits'), branchPoint, since, measured: true };
 
   const stdout = await git(worktreePath, [
     'log',
@@ -248,7 +256,12 @@ export async function resolveExternalDrift(
   const own = await haiveOwnShas(ctx.db, repositoryId);
   const external = parseCommitLog(stdout).filter((c) => !own.has(c.commit.sha));
   if (external.length === 0) {
-    return { ...empty('every commit in this range was made by Haive'), branchPoint, since };
+    return {
+      ...empty('every commit in this range was made by Haive'),
+      branchPoint,
+      since,
+      measured: true,
+    };
   }
 
   const kept = external.slice(0, MAX_EXTERNAL_COMMITS);
@@ -263,6 +276,7 @@ export async function resolveExternalDrift(
     commitsOmitted: external.length - kept.length,
     pathsOmitted: Math.max(0, paths.length - MAX_EXTERNAL_PATHS),
     reason: null,
+    measured: true,
   };
 }
 

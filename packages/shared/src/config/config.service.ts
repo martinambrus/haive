@@ -112,6 +112,15 @@ export const CONFIG_KEYS = {
   // forward walk for tasks already mid-flight.
   PLAN_CANVAS_ENABLED: 'config:plan:canvasEnabled',
 
+  // Catch-up for commits that reached a repository without Haive making them. Off makes
+  // 01e-external-kb-sync and 01f-external-plan-sync self-skip, which restores byte-identical
+  // prior behaviour: no extra prompt, no extra form, no watermark write. This is the
+  // rollback rather than unregistering the steps, because removing a registered step breaks
+  // the forward walk for tasks already mid-flight. Global only — a repository nobody else
+  // touches produces an empty commit range and skips for free, so a per-repo switch would
+  // gate something that already costs nothing.
+  EXTERNAL_SYNC_ENABLED: 'config:workflow:externalSyncEnabled',
+
   CLAWKER_BIN: 'config:sandbox:clawkerBin',
   SANDBOX_NETWORK: 'config:sandbox:network',
   // Global kill-switch for secret-file masking (hides deny-listed files from AI
@@ -585,6 +594,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',
   [CONFIG_KEYS.SANDBOX_NETWORK]: 'haive-network',
   [CONFIG_KEYS.PLAN_CANVAS_ENABLED]: 'true',
+  [CONFIG_KEYS.EXTERNAL_SYNC_ENABLED]: 'true',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.TEST_BROWSER_PROVISION_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',

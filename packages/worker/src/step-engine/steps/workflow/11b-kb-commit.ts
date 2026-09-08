@@ -1,28 +1,9 @@
-import { execFile } from 'node:child_process';
-import path from 'node:path';
-import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
-import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { KB_COMMIT_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
-import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
+import { KB_PATHSPECS, commitKnowledgeTrees, gitRun } from './_kb-commit.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
-
-const exec = promisify(execFile);
-
-const FALLBACK_GIT_IDENTITY = {
-  GIT_AUTHOR_NAME: 'Haive',
-  GIT_AUTHOR_EMAIL: 'worker@haive.local',
-  GIT_COMMITTER_NAME: 'Haive',
-  GIT_COMMITTER_EMAIL: 'worker@haive.local',
-};
-
-// Knowledge-base + learnings trees written by the learning phase (11). Both carry
-// durable knowledge that must travel ON the feature branch: committed here →
-// pushed (11a) → merged (12) → and so reaching a fresh clone (the file fallback
-// when another instance has no shared RAG/DB). Pathspecs are repo-relative.
-const KB_PATHSPECS = [KB_DIR, LEARNINGS_DIR] as const;
 
 const DEFAULT_KB_COMMIT_MESSAGE = 'docs: update knowledge base from workflow';
 
@@ -42,25 +23,6 @@ interface KbCommitApply {
   committed: boolean;
   commitSha: string | null;
   message: string;
-}
-
-async function gitRun(
-  cwd: string,
-  args: string[],
-  env?: Record<string, string>,
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, opts);
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
 }
 
 /** Resolve the worktree the learning phase wrote into (mirrors 10-gate-3-commit /
@@ -205,36 +167,19 @@ export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
     if (!args.detected.hasGit) {
       return { committed: false, commitSha: null, message: 'no git repo' };
     }
-    const workspace = args.detected.workspacePath;
-    // `git add` fatals on a pathspec that matches nothing (unlike `git status`), so
-    // stage only the KB trees that actually exist — a run may write knowledge_base
-    // without learnings, or vice versa.
-    const present: string[] = [];
-    for (const spec of KB_PATHSPECS) {
-      if (await pathExists(path.join(workspace, spec))) present.push(spec);
+    const result = await commitKnowledgeTrees({
+      workspace: args.detected.workspacePath,
+      message: (values.commitMessage ?? '').trim() || DEFAULT_KB_COMMIT_MESSAGE,
+      db: ctx.db,
+      userId: ctx.userId,
+      taskId: ctx.taskId,
+    });
+    if (result.committed) {
+      ctx.logger.info(
+        { commitSha: result.commitSha, message: result.message },
+        'knowledge-base commit finalised',
+      );
     }
-    if (present.length === 0) {
-      return { committed: false, commitSha: null, message: 'nothing to commit' };
-    }
-    const add = await gitRun(workspace, ['add', '--', ...present]);
-    if (add.code !== 0) {
-      throw new Error(`git add failed: ${add.stderr || add.stdout}`);
-    }
-    const message = (values.commitMessage ?? '').trim() || DEFAULT_KB_COMMIT_MESSAGE;
-    const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
-    const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-    const commit = await gitRun(workspace, ['commit', '-m', message], commitEnv);
-    if (commit.code !== 0) {
-      const stderr = commit.stderr || commit.stdout;
-      // KB files already clean (e.g. committed by an earlier retry) — not an error.
-      if (/nothing to commit/i.test(stderr)) {
-        return { committed: false, commitSha: null, message: 'nothing to commit' };
-      }
-      throw new Error(`git commit failed: ${stderr}`);
-    }
-    const sha = await gitRun(workspace, ['rev-parse', 'HEAD']);
-    const commitSha = sha.code === 0 ? sha.stdout.trim() : null;
-    ctx.logger.info({ commitSha, message }, 'knowledge-base commit finalised');
-    return { committed: true, commitSha, message };
+    return result;
   },
 };

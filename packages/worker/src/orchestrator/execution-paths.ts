@@ -64,6 +64,11 @@ const SPINE: readonly string[] = [
  *  the plan-approval gate; 06b/06c are the DAG tasklist + executor. Lighter than
  *  full: no 08d adversarial QA, no browser verify. */
 const PLAN_TASKLIST_EXTRA: readonly string[] = [
+  // Same membership as the KB steps it feeds (11, 11b), and for the same reason: this
+  // path does knowledge-base work, the spine does none. On quick_bugfix the catch-up is
+  // simply absent and the watermark does not move, so the drift is carried to the next
+  // task that can act on it rather than silently marked reviewed.
+  '01e-external-kb-sync',
   '03-phase-0a-discovery',
   '04-phase-0b-pre-planning',
   '04a-spec-audit',

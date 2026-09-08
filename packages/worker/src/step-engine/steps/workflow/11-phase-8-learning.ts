@@ -28,6 +28,7 @@ import {
 import { loadRepoStackAnchors, techAnchorFacets } from '../_repo-stack.js';
 import { buildTaskHistoryDigest, type TaskHistoryDigest } from './_task-history-digest.js';
 import { KNOWLEDGE_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
+import { revertKnowledgeBase } from './_kb-commit.js';
 import type { CommitDiffFile } from './_commit-diff.js';
 import {
   loadOutstandingLearningInstruction,
@@ -414,16 +415,6 @@ export function parseGlobalCandidates(raw: unknown): GlobalCandidate[] {
     out.push({ id, title, body, category, tech });
   }
   return out;
-}
-
-/** Discard the learning agent's structured-KB edits (Feature KB Sync) when the user
- *  rejects them: `checkout` restores tracked modifications + deletions, `clean` removes
- *  new files. Scoped to the knowledge-base root — investigations/ is written AFTER this
- *  and learnings live elsewhere, so neither is affected. Best-effort (a brand-new repo
- *  with no tracked KB makes checkout a no-op). */
-async function revertKbSync(worktree: string): Promise<void> {
-  await execFileP('git', ['-C', worktree, 'checkout', 'HEAD', '--', KB_DIR]).catch(() => undefined);
-  await execFileP('git', ['-C', worktree, 'clean', '-fdq', '--', KB_DIR]).catch(() => undefined);
 }
 
 interface ImplementOutput {
@@ -1407,7 +1398,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const kbHasChanges = (kbSync?.changes.length ?? 0) > 0;
     let kbReverted = false;
     if (kbHasChanges && values.keepKbSync === false) {
-      await revertKbSync(worktreePath);
+      await revertKnowledgeBase(worktreePath);
       kbReverted = true;
       ctx.logger.info({ files: kbSync!.changes.length }, 'feature KB sync reverted by reviewer');
     }
