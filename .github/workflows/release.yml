@@ -43,6 +43,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # `v0.1.0` the git tag, `0.1.0` the version. Everything downstream — the image tag, the
+      # release manifest — uses the stripped form, so the build arg must too. MEASURED on
+      # v0.1.0-rc.2: passing the raw ref stamped `v0.1.0-rc.2` into the image while the manifest
+      # said `0.1.0-rc.2`, and an upgrade comparing what came up against its target would have
+      # read that one character as a failed swap and rolled back a good release.
+      - name: Resolve the version
+        run: echo "HAIVE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Setup Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -65,7 +73,7 @@ jobs:
           # HAIVE_VERSION is what getHaiveVersion() reports and what an upgrade compares against.
           # web is deliberately NOT stamped: it renders the API's version, never its own.
           build-args: |
-            HAIVE_VERSION=${{ github.ref_name }}
+            HAIVE_VERSION=${{ env.HAIVE_VERSION }}
           cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.arch }}
           # Pushed by digest with no tag, so the per-architecture images never appear as tags a
@@ -182,6 +190,22 @@ jobs:
           done
           node scripts/build-release-manifest.mjs --version "${GITHUB_REF_NAME}" "${args[@]}" > release.json
           cat release.json
+
+      # The check that makes the stamp trustworthy rather than assumed. An upgrade decides whether
+      # a swap succeeded by comparing the version the new container REPORTS against its target, so
+      # a stamp that disagrees with the manifest by even one character turns a good release into a
+      # rollback. Cheap, and it runs against the artefact that was actually published.
+      - name: The published image reports the released version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          REPORTED=$(docker run --rm "${REGISTRY}/${IMAGE_PREFIX}-api:${VERSION}" \
+            node -e 'process.stdout.write(require("/app/packages/shared/dist/constants/index.js").getHaiveVersion())')
+          if [ "$REPORTED" != "$VERSION" ]; then
+            echo "::error::published image reports '$REPORTED' but this release is '$VERSION'"
+            exit 1
+          fi
+          echo "ok: the published image reports $REPORTED"
 
       # Attached to the Release rather than committed: the manifest describes a build, so it cannot
       # exist before the tag it describes, and a release asset is immutable and fetchable at a
