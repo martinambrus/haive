@@ -1,0 +1,25 @@
+{
+  "name": "@haive/updater",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drives a Haive upgrade from outside the stack it replaces",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@haive/database": "workspace:*",
+    "@haive/shared": "workspace:*",
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
+  }
+}
