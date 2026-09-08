@@ -335,13 +335,39 @@ the parity filter must strip alongside the version banner.
 Verified: 53 unit tests, a 28-check live-Postgres smoke, and the runner building a database from
 inside the shipped api image with no source tree.
 
-### Slice 2 — Version stamping + release manifest
-*Rollback: revert the constant and the CI step; images simply stop carrying a version, as today.*
+### Slice 2 — Version stamping + release manifest — **SHIPPED**
+*Rollback: revert the constant and the build args; images simply stop carrying a version, as today.*
 
-- `APP_VERSION` to `0.0.0-dev`; `HAIVE_VERSION` build arg threaded to env; `/version` endpoint on
-  api and worker reporting the running version and the migration head.
+- `APP_VERSION` to `0.0.0-dev`; `HAIVE_VERSION` build arg threaded to env; `/version` reporting the
+  running version and the migration head.
 - Release manifest schema + generator.
-- Verify: a locally built image reports `0.0.0-dev`; one built with the arg reports the tag.
+
+**As built.** Three departures, each forced by something the plan did not know:
+
+- **The worker has no HTTP surface** (no `listen()` anywhere in `index.ts`), so "a `/version`
+  endpoint on api and worker" is not buildable as written. The worker publishes
+  `{version, startedAt}` to a Redis key at every boot and the api's `/version` reports both. The
+  key deliberately carries NO TTL and is not a heartbeat: a worker that failed to restart leaves
+  the PREVIOUS version and an old `startedAt`, which is exactly the evidence a health gate needs,
+  where a TTL would erase it and read as "no worker" either way.
+- **`/version` is unauthenticated, beside `/health`**, because an upgrade must verify what came up
+  before and without any credential. `/health` cannot answer this — it returns a fixed
+  `{status, service}` and would report `ok` from a container still running the previous image.
+- **Changing the constant broke a user-visible surface the plan did not account for.**
+  `getHaiveVersion()` already feeds the repo upgrade banner, which renders `On v{installed} →
+  v{current}`; with the sentinel that reads `On v0.1.0 → v0.0.0-dev`, i.e. a downgrade. The banner
+  now renders `(dev build)` instead of a transition. `isDevVersion()` exists so no other surface
+  has to string-match the sentinel.
+
+The manifest carries one field the plan did not list: `contracts`. An additive-only release rolls
+back by re-pinning the previous tag and leaving the schema alone; one that removes something cannot,
+so the flag tells the upgrade its snapshot is load-bearing rather than insurance. The generator
+computes it from the corpus, ignoring `DROP`s that appear only in rollback comments — verified both
+ways. It also refuses to emit a manifest for the dev sentinel.
+
+Verified: an image built with `--build-arg HAIVE_VERSION=0.2.0-test` reports it and
+`isDevVersion()` is false; one built without reports `0.0.0-dev`. `/version` answers live with both
+services' versions and the migration head.
 
 ### Slice 3 — CI publish + compose run overlay
 *Rollback: delete the release workflow and the overlay. Neither is referenced by the dev path.*
@@ -375,7 +401,15 @@ exactly as before.*
 
 - Updater image, journal table, advisory lock, the six phases, resume-or-reverse on restart.
 - Worker-spawn entry point and the host CLI entry point.
-- Verify: the end-to-end matrix below.
+- **Call `runDestructiveDataMigrations(db)` at Phase 5**, after the health gate has passed and the
+  upgrade is committed. It was exported by Slice 1 (`packages/worker/src/data-migrations.ts`) and is
+  deliberately called by NOTHING until this slice — it reads as dead code in the meantime, so do not
+  delete it. Today it holds one entry, `dropHeadingOnlyGlobalKbChunks`, whose raw
+  `DELETE FROM ai_rag_embeddings` runs against the global KB store: a separate database, outside any
+  core-DB transaction and outside the Phase 2 snapshot. Running it before the gate is precisely the
+  case that makes a Phase 4 rollback restore old images onto data the new version already destroyed.
+- Verify: the end-to-end matrix below, plus — a rollback at Phase 4 leaves the destructive set
+  UNRUN, and a successful upgrade runs it exactly once.
 
 ## Verification
 

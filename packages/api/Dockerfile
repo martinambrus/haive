@@ -55,6 +55,11 @@ RUN pnpm --filter @haive/database build \
 
 FROM base AS production
 ENV NODE_ENV=production
+# Stamped by the release workflow from the git tag. Left EMPTY for an unstamped build, which
+# `getHaiveVersion()` then reports as DEV_VERSION rather than inventing a release number — an
+# upgrade compares this value to decide whether the new containers actually came up at the target.
+ARG HAIVE_VERSION=""
+ENV HAIVE_VERSION=$HAIVE_VERSION
 COPY --from=builder /app/package.json /app/pnpm-workspace.yaml /app/.npmrc ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages/shared/package.json ./packages/shared/

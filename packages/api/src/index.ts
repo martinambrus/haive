@@ -39,6 +39,7 @@ import { installTerminalWebSocket } from './routes/terminal.js';
 import { installTerminalShellWebSocket } from './routes/terminal-shell.js';
 import { terminalSessionRoutes } from './routes/terminal-sessions.js';
 import { toolingRoutes } from './routes/tooling.js';
+import { versionRoutes } from './routes/version.js';
 
 export function createApiApp(webOrigin: string): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -57,6 +58,9 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.onError(errorHandler);
 
   app.get('/health', (c) => c.json({ status: 'ok', service: 'haive-api' }));
+  // Unauthenticated, like /health, because an upgrade must verify what came up before any
+  // credential exists. See routes/version.ts.
+  app.route('/version', versionRoutes);
 
   app.route('/auth', authRoutes);
   app.route('/bundles', bundleRoutes);

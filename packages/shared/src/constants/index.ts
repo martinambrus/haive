@@ -1,19 +1,57 @@
 export * from './default-agent-rules.js';
 
 export const APP_NAME = 'Haive';
-export const APP_VERSION = '0.1.0';
 
 /**
- * Current Haive release version. Prefer `HAIVE_VERSION` env when set (CI
- * release builds stamp this) so staging/prod images can advertise a newer
- * version than the source-tree default. Callers should use `getHaiveVersion`
- * rather than reading process.env directly so web/API/worker stay aligned.
+ * What an UNSTAMPED build reports: a source checkout, a locally built image, anything CI did not
+ * stamp.
+ *
+ * Deliberately not a plausible release number. This value is what an upgrade compares against to
+ * decide whether a jump is legal and whether the new containers actually came up at the target,
+ * so a dev build claiming `0.1.0` is a WRONG ANSWER rather than a cosmetic placeholder — it would
+ * let an upgrade believe it had landed a release it never built. `0.0.0-dev` sorts below every
+ * real version and reads as what it is.
+ */
+export const DEV_VERSION = '0.0.0-dev';
+
+/** Kept as the historical alias. Prefer `getHaiveVersion()`, which honours the build stamp. */
+export const APP_VERSION = DEV_VERSION;
+
+/**
+ * The running Haive version.
+ *
+ * `HAIVE_VERSION` is stamped into the image at build time from the release tag (see the release
+ * workflow); with nothing stamped this is a dev build and says so.
+ * Callers should use this rather than reading `process.env` directly, so web, API and worker
+ * cannot disagree about what is running.
  */
 export function getHaiveVersion(): string {
   if (typeof process !== 'undefined' && process.env && process.env.HAIVE_VERSION) {
     return process.env.HAIVE_VERSION;
   }
-  return APP_VERSION;
+  return DEV_VERSION;
+}
+
+/** True when nothing stamped a release version into this build.
+ *
+ *  Worth testing rather than string-matching at each call site: a dev build has no meaningful
+ *  version to compare, so surfaces that render a version TRANSITION must not present it as one. */
+export function isDevVersion(version: string = getHaiveVersion()): boolean {
+  return version === DEV_VERSION;
+}
+
+/** Redis key where the worker publishes what it is running, at every boot.
+ *
+ *  The worker has no HTTP surface, so `GET /version` on the api cannot ask it directly — and an
+ *  upgrade has to verify that BOTH services came up at the target, not just the one that answers
+ *  HTTP. Deliberately carries no TTL and is not a heartbeat: it records the last boot, so a worker
+ *  that failed to start leaves the PREVIOUS version and an old `startedAt`, which is exactly the
+ *  evidence a health gate needs. A TTL would erase that and read as "no worker" either way. */
+export const WORKER_RUNTIME_VERSION_KEY = 'haive:runtime:worker';
+
+export interface WorkerRuntimeVersion {
+  version: string;
+  startedAt: string;
 }
 
 /** The bundled Ollama daemon (compose service `ollama`), as reached from inside the

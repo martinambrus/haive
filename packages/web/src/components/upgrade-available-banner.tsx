@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api-client';
 import { Badge, Button } from '@/components/ui';
+import { DEV_VERSION } from '@haive/shared/constants';
 
 interface UpgradeStatusBundleChange {
   bundleId: string;
@@ -104,11 +105,17 @@ export function UpgradeAvailableBanner({
   if (!status) return null;
   if (!status.isOnboarded) return null;
 
+  // A build CI never stamped reports the dev sentinel, which is not a release and must not be
+  // rendered as one: `On v0.2.0 -> v0.0.0-dev` reads as a downgrade when it only means "these
+  // artifacts were written by a released build and you are running from source".
+  const runningDevBuild = status.currentHaiveVersion === DEV_VERSION;
   const versionLine =
-    status.installedHaiveVersion && status.installedHaiveVersion !== status.currentHaiveVersion
+    status.installedHaiveVersion &&
+    status.installedHaiveVersion !== status.currentHaiveVersion &&
+    !runningDevBuild
       ? `On v${status.installedHaiveVersion} → v${status.currentHaiveVersion}`
       : status.installedHaiveVersion
-        ? `On v${status.installedHaiveVersion}`
+        ? `On v${status.installedHaiveVersion}${runningDevBuild ? ' (dev build)' : ''}`
         : null;
 
   if (status.hasUpgradeAvailable) {

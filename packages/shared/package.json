@@ -82,6 +82,10 @@
     "./fair-priority": {
       "types": "./dist/scheduling/fair-priority.d.ts",
       "import": "./dist/scheduling/fair-priority.js"
+    },
+    "./release": {
+      "types": "./dist/release/index.d.ts",
+      "import": "./dist/release/index.js"
     }
   },
   "scripts": {

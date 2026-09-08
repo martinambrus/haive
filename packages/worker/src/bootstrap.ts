@@ -5,10 +5,13 @@ import {
   userSecretsService,
   logger,
   CONFIG_KEYS,
+  getHaiveVersion,
+  WORKER_RUNTIME_VERSION_KEY,
+  type WorkerRuntimeVersion,
 } from '@haive/shared';
 import { waitForDatabaseReady } from '@haive/database';
 import { initDatabase } from './db.js';
-import { initRedis } from './redis.js';
+import { initRedis, getRedis } from './redis.js';
 import { runDataMigrations } from './data-migrations.js';
 import { syncTemplateManifestCache } from './step-engine/template-manifest.js';
 
@@ -49,6 +52,18 @@ export async function bootstrap(): Promise<BootstrapResult> {
 
   await syncTemplateManifestCache(db);
   await runDataMigrations(db);
+
+  // Publish what this worker is running, so `GET /version` on the api can report both services.
+  // Best-effort: failing to advertise a version must never stop the worker from doing its job.
+  try {
+    const runtime: WorkerRuntimeVersion = {
+      version: getHaiveVersion(),
+      startedAt: new Date().toISOString(),
+    };
+    await getRedis().set(WORKER_RUNTIME_VERSION_KEY, JSON.stringify(runtime));
+  } catch (err) {
+    logger.warn({ err }, 'could not publish worker runtime version');
+  }
 
   logger.info({ repoStoragePath, bundleStoragePath }, 'Worker bootstrap complete');
   return { databaseUrl, redisUrl, repoStoragePath, bundleStoragePath };
