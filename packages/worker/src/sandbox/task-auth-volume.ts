@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -15,7 +16,7 @@ import { expandTildeToSandbox } from './cli-auth-volume.js';
 import { buildMcpAddArgv, type McpServerSpec } from './mcp-config.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
-import { SANDBOX_USER_HOME } from './sandbox-runner.js';
+import { SANDBOX_USER, SANDBOX_USER_HOME } from './sandbox-runner.js';
 import { CLI_CREDENTIAL_FILES } from '../usage-window/credential-files.js';
 import { readVolumeFile } from '../usage-window/token-source.js';
 
@@ -80,6 +81,8 @@ const VOLUME_REMOVE_RETRIES = 5;
 const ensureVolumeRuns = new Map<string, Promise<void>>();
 const rtkSeedRuns = new Map<string, Promise<void>>();
 const cliMcpMergeRuns = new Map<string, Promise<void>>();
+const geminiMcpMergeRuns = new Map<string, Promise<void>>();
+const mcpFileWriteRuns = new Map<string, Promise<void>>();
 
 function coalesceAuthPreparation(
   runs: Map<string, Promise<void>>,
@@ -94,6 +97,84 @@ function coalesceAuthPreparation(
   });
   runs.set(key, tracked);
   return tracked;
+}
+
+/**
+ * What each preparation slot has already been APPLIED with: `scope` (task + provider +
+ * phase) -> the identity of the last preparation that SUCCEEDED there.
+ *
+ * Coalescing alone dedupes only CONCURRENT calls — the map entry is dropped when the
+ * promise settles — and a fan-out dispatches its agents seconds apart, so each sibling
+ * re-ran an identical root helper against a volume its predecessors were already reading.
+ * MEASURED on a 7-agent discovery fan-out: 6 rtk seeds and 6 MCP merges, one of which
+ * overlapped an agent's codex boot and killed it with `config.toml: Permission denied`.
+ *
+ * LAST-applied, not ever-seen: {@link mergeCliMcpIntoTaskVolume} RECONCILES (it removes
+ * every server named in the marker and re-adds the current set), so a surface that goes
+ * 4 -> 2 -> 4 must run all three times. An ever-seen cache would skip the third and leave
+ * the volume holding the wrong set.
+ *
+ * In-process, like the coalescing above and for the same reason: one worker owns a task
+ * (compose pins `container_name`, no replicas, and usage-poll/pr-poll already depend on
+ * it). A restart empties this and costs one extra helper run — the safe direction.
+ * Cleared per task by {@link clearTaskAuthPreparationState}.
+ */
+const appliedAuthPreparations = new Map<string, string>();
+
+/** Coalesce like {@link coalesceAuthPreparation}, and additionally SKIP a preparation whose
+ *  exact identity is the one already applied to that slot. `work` reports whether it
+ *  actually applied: a best-effort helper that logged and returned changed nothing, so the
+ *  slot is forgotten rather than recorded and the next caller tries again. */
+async function applyAuthPreparationOnce(
+  runs: Map<string, Promise<void>>,
+  scope: string,
+  key: string,
+  work: () => Promise<boolean>,
+): Promise<void> {
+  if (appliedAuthPreparations.get(scope) === key) return;
+  await coalesceAuthPreparation(runs, `${scope}|${key}`, async () => {
+    if (await work()) appliedAuthPreparations.set(scope, key);
+    else appliedAuthPreparations.delete(scope);
+  });
+}
+
+/** Forget every applied-preparation slot for one task. Called from the task-end funnel that
+ *  destroys the volumes themselves — the slots describe volumes that no longer exist. */
+export function clearTaskAuthPreparationState(taskId: string): void {
+  const prefix = `${taskId}|`;
+  for (const scope of appliedAuthPreparations.keys()) {
+    if (scope.startsWith(prefix)) appliedAuthPreparations.delete(scope);
+  }
+}
+
+/** Defines `$AS_NODE`, the privilege-drop prefix {@link asSandboxUser} expands to.
+ *
+ *  The helpers need root only to REPAIR a volume left root-owned by an older task, and they
+ *  used to do the whole job as root and chown back at the end — which leaves every file they
+ *  touch root-owned for as long as the payload runs. That is seconds for `rtk init` or a
+ *  string of `mcp add` calls, and a sibling agent booting in that window reads a config file
+ *  it cannot open. Repair first, drop privileges for the payload, keep the trailing chown as
+ *  a safety net.
+ *
+ *  Empty when `runuser` is absent, which restores the previous all-as-root behaviour exactly.
+ *  It ships with util-linux and is present in the sandbox image and everything composed from
+ *  it, but the merge helper runs in the TASK's image, which an operator can pin to anything —
+ *  and a merge that fails there costs the run its MCP servers. */
+const SANDBOX_USER_PREFIX_INIT = `if command -v runuser >/dev/null 2>&1; then AS_NODE="runuser -u ${SANDBOX_USER} --"; else AS_NODE=""; fi`;
+
+/** Run one command of a root helper's payload as the sandbox user. Unquoted on purpose:
+ *  `$AS_NODE` must word-split into argv, and is empty when the fallback above applies. */
+function asSandboxUser(command: string): string {
+  return `$AS_NODE ${command}`;
+}
+
+/** Repair pass for a volume an older task may have left root-owned; harmless otherwise. */
+function repairOwnership(path: string): string {
+  return `chown -R ${SANDBOX_UID}:${SANDBOX_GID} ${shellQuote(path)} 2>/dev/null || true`;
+}
+
+function contentKey(...parts: string[]): string {
+  return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 32);
 }
 
 /** Distinct exit code from the rtk seed helper script when the sandbox image
@@ -337,7 +418,9 @@ export function seedRtkInTaskVolume(
   providerName: CliProviderName,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<void> {
-  return coalesceAuthPreparation(rtkSeedRuns, `${taskId}:${providerName}`, () =>
+  // The seed writes the same thing every time for a given provider, so its identity is the
+  // slot itself: applied once per task, not once per invocation.
+  return applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|rtk|${providerName}`, 'seeded', () =>
     seedRtkInTaskVolumeUnlocked(taskId, providerName, runner),
   );
 }
@@ -346,16 +429,17 @@ async function seedRtkInTaskVolumeUnlocked(
   taskId: string,
   providerName: CliProviderName,
   runner: DockerRunner,
-): Promise<void> {
+): Promise<boolean> {
   const flag = rtkInitFlagFor(providerName);
   if (flag === undefined) {
     log.debug({ providerName }, 'rtk seed skipped: provider has no rtk-native flag');
-    return;
+    // Nothing to do for this provider, ever — record it so siblings do not re-derive it.
+    return true;
   }
   const meta = getCliProviderMetadata(providerName);
   if (meta.authConfigPaths.length === 0) {
     log.debug({ providerName }, 'rtk seed skipped: provider has no auth config paths');
-    return;
+    return true;
   }
 
   const mounts: DockerVolumeMount[] = meta.authConfigPaths.map((raw, idx) => ({
@@ -364,17 +448,19 @@ async function seedRtkInTaskVolumeUnlocked(
     readOnly: false,
   }));
 
-  // Run as root so we can write regardless of original volume ownership; chown
-  // back to 1000:1000 after so the CLI runtime (which runs as the node user)
-  // can read its own settings file. The missing-binary branch exits with a
-  // distinct code (RTK_HELPER_MISSING_BINARY_EXIT) so the worker can log
-  // "rtk binary missing" instead of falsely claiming success — that mistake
+  // The container is root so it can repair a volume an older task left root-owned, but the
+  // seed itself runs as the sandbox user — `rtk init` takes seconds and a sibling agent
+  // booting against root-owned config in that window dies on it (see asSandboxUser). The
+  // missing-binary branch exits with a distinct code (RTK_HELPER_MISSING_BINARY_EXIT) so the
+  // worker can log "rtk binary missing" instead of falsely claiming success — that mistake
   // hid stale per-CLI sandbox images during rtk integration testing.
   const flagArg = flag.length > 0 ? ` ${flag}` : '';
   const script =
+    `${SANDBOX_USER_PREFIX_INIT}; ` +
+    `${repairOwnership(SANDBOX_USER_HOME)}; ` +
     `command -v rtk >/dev/null 2>&1 || { echo "rtk: binary missing in sandbox image" >&2; exit ${RTK_HELPER_MISSING_BINARY_EXIT}; }; ` +
-    `HOME=/home/node rtk init -g --auto-patch${flagArg} || echo "rtk init exit=$?" >&2; ` +
-    `chown -R 1000:1000 /home/node 2>/dev/null || true`;
+    `${asSandboxUser(`env HOME=${shellQuote(SANDBOX_USER_HOME)} rtk init -g --auto-patch${flagArg}`)} || echo "rtk init exit=$?" >&2; ` +
+    `${repairOwnership(SANDBOX_USER_HOME)}`;
 
   const result = await runner.run({
     image: HELPER_IMAGE,
@@ -389,19 +475,22 @@ async function seedRtkInTaskVolumeUnlocked(
       { taskId, providerName },
       'rtk seed skipped: rtk binary missing in sandbox image — rebuild via pnpm sandbox:build and recompose per-CLI images',
     );
-    return;
+    // A missing binary will not appear mid-task; record it so the warning is logged once
+    // rather than once per invocation of the fan-out.
+    return true;
   }
   if (result.exitCode !== 0) {
     log.warn(
       { taskId, providerName, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
       'rtk seed helper exited non-zero',
     );
-    return;
+    return false;
   }
   log.info(
     { taskId, providerName, flag: flag.length > 0 ? flag : '<claude>' },
     'rtk seeded in task auth volume',
   );
+  return true;
 }
 
 /** Merge `mcpServers` into the gemini task auth volume's settings.json
@@ -415,28 +504,47 @@ async function seedRtkInTaskVolumeUnlocked(
  *  No-op when servers is empty. Best-effort: failures are logged and the
  *  spawn proceeds — the user sees the MCP-related error from the CLI rather
  *  than a hard worker failure. */
-export async function mergeGeminiMcpIntoSettings(
+export function mergeGeminiMcpIntoSettings(
   taskId: string,
   mcpServers: Record<string, unknown>,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<void> {
-  if (Object.keys(mcpServers).length === 0) return;
+  const content = JSON.stringify(mcpServers);
+  return applyAuthPreparationOnce(
+    geminiMcpMergeRuns,
+    `${taskId}|gemini-mcp`,
+    contentKey(content),
+    () => mergeGeminiMcpIntoSettingsUnlocked(taskId, mcpServers, content, runner),
+  );
+}
+
+async function mergeGeminiMcpIntoSettingsUnlocked(
+  taskId: string,
+  mcpServers: Record<string, unknown>,
+  mcpJson: string,
+  runner: DockerRunner,
+): Promise<boolean> {
+  if (Object.keys(mcpServers).length === 0) return true;
   const meta = getCliProviderMetadata('gemini');
   // Index 1 is `~/.gemini` per shared catalog; skip if absent for some
   // reason (would mean the catalog drifted).
-  if (meta.authConfigPaths.length < 2) return;
+  if (meta.authConfigPaths.length < 2) return true;
   const taskVol = cliAuthTaskVolumeName(taskId, 'gemini', 1);
-  if (!(await runner.volumeExists(taskVol))) return;
+  // Not applied — the volume may exist by the time the next invocation asks.
+  if (!(await runner.volumeExists(taskVol))) return false;
 
   // Embed the MCP servers JSON via a heredoc so any prompt-style content
   // can't accidentally inject shell. node is in the sandbox image and gives
-  // us atomic JSON merge with parse-error tolerance.
-  const mcpJson = JSON.stringify(mcpServers);
+  // us atomic JSON merge with parse-error tolerance. The merge itself runs as the
+  // sandbox user (see asSandboxUser) so settings.json is never momentarily root-owned
+  // under a sibling agent that is reading it.
   const script = `
 set -e
+${SANDBOX_USER_PREFIX_INIT}
 mkdir -p /vol
+${repairOwnership('/vol')}
 cd /vol
-node -e '
+${asSandboxUser('node')} -e '
 const fs = require("fs");
 const path = "/vol/settings.json";
 let cur = {};
@@ -465,12 +573,13 @@ chown 1000:1000 /vol/settings.json
       { taskId, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
       'gemini mcp merge helper exited non-zero',
     );
-    return;
+    return false;
   }
   log.info(
     { taskId, count: Object.keys(mcpServers).length },
     'merged mcpServers into gemini settings.json',
   );
+  return true;
 }
 
 /** Names Haive wrote into the CLI's own MCP config last time, one per line. Lives in the
@@ -503,9 +612,9 @@ function shellQuote(value: string): string {
  * re-added — `mcp add` is add-or-update, so a survivor costs one redundant write and no
  * membership test.
  *
- * Runs as root with HOME pointed at the sandbox user's home, then chowns back to the sandbox uid:
- * same shape as {@link seedRtkInTaskVolume}, and it also repairs a root-owned stub left in the
- * volume by a task that started before this existed.
+ * Repairs ownership as root, then runs the CLI's own `mcp` calls as the sandbox user and chowns
+ * again as a safety net: same shape as {@link seedRtkInTaskVolume}, and the repair pass is what
+ * fixes a root-owned stub left in the volume by a task that started before this existed.
  *
  * Best-effort by contract, like {@link mergeGeminiMcpIntoSettings}: every failure is logged and
  * swallowed. A missing MCP server degrades a run; throwing here would kill it.
@@ -518,11 +627,14 @@ export function mergeCliMcpIntoTaskVolume(
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<void> {
   // The surface is the same for siblings of one fan-out. Include it in the key
-  // so only byte-equivalent preparations coalesce; a genuinely different
+  // so only byte-equivalent preparations coalesce or skip; a genuinely different
   // surface still runs its own reconciliation.
-  const surfaceKey = JSON.stringify({ image, servers });
-  return coalesceAuthPreparation(cliMcpMergeRuns, `${taskId}:${providerName}:${surfaceKey}`, () =>
-    mergeCliMcpIntoTaskVolumeUnlocked(taskId, providerName, image, servers, runner),
+  const surfaceKey = contentKey(JSON.stringify({ image, servers }));
+  return applyAuthPreparationOnce(
+    cliMcpMergeRuns,
+    `${taskId}|cli-mcp|${providerName}`,
+    surfaceKey,
+    () => mergeCliMcpIntoTaskVolumeUnlocked(taskId, providerName, image, servers, runner),
   );
 }
 
@@ -532,17 +644,18 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
   image: string | null,
   servers: McpServerSpec[],
   runner: DockerRunner,
-): Promise<void> {
+): Promise<boolean> {
   const meta = getCliProviderMetadata(providerName);
   // Index 0 is the CLI's own home dir for both cli-merge providers (`~/.grok`, `~/.codex`).
   const authPath = meta.authConfigPaths[0];
-  if (!authPath) return;
+  if (!authPath) return true;
   if (!image) {
     log.warn(
       { taskId, providerName },
       'mcp merge skipped: no sandbox image resolved, so the CLI binary is unreachable',
     );
-    return;
+    // Not applied: the image is resolved per invocation and a later one may have it.
+    return false;
   }
   const taskVol = cliAuthTaskVolumeName(taskId, providerName, 0);
   // ensureTaskAuthVolumes (via resolveAuthMounts) is what creates this, and it must have run
@@ -554,17 +667,22 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
       { taskId, providerName, taskVol },
       'mcp merge skipped: task auth volume does not exist yet — resolveAuthMounts must run first',
     );
-    return;
+    return false;
   }
 
   const home = expandTildeToSandbox(authPath);
   const marker = `${home}/${MCP_MANAGED_MARKER}`;
   const exec = shellQuote(meta.defaultExecutable);
   const quotedMarker = shellQuote(marker);
+  // Every CLI call runs as the sandbox user with its own HOME, so the config file it writes
+  // is owned by the uid that has to read it — a sibling agent booting mid-merge sees a file
+  // it can open. Only the repair and the marker write need root.
+  const runCli = asSandboxUser(`env HOME=${shellQuote(SANDBOX_USER_HOME)} ${exec}`);
 
   const script = [
     'set -u',
-    `export HOME=${shellQuote(SANDBOX_USER_HOME)}`,
+    SANDBOX_USER_PREFIX_INIT,
+    repairOwnership(home),
     // `mcp remove <name>` is the same on grok and codex (measured against 1.0.3 / 0.147.0);
     // only `mcp add` differs, which is why that one goes through buildMcpAddArgv.
     `if [ -f ${quotedMarker} ]; then`,
@@ -572,18 +690,21 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
     '    [ -n "$name" ] || continue',
     // `</dev/null` is load-bearing: the loop's stdin IS the marker file, and a CLI that reads
     // stdin would swallow the remaining names and silently skip their removal.
-    `    ${exec} mcp remove "$name" </dev/null >/dev/null 2>&1 || true`,
+    `    ${runCli} mcp remove "$name" </dev/null >/dev/null 2>&1 || true`,
     `  done < ${quotedMarker}`,
     'fi',
     ...servers.map((server) => {
       const argv = buildMcpAddArgv(providerName, server).map(shellQuote).join(' ');
       const failure = shellQuote(`haive-mcp: add ${server.name} failed`);
-      return `${exec} ${argv} >/dev/null || echo ${failure} >&2`;
+      return `${runCli} ${argv} >/dev/null || echo ${failure} >&2`;
     }),
+    // Written by the root shell (the redirection is the shell's, not the CLI's) and owned
+    // back by the trailing repair. Nothing but this module reads it, so the sub-second
+    // window in which it is root-owned reaches no CLI.
     servers.length > 0
       ? `printf '%s\\n' ${servers.map((s) => shellQuote(s.name)).join(' ')} > ${quotedMarker}`
       : `: > ${quotedMarker}`,
-    `chown -R ${SANDBOX_UID}:${SANDBOX_GID} ${shellQuote(home)} 2>/dev/null || true`,
+    repairOwnership(home),
   ].join('\n');
 
   const result = await runner.run({
@@ -599,9 +720,10 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
       { taskId, providerName, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
       'mcp merge helper exited non-zero',
     );
-    return;
+    return false;
   }
   log.info({ taskId, providerName, count: servers.length }, 'merged mcp servers into CLI config');
+  return true;
 }
 
 /**
@@ -613,31 +735,51 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
  *
  * Best-effort, same contract as the merges above.
  */
-export async function writeMcpFileIntoTaskVolume(
+export function writeMcpFileIntoTaskVolume(
   taskId: string,
   providerName: CliProviderName,
   containerPath: string,
   content: string,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<void> {
+  return applyAuthPreparationOnce(
+    mcpFileWriteRuns,
+    `${taskId}|mcp-file|${providerName}|${containerPath}`,
+    contentKey(content),
+    () => writeMcpFileIntoTaskVolumeUnlocked(taskId, providerName, containerPath, content, runner),
+  );
+}
+
+async function writeMcpFileIntoTaskVolumeUnlocked(
+  taskId: string,
+  providerName: CliProviderName,
+  containerPath: string,
+  content: string,
+  runner: DockerRunner,
+): Promise<boolean> {
   const meta = getCliProviderMetadata(providerName);
   const authPath = meta.authConfigPaths[0];
-  if (!authPath) return;
+  if (!authPath) return true;
   const home = expandTildeToSandbox(authPath);
   if (!containerPath.startsWith(`${home}/`)) {
     log.warn(
       { taskId, providerName, containerPath, home },
       'mcp file write skipped: path is not inside the auth volume mount',
     );
-    return;
+    return true;
   }
   const taskVol = cliAuthTaskVolumeName(taskId, providerName, 0);
-  if (!(await runner.volumeExists(taskVol))) return;
+  if (!(await runner.volumeExists(taskVol))) return false;
 
   const relDir = containerPath.slice(0, containerPath.lastIndexOf('/'));
+  // No privilege drop here, unlike the two merges: this payload is one `printf` and the
+  // file is root-owned for the microseconds before the chown, where `rtk init` and a string
+  // of `mcp add` calls hold it for seconds. The leading repair still runs, because a volume
+  // an older task left root-owned would otherwise fail the write itself.
   const script = [
     'set -e',
     `mkdir -p ${shellQuote(relDir)}`,
+    repairOwnership(home),
     `printf '%s' ${shellQuote(content)} > ${shellQuote(containerPath)}`,
     `chown -R ${SANDBOX_UID}:${SANDBOX_GID} ${shellQuote(home)}`,
   ].join('\n');
@@ -655,9 +797,10 @@ export async function writeMcpFileIntoTaskVolume(
       { taskId, providerName, containerPath, exitCode: result.exitCode },
       'mcp file write helper exited non-zero',
     );
-    return;
+    return false;
   }
   log.info({ taskId, providerName, containerPath }, 'wrote mcp config into task auth volume');
+  return true;
 }
 
 /** Should the task copy's credential replace the user volume's?

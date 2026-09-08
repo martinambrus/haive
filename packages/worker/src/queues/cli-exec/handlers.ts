@@ -79,6 +79,7 @@ import { resolveInvocationCost } from './invocation-cost.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
 import {
   cleanupTaskAuthVolumes,
+  clearTaskAuthPreparationState,
   syncRefreshedAuthToUserVolumes,
 } from '../../sandbox/task-auth-volume.js';
 
@@ -347,6 +348,10 @@ async function cleanupAuthAfterTerminalSummary(db: Database, taskId: string): Pr
       columns: { status: true },
     });
     if (!task || !['completed', 'failed', 'cancelled'].includes(task.status)) return;
+    // Past the terminal check the volumes are going away whatever happens below, so the
+    // record of what was applied to them goes now rather than inside the removal's success
+    // path. Before the check it must NOT run: a live task's preparations are still in place.
+    clearTaskAuthPreparationState(taskId);
     await syncRefreshedAuthToUserVolumes(db, taskId);
     const result = await cleanupTaskAuthVolumes(taskId);
     if (result.removed.length > 0) {

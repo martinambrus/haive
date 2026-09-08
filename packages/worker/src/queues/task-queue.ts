@@ -59,6 +59,7 @@ import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import {
   cleanupTaskAuthVolumes,
+  clearTaskAuthPreparationState,
   syncRefreshedAuthToUserVolumes,
 } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
@@ -624,6 +625,10 @@ async function cleanupTaskContainers(
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
   }
+  // Outside the try: the in-process record of what was applied to those volumes must be
+  // dropped even when their removal failed, or a task id that came round again would be
+  // told its preparations are already in place.
+  clearTaskAuthPreparationState(taskId);
 
   // Remove the feature worktree. On cancel: always (a task cancelled before its
   // worktree-cleanup step would leak the dir into the haive_repos volume). On

@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   cleanupTaskAuthVolumes,
+  clearTaskAuthPreparationState,
   ensureTaskAuthVolumes,
   mergeCliMcpIntoTaskVolume,
+  mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
   RTK_HELPER_MISSING_BINARY_EXIT,
   seedRtkInTaskVolume,
@@ -447,6 +449,26 @@ describe('seedRtkInTaskVolume', () => {
     );
     expect(runner.runCalls).toHaveLength(1);
   });
+
+  // The seed writes the same thing every time, so it is applied once per task — the
+  // sequential repeats a staggered fan-out produces run nothing.
+  it('skips sequential repeats of the seed', async () => {
+    const runner = makeRunner();
+    for (let i = 0; i < 6; i += 1) await seedRtkInTaskVolume('task-rtk-seq', 'codex', runner);
+    expect(runner.runCalls).toHaveLength(1);
+  });
+
+  it('runs rtk init as the sandbox user, between two ownership repairs', async () => {
+    const runner = makeRunner();
+    await seedRtkInTaskVolume('task-rtk-user', 'codex', runner);
+    const script = runner.runCalls[0]!.cmd[2]!;
+    expect(script).toContain(`$AS_NODE env HOME='/home/node' rtk init -g --auto-patch`);
+    expect(script).toContain('AS_NODE="runuser -u node --"');
+    // An image without runuser falls back to the previous all-as-root behaviour rather than
+    // failing the seed.
+    expect(script).toContain('else AS_NODE=""');
+    expect(script.match(/chown -R 1000:1000/g)).toHaveLength(2);
+  });
 });
 
 describe('mergeCliMcpIntoTaskVolume', () => {
@@ -458,19 +480,27 @@ describe('mergeCliMcpIntoTaskVolume', () => {
   };
   const taskVol = 'haive_cli_auth_task_taskmcp0000_grok_0';
 
-  it('runs the CLI as root against the mounted volume and chowns back to the sandbox uid', async () => {
+  // These share one (task, provider) slot, and an applied preparation is skipped — which is
+  // the whole point of the feature. Each case wants a fresh slot.
+  beforeEach(() => clearTaskAuthPreparationState('taskmcp-0000'));
+
+  it('repairs ownership as root but runs the CLI as the sandbox user', async () => {
     const runner = makeRunner({ preExistingVolumes: [taskVol] });
     await mergeCliMcpIntoTaskVolume('taskmcp-0000', 'grok', 'img:tag', [RAG], runner);
 
     expect(runner.runCalls).toHaveLength(1);
     const call = runner.runCalls[0]!;
     expect(call.image).toBe('img:tag');
+    // The CONTAINER is root so it can repair a volume an older task left root-owned...
     expect(call.user).toBe('root');
     // The mount target IS the CLI's config dir, and HOME must resolve `~/.grok` onto it.
     expect(call.mounts).toEqual([{ source: taskVol, target: '/home/node/.grok', readOnly: false }]);
-    expect(call.cmd[2]).toContain(`export HOME='/home/node'`);
-    expect(call.cmd[2]).toContain(`'grok' 'mcp' 'add' '-s' 'user'`);
-    expect(call.cmd[2]).toContain('chown -R 1000:1000');
+    // ...but the CLI itself runs as uid 1000, so no config file is root-owned while a
+    // sibling agent is booting against it.
+    expect(call.cmd[2]).toContain(`$AS_NODE env HOME='/home/node' 'grok' 'mcp' 'add' '-s' 'user'`);
+    expect(call.cmd[2]).toContain('AS_NODE="runuser -u node --"');
+    // Repair before the payload, safety net after.
+    expect(call.cmd[2]?.match(/chown -R 1000:1000/g)).toHaveLength(2);
   });
 
   it('removes everything the previous run registered before adding the current set', async () => {
@@ -517,6 +547,94 @@ describe('mergeCliMcpIntoTaskVolume', () => {
       ),
     );
     expect(runner.runCalls).toHaveLength(1);
+  });
+
+  // A fan-out dispatches its agents seconds apart, so the calls are SEQUENTIAL and the
+  // in-flight coalescing above never sees them. Each repeat used to re-run a root helper
+  // against a volume its predecessors were already reading — which is what killed a mining
+  // agent with `config.toml: Permission denied`.
+  it('skips a sequential repeat of an already-applied merge', async () => {
+    const vol = 'haive_cli_auth_task_taskmcpseq_grok_0';
+    const runner = makeRunner({ preExistingVolumes: [vol] });
+    for (let i = 0; i < 6; i += 1) {
+      await mergeCliMcpIntoTaskVolume('task-mcp-seq', 'grok', 'img:tag', [RAG], runner);
+    }
+    expect(runner.runCalls).toHaveLength(1);
+  });
+
+  // The merge RECONCILES, so the record is of the LAST surface applied, never of every
+  // surface ever seen: a run that goes back to an earlier surface must reconcile again or
+  // the volume keeps the wrong server set.
+  it('re-runs when the surface changes, including a change back to an earlier one', async () => {
+    const vol = 'haive_cli_auth_task_taskmcpsurf_grok_0';
+    const runner = makeRunner({ preExistingVolumes: [vol] });
+    const OTHER: McpServerSpec = { name: 'chrome-devtools', command: 'node', args: ['/x.mjs'] };
+
+    await mergeCliMcpIntoTaskVolume('task-mcp-surf', 'grok', 'img:tag', [RAG], runner);
+    await mergeCliMcpIntoTaskVolume('task-mcp-surf', 'grok', 'img:tag', [RAG, OTHER], runner);
+    await mergeCliMcpIntoTaskVolume('task-mcp-surf', 'grok', 'img:tag', [RAG], runner);
+
+    expect(runner.runCalls).toHaveLength(3);
+  });
+
+  it('does not record a failed helper as applied', async () => {
+    const vol = 'haive_cli_auth_task_taskmcpfail_grok_0';
+    const runner = makeRunner({
+      preExistingVolumes: [vol],
+      runHandler: () => ({
+        exitCode: 1,
+        stdout: '',
+        stderr: 'boom',
+        durationMs: 1,
+        timedOut: false,
+      }),
+    });
+    await mergeCliMcpIntoTaskVolume('task-mcp-fail', 'grok', 'img:tag', [RAG], runner);
+    await mergeCliMcpIntoTaskVolume('task-mcp-fail', 'grok', 'img:tag', [RAG], runner);
+    expect(runner.runCalls).toHaveLength(2);
+  });
+
+  it('forgets applied preparations once the task ends', async () => {
+    const vol = 'haive_cli_auth_task_taskmcpend_grok_0';
+    const runner = makeRunner({ preExistingVolumes: [vol] });
+    await mergeCliMcpIntoTaskVolume('task-mcp-end', 'grok', 'img:tag', [RAG], runner);
+    clearTaskAuthPreparationState('task-mcp-end');
+    await mergeCliMcpIntoTaskVolume('task-mcp-end', 'grok', 'img:tag', [RAG], runner);
+    expect(runner.runCalls).toHaveLength(2);
+  });
+});
+
+describe('mergeGeminiMcpIntoSettings', () => {
+  const taskVol = 'haive_cli_auth_task_taskgem0000_gemini_1';
+  const servers = { 'haive-rag': { command: 'node', args: ['/haive/haive-rag-mcp.mjs'] } };
+
+  beforeEach(() => clearTaskAuthPreparationState('taskgem-0000'));
+
+  it('merges as the sandbox user into the volume that also holds the auth fields', async () => {
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await mergeGeminiMcpIntoSettings('taskgem-0000', servers, runner);
+
+    expect(runner.runCalls).toHaveLength(1);
+    const call = runner.runCalls[0]!;
+    expect(call.user).toBe('root');
+    expect(call.mounts).toEqual([{ source: taskVol, target: '/vol', readOnly: false }]);
+    expect(call.cmd[2]).toContain('$AS_NODE node -e');
+    expect(call.cmd[2]).toContain('AS_NODE="runuser -u node --"');
+    expect(call.cmd[2]).toContain('chown -R 1000:1000');
+  });
+
+  it('skips a sequential repeat and re-runs on a changed server set', async () => {
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await mergeGeminiMcpIntoSettings('taskgem-0000', servers, runner);
+    await mergeGeminiMcpIntoSettings('taskgem-0000', servers, runner);
+    expect(runner.runCalls).toHaveLength(1);
+
+    await mergeGeminiMcpIntoSettings(
+      'taskgem-0000',
+      { ...servers, other: { command: 'x' } },
+      runner,
+    );
+    expect(runner.runCalls).toHaveLength(2);
   });
 });
 
