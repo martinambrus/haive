@@ -20,8 +20,9 @@
 > **Corrected 2026-09-08:** this plan claimed WSL2 was required on Windows and put Windows-native
 > out of scope. Wrong for RUN-IT — WSL2 is Docker Desktop's ENGINE, not a requirement on the user's
 > shell, and nothing in a published-image install needs a WSL distro. That claim was inherited from
-> AGENTS.md's DEVELOPER-environment constraint, where it is true and stays. See Platforms; the
-> Windows path is in scope and UNVERIFIED, which is not the same as supported.
+> AGENTS.md's DEVELOPER-environment constraint, where it is true and stays. See Platforms, where the
+> Windows mechanics are now MEASURED against Docker Desktop 29.7.2 — including the `$env:HOME`
+> failure, which is a hard stop rather than a degradation.
 
 ## The gap
 
@@ -208,11 +209,27 @@ that constraint. Windows-native (non-WSL2) stays out of scope regardless — see
     container spawning works unchanged; `DOCKER_SOCKET` is already parameterised if a given setup
     needs another path. The host-root disclosure this plan owes the user applies identically here.
 
-  **UNVERIFIED.** Nobody has run this on a real Windows host — the reasoning is from the compose
-  files and Docker Desktop's documented behaviour, not from a measurement, and this plan does not
-  get to call something supported on that basis. What to check, in order: the stack boots from
-  PowerShell with no WSL distro installed; `/host-fs` mounts or degrades with a named reason; the
-  worker spawns a sandbox container through the socket; and a local-path repository imports.
+  **MEASURED 2026-09-08** against Docker Desktop 29.7.2 / Compose v5.5.0, driving Windows
+  PowerShell from WSL (`powershell.exe -NoProfile`), so these are results rather than reasoning:
+
+  - `docker` and `docker compose` answer natively from PowerShell — server 29.7.2, linux
+    containers. Preflight passes on Windows with no WSL distro involved.
+  - `$env:HOME` really is **not set** (PowerShell's `$HOME` is a shell variable, not an environment
+    variable, and Compose reads the environment). The default mount then fails HARD, not softly:
+    `The "HOME" variable is not set. Defaulting to a blank string.` followed by
+    `invalid spec: :/host-fs:ro: empty section between colons`. The stack cannot start.
+  - Setting `HOST_REPO_ROOT` fixes it, and BOTH path forms are accepted — `C:\Users\x` and
+    `/c/Users/x`. A container mounted at the native form listed the directory's real contents, so
+    Docker Desktop's file sharing permits it without extra configuration for a path under the user
+    profile.
+  - **The Docker socket passes through.** A Linux container run with
+    `-v /var/run/docker.sock:/var/run/docker.sock` reached the daemon and reported its server
+    version, exit 0. The worker's container spawning needs nothing special here.
+
+  Still untested, and it is the interesting half: the FULL stack booting from PowerShell, and a
+  local-path repository importing end to end. Both need the machine's dev stack stopped first,
+  because container names, networks and six volume names are global (see "Two installs on one
+  machine"). Nothing measured so far contradicts them working.
 
 - **Bind-mount throughput is lower on macOS** (VirtioFS) for the repo volume and node_modules. A
   documented expectation, not a blocker.
