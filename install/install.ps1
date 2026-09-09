@@ -441,9 +441,20 @@ $stray = @(Native-Lines docker @('ps', '-aq', '--filter', "name=^$id-"))
 foreach ($c in $stray) { Invoke-Native docker @('rm', '-f', $c) | Out-Null }
 if ($stray.Count -gt 0) { Write-Host "  removed $($stray.Count) container(s) outside the compose project" }
 
-# Now nothing holds them. Removing a network that is already gone is a silent no-op.
+# Now nothing THIS install owns holds them. A network already gone is a silent no-op, but one that
+# REFUSES is reported: something outside this install is still attached, and the closing
+# "everything is gone" line would otherwise be a lie.
+$networksLeft = $false
 foreach ($n in (Native-Lines docker @('network', 'ls', '-q', '--filter', "name=^$id-"))) {
-  if ((Invoke-Native docker @('network', 'rm', $n)).ExitCode -eq 0) { Write-Host "  removed network $n" }
+  $name = (Invoke-Native docker @('network', 'inspect', $n, '--format', '{{.Name}}') -Capture).Output.Trim()
+  if (-not $name) { $name = $n }
+  if ((Invoke-Native docker @('network', 'rm', $n)).ExitCode -eq 0) {
+    Write-Host "  removed network $name"
+  } else {
+    $attached = (Invoke-Native docker @('network', 'inspect', $n, '--format', '{{range .Containers}}{{.Name}} {{end}}') -Capture).Output.Trim()
+    Write-Host "  COULD NOT remove network $name - still attached: $(if ($attached) { $attached } else { 'unknown' })"
+    $networksLeft = $true
+  }
 }
 
 foreach ($v in $runtimeVolumes) {
@@ -475,7 +486,14 @@ if ($Purge) {
     if ((Invoke-Native docker @('rmi', '-f', $img)).ExitCode -eq 0) { Write-Host "  removed image $img" }
   }
   Write-Host ""
-  Write-Host "Everything this install owned is gone. Delete this directory to finish:"
+  if ($networksLeft) {
+    Write-Host "Everything this install owned is gone EXCEPT the network(s) named above, which"
+    Write-Host "something outside this install is still using. Detach those containers, then:"
+    Write-Host "  docker network ls -q --filter name=^${id}- | ForEach-Object { docker network rm `$_ }"
+  } else {
+    Write-Host "Everything this install owned is gone."
+  }
+  Write-Host "Delete this directory to finish:"
   Write-Host "  Remove-Item -Recurse -Force '$PSScriptRoot'"
 } else {
   Write-Host ""

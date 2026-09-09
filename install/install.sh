@@ -449,6 +449,7 @@ cd "$(dirname "$0")"
 
 PURGE=0
 ASSUME_YES=0
+NETWORKS_LEFT=0
 for arg in "$@"; do
   case "$arg" in
     --purge) PURGE=1 ;;
@@ -504,9 +505,19 @@ for c in $(docker ps -aq --filter "name=^${ID}-" 2>/dev/null); do
 done
 [ "$swept" -gt 0 ] && echo "  removed ${swept} container(s) outside the compose project"
 
-# Now nothing holds them. Removing a network that is already gone is a silent no-op.
+# Now nothing THIS install owns holds them. A network that is already gone is a silent no-op, but
+# one that REFUSES is reported: something outside this install is still attached to it, and the
+# closing "everything is gone" line would otherwise be a lie. MEASURED — a container created
+# outside the install kept its network alive through a --purge that claimed success.
 for n in $(docker network ls -q --filter "name=^${ID}-" 2>/dev/null); do
-  docker network rm "$n" >/dev/null 2>&1 && echo "  removed network $n" || true
+  name=$(docker network inspect "$n" --format '{{.Name}}' 2>/dev/null || printf '%s' "$n")
+  if docker network rm "$n" >/dev/null 2>&1; then
+    echo "  removed network ${name}"
+  else
+    attached=$(docker network inspect "$n" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null)
+    echo "  COULD NOT remove network ${name} — still attached: ${attached:-unknown}"
+    NETWORKS_LEFT=1
+  fi
 done
 
 for v in $RUNTIME_VOLUMES; do
@@ -533,7 +544,14 @@ if [ "$PURGE" -eq 1 ]; then
     docker rmi -f "$img" >/dev/null 2>&1 && echo "  removed image $img" || true
   done
   echo ""
-  echo "Everything this install owned is gone. Delete this directory to finish:"
+  if [ "$NETWORKS_LEFT" -eq 1 ]; then
+    echo "Everything this install owned is gone EXCEPT the network(s) named above, which something"
+    echo "outside this install is still using. Detach or remove those containers, then:"
+    echo "  docker network ls -q --filter name=^${ID}- | xargs -r docker network rm"
+  else
+    echo "Everything this install owned is gone."
+  fi
+  echo "Delete this directory to finish:"
   echo "  rm -rf $(pwd)"
 else
   echo ""
