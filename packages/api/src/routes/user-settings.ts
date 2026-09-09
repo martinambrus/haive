@@ -4,7 +4,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   accountUpdateSchema,
@@ -259,6 +259,49 @@ userSettingsRoutes.put('/ui-prefs', async (c) => {
     .onConflictDoUpdate({
       target: schema.userUiPrefs.userId,
       set: { settingsJson, updatedAt: new Date() },
+    });
+  return c.json({ ok: true });
+});
+
+/** Merge a partial blob instead of replacing it.
+ *
+ *  The PUT above is last-write-wins over the WHOLE blob, and its callers each hold a copy
+ *  read once at mount. That is fine while one page owns every key, but the sidebar writes
+ *  its width from the app shell — present on the plan and statistics pages too — so a
+ *  splitter drag there would PUT a blob that predates the resize and silently drop it.
+ *  Merging in the upsert means no reader is involved and there is no read-modify-write
+ *  window to lose. */
+userSettingsRoutes.patch('/ui-prefs', async (c) => {
+  const userId = c.get('userId');
+  const body = (await c.req.json()) as { settingsJson?: unknown };
+  const settingsJson = body.settingsJson;
+  if (typeof settingsJson !== 'string') throw new HttpError(400, 'settingsJson must be a string');
+  if (Buffer.byteLength(settingsJson, 'utf8') > MAX_IDE_SETTINGS_BYTES) {
+    throw new HttpError(413, 'settings exceed the 64 KiB limit');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(settingsJson);
+  } catch {
+    throw new HttpError(400, 'settingsJson must be valid JSON');
+  }
+  // Not merely a shape check: jsonb `||` CONCATENATES two arrays and REPLACES a scalar,
+  // so a non-object patch would destroy the blob rather than merge into it.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new HttpError(400, 'settingsJson must be a JSON object');
+  }
+  const db = getDb();
+  await db
+    .insert(schema.userUiPrefs)
+    .values({ userId, settingsJson })
+    .onConflictDoUpdate({
+      target: schema.userUiPrefs.userId,
+      // An unqualified column reference in DO UPDATE is the EXISTING row, which is the
+      // side being merged into; `excluded` would be the patch we are already binding.
+      set: {
+        settingsJson: sql`(coalesce(${schema.userUiPrefs.settingsJson}, '{}')::jsonb || ${settingsJson}::jsonb)::text`,
+        updatedAt: new Date(),
+      },
     });
   return c.json({ ok: true });
 });

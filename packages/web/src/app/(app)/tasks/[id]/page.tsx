@@ -1460,7 +1460,7 @@ export default function TaskDetailPage() {
         // line box, so any type or spacing change here would silently move it out from under.
         <div
           data-fixed-title-strip
-          className="fixed left-64 right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-8 py-2 backdrop-blur"
+          className="fixed left-[var(--haive-sidebar-w,16rem)] right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-8 py-2 backdrop-blur"
         >
           {/* Same destination as the header link the strip replaces, so scrolling never
               costs the user the way out. */}

@@ -1,6 +1,8 @@
 // Type-only, so this stays erased at build time and api-client keeps its no-runtime-import
 // shape. format-cost has no imports of its own, so there is no cycle.
 import type { CostDisplay } from './format-cost';
+import type { SidebarTree } from './sidebar-tree';
+import type { TaskToneFilter } from './task-tone';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
@@ -1930,6 +1932,15 @@ export interface UiPrefs {
    *  reload. Costs nothing on load — the panel only mounts once a node is
    *  selected, so no tab fetches anything until it is asked for. */
   planTab?: 'details' | 'links' | 'chat' | 'impact';
+  /** Width in pixels of the left sidebar when expanded. Clamped by
+   *  `clampSidebarWidth` on both read and write. */
+  sidebarWidthPx?: number;
+  /** Whether the left sidebar is collapsed to its icon rail. */
+  sidebarCollapsed?: boolean;
+  /** The user's own folder arrangement of the sidebar's active-task list. */
+  sidebarTree?: SidebarTree;
+  /** Which task states the sidebar list is narrowed to. Empty or absent = no filter. */
+  sidebarFilters?: TaskToneFilter[];
 }
 
 export function getUiPrefs(): Promise<UiPrefs> {
@@ -1939,9 +1950,15 @@ export function getUiPrefs(): Promise<UiPrefs> {
     .catch(() => ({}));
 }
 
-export function putUiPrefs(prefs: UiPrefs): Promise<void> {
+/** Write only the keys given, merged server-side into the stored blob.
+ *
+ *  The only writer. The blob has writers on more than one surface — the sidebar sits in the
+ *  app shell and is therefore present on the plan and statistics pages while each holds its
+ *  own copy — so a whole-blob PUT from any of them would drop whatever the others had
+ *  written since it last read. The api still exposes that PUT; nothing here uses it. */
+export function patchUiPrefs(partial: UiPrefs): Promise<void> {
   return api
-    .put('/user-settings/ui-prefs', { settingsJson: JSON.stringify(prefs) })
+    .patch('/user-settings/ui-prefs', { settingsJson: JSON.stringify(partial) })
     .then(() => undefined);
 }
 

@@ -15,7 +15,7 @@ import {
   getStatsTaskTime,
   getStatsTimeline,
   getUiPrefs,
-  putUiPrefs,
+  patchUiPrefs,
   type Repository,
   type StatsEstimates,
   type StatsPlan,
@@ -213,9 +213,9 @@ function StatsPageInner() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // The stored zone wins over the browser's once it arrives. Merged with local precedence and
-  // written back whole, because putUiPrefs replaces the entire blob — the idiom the plan page
-  // established.
+  // The stored zone wins over the browser's once it arrives. Merged with local precedence on
+  // read; the WRITE below sends only the key it changed, so nothing else in the blob — the
+  // sidebar's width among it — is touched.
   useEffect(() => {
     setNowMs(Date.now());
     const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -238,9 +238,8 @@ function StatsPageInner() {
   }, []);
 
   const persistTimeZone = useCallback((tz: string) => {
-    const next = { ...prefsRef.current, statsTimeZone: tz };
-    prefsRef.current = next;
-    void putUiPrefs(next).catch(() => {
+    prefsRef.current = { ...prefsRef.current, statsTimeZone: tz };
+    void patchUiPrefs({ statsTimeZone: tz }).catch(() => {
       /* a failed preference write must not break the page */
     });
   }, []);

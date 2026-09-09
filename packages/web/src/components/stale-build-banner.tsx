@@ -157,8 +157,9 @@ export function StaleBuildBanner() {
         // Full-bleed across the content column and opaque, matching the title strip it parks
         // under: a translucent card would show the page scrolling through it. z-20 keeps it
         // below that strip (z-30), which is what makes the measured offset a gap and not an
-        // overlap. left-64 is the sidebar width, the same constant the strip uses.
-        className="fixed left-64 right-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-sky-500/40 bg-sky-950/95 px-8 py-3 text-sm text-sky-200 backdrop-blur"
+        // overlap. The left offset tracks the resizable sidebar through a CSS variable the
+        // app shell publishes — see SIDEBAR_WIDTH_VAR; the fallback is the default column.
+        className="fixed left-[var(--haive-sidebar-w,16rem)] right-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-sky-500/40 bg-sky-950/95 px-8 py-3 text-sm text-sky-200 backdrop-blur"
       >
         <RefreshCw className="h-5 w-5 shrink-0 text-sky-400" />
         <span className="font-semibold">

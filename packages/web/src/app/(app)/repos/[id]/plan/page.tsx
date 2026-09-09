@@ -21,7 +21,7 @@ import {
   getPlanUnread,
   getRepoOnboardingStatus,
   getUiPrefs,
-  putUiPrefs,
+  patchUiPrefs,
   getPlanOverview,
   getPlanReady,
   getPlanTree,
@@ -258,15 +258,21 @@ export default function PlanPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const persistPrefs = useCallback((next: UiPrefs) => {
-    prefsRef.current = next;
-    void putUiPrefs(next);
+  /** Writes only the keys given, merged server-side. The blob has writers on other
+   *  surfaces now — the app-shell sidebar stores its width there and is on this page too —
+   *  and a whole-blob write from here would drop whatever it had saved since this page's
+   *  own GET. The ref is still updated so the reads below stay current. */
+  const persistPrefs = useCallback((patch: UiPrefs) => {
+    prefsRef.current = { ...prefsRef.current, ...patch };
+    void patchUiPrefs(patch).catch(() => {
+      /* a failed preference write must not break the page */
+    });
   }, []);
 
   const switchView = useCallback(
     (v: 'tree' | 'tiles') => {
       setView(v);
-      persistPrefs({ ...prefsRef.current, planView: v });
+      persistPrefs({ planView: v });
     },
     [persistPrefs],
   );
@@ -290,7 +296,7 @@ export default function PlanPage() {
     splitDragging.current = false;
     setDragging(false);
     if (persist) {
-      persistPrefs({ ...prefsRef.current, planSplitPct: Math.round(splitPctRef.current) });
+      persistPrefs({ planSplitPct: Math.round(splitPctRef.current) });
     }
   };
   const onSplitterUp = (): void => endSplitterDrag(true);
@@ -1487,7 +1493,7 @@ export default function PlanPage() {
                 tab={panelTab}
                 onTabChange={(t) => {
                   setPanelTab(t);
-                  persistPrefs({ ...prefsRef.current, planTab: t });
+                  persistPrefs({ planTab: t });
                 }}
                 onChanged={() => void refresh()}
                 onNavigate={(id) => void descend(id)}
