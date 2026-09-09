@@ -1,0 +1,139 @@
+# Platform coverage that ubuntu-amd64 CI cannot answer.
+#
+# `frictionless-bootstrapping-otter` items 7 and 8 ask two DIFFERENT questions, and separating
+# them is what makes this affordable:
+#
+#   item 8 — do the CLI adapters install and run on arm64? The CLIs install into
+#            node:24-bookworm-slim, a LINUX container, so this is an arm64-LINUX question and a
+#            free native arm64 runner answers it. It is not a macOS question at all.
+#   item 7 — does the stack boot on Apple Silicon under Docker Desktop / Colima? That genuinely
+#            needs Apple hardware, which GitHub provides free to public repos.
+#
+# Not on every push: item 8 builds one image per adapter and item 7 boots a whole stack on a
+# 3-core runner. Weekly, on demand, and whenever the files that decide the answer change.
+name: Platform checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release to install for the macOS check (blank = latest)'
+        required: false
+        type: string
+  schedule:
+    - cron: '0 4 * * 1'
+  pull_request:
+    paths:
+      - 'packages/shared/src/cli-providers/install-metadata.ts'
+      - 'packages/worker/sandbox-image/**'
+      - 'packages/worker/src/cli-versions/codegen.ts'
+      - 'packages/worker/src/sandbox/image-composer.ts'
+      - 'packages/worker/scripts/check-cli-arch.ts'
+      - 'install/**'
+      - '.github/workflows/platform-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  cli-adapters-arm64:
+    name: CLI adapters install on arm64 (item 8)
+    # NATIVE arm64, not QEMU. An emulated npm install of five CLIs costs tens of minutes, and
+    # emulation is also the wrong test: it can mask an "Exec format error" that a real arm64
+    # host would hit, which is precisely the failure this job exists to catch.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      # The script imports @haive/shared, whose dist the worker resolves through the workspace link.
+      - run: pnpm --filter @haive/shared --filter @haive/database build
+
+      - name: Compose and run every adapter
+        # A distinct install id so the images this job builds cannot collide with anything else
+        # sharing the runner, and so the naming module is exercised on arm64 too.
+        env:
+          HAIVE_INSTALL_ID: archcheck
+        run: pnpm --filter @haive/worker exec tsx scripts/check-cli-arch.ts
+
+  macos-install:
+    name: Installer boots on Apple Silicon (item 7)
+    # macos-15 is Apple Silicon and free for public repositories.
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Docker is NOT preinstalled on GitHub's macOS runners, and Docker Desktop is a GUI
+      # application with a licence nobody can accept on a runner's behalf. Colima is the
+      # supported headless path; it is also what a Mac user who declines Docker Desktop uses.
+      - name: Install Colima and the docker CLI
+        run: |
+          brew install docker docker-compose colima
+          mkdir -p ~/.docker/cli-plugins
+          ln -sfn "$(brew --prefix)/opt/docker-compose/bin/docker-compose" ~/.docker/cli-plugins/docker-compose
+
+      - name: Start the Docker VM
+        # The runner has 3 cores / 7 GB, so the VM gets most of it and the stack is scoped to
+        # match (see the install step). Anything larger fails to allocate rather than swapping.
+        run: |
+          colima start --cpu 3 --memory 6 --disk 30 --vm-type=vz --mount-type=virtiofs
+          docker version
+          docker compose version
+
+      # If this fails, item 7 is not answerable on a hosted runner and the finding is that,
+      # not a Haive bug. Kept as its own step so the distinction is visible in the log.
+      - name: Docker actually works here
+        run: docker run --rm alpine:latest uname -m
+
+      - name: Install Haive from published images
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          args="--install-id ci --dir $HOME/haive-ci"
+          [ -n "${VERSION_INPUT}" ] && args="$args --version ${VERSION_INPUT}"
+          # shellcheck disable=SC2086
+          sh install/install.sh $args
+
+      - name: The stack reports the version it installed
+        run: |
+          set -euo pipefail
+          port=$(sed -n 's/^HAIVE_API_PORT=//p' "$HOME/haive-ci/.env")
+          pinned=$(sed -n 's/^HAIVE_VERSION=//p' "$HOME/haive-ci/.env")
+          body=$(curl -fsS "http://localhost:${port}/version")
+          echo "$body"
+          echo "$body" | grep -q "\"version\":\"${pinned}\"" \
+            || { echo "::error::/version does not report ${pinned}"; exit 1; }
+          echo "$body" | grep -q '"devBuild":false' \
+            || { echo "::error::published image reports devBuild true"; exit 1; }
+
+      - name: Every running image is arm64
+        # The point of testing here rather than on amd64: nothing pins `platform:`, so an
+        # amd64-only base would silently emulate (slow, and misleading) or fail to pull.
+        run: |
+          set -euo pipefail
+          bad=0
+          for c in $(docker ps --filter "name=^ci-" --format '{{.Names}}'); do
+            a=$(docker inspect "$c" --format '{{.Image}}' | xargs docker image inspect --format '{{.Architecture}}')
+            printf '  %-28s %s\n' "$c" "$a"
+            [ "$a" = "arm64" ] || { echo "::error::$c is running a $a image"; bad=1; }
+          done
+          exit $bad
+
+      - name: Uninstall leaves nothing behind
+        if: always()
+        run: |
+          cd "$HOME/haive-ci" 2>/dev/null || exit 0
+          sh ./uninstall.sh --purge --yes
+          left=$( { docker ps -aq --filter "name=^ci-"; docker volume ls -q --filter "name=^ci_"; } | wc -l | tr -d ' ')
+          [ "$left" = "0" ] || { echo "::error::$left object(s) left behind"; exit 1; }

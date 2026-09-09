@@ -175,6 +175,29 @@ any upgrade happens.
 - A channel that does not resolve FAILS at preflight, next to the other prerequisite checks. Falling
   back to `public` would produce a stack that boots green and is silently the wrong one.
 
+**What is missing here is a RESOLVER, not plumbing — measured 2026-09-09 by emulating a channel.**
+A local registry stood in for a per-customer one: the six 0.1.5 images were pushed under a
+`customer-a/` namespace, an install was written with `--no-start`, its `HAIVE_REGISTRY` repointed
+at `localhost:5111/customer-a`, and it came up. Compose resolved all five service images to that
+namespace, docker PULLED them from it, `db-migrate` ran, and `/version` reported `0.1.5` with
+`devBuild: false`. So every layer beneath the flag already carries a per-customer registry; one
+line of `.env` is the whole difference.
+
+What the installer lacks is the step above it. `--channel` is a hard refusal today
+(`install.sh`: anything but `public` dies at preflight) and `REGISTRY_DEFAULT` is a literal with
+no flag and no environment override, so there is deliberately no way to aim an install at another
+registry by hand. The work is therefore: resolve a channel id to `(registry, manifest URL,
+credential)`, `docker login` when the registry is private, and write the resolved registry into
+`.env` — not new machinery in compose, the updater or the run overlay.
+
+The emulation could not exercise ONE thing, and it is the piece with no design yet: a real
+per-customer registry is PRIVATE, and while the credential is named above ("any credential the
+per-customer registry needs"), how it is scoped, delivered and revoked is written down nowhere.
+`serialized-chasing-thacker`'s token reasoning covers the npm scope used at BUILD time by the
+vendor — it states that token "never reaches the customer's machine" — which is a different
+credential from the container-registry one a customer needs to PULL their images. Worth settling
+in that plan when the per-customer build lands, since entitlement and revocation are its subject.
+
 ## Platforms — macOS is first-class for RUN-IT
 
 RUN-IT and DEV-IT have different substrate rules and this section is about RUN-IT only. AGENTS.md's
@@ -496,10 +519,16 @@ plumbing is sound (`canUpgrade: true`, and the mount was verified directly).
 | 4 | no-GPU machine boots on the CPU overlay | PARTIAL — the CPU path booted green on Windows; not run on a host that LACKS a GPU |
 | 5 | uninstall returns the machine to its pre-install state | MET, with one deviation: the install DIRECTORY is not removed |
 | 6 | `docker history` reveals no baked secret | MET — 0 secret-shaped layers and 0 baked env secrets across api/worker/web/updater |
-| 7-8 | macOS arm64, and per-CLI adapter behaviour there | UNTESTED — no Mac |
-| 9 | `--channel <id>` for a module customer | NOT IMPLEMENTED — anything but `public` is refused at preflight |
+| 7 | macOS arm64: the stack boots, every base image resolves an arm64 manifest | PARTIAL — the manifest clause is MET (all 15 images, checked without a Mac); the boot needs Apple hardware and now has a `macos-15` CI job |
+| 8 | each CLI adapter installs on arm64 or is reported unavailable with a named reason | JOB BUILT — `check-cli-arch.ts` on a native `ubuntu-24.04-arm` runner; the amd64 baseline is green (6 install, 4 piggyback) |
+| 9 | `--channel <id>` for a module customer | BLOCKED on `serialized-chasing-thacker`, not on plumbing — an emulated per-customer registry booted a full install; only the channel RESOLVER is missing (see the channel section) |
 | 10 | `--version` pins a concrete release; a bad one fails early | MET — `next` and `latest` both landed `0.1.5` in `.env`, never an alias; `99.99.99` failed at preflight with no directory, no volumes and nothing pulled |
 | 11 | no Docker: name the missing piece and stop, changing nothing | MET — run in a container with no docker CLI: names the piece, prints the platform's exact fix, exits 1, writes nothing |
+
+**Item 8 is not a macOS question, and separating it from item 7 is what makes it affordable.** The
+CLIs install into `node:24-bookworm-slim`, a LINUX container, so on an Apple Silicon Mac they run
+`linux/arm64` — which a free native arm64 Linux runner provides directly. The host OS never enters
+into it. Only item 7's BOOT clause needs Apple hardware.
 
 Two deviations from the text above are deliberate. **Item 1's `/setup`** cannot be met until
 `anointing-gatekeeping-ibex` lands `POST /auth/setup`; a fresh install still opens to a login wall
