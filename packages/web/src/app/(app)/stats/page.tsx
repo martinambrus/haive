@@ -31,6 +31,7 @@ import {
   type UiPrefs,
 } from '@/lib/api-client';
 import { Card, CardDescription, CardHeader, CardTitle, Input } from '@/components/ui';
+import { TabNav } from '@/components/tabs';
 import { StatTile } from '@/components/stats/stat-tile';
 import { ActivityHeatmap } from '@/components/stats/activity-heatmap';
 import { StackedShareBar } from '@/components/stats/stacked-share-bar';
@@ -499,22 +500,11 @@ function StatsPageInner() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-1 border-b border-neutral-800">
-        {TABS.map((t) => (
-          <button
-            key={t}
-            type="button"
-            onClick={() => setParam('tab', t)}
-            className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
-              t === tab
-                ? 'border-indigo-500 text-indigo-200'
-                : 'border-transparent text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            {TAB_LABELS[t]}
-          </button>
-        ))}
-      </div>
+      <TabNav
+        items={TABS.map((t) => ({ key: t, label: TAB_LABELS[t] }))}
+        active={tab}
+        onSelect={(key) => setParam('tab', key)}
+      />
 
       {loading && !summary && <div className="text-sm text-neutral-500">Loading...</div>}
 
