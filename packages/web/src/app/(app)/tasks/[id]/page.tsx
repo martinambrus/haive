@@ -30,7 +30,19 @@ import {
 } from '@/lib/api-client';
 import { Badge, Button, Card, Input } from '@/components/ui';
 import { CliPickerGrid } from '@/components/cli-picker-grid';
-import { ArrowLeft, CircleDot, Pencil, Route, FolderGit2 } from 'lucide-react';
+import { ActionMenu } from '@/components/action-menu';
+import {
+  ArrowLeft,
+  Ban,
+  CircleDot,
+  Pause,
+  Pencil,
+  Play,
+  RefreshCw,
+  Route,
+  Square,
+  FolderGit2,
+} from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
@@ -1406,6 +1418,10 @@ export default function TaskDetailPage() {
   // task-level retry only when nothing is marked failed (e.g. an orchestrator-
   // level failure before any step ran).
   const failedStep = steps.find((s) => s.status === 'failed');
+  // Mirror the failed step's own primary button (primaryRecovery) instead of hardcoding
+  // `retry`: on a multi-pass step that is Resume, so the header no longer discards passes
+  // the CLIs already delivered.
+  const headerRecovery = failedStep ? primaryRecovery(failedStep, steps, frontierKey) : null;
   // The step the run is currently parked on — the only card that offers the
   // auto-continue checkbox (passed steps can't be auto-continued anymore).
   const currentStep = steps.find(
@@ -1522,267 +1538,266 @@ export default function TaskDetailPage() {
           <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
         </div>
       )}
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex min-w-0 flex-col gap-1">
-          <Link href={backHref} className="text-xs text-indigo-400 underline">
-            {backLabel}
-          </Link>
-          <div ref={titleRowRef} className="flex flex-wrap items-center gap-2">
-            {renaming ? (
-              <>
-                <Input
-                  value={titleDraft}
-                  onChange={(e) => setTitleDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void saveRename();
-                    else if (e.key === 'Escape') setRenaming(false);
-                  }}
-                  maxLength={512}
-                  autoFocus
-                  className="w-80 text-lg"
-                />
-                <Button size="sm" disabled={renameBusy} onClick={() => void saveRename()}>
-                  {renameBusy ? 'Saving…' : 'Save'}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={renameBusy}
-                  onClick={() => setRenaming(false)}
-                >
-                  Cancel
-                </Button>
-              </>
-            ) : (
-              <>
-                <TaskVote taskId={task.id} score={task.voteScore ?? 0} className="shrink-0" />
-                {/* Same affordance as the plan detail panel's node title: a pencil in front
-                    of the name rather than a labelled button after it, so the two title
-                    editors read the same way. Bare button, not <Button> — a chrome-less icon
-                    beside a heading is what the plan panel established. */}
-                <button
-                  type="button"
-                  title="Rename"
-                  onClick={startRename}
-                  className="shrink-0 text-neutral-500 hover:text-neutral-200"
-                >
-                  <Pencil className="h-4 w-4" />
-                  <span className="sr-only">Rename</span>
-                </button>
-                {/* The one elastic item in this row. Every sibling is a fixed-size label, so
-                    they carry shrink-0 and the title absorbs the whole squeeze — otherwise
-                    flex shrinks the badges too and a rounded-full pill renders its text over
-                    two lines. `title` keeps the full string reachable on hover, and the
-                    sticky strip above shows it as well.
-
-                    The floor is what stops that trade going the other way: with shrink-0
-                    siblings and a min-width of 0, MEASURED at a 1280px viewport this title
-                    was squeezed to 1px — the badges fit and the title was simply gone. The
-                    row wraps instead, so a viewport too narrow for both pushes badges onto a
-                    second line rather than erasing what the page is about. */}
-                <h1
-                  className="min-w-[18rem] flex-1 truncate text-2xl font-bold text-neutral-50"
-                  title={task.title}
-                >
-                  {task.title}
-                </h1>
-                {/* One flex ITEM, not seven. Wrapping is all-or-nothing that way: the group
-                    either sits to the right of the title or drops to its own line intact,
-                    instead of splitting mid-run with two badges stranded below the rest.
-                    shrink-0 is what makes that decision all-or-nothing; max-w-full is what
-                    stops it becoming a horizontal overflow once the group is alone on its
-                    line and still too wide, and flex-wrap then lets the badges stack inside
-                    it. So the group never squashes a pill, and a future sixth badge wraps
-                    within the cluster rather than off the page. */}
-                <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
-                  {/* Paused, or queued behind a capacity cap: the task row still says
-                      `running` in both cases, so show the real state instead (same precedence
-                      as the tasks listing — paused wins, and the server suppresses slotWait
-                      while it is set, so the two can never both be true). */}
-                  {task.pausedAt ? (
-                    <Badge variant="warning" className="shrink-0">
-                      paused
-                    </Badge>
-                  ) : task.slotWait ? (
-                    <SlotWaitBadge slotWait={task.slotWait} className="shrink-0" />
-                  ) : (
-                    <Badge variant={taskStatusVariant(task.status)} className="shrink-0">
-                      {task.status}
-                    </Badge>
-                  )}
-                  <Badge className="shrink-0">{task.type}</Badge>
-                  {task.executionPath && (
-                    <Badge variant={executionPathVariant(task.executionPath)} className="shrink-0">
-                      {EXECUTION_PATH_LABELS[task.executionPath]}
-                    </Badge>
-                  )}
-                  {task.repository && (
-                    <Badge variant="info" className="shrink-0">
-                      repo: {task.repository.name}
-                    </Badge>
-                  )}
-                  {/* Which model ANSWERED, not which one is configured — captured by the
-                    00-model-health canary from the CLI's own stream. Shown only when a CLI
-                    actually reported one; codex and amp report none, and an empty badge
-                    would read as "no model" rather than "this CLI does not say". */}
-                  {task.modelIdentity?.served && (
-                    <Badge
-                      variant={task.modelIdentity.match === 'differs' ? 'warning' : 'info'}
-                      className="shrink-0"
-                      title={
-                        task.modelIdentity.match === 'differs'
-                          ? `Configured ${task.modelIdentity.requested ?? 'unknown'}, but ${task.modelIdentity.served} answered.`
-                          : `Requested ${task.modelIdentity.requested ?? 'unknown'} · reported by ${task.modelIdentity.source ?? 'unknown'}`
-                      }
-                    >
-                      model: {task.modelIdentity.served}
-                    </Badge>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-          {renameError && <p className="mt-1 text-xs text-red-400">{renameError}</p>}
-          {task.description && <TaskDescription text={task.description} />}
-          {task.status === 'failed' && task.errorMessage && (
-            <p className="text-sm text-red-400">Error: {task.errorMessage}</p>
-          )}
-          {/* Amber, not red: a mismatch is a fact worth seeing, not a failure. Some are
-              benign (an alias resolving to a dated snapshot); the one that matters is an
-              endpoint quietly serving a different model than the one configured. The
-              visibility rule lives in modelIdentityBanner (lib/step-banners), gated on the
-              structural `match` field rather than re-compared here. */}
-          {modelIdentityBanner(task.modelIdentity) && (
-            <p className="mt-1 text-sm text-amber-400">
-              {modelIdentityBanner(task.modelIdentity)!.text}
-            </p>
-          )}
-          {parentTask && (
-            <p className="mt-1 text-sm text-neutral-400">
-              Parent task:{' '}
-              <Link
-                href={`/tasks/${parentTask.id}`}
-                onClick={() =>
-                  rememberTaskOrigin(`/tasks/${parentTask.id}`, taskTitleOrigin(id, task.title))
-                }
-                className="text-indigo-400 underline"
-              >
-                {parentTask.title}
-              </Link>
-            </p>
-          )}
-          {childTasks.length > 0 && (
-            <div className="mt-1 text-sm text-neutral-400">
-              Linked bug fixes ({childTasks.length}):
-              <ul className="mt-0.5 flex flex-col gap-1">
-                {childTasks.map((ct) => (
-                  <li key={ct.id} className="flex items-center gap-2">
-                    <Link
-                      href={`/tasks/${ct.id}`}
-                      onClick={() =>
-                        rememberTaskOrigin(`/tasks/${ct.id}`, taskTitleOrigin(id, task.title))
-                      }
-                      className="text-indigo-400 underline"
-                    >
-                      {ct.title}
-                    </Link>
-                    <Badge variant={taskStatusVariant(ct.status)}>{ct.status}</Badge>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {/* The same chip the fixed title strip carries, because the strip only exists once
-              the header has scrolled away — at the top of the page, which is where a run is
-              started and where a dead token has to be repaired, there was no reading of what
-              allowance is left. */}
-          <HeaderUsageChip providerIds={usageProviderIds} providers={providers} />
-          {/* A task created but never enqueued — the plan builder does that so
-              attachments land before the first step reads them. Keyed on the
-              STATUS, which is what actually proves it never started; the
-              metadata only records how it was made. Idempotent server-side, so
-              a double-click cannot enqueue two starts. */}
-          {task.status === 'created' && (
-            <Button
-              size="sm"
-              onClick={() => void runAction('start')}
-              title="Start this task. It was created without being started so its attachments could be uploaded first."
-            >
-              Start
-            </Button>
-          )}
-          {canRetry &&
-            (() => {
-              // Mirror the failed step's own primary button (primaryRecovery) instead of
-              // hardcoding `retry`: on a multi-pass step that is Resume, so the header no
-              // longer discards passes the CLIs already delivered.
-              const recovery = failedStep ? primaryRecovery(failedStep, steps, frontierKey) : null;
-              return (
-                <Button
-                  size="sm"
-                  title={recovery?.title}
-                  onClick={() => {
-                    if (recovery) void runStepAction(recovery.step, recovery.action);
-                    else void runAction('retry');
-                  }}
-                >
-                  {recovery?.label ?? 'Retry'}
-                </Button>
-              );
-            })()}
-          {/* Pause/Resume: hold this task so the CLI concurrency goes to the others. No
-              confirm() — nothing is killed and nothing is lost, so it is cheap to undo. */}
-          {canCancel &&
-            (task.pausedAt ? (
+      {/* ONE column, not a title column beside an actions column. The actions used to be
+          the second half of a `justify-between` row, which top-aligned them against the
+          column's FIRST line — the back link — so the meter and the menu sat a line above
+          the badges, and the shrinkable actions column was narrower (120px) than the usage
+          chip inside it (141px), which then overflowed and wrapped on top of the button.
+          Both go away once the cluster is an item of the title row itself. */}
+      <div className="flex min-w-0 flex-col gap-1">
+        <Link href={backHref} className="text-xs text-indigo-400 underline">
+          {backLabel}
+        </Link>
+        <div ref={titleRowRef} className="flex flex-wrap items-center gap-2">
+          {renaming ? (
+            <>
+              <Input
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void saveRename();
+                  else if (e.key === 'Escape') setRenaming(false);
+                }}
+                maxLength={512}
+                autoFocus
+                className="w-80 text-lg"
+              />
+              <Button size="sm" disabled={renameBusy} onClick={() => void saveRename()}>
+                {renameBusy ? 'Saving…' : 'Save'}
+              </Button>
               <Button
                 size="sm"
-                onClick={() => void runAction('resume')}
-                title="Continue this task from where it stopped. It picks up within ~30 seconds."
-              >
-                Resume
-              </Button>
-            ) : (
-              <Button
                 variant="secondary"
-                size="sm"
-                onClick={() => void runAction('pause')}
-                title="Let the CLI run in flight finish, then hold the task so its subscription budget goes to your other tasks. Nothing is killed and the task stays open. The environment stays up, but another task may reclaim its runtime slot while this one is held."
+                disabled={renameBusy}
+                onClick={() => setRenaming(false)}
               >
-                Pause
+                Cancel
               </Button>
-            ))}
-          {stepRunning && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                if (confirm('Stop the running step? The task stays open so you can restart it.'))
-                  void stopActiveCli();
-              }}
-              title="Stop the running CLI for the current step. Keeps the environment; the task stays open and restartable."
-            >
-              Stop
-            </Button>
+            </>
+          ) : (
+            <>
+              <TaskVote taskId={task.id} score={task.voteScore ?? 0} className="shrink-0" />
+              {/* Same affordance as the plan detail panel's node title: a pencil in front
+                  of the name rather than a labelled button after it, so the two title
+                  editors read the same way. Bare button, not <Button> — a chrome-less icon
+                  beside a heading is what the plan panel established. */}
+              <button
+                type="button"
+                title="Rename"
+                onClick={startRename}
+                className="shrink-0 text-neutral-500 hover:text-neutral-200"
+              >
+                <Pencil className="h-4 w-4" />
+                <span className="sr-only">Rename</span>
+              </button>
+              {/* The one elastic item in this row. Every sibling is a fixed-size label, so
+                  they carry shrink-0 and the title absorbs the whole squeeze — otherwise
+                  flex shrinks the badges too and a rounded-full pill renders its text over
+                  two lines. `title` keeps the full string reachable on hover, and the
+                  sticky strip above shows it as well.
+
+                  The floor is what stops that trade going the other way: with shrink-0
+                  siblings and a min-width of 0, MEASURED at a 1280px viewport this title
+                  was squeezed to 1px — the badges fit and the title was simply gone. The
+                  row wraps instead, so a viewport too narrow for both pushes badges onto a
+                  second line rather than erasing what the page is about. */}
+              <h1
+                className="min-w-[18rem] flex-1 truncate text-2xl font-bold text-neutral-50"
+                title={task.title}
+              >
+                {task.title}
+              </h1>
+              {/* One flex ITEM, not seven. Wrapping is all-or-nothing that way: the group
+                  either sits to the right of the title or drops to its own line intact,
+                  instead of splitting mid-run with two badges stranded below the rest.
+                  shrink-0 is what makes that decision all-or-nothing; max-w-full is what
+                  stops it becoming a horizontal overflow once the group is alone on its
+                  line and still too wide, and flex-wrap then lets the badges stack inside
+                  it. So the group never squashes a pill, and a future sixth badge wraps
+                  within the cluster rather than off the page. */}
+              <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
+                {/* Paused, or queued behind a capacity cap: the task row still says
+                    `running` in both cases, so show the real state instead (same precedence
+                    as the tasks listing — paused wins, and the server suppresses slotWait
+                    while it is set, so the two can never both be true). */}
+                {task.pausedAt ? (
+                  <Badge variant="warning" className="shrink-0">
+                    paused
+                  </Badge>
+                ) : task.slotWait ? (
+                  <SlotWaitBadge slotWait={task.slotWait} className="shrink-0" />
+                ) : (
+                  <Badge variant={taskStatusVariant(task.status)} className="shrink-0">
+                    {task.status}
+                  </Badge>
+                )}
+                <Badge className="shrink-0">{task.type}</Badge>
+                {task.executionPath && (
+                  <Badge variant={executionPathVariant(task.executionPath)} className="shrink-0">
+                    {EXECUTION_PATH_LABELS[task.executionPath]}
+                  </Badge>
+                )}
+                {task.repository && (
+                  <Badge variant="info" className="shrink-0">
+                    repo: {task.repository.name}
+                  </Badge>
+                )}
+                {/* Which model ANSWERED, not which one is configured — captured by the
+                  00-model-health canary from the CLI's own stream. Shown only when a CLI
+                  actually reported one; codex and amp report none, and an empty badge
+                  would read as "no model" rather than "this CLI does not say". */}
+                {task.modelIdentity?.served && (
+                  <Badge
+                    variant={task.modelIdentity.match === 'differs' ? 'warning' : 'info'}
+                    className="shrink-0"
+                    title={
+                      task.modelIdentity.match === 'differs'
+                        ? `Configured ${task.modelIdentity.requested ?? 'unknown'}, but ${task.modelIdentity.served} answered.`
+                        : `Requested ${task.modelIdentity.requested ?? 'unknown'} · reported by ${task.modelIdentity.source ?? 'unknown'}`
+                    }
+                  >
+                    model: {task.modelIdentity.served}
+                  </Badge>
+                )}
+              </div>
+            </>
           )}
-          {canCancel && (
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => {
-                if (
-                  confirm(
-                    'Cancel this task? This stops the running step, tears down the environment, and ends the task.',
-                  )
-                )
-                  void runAction('cancel');
-              }}
-            >
-              Cancel
-            </Button>
-          )}
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            {/* The same chip the fixed title strip carries, because the strip only exists once
+                  the header has scrolled away — at the top of the page, which is where a run is
+                  started and where a dead token has to be repaired, there was no reading of what
+                  allowance is left. */}
+            <HeaderUsageChip providerIds={usageProviderIds} providers={providers} />
+            <ActionMenu
+              items={[
+                // A task created but never enqueued — the plan builder does that so
+                // attachments land before the first step reads them. Keyed on the
+                // STATUS, which is what actually proves it never started; the
+                // metadata only records how it was made. Idempotent server-side, so
+                // a double-click cannot enqueue two starts.
+                task.status === 'created' && {
+                  key: 'start',
+                  label: 'Start',
+                  icon: Play,
+                  onClick: () => void runAction('start'),
+                  title:
+                    'Start this task. It was created without being started so its attachments could be uploaded first.',
+                },
+                canRetry && {
+                  key: 'retry',
+                  label: headerRecovery?.label ?? 'Retry',
+                  // Keyed on the ACTION, never on the label — that string is generated
+                  // prose ("Resume (keep 8 of 9 terminals)") and rewording it must not
+                  // silently change the icon.
+                  icon: headerRecovery?.action === 'resume' ? Play : RefreshCw,
+                  title: headerRecovery?.title,
+                  onClick: () => {
+                    if (headerRecovery)
+                      void runStepAction(headerRecovery.step, headerRecovery.action);
+                    else void runAction('retry');
+                  },
+                },
+                // Pause/Resume: hold this task so the CLI concurrency goes to the others. No
+                // confirm() — nothing is killed and nothing is lost, so it is cheap to undo.
+                canCancel &&
+                  task.pausedAt != null && {
+                    key: 'resume',
+                    label: 'Resume',
+                    icon: Play,
+                    onClick: () => void runAction('resume'),
+                    title:
+                      'Continue this task from where it stopped. It picks up within ~30 seconds.',
+                  },
+                canCancel &&
+                  task.pausedAt == null && {
+                    key: 'pause',
+                    label: 'Pause',
+                    icon: Pause,
+                    onClick: () => void runAction('pause'),
+                    title:
+                      'Let the CLI run in flight finish, then hold the task so its subscription budget goes to your other tasks. Nothing is killed and the task stays open. The environment stays up, but another task may reclaim its runtime slot while this one is held.',
+                  },
+                stepRunning && {
+                  key: 'stop',
+                  label: 'Stop',
+                  icon: Square,
+                  onClick: () => {
+                    if (
+                      confirm('Stop the running step? The task stays open so you can restart it.')
+                    )
+                      void stopActiveCli();
+                  },
+                  title:
+                    'Stop the running CLI for the current step. Keeps the environment; the task stays open and restartable.',
+                },
+                canCancel && {
+                  key: 'cancel',
+                  label: 'Cancel',
+                  icon: Ban,
+                  danger: true,
+                  onClick: () => {
+                    if (
+                      confirm(
+                        'Cancel this task? This stops the running step, tears down the environment, and ends the task.',
+                      )
+                    )
+                      void runAction('cancel');
+                  },
+                },
+              ]}
+            />
+          </div>
         </div>
+        {renameError && <p className="mt-1 text-xs text-red-400">{renameError}</p>}
+        {task.description && <TaskDescription text={task.description} />}
+        {task.status === 'failed' && task.errorMessage && (
+          <p className="text-sm text-red-400">Error: {task.errorMessage}</p>
+        )}
+        {/* Amber, not red: a mismatch is a fact worth seeing, not a failure. Some are
+            benign (an alias resolving to a dated snapshot); the one that matters is an
+            endpoint quietly serving a different model than the one configured. The
+            visibility rule lives in modelIdentityBanner (lib/step-banners), gated on the
+            structural `match` field rather than re-compared here. */}
+        {modelIdentityBanner(task.modelIdentity) && (
+          <p className="mt-1 text-sm text-amber-400">
+            {modelIdentityBanner(task.modelIdentity)!.text}
+          </p>
+        )}
+        {parentTask && (
+          <p className="mt-1 text-sm text-neutral-400">
+            Parent task:{' '}
+            <Link
+              href={`/tasks/${parentTask.id}`}
+              onClick={() =>
+                rememberTaskOrigin(`/tasks/${parentTask.id}`, taskTitleOrigin(id, task.title))
+              }
+              className="text-indigo-400 underline"
+            >
+              {parentTask.title}
+            </Link>
+          </p>
+        )}
+        {childTasks.length > 0 && (
+          <div className="mt-1 text-sm text-neutral-400">
+            Linked bug fixes ({childTasks.length}):
+            <ul className="mt-0.5 flex flex-col gap-1">
+              {childTasks.map((ct) => (
+                <li key={ct.id} className="flex items-center gap-2">
+                  <Link
+                    href={`/tasks/${ct.id}`}
+                    onClick={() =>
+                      rememberTaskOrigin(`/tasks/${ct.id}`, taskTitleOrigin(id, task.title))
+                    }
+                    className="text-indigo-400 underline"
+                  >
+                    {ct.title}
+                  </Link>
+                  <Badge variant={taskStatusVariant(ct.status)}>{ct.status}</Badge>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       {/* The 2s refresh is failing but the task below is still on screen: say so
@@ -2660,7 +2675,7 @@ function HeaderUsageChip({
   providers: CliProvider[];
   /** Extra classes for the chip's outer element. The strip's ml-auto centering is layout the
    *  STRIP owns, not the chip: the page header mounts the same chip inline, ahead of the
-   *  recovery buttons, where an ml-auto would push it off on a wrapped row. */
+   *  Actions menu, where an ml-auto would open a gap between the two instead. */
   className?: string;
 }) {
   const [snapshots, setSnapshots] = useState<UsageWindowSnapshot[] | null>(null);

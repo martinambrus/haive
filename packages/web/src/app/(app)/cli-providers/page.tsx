@@ -3,6 +3,18 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Activity,
+  CircleArrowUp,
+  Copy,
+  Gauge,
+  LogIn,
+  LogOut,
+  Pencil,
+  RefreshCw,
+  Trash2,
+  Unlink,
+} from 'lucide-react';
+import {
   api,
   type CliAuthStatus,
   type CliProbePathResult,
@@ -21,6 +33,7 @@ import {
   FormError,
   Input,
 } from '@/components/ui';
+import { ActionMenu } from '@/components/action-menu';
 import { CliUpgradeAll } from '@/components/cli-upgrade-all';
 import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-selection';
 import { runCliProbe, runCliSignOut, type QueuedJobPhase } from '@/lib/cli-jobs';
@@ -519,125 +532,118 @@ export default function CliProvidersPage() {
                             <p className="mt-1 text-xs text-neutral-500">{meta.description}</p>
                           )}
                         </div>
-                        <div className="flex flex-shrink-0 gap-2">
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => handleTest(p.id)}
-                            disabled={testState?.testing === true}
-                          >
-                            {testState?.testing
-                              ? testState.phase === 'running'
-                                ? 'Testing...'
-                                : 'Queued...'
-                              : 'Test'}
-                          </Button>
-                          {showLogin && (
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              onClick={() => handleLogin(p)}
+                        {/* One control, so a row's width no longer depends on how many of
+                            the ten actions this provider happens to offer. */}
+                        <ActionMenu
+                          className="flex-shrink-0"
+                          items={[
+                            {
+                              key: 'test',
+                              label: testState?.testing
+                                ? testState.phase === 'running'
+                                  ? 'Testing...'
+                                  : 'Queued...'
+                                : 'Test',
+                              icon: Activity,
+                              spin: testState?.testing === true,
+                              disabled: testState?.testing === true,
+                              onClick: () => handleTest(p.id),
+                            },
+                            showLogin && {
+                              key: 'login',
+                              label: 'Log in',
+                              icon: LogIn,
+                              onClick: () => handleLogin(p),
                               // No separate Reconnect for these CLIs, and that is not an
                               // omission: their meter reads the very file the login writes, so
                               // logging in IS the reconnect. Only claude-code needs its own
-                              // button, because its meter runs on a different credential.
-                              title={
-                                loginRepairsUsage
-                                  ? 'Logging in rewrites the credential its usage meter reads — this is the reconnect for this CLI'
-                                  : undefined
-                              }
-                            >
-                              Log in
-                            </Button>
-                          )}
-                          {showSignOut && (
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              onClick={() => handleSignOut(p)}
-                              disabled={signOutState?.busy === true}
-                            >
-                              {signOutState?.busy
+                              // entry, because its meter runs on a different credential.
+                              title: loginRepairsUsage
+                                ? 'Logging in rewrites the credential its usage meter reads — this is the reconnect for this CLI'
+                                : undefined,
+                            },
+                            showSignOut && {
+                              key: 'sign-out',
+                              label: signOutState?.busy
                                 ? signOutState.phase === 'running'
                                   ? 'Signing out...'
                                   : 'Queued...'
-                                : 'Sign out'}
-                            </Button>
-                          )}
-                          {p.name === 'claude-code' &&
-                            (needsReconnect[p.id] ? (
-                              <>
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  onClick={() => handleStartUsage(p)}
-                                  disabled={usageState?.busy === true}
-                                  title="Re-authorize the expired usage token to restore this provider's meters"
-                                >
-                                  {usageState?.busy ? 'Connecting...' : 'Reconnect'}
-                                </Button>
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  onClick={() => handleDisconnectUsage(p)}
-                                  disabled={usageState?.busy === true}
-                                  title="Stop tracking usage and delete the stored token (use this to drop a duplicate of the same account)"
-                                >
-                                  {usageState?.busy ? 'Working...' : 'Disconnect usage'}
-                                </Button>
-                              </>
-                            ) : usageConnected[p.id] ? (
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() => handleDisconnectUsage(p)}
-                                disabled={usageState?.busy === true}
-                                title="Stop tracking Claude's subscription usage and delete the stored usage token"
-                              >
-                                {usageState?.busy ? 'Working...' : 'Disconnect usage'}
-                              </Button>
-                            ) : (
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() => handleStartUsage(p)}
-                                disabled={usageState?.busy === true}
-                                title="Authorize a usage-scoped token so the task header can show Claude's 5h/weekly windows"
-                              >
-                                {usageState?.busy ? 'Connecting...' : 'Connect usage'}
-                              </Button>
-                            ))}
-                          {upgradeLatest && (
-                            <Button
-                              size="sm"
-                              onClick={() => handleUpgrade(p, upgradeLatest)}
-                              disabled={upgrading}
-                              title={`Pin ${upgradeLatest} and rebuild this provider's sandbox image`}
-                            >
-                              {upgrading ? 'Upgrading...' : 'Upgrade'}
-                            </Button>
-                          )}
-                          <Link href={`/cli-providers/${p.id}`}>
-                            <Button variant="secondary" size="sm">
-                              Edit
-                            </Button>
-                          </Link>
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => handleClone(p.id)}
-                            disabled={cloningIds[p.id] === true}
-                          >
-                            {cloningIds[p.id] ? 'Cloning...' : 'Clone'}
-                          </Button>
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            onClick={() => handleDelete(p.id)}
-                          >
-                            Delete
-                          </Button>
-                        </div>
+                                : 'Sign out',
+                              icon: LogOut,
+                              spin: signOutState?.busy === true,
+                              disabled: signOutState?.busy === true,
+                              onClick: () => handleSignOut(p),
+                            },
+                            p.name === 'claude-code' &&
+                              needsReconnect[p.id] === true && {
+                                key: 'usage-reconnect',
+                                label: usageState?.busy ? 'Connecting...' : 'Reconnect',
+                                icon: RefreshCw,
+                                spin: usageState?.busy === true,
+                                disabled: usageState?.busy === true,
+                                onClick: () => handleStartUsage(p),
+                                title:
+                                  "Re-authorize the expired usage token to restore this provider's meters",
+                              },
+                            p.name === 'claude-code' &&
+                              (needsReconnect[p.id] === true || usageConnected[p.id] === true) && {
+                                key: 'usage-disconnect',
+                                label: usageState?.busy ? 'Working...' : 'Disconnect usage',
+                                icon: Unlink,
+                                spin: usageState?.busy === true,
+                                disabled: usageState?.busy === true,
+                                onClick: () => handleDisconnectUsage(p),
+                                title:
+                                  needsReconnect[p.id] === true
+                                    ? 'Stop tracking usage and delete the stored token (use this to drop a duplicate of the same account)'
+                                    : "Stop tracking Claude's subscription usage and delete the stored usage token",
+                              },
+                            p.name === 'claude-code' &&
+                              needsReconnect[p.id] !== true &&
+                              usageConnected[p.id] !== true && {
+                                key: 'usage-connect',
+                                label: usageState?.busy ? 'Connecting...' : 'Connect usage',
+                                icon: Gauge,
+                                spin: usageState?.busy === true,
+                                disabled: usageState?.busy === true,
+                                onClick: () => handleStartUsage(p),
+                                title:
+                                  "Authorize a usage-scoped token so the task header can show Claude's 5h/weekly windows",
+                              },
+                            upgradeLatest
+                              ? {
+                                  key: 'upgrade',
+                                  label: upgrading ? 'Upgrading...' : 'Upgrade',
+                                  icon: CircleArrowUp,
+                                  spin: upgrading,
+                                  disabled: upgrading,
+                                  onClick: () => handleUpgrade(p, upgradeLatest),
+                                  title: `Pin ${upgradeLatest} and rebuild this provider's sandbox image`,
+                                }
+                              : null,
+                            {
+                              key: 'edit',
+                              label: 'Edit',
+                              icon: Pencil,
+                              href: `/cli-providers/${p.id}`,
+                            },
+                            {
+                              key: 'clone',
+                              label: cloningIds[p.id] ? 'Cloning...' : 'Clone',
+                              icon: Copy,
+                              spin: cloningIds[p.id] === true,
+                              disabled: cloningIds[p.id] === true,
+                              onClick: () => handleClone(p.id),
+                            },
+                            {
+                              key: 'delete',
+                              label: 'Delete',
+                              icon: Trash2,
+                              danger: true,
+                              onClick: () => handleDelete(p.id),
+                            },
+                          ]}
+                        />
                       </div>
                       {(testState?.error || testState?.result) && (
                         <div className="mt-3 border-t border-neutral-800 pt-3">
