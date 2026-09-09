@@ -38,8 +38,14 @@ describe('baselineColumns', () => {
 describe('the real baseline', () => {
   // The standing guard that a re-cut baseline is COMPLETE. drizzle-kit's export swallows its own
   // errors and still exits 0, so a truncated baseline is a real possibility; this asserts the
-  // committed file against the schema barrel it is supposed to represent.
-  it('creates exactly as many tables as the barrel declares', () => {
+  // applied schema against the barrel it is supposed to represent.
+  //
+  // Against the baseline PLUS every later migration, not the baseline alone. The baseline is
+  // FROZEN, so it legitimately falls behind the barrel the moment a migration adds a table —
+  // asserting equality with it by itself turns the first such migration red and stays red, which
+  // is a guard failing for being right. A truncated baseline is still caught: the union would
+  // then be SHORT of the barrel.
+  it('the migrations create exactly as many tables as the barrel declares', () => {
     const schemaDir = new URL('../schema/', import.meta.url);
     let declared = 0;
     for (const file of readdirSync(schemaDir)) {
@@ -47,7 +53,27 @@ describe('the real baseline', () => {
       const src = readFileSync(new URL(file, schemaDir), 'utf8');
       declared += (src.match(/=\s*pgTable\(/g) ?? []).length;
     }
-    expect(baselineTableNames(baselineSql).length).toBe(declared);
+    const tables = new Set(baselineTableNames(baselineSql));
+    // A LOOSER parser than the production one, deliberately: `baselineTableNames` matches
+    // drizzle-kit's exact generated shape, while these are hand-written and guarded
+    // (`CREATE TABLE IF NOT EXISTS`). Tightening the production parser to fit them would make it
+    // accept output drizzle-kit never produces, which is the shape it exists to verify.
+    const migrationsDir = new URL('../../migrations/', import.meta.url);
+    for (const file of readdirSync(migrationsDir).sort()) {
+      if (!file.endsWith('.sql') || file === '0000_baseline.sql') continue;
+      // Comments STRIPPED first. Every migration here documents its own rollback, which means the
+      // header literally contains `DROP TABLE IF EXISTS "…"` — matched by the loop below, this
+      // silently removed the very table the file creates and the count came out unchanged.
+      const sql = readFileSync(new URL(file, migrationsDir), 'utf8').replace(/--[^\n]*/g, '');
+      for (const m of sql.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?"?([a-z0-9_]+)"?/gi)) {
+        tables.add(m[1]!);
+      }
+      for (const m of sql.matchAll(/DROP TABLE (?:IF EXISTS )?"?([a-z0-9_]+)"?/gi)) {
+        tables.delete(m[1]!);
+      }
+    }
+
+    expect(tables.size).toBe(declared);
   });
 
   it('creates the core tables the pre-baseline corpus never could', () => {
