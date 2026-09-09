@@ -548,7 +548,7 @@ plumbing is sound (`canUpgrade: true`, and the mount was verified directly).
 | 4 | no-GPU machine boots on the CPU overlay | PARTIAL — the CPU path booted green on Windows; not run on a host that LACKS a GPU |
 | 5 | uninstall returns the machine to its pre-install state | MET, with one deviation: the install DIRECTORY is not removed |
 | 6 | `docker history` reveals no baked secret | MET — 0 secret-shaped layers and 0 baked env secrets across api/worker/web/updater |
-| 7 | macOS arm64: the stack boots, every base image resolves an arm64 manifest | PARTIAL, and the remainder needs a real Mac — see below |
+| 7 | macOS arm64: the stack boots, every base image resolves an arm64 manifest | PARTIAL — the manifest clause and the macOS BOOT are both MET; only "on Apple Silicon" is unreachable from hosted CI, see below |
 | 8 | each CLI adapter installs on arm64 or is reported unavailable with a named reason | **MET** — measured on a native arm64 runner: all 10 accounted for, identical to amd64 |
 | 9 | `--channel <id>` for a module customer | BLOCKED on `serialized-chasing-thacker`, and on the RESOLVER alone — an emulated per-customer registry both installed and UPGRADED end to end (see the channel section) |
 | 10 | `--version` pins a concrete release; a bad one fails early | MET — `next` and `latest` both landed `0.1.5` in `.env`, never an alias; `99.99.99` failed at preflight with no directory, no volumes and nothing pulled |
@@ -585,6 +585,19 @@ So arm64 coverage comes from two places that need no Mac (every image resolves a
 manifest; the adapters run natively on arm64), and macOS coverage comes from the Intel runner. The
 one cell neither reaches — the stack booting on Apple Silicon under Docker Desktop, with VirtioFS
 bind mounts — needs real Apple hardware and stays open.
+
+**Both jobs are GREEN as of 2026-09-09.** The macOS run installed v0.1.6 from published images,
+probed free host ports, brought up postgres/redis/db-migrate/api/web, and `/version` answered
+`{"version":"0.1.6","devBuild":false,"migrationHead":"0000_baseline"}` before `uninstall.sh --purge`
+removed everything. 15 minutes, against 73 for the failing full-stack version — the difference is
+not pulling a 9.19 GB Ollama image the test never uses.
+
+Getting there cost two fixes that are worth more than the job. `container ci-postgres is unhealthy`
+was a REAL portability bug — the healthcheck had no `start_period`, so a first boot had 25 seconds
+to run initdb and answer, which a contended host misses and a dev machine never does (see
+`docker-compose.yml`). And the Apple Silicon job killed itself: GitHub's default shell is `bash -e`,
+which a step-level `set -uo pipefail` does not clear, so capturing the output of a command that is
+EXPECTED to fail aborted the step before its own assertion could run.
 
 Two deviations from the text above are deliberate. **Item 1's `/setup`** cannot be met until
 `anointing-gatekeeping-ibex` lands `POST /auth/setup`; a fresh install still opens to a login wall
