@@ -149,6 +149,7 @@ export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormPr
               name="email"
               type="email"
               autoComplete="email"
+              autoFocus
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
