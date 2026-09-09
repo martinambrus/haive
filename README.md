@@ -2,9 +2,99 @@
 
 Deterministic multi-CLI orchestration and AI agentic workflow utility. Replaces a markdown-driven Claude Code onboarding flow, an autonomous `/workflow` implementation loop, and a sandboxed local environment replication step set with a deterministic web project. Agentic CLI invocations only happen for parts that need reasoning; everything else is a TypeScript step module with a web form.
 
-## Quickstart
+## Install
 
-Requires Docker and Docker Compose. WSL2 plus Docker Desktop is the supported developer environment.
+There are two ways in and they are different things. **Run a release** boots published images —
+no source, no build, one command. **Build from source** is the contributor path and is what the
+rest of this file documents.
+
+### Run a release
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/martinambrus/haive/main/install/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/martinambrus/haive/main/install/install.ps1 | iex
+```
+
+Linux, macOS and Windows. On Windows this is PowerShell with Docker Desktop — no WSL shell is
+involved; Docker Desktop uses WSL2 as its engine, which is its plumbing rather than a requirement
+on you. If you would rather read a script than pipe one into a shell, download it, read it, run it.
+
+**Docker is the only prerequisite, and the installer never installs it.** It names what is missing
+and the exact fix for your platform, then stops having changed nothing. Everything else Haive needs
+runs inside a container.
+
+| Option              |                                                                                                                                                                      |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--version <v>`     | Install a specific release. An alias (`latest`, `next`) is resolved to a concrete version and PINNED, so an install cannot drift onto a moving tag. Default: latest. |
+| `--install-id <id>` | Names every container, volume, network and database this install owns (`[a-z0-9_]`, default `haive`). Required for a SECOND install on one machine — see below.      |
+| `--dir <path>`      | Where to install. Default `~/<install-id>`.                                                                                                                          |
+| `--check`           | Run the prerequisite checks and exit, changing nothing.                                                                                                              |
+| `--no-start`        | Write the install but do not boot it.                                                                                                                                |
+| `--force`           | Install into a non-empty directory.                                                                                                                                  |
+
+It writes one directory and nothing system-wide: the compose bundle, an `.env` holding secrets it
+generates for this install (mode 600), and two helper scripts — `./haive` and `./uninstall.sh`
+(`.ps1` on Windows). Host ports are probed rather than assumed, so a second install, or a machine
+already running ddev, gets free ones instead of a bind error.
+
+**Before you use it, know what it can do:** the Haive worker mounts the Docker socket, which is
+equivalent to root on the host. That is how it runs AI CLIs in sandboxes. See
+[Docker socket exposure](#docker-socket-exposure) for the rootless alternative.
+
+> **First account:** registration currently creates a normal user, and there is no first-admin
+> setup flow yet, so the admin pages are unreachable on a fresh install until you promote the
+> account yourself:
+>
+> ```bash
+> docker exec haive-postgres psql -U haive -d haive -c "UPDATE users SET role='admin'"
+> ```
+>
+> (`haive-` is your `--install-id`.) On a fresh install that is your only account. A proper
+> `/setup` flow is the next piece of work.
+
+### Upgrading
+
+An upgrade drains running work, snapshots the database, migrates, and keeps the new version only
+once the new containers report it — anything that fails before that point rolls back. Either:
+
+- **Admin console → Maintenance & upgrade**, which also shows what work is still running and the
+  history of past upgrades; or
+- `./haive upgrade --version 0.2.0` from the install directory, which is the one that still works
+  when the stack is down.
+
+The installer never upgrades: re-running it against an existing install is refused.
+
+### Uninstalling
+
+```bash
+cd ~/haive && ./uninstall.sh            # stack + this install's runtime data
+cd ~/haive && ./uninstall.sh --purge    # …and repositories, CLI logins, built images
+```
+
+The default keeps your cloned repositories, uploaded bundles, CLI logins and the DDEV CA, and
+lists them by name; `--purge` removes those too. It only ever touches resources belonging to this
+install id, and it does not delete the directory it is running from — the last line prints the
+command that does.
+
+### More than one install on a machine
+
+Give each one its own id:
+
+```bash
+sh install.sh --install-id staging --dir ~/haive-staging
+```
+
+Every container, volume, network, image and database is namespaced by that id, and each install's
+cleanup only ever matches its own. Without it the second install refuses rather than adopting the
+first one's database.
+
+### Build from source
+
+For contributing. Requires Docker and Docker Compose; **WSL2 plus Docker Desktop is the supported
+developer environment** (this constraint is about building, not about running a release).
 
 ```bash
 # Clone
@@ -28,6 +118,9 @@ pnpm docker:down
 ```
 
 ### Ports (dev override)
+
+These are the fixed ports `docker-compose.dev.yml` publishes for the source build. A release
+install probes for free ports instead and writes what it chose into its own `.env`.
 
 | Service      | Host port | Container port | URL / DSN                                 |
 | ------------ | --------- | -------------- | ----------------------------------------- |
