@@ -458,8 +458,13 @@ async function verifyOwnership(
     columns: { userId: true },
   });
   if (!provider || provider.userId !== userId) return null;
-  const terminalDisabled =
-    task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled';
+  // Enabled on 'failed': only a definitive end (completed/cancelled) reaps the worktree,
+  // so a failed task is still the state a user recovers from — the same reason the ddev,
+  // app-runner and IDE containers are kept alive on 'failed' (cleanupTaskContainers). This
+  // upgrade gate runs BEFORE openSession, so it is the binding one: the worker's own gate
+  // (terminal-session-manager.openSession) and the web tab (tasks/[id]/page.tsx) already
+  // read it this way, and a 'failed' here rejected the handshake 409 before either ran.
+  const terminalDisabled = task.status === 'completed' || task.status === 'cancelled';
   return { taskTerminal: !terminalDisabled, taskStatus: task.status };
 }
 

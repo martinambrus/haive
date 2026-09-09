@@ -687,10 +687,11 @@ async function cleanupTaskContainers(
     }
   }
 
-  // Force-tear-down any open interactive terminal sessions for this task.
-  // The web UI disables the Terminal tab when status is in a terminal state,
-  // and the WS owner sees its out-channel close as the container is removed
-  // here.
+  // Force-tear-down any open interactive terminal sessions for this task. The WS
+  // owner sees its out-channel close as the container is removed here. Runs on
+  // 'failed' too, which does NOT disable the tab (the shell stays reachable there
+  // for recovery) — it only drops the live tmux session, and the next attach
+  // rebuilds a container via ensureShellContainer.
   try {
     const reaped = await reapAllSessionsForTask(getRedis(), new Docker(), taskId);
     if (reaped > 0) {
