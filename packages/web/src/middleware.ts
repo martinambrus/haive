@@ -1,29 +1,35 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import {
+  decideRouteAccess,
+  SESSION_EXPIRED_PARAM,
+  SESSION_EXPIRED_VALUE,
+} from '@/lib/route-access';
 
-// `/setup` MUST be here. It is reachable only when the install has no users, so no one can be
-// authenticated for it — without it this middleware bounces the visitor to `/login`, whose form
-// reads the same registration status and bounces them back to `/setup`, forever.
-const PUBLIC_PATHS = new Set(['/login', '/register', '/setup']);
+const ACCESS_COOKIE = 'haive_access';
+const REFRESH_COOKIE = 'haive_refresh';
 
 export function middleware(request: NextRequest) {
-  const accessCookie = request.cookies.get('haive_access');
-  const refreshCookie = request.cookies.get('haive_refresh');
-  const path = request.nextUrl.pathname;
+  const decision = decideRouteAccess({
+    path: request.nextUrl.pathname,
+    hasAccessCookie: request.cookies.has(ACCESS_COOKIE),
+    hasRefreshCookie: request.cookies.has(REFRESH_COOKIE),
+    sessionRejected:
+      request.nextUrl.searchParams.get(SESSION_EXPIRED_PARAM) === SESSION_EXPIRED_VALUE,
+  });
 
-  if (PUBLIC_PATHS.has(path)) {
-    if (accessCookie) {
-      return NextResponse.redirect(new URL('/dashboard', request.url));
-    }
-    return NextResponse.next();
+  if (decision.action === 'redirect') {
+    return NextResponse.redirect(new URL(decision.to, request.url));
   }
 
-  // Allow through if either token exists — client-side interceptor handles refresh
-  if (!accessCookie && !refreshCookie) {
-    const loginUrl = new URL('/login', request.url);
-    return NextResponse.redirect(loginUrl);
+  const response = NextResponse.next();
+  if (decision.action === 'continue-and-clear') {
+    // Deleted HERE rather than by the layout that discovered the problem: a Server Component
+    // cannot set cookies, and leaving them in place is what closes the loop — the next request
+    // would arrive holding the same dead cookie and be bounced to /dashboard again.
+    response.cookies.delete(ACCESS_COOKIE);
+    response.cookies.delete(REFRESH_COOKIE);
   }
-
-  return NextResponse.next();
+  return response;
 }
 
 export const config = {

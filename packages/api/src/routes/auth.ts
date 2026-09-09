@@ -262,7 +262,18 @@ authRoutes.post('/refresh', async (c) => {
   return c.json({ ok: true });
 });
 
-authRoutes.post('/logout', requireAuth, async (c) => {
+/**
+ * Log out. Deliberately NOT behind `requireAuth`.
+ *
+ * The handler never reads the authenticated user — it revokes whatever refresh token the caller
+ * presents and clears their cookies — so the guard bought nothing and cost the one case that
+ * matters: a user whose token has just been invalidated (a `reset_password` bumps `tokenVersion`)
+ * got a 401 from the one endpoint that would have cleaned up their browser.
+ *
+ * No new exposure. Revoking needs the token itself, which anyone holding it could already use, and
+ * the cookies are `SameSite=Lax`, so a cross-site POST carries none of them.
+ */
+authRoutes.post('/logout', async (c) => {
   const token = getRefreshCookie(c);
   const db = getDb();
   if (token) {

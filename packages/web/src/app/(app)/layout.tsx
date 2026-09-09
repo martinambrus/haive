@@ -66,7 +66,11 @@ async function fetchMe(): Promise<MeResponse | null> {
 
 export default async function AppLayout({ children }: { children: ReactNode }) {
   const data = await fetchMe();
-  if (!data) redirect('/login');
+  // `?session=expired`, not a bare `/login`: this layout has just asked the api and been refused,
+  // but the browser still HOLDS the cookies. Without the marker the middleware reads their presence
+  // as a session and sends the visitor back to /dashboard, which lands here again — an infinite
+  // redirect on exactly the state a user cannot fix themselves. The marker tells it to clear them.
+  if (!data) redirect('/login?session=expired');
 
   return (
     <CliLoginProvider>
