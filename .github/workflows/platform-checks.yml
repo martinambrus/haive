@@ -91,10 +91,16 @@ jobs:
         # nothing. Tolerant of which branch fires (binary absent vs daemon unreachable) because
         # the runner image may ship the CLI without a usable daemon.
         run: |
-          set -uo pipefail
-          out=$(sh install/install.sh --check --dir "$HOME/should-not-exist" 2>&1); code=$?
+          # The command is EXPECTED to fail, so it has to run as an `if` condition. GitHub's
+          # default shell is `bash -e`, which a `set -uo pipefail` here does not clear, and a
+          # bare `out=$(failing-command)` therefore aborts the step before the assertions run —
+          # the assertion never executes and the step's own success criterion kills it.
+          if out=$(sh install/install.sh --check --dir "$HOME/should-not-exist" 2>&1); then
+            echo "$out"
+            echo "::error::preflight exited 0 on a runner that cannot run Docker"
+            exit 1
+          fi
           echo "$out"
-          [ "$code" -ne 0 ] || { echo "::error::preflight exited 0 with no Docker"; exit 1; }
           echo "$out" | grep -qi docker || { echo "::error::failure does not mention Docker"; exit 1; }
           [ ! -e "$HOME/should-not-exist" ] || { echo "::error::it created a directory anyway"; exit 1; }
 
