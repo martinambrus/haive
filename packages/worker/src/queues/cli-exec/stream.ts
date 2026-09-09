@@ -2,7 +2,7 @@
 /* NDJSON stream-json parser for Claude Code / Zai / Amp               */
 /* ------------------------------------------------------------------ */
 
-import type { CliTokenUsage } from '@haive/shared';
+import type { CliTokenUsage, CompactionEvent } from '@haive/shared';
 import { normalizeClaudeUsage } from '../../cli-executor/usage-extract.js';
 import { classifyStreamFailure, OUTPUT_TRUNCATION_HEADLINE } from './failure-class.js';
 import { isPlaceholderModel, type StreamModelReport } from './model-identity.js';
@@ -47,6 +47,10 @@ interface StreamJsonCollector {
    *  every declared server connected, and ALSO empty for a CLI whose init event does
    *  not report them at all — absence is not evidence of failure. */
   getFailedMcpServers: () => string[];
+  /** Every `compact_boundary` event the stream carried, in order. Empty for a run that
+   *  did not compact AND for every CLI that emits no such event at all — absence is not
+   *  evidence either way, which is why nothing branches on this. */
+  getCompactions: () => CompactionEvent[];
 }
 
 export function createStreamJsonCollector(
@@ -108,6 +112,7 @@ export function createStreamJsonCollector(
   // real model from the turns that did come back.
   let requestedModel: string | null = null;
   const failedMcpServers = new Set<string>();
+  const compactions: CompactionEvent[] = [];
   let servedModel: string | null = null;
   const billedModels = new Set<string>();
   let costUsd: number | null = null;
@@ -183,6 +188,32 @@ export function createStreamJsonCollector(
             failedMcpServers.add(server.name.trim());
         }
       }
+    }
+
+    // Context compaction. The binary drops the middle of its own transcript when the window
+    // fills and carries on, so a step that compacted is still reasoning about state it can no
+    // longer see — and until now nothing here read the event that says so.
+    //
+    // Recorded, never acted on. MEASURED before this shipped: of 2,884 stream logs on the dev
+    // install, ZERO carried this event, while api_retry (an equally rare `system` subtype)
+    // appears in 3 and only 4 rows are long enough to hit stream-log-buffer's elision cap. So
+    // 2,880 complete logs saw no compaction, and anything built on top of that would be built
+    // for something nobody has observed. This is what turns that into a number.
+    //
+    // Fields are read defensively for the same reason the api_retry branch defaults its own:
+    // the event's PRESENCE is the signal, and an event that stopped carrying `pre_tokens` is
+    // still a compaction. Dropping it would hide the only evidence the run leaves behind.
+    if (type === 'system' && subtype === 'compact_boundary') {
+      const meta = (event.compact_metadata ?? {}) as Record<string, unknown>;
+      const int = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) ? v : null;
+      compactions.push({
+        trigger: typeof meta.trigger === 'string' && meta.trigger ? meta.trigger : null,
+        preTokens: int(meta.pre_tokens),
+        postTokens: int(meta.post_tokens),
+        cumulativeDroppedTokens: int(meta.cumulative_dropped_tokens),
+        durationMs: int(meta.duration_ms),
+      });
     }
 
     // Extract final result
@@ -382,6 +413,16 @@ export function createStreamJsonCollector(
     },
     getFailedMcpServers(): string[] {
       return [...failedMcpServers];
+    },
+    getCompactions(): CompactionEvent[] {
+      // Flush like getTokenUsage/getModelIdentity do, rather than reading the accumulator
+      // straight: a stream cut off mid-line right after a compaction is precisely the run
+      // worth recording one for, and its final event would otherwise sit unparsed in `buffer`.
+      if (buffer.trim()) {
+        processLine(buffer);
+        buffer = '';
+      }
+      return [...compactions];
     },
     getModelIdentity(): StreamModelReport | null {
       if (buffer.trim()) {

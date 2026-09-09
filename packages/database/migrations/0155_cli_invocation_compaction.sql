@@ -1,0 +1,38 @@
+-- cli_invocations.compaction — what the CLI's own context compaction did to this run.
+--
+-- The claude binary drops the middle of its own transcript when the context window fills and
+-- carries on, emitting a `system`/`compact_boundary` event on the stream-json output Haive
+-- already parses. Haive has never read it: `stream.ts`'s processLine handles api_retry,
+-- rate_limit_event, init, result, assistant and user, and nothing else. So a step that lost
+-- half its working state mid-run looked identical to one that did not, and the only evidence
+-- was sitting in a column we store and never query.
+--
+-- Recorded, not acted on. MEASURED on the dev install before this shipped: of 2,884 rows
+-- carrying a stream_log, ZERO contained `compact_boundary`. That is not an artifact of the
+-- capture — `api_retry`, an equally rare `system` subtype, appears in 3 of them, and only 4
+-- rows are long enough to hit the 4 MiB head+tail elision cap in stream-log-buffer.ts, so
+-- 2,880 complete logs record no compaction at all. The largest single-turn context observed
+-- was ~389k tokens against a 1M window. Building a mitigation on that evidence would be
+-- building for an event nobody has seen; this column is what turns "we think it never
+-- happens" into a number, and it is the gate on whether the snapshot/restore half is built.
+--
+-- An OBJECT rather than a bare jsonb array, matching every other artifact column on this
+-- table (token_usage, cost, model_identity, effort) so the `->>` access `/stats` and
+-- `/reliability` already use keeps working here. `trigger` is stored VERBATIM as text rather
+-- than as a checked enum: the binary's schema names "manual" and "auto" today, and a value it
+-- adds later must be recorded rather than dropped — losing the whole event to an unrecognised
+-- trigger would hide exactly the case worth seeing. Every numeric field is nullable because
+-- `post_tokens` and `cumulative_dropped_tokens` are optional in the binary's own schema.
+--
+-- NULL means "nothing recorded" and is the normal state: legacy rows, every non-claude-family
+-- provider (no such event exists for codex, gemini, amp, antigravity), and any run that did
+-- not compact. Deliberately NOT defaulted to an empty object — "did not compact" and "was
+-- never measured" must stay distinguishable, the same stance model_identity takes for the
+-- providers that name no model.
+--
+-- Additive and idempotent, no FK, no index, nothing joins on it. Rollback: revert the code,
+-- which leaves the column unwritten and unread, then optionally
+--   ALTER TABLE "cli_invocations" DROP COLUMN IF EXISTS "compaction";
+-- That statement stands alone.
+
+ALTER TABLE "cli_invocations" ADD COLUMN IF NOT EXISTS "compaction" jsonb;

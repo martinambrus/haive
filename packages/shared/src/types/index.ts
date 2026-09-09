@@ -144,6 +144,43 @@ export interface ModelIdentity {
   match: 'exact' | 'differs' | 'unknown';
 }
 
+/** One `system`/`compact_boundary` event: the CLI dropped the middle of its own
+ *  transcript and carried on. Field names mirror the binary's own `compact_metadata`
+ *  schema, in which `post_tokens` and `cumulative_dropped_tokens` are optional — so a
+ *  compaction that reported only its trigger is still recorded. The event's PRESENCE is
+ *  the signal; the token figures are detail.
+ *
+ *  `trigger` is the raw string, deliberately NOT a checked union. The binary names
+ *  "manual" and "auto" today; a value it adds later must be RECORDED rather than
+ *  dropped, because an unrecognised trigger is exactly the case worth looking at. */
+export interface CompactionEvent {
+  trigger: string | null;
+  preTokens: number | null;
+  postTokens: number | null;
+  cumulativeDroppedTokens: number | null;
+  /** Wall-clock the compaction itself burned, which is charged to the step's own timeout
+   *  budget — MEASURED against the live binary, one manual compaction of a 7-turn session
+   *  took 46,664 ms. That is the half of the cost a token count does not show.
+   *
+   *  The real payload also carries `preserved_segment` and `preserved_messages`, both of
+   *  which are uuid pointers into a transcript Haive does not keep and could not resolve.
+   *  Deliberately not captured: they would be dead weight in every row. */
+  durationMs: number | null;
+}
+
+/** What context compaction did to one invocation. An object rather than a bare array, so
+ *  the `->>` access every other jsonb artifact column on `cli_invocations` already uses
+ *  keeps working here.
+ *
+ *  A NULL column means "nothing recorded": a legacy row, a CLI that emits no such event
+ *  (codex, gemini, amp, antigravity), or a run that did not compact. Deliberately not
+ *  defaulted to `{ events: [] }` — "did not compact" and "was never measured" must stay
+ *  distinguishable, the same stance `ModelIdentity` takes for the providers that name no
+ *  model. Nothing branches on this; it exists to be counted and read. */
+export interface InvocationCompaction {
+  events: CompactionEvent[];
+}
+
 export type RepoSource =
   | 'local_path'
   | 'git_https'

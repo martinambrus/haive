@@ -1,5 +1,11 @@
 import { Queue } from 'bullmq';
-import { logger, type CliTokenUsage, type ModelIdentity, type StepErrorHint } from '@haive/shared';
+import {
+  logger,
+  type CliTokenUsage,
+  type InvocationCompaction,
+  type ModelIdentity,
+  type StepErrorHint,
+} from '@haive/shared';
 import type {
   CliExecJobPayload,
   CliProbeJobPayload,
@@ -63,6 +69,11 @@ export interface ExecutionOutcome {
    *  Persisted to cli_invocations.model_identity. Null when this execution path
    *  captures no stream, and for CLIs that name no model at all (codex, amp). */
   modelIdentity?: ModelIdentity | null;
+  /** What the CLI's own context compaction did to this run, parsed from the same
+   *  stream as tokenUsage. Persisted to cli_invocations.compaction. Null when this
+   *  execution path captures no stream-json, and for every CLI that emits no
+   *  compact_boundary event — which is all of them except the claude family. */
+  compaction?: InvocationCompaction | null;
   /** Full live-stream transcript (header + every stdout/stderr chunk) the
    *  same bytes published to the cli-stream Redis channel. Persisted to
    *  cli_invocations.stream_log for historical replay. Null when the

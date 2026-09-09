@@ -202,6 +202,7 @@ export async function handleCliExecJob(
         parsedOutput: result.parsedOutput as unknown,
         tokenUsage: result.tokenUsage ?? null,
         modelIdentity: result.modelIdentity ?? null,
+        compaction: result.compaction ?? null,
         cost,
         durationMs,
         errorMessage: finalErrorMessage,

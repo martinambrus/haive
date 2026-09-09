@@ -900,6 +900,30 @@ export const cliInvocations = pgTable(
     endedAt: timestamp('ended_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     supersededAt: timestamp('superseded_at'),
+    /** What the CLI's own context compaction did to this run: one entry per
+     *  `system`/`compact_boundary` event on the stream, parsed by the same pass that
+     *  extracts tokenUsage and modelIdentity, so it costs no extra call or tokens.
+     *
+     *  NULL means "nothing recorded" — a legacy row, a CLI that emits no such event
+     *  (codex, gemini, amp, antigravity), or a run that did not compact. Deliberately NOT
+     *  defaulted to an empty object: "did not compact" and "was never measured" must stay
+     *  distinguishable, the same stance modelIdentity takes for the CLIs that name no
+     *  model. `trigger` is stored verbatim rather than as a checked union so a value the
+     *  binary adds later is recorded instead of dropped.
+     *  Keep in sync with `InvocationCompaction` in @haive/shared — this package cannot
+     *  import shared (circular; same note as tokenUsage above). Migration 0155.
+     *
+     *  Declared LAST because ALTER TABLE ADD COLUMN appends while drizzle-kit push builds
+     *  the table in declaration order; anywhere else and schema-parity goes red. */
+    compaction: jsonb('compaction').$type<{
+      events: Array<{
+        trigger: string | null;
+        preTokens: number | null;
+        postTokens: number | null;
+        cumulativeDroppedTokens: number | null;
+        durationMs: number | null;
+      }>;
+    }>(),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

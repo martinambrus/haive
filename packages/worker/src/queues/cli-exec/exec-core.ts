@@ -12,6 +12,8 @@ import {
   type CliNetworkPolicy,
   type CliProviderName,
   type CliTokenUsage,
+  type CompactionEvent,
+  type InvocationCompaction,
   type ModelIdentity,
 } from '@haive/shared';
 import { DEFAULT_RUN_TIMEOUT_MS, type DockerVolumeMount } from '../../sandbox/docker-runner.js';
@@ -739,6 +741,11 @@ export async function executeCliSpec(
   const modelIdentityFrom = (
     extra: Omit<ModelIdentityInput, 'specRequested'> = {},
   ): ModelIdentity | null => buildModelIdentity({ specRequested: specRequestedModel, ...extra });
+  // Null rather than `{ events: [] }` for a run that did not compact: null is also what
+  // every path capturing no stream writes, and "did not compact" is not a fact those paths
+  // are entitled to assert. Only a stream we actually parsed can say either way.
+  const compactionFrom = (events: CompactionEvent[]): InvocationCompaction | null =>
+    events.length > 0 ? { events } : null;
 
   if (jsonlCollector && jsonlCollector.isJsonl()) {
     const jsonlText = jsonlCollector.getResult();
@@ -862,6 +869,7 @@ export async function executeCliSpec(
           : null),
       tokenUsage: collector.getTokenUsage(),
       modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
+      compaction: compactionFrom(collector.getCompactions()),
       streamLog,
     };
   }
@@ -898,6 +906,10 @@ export async function executeCliSpec(
       // for, which is how a task that died on "unrecognized model" shows which
       // model it tried. served stays null unless a turn came back before the fault.
       modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
+      // A run that died mid-stream is the one most likely to have compacted first, so this
+      // is recorded on the failure branch too — the compaction is a fact about the run
+      // whether or not it produced a result event.
+      compaction: compactionFrom(collector.getCompactions()),
       streamLog,
       providerErrorScan,
     };
