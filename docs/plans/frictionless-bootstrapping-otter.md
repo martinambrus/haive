@@ -519,8 +519,8 @@ plumbing is sound (`canUpgrade: true`, and the mount was verified directly).
 | 4 | no-GPU machine boots on the CPU overlay | PARTIAL — the CPU path booted green on Windows; not run on a host that LACKS a GPU |
 | 5 | uninstall returns the machine to its pre-install state | MET, with one deviation: the install DIRECTORY is not removed |
 | 6 | `docker history` reveals no baked secret | MET — 0 secret-shaped layers and 0 baked env secrets across api/worker/web/updater |
-| 7 | macOS arm64: the stack boots, every base image resolves an arm64 manifest | PARTIAL — the manifest clause is MET (all 15 images, checked without a Mac); the boot needs Apple hardware and now has a `macos-15` CI job |
-| 8 | each CLI adapter installs on arm64 or is reported unavailable with a named reason | JOB BUILT — `check-cli-arch.ts` on a native `ubuntu-24.04-arm` runner; the amd64 baseline is green (6 install, 4 piggyback) |
+| 7 | macOS arm64: the stack boots, every base image resolves an arm64 manifest | PARTIAL, and the remainder needs a real Mac — see below |
+| 8 | each CLI adapter installs on arm64 or is reported unavailable with a named reason | **MET** — measured on a native arm64 runner: all 10 accounted for, identical to amd64 |
 | 9 | `--channel <id>` for a module customer | BLOCKED on `serialized-chasing-thacker`, not on plumbing — an emulated per-customer registry booted a full install; only the channel RESOLVER is missing (see the channel section) |
 | 10 | `--version` pins a concrete release; a bad one fails early | MET — `next` and `latest` both landed `0.1.5` in `.env`, never an alias; `99.99.99` failed at preflight with no directory, no volumes and nothing pulled |
 | 11 | no Docker: name the missing piece and stop, changing nothing | MET — run in a container with no docker CLI: names the piece, prints the platform's exact fix, exits 1, writes nothing |
@@ -528,7 +528,34 @@ plumbing is sound (`canUpgrade: true`, and the mount was verified directly).
 **Item 8 is not a macOS question, and separating it from item 7 is what makes it affordable.** The
 CLIs install into `node:24-bookworm-slim`, a LINUX container, so on an Apple Silicon Mac they run
 `linux/arm64` — which a free native arm64 Linux runner provides directly. The host OS never enters
-into it. Only item 7's BOOT clause needs Apple hardware.
+into it. MEASURED 2026-09-09 on `ubuntu-24.04-arm`: claude-code 2.1.266, codex 0.153.4, gemini
+0.59.0, amp, antigravity 1.1.28 and grok 1.0.24 all install AND report a version; the other four
+are piggyback and install nothing. Identical to the amd64 baseline, so item 8 is met and the
+`DECLARED_UNAVAILABLE` list in `check-cli-arch.ts` stays empty — nothing has earned a place in it.
+
+**Item 7's boot clause cannot be answered by hosted CI, and that is a documented Apple limitation
+rather than a configuration problem.** GitHub's macOS Apple Silicon runners are themselves VMs, and
+Apple's Virtualization Framework does not support nested virtualization — GitHub's own runner
+reference states it, and MEASURED here: `colima start --vm-type=vz` on `macos-15` reaches
+"Converting datadisk" and then exits with `error starting vm: error at 'creating and starting'` and
+an EMPTY error set. M1 lacks the hardware support outright; M2/M3 have it but Apple's framework does
+not expose it, and GitHub's runners are M1. No amount of flag-tuning reaches Docker there.
+
+What CI can do is split the question, which is what `platform-checks.yml` does:
+
+- `macos-15` (Apple Silicon), NO Docker: the installer's `--help`, its unknown-option refusal, and
+  a preflight that must FAIL naming Docker and writing nothing. That is not a consolation prize —
+  `install.sh` had never run on a BSD userland, and its argument parsing, port probe and preflight
+  all lean on `sed`/`awk`/`grep`, whose macOS variants differ from GNU. A script that dies on `sed`
+  there would die on every real Mac.
+- `macos-15-intel`, WITH Docker via Colima: the whole install → boot → `/version` → uninstall cycle
+  on real macOS. It proves macOS-ness, not arm64-ness — it pulls amd64 images — and it is the
+  better-resourced image anyway (4 CPU / 14 GB against Apple Silicon's 3 / 7).
+
+So arm64 coverage comes from two places that need no Mac (every image resolves a `linux/arm64`
+manifest; the adapters run natively on arm64), and macOS coverage comes from the Intel runner. The
+one cell neither reaches — the stack booting on Apple Silicon under Docker Desktop, with VirtioFS
+bind mounts — needs real Apple hardware and stays open.
 
 Two deviations from the text above are deliberate. **Item 1's `/setup`** cannot be met until
 `anointing-gatekeeping-ibex` lands `POST /auth/setup`; a fresh install still opens to a login wall

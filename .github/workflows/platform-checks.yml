@@ -65,33 +65,72 @@ jobs:
           HAIVE_INSTALL_ID: archcheck
         run: pnpm --filter @haive/worker exec tsx scripts/check-cli-arch.ts
 
-  macos-install:
-    name: Installer boots on Apple Silicon (item 7)
-    # macos-15 is Apple Silicon and free for public repositories.
+  macos-preflight:
+    name: Installer runs on Apple Silicon (item 7, no Docker)
+    # Apple Silicon, and DELIBERATELY without Docker — see macos-boot below for why it cannot
+    # have any. What this proves is still worth a minute: install.sh has never touched a BSD
+    # userland, and its argument parsing, port probe and preflight all lean on sed/awk/grep,
+    # whose macOS variants differ from GNU. A script that dies on `sed` here would fail on every
+    # real Mac too, and no Docker is needed to find that out.
     runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: --help and an unknown option behave
+        run: |
+          set -euo pipefail
+          sh install/install.sh --help | grep -q -- '--install-id'
+          if sh install/install.sh --nonsense 2>/dev/null; then
+            echo "::error::an unknown option was accepted"; exit 1
+          fi
+
+      - name: Preflight names Docker and changes nothing
+        # No daemon can run here, so preflight MUST fail — the assertion is that it fails the
+        # right way: naming Docker, pointing at Docker Desktop for this platform, and writing
+        # nothing. Tolerant of which branch fires (binary absent vs daemon unreachable) because
+        # the runner image may ship the CLI without a usable daemon.
+        run: |
+          set -uo pipefail
+          out=$(sh install/install.sh --check --dir "$HOME/should-not-exist" 2>&1); code=$?
+          echo "$out"
+          [ "$code" -ne 0 ] || { echo "::error::preflight exited 0 with no Docker"; exit 1; }
+          echo "$out" | grep -qi docker || { echo "::error::failure does not mention Docker"; exit 1; }
+          [ ! -e "$HOME/should-not-exist" ] || { echo "::error::it created a directory anyway"; exit 1; }
+
+  macos-boot:
+    name: Installer boots on macOS (item 7, Intel)
+    # INTEL, and that is forced rather than preferred. GitHub's Apple Silicon runners cannot run
+    # Docker at all: they are themselves VMs, and Apple's Virtualization Framework does not
+    # support nested virtualization — GitHub documents this, and MEASURED here, `colima start`
+    # on macos-15 dies at "creating and starting" with an empty error set. The Intel image is
+    # also the better-resourced one (4 CPU / 14 GB against 3 / 7).
+    #
+    # So this job proves macOS-ness — BSD userland, Colima rather than Docker Desktop, the whole
+    # install/boot/uninstall cycle — and NOT arm64-ness. arm64 is covered without a Mac: every
+    # image resolves a linux/arm64 manifest, and the adapter job above runs natively on arm64.
+    # Item 7's "Apple Silicon boots the stack" clause needs real Apple hardware; a hosted runner
+    # cannot answer it.
+    runs-on: macos-15-intel
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Docker is NOT preinstalled on GitHub's macOS runners, and Docker Desktop is a GUI
-      # application with a licence nobody can accept on a runner's behalf. Colima is the
-      # supported headless path; it is also what a Mac user who declines Docker Desktop uses.
       - name: Install Colima and the docker CLI
+        # Docker is not preinstalled on macOS runners, and Docker Desktop is a GUI application
+        # whose licence nobody can accept on a runner's behalf. Colima is the headless path, and
+        # also what a Mac user who declines Docker Desktop actually uses.
         run: |
           brew install docker docker-compose colima
           mkdir -p ~/.docker/cli-plugins
           ln -sfn "$(brew --prefix)/opt/docker-compose/bin/docker-compose" ~/.docker/cli-plugins/docker-compose
 
       - name: Start the Docker VM
-        # The runner has 3 cores / 7 GB, so the VM gets most of it and the stack is scoped to
-        # match (see the install step). Anything larger fails to allocate rather than swapping.
         run: |
-          colima start --cpu 3 --memory 6 --disk 30 --vm-type=vz --mount-type=virtiofs
+          colima start --cpu 4 --memory 10 --disk 40
           docker version
           docker compose version
 
-      # If this fails, item 7 is not answerable on a hosted runner and the finding is that,
-      # not a Haive bug. Kept as its own step so the distinction is visible in the log.
       - name: Docker actually works here
         run: docker run --rm alpine:latest uname -m
 
@@ -116,19 +155,6 @@ jobs:
             || { echo "::error::/version does not report ${pinned}"; exit 1; }
           echo "$body" | grep -q '"devBuild":false' \
             || { echo "::error::published image reports devBuild true"; exit 1; }
-
-      - name: Every running image is arm64
-        # The point of testing here rather than on amd64: nothing pins `platform:`, so an
-        # amd64-only base would silently emulate (slow, and misleading) or fail to pull.
-        run: |
-          set -euo pipefail
-          bad=0
-          for c in $(docker ps --filter "name=^ci-" --format '{{.Names}}'); do
-            a=$(docker inspect "$c" --format '{{.Image}}' | xargs docker image inspect --format '{{.Architecture}}')
-            printf '  %-28s %s\n' "$c" "$a"
-            [ "$a" = "arm64" ] || { echo "::error::$c is running a $a image"; bad=1; }
-          done
-          exit $bad
 
       - name: Uninstall leaves nothing behind
         if: always()
