@@ -37,16 +37,22 @@ export function taskTone(task: TaskToneLike): TaskTone {
  *  and giving it a fourth hue would make the three that matter harder to pick out.
  *
  *  The alpha is bounded from BELOW by tone-vs-tone separation, not by whether a tint is
- *  visible against the background — red and amber are the closest pair, and two adjacent
- *  rows reading as the same colour destroys the signal well before either becomes
- *  invisible. MEASURED over the aside's neutral-950 (CIELab dE, JND ~2.3): at /6 each tint
- *  is 4.9-6.2 from the background and red-vs-amber is 5.40; at /5 that pair falls to 3.71
- *  and at /4 red itself reaches 2.82, which is the floor. Hover doubles to /12, keeping the
- *  2x relationship the original /10-to-/20 had. Title text is unaffected — a lighter tint
- *  only darkens the row, so contrast rises (14.7-15.1:1 at /6). */
+ *  visible against the background — two adjacent rows reading as the same colour destroys
+ *  the signal well before either becomes invisible. MEASURED over the aside's neutral-950
+ *  (CIELab dE76, JND ~2.3): at a uniform /6 every tint is 5.5-6.4 from the background, but
+ *  red-vs-amber — the closest pair, and the only one that matters, since red-vs-emerald is
+ *  9.8 — is 5.71, i.e. 2.5 JND. Over threshold on paper and too close in the list.
+ *
+ *  So amber alone is lifted, rather than every tint: raising the pair together moves both
+ *  and leaves the gap ~2.5 JND (13.54 at /12, against 13.68-15.49 to the background). At
+ *  amber /10 the gap is 10.31 (4.5 JND) with red and emerald held at /6, and no other pair
+ *  regresses — amber-vs-emerald goes 7.34 to 12.42. /4-/5 is the floor either way: red
+ *  reaches 3.25 from the background at /4. Hover doubles, keeping the 2x relationship the
+ *  original /10-to-/20 had. Title text is unaffected — a tint only darkens the row, so
+ *  contrast rises (13.8:1 for neutral-200 over amber /10). */
 export const TASK_TONE_CLASS: Record<TaskTone, string> = {
   failed: 'bg-red-500/6 hover:bg-red-500/12',
-  waiting: 'bg-amber-500/6 hover:bg-amber-500/12',
+  waiting: 'bg-amber-500/10 hover:bg-amber-500/20',
   running: 'bg-emerald-500/6 hover:bg-emerald-500/12',
   idle: 'hover:bg-neutral-800/60',
 };
