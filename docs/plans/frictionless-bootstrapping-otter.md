@@ -548,7 +548,7 @@ plumbing is sound (`canUpgrade: true`, and the mount was verified directly).
 | 4 | no-GPU machine boots on the CPU overlay | PARTIAL — the CPU path booted green on Windows; not run on a host that LACKS a GPU |
 | 5 | uninstall returns the machine to its pre-install state | MET, with one deviation: the install DIRECTORY is not removed |
 | 6 | `docker history` reveals no baked secret | MET — 0 secret-shaped layers and 0 baked env secrets across api/worker/web/updater |
-| 7 | macOS arm64: the stack boots, every base image resolves an arm64 manifest | PARTIAL — the manifest clause and the macOS BOOT are both MET; only "on Apple Silicon" is unreachable from hosted CI, see below |
+| 7 | macOS arm64: the stack boots, every base image resolves an arm64 manifest | **MET**, the last cell by a real-hardware REPORT rather than by CI — see below for exactly what it does and does not establish |
 | 8 | each CLI adapter installs on arm64 or is reported unavailable with a named reason | **MET** — measured on a native arm64 runner: all 10 accounted for, identical to amd64 |
 | 9 | `--channel <id>` for a module customer | BLOCKED on `serialized-chasing-thacker`, and on the RESOLVER alone — an emulated per-customer registry both installed and UPGRADED end to end (see the channel section) |
 | 10 | `--version` pins a concrete release; a bad one fails early | MET — `next` and `latest` both landed `0.1.5` in `.env`, never an alias; `99.99.99` failed at preflight with no directory, no volumes and nothing pulled |
@@ -582,9 +582,31 @@ What CI can do is split the question, which is what `platform-checks.yml` does:
   better-resourced image anyway (4 CPU / 14 GB against Apple Silicon's 3 / 7).
 
 So arm64 coverage comes from two places that need no Mac (every image resolves a `linux/arm64`
-manifest; the adapters run natively on arm64), and macOS coverage comes from the Intel runner. The
-one cell neither reaches — the stack booting on Apple Silicon under Docker Desktop, with VirtioFS
-bind mounts — needs real Apple hardware and stays open.
+manifest; the adapters run natively on arm64), and macOS coverage comes from the Intel runner.
+
+**The one cell neither reaches — the stack booting on Apple Silicon under Docker Desktop, with
+VirtioFS bind mounts — was closed on 2026-09-09 by a REPORT from real hardware**, and the word is
+REPORTED rather than MEASURED on purpose: it is a user's account with no logs kept, so it is
+evidence and not an instrumented run. What it establishes is the cell itself. The install wrote
+itself on a BSD userland, the pinned arm64 images pulled, `docker compose up` brought the stack up
+under Docker Desktop, the containers appeared, the web UI served, and the login page rendered — so
+VirtioFS bind mounts, the arm64 manifests and Docker Desktop's engine all work together on that
+host. `uninstall.sh` then removed it.
+
+What it does NOT establish, and none of it is a reason to reopen the cell: the run never got past
+the login page, so nothing exercises a task, the worker or in-stack Ollama on that host; and only
+the services a login needs were proven, which is the same subset the Intel job boots.
+
+**It also found a bug, which is the part worth keeping.** The installer's own boot step did not
+start the stack — its owner recovered by working out `docker compose -f docker-compose.yml -f
+docker-compose.run.yml up` by hand, with the `./haive up` that does exactly that sitting beside it.
+The cause was on our side and not Apple's: `pull` discarded docker's exit status twice over
+(a pipeline reports its LAST command's, and `|| true` covered the rest), so a pull that gave out
+mid-way produced an install that was written, complete and not running, and said neither. MEASURED
+afterwards against that line, a failed pull exited **0** — the installer declared the stack RUNNING
+over images it had never fetched. `install/test/boot-failures.sh` is the regression test, and it
+runs with `docker` and `curl` stubbed precisely so it costs none of the 15 GB that keeps the real
+boot path out of CI.
 
 **Both jobs are GREEN as of 2026-09-09.** The macOS run installed v0.1.6 from published images,
 probed free host ports, brought up postgres/redis/db-migrate/api/web, and `/version` answered
