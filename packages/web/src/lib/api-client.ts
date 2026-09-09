@@ -2313,6 +2313,13 @@ export async function getStatsSteps(params: StatsQueryParams = {}): Promise<Stat
   return api.get<StatsSteps>(`/stats/steps${statsQueryString(params)}`);
 }
 
+/** GET /auth/registration-status — unauthenticated, because an install with no users has nobody
+ *  who could authenticate, which is exactly the state it reports. */
+export interface RegistrationStatus {
+  setupNeeded: boolean;
+  setupTokenRequired: boolean;
+}
+
 /* ── Maintenance and upgrade (admin) ───────────────────────────────────────── */
 
 export type MaintenanceState = 'normal' | 'draining' | 'maintenance';

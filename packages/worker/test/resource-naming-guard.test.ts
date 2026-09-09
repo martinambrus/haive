@@ -77,6 +77,14 @@ describe('resource names are never typed at a call site', () => {
         if (OWNS_THE_SHAPE.some((p) => file.replace(/\\/g, '/').includes(p))) continue;
         const lines = codeOnly(readFileSync(file, 'utf8')).split('\n');
         lines.forEach((line, i) => {
+          // A Postgres advisory lock key is not a resource name. It is scoped to the DATABASE the
+          // connection is on, and every install has its own Postgres, so the isolation the install
+          // id would add is already there — namespacing it would change a key for no gain. Keyed
+          // on the CALL rather than on the string's shape, because what makes it a lock key is
+          // where it is passed, not what it is spelled.
+          // `advisory` alone, not `advisory_lock`: the function this repo actually calls is
+          // `pg_advisory_XACT_lock`, so the narrower string matches none of the call sites.
+          if (line.includes('advisory')) return;
           const matches = line.match(/['"`]haive[-_][A-Za-z0-9_-]*/g);
           if (!matches) return;
           for (const m of matches) {

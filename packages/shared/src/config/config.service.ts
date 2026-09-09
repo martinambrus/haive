@@ -583,6 +583,23 @@ export function parseAllowanceWatchMode(raw: string | null | undefined): Allowan
     : 'notify';
 }
 
+/** Who may create an account on this instance.
+ *
+ *  `closed` is the intended default for a self-hosted product, but the FIRST registration is exempt
+ *  from every mode — an install whose own first account were refused would have no way in at all,
+ *  which is the trap this whole subsystem removes. `invite` requires an unconsumed token and takes
+ *  the role the invite carries; `open` is self-signup as a plain user. */
+export const REGISTRATION_MODES = ['open', 'invite', 'closed'] as const;
+export type RegistrationMode = (typeof REGISTRATION_MODES)[number];
+
+/** Read a stored registration mode. Anything unrecognised — including an absent key — reads as
+ *  `closed`, so a typo or a half-written value fails SHUT rather than opening self-signup. */
+export function parseRegistrationMode(raw: string | null | undefined): RegistrationMode {
+  return (REGISTRATION_MODES as readonly string[]).includes(raw ?? '')
+    ? (raw as RegistrationMode)
+    : 'closed';
+}
+
 const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.API_PORT]: '3001',
   [CONFIG_KEYS.RATE_LIMIT_API_RPM]: '60',

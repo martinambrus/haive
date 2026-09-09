@@ -1,5 +1,9 @@
 # First-admin onboarding + registration gating
 
+> **Section A (first-admin) and D (setup detection) SHIPPED 2026-09-09.** `register` is first-run
+> aware, `GET /auth/registration-status` reports it, and `/setup` is the web entry point. B, C and
+> E-G remain. Three things this plan could not have known are recorded under "As built" at the end.
+>
 > Status: PROPOSED, 2026-08-25. Companion to `frictionless-bootstrapping-otter` (the one-line
 > installer), which HANDS OFF to this flow but does not define it. This plan is the app-level
 > user/registration/admin model and is valuable independently of the installer — even a manual
@@ -187,3 +191,27 @@ flow above. The installer's job is to generate the `SETUP_TOKEN` (hardened path)
 before exposure (local-first path), and to open the browser at `/setup`. Keep the two plans in sync;
 this one owns the auth/user model, the installer owns getting the stack running to the point this
 flow can start.
+
+## As built — A and D, 2026-09-09
+
+**Migration numbering moved under this plan's feet.** `packages/database/migrations/` now holds only
+`0000_baseline.sql`; the 0001-0152 history lives in `pre-baseline/` and is never executed. Section
+C's `user_invites` migration is therefore `0153_`, not `0001_` — which would sort correctly and read
+to a human as predating the baseline.
+
+**The plan assumes a forced password change that does not exist.** Verification item 8 says a
+user created by an admin "is forced to change it", but `reset_password` only mints a password and
+bumps `tokenVersion`; nothing marks the account, and no column carries the requirement.
+`PUT /user-settings/password` and its UI do exist, so it is a column's worth of work — and it closes
+the same gap in today's `reset_password`, which has always had it.
+
+**`/setup` had to be added to `packages/web/src/middleware.ts`'s `PUBLIC_PATHS`**, which the plan
+does not name. Without it the middleware bounces an unauthenticated visitor to `/login`, whose form
+reads the same registration status and bounces them back — an infinite redirect on exactly the
+install this feature exists to rescue.
+
+Two implementation notes worth keeping. The decision is a pure function
+(`packages/api/src/lib/registration.ts`) because `packages/api` has no HTTP-level auth tests at all;
+the house style is extract-and-unit-test, with real-database work in the `*-smoke.ts` tier. And the
+race is closed with a TRANSACTION-scoped advisory lock around count-then-insert — MEASURED with
+eight simultaneous first-registrations against a live database: one admin, seven users.

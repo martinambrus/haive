@@ -542,8 +542,8 @@ plumbing is sound (`canUpgrade: true`, and the mount was verified directly).
 
 | # | What it asks | Status |
 |---|---|---|
-| 1 | one command boots green, unique key, migrations, working `/setup` | MET except `/setup` — see item 2 |
-| 2 | first-admin creation, then `/auth/setup` 409 forever | NOT MET — the endpoint does not exist |
+| 1 | one command boots green, unique key, migrations, working `/setup` | **MET** |
+| 2 | first-admin creation, then `/auth/setup` 409 forever | **MET** — by `register` being first-run aware rather than a separate `/auth/setup`; once a user exists the branch is over, which is the same guarantee (`anointing-gatekeeping-ibex` S1) |
 | 3 | a second install generates a DIFFERENT encryption key | MET — two installs compared field by field |
 | 4 | no-GPU machine boots on the CPU overlay | PARTIAL — the CPU path booted green on Windows; not run on a host that LACKS a GPU |
 | 5 | uninstall returns the machine to its pre-install state | MET, with one deviation: the install DIRECTORY is not removed |
@@ -599,9 +599,7 @@ to run initdb and answer, which a contended host misses and a dev machine never 
 which a step-level `set -uo pipefail` does not clear, so capturing the output of a command that is
 EXPECTED to fail aborted the step before its own assertion could run.
 
-Two deviations from the text above are deliberate. **Item 1's `/setup`** cannot be met until
-`anointing-gatekeeping-ibex` lands `POST /auth/setup`; a fresh install still opens to a login wall
-and every test here had to promote its first user with SQL. **Item 5's "or the install dir"** — the
+One deviation from the text above is deliberate. **Item 5's "or the install dir"** — the
 uninstaller does not delete the directory it is running from; it prints the one command that does.
 Its `--purge` mode covers everything else the item asks for.
 

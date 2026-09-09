@@ -1,5 +1,6 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
-import { eq, and } from 'drizzle-orm';
+import { count, eq, and, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   loginRequestSchema,
@@ -8,6 +9,7 @@ import {
   encryptEmail,
   decryptEmail,
   configService,
+  logger,
   secretsService,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -19,10 +21,29 @@ import {
   hashRefreshToken,
 } from '../auth/jwt.js';
 import { setAuthCookies, clearAuthCookies, getRefreshCookie } from '../auth/cookies.js';
+import { decideRegistration } from '../lib/registration.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
+const log = logger.child({ module: 'auth' });
+
 export const authRoutes = new Hono<AppEnv>();
+
+/** Set on an install that wants the first registration gated. Read once: it is process config, and
+ *  a value that changed under a running api would make the gate non-deterministic. */
+const setupToken = (process.env.SETUP_TOKEN ?? '').trim();
+
+/** Compare two secrets without leaking their contents through timing.
+ *
+ *  Both sides are hashed first so the comparison is over fixed-width buffers — `timingSafeEqual`
+ *  THROWS on a length mismatch, and branching on length beforehand would leak the token's length. */
+function timingSafeEqualString(a: string, b: string | undefined): boolean {
+  const ha = createHash('sha256').update(a).digest();
+  const hb = createHash('sha256')
+    .update(b ?? '')
+    .digest();
+  return timingSafeEqual(ha, hb);
+}
 
 async function issueTokens(
   userId: string,
@@ -41,27 +62,64 @@ authRoutes.post('/register', async (c) => {
   const pepper = await secretsService.getEmailBlindIndexPepper();
   const blindIndex = computeEmailBlindIndex(body.email, pepper);
 
-  const existing = await db.query.users.findFirst({
-    where: eq(schema.users.emailBlindIndex, blindIndex),
-    columns: { id: true },
-  });
-  if (existing) throw new HttpError(409, 'Email already registered');
-
   const passwordHash = await hashPassword(body.password);
   const emailEncrypted = encryptEmail(body.email, fieldKey);
 
-  const inserted = await db
-    .insert(schema.users)
-    .values({ emailEncrypted, emailBlindIndex: blindIndex, passwordHash })
-    .returning({
-      id: schema.users.id,
-      role: schema.users.role,
-      status: schema.users.status,
-      tokenVersion: schema.users.tokenVersion,
-      createdAt: schema.users.createdAt,
-    });
+  // Hashing is deliberately outside the transaction below: bcrypt takes ~100ms and the transaction
+  // holds a lock every other registration queues behind.
+  const user = await db.transaction(async (tx) => {
+    // Serialise the count-then-insert. Without it two simultaneous first-registrations both read
+    // zero users and BOTH become admin — the one race this feature has, and it is invisible in
+    // testing because it needs concurrency to appear.
+    //
+    // Transaction-scoped, matching plan/mirror.ts and _global-kb-promote.ts; it releases when this
+    // transaction ends. NOT the session-scoped form the migration runner uses — see
+    // packages/database/src/migrate/lock.ts, which explains why that one is different.
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext('haive_bootstrap'), hashtext('first_admin'))`,
+    );
 
-  const user = inserted[0]!;
+    const existing = await tx.query.users.findFirst({
+      where: eq(schema.users.emailBlindIndex, blindIndex),
+      columns: { id: true },
+    });
+    if (existing) throw new HttpError(409, 'Email already registered');
+
+    const counted = await tx.select({ n: count() }).from(schema.users);
+    const userCount = Number(counted[0]?.n ?? 0);
+
+    const decision = decideRegistration({
+      userCount,
+      // The mode arrives with the config key in the next slice; today registration is open once an
+      // admin exists, which is exactly what this instance already did.
+      mode: 'open',
+      setupTokenConfigured: setupToken.length > 0,
+      setupTokenMatches:
+        setupToken.length > 0 && timingSafeEqualString(setupToken, body.setupToken),
+    });
+    if (!decision.allow) throw new HttpError(403, decision.message);
+
+    const inserted = await tx
+      .insert(schema.users)
+      .values({
+        emailEncrypted,
+        emailBlindIndex: blindIndex,
+        passwordHash,
+        role: decision.role,
+      })
+      .returning({
+        id: schema.users.id,
+        role: schema.users.role,
+        status: schema.users.status,
+        tokenVersion: schema.users.tokenVersion,
+        createdAt: schema.users.createdAt,
+      });
+
+    if (decision.firstRun) {
+      log.info({ userId: inserted[0]!.id }, 'first account created — anointed as administrator');
+    }
+    return inserted[0]!;
+  });
   const { accessToken, refreshToken, expiresAt } = await issueTokens(
     user.id,
     user.role,
@@ -86,6 +144,26 @@ authRoutes.post('/register', async (c) => {
     },
     201,
   );
+});
+
+/**
+ * Does this install still need its first account?
+ *
+ * UNAUTHENTICATED, and it has to be: an install with zero users has nobody who could authenticate,
+ * which is the entire condition being reported. It discloses only what any visitor learns by
+ * POSTing to `/register` and reading the response, and `maintenanceGate` already lets `/auth/*`
+ * through so a stack mid-upgrade can still answer it.
+ *
+ * `setupTokenRequired` is reported so the setup page can ask for the token instead of letting the
+ * operator discover the requirement through a 403.
+ */
+authRoutes.get('/registration-status', async (c) => {
+  const counted = await getDb().select({ n: count() }).from(schema.users);
+  const userCount = Number(counted[0]?.n ?? 0);
+  return c.json({
+    setupNeeded: userCount === 0,
+    setupTokenRequired: userCount === 0 && setupToken.length > 0,
+  });
 });
 
 authRoutes.post('/login', async (c) => {

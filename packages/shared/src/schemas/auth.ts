@@ -14,6 +14,9 @@ export const loginRequestSchema = z.object({
 export const registerRequestSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
+  /** Required only for the FIRST account on an install that sets `SETUP_TOKEN` — the opt-in guard
+   *  against someone else registering first on an instance exposed before its owner arrives. */
+  setupToken: z.string().max(255).optional(),
 });
 
 export const refreshRequestSchema = z.object({

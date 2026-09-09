@@ -44,16 +44,13 @@ already running ddev, gets free ones instead of a bind error.
 equivalent to root on the host. That is how it runs AI CLIs in sandboxes. See
 [Docker socket exposure](#docker-socket-exposure) for the rootless alternative.
 
-> **First account:** registration currently creates a normal user, and there is no first-admin
-> setup flow yet, so the admin pages are unreachable on a fresh install until you promote the
-> account yourself:
+> **First account:** the first person to register becomes the administrator. Open the app and the
+> setup page asks for an email and password; every account created after that is a normal user.
 >
-> ```bash
-> docker exec haive-postgres psql -U haive -d haive -c "UPDATE users SET role='admin'"
-> ```
->
-> (`haive-` is your `--install-id`.) On a fresh install that is your only account. A proper
-> `/setup` flow is the next piece of work.
+> Exactly one first account can be anointed even if several arrive at once — the check and the
+> insert share a transaction under an advisory lock. On an instance you expose to a network before
+> registering yourself, set `SETUP_TOKEN` in the install's `.env` and that first registration must
+> present it, which closes the window where a stranger could claim the instance.
 
 ### Upgrading
 
