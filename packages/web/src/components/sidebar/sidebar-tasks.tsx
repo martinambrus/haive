@@ -226,9 +226,16 @@ export function SidebarTasks({
       const tone = taskTone(task);
       const effort = (task.timing?.workMs ?? 0) + (task.timing?.userActiveMs ?? 0);
       const tokens = task.tokenUsage?.totalTokens ?? 0;
+      // The step the task sits on, as the server derives it ("Spec audit (broad) (spec rev 1)").
+      // The same string the tasks list and the task header render, so the three surfaces cannot
+      // name one step differently; the raw slug is the fallback when an older api omits it. The
+      // feed is `status=unfinished`, so a completed task — which has no current step — never
+      // reaches here and needs no guard.
+      const phase = task.currentStepLabel ?? task.currentStepId;
       const meta = [
         effort > 0 ? formatDuration(effort) : null,
         tokens > 0 ? formatTokens(tokens) : null,
+        phase,
       ]
         .filter(Boolean)
         .join(' · ');
@@ -246,7 +253,7 @@ export function SidebarTasks({
           {...dragProps(node.key)}
           {...rowDropProps(node.key, container, siblings, false)}
           style={pad}
-          title={`${task.title} — ${TASK_TONE_LABEL[tone]}`}
+          title={`${task.title} — ${TASK_TONE_LABEL[tone]}${phase ? ` — ${phase}` : ''}`}
           className={cn(
             'block cursor-grab rounded px-1.5 py-1 transition-colors active:cursor-grabbing',
             TASK_TONE_CLASS[tone],
