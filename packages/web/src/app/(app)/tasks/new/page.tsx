@@ -925,7 +925,7 @@ export default function NewTaskPage() {
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center justify-between gap-2">
             <Label htmlFor="cliProviderId">CLI provider (optional)</Label>
-            <Link href="/settings/cli-providers">
+            <Link href="/cli-providers">
               <Button type="button" variant="primary" size="sm">
                 Add a CLI
               </Button>

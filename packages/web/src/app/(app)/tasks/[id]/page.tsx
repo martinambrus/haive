@@ -2180,7 +2180,7 @@ function TerminalTab({
     return (
       <Card className="p-4 text-sm text-neutral-400">
         No CLI providers configured. Add one in{' '}
-        <Link href="/settings/cli-providers" className="text-indigo-400 underline">
+        <Link href="/cli-providers" className="text-indigo-400 underline">
           Settings → CLI providers
         </Link>{' '}
         to launch a shell.

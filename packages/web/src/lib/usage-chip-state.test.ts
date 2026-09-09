@@ -156,7 +156,7 @@ describe('fault copy', () => {
   });
 
   it('offers a destination only for the fault a user can act on', () => {
-    expect(usageFaultHref('not_connected')).toBe('/settings/cli-providers');
+    expect(usageFaultHref('not_connected')).toBe('/cli-providers');
     expect(usageFaultHref('unavailable')).toBeNull();
     expect(usageFaultHref('no_windows')).toBeNull();
     expect(usageFaultHref('no_meter')).toBeNull();

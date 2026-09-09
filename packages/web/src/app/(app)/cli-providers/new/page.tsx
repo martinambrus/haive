@@ -18,7 +18,7 @@ export default function NewCliProviderPage() {
 
   useEffect(() => {
     if (!name) {
-      router.replace('/settings/cli-providers');
+      router.replace('/cli-providers');
       return;
     }
     api

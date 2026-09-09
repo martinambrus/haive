@@ -71,10 +71,7 @@ export default function EditCliProviderPage() {
   return (
     <div className="flex max-w-2xl flex-col gap-6">
       <div>
-        <Link
-          href="/settings/cli-providers"
-          className="text-xs text-neutral-500 hover:text-neutral-300"
-        >
+        <Link href="/cli-providers" className="text-xs text-neutral-500 hover:text-neutral-300">
           Back to providers
         </Link>
         <h1 className="mt-2 text-2xl font-bold text-neutral-50">{provider.label}</h1>

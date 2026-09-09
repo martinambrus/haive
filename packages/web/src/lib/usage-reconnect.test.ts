@@ -27,23 +27,21 @@ describe('usageReconnectFix', () => {
 
 describe('usageReconnectHref', () => {
   it('anchors claude-code at the Usage tracking section', () => {
-    expect(usageReconnectHref('p1', 'claude-code')).toBe(
-      '/settings/cli-providers/p1#usage-tracking',
-    );
+    expect(usageReconnectHref('p1', 'claude-code')).toBe('/cli-providers/p1#usage-tracking');
   });
 
   it('anchors an interactive-login CLI at the card holding its Log in button', () => {
     // Landing on the edit form instead leaves the user hunting for a control that is not
     // visible until they think to run a Test first.
-    expect(usageReconnectHref('p1', 'codex')).toBe('/settings/cli-providers/p1#cli-login');
-    expect(usageReconnectHref('p1', 'amp')).toBe('/settings/cli-providers/p1#cli-login');
+    expect(usageReconnectHref('p1', 'codex')).toBe('/cli-providers/p1#cli-login');
+    expect(usageReconnectHref('p1', 'amp')).toBe('/cli-providers/p1#cli-login');
   });
 
   it('anchors a BYOK provider at the credential field, not the top of the edit form', () => {
     // Nothing to open for these — no OAuth page, no login TUI — so the closest thing to
     // starting the repair is landing on (and focusing) the field the new key is pasted into.
-    expect(usageReconnectHref('p1', 'zai')).toBe('/settings/cli-providers/p1#secrets');
-    expect(usageReconnectHref('p1', null)).toBe('/settings/cli-providers/p1#secrets');
+    expect(usageReconnectHref('p1', 'zai')).toBe('/cli-providers/p1#secrets');
+    expect(usageReconnectHref('p1', null)).toBe('/cli-providers/p1#secrets');
   });
 });
 

@@ -38,6 +38,7 @@ test.describe('app layout and navigation', () => {
       await expect(aside.getByRole('link', { name: 'Dashboard' })).toBeVisible();
       await expect(aside.getByRole('link', { name: 'Tasks' })).toBeVisible();
       await expect(aside.getByRole('link', { name: 'Repositories' })).toBeVisible();
+      await expect(aside.getByRole('link', { name: 'CLI Providers' })).toBeVisible();
       await expect(aside.getByRole('link', { name: 'Settings' })).toBeVisible();
 
       await expect(aside.getByRole('button', { name: 'Sign out' })).toBeVisible();
@@ -65,9 +66,19 @@ test.describe('app layout and navigation', () => {
       await expect(page).toHaveURL(/\/repos$/);
       await expect(page.getByRole('heading', { level: 1, name: 'Repositories' })).toBeVisible();
 
-      await aside.getByRole('link', { name: 'Settings' }).click();
-      await expect(page).toHaveURL(/\/settings\/cli-providers$/);
+      await aside.getByRole('link', { name: 'CLI Providers' }).click();
+      await expect(page).toHaveURL(/\/cli-providers$/);
       await expect(page.getByRole('heading', { level: 1, name: 'CLI Providers' })).toBeVisible();
+
+      await aside.getByRole('link', { name: 'Settings' }).click();
+      await expect(page).toHaveURL(/\/settings\/account$/);
+      await expect(page.getByRole('heading', { level: 1, name: 'Settings' })).toBeVisible();
+
+      // Settings links to one tab but owns the whole section, so it must stay lit on the other
+      // six. Asserted on a tab that is NOT the link target, which is the case that regressed.
+      await page.getByRole('link', { name: 'Editor' }).click();
+      await expect(page).toHaveURL(/\/settings\/ide$/);
+      await expect(aside.getByRole('link', { name: 'Settings' })).toHaveClass(/bg-indigo-950/);
 
       await aside.getByRole('link', { name: 'Dashboard' }).click();
       await expect(page).toHaveURL(/\/dashboard$/);

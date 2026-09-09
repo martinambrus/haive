@@ -114,5 +114,5 @@ export function usageFaultTooltip(fault: UsageChipFault, displayName: string): s
 
 /** Only the actionable fault gets a destination; the rest are statements of fact. */
 export function usageFaultHref(fault: UsageChipFault): string | null {
-  return fault === 'not_connected' ? '/settings/cli-providers' : null;
+  return fault === 'not_connected' ? '/cli-providers' : null;
 }

@@ -617,7 +617,7 @@ export default function CliProvidersPage() {
                               {upgrading ? 'Upgrading...' : 'Upgrade'}
                             </Button>
                           )}
-                          <Link href={`/settings/cli-providers/${p.id}`}>
+                          <Link href={`/cli-providers/${p.id}`}>
                             <Button variant="secondary" size="sm">
                               Edit
                             </Button>
@@ -740,7 +740,7 @@ export default function CliProvidersPage() {
                       {m.supportsCliAuth && <Badge>CLI</Badge>}
                     </div>
                     <div className="mt-4">
-                      <Link href={`/settings/cli-providers/new?name=${m.name}`}>
+                      <Link href={`/cli-providers/new?name=${m.name}`}>
                         <Button size="sm">Add</Button>
                       </Link>
                     </div>

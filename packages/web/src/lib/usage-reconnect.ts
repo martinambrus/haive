@@ -49,7 +49,7 @@ export function usageReconnectHref(
   providerId: string,
   name: CliProviderName | null | undefined,
 ): string {
-  const base = `/settings/cli-providers/${providerId}`;
+  const base = `/cli-providers/${providerId}`;
   switch (usageReconnectFix(name)) {
     case 'usage-oauth':
       return `${base}#usage-tracking`;

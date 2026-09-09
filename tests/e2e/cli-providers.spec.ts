@@ -67,7 +67,7 @@ test.describe('cli providers', () => {
       const body = (await listRes.json()) as { providers: unknown[] };
       expect(body.providers).toEqual([]);
 
-      await page.goto('/settings/cli-providers');
+      await page.goto('/cli-providers');
       await expect(page.getByRole('heading', { level: 1, name: 'CLI Providers' })).toBeVisible();
       await expect(page.getByText('None yet. Pick a CLI below to get started.')).toBeVisible();
       await expect(page.getByRole('heading', { level: 2, name: 'Add another CLI' })).toBeVisible();

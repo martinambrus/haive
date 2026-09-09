@@ -5,15 +5,25 @@ import { usePathname, useRouter } from 'next/navigation';
 import { api } from '@/lib/api-client';
 import { Button } from '@/components/ui';
 
-const BASE_NAV_ITEMS = [
+/** `section` is the prefix that lights the item up, for a link whose target is one page of a
+ *  larger section — without it Settings highlights on /settings/account alone and goes dark on
+ *  the other six tabs. Defaults to `href`, which is the whole section for every other item. */
+interface NavItem {
+  href: string;
+  label: string;
+  section?: string;
+}
+
+const BASE_NAV_ITEMS: NavItem[] = [
   { href: '/dashboard', label: 'Dashboard' },
   { href: '/stats', label: 'Statistics' },
   { href: '/tasks', label: 'Tasks' },
   { href: '/repos', label: 'Repositories' },
-  { href: '/settings/cli-providers', label: 'Settings' },
+  { href: '/cli-providers', label: 'CLI Providers' },
+  { href: '/settings/account', label: 'Settings', section: '/settings' },
 ];
 
-const ADMIN_NAV_ITEM = { href: '/admin', label: 'Admin' };
+const ADMIN_NAV_ITEM: NavItem = { href: '/admin', label: 'Admin' };
 
 interface SidebarNavProps {
   email: string;
@@ -43,7 +53,8 @@ export function SidebarNav({ email, role }: SidebarNavProps) {
       </div>
       <nav className="flex flex-1 flex-col gap-1">
         {navItems.map((item) => {
-          const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
+          const section = item.section ?? item.href;
+          const isActive = pathname === section || pathname.startsWith(`${section}/`);
           return (
             <Link
               key={item.href}

@@ -6,7 +6,6 @@ import { cn } from '@/lib/cn';
 
 const SETTINGS_TABS = [
   { href: '/settings/account', label: 'Account' },
-  { href: '/settings/cli-providers', label: 'CLI Providers' },
   { href: '/settings/ide', label: 'Editor' },
   { href: '/settings/credentials', label: 'Git Credentials' },
   { href: '/settings/git-identity', label: 'Git Identity' },
@@ -23,7 +22,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
       <div>
         <h1 className="text-2xl font-bold text-neutral-50">Settings</h1>
         <p className="text-sm text-neutral-400">
-          Manage your account, CLI providers, and git integrations.
+          Manage your account, editor, and git integrations.
         </p>
       </div>
       <nav className="flex gap-1 border-b border-neutral-800">

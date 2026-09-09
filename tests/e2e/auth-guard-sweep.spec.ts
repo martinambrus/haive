@@ -70,9 +70,9 @@ const PROTECTED_WEB_PATHS = [
   `/tasks/${FAKE_UUID}`,
   '/repos',
   '/repos/new',
-  '/settings/cli-providers',
-  '/settings/cli-providers/new?name=claude-code',
-  `/settings/cli-providers/${FAKE_UUID}`,
+  '/cli-providers',
+  '/cli-providers/new?name=claude-code',
+  `/cli-providers/${FAKE_UUID}`,
 ];
 
 test.describe('auth guard sweep', () => {

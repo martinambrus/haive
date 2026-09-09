@@ -628,7 +628,7 @@ export function CliProviderForm({
         throw new Error('No provider context for edit mode');
       }
 
-      router.push('/settings/cli-providers');
+      router.push('/cli-providers');
       router.refresh();
     } catch (err) {
       captureError(err, 'Failed to save provider');

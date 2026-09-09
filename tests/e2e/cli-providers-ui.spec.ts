@@ -29,7 +29,7 @@ test.describe('cli providers UI', () => {
       const email = uniqueEmail('cli-ui-create');
       userId = await registerAndGetUserId(page.request, email);
 
-      await page.goto('/settings/cli-providers');
+      await page.goto('/cli-providers');
       await expect(page.getByRole('heading', { level: 1, name: 'CLI Providers' })).toBeVisible();
 
       // Available card has an Add button that links to /new?name=claude-code
@@ -85,7 +85,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/settings/cli-providers/${providerId}`);
+      await page.goto(`/cli-providers/${providerId}`);
       await expect(page.getByRole('heading', { level: 1, name: 'Before label' })).toBeVisible();
 
       await page.getByLabel('Label').fill('After label');
@@ -128,7 +128,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/settings/cli-providers/${providerId}`);
+      await page.goto(`/cli-providers/${providerId}`);
       await expect(page.getByRole('heading', { level: 1, name: 'Secrets target' })).toBeVisible();
 
       const secretsField = page.getByLabel('Secrets', { exact: true });
@@ -177,7 +177,7 @@ test.describe('cli providers UI', () => {
       );
       expect(seedSecretRes.status()).toBe(201);
 
-      await page.goto(`/settings/cli-providers/${providerId}`);
+      await page.goto(`/cli-providers/${providerId}`);
       await expect(page.getByRole('heading', { level: 1, name: 'Delete target' })).toBeVisible();
 
       const secretsField = page.getByLabel('Secrets', { exact: true });
@@ -213,7 +213,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/settings/cli-providers/${providerId}`);
+      await page.goto(`/cli-providers/${providerId}`);
       await expect(page.getByRole('heading', { level: 1, name: 'Gate target' })).toBeVisible();
 
       const testButton = page.getByRole('button', { name: 'Test connection' });
@@ -305,7 +305,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/settings/cli-providers/${providerId}`);
+      await page.goto(`/cli-providers/${providerId}`);
       await expect(page.getByRole('heading', { level: 1, name: 'Rebuild target' })).toBeVisible();
 
       const testButton = page.getByRole('button', { name: 'Test connection' });
@@ -382,7 +382,7 @@ test.describe('cli providers UI', () => {
         provider: { id: providerId },
       } = (await createRes.json()) as { provider: { id: string } };
 
-      await page.goto(`/settings/cli-providers/${providerId}`);
+      await page.goto(`/cli-providers/${providerId}`);
       await expect(page.getByRole('heading', { level: 1, name: 'Clearable UI' })).toBeVisible();
 
       const execField = page.getByLabel('Executable path');
@@ -418,7 +418,7 @@ test.describe('cli providers UI', () => {
       });
       expect(createRes.status()).toBe(201);
 
-      await page.goto('/settings/cli-providers');
+      await page.goto('/cli-providers');
       await expect(page.getByRole('heading', { level: 1, name: 'CLI Providers' })).toBeVisible();
       await expect(page.getByRole('heading', { level: 3, name: 'Clone me UI' })).toBeVisible();
 
@@ -476,7 +476,7 @@ test.describe('cli providers UI', () => {
       expect(before).toHaveLength(1);
       const beforeEncrypted = before[0]!.encrypted_value;
 
-      await page.goto(`/settings/cli-providers/${providerId}`);
+      await page.goto(`/cli-providers/${providerId}`);
       await expect(page.getByRole('heading', { level: 1, name: 'Keep target' })).toBeVisible();
 
       // Auto-filled with name= placeholder; do not touch, click Save.
