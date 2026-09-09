@@ -2004,6 +2004,10 @@ export interface StatsNormalizedTokens {
   cacheCreationTokens: number;
   totalTokens: number;
   cacheHitRatio: number | null;
+  /** cacheCreation / (cacheCreation + cacheRead) — the share of cached traffic that was
+   *  re-written rather than reused. NOT visible in cacheHitRatio, which leaves cache creation
+   *  out of its denominator entirely. null when nothing was cached either way. */
+  cacheWriteShare: number | null;
 }
 
 export interface StatsProviderUsage {
@@ -2051,15 +2055,9 @@ export interface StatsSummary {
     realDelta: StatsDelta;
     notionalDelta: StatsDelta;
   };
-  tokens: {
-    freshInputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-    totalTokens: number;
-    /** Normalised across providers (codex/gemini report input inclusive of cache). */
-    cacheHitRatio: number | null;
-  };
+  /** The window total, from the same `sumNormalizedTokens` that builds every per-provider row
+   *  below — one named type rather than a second inline copy, which had already drifted. */
+  tokens: StatsNormalizedTokens;
   time: {
     /** Σ invocation durations — compute consumed. Not a duration; never render it beside one. */
     agentMs: number;
@@ -2311,6 +2309,12 @@ export interface StatsStepRow {
   notionalUsd: number;
   unpricedInvocations: number;
   taskCount: number;
+  /** This step's four token buckets, normalised per provider before being added. Read
+   *  `cacheWriteShare` to see whether the step reuses its cached prefix or re-writes it. */
+  tokens: StatsNormalizedTokens;
+  /** `tokens.cacheWriteShare` with the invocation count to judge it by, so a 100% share off
+   *  two runs renders as `n=2` rather than as a finding. */
+  cacheWriteShareSampled: SampledRatio;
 }
 
 /** Which model ANSWERED, per the CLI's own output. `served` is null for the invocations that

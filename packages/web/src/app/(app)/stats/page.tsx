@@ -961,6 +961,88 @@ function StatsPageInner() {
 
               <Card>
                 <CardHeader>
+                  <CardTitle>Prompt cache</CardTitle>
+                  <CardDescription>
+                    Whether a step REUSES its cached prefix or re-writes it. A cache write bills at
+                    1.25&times; the input rate and a read at 0.1&times;, so a high write share is a
+                    step paying full price for context it already sent. This is the figure the
+                    1-hour prompt-cache setting under Admin asks you to check before turning it on
+                    &mdash; and it is not the &ldquo;cached&rdquo; percentage on the Money tab,
+                    which leaves cache writes out of its denominator entirely and so reports a step
+                    re-writing 84k tokens per agent as a near-perfect hit. These are the same rows
+                    as the table above, re-sorted: a step outside the agent-hours cap is not shown
+                    here either.
+                  </CardDescription>
+                </CardHeader>
+                {steps.rows.length === 0 ? (
+                  <p className="text-sm text-neutral-500">No steps ran in this window.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                          <th className="pb-2 font-medium">Step</th>
+                          <th className="pb-2 text-right font-medium">Runs</th>
+                          <th className="pb-2 text-right font-medium">Tokens</th>
+                          <th className="pb-2 text-right font-medium">Cache read</th>
+                          <th className="pb-2 text-right font-medium">Cache write</th>
+                          <th className="pb-2 text-right font-medium">Write share</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...steps.rows]
+                          .sort(
+                            (a, b) =>
+                              (b.tokens.cacheWriteShare ?? -1) - (a.tokens.cacheWriteShare ?? -1) ||
+                              b.tokens.cacheCreationTokens - a.tokens.cacheCreationTokens ||
+                              a.stepId.localeCompare(b.stepId),
+                          )
+                          .map((r) => (
+                            <tr key={r.stepId} className="border-t border-neutral-800">
+                              <td className="py-2 font-mono text-xs text-neutral-200">
+                                {r.stepId}
+                              </td>
+                              <td className="py-2 text-right font-mono text-neutral-400">
+                                {formatCount(r.invocations)}
+                              </td>
+                              <td className="py-2 text-right font-mono text-neutral-400">
+                                {formatTokens(r.tokens.totalTokens)}
+                              </td>
+                              <td
+                                className="py-2 text-right font-mono"
+                                style={{ color: TOKEN_COLORS.cacheRead }}
+                              >
+                                {formatTokens(r.tokens.cacheReadTokens)}
+                              </td>
+                              <td
+                                className="py-2 text-right font-mono"
+                                style={{ color: TOKEN_COLORS.cacheCreation }}
+                              >
+                                {formatTokens(r.tokens.cacheCreationTokens)}
+                              </td>
+                              <td className="w-32 py-2 text-right font-mono text-neutral-300">
+                                {formatSampledRatio(r.cacheWriteShareSampled, 1)}
+                                {/* max=1: a share has a real 0-100% domain, so the track must
+                                    not be scaled against whichever row happens to be largest. */}
+                                {!isUnderSampled(r.cacheWriteShareSampled) &&
+                                  r.tokens.cacheWriteShare != null && (
+                                    <InlineBar
+                                      value={r.tokens.cacheWriteShare}
+                                      max={1}
+                                      color={TOKEN_COLORS.cacheCreation}
+                                    />
+                                  )}
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+
+              <Card>
+                <CardHeader>
                   <CardTitle>Models that answered</CardTitle>
                   <CardDescription>
                     Which model actually replied, parsed from each CLI&apos;s own output rather than

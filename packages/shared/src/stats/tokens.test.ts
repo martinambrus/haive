@@ -78,7 +78,35 @@ describe('normalizeTokens', () => {
       cacheCreationTokens: 0,
     });
     expect(n.cacheHitRatio).toBeNull();
+    expect(n.cacheWriteShare).toBeNull();
     expect(n.totalTokens).toBe(0);
+  });
+
+  it('sees a re-written prefix that cacheHitRatio reports as a perfect hit', () => {
+    // The whole reason cacheWriteShare exists. MEASURED on step 00-plan-sequence: 499 fan-out
+    // agents, each averaging these figures. cacheHitRatio says 99.99% cached because cache
+    // CREATION is not in its denominator — for a step writing 84k cache tokens per agent.
+    const n = normalizeTokens({
+      provider: 'claude-code',
+      inputTokens: 2,
+      outputTokens: 1_400,
+      cacheReadTokens: 24_263,
+      cacheCreationTokens: 84_305,
+    });
+    expect(n.cacheHitRatio! * 100).toBeCloseTo(99.99, 2);
+    expect(n.cacheWriteShare! * 100).toBeCloseTo(77.65, 2);
+  });
+
+  it('reports a zero write share when nothing was re-written', () => {
+    // Distinct from the null above: this cached traffic exists and was entirely reuse.
+    const n = normalizeTokens({
+      provider: 'claude-code',
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 900,
+      cacheCreationTokens: 0,
+    });
+    expect(n.cacheWriteShare).toBe(0);
   });
 
   it('coerces missing, negative and non-finite counts to zero', () => {
@@ -118,5 +146,16 @@ describe('sumNormalizedTokens', () => {
     const combined = sumNormalizedTokens([]);
     expect(combined.totalTokens).toBe(0);
     expect(combined.cacheHitRatio).toBeNull();
+    expect(combined.cacheWriteShare).toBeNull();
+  });
+
+  it('computes the write share off the summed buckets, not an average of shares', () => {
+    // A per-row average would weight a tiny provider the same as a large one. CLAUDE carries
+    // every cache-creation token here, so the combined share is its writes over the whole
+    // cached side — well below its own 35.0%.
+    const combined = sumNormalizedTokens([CLAUDE, CODEX]);
+    const cachedSide = combined.cacheCreationTokens + combined.cacheReadTokens;
+    expect(combined.cacheWriteShare).toBeCloseTo(combined.cacheCreationTokens / cachedSide, 12);
+    expect(combined.cacheWriteShare!).toBeLessThan(normalizeTokens(CLAUDE).cacheWriteShare!);
   });
 });

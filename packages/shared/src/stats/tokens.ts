@@ -43,6 +43,20 @@ export interface NormalizedTokens {
    *  null when there was no prompt side at all — 0% and "nothing to measure" are different
    *  claims and a KPI tile must not render them the same way. */
   cacheHitRatio: number | null;
+  /** cacheCreation / (cacheCreation + cacheRead): the share of CACHED traffic that was
+   *  re-written rather than reused. null when nothing was cached either way, for the same
+   *  reason cacheHitRatio is.
+   *
+   *  NOT a restatement of cacheHitRatio, which cannot see this at all: cache CREATION is
+   *  absent from that ratio's denominator. MEASURED on step 00-plan-sequence — 499 fan-out
+   *  agents averaging input 2, cacheRead 24,263, cacheCreation 84,305 — cacheHitRatio reports
+   *  0.9999, a near-perfect cache hit, for a step writing 84k cache tokens per agent. A write
+   *  bills at 1.25x input against a read's 0.1x, so the two figures disagree about money by
+   *  more than 12x on exactly the steps that cost the most.
+   *
+   *  Denominator is the cached traffic alone. Folding in freshInput/output would dilute it
+   *  with volume that has nothing to do with whether a prefix was reused. */
+  cacheWriteShare: number | null;
 }
 
 function nonNegative(n: number | null | undefined): number {
@@ -64,6 +78,7 @@ export function normalizeTokens(raw: RawTokenTotals): NormalizedTokens {
     : input;
 
   const promptSide = freshInputTokens + cacheReadTokens;
+  const cachedSide = cacheCreationTokens + cacheReadTokens;
   return {
     freshInputTokens,
     outputTokens,
@@ -71,6 +86,7 @@ export function normalizeTokens(raw: RawTokenTotals): NormalizedTokens {
     cacheCreationTokens,
     totalTokens: freshInputTokens + outputTokens + cacheReadTokens + cacheCreationTokens,
     cacheHitRatio: promptSide > 0 ? cacheReadTokens / promptSide : null,
+    cacheWriteShare: cachedSide > 0 ? cacheCreationTokens / cachedSide : null,
   };
 }
 
@@ -91,6 +107,7 @@ export function sumNormalizedTokens(rows: RawTokenTotals[]): NormalizedTokens {
     cacheCreationTokens += n.cacheCreationTokens;
   }
   const promptSide = freshInputTokens + cacheReadTokens;
+  const cachedSide = cacheCreationTokens + cacheReadTokens;
   return {
     freshInputTokens,
     outputTokens,
@@ -98,5 +115,6 @@ export function sumNormalizedTokens(rows: RawTokenTotals[]): NormalizedTokens {
     cacheCreationTokens,
     totalTokens: freshInputTokens + outputTokens + cacheReadTokens + cacheCreationTokens,
     cacheHitRatio: promptSide > 0 ? cacheReadTokens / promptSide : null,
+    cacheWriteShare: cachedSide > 0 ? cacheCreationTokens / cachedSide : null,
   };
 }

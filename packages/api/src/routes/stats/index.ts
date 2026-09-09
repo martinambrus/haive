@@ -11,6 +11,7 @@ import {
   computeDelta,
   dayKey,
   dayKeysBetween,
+  hasEnoughSamples,
   knownTaskTypes,
   previousWindow,
   resolveTaskClass,
@@ -212,7 +213,12 @@ async function effortOver(
  *  The order matters: codex and gemini report `input` INCLUSIVE of the cached prefix, so
  *  adding raw fields across providers and normalising once at the end mixes two different
  *  definitions of the same column. See `sumNormalizedTokens`. */
-function toRawTotals(p: TaskProviderUsage) {
+function toRawTotals(
+  p: Pick<
+    TaskProviderUsage,
+    'provider' | 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'
+  >,
+) {
   return {
     provider: p.provider,
     inputTokens: p.inputTokens,
@@ -778,6 +784,12 @@ const STEP_ROW_LIMIT = 60;
  * counts superseded and unattributed rows because those rows ARE the waste it measures; a spend
  * rollup is the opposite case and has to reconcile.
  *
+ * `tokens` answers the question `CONFIG_KEYS.PROMPT_CACHING_1H` asks an admin and nothing could
+ * previously show them: whether a step REUSES its cached prefix or re-writes it. Read
+ * `tokens.cacheWriteShare`, not `cacheHitRatio` — cache creation is absent from the latter's
+ * denominator, so MEASURED it calls 00-plan-sequence a 99.99% cache hit while that step writes
+ * 84k cache tokens per fan-out agent. A write bills at 1.25x input against a read's 0.1x.
+ *
  * agentMs is summed from the timestamps rather than from `duration_ms`, matching how every other
  * agent-hours figure in this file is defined — and MEASURED, 17 rows on this install carry both
  * timestamps and a null `duration_ms`, which the column form would silently drop. It is summed
@@ -818,8 +830,9 @@ statsRoutes.get('/steps', async (c) => {
   ), 0)::double precision`;
 
   const servedSql = sql<string | null>`${schema.cliInvocations.modelIdentity} ->> 'served'`;
+  const tu = schema.cliInvocations.tokenUsage;
 
-  const [stepRows, modelRows] = await Promise.all([
+  const [stepRows, modelRows, tokenRows] = await Promise.all([
     db
       .select({
         stepId: schema.taskSteps.stepId,
@@ -853,18 +866,74 @@ statsRoutes.get('/steps', async (c) => {
       .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
       .where(window)
       .groupBy(servedSql),
+    // Token buckets keep the PROVIDER dimension the rollup above does not need, because the
+    // cache-inclusive reporters have to be normalised before they are added — see toRawTotals.
+    // Same window, same attribution join, so these rows partition exactly the set above.
+    db
+      .select({
+        stepId: schema.taskSteps.stepId,
+        provider: schema.cliProviders.name,
+        inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
+        outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
+        cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
+        cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
+      })
+      .from(schema.cliInvocations)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+      .innerJoin(
+        schema.taskSteps,
+        sql`${schema.taskSteps.id} = coalesce(${schema.cliInvocations.taskStepId}, ${schema.cliInvocations.summaryForStepId})`,
+      )
+      .leftJoin(
+        schema.cliProviders,
+        eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId),
+      )
+      .where(window)
+      .groupBy(schema.taskSteps.stepId, schema.cliProviders.name),
   ]);
 
+  // Per step, normalise each provider's totals and THEN add them — never the reverse; the sum
+  // of raw fields mixes two definitions of `input`. A row whose provider was deleted (the FK
+  // nulls) is skipped exactly as providerBreakdownWhere skips it, so this reconciles with
+  // /summary; MEASURED 0 such rows of 1,853 attributed invocations on this install.
+  const rawByStep = new Map<string, ReturnType<typeof toRawTotals>[]>();
+  for (const r of tokenRows) {
+    if (!r.provider) continue;
+    const list = rawByStep.get(r.stepId);
+    const raw = toRawTotals({
+      provider: r.provider,
+      inputTokens: Number(r.inputTokens) || 0,
+      outputTokens: Number(r.outputTokens) || 0,
+      cacheReadTokens: Number(r.cacheReadTokens) || 0,
+      cacheCreationTokens: Number(r.cacheCreationTokens) || 0,
+    });
+    if (list) list.push(raw);
+    else rawByStep.set(r.stepId, [raw]);
+  }
+
   const ranked = stepRows
-    .map((r) => ({
-      stepId: r.stepId,
-      invocations: Number(r.invocations) || 0,
-      agentMs: Number(r.agentMs) || 0,
-      realUsd: Number(r.realUsd) || 0,
-      notionalUsd: Number(r.notionalUsd) || 0,
-      unpricedInvocations: Number(r.unpricedInvocations) || 0,
-      taskCount: Number(r.taskCount) || 0,
-    }))
+    .map((r) => {
+      const invocations = Number(r.invocations) || 0;
+      const tokens = sumNormalizedTokens(rawByStep.get(r.stepId) ?? []);
+      return {
+        stepId: r.stepId,
+        invocations,
+        agentMs: Number(r.agentMs) || 0,
+        realUsd: Number(r.realUsd) || 0,
+        notionalUsd: Number(r.notionalUsd) || 0,
+        unpricedInvocations: Number(r.unpricedInvocations) || 0,
+        taskCount: Number(r.taskCount) || 0,
+        tokens,
+        // The same share, carrying the count a reader should judge it by. `n` is INVOCATIONS,
+        // not the token denominator sampledRatio() would have used: a 100% write share off two
+        // runs is uninformative however many tokens those two runs moved.
+        cacheWriteShareSampled: {
+          ratio: tokens.cacheWriteShare,
+          n: invocations,
+          sufficient: hasEnoughSamples(invocations),
+        },
+      };
+    })
     // Tie-broken on the step id so the cap always cuts the same rows — the same reason
     // buildTaskTimeBreakdown breaks its own ties rather than leaving the order to the planner.
     .sort(
