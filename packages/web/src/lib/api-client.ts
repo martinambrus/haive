@@ -4,7 +4,24 @@ import type { CostDisplay } from './format-cost';
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+// A real runtime import, unlike the type-only ones above. `api-origin` has no imports of its own,
+// so it introduces no cycle — the same reasoning that lets `format-cost` be imported for its type.
+import { resolveApiOrigin, type RuntimeApiConfig } from './api-origin';
+
+declare global {
+  interface Window {
+    /** Written by the root layout, per request, before this bundle runs. */
+    __HAIVE_RUNTIME__?: RuntimeApiConfig;
+  }
+}
+
+// Resolved ONCE at module load, which is why the layout injects its script into <head>: an inline
+// classic script executes during parse, ahead of the deferred module scripts that evaluate this.
+const API_BASE = resolveApiOrigin({
+  config: typeof window === 'undefined' ? undefined : window.__HAIVE_RUNTIME__,
+  location: typeof window === 'undefined' ? undefined : window.location,
+  buildTime: process.env.NEXT_PUBLIC_API_URL,
+});
 
 export const API_BASE_URL = API_BASE;
 

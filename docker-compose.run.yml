@@ -101,11 +101,12 @@ services:
   web:
     build: !reset null
     image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-web:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
-    # The browser runs on the HOST and calls the api directly, at the URL baked into the web image
-    # at build time (NEXT_PUBLIC_API_URL, default http://localhost:3001). So changing
-    # HAIVE_API_PORT away from 3001 needs a web image built for that port — the published one
-    # assumes the default. Documented rather than solved; a per-install web build is the fix, and
-    # it is the same constraint frictionless-bootstrapping-otter records.
+    # The browser runs on the HOST and calls the api directly. It used to call the URL baked into
+    # the image at build time, which meant the published web image could only reach an api on
+    # 3001 — so an install whose port the installer had moved (because 3001 was taken, which is
+    # the case the probe exists for) had a UI that could not reach its own api, while its
+    # server-rendered pages worked. MEASURED on v0.2.0-rc.1. The origin is resolved at RUNTIME
+    # now, from HAIVE_API_PORT in docker-compose.yml, so one published image serves any port.
     ports:
       - '${HAIVE_WEB_PORT:-3000}:3000'
     depends_on:

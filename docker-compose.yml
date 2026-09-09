@@ -113,6 +113,15 @@ services:
       # above; they have to agree or one install's reapers act on another's resources.
       HAIVE_INSTALL_ID: ${HAIVE_INSTALL_ID:-haive}
       API_PORT: 3001
+      # The origin CORS admits, DERIVED from the port the web app is published on. It used to be
+      # unset, so the api fell back to `http://localhost:3000` and refused an install the
+      # installer had moved to any other port — the same class of failure as the api URL the
+      # browser calls, and the half that would still have blocked a request even once that was
+      # right. Set WEB_ORIGIN explicitly to reach this install from another machine or from behind
+      # a reverse proxy: the browser derives the api origin from the page it is on, but CORS
+      # cannot guess which origins you meant to allow, and reflecting any of them back with
+      # `credentials: true` is not a default worth shipping.
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:${HAIVE_WEB_PORT:-3000}}
       DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
       REDIS_URL: redis://redis:6379
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
@@ -208,6 +217,13 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
       API_URL_INTERNAL: ${API_URL_INTERNAL:-http://api:3001}
+      # What the BROWSER should call. Runtime, deliberately not NEXT_PUBLIC_*: Next inlines those
+      # at build time, so the published image could only ever reach an api on 3001 and an install
+      # whose port the installer had moved was silently broken. The root layout injects these into
+      # the page per request. HAIVE_PUBLIC_API_URL is the escape hatch for a reverse proxy or a
+      # public hostname; unset, the browser derives the origin from the page it is already on.
+      HAIVE_API_PORT: ${HAIVE_API_PORT:-3001}
+      HAIVE_PUBLIC_API_URL: ${HAIVE_PUBLIC_API_URL:-}
     networks:
       - haive-network
 
