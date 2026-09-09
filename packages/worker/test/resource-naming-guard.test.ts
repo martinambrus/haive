@@ -20,6 +20,10 @@ const ROOTS = [
   fileURLToPath(new URL('../src', import.meta.url)),
   fileURLToPath(new URL('../../api/src', import.meta.url)),
   fileURLToPath(new URL('../../shared/src', import.meta.url)),
+  // The updater was omitted at first, and a literal `haive-network` survived in it as a result:
+  // its one-shot containers joined the DEFAULT install's network on a namespaced install. A guard
+  // that does not read a package cannot protect it.
+  fileURLToPath(new URL('../../updater/src', import.meta.url)),
 ];
 
 /** The naming module is where the shape of a name is allowed to be written down. */

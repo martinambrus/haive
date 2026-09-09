@@ -10,6 +10,7 @@ import {
   containerName,
   decryptEmail,
   getHaiveVersion,
+  installId,
   isDevVersion,
   logger,
   maintenanceStateSchema,
@@ -369,6 +370,10 @@ maintenanceRoutes.post('/upgrade', async (c) => {
     'CONFIG_ENCRYPTION_KEY',
     '-e',
     `COMPOSE_PROJECT_NAME=${project}`,
+    // Without this the updater falls back to the DEFAULT install id and its one-shot containers
+    // join `haive-network` — another install's, on any namespaced install.
+    '-e',
+    `HAIVE_INSTALL_ID=${installId()}`,
     image,
     '--manifest',
     manifestUrl(version),

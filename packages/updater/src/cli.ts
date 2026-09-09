@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 import postgres from 'postgres';
-import { configService } from '@haive/shared';
+import { configService, networkName } from '@haive/shared';
 import { parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
 import { ensureJournal, findLiveRun, finishRun, startRun, tryLock } from './journal.js';
@@ -61,7 +61,13 @@ async function main(): Promise<number> {
   const installDir = arg('install-dir', process.env.HAIVE_INSTALL_DIR ?? '/install')!;
   const registry = arg('registry', process.env.HAIVE_REGISTRY ?? 'ghcr.io/martinambrus')!;
   const apiUrl = arg('api-url', process.env.HAIVE_API_URL ?? 'http://api:3001')!;
-  const network = arg('network', process.env.HAIVE_NETWORK ?? 'haive-network')!;
+  // The one-shot containers this updater runs (migrate, destructive data migrations) join this
+  // network to reach postgres by name. A literal `haive-network` here made them join the DEFAULT
+  // install's network on a namespaced install — MEASURED: the migrate container resolved `postgres`
+  // to a different install's database and died on `password authentication failed`, which the
+  // health gate then correctly rolled back. The install id reaches this process as an env var set
+  // by whoever launched it.
+  const network = arg('network', process.env.HAIVE_NETWORK ?? networkName('network'))!;
   // As the DAEMON sees it. Defaults to the container-side path only because a host-run updater has
   // one view; a containerised one must be told, or the snapshot lands somewhere nobody looks.
   const snapshotDir = arg(
