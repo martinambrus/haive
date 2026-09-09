@@ -1,5 +1,10 @@
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
-import { schema, resetDagCurrentLevelForRetry, type Database } from '@haive/database';
+import {
+  schema,
+  resetDagCurrentLevelForRetry,
+  CLOSED_GAP_INTO_IDLE_MS,
+  type Database,
+} from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import { isFatalProviderFailure } from './cli-exec/failure-class.js';
 
@@ -160,8 +165,11 @@ export async function resetStepAndDownstream(
  *  it to running first) wins and this no-ops → returns false and the caller skips the enqueue.
  *  Clears the allowance watch inline (mirror of the api CLEAR_ALLOWANCE_WATCH — the worker
  *  must not import @haive/api) plus the stale completedAt (else the UI wall clock stays frozen
- *  at failure time). Does NOT enqueue the advance itself (that would import the task queue and
- *  form a cycle) — the caller enqueues ADVANCE_STEP when this returns true. */
+ *  at failure time). Re-opening the step keeps its `started_at`, so the outage sit lands inside
+ *  its span and would bill as WORK — CLOSED_GAP_INTO_IDLE_MS credits it to idle in the same
+ *  update, exactly as the api re-open sites do. Does NOT enqueue the advance itself (that
+ *  would import the task queue and form a cycle) — the caller enqueues ADVANCE_STEP when this
+ *  returns true. */
 export async function autoResumeFailedStep(
   db: Database,
   args: { taskId: string; stepId: string; round: number; providerId: string | null; via: string },
@@ -297,6 +305,8 @@ export async function autoResumeFailedStep(
         errorMessage: null,
         errorHint: null,
         endedAt: null,
+        // Re-opening a closed row: bill the outage sit since it closed as idle, not work.
+        idleMs: CLOSED_GAP_INTO_IDLE_MS,
         statusMessage: null,
         updatedAt: now,
       })
