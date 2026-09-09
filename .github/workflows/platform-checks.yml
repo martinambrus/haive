@@ -118,7 +118,7 @@ jobs:
     # Item 7's "Apple Silicon boots the stack" clause needs real Apple hardware; a hosted runner
     # cannot answer it.
     runs-on: macos-15-intel
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -140,27 +140,62 @@ jobs:
       - name: Docker actually works here
         run: docker run --rm alpine:latest uname -m
 
-      - name: Install Haive from published images
+      - name: Write the install (no boot)
         env:
           VERSION_INPUT: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          args="--install-id ci --dir $HOME/haive-ci"
+          args="--install-id ci --dir $HOME/haive-ci --no-start"
           [ -n "${VERSION_INPUT}" ] && args="$args --version ${VERSION_INPUT}"
           # shellcheck disable=SC2086
           sh install/install.sh $args
+          echo "--- .env (secrets elided) ---"
+          sed -E 's/^(CONFIG_ENCRYPTION_KEY|JWT_SECRET|POSTGRES_PASSWORD)=.*/\1=<elided>/' "$HOME/haive-ci/.env"
 
-      - name: The stack reports the version it installed
+      - name: Boot the core services
+        # A SUBSET, and the reason is measured rather than squeamish: `ollama/ollama:latest` is
+        # 9.19 GB on disk — 60% of the stack's ~15 GB — and a first attempt at the full `up` spent
+        # 50+ minutes pulling before this job was rewritten. Ollama contributes nothing to "does
+        # the installer work on macOS": no task runs here, so nothing embeds or infers.
+        #
+        # postgres + redis + db-migrate + api + web is ~3.4 GB and still exercises everything this
+        # item is about — the pinned images resolve and pull, migrations run against a fresh
+        # database before the api is allowed up, and both HTTP surfaces serve. The worker is left
+        # out for the same cost reason (2 GB, and it would run no job); the earlier Windows boot
+        # test in `frictionless-bootstrapping-otter` excluded it too.
         run: |
           set -euo pipefail
-          port=$(sed -n 's/^HAIVE_API_PORT=//p' "$HOME/haive-ci/.env")
-          pinned=$(sed -n 's/^HAIVE_VERSION=//p' "$HOME/haive-ci/.env")
-          body=$(curl -fsS "http://localhost:${port}/version")
-          echo "$body"
+          cd "$HOME/haive-ci"
+          ./haive up api web
+          docker images --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
+
+      - name: Migrations ran and both surfaces serve
+        run: |
+          set -euo pipefail
+          cd "$HOME/haive-ci"
+          port=$(sed -n 's/^HAIVE_API_PORT=//p' .env)
+          web=$(sed -n 's/^HAIVE_WEB_PORT=//p' .env)
+          pinned=$(sed -n 's/^HAIVE_VERSION=//p' .env)
+
+          # db-migrate is a one-shot that api/web gate on, so it has already run by the time the
+          # api answers. Its exit status is the assertion that the schema was actually applied.
+          docker inspect ci-db-migrate --format '{{.State.ExitCode}}' | grep -qx 0 \
+            || { docker logs ci-db-migrate; echo "::error::db-migrate did not succeed"; exit 1; }
+
+          for i in $(seq 1 60); do
+            curl -fsS "http://localhost:${port}/health" >/dev/null 2>&1 && break
+            [ "$i" -lt 60 ] || { docker logs ci-api; echo "::error::api never became healthy"; exit 1; }
+            sleep 5
+          done
+
+          body=$(curl -fsS "http://localhost:${port}/version"); echo "$body"
           echo "$body" | grep -q "\"version\":\"${pinned}\"" \
             || { echo "::error::/version does not report ${pinned}"; exit 1; }
           echo "$body" | grep -q '"devBuild":false' \
             || { echo "::error::published image reports devBuild true"; exit 1; }
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${web}/login")
+          [ "$code" = "200" ] || { echo "::error::web /login answered ${code}"; exit 1; }
 
       - name: Uninstall leaves nothing behind
         if: always()
