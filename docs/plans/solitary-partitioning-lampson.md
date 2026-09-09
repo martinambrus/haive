@@ -132,6 +132,22 @@ this slice anticipated turned out to be unnecessary rather than skipped: at the 
 prefixed name IS the bare name, so a repo indexed before this existed resolves to the same database
 with no second lookup.
 
+**A package the guard does not READ is a package it does not protect.** Its ROOTS originally
+covered worker, api and shared — not `packages/updater`, where a literal `haive-network` therefore
+survived the whole sweep. MEASURED 2026-09-09, upgrading a namespaced install (`chan2`) through an
+emulated per-customer channel: the updater CONTAINER joined `chan2-network` correctly, because the
+api passes `--network` when it spawns it — but the one-shot MIGRATE container the updater itself
+launches used the updater's own default, joined the DEFAULT install's `haive-network`, resolved
+`postgres` to another install's database and died on `password authentication failed`. The health
+gate caught it and rolled back, so the system behaved correctly; two installs sharing a password
+would instead have had the wrong database migrated, silently.
+
+The literal was only half of it. The updater resolves through `networkName()` now, AND the api
+passes `-e HAIVE_INSTALL_ID` when spawning it — without which `networkName()` in that container has
+no id to work from and falls back to the default regardless. A namespaced resource needs the
+namespace to REACH the process that builds the name, which a container boundary does not carry for
+free.
+
 **S4 — verify by doing the thing. The guard that keeps S0-S3 true is
 `resource-naming-guard.test.ts`**, which fails the build on any resource-name literal typed outside
 the naming module. Source-level rather than behavioural, because the failure mode IS a literal in
