@@ -108,7 +108,12 @@ export function AuthForm({ mode }: AuthFormProps) {
             : isLogin
               ? 'Sign in to Haive'
               : needsInvite
-                ? 'Registration is closed'
+                ? // `invite` and `closed` both refuse a request carrying no invite, but only one
+                  // of them is CLOSED — saying so of an install that is actively inviting people
+                  // reads as an outage.
+                  status?.mode === 'invite'
+                  ? 'Registration is by invitation'
+                  : 'Registration is closed'
                 : 'Create your Haive account'}
         </CardTitle>
         <CardDescription>
