@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { usePageTitle } from '@/lib/use-page-title';
 import {
@@ -185,18 +184,11 @@ export default function AdminUsersPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-neutral-50">Users</h1>
-          <p className="text-sm text-neutral-400">
-            Everyone with an account on this instance. Requires an admin role.
-          </p>
-        </div>
-        <Link href="/admin">
-          <Button variant="secondary" size="sm">
-            Back to admin
-          </Button>
-        </Link>
+      <div>
+        <h2 className="text-lg font-semibold text-neutral-50">Users</h2>
+        <p className="text-sm text-neutral-400">
+          Everyone with an account on this instance. Requires an admin role.
+        </p>
       </div>
 
       <FormError message={error} />

@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { api, listAuditEvents, type AdminUser, type AuditListResponse } from '@/lib/api-client';
 import { Button, Badge, Input, FormError } from '@/components/ui';
@@ -98,18 +97,11 @@ export default function AuditLogPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-neutral-50">Audit log</h1>
-          <p className="text-sm text-neutral-400">
-            Security-sensitive actions (git credentials, admin user actions). Append-only.
-          </p>
-        </div>
-        <Link href="/admin">
-          <Button variant="secondary" size="sm">
-            Back to admin
-          </Button>
-        </Link>
+      <div>
+        <h2 className="text-lg font-semibold text-neutral-50">Audit log</h2>
+        <p className="text-sm text-neutral-400">
+          Security-sensitive actions (git credentials, admin user actions). Append-only.
+        </p>
       </div>
 
       <div className="flex flex-wrap items-end gap-3 rounded-md border border-neutral-800 bg-neutral-900/50 p-3">

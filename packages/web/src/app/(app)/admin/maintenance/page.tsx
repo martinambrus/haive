@@ -128,28 +128,21 @@ export default function MaintenancePage() {
   const liveRun = upgrade?.runs.find((r) => r.status === 'running') ?? null;
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-neutral-50">Maintenance &amp; upgrade</h1>
-          <p className="max-w-3xl text-sm text-neutral-400">
-            Hold the system, see whose work is holding it open, and install a new release. An
-            upgrade drains, snapshots the database, migrates, and only keeps the new version once
-            the new containers report it — anything that fails before that point rolls back.
-          </p>
-        </div>
-        <Link href="/admin">
-          <Button variant="secondary" size="sm">
-            Back to admin
-          </Button>
-        </Link>
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-lg font-semibold text-neutral-50">Maintenance &amp; upgrade</h2>
+        <p className="max-w-3xl text-sm text-neutral-400">
+          Hold the system, see whose work is holding it open, and install a new release. An upgrade
+          drains, snapshots the database, migrates, and only keeps the new version once the new
+          containers report it — anything that fails before that point rolls back.
+        </p>
       </div>
 
       <FormError message={error} />
 
       <Card className="space-y-4 p-5">
         <div className="flex items-center gap-3">
-          <h2 className="text-lg font-semibold text-neutral-100">System state</h2>
+          <h3 className="text-base font-semibold text-neutral-100">System state</h3>
           {state ? (
             <Badge variant={state === 'normal' ? 'success' : 'warning'}>{state}</Badge>
           ) : null}
@@ -176,7 +169,7 @@ export default function MaintenancePage() {
 
       <Card className="space-y-4 p-5">
         <div className="flex items-center gap-3">
-          <h2 className="text-lg font-semibold text-neutral-100">Work still running</h2>
+          <h3 className="text-base font-semibold text-neutral-100">Work still running</h3>
           <Badge variant={blocking && blocking.total > 0 ? 'warning' : 'success'}>
             {blocking ? blocking.total : '—'}
           </Badge>
@@ -250,7 +243,7 @@ export default function MaintenancePage() {
 
       <Card className="space-y-4 p-5">
         <div className="flex items-center gap-3">
-          <h2 className="text-lg font-semibold text-neutral-100">Upgrade</h2>
+          <h3 className="text-base font-semibold text-neutral-100">Upgrade</h3>
           {upgrade ? <Badge>current {upgrade.version}</Badge> : null}
         </div>
 

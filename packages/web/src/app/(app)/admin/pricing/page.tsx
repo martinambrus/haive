@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api-client';
 import { Button, Badge, Input, FormError } from '@/components/ui';
@@ -200,10 +199,10 @@ export default function PricingPage() {
   );
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-neutral-50">Model pricing</h1>
+          <h2 className="text-lg font-semibold text-neutral-50">Model pricing</h2>
           <p className="max-w-3xl text-sm text-neutral-400">
             Per-model token rates, quoted per million tokens. Synced twice daily from public feeds
             and used to price each CLI invocation. A manual rate always wins over a synced one, and
@@ -213,22 +212,15 @@ export default function PricingPage() {
             actually cost.
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" size="sm" disabled={busy} onClick={() => void refreshNow()}>
-            Refresh now
-          </Button>
-          <Link href="/admin">
-            <Button variant="secondary" size="sm">
-              Back to admin
-            </Button>
-          </Link>
-        </div>
+        <Button variant="secondary" size="sm" disabled={busy} onClick={() => void refreshNow()}>
+          Refresh now
+        </Button>
       </div>
 
       <FormError message={error} />
 
       <section className="space-y-2">
-        <h2 className="text-lg font-semibold text-neutral-100">Auto-update per CLI</h2>
+        <h3 className="text-base font-semibold text-neutral-100">Auto-update per CLI</h3>
         <div className="overflow-x-auto rounded-md border border-neutral-800">
           <table className="w-full text-sm">
             <thead className="bg-neutral-900 text-left text-xs uppercase tracking-wider text-neutral-500">
@@ -281,7 +273,7 @@ export default function PricingPage() {
       </section>
 
       <section className="space-y-2">
-        <h2 className="text-lg font-semibold text-neutral-100">Add or replace a rate</h2>
+        <h3 className="text-base font-semibold text-neutral-100">Add or replace a rate</h3>
         <p className="text-sm text-neutral-400">
           For a negotiated price, or for a model no feed carries yet. Leave a field empty to say
           there is no rate for that bucket — empty is not zero, and a wrongly-zero rate reads as
@@ -350,7 +342,7 @@ export default function PricingPage() {
 
       <section className="space-y-2">
         <div className="flex flex-wrap items-center gap-3">
-          <h2 className="text-lg font-semibold text-neutral-100">Live rates</h2>
+          <h3 className="text-base font-semibold text-neutral-100">Live rates</h3>
           <select
             className={selectClass}
             value={providerFilter}

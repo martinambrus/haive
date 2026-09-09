@@ -1,10 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { usePageTitle } from '@/lib/use-page-title';
 import { formatBytes } from '@/lib/format-bytes';
 import { api, type AdminHealthResponse } from '@/lib/api-client';
+import { TabNav } from '@/components/tabs';
 import {
   Badge,
   Button,
@@ -113,8 +115,47 @@ function runtimeLimitsFormOf(s: RuntimeLimitsSettings): RuntimeLimitsForm {
  *  shared barrel — the same reason the stats page re-declares its own row shapes. */
 type RegistrationMode = 'open' | 'invite' | 'closed';
 
+/** The settings are one page of ~30 independent switches, so they are grouped rather than
+ *  stacked. The global pause switch is deliberately outside this: it renders above the bar on
+ *  every tab. */
+const SETTINGS_TABS = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'capacity', label: 'Capacity' },
+  { key: 'execution', label: 'CLI execution' },
+  { key: 'cost', label: 'Cost' },
+  { key: 'workflow', label: 'Workflow' },
+  { key: 'environments', label: 'Environments' },
+  { key: 'data', label: 'Data & access' },
+];
+
+function isSettingsTab(v: string | null): boolean {
+  return !!v && SETTINGS_TABS.some((t) => t.key === v);
+}
+
 export default function AdminPage() {
+  return (
+    // useSearchParams needs a Suspense boundary to keep the route from opting the whole page
+    // out of static rendering.
+    <Suspense fallback={<div className="text-sm text-neutral-500">Loading...</div>}>
+      <AdminPageInner />
+    </Suspense>
+  );
+}
+
+function AdminPageInner() {
   usePageTitle('Admin console');
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const tab = isSettingsTab(searchParams.get('tab')) ? searchParams.get('tab')! : 'overview';
+
+  function setParam(key: string, value: string) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (value) params.set(key, value);
+    else params.delete(key);
+    const qs = params.toString();
+    router.replace(qs ? `/admin?${qs}` : '/admin', { scroll: false });
+  }
+
   const [health, setHealth] = useState<AdminHealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [maxParallel, setMaxParallel] = useState<number | null>(null);
@@ -166,8 +207,6 @@ export default function AdminPage() {
   const [savingFair, setSavingFair] = useState(false);
   const [modelIdentityStrict, setModelIdentityStrict] = useState<boolean | null>(null);
   const [savingModelIdentityStrict, setSavingModelIdentityStrict] = useState(false);
-  const [globalPause, setGlobalPause] = useState<boolean | null>(null);
-  const [savingGlobalPause, setSavingGlobalPause] = useState(false);
   const [promptCaching1hEnabled, setPromptCaching1hEnabled] = useState<boolean | null>(null);
   const [pricing, setPricing] = useState<{
     autoUpdateEnabled: boolean;
@@ -258,7 +297,6 @@ export default function AdminPage() {
         streamLogRetentionData,
         promptRetentionData,
         chromeMcpTimeoutData,
-        globalPauseData,
         ragEmbeddingData,
       ] = await Promise.all([
         api.get<AdminHealthResponse>('/admin/health'),
@@ -297,7 +335,6 @@ export default function AdminPage() {
         api.get<{ retentionDays: number }>('/admin/config/cli-stream-log-retention'),
         api.get<{ retentionDays: number }>('/admin/config/cli-prompt-retention'),
         api.get<{ timeoutMs: number }>('/admin/config/chrome-mcp-timeout'),
-        api.get<{ paused: boolean }>('/admin/config/global-pause'),
         api.get<RagEmbeddingSettings>('/admin/config/rag-embedding'),
       ]);
       setHealth(healthData);
@@ -354,7 +391,6 @@ export default function AdminPage() {
       setPromptRetentionInput(String(promptRetentionData.retentionDays));
       setChromeMcpTimeoutMs(chromeMcpTimeoutData.timeoutMs);
       setChromeMcpTimeoutInput(String(chromeMcpTimeoutData.timeoutMs));
-      setGlobalPause(globalPauseData.paused);
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -1011,89 +1047,20 @@ export default function AdminPage() {
     }
   }
 
-  async function setGlobalPauseSwitch(next: boolean) {
-    setSavingGlobalPause(true);
-    try {
-      const result = await api.put<{ paused: boolean }>('/admin/config/global-pause', {
-        paused: next,
-      });
-      setGlobalPause(result.paused);
-      setError(null);
-    } catch (err) {
-      setError((err as Error).message ?? 'Failed to update the global pause switch');
-    } finally {
-      setSavingGlobalPause(false);
-    }
-  }
-
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-neutral-50">Admin console</h1>
-          <p className="text-sm text-neutral-400">
-            User management and system health. Requires an admin role.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Link href="/admin/users">
-            <Button variant="secondary" size="sm">
-              Users
-            </Button>
-          </Link>
-          <Link href="/admin/maintenance">
-            <Button variant="secondary" size="sm">
-              Maintenance &amp; upgrade
-            </Button>
-          </Link>
-          <Link href="/admin/audit">
-            <Button variant="secondary" size="sm">
-              Audit log
-            </Button>
-          </Link>
-        </div>
-      </div>
-
       <FormError message={error} />
 
-      {/* Global pause. First thing on the page and the only control rendered as a button
-          rather than a checkbox: it is the one switch that changes what the whole system is
-          doing right now, and it has to be obvious both to reach and to notice when it is on. */}
-      {globalPause !== null && (
-        <Card
-          className={
-            globalPause ? 'border-amber-500/60 bg-amber-500/10' : 'border-red-900/60 bg-red-950/20'
-          }
-        >
-          <CardHeader>
-            <CardTitle className={globalPause ? 'text-amber-200' : undefined}>
-              {globalPause ? 'ALL EXECUTION PAUSED' : 'Global pause'}
-            </CardTitle>
-            <CardDescription>
-              {globalPause
-                ? 'No task is being advanced and no queued CLI run is being picked up. Runs that were already in flight finish normally.'
-                : 'Freeze every task at once without cancelling anything. The CLI run in flight finishes, then no step advances and no queued CLI run starts anywhere.'}{' '}
-              Terminals, the editor, the browser and the app environments keep working either way,
-              so a frozen system stays debuggable. Takes effect within ~30 seconds and persists
-              across restarts.
-            </CardDescription>
-          </CardHeader>
-          <Button
-            variant={globalPause ? 'primary' : 'destructive'}
-            disabled={savingGlobalPause}
-            onClick={() => void setGlobalPauseSwitch(!globalPause)}
-            className="w-full py-3 text-base font-semibold sm:w-auto sm:px-8"
-          >
-            {savingGlobalPause
-              ? 'Saving…'
-              : globalPause
-                ? 'Resume all execution'
-                : 'Pause all execution'}
-          </Button>
-        </Card>
-      )}
+      {/* Every card below carries its own `tab === '<key>'` guard, so a new setting is only
+          reachable once it has been filed under one of these. */}
+      <TabNav
+        items={SETTINGS_TABS}
+        active={tab}
+        onSelect={(key) => setParam('tab', key)}
+        variant="pill"
+      />
 
-      {health && (
+      {tab === 'overview' && health && (
         <section className="grid gap-3 md:grid-cols-4">
           <Link href="/admin/users" className="block">
             <Card className="h-full transition-colors hover:border-neutral-700">
@@ -1150,7 +1117,7 @@ export default function AdminPage() {
         </section>
       )}
 
-      {health && health.recentFailures.length > 0 && (
+      {tab === 'overview' && health && health.recentFailures.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Recent failed tasks</CardTitle>
@@ -1168,7 +1135,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {maxParallel !== null && (
+      {tab === 'capacity' && maxParallel !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Performance</CardTitle>
@@ -1204,7 +1171,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {maxPerTask !== null && (
+      {tab === 'capacity' && maxPerTask !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Per-task agent cap</CardTitle>
@@ -1238,7 +1205,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {runtimeLimits !== null && (
+      {tab === 'capacity' && runtimeLimits !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Runtime resource limits</CardTitle>
@@ -1460,7 +1427,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {attachmentMaxBytes !== null && (
+      {tab === 'data' && attachmentMaxBytes !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Task attachment size</CardTitle>
@@ -1493,7 +1460,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {streamLogRetentionDays !== null && (
+      {tab === 'data' && streamLogRetentionDays !== null && (
         <Card>
           <CardHeader>
             <CardTitle>CLI text retention</CardTitle>
@@ -1597,7 +1564,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {steeringEnabled !== null && (
+      {tab === 'execution' && steeringEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Mid-run steering</CardTitle>
@@ -1621,7 +1588,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {prWorkflowEnabled !== null && (
+      {tab === 'workflow' && prWorkflowEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Pull-request close-out</CardTitle>
@@ -1647,7 +1614,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {ragEmbedding !== null && (
+      {tab === 'data' && ragEmbedding !== null && (
         <Card>
           <CardHeader>
             <CardTitle>RAG embedding budgets</CardTitle>
@@ -1707,7 +1674,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {softTimeoutEnabled !== null && (
+      {tab === 'execution' && softTimeoutEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>CLI soft timeout</CardTitle>
@@ -1755,7 +1722,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {timeoutRungs !== null && (
+      {tab === 'execution' && timeoutRungs !== null && (
         <Card>
           <CardHeader>
             <CardTitle>CLI timeout ladder</CardTitle>
@@ -1808,7 +1775,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {usageWindowEnabled !== null && (
+      {tab === 'cost' && usageWindowEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Subscription usage display</CardTitle>
@@ -1833,7 +1800,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {usageAlertEnabled !== null && (
+      {tab === 'cost' && usageAlertEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Subscription usage alerts</CardTitle>
@@ -1884,7 +1851,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {pricing !== null && (
+      {tab === 'cost' && pricing !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Model pricing and spend</CardTitle>
@@ -1936,7 +1903,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {promptCaching1hEnabled !== null && (
+      {tab === 'cost' && promptCaching1hEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>1-hour prompt cache (claude-family)</CardTitle>
@@ -1962,7 +1929,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {tersenessLevel !== null && (
+      {tab === 'workflow' && tersenessLevel !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Output terseness</CardTitle>
@@ -1991,7 +1958,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {specViewMode !== null && (
+      {tab === 'workflow' && specViewMode !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Spec sent to agents</CardTitle>
@@ -2024,7 +1991,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {stepGuidanceEnabled !== null && (
+      {tab === 'workflow' && stepGuidanceEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Learned step guidance</CardTitle>
@@ -2056,7 +2023,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {reviewRefuteEnabled !== null && (
+      {tab === 'workflow' && reviewRefuteEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Refute blocking review findings</CardTitle>
@@ -2102,7 +2069,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {qaVerifyEnabled !== null && (
+      {tab === 'workflow' && qaVerifyEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Verify adversarial QA proofs-of-concept</CardTitle>
@@ -2152,7 +2119,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {ideEnabled !== null && (
+      {tab === 'environments' && ideEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>In-task editor (IDE)</CardTitle>
@@ -2176,7 +2143,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {registrationMode !== null && (
+      {tab === 'data' && registrationMode !== null && (
         <Card
           className={
             registrationMode === 'open' ? 'border-amber-500/60 bg-amber-500/10' : undefined
@@ -2227,7 +2194,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {planCanvasEnabled !== null && (
+      {tab === 'workflow' && planCanvasEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Plan canvas</CardTitle>
@@ -2253,7 +2220,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {debugModeEnabled !== null && (
+      {tab === 'environments' && debugModeEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Step debugging</CardTitle>
@@ -2279,7 +2246,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {browserAccessEnabled !== null && (
+      {tab === 'environments' && browserAccessEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Direct browser access</CardTitle>
@@ -2304,7 +2271,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {dbAccessEnabled !== null && (
+      {tab === 'environments' && dbAccessEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Direct database access</CardTitle>
@@ -2330,7 +2297,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {ddevRegistryCacheEnabled !== null && (
+      {tab === 'environments' && ddevRegistryCacheEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>DDEV image cache</CardTitle>
@@ -2358,7 +2325,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {allowanceWatchMode !== null && (
+      {tab === 'execution' && allowanceWatchMode !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Provider-outage recovery</CardTitle>
@@ -2392,7 +2359,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {ddevControlEnabled !== null && (
+      {tab === 'environments' && ddevControlEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>DDEV control (agent MCP)</CardTitle>
@@ -2418,7 +2385,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {chromeMcpTimeoutMs !== null && (
+      {tab === 'execution' && chromeMcpTimeoutMs !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Chrome MCP tool timeout</CardTitle>
@@ -2456,7 +2423,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {fairEnabled !== null && (
+      {tab === 'capacity' && fairEnabled !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Fair scheduling</CardTitle>
@@ -2481,7 +2448,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {modelIdentityStrict !== null && (
+      {tab === 'execution' && modelIdentityStrict !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Strict model identity</CardTitle>
