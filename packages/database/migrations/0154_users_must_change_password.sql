@@ -1,0 +1,23 @@
+-- A password the account holder did not choose must not stay in place.
+--
+-- `POST /admin/users/:id/action` with `reset_password` mints a temporary password and hands it to
+-- the ADMIN, who then has to pass it to the user out of band. Until this column existed the
+-- account carried that shared secret indefinitely: bumping `token_version` logs the user out, but
+-- nothing ever asked them to replace the password they were given. The same is true of every user
+-- an admin creates.
+--
+-- A column rather than an inference, because there is no other evidence to read. `updated_at`
+-- moves for a profile edit; `token_version` moves for a deactivate and a role change too. Only the
+-- act of MINTING a password anyone but the holder has seen sets this, and only the holder changing
+-- it clears it.
+--
+-- NOT NULL with a default, so every existing row answers `false`: an account whose password was
+-- reset before this shipped was never marked, and inventing a mark for it would lock a working
+-- user into a settings page over an event nobody recorded.
+--
+-- Additive and idempotent. Rollback: revert the code, which leaves the column unread and inert
+-- (its default is the same answer the code gave before it existed), then optionally
+--   ALTER TABLE "users" DROP COLUMN IF EXISTS "must_change_password";
+-- No FK, index or view references it, so that statement stands alone.
+
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "must_change_password" boolean DEFAULT false NOT NULL;

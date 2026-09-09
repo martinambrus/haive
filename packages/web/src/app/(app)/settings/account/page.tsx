@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { api, type ApiError } from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
 import {
@@ -22,6 +23,7 @@ interface AccountData {
 
 export default function AccountPage() {
   usePageTitle('Account');
+  const router = useRouter();
   const [account, setAccount] = useState<AccountData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -87,6 +89,10 @@ export default function AccountPage() {
       setNewPassword('');
       setConfirmPassword('');
       setPasswordSuccess('Password changed. Other devices have been signed out.');
+      // The `(app)` layout read `mustChangePassword` when it rendered, and that answer is now
+      // stale. Without this the forced-password guard keeps bouncing the user back here after
+      // they have already complied — a lockout only a full page reload clears.
+      router.refresh();
     } catch (err) {
       setPasswordError((err as ApiError).message ?? 'Failed to change password');
     } finally {

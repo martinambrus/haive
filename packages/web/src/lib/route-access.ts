@@ -53,3 +53,38 @@ export function decideRouteAccess(req: RouteRequest): RouteDecision {
   if (!req.hasAccessCookie && !req.hasRefreshCookie) return { action: 'redirect', to: '/login' };
   return { action: 'continue' };
 }
+
+/** The one page a visitor who must replace their password is allowed to be on. */
+export const PASSWORD_CHANGE_PATH = '/settings/account';
+
+export interface ForcedPasswordRequest {
+  /** From `usePathname()`. Nullable so an unknown path is a case this function must answer — see
+   *  the fail-open branch below. */
+  path: string | null;
+  mustChangePassword: boolean;
+}
+
+/**
+ * A user carrying a password an administrator minted for them is sent to change it.
+ *
+ * The flag is set wherever such a password is created and cleared only by the holder changing it,
+ * so this is the whole enforcement — the api gates nothing on it. That is deliberate: it is
+ * hygiene, not an authorisation boundary, and a redirect the api also enforced would take a
+ * partially-broken deploy from "annoying" to "locked out".
+ *
+ * Applied on the CLIENT, by `ForcedPasswordGuard`, because a Server Component cannot learn which
+ * route it is rendering. Forwarding the path from middleware as a request header was tried and
+ * MEASURED to break RSC navigation outright: `NextResponse.next({ request: { headers } })` made a
+ * single visit to /settings/account re-request `?_rsc=` about a thousand times in 40 seconds and
+ * render a blank page, while the same visit without it is one request.
+ */
+export function decideForcedPasswordChange(req: ForcedPasswordRequest): RouteDecision {
+  if (!req.mustChangePassword) return { action: 'continue' };
+  // An unrecognised path CONTINUES — the same loop this file's header describes, seen from the
+  // other side. Redirecting a path we cannot identify would redirect the password page itself.
+  if (!req.path) return { action: 'continue' };
+  if (req.path === PASSWORD_CHANGE_PATH || req.path.startsWith(`${PASSWORD_CHANGE_PATH}/`)) {
+    return { action: 'continue' };
+  }
+  return { action: 'redirect', to: PASSWORD_CHANGE_PATH };
+}

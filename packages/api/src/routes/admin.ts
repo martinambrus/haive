@@ -249,6 +249,10 @@ adminRoutes.post('/users/:id/action', async (c) => {
       .set({
         passwordHash,
         tokenVersion: target.tokenVersion + 1,
+        // The admin has seen this password and has to pass it on out of band, so it is a shared
+        // secret from the moment it exists. Bumping tokenVersion only ends the old SESSION; this
+        // is what ends the password.
+        mustChangePassword: true,
         updatedAt: now,
       })
       .where(eq(schema.users.id, targetUserId));

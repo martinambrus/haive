@@ -4,6 +4,7 @@ import {
   text,
   varchar,
   integer,
+  boolean,
   timestamp,
   uniqueIndex,
   index,
@@ -36,6 +37,9 @@ export const users = pgTable(
     role: userRoleEnum('role').notNull().default('user'),
     status: userStatusEnum('status').notNull().default('active'),
     tokenVersion: integer('token_version').notNull().default(0),
+    // Set wherever a password this account's holder did not choose is minted for them, cleared by
+    // PUT /user-settings/password. See migration 0154.
+    mustChangePassword: boolean('must_change_password').notNull().default(false),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

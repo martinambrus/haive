@@ -348,6 +348,10 @@ authRoutes.get('/me', requireAuth, async (c) => {
       email: decryptEmail(user.emailEncrypted, fieldKey),
       role: user.role,
       status: user.status,
+      // The app layout already makes this call, so forcing a password change costs no extra
+      // request. Reported here and not on /login or /register: on those two the holder has just
+      // CHOSEN the password, so the answer is always false.
+      mustChangePassword: user.mustChangePassword,
       createdAt: user.createdAt.toISOString(),
     },
   });

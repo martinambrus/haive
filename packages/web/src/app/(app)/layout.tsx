@@ -1,6 +1,8 @@
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
+import { KeyRound } from 'lucide-react';
+import { ForcedPasswordGuard } from '@/components/forced-password-guard';
 import { SidebarNav } from '@/components/sidebar-nav';
 import { GlobalPauseBanner } from '@/components/global-pause-banner';
 import { MaintenanceNotice } from '@/components/maintenance-notice';
@@ -15,6 +17,8 @@ interface MeResponse {
     email: string;
     role: 'admin' | 'user';
     status: 'active' | 'deactivated';
+    /** Optional: an api that predates the column omits it, and the guard must fail open. */
+    mustChangePassword?: boolean;
     createdAt: string;
   };
 }
@@ -72,6 +76,10 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   // redirect on exactly the state a user cannot fix themselves. The marker tells it to clear them.
   if (!data) redirect('/login?session=expired');
 
+  // A password an administrator minted is a shared secret until its holder replaces it. Read from
+  // the /auth/me call above, so the guard below costs no extra request.
+  const mustChangePassword = data.user.mustChangePassword ?? false;
+
   return (
     <CliLoginProvider>
       <div className="flex min-h-screen">
@@ -85,11 +93,30 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
               its bar is fixed and its spacer is what keeps everything below it — the pause
               banner included — out from under that bar. */}
           <StaleBuildBanner />
+          {/* Without this the guard below is unexplained: the user asked for one page and
+              landed on another. */}
+          {mustChangePassword && (
+            <div
+              role="status"
+              className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+            >
+              <KeyRound className="h-5 w-5 shrink-0 text-amber-400" />
+              <span className="font-semibold">Choose a new password to continue.</span>
+              <span className="text-amber-200/80">
+                Your current password was set for you by an administrator, so someone else has seen
+                it. The rest of Haive is available again once you have replaced it.
+              </span>
+            </div>
+          )}
           <GlobalPauseBanner role={data.user.role} />
           {/* Wraps rather than sits beside the others: under full maintenance a non-admin's
               requests are being refused, so their page is REPLACED with an explanation instead
               of left to fail every fetch behind a banner. Draining renders as a banner. */}
-          <MaintenanceNotice role={data.user.role}>{children}</MaintenanceNotice>
+          <MaintenanceNotice role={data.user.role}>
+            <ForcedPasswordGuard mustChangePassword={mustChangePassword}>
+              {children}
+            </ForcedPasswordGuard>
+          </MaintenanceNotice>
         </main>
       </div>
       <NotificationProvider />

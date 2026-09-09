@@ -133,7 +133,14 @@ userSettingsRoutes.put('/password', async (c) => {
   const newTokenVersion = user.tokenVersion + 1;
   await db
     .update(schema.users)
-    .set({ passwordHash: newHash, tokenVersion: newTokenVersion, updatedAt: new Date() })
+    .set({
+      passwordHash: newHash,
+      tokenVersion: newTokenVersion,
+      // The one writer that clears it: this route is the only place the account HOLDER chooses the
+      // password, which is the whole condition the flag records.
+      mustChangePassword: false,
+      updatedAt: new Date(),
+    })
     .where(eq(schema.users.id, userId));
 
   const accessToken = await signAccessToken({
