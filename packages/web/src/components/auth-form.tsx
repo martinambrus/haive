@@ -20,34 +20,37 @@ interface AuthFormProps {
    *  endpoint — the api decides admin-ness from the user count, not from which page asked — and
    *  differs only in its copy and in offering the setup-token field. */
   mode: 'login' | 'register' | 'setup';
+  /**
+   * Read by the PAGE, on the server, so this component's first paint is already correct.
+   *
+   * Null only when that probe failed, which is the one case this still has to guess about.
+   */
+  initialStatus: RegistrationStatus | null;
+  /**
+   * `?invite=`, read by the page on the server. Only `/register` can carry one, which is why the
+   * other two entry points leave it out.
+   */
+  initialInviteToken?: string | null;
 }
 
-export function AuthForm({ mode }: AuthFormProps) {
+export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormProps) {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [setupToken, setSetupToken] = useState('');
-  const [inviteToken, setInviteToken] = useState('');
+  // Not state: it comes from the URL the page was rendered for and never changes under us.
+  const inviteToken = initialInviteToken ?? '';
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [status, setStatus] = useState<RegistrationStatus | null>(null);
+  const [status, setStatus] = useState<RegistrationStatus | null>(initialStatus);
 
   const isLogin = mode === 'login';
   const isSetup = mode === 'setup';
 
-  // `?invite=` off an invitation link. Read through the browser rather than useSearchParams():
-  // that hook opts the route out of static rendering unless it sits under a Suspense boundary,
-  // and this needs neither router state nor a re-render to answer. In an effect rather than a
-  // state initialiser, so it runs after the commit with the URL actually being rendered.
-  useEffect(() => {
-    const token = new URLSearchParams(window.location.search).get('invite');
-    if (token) setInviteToken(token);
-  }, []);
-
   // An invite admits its holder whatever the mode says, so a token is enough on its own. Without
   // one, only `open` can succeed — offering the form anyway would collect an email and a password
-  // and answer 403. Null status renders the form: the fetch has not landed yet, and an install
-  // with self-signup on is the case that must not flash a refusal it does not mean.
+  // and answer 403. A null status still renders the form — that means the SERVER probe failed, and
+  // withholding registration because a status check could not run would be the wrong direction.
   const canRegister =
     isLogin || isSetup || inviteToken.length > 0 || status === null || status.mode === 'open';
   const needsInvite = !canRegister;
@@ -55,27 +58,30 @@ export function AuthForm({ mode }: AuthFormProps) {
   // Keep the three auth entry points consistent with the install's actual state, in ONE place
   // rather than in each page. An install with no users must not offer a sign-in that cannot
   // succeed, and one that is already set up must not offer to create a second "first" admin.
-  //
-  // The form renders immediately rather than waiting on this: an install WITH users is the common
-  // case and redirects nowhere, so blocking on the fetch would give everyone a blank card to avoid
-  // a one-time flash on a fresh install.
   useEffect(() => {
     let cancelled = false;
+    const apply = (s: RegistrationStatus): void => {
+      if (cancelled) return;
+      setStatus(s);
+      if (s.setupNeeded && !isSetup) router.replace('/setup');
+      if (!s.setupNeeded && isSetup) router.replace('/login');
+    };
+    // The page already asked, on the server, and a second request could only confirm it. This is
+    // the recovery path for a probe that failed there, not the normal one.
+    if (initialStatus) {
+      apply(initialStatus);
+      return;
+    }
     api
       .get<RegistrationStatus>('/auth/registration-status')
-      .then((s) => {
-        if (cancelled) return;
-        setStatus(s);
-        if (s.setupNeeded && !isSetup) router.replace('/setup');
-        if (!s.setupNeeded && isSetup) router.replace('/login');
-      })
+      .then(apply)
       // An unreachable API is the login page's own problem to report on submit; a failed status
       // probe must not strand the user on a blank page.
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [isSetup, router]);
+  }, [initialStatus, isSetup, router]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -198,9 +204,10 @@ export function AuthForm({ mode }: AuthFormProps) {
       {!isSetup && (
         <p className="mt-4 text-center text-sm text-neutral-400">
           {isLogin ? (
-            // Silent while registration is shut: pointing at a page that refuses is worse than
-            // saying nothing, and an invited user arrives by their own link, not by this one.
-            status === null || status.mode === 'open' ? (
+            // Silent unless registration is KNOWN open. Pointing at a page that refuses is worse
+            // than saying nothing, an invited user arrives by their own link rather than this one,
+            // and treating "not known yet" as open is what made this link appear and then vanish.
+            status?.mode === 'open' ? (
               <>
                 New here?{' '}
                 <Link href="/register" className="text-indigo-400 hover:underline">
