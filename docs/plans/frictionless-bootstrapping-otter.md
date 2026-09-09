@@ -206,6 +206,19 @@ registry by hand. The work is therefore: resolve a channel id to `(registry, man
 credential)`, `docker login` when the registry is private, and write the resolved registry into
 `.env` — not new machinery in compose, the updater or the run overlay.
 
+**The UPGRADE path was then emulated too, and it works** — the half that matters most, since an
+upgrade that silently resolved the public channel would drop a customer's modules. On an install
+pointed at `localhost:5111/customer-a`, the in-app upgrade to the channel's own 0.1.7 ran all seven
+phases to `done`: the api spawned `localhost:5111/customer-a/haive-updater:0.1.7` with
+`--manifest http://chan-manifest/release-0.1.7.json`, `--registry localhost:5111/customer-a` and
+the namespaced Postgres volume. Afterwards api and worker both reported 0.1.7 and every Haive image
+came from the channel. That is `serialized-chasing-thacker`'s verification 9b, answered before that
+plan exists.
+
+The first attempt FAILED, which is why it was worth running: the updater's one-shot containers
+joined the default install's network and migrated against another install's database. Fixed in
+0.1.6 — see `solitary-partitioning-lampson`.
+
 The emulation could not exercise ONE thing, and it is the piece with no design yet: a real
 per-customer registry is PRIVATE, and while the credential is named above ("any credential the
 per-customer registry needs"), how it is scoped, delivered and revoked is written down nowhere.
@@ -537,7 +550,7 @@ plumbing is sound (`canUpgrade: true`, and the mount was verified directly).
 | 6 | `docker history` reveals no baked secret | MET — 0 secret-shaped layers and 0 baked env secrets across api/worker/web/updater |
 | 7 | macOS arm64: the stack boots, every base image resolves an arm64 manifest | PARTIAL, and the remainder needs a real Mac — see below |
 | 8 | each CLI adapter installs on arm64 or is reported unavailable with a named reason | **MET** — measured on a native arm64 runner: all 10 accounted for, identical to amd64 |
-| 9 | `--channel <id>` for a module customer | BLOCKED on `serialized-chasing-thacker`, not on plumbing — an emulated per-customer registry booted a full install; only the channel RESOLVER is missing (see the channel section) |
+| 9 | `--channel <id>` for a module customer | BLOCKED on `serialized-chasing-thacker`, and on the RESOLVER alone — an emulated per-customer registry both installed and UPGRADED end to end (see the channel section) |
 | 10 | `--version` pins a concrete release; a bad one fails early | MET — `next` and `latest` both landed `0.1.5` in `.env`, never an alias; `99.99.99` failed at preflight with no directory, no volumes and nothing pulled |
 | 11 | no Docker: name the missing piece and stop, changing nothing | MET — run in a container with no docker CLI: names the piece, prints the platform's exact fix, exits 1, writes nothing |
 

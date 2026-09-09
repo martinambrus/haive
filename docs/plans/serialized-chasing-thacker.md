@@ -569,6 +569,23 @@ Distribution and entitlement:
 9b. A per-customer install pulls its own channel: `haive upgrade` on customer A's host resolves A's
    manifest and never the public one, so upgrading does not silently drop A's modules
    (`steadfast-committing-gray`, release manifest).
+
+   **The MECHANISM is already verified, ahead of this plan** — 2026-09-09, against a local registry
+   standing in for a per-customer one. A `customer-a/` namespace was populated with 0.1.6 plus a
+   derived 0.1.7, an install was pointed at it, and the in-app upgrade ran end to end: preflight,
+   pull, drain, snapshot, migrate, health gate, destructive migrations, done. Every input came from
+   the channel — the updater image, the manifest URL, the registry passed to the updater, the
+   namespaced Postgres volume — and none from the public one. Afterwards all five Haive images were
+   `localhost:5111/customer-a/*` while postgres, redis, ollama and mailpit stayed on their upstream
+   registries, which is the intended split.
+
+   So what this item still has to prove is ENTITLEMENT, not plumbing: that A's channel contains A's
+   modules and nobody else's. The plumbing that carries a channel through an install and an upgrade
+   works today.
+
+   It also found a real defect, recorded in `solitary-partitioning-lampson`: the updater's one-shot
+   containers joined the DEFAULT install's network, so on a namespaced install the migrate step ran
+   against another install's database. Fixed in 0.1.6.
 10. A module's composable steps appear in the task-type composer palette (`rippling-wibbling-puffin.md`,
     "Definitions may reference module-contributed steps").
 11. Removing the dependency + rebuild returns to the zero-module state, and any task-type definition
