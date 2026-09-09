@@ -183,10 +183,17 @@ function docxHeadingLevel(paragraphXml: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/** Backslashes escape first: escaping only `|` turns an input `\|` into `\\|`, which
+ *  Markdown reads as an escaped backslash followed by a live cell separator, splitting
+ *  the row. Document cells carry whatever the author typed, so both are reachable. */
+function escapeTableCell(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+}
+
 function docxTableMarkdown(tableXml: string): string[] {
   const rows = elements(tableXml, 'w:tr').map((row) =>
     elements(row, 'w:tc').map((cell) =>
-      elements(cell, 'w:p').map(docxParagraphText).filter(Boolean).join(' ').replace(/\|/g, '\\|'),
+      escapeTableCell(elements(cell, 'w:p').map(docxParagraphText).filter(Boolean).join(' ')),
     ),
   );
   const populated = rows.filter((cells) => cells.some((cell) => cell.length > 0));
@@ -298,7 +305,7 @@ export function xlsxSheetToMarkdown(sheetXml: string, sharedStrings: string[]): 
     const formula = decodeXmlText(elements(inner, 'f')[0] ?? '').trim();
     const text = formula ? (value ? `=${formula} → ${value}` : `=${formula}`) : value;
     if (!text) continue;
-    cells.push({ column: cellColumn(ref), row: cellRow(ref), text: text.replace(/\|/g, '\\|') });
+    cells.push({ column: cellColumn(ref), row: cellRow(ref), text: escapeTableCell(text) });
   }
   if (cells.length === 0) return [];
 

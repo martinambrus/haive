@@ -33,6 +33,7 @@ const FETCH_TIMEOUT_MS = 30_000;
  * rather than wrong, because no asset matches, and the Ruby install falls back to apt.
  */
 const ASSET_OS_SUFFIX = 'ubuntu-24.04';
+const ASSET_OS_SUFFIX_RE = ASSET_OS_SUFFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
  * CRuby assets for our base image, newest first.
@@ -51,7 +52,7 @@ export function parseRubyBuilderAssets(payload: unknown): { version: string; lab
   const assets = (payload as { assets?: { name?: unknown }[] })?.assets;
   if (!Array.isArray(assets)) return [];
   const pattern = new RegExp(
-    `^ruby-(\\d+\\.\\d+\\.\\d+(?:-p\\d+)?)-${ASSET_OS_SUFFIX.replace(/\./g, '\\.')}\\.tar\\.gz$`,
+    `^ruby-(\\d+\\.\\d+\\.\\d+(?:-p\\d+)?)-${ASSET_OS_SUFFIX_RE}\\.tar\\.gz$`,
   );
   const seen = new Set<string>();
   const out: { version: string; label: string; sort: number[] }[] = [];

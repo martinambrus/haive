@@ -147,6 +147,17 @@ describe('docx extraction', () => {
     expect(md).toContain('a & b \\| c');
   });
 
+  it('escapes the backslash before the pipe, so an authored `\\|` survives', () => {
+    // Escaping only `|` turns an input `\|` into `\\|`, which Markdown reads as a
+    // literal backslash followed by a live separator — the row splits anyway.
+    const md = docxToMarkdown(
+      docxDocument(
+        '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>a \\| b</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+      ),
+    );
+    expect(md).toContain(String.raw`a \\\| b`);
+  });
+
   it('reads a real .docx off disk', async () => {
     const file = await writeZip('spec.docx', {
       'word/document.xml': docxDocument('<w:p><w:r><w:t>Renewal reminders.</w:t></w:r></w:p>'),
@@ -190,6 +201,11 @@ describe('xlsx extraction', () => {
     // wider than 26 columns.
     const table = xlsxSheetToMarkdown('<c r="AA1"><v>wide</v></c><c r="B1"><v>near</v></c>', []);
     expect(table[0]).toBe('| B | AA |');
+  });
+
+  it('escapes the backslash before the pipe, so an authored `\\|` survives', () => {
+    const table = xlsxSheetToMarkdown(String.raw`<c r="A1"><v>a \| b</v></c>`, []);
+    expect(table.join('\n')).toContain(String.raw`a \\\| b`);
   });
 
   it('reads a real .xlsx off disk, one section per named sheet', async () => {
