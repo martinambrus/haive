@@ -28,6 +28,8 @@ import {
   buildClaudeSettingsJson,
   buildGeminiSettingsJson,
   buildRtkAwarenessBlock,
+  hasClaudeFamily,
+  hasGemini,
   RTK_REF_MARKER_END,
   RTK_REF_MARKER_START,
 } from './_rtk-templates.js';
@@ -785,19 +787,15 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     // CLAUDE.md/GEMINI.md stay a lone `@AGENTS.md` import.
     if (detected.rtkEnabled) {
       const enabled = detected.enabledCliProviders ?? [];
-      const hasClaudeFamily = enabled.some(
-        (p) =>
-          p.name === 'claude-code' ||
-          p.name === 'zai' ||
-          p.name === 'muse' ||
-          p.name === 'openrouter',
-      );
-      const hasGemini = enabled.some((p) => p.name === 'gemini');
+      // Predicates come from _rtk-templates.ts rather than being restated here: this used to
+      // carry its own copy of the family list, and the copy is what let it fall behind by
+      // one provider (ollama) without anything failing.
+      const rtkCtx = { rtkEnabled: detected.rtkEnabled, enabledCliProviders: enabled };
 
-      if (hasClaudeFamily) {
+      if (hasClaudeFamily(rtkCtx)) {
         await writeIfAllowed('.claude/settings.json', buildClaudeSettingsJson());
       }
-      if (hasGemini) {
+      if (hasGemini(rtkCtx)) {
         await writeIfAllowed('.gemini/settings.json', buildGeminiSettingsJson());
       }
       if (enabled.length > 0) {

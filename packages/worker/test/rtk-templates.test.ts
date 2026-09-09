@@ -5,6 +5,7 @@ import {
   buildGeminiSettingsJson,
   buildRtkAwarenessBlock,
   buildRtkTemplateItems,
+  hasClaudeFamily,
   insertRtkHookEntry,
   RTK_HOOK_CLAUDE_COMMAND,
   RTK_HOOK_GEMINI_COMMAND,
@@ -50,6 +51,30 @@ describe('buildRtkTemplateItems gating', () => {
     const c = ctx(true, ['zai']);
     const paths = items.flatMap((i) => i.render(c)).map((r) => r.diskPath);
     expect(paths).toEqual(['.claude/settings.json']);
+  });
+
+  it('ollama routes through .claude/settings.json like the rest of the claude family', () => {
+    // It IS the claude binary on another endpoint, so it reads the same project settings
+    // file. It was the one family member this list omitted, which left an ollama-only repo
+    // with the home-level rtk hook and no project-level one.
+    const items = buildRtkTemplateItems<RtkRenderInputs>();
+    const c = ctx(true, ['ollama']);
+    const paths = items.flatMap((i) => i.render(c)).map((r) => r.diskPath);
+    expect(paths).toEqual(['.claude/settings.json']);
+  });
+
+  it('names every claude-binary provider and no other', () => {
+    // Stated as a whole set rather than one case per provider, so adding a family member
+    // without adding it here shows up as a diff on this line instead of as a repo that
+    // silently never gets the hook — which is how ollama went missing.
+    const family: CliProviderName[] = ['claude-code', 'zai', 'ollama', 'muse', 'openrouter'];
+    const outsiders: CliProviderName[] = ['gemini', 'codex', 'amp', 'grok', 'antigravity'];
+    for (const name of family) {
+      expect(hasClaudeFamily(ctx(true, [name])), name).toBe(true);
+    }
+    for (const name of outsiders) {
+      expect(hasClaudeFamily(ctx(true, [name])), name).toBe(false);
+    }
   });
 
   it('gemini enabled emits only .gemini/settings.json', () => {
