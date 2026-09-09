@@ -438,45 +438,119 @@ chmod +x haive
 # and the shared ones are named so the choice is the operator's.
 cat > uninstall.sh <<'EOF'
 #!/bin/sh
+#
+# Remove THIS Haive install. Touches nothing that belongs to another install on this machine.
+#
+#   ./uninstall.sh              stack + this install's runtime data; your work is kept
+#   ./uninstall.sh --purge      the above, plus repositories, credentials and built images
+#   ./uninstall.sh --yes        skip the confirmation prompt
 set -eu
 cd "$(dirname "$0")"
+
+PURGE=0
+ASSUME_YES=0
+for arg in "$@"; do
+  case "$arg" in
+    --purge) PURGE=1 ;;
+    --yes|-y) ASSUME_YES=1 ;;
+    -h|--help)
+      echo "usage: ./uninstall.sh [--purge] [--yes]"
+      echo "  --purge  also remove cloned repositories, CLI credentials and this install's images"
+      echo "  --yes    do not prompt"
+      exit 0 ;;
+    *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
+  esac
+done
+
 DC="docker compose -f docker-compose.yml -f docker-compose.run.yml"
 ID="$(sed -n 's/^HAIVE_INSTALL_ID=//p' .env | head -1)"; : "${ID:=haive}"
 PROJECT="$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env | head -1)"; : "${PROJECT:=$ID}"
 
-echo "Removing the Haive stack and THIS install's runtime data."
-echo "Install: $ID   Project: $PROJECT"
-printf 'Type the install id to confirm: '
-read -r reply
-[ "$reply" = "$ID" ] || { echo "aborted."; exit 1; }
+# Runtime state: recreated from scratch on the next install. Losing it loses no work.
+RUNTIME_VOLUMES="postgres_data redis_data mailpit_data ollama_data"
+# Work: cloned repositories, uploaded bundles, CLI logins, the shared DDEV CA. Removed only
+# under --purge, because "uninstall the app" and "delete my repositories" are different
+# intentions and only one of them is reversible.
+WORK_VOLUMES="repos bundles wrappers squid_configs ddev_ca npm_cache ddev_registry_cache"
+# Image repositories this install BUILT. Enumerated, never matched with a `${ID}-*` wildcard:
+# on the default id that glob also matches `haive-api`, `haive-worker` and `haive-web`, which is
+# what a source checkout's compose build is called — so a wildcard purge would delete a
+# developer's stack images from underneath them.
+IMAGE_REPOS="${ID}-cli-sandbox ${ID}-sandbox ${ID}-ddev-runner"
 
+echo "Removing the Haive install '${ID}' (compose project ${PROJECT})."
+if [ "$PURGE" -eq 1 ]; then
+  echo "--purge: cloned repositories, CLI credentials and built images will ALSO be removed."
+else
+  echo "Your repositories and CLI logins will be KEPT. Re-run with --purge to remove them too."
+fi
+if [ "$ASSUME_YES" -eq 0 ]; then
+  printf 'Type the install id to confirm: '
+  read -r reply
+  [ "$reply" = "$ID" ] || { echo "aborted."; exit 1; }
+fi
+
+# `down` first, so compose STOPS its own services rather than having them killed underneath it.
+# The work volumes survive a default uninstall and a worker can be mid-write to one of them.
 $DC down || true
-# Containers the WORKER creates are outside the compose project, so `down` does not reach them.
-for c in $(docker ps -aq --filter "name=^${ID}-" 2>/dev/null); do docker rm -f "$c" >/dev/null 2>&1 || true; done
-for v in postgres_data redis_data mailpit_data ollama_data; do
+
+# Containers the WORKER creates — per-task sandboxes, terminals, DDEV and app runners, the
+# registry — are plain `docker run` and are NOT part of the compose project, so `down` neither
+# stops them nor removes them. While one is attached the project network is still in use, which
+# is why `down` reports "resource is still in use" and leaves the network behind.
+swept=0
+for c in $(docker ps -aq --filter "name=^${ID}-" 2>/dev/null); do
+  docker rm -f "$c" >/dev/null 2>&1 && swept=$((swept + 1)) || true
+done
+[ "$swept" -gt 0 ] && echo "  removed ${swept} container(s) outside the compose project"
+
+# Now nothing holds them. Removing a network that is already gone is a silent no-op.
+for n in $(docker network ls -q --filter "name=^${ID}-" 2>/dev/null); do
+  docker network rm "$n" >/dev/null 2>&1 && echo "  removed network $n" || true
+done
+
+for v in $RUNTIME_VOLUMES; do
   docker volume rm "${PROJECT}_${v}" >/dev/null 2>&1 && echo "  removed ${PROJECT}_${v}" || true
 done
 
-# These hold WORK, not runtime state: cloned repositories, uploaded bundles, CLI credentials and
-# the shared DDEV CA. Never removed without being asked for, because "uninstall the app" and
-# "delete my repositories" are different intentions and only one of them is reversible.
-#
-# They are named per-install, so on an install whose id is not `haive` nothing else can be using
-# them. An install using the DEFAULT id may still share them with one created before per-install
-# naming existed, which is the case worth pausing over.
-echo ""
-echo "Left in place, because they hold your work rather than this install's runtime state:"
-for v in repos bundles wrappers squid_configs ddev_ca npm_cache ddev_registry_cache; do
-  docker volume inspect "${ID}_${v}" >/dev/null 2>&1 && echo "  ${ID}_${v}"
-done
-for v in $(docker volume ls -q --filter "name=^${ID}_cli_auth_" --filter "name=^${ID}_ide_" 2>/dev/null); do
-  echo "  $v"
-done
-echo ""
-echo "${ID}_repos holds your cloned repositories. To remove all of the above:"
-echo "  docker volume ls -q --filter name=^${ID}_ | xargs -r docker volume rm"
-echo ""
-echo "Then delete this directory."
+if [ "$PURGE" -eq 1 ]; then
+  for v in $WORK_VOLUMES; do
+    docker volume rm "${ID}_${v}" >/dev/null 2>&1 && echo "  removed ${ID}_${v}" || true
+  done
+  # Per-task auth and IDE volumes are created at runtime, so they are found rather than listed.
+  for v in $(docker volume ls -q --filter "name=^${ID}_cli_auth_" 2>/dev/null) \
+           $(docker volume ls -q --filter "name=^${ID}_ide_" 2>/dev/null); do
+    docker volume rm "$v" >/dev/null 2>&1 && echo "  removed $v" || true
+  done
+  for repo in $IMAGE_REPOS; do
+    for img in $(docker images -q "$repo" 2>/dev/null | sort -u); do
+      docker rmi -f "$img" >/dev/null 2>&1 && echo "  removed image $repo" || true
+    done
+  done
+  # Replicated environments are `<id>-env-<slug>`, one repository per project, so they are
+  # matched on the prefix rather than enumerated.
+  for img in $(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${ID}-env-" || true); do
+    docker rmi -f "$img" >/dev/null 2>&1 && echo "  removed image $img" || true
+  done
+  echo ""
+  echo "Everything this install owned is gone. Delete this directory to finish:"
+  echo "  rm -rf $(pwd)"
+else
+  echo ""
+  echo "Kept, because it holds your work rather than this install's runtime state:"
+  kept=0
+  for v in $WORK_VOLUMES; do
+    docker volume inspect "${ID}_${v}" >/dev/null 2>&1 && { echo "  ${ID}_${v}"; kept=$((kept + 1)); }
+  done
+  for v in $(docker volume ls -q --filter "name=^${ID}_cli_auth_" 2>/dev/null) \
+           $(docker volume ls -q --filter "name=^${ID}_ide_" 2>/dev/null); do
+    echo "  $v"; kept=$((kept + 1))
+  done
+  [ "$kept" -eq 0 ] && echo "  (nothing — this install never cloned a repository or logged a CLI in)"
+  echo ""
+  echo "To remove those too, re-run:  ./uninstall.sh --purge"
+  echo "The stack is gone either way; delete this directory when you are done with it."
+fi
 EOF
 chmod +x uninstall.sh
 say "  helpers           ./haive, ./uninstall.sh"

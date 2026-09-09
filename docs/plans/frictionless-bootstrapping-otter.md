@@ -375,11 +375,49 @@ installer's UX hinges on closing this:
 
 ## Rollback / uninstall (write the undo before the change)
 
-The installer's whole footprint is one directory plus a compose project. Uninstall is
-`docker compose -p haive down -v` (removes containers, networks, and the named volumes —
-`haive_repos`, postgres, redis) followed by removing the install dir. The installer writes an
-`uninstall.sh` that does exactly this, and its final message names it. Nothing is installed
-system-wide; there is no package to purge and no host path outside the install dir to clean.
+The installer's whole footprint is one directory plus a compose project — nothing is installed
+system-wide, there is no package to purge and no host path outside the install dir to clean. It
+writes `uninstall.sh` (`uninstall.ps1` on Windows) beside the compose bundle, and that script
+removes THIS install and nothing else on the machine.
+
+**`docker compose down -v` is the wrong undo and this plan used to prescribe it.** Two reasons,
+both measured. Six volumes carry an explicit `name:`, so before per-install naming `-v` from one
+install took another's cloned repositories with it — and even now `-v` cannot tell runtime state
+from work. And `down` does not reach the containers the WORKER creates: they are plain
+`docker run`, outside the compose project, so `down` neither stops nor removes them and reports
+`resource is still in use` while leaving the project network behind. MEASURED on a real install:
+one such container (`<id>-ddev-registry`) at every teardown.
+
+So the script is ordered `down` → sweep `^<id>-` strays → remove any network they were holding.
+`down` runs FIRST rather than last, deliberately: a default uninstall KEEPS the work volumes and
+a worker can be mid-write to one, so compose stops its own services cleanly instead of having
+them killed underneath it.
+
+Two modes, because "uninstall the app" and "delete my repositories" are different intentions and
+only one of them is reversible:
+
+- default — the stack, the project networks, and the four runtime volumes (postgres, redis,
+  mailpit, ollama). Cloned repositories, uploaded bundles, CLI logins and the DDEV CA are KEPT
+  and listed by name.
+- `--purge` / `-Purge` — the above plus those work volumes, the per-task auth and IDE volumes,
+  and the images this install BUILT.
+
+`--yes` / `-Yes` skips the confirmation, which otherwise requires typing the install id back.
+
+**Images are enumerated, never matched with a `<id>-*` wildcard.** On the default id that glob
+also matches `haive-api`, `haive-worker` and `haive-web` — which is exactly what a source
+checkout's compose build is called, so a wildcard purge would delete a developer's stack images
+from underneath them. Only `<id>-cli-sandbox`, `<id>-sandbox`, `<id>-ddev-runner` and the
+`<id>-env-*` prefix are this install's to remove. The pulled release images are shared between
+installs and are left alone.
+
+The install DIRECTORY is not removed by the script — it holds the script — and the final message
+prints the one command that does. `.env` is never deleted while volumes survive, because
+`CONFIG_ENCRYPTION_KEY` is what makes them readable.
+
+VERIFIED end to end on both platforms 2026-09-09: install → boot → uninstall (default), then
+`--purge`; zero containers, volumes, networks or images left, and the co-resident dev stack's
+containers, volumes and images untouched.
 
 ## Verification
 

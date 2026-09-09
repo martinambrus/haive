@@ -370,44 +370,130 @@ switch ($Command) {
 # explicit global name, so they are shared with any other Haive on this machine and `-v` would
 # take another install's cloned repositories with it.
 $uninstall = @'
+<#
+Remove THIS Haive install. Touches nothing that belongs to another install on this machine.
+
+  .\uninstall.ps1            stack + this install's runtime data; your work is kept
+  .\uninstall.ps1 -Purge     the above, plus repositories, credentials and built images
+  .\uninstall.ps1 -Yes       skip the confirmation prompt
+#>
+param([switch]$Purge, [switch]$Yes)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
-function Get-DotEnv {
-  $h = @{}
-  Get-Content .env | Where-Object { $_ -match '^\s*[^#].*=' } | ForEach-Object {
-    $k,$v = $_ -split '=', 2; $h[$k.Trim()] = $v.Trim()
+
+# Native commands write to stderr on success (docker's blkio warning is the usual one), and under
+# ErrorActionPreference=Stop PowerShell turns that into a terminating error. Same helper, same
+# reason, as the installer that generated this file.
+function Invoke-Native {
+  param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [switch]$Capture)
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    if ($Capture) { $out = & $Exe @Arguments 2>&1 | Out-String }
+    else          { & $Exe @Arguments 2>&1 | Out-Null; $out = '' }
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $out }
+  } finally { $ErrorActionPreference = $prev }
+}
+function Native-Lines([string]$Exe, [string[]]$Arguments) {
+  (Invoke-Native $Exe $Arguments -Capture).Output -split "`r?`n" |
+    ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+
+$env_ = @{}
+Get-Content .env | Where-Object { $_ -match '^\s*[^#].*=' } | ForEach-Object {
+  $k, $v = $_ -split '=', 2; $env_[$k.Trim()] = $v.Trim()
+}
+$id      = if ($env_['HAIVE_INSTALL_ID']) { $env_['HAIVE_INSTALL_ID'] } else { 'haive' }
+$project = if ($env_['COMPOSE_PROJECT_NAME']) { $env_['COMPOSE_PROJECT_NAME'] } else { $id }
+
+# Runtime state: recreated from scratch on the next install. Losing it loses no work.
+$runtimeVolumes = @('postgres_data', 'redis_data', 'mailpit_data', 'ollama_data')
+# Work: cloned repositories, uploaded bundles, CLI logins, the shared DDEV CA. Removed only under
+# -Purge, because "uninstall the app" and "delete my repositories" are different intentions and
+# only one of them is reversible.
+$workVolumes = @('repos', 'bundles', 'wrappers', 'squid_configs', 'ddev_ca', 'npm_cache', 'ddev_registry_cache')
+# Image repositories this install BUILT. Enumerated, never matched with an "$id-*" wildcard: on
+# the default id that glob also matches haive-api, haive-worker and haive-web, which is what a
+# source checkout's compose build is called - a wildcard purge would delete a developer's stack
+# images from underneath them.
+$imageRepos = @("$id-cli-sandbox", "$id-sandbox", "$id-ddev-runner")
+
+Write-Host "Removing the Haive install '$id' (compose project $project)."
+if ($Purge) {
+  Write-Host "-Purge: cloned repositories, CLI credentials and built images will ALSO be removed."
+} else {
+  Write-Host "Your repositories and CLI logins will be KEPT. Re-run with -Purge to remove them too."
+}
+if (-not $Yes) {
+  $reply = Read-Host "Type the install id to confirm"
+  if ($reply -ne $id) { Write-Host "aborted."; exit 1 }
+}
+
+# `down` first, so compose STOPS its own services rather than having them killed underneath it.
+# The work volumes survive a default uninstall and a worker can be mid-write to one of them.
+Invoke-Native docker @('compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.run.yml', 'down') | Out-Null
+
+# Containers the WORKER creates - per-task sandboxes, terminals, DDEV and app runners, the
+# registry - are plain `docker run` and are NOT part of the compose project, so `down` neither
+# stops them nor removes them. While one is attached the project network is still in use, which
+# is why `down` reports "resource is still in use" and leaves the network behind.
+$stray = @(Native-Lines docker @('ps', '-aq', '--filter', "name=^$id-"))
+foreach ($c in $stray) { Invoke-Native docker @('rm', '-f', $c) | Out-Null }
+if ($stray.Count -gt 0) { Write-Host "  removed $($stray.Count) container(s) outside the compose project" }
+
+# Now nothing holds them. Removing a network that is already gone is a silent no-op.
+foreach ($n in (Native-Lines docker @('network', 'ls', '-q', '--filter', "name=^$id-"))) {
+  if ((Invoke-Native docker @('network', 'rm', $n)).ExitCode -eq 0) { Write-Host "  removed network $n" }
+}
+
+foreach ($v in $runtimeVolumes) {
+  if ((Invoke-Native docker @('volume', 'rm', "${project}_$v")).ExitCode -eq 0) {
+    Write-Host "  removed ${project}_$v"
   }
-  $h
-}
-$e = Get-DotEnv
-$id = if ($e['HAIVE_INSTALL_ID']) { $e['HAIVE_INSTALL_ID'] } else { 'haive' }
-$project = if ($e['COMPOSE_PROJECT_NAME']) { $e['COMPOSE_PROJECT_NAME'] } else { $id }
-
-Write-Host "Removing the Haive stack and THIS install's runtime data."
-Write-Host "Install: $id   Project: $project"
-$reply = Read-Host "Type the install id to confirm"
-if ($reply -ne $id) { Write-Host "aborted."; exit 1 }
-
-docker compose -f docker-compose.yml -f docker-compose.run.yml down 2>&1 | Out-Null
-# Containers the WORKER creates are outside the compose project, so `down` does not reach them.
-$stray = docker ps -aq --filter "name=^$id-" 2>$null
-foreach ($c in $stray) { docker rm -f $c 2>&1 | Out-Null }
-foreach ($v in @('postgres_data','redis_data','mailpit_data','ollama_data')) {
-  docker volume rm "${project}_$v" 2>&1 | Out-Null
-  Write-Host "  removed ${project}_$v"
 }
 
-# These hold WORK, not runtime state: cloned repositories, uploaded bundles, CLI credentials and
-# the shared DDEV CA. Never removed without being asked for, because "uninstall the app" and
-# "delete my repositories" are different intentions and only one of them is reversible.
-Write-Host ""
-Write-Host "Left in place, because they hold your work rather than this install's runtime state:"
-docker volume ls -q --filter "name=^${id}_" 2>$null | Where-Object { $_ -notmatch "_(postgres|redis|mailpit|ollama)_data$" } | ForEach-Object { Write-Host "  $_" }
-Write-Host ""
-Write-Host "${id}_repos holds your cloned repositories. To remove all of the above:"
-Write-Host "  docker volume ls -q --filter name=^${id}_ | ForEach-Object { docker volume rm `$_ }"
-Write-Host ""
-Write-Host "Then delete this directory."
+if ($Purge) {
+  foreach ($v in $workVolumes) {
+    if ((Invoke-Native docker @('volume', 'rm', "${id}_$v")).ExitCode -eq 0) {
+      Write-Host "  removed ${id}_$v"
+    }
+  }
+  # Per-task auth and IDE volumes are created at runtime, so they are found rather than listed.
+  $runtime = @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_cli_auth_")) +
+             @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_ide_"))
+  foreach ($v in $runtime) {
+    if ((Invoke-Native docker @('volume', 'rm', $v)).ExitCode -eq 0) { Write-Host "  removed $v" }
+  }
+  foreach ($repo in $imageRepos) {
+    foreach ($img in (Native-Lines docker @('images', '-q', $repo) | Select-Object -Unique)) {
+      if ((Invoke-Native docker @('rmi', '-f', $img)).ExitCode -eq 0) { Write-Host "  removed image $repo" }
+    }
+  }
+  # Replicated environments are "<id>-env-<slug>", one repository per project, so they are matched
+  # on the prefix rather than enumerated.
+  foreach ($img in (Native-Lines docker @('images', '--format', '{{.Repository}}:{{.Tag}}') | Where-Object { $_ -like "$id-env-*" })) {
+    if ((Invoke-Native docker @('rmi', '-f', $img)).ExitCode -eq 0) { Write-Host "  removed image $img" }
+  }
+  Write-Host ""
+  Write-Host "Everything this install owned is gone. Delete this directory to finish:"
+  Write-Host "  Remove-Item -Recurse -Force '$PSScriptRoot'"
+} else {
+  Write-Host ""
+  Write-Host "Kept, because it holds your work rather than this install's runtime state:"
+  $kept = 0
+  foreach ($v in $workVolumes) {
+    if ((Invoke-Native docker @('volume', 'inspect', "${id}_$v")).ExitCode -eq 0) {
+      Write-Host "  ${id}_$v"; $kept++
+    }
+  }
+  $runtime = @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_cli_auth_")) +
+             @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_ide_"))
+  foreach ($v in $runtime) { Write-Host "  $v"; $kept++ }
+  if ($kept -eq 0) { Write-Host "  (nothing - this install never cloned a repository or logged a CLI in)" }
+  Write-Host ""
+  Write-Host "To remove those too, re-run:  .\uninstall.ps1 -Purge"
+  Write-Host "The stack is gone either way; delete this directory when you are done with it."
+}
 '@
 [System.IO.File]::WriteAllText((Join-Path $Dir 'uninstall.ps1'), $uninstall, (New-Object System.Text.UTF8Encoding($false)))
 Write-Note "helpers           .\haive.ps1, .\uninstall.ps1"
