@@ -346,7 +346,12 @@ if [ ! -f .env ]; then
   KEY=$(rand_hex 32)
   JWT=$(rand_hex 32)
   PGPW=$(rand_hex 16)
-  [ -n "$KEY" ] && [ -n "$JWT" ] && [ -n "$PGPW" ] || die "could not generate secrets. Nothing was installed."
+  # Explicit, not `A && B && C || die`: that reads as if-then-else and is not one — shellcheck
+  # says so as SC2015 — and the answer here has to be unambiguous, since the branch it guards is
+  # the one that would otherwise write an install with an empty encryption key.
+  if [ -z "$KEY" ] || [ -z "$JWT" ] || [ -z "$PGPW" ]; then
+    die "could not generate secrets. Nothing was installed."
+  fi
   umask 077
   cat > .env <<EOF
 # Haive install — generated $(date -u '+%Y-%m-%dT%H:%M:%SZ')

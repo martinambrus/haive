@@ -103,6 +103,16 @@ assert_complete() {
         "$([ -z "$missing" ] && echo 1 || echo 0)" "missing:$missing"
   check "$label: ./haive is executable" \
         "$([ -x "$dir/haive" ] && echo 1 || echo 0)"
+  # Not just that .env exists. The guard above it refuses to write an install whose secrets did
+  # not generate, and an empty CONFIG_ENCRYPTION_KEY is the one that matters: it is the master key
+  # for everything this install later stores.
+  key=$(sed -n 's/^CONFIG_ENCRYPTION_KEY=//p' "$dir/.env" 2>/dev/null | head -1)
+  check "$label: .env carries a real encryption key" \
+        "$([ "${#key}" -eq 64 ] && echo 1 || echo 0)" "length was ${#key}"
+  # `find -perm`, not a parse of `ls -l`: the mode is what is being asserted, and reading it out
+  # of a listing is both fragile and non-portable (shellcheck SC2012 says so).
+  check "$label: .env is mode 600" \
+        "$([ -n "$(find "$dir/.env" -perm 600 2>/dev/null)" ] && echo 1 || echo 0)"
 }
 
 run() {

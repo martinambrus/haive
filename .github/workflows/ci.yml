@@ -72,16 +72,18 @@ jobs:
       # while fixing the installer put a live COMMAND SUBSTITUTION inside an error message, which
       # `sh -n` accepts because it is valid syntax. shellcheck flagged it as SC2006 on the exact
       # line.
+      # PINNED BY DIGEST, for the same reason every action above is pinned to a SHA: a linter is
+      # only a gate if its verdict is reproducible. The first version of this step used whatever
+      # shellcheck the runner image happened to carry, and MEASURED that is not one thing —
+      # ubuntu's build reported SC2015 on a line that 0.11.0 passes, so the gate went red on code
+      # that had been checked. An unpinned linter fails builds nobody caused, and the fix for the
+      # finding it did raise is in `install.sh`, not in a suppression here.
       - name: Shellcheck the installer
         run: |
           set -euo pipefail
-          # Installed only if absent. The runner image is expected to carry it, but a gate that
-          # silently stops existing when an image changes is worse than one that spends 10s.
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq shellcheck
-          fi
-          shellcheck --shell=sh install/install.sh install/test/boot-failures.sh
+          docker run --rm -v "$PWD:/mnt:ro" \
+            koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
+            --shell=sh install/install.sh install/test/boot-failures.sh
 
       # The installer's BOOT block, which nothing else runs. `platform-checks.yml` installs with
       # `--no-start` and boots through the generated `./haive`, deliberately — a full `up` pulls
