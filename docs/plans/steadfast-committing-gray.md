@@ -553,6 +553,21 @@ Four details that are load-bearing rather than stylistic:
   says which line to add; a dev checkout is reported separately, because "there is no release to
   swap to" and "this install was not told where it lives" have different fixes.
 
+**The in-app trigger could not reach a namespaced install before 0.1.6, and the fix is not
+retroactive.** The api spawns the updater as a container, and a container boundary does not carry
+`HAIVE_INSTALL_ID` for free — an api that does not pass it leaves `networkName()` inside the
+updater with no id, so the one-shot MIGRATE container joins the DEFAULT install's network. MEASURED
+on an install with id `chan2`: that container resolved `postgres` to a different install's database
+and failed on `password authentication failed`, which the health gate rolled back. Two installs
+sharing a password would instead have had the wrong one migrated.
+
+Fixed in 0.1.6 on both sides (the api passes the id; the updater resolves through `networkName()`),
+but the api that SPAWNS is the one being replaced, so an install at 0.1.5 or earlier still spawns
+without it. Those installs take the hop with the HOST-SIDE `./haive upgrade`, which reads `.env`
+and passes both `--network <id>-network` and `-e HAIVE_INSTALL_ID` — verified present in the script
+the v0.1.5 installer already generated. From 0.1.6 the in-app button works. An install on the
+DEFAULT id was never affected, since the fallback and the truth are the same name there.
+
 The admin surface is its own page (`/admin/maintenance`) rather than another card on `/admin`,
 which is already 2,500 lines: state control, the blocking-work list with per-task pause/resume/stop,
 the version field, and the `upgrade_runs` history. It stays reachable under full maintenance because
