@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Hono } from 'hono';
-import { and, desc, eq, gte, lte, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, lte, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   ALLOWANCE_WATCH_MODES,
@@ -18,6 +18,7 @@ import {
   REGISTRATION_MODES,
   SPEC_VIEW_MODES,
   TERSENESS_LEVELS,
+  computeEmailBlindIndex,
   configService,
   decryptEmail,
   deriveAgentConcurrency,
@@ -30,12 +31,14 @@ import {
   parseTimeoutLadder,
   readHostAvailableMb,
   readHostResources,
+  secretsService,
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { recordAuditEvent } from '../lib/audit.js';
+import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
 
 const log = logger.child({ module: 'admin' });
 
@@ -964,6 +967,110 @@ adminRoutes.put('/config/plan-canvas', async (c) => {
 });
 
 const registrationModeSchema = z.object({ mode: z.enum(REGISTRATION_MODES) });
+
+const createInviteSchema = z.object({
+  /** Optional: omit for a generic link anyone may redeem, give one to bind it to that address. */
+  email: z.string().email().max(255).optional(),
+  role: z.enum(['admin', 'user']).default('user'),
+  expiresInHours: z
+    .number()
+    .int()
+    .min(1)
+    .max(24 * 90)
+    .default(24 * 7),
+});
+
+/**
+ * Create an invitation.
+ *
+ * The raw token is returned ONCE and never stored — only its sha256 is, the same shape
+ * `refresh_tokens` uses — so this response is the only chance to copy it. Losing it means revoking
+ * and issuing another, which is the correct trade for a database dump that hands out no working
+ * links.
+ */
+adminRoutes.post('/invites', async (c) => {
+  const body = createInviteSchema.parse(await c.req.json());
+  const db = getDb();
+  const token = generateInviteToken();
+
+  const emailBlindIndex = body.email
+    ? computeEmailBlindIndex(body.email, await secretsService.getEmailBlindIndexPepper())
+    : null;
+
+  const inserted = await db
+    .insert(schema.userInvites)
+    .values({
+      emailBlindIndex,
+      tokenHash: hashInviteToken(token),
+      role: body.role,
+      createdBy: c.get('userId'),
+      expiresAt: new Date(Date.now() + body.expiresInHours * 3_600_000),
+    })
+    .returning({ id: schema.userInvites.id, expiresAt: schema.userInvites.expiresAt });
+
+  await recordAuditEvent(db, {
+    actorUserId: c.get('userId'),
+    action: 'invite.create',
+    targetType: 'invite',
+    targetId: inserted[0]!.id,
+    // The token is deliberately absent: an audit row is not a place to store a live credential.
+    metadata: { role: body.role, bound: emailBlindIndex !== null },
+  });
+  log.info({ inviteId: inserted[0]!.id, role: body.role }, 'invite created');
+
+  return c.json(
+    { id: inserted[0]!.id, token, role: body.role, expiresAt: inserted[0]!.expiresAt },
+    201,
+  );
+});
+
+/** Outstanding and recently used invitations. Never returns `token_hash` — it is not the token,
+ *  but there is no reason for it to leave the database either. */
+adminRoutes.get('/invites', async (c) => {
+  const rows = await getDb()
+    .select({
+      id: schema.userInvites.id,
+      role: schema.userInvites.role,
+      bound: schema.userInvites.emailBlindIndex,
+      expiresAt: schema.userInvites.expiresAt,
+      revokedAt: schema.userInvites.revokedAt,
+      consumedAt: schema.userInvites.consumedAt,
+      createdAt: schema.userInvites.createdAt,
+    })
+    .from(schema.userInvites)
+    .orderBy(desc(schema.userInvites.createdAt))
+    .limit(100);
+
+  return c.json({
+    invites: rows.map(({ bound, ...r }) => ({
+      ...r,
+      // Whether it is address-bound, not WHICH address — the blind index is a lookup key, and
+      // echoing it back would let a listing be replayed against the users table.
+      bound: bound !== null,
+    })),
+  });
+});
+
+/** Revoke an outstanding invitation. Kept as a row, not deleted: how someone came to have an
+ *  account, or was stopped from getting one, outlives the row's storage cost. */
+adminRoutes.delete('/invites/:id', async (c) => {
+  const db = getDb();
+  const id = c.req.param('id');
+  const updated = await db
+    .update(schema.userInvites)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(schema.userInvites.id, id), isNull(schema.userInvites.revokedAt)))
+    .returning({ id: schema.userInvites.id });
+
+  if (updated.length === 0) throw new HttpError(404, 'No such outstanding invitation');
+  await recordAuditEvent(db, {
+    actorUserId: c.get('userId'),
+    action: 'invite.revoke',
+    targetType: 'invite',
+    targetId: id,
+  });
+  return c.json({ ok: true });
+});
 
 /**
  * Who may create an account on this instance.

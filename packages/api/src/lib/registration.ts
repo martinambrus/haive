@@ -28,6 +28,13 @@ export interface RegistrationContext {
   setupTokenConfigured: boolean;
   /** The token the request presented, if any. Compared by the caller, never stored. */
   setupTokenMatches: boolean;
+  /**
+   * The request carried an invitation the caller has already validated against the database.
+   *
+   * A boolean rather than the invite itself: whether registration is ALLOWED is this function's
+   * question, while which role the invite carries is the caller's to apply — it has the row.
+   */
+  hasValidInvite?: boolean;
 }
 
 export type RegistrationRefusal =
@@ -59,14 +66,20 @@ export function decideRegistration(ctx: RegistrationContext): RegistrationDecisi
   if (ctx.mode === 'open') return { allow: true, role: 'user', firstRun: false };
 
   if (ctx.mode === 'invite') {
-    // The invite itself is validated by the caller against the database and carries the role it was
-    // created with; reaching here means no valid invite accompanied the request.
+    // The invite is validated by the caller against the database, which also applies the role it
+    // carries; all this needs to know is whether one accompanied the request.
+    if (ctx.hasValidInvite) return { allow: true, role: 'user', firstRun: false };
     return {
       allow: false,
       refusal: 'invite-required',
       message: 'Registration is by invitation. Ask an administrator for an invite link.',
     };
   }
+
+  // An invite admits its holder even while registration is CLOSED. That is what makes `closed` a
+  // usable default rather than a wall: the administrator hands out the only way in, one link at a
+  // time, instead of opening the door to everyone to let one person through.
+  if (ctx.hasValidInvite) return { allow: true, role: 'user', firstRun: false };
 
   // `closed`, and anything a future mode adds until it is handled above — failing SHUT is the only
   // safe direction for a gate whose other outcome is creating an account.

@@ -17,6 +17,9 @@ export const registerRequestSchema = z.object({
   /** Required only for the FIRST account on an install that sets `SETUP_TOKEN` — the opt-in guard
    *  against someone else registering first on an instance exposed before its owner arrives. */
   setupToken: z.string().max(255).optional(),
+  /** Required when the registration mode is `invite`. Carries the role the invite was created
+   *  with, so an invited administrator arrives as one. */
+  inviteToken: z.string().max(255).optional(),
 });
 
 export const refreshRequestSchema = z.object({

@@ -101,3 +101,43 @@ describe('registration mode, once an admin exists', () => {
     }
   });
 });
+
+describe('an invite', () => {
+  // The reason `closed` is a usable default rather than a wall: the administrator hands out the
+  // only way in, one link at a time, instead of opening the door to everyone to admit one person.
+  it('admits its holder even while registration is closed', () => {
+    expect(decideRegistration(ctx({ mode: 'closed', hasValidInvite: true }))).toEqual({
+      allow: true,
+      role: 'user',
+      firstRun: false,
+    });
+  });
+
+  it('is what invite mode is waiting for', () => {
+    expect(decideRegistration(ctx({ mode: 'invite' }))).toMatchObject({
+      allow: false,
+      refusal: 'invite-required',
+    });
+    expect(decideRegistration(ctx({ mode: 'invite', hasValidInvite: true }))).toMatchObject({
+      allow: true,
+    });
+  });
+
+  // The ROLE an invite carries is applied by the caller, which holds the row. This function only
+  // decides admission, so it must never be the thing that grants admin.
+  it('never makes this function return admin', () => {
+    for (const mode of ['open', 'invite', 'closed'] as const) {
+      const d = decideRegistration(ctx({ mode, hasValidInvite: true }));
+      expect(d.allow === true && d.role, mode).toBe('user');
+    }
+  });
+
+  // An invite cannot manufacture a first run, and a first run needs no invite.
+  it('does not interact with the first-run branch', () => {
+    expect(decideRegistration(ctx({ userCount: 0, hasValidInvite: true }))).toMatchObject({
+      allow: true,
+      role: 'admin',
+      firstRun: true,
+    });
+  });
+});

@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
-import { count, eq, and, sql } from 'drizzle-orm';
+import { count, eq, and, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   loginRequestSchema,
@@ -23,6 +23,7 @@ import {
   hashRefreshToken,
 } from '../auth/jwt.js';
 import { setAuthCookies, clearAuthCookies, getRefreshCookie } from '../auth/cookies.js';
+import { checkInvite, hashInviteToken } from '../lib/invites.js';
 import { decideRegistration } from '../lib/registration.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -93,14 +94,43 @@ authRoutes.post('/register', async (c) => {
     const counted = await tx.select({ n: count() }).from(schema.users);
     const userCount = Number(counted[0]?.n ?? 0);
 
+    // Looked up INSIDE the transaction, and consumed there too: that is what makes an invite
+    // single-use. Two people redeeming the same link at once both pass `checkInvite`, but only one
+    // UPDATE can match `consumed_at IS NULL`, and the loser's whole registration rolls back.
+    let invite: { id: string; role: 'admin' | 'user' } | null = null;
+    if (body.inviteToken) {
+      const row = await tx.query.userInvites.findFirst({
+        where: eq(schema.userInvites.tokenHash, hashInviteToken(body.inviteToken)),
+        columns: {
+          id: true,
+          role: true,
+          emailBlindIndex: true,
+          expiresAt: true,
+          revokedAt: true,
+          consumedAt: true,
+        },
+      });
+      const verdict = checkInvite(row ?? null, blindIndex);
+      if (!verdict.valid) {
+        log.warn({ refusal: verdict.refusal }, 'invite rejected');
+        throw new HttpError(403, verdict.message);
+      }
+      invite = { id: row!.id, role: verdict.role };
+    }
+
     const decision = decideRegistration({
       userCount,
       mode,
+      hasValidInvite: invite !== null,
       setupTokenConfigured: setupToken.length > 0,
       setupTokenMatches:
         setupToken.length > 0 && timingSafeEqualString(setupToken, body.setupToken),
     });
     if (!decision.allow) throw new HttpError(403, decision.message);
+
+    // An invite's role wins over the mode's default: that is the whole point of inviting someone
+    // as an administrator. The first-run branch still outranks both — it is already `admin`.
+    const role = decision.firstRun ? decision.role : (invite?.role ?? decision.role);
 
     const inserted = await tx
       .insert(schema.users)
@@ -108,7 +138,7 @@ authRoutes.post('/register', async (c) => {
         emailEncrypted,
         emailBlindIndex: blindIndex,
         passwordHash,
-        role: decision.role,
+        role,
       })
       .returning({
         id: schema.users.id,
@@ -117,6 +147,23 @@ authRoutes.post('/register', async (c) => {
         tokenVersion: schema.users.tokenVersion,
         createdAt: schema.users.createdAt,
       });
+
+    if (invite) {
+      // Guarded on `consumed_at IS NULL` rather than trusting the read above: between that read
+      // and this write another transaction could have consumed it. Zero rows means it lost the
+      // race, and throwing rolls this whole registration back.
+      const consumed = await tx
+        .update(schema.userInvites)
+        .set({ consumedAt: new Date(), consumedByUserId: inserted[0]!.id })
+        .where(and(eq(schema.userInvites.id, invite.id), isNull(schema.userInvites.consumedAt)))
+        .returning({ id: schema.userInvites.id });
+      if (consumed.length === 0) {
+        throw new HttpError(
+          409,
+          'That invitation was just used. Ask an administrator for a new one.',
+        );
+      }
+    }
 
     if (decision.firstRun) {
       log.info({ userId: inserted[0]!.id }, 'first account created — anointed as administrator');

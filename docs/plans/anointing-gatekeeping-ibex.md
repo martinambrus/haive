@@ -1,8 +1,11 @@
 # First-admin onboarding + registration gating
 
-> **Sections A (first-admin), B (registration mode) and D (setup detection) SHIPPED 2026-09-09.** `register` is first-run
+> **Sections A (first-admin), B (registration mode), C (invites) and D (setup detection) SHIPPED
+> 2026-09-09.** `register` is first-run
 > aware, `GET /auth/registration-status` reports it and the mode, `/setup` is the web entry point,
-> and `CONFIG_KEYS.REGISTRATION_MODE` defaults to `closed` with an admin card. C and E-G remain. Three things this plan could not have known are recorded under "As built" at the end.
+> `CONFIG_KEYS.REGISTRATION_MODE` defaults to `closed` with an admin card, and `user_invites`
+> (migration `0153`) plus `POST/GET/DELETE /admin/invites` give `closed` a legitimate way in.
+> E-G remain — the invite API has no UI panel yet. Three things this plan could not have known are recorded under "As built" at the end.
 >
 > Status: PROPOSED, 2026-08-25. Companion to `frictionless-bootstrapping-otter` (the one-line
 > installer), which HANDS OFF to this flow but does not define it. This plan is the app-level
