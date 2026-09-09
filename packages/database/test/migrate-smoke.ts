@@ -16,7 +16,7 @@
  */
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -32,6 +32,16 @@ if (!process.env.DATABASE_URL) {
 const adminUrl = process.env.DATABASE_URL;
 const RUNNER = fileURLToPath(new URL('../dist/migrate/index.js', import.meta.url));
 const MIGRATIONS = fileURLToPath(new URL('../migrations/', import.meta.url));
+
+/** How many files the corpus holds RIGHT NOW.
+ *
+ *  Read rather than written down: every assertion below that used to name a literal 1 was true
+ *  only while the directory held the baseline alone, and the first real migration turned three of
+ *  them red for being right. The invariants are "one runner did the applying" and "one journal row
+ *  per file" — neither is a number this file gets to know. */
+async function corpusSize(): Promise<number> {
+  return (await readdir(MIGRATIONS)).filter((f) => f.endsWith('.sql')).length;
+}
 
 const failures: string[] = [];
 function check(label: string, ok: boolean, detail?: unknown): void {
@@ -157,16 +167,25 @@ async function main(): Promise<void> {
     const run = await runMigrate(urlFor(db));
     check('adopt: exits 0', run.code === 0, run.stderr);
     check('adopt: classified legacy', run.stdout.includes('"kind":"legacy"'));
-    check('adopt: applied nothing', run.stdout.includes('"applied":0'));
     await withDb(db, async (sql) => {
       const rows = await sql<
         { id: string; applied_by: string }[]
-      >`SELECT id, applied_by FROM schema_migrations`;
+      >`SELECT id, applied_by FROM schema_migrations ORDER BY id`;
+      // The BASELINE is what must be stamped rather than executed — a database push built already
+      // has its tables. Post-baseline migrations then run normally and are `runner` rows; that is
+      // the correct outcome and the reason every one of them is written guarded and idempotent.
+      const adopted = rows.filter((r) => r.applied_by === 'baseline-adopt');
       check(
         'adopt: exactly one baseline-adopt row',
-        rows.length === 1 && rows[0]?.applied_by === 'baseline-adopt',
+        adopted.length === 1 && adopted[0]?.id === '0000_baseline',
         rows,
       );
+      check(
+        'adopt: every later migration ran as the runner',
+        rows.every((r) => r.id === '0000_baseline' || r.applied_by === 'runner'),
+        rows,
+      );
+      check('adopt: journal holds one row per file', rows.length === (await corpusSize()), rows);
       const sentinel = await sql<{ email_encrypted: string }[]>`SELECT email_encrypted FROM users`;
       check(
         'adopt: sentinel row survived, so no DDL ran',
@@ -212,11 +231,19 @@ async function main(): Promise<void> {
     const db = await freshDatabase('race');
     const [a, b] = await Promise.all([runMigrate(urlFor(db)), runMigrate(urlFor(db))]);
     check('race: both exit 0', a.code === 0 && b.code === 0, { a: a.code, b: b.code });
-    const applied = [a, b].filter((r) => r.stdout.includes('"applied":1')).length;
-    check('race: exactly one runner applied the baseline', applied === 1, { applied });
+    const size = await corpusSize();
+    // One runner does the whole corpus and the other finds nothing to do — the lock is what makes
+    // it all-or-nothing rather than a split.
+    const applied = [a, b].filter((r) => r.stdout.includes(`"applied":${size}`)).length;
+    const idle = [a, b].filter((r) => r.stdout.includes('"applied":0')).length;
+    check('race: exactly one runner applied the corpus', applied === 1 && idle === 1, {
+      applied,
+      idle,
+      size,
+    });
     await withDb(db, async (sql) => {
       const rows = await sql<{ id: string }[]>`SELECT id FROM schema_migrations`;
-      check('race: exactly one journal row', rows.length === 1, rows);
+      check('race: one journal row per file, no duplicates', rows.length === size, rows);
     });
   }
 
@@ -227,8 +254,14 @@ async function main(): Promise<void> {
     await runMigrate(urlFor(db));
     const dir = await mkdtemp(path.join(os.tmpdir(), 'haive-migrate-'));
     try {
-      await execFileAsync('cp', [path.join(MIGRATIONS, '0000_baseline.sql'), dir]);
-      const target = path.join(dir, '0153_concurrent_index.sql');
+      // The WHOLE corpus, not the baseline alone: the database above was migrated with every
+      // file, so a directory holding fewer is a FORK to the runner, which refuses before it ever
+      // reaches the directive this case is about. Numbered above anything real for the same
+      // reason — a fixture that collides with a shipped id is the same refusal by another name.
+      for (const file of (await readdir(MIGRATIONS)).filter((f) => f.endsWith('.sql'))) {
+        await execFileAsync('cp', [path.join(MIGRATIONS, file), dir]);
+      }
+      const target = path.join(dir, '9999_concurrent_index.sql');
       const body =
         'CREATE INDEX CONCURRENTLY IF NOT EXISTS smoke_idx ON users (email_blind_index);\n';
 
