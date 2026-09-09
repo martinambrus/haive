@@ -79,8 +79,24 @@ steps "need no rebuild". Only a module contributing steps, routes or jobs does.
 
 ## Shape of the command
 
-`curl -fsSL https://get.haive.dev | sh` (and a `powershell -c "irm get.haive.dev/install.ps1 | iex"`
+`curl -fsSL <install-url> | sh` (and a `powershell -c "irm <install-url>/install.ps1 | iex"`
 sibling), or `npx create-haive`. All three do the same bootstrap:
+
+**The vanity domain is UNDECIDED and this plan should not have named one.** It said
+`get.haive.dev` throughout, which reads as settled; VERIFIED 2026-09-09 that domain belongs to
+somebody else — it resolves, serves an unrelated site behind Cloudflare, and `get.` answers only
+because of a `*.haive.dev` wildcard pointing at a host that listens on nothing. So a domain has
+still to be chosen and registered.
+
+What ships today is the raw repository URL
+(`raw.githubusercontent.com/<owner>/haive/main/install/install.sh`), which works and is what the
+README documents. A vanity URL buys STABLE INDIRECTION rather than prettiness — the raw form bakes
+in the owner, the repo name and the branch, and all three can change — so it is worth having, and
+worth having BEFORE the raw URL spreads into anything published, because a copied install line
+cannot be recalled. Implement it as a 302 to the raw URL rather than by proxying the bytes: the
+script still comes from the repo, the domain is only an alias, and both `curl -fsSL` and `irm`
+follow redirects, so the command's shape does not change. Point it at `main`, not at a tag — the
+SCRIPT should be current while the RELEASE it installs stays pinned.
 
 1. Preflight: Docker Engine + Compose v2 present and the daemon reachable (on Windows that means
    Docker Desktop — see Platforms); enough free RAM and disk for the stack's reserve budget; and the
@@ -206,7 +222,7 @@ environment; a published-image install builds nothing and needs no workspace, so
 that constraint. Windows-native (non-WSL2) stays out of scope regardless — see below.
 
 - **macOS needs no PowerShell.** It ships `curl` and `bash`, so the documented
-  `curl -fsSL https://get.haive.dev | sh` line is byte-identical to the Linux one. The
+  `curl -fsSL <install-url> | sh` line is byte-identical to the Linux one. The
   `irm | iex` sibling is Windows-only. Mac is the cheapest of the three targets for the installer,
   and its risks are all downstream of it.
 - **No GPU on Apple Silicon.** Docker Desktop cannot pass the GPU to a container, so in-stack Ollama
