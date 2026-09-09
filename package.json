@@ -42,7 +42,7 @@
     "turbo": "^2.10.9",
     "typescript": "^5.7.3",
     "vite": "^8.2.1",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx,json,md}": "prettier --write"
@@ -65,7 +65,7 @@
       "ws": "^8.21.1",
       "postcss": "^8.5.18",
       "esbuild": "^0.28.1",
-      "sharp": "^0.35.0",
+      "sharp": "^0.35.4",
       "brace-expansion": "^5.0.9",
       "nanoid": "^3.3.18"
     }
