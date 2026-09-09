@@ -486,10 +486,26 @@ no translation for this mount. And a `C:\` install directory resolves correctly 
 -v` bind mount, which is what the in-app updater hands the daemon — so the Windows upgrade
 plumbing is sound (`canUpgrade: true`, and the mount was verified directly).
 
-Verification items 1, 3, 5, 10 and 11 are met; 2 waits on first-admin bootstrap, 4 and 7-9 are
-untested (no non-NVIDIA-less host, no Mac, no non-public channel). One gap worth naming: a fresh
-install still opens to a login wall, because `POST /auth/setup` does not exist yet — every test
-above had to promote its first user with SQL.
+### Verification status, measured rather than assumed
+
+| # | What it asks | Status |
+|---|---|---|
+| 1 | one command boots green, unique key, migrations, working `/setup` | MET except `/setup` — see item 2 |
+| 2 | first-admin creation, then `/auth/setup` 409 forever | NOT MET — the endpoint does not exist |
+| 3 | a second install generates a DIFFERENT encryption key | MET — two installs compared field by field |
+| 4 | no-GPU machine boots on the CPU overlay | PARTIAL — the CPU path booted green on Windows; not run on a host that LACKS a GPU |
+| 5 | uninstall returns the machine to its pre-install state | MET, with one deviation: the install DIRECTORY is not removed |
+| 6 | `docker history` reveals no baked secret | MET — 0 secret-shaped layers and 0 baked env secrets across api/worker/web/updater |
+| 7-8 | macOS arm64, and per-CLI adapter behaviour there | UNTESTED — no Mac |
+| 9 | `--channel <id>` for a module customer | NOT IMPLEMENTED — anything but `public` is refused at preflight |
+| 10 | `--version` pins a concrete release; a bad one fails early | MET — `next` and `latest` both landed `0.1.5` in `.env`, never an alias; `99.99.99` failed at preflight with no directory, no volumes and nothing pulled |
+| 11 | no Docker: name the missing piece and stop, changing nothing | MET — run in a container with no docker CLI: names the piece, prints the platform's exact fix, exits 1, writes nothing |
+
+Two deviations from the text above are deliberate. **Item 1's `/setup`** cannot be met until
+`anointing-gatekeeping-ibex` lands `POST /auth/setup`; a fresh install still opens to a login wall
+and every test here had to promote its first user with SQL. **Item 5's "or the install dir"** — the
+uninstaller does not delete the directory it is running from; it prints the one command that does.
+Its `--purge` mode covers everything else the item asks for.
 
 ## Out of scope
 
