@@ -2324,6 +2324,28 @@ export async function getStatsSteps(params: StatsQueryParams = {}): Promise<Stat
 export interface RegistrationStatus {
   setupNeeded: boolean;
   setupTokenRequired: boolean;
+  /** Who may register AFTER the first account. The first run is exempt from it. */
+  mode: 'open' | 'invite' | 'closed';
+}
+
+export interface AdminInvite {
+  id: string;
+  role: 'admin' | 'user';
+  /** Whether it is bound to one address, never WHICH — the api reports the blind index as a
+   *  boolean so a listing cannot be replayed against the users table. */
+  bound: boolean;
+  expiresAt: string;
+  revokedAt: string | null;
+  consumedAt: string | null;
+  createdAt: string;
+}
+
+export interface AdminInviteCreated {
+  id: string;
+  /** Returned once, at creation, and stored only as a hash. */
+  token: string;
+  role: 'admin' | 'user';
+  expiresAt: string;
 }
 
 /* ── Maintenance and upgrade (admin) ───────────────────────────────────────── */
