@@ -580,22 +580,54 @@ if [ "$NO_START" -eq 1 ]; then
 fi
 
 step "Pulling images (this is the slow part)"
+# A pull failure is FATAL and named. It used to be swallowed by `|| true`, which turned the single
+# most likely failure on a slow or flaky network — the step whose own banner calls it the slow part
+# — into an install that wrote itself and then simply never came up, with nothing said about why.
+# install.ps1 has always failed loudly here; this is the sh side catching up.
+#
+# The old noise filter went with it: `pull` streams into a pipeline, and a pipeline's status is the
+# LAST command's, so keeping `| grep -v …` means reading grep's answer and not docker's. (That grep
+# was also GNU-only — BSD grep reads `\|` as a literal, so on macOS it filtered nothing at all.)
+# `--quiet` is what suppresses the progress bars; the filter was only trimming what it left behind.
 # shellcheck disable=SC2086
-docker compose $COMPOSE_FILES pull --quiet 2>&1 | grep -vi 'pulling\|pulled\|waiting' || true
+docker compose $COMPOSE_FILES pull --quiet || die "could not pull the images.
+       Check your network, then retry — the install itself is written and complete:
+         cd $INSTALL_DIR && ./haive up"
 
 step "Starting Haive"
+# The install directory is COMPLETE by now, so a boot failure is a retry rather than a reinstall —
+# and saying so is the difference between a one-line fix and reverse-engineering the compose
+# invocation. REPORTED from a macOS arm64 install: the stack did not start, and its owner worked
+# out `docker compose -f docker-compose.yml -f docker-compose.run.yml up` by hand rather than
+# running the `./haive up` that was sitting beside it.
 # shellcheck disable=SC2086
-docker compose $COMPOSE_FILES up -d
+docker compose $COMPOSE_FILES up -d || die "the stack did not start.
+       The install is written and complete, so this is a retry, not a reinstall:
+         cd $INSTALL_DIR && ./haive up
+       And to see why it failed:
+         cd $INSTALL_DIR && ./haive logs"
 
 step "Waiting for the API"
+# 6 minutes, not 4. A FIRST boot initialises the Postgres data directory and applies the whole
+# baseline before the api can answer, and it does that on a machine that has just finished pulling
+# several images — so the budget has to cover the slowest legitimate start, not the typical one.
+# The periodic note is not decoration: without it a silent multi-minute wait is indistinguishable
+# from a hang, which is what makes someone kill the installer on a stack that was about to come up.
 PORT=$(sed -n 's/^HAIVE_API_PORT=//p' .env | head -1); : "${PORT:=3001}"
 i=1
-while [ "$i" -le 120 ]; do
+while [ "$i" -le 180 ]; do
   if curl -fsS "http://localhost:${PORT}/health" >/dev/null 2>&1; then
     say "  api               healthy"
     break
   fi
-  [ "$i" -lt 120 ] || die "the API never became healthy. Look at the logs:  cd $INSTALL_DIR && ./haive logs api"
+  # The containers are already up; this is the api's own startup. Say the elapsed time so the wait
+  # reads as progress.
+  [ "$((i % 15))" -ne 0 ] || say "  waiting           $((i * 2))s — a first boot initialises the database"
+  [ "$i" -lt 180 ] || die "the API did not answer within 6 minutes.
+       The containers ARE running: the start step above succeeded, so this is a slow or stuck
+       start rather than a failed install. Watch it:
+         cd $INSTALL_DIR && ./haive logs api
+       And once it answers, open http://localhost:$(sed -n 's/^HAIVE_WEB_PORT=//p' .env | head -1)."
   sleep 2
   i=$((i + 1))
 done

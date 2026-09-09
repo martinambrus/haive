@@ -59,6 +59,30 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+      # `install/install.sh` is the one script in this repo that runs on a stranger's machine, out
+      # of a `curl … | sh`, with no review step between us and them. It carried three
+      # `# shellcheck disable=` directives written for a linter nothing ever ran.
+      #
+      # MEASURED before adding this: shellcheck reports ZERO findings on that file, so the gate has
+      # no backlog to work through. It is scoped to the installer rather than every `*.sh` because
+      # the other four scripts carry style notes (SC2034 on loop counters, one SC2086) that belong
+      # to their own change, not to this one.
+      #
+      # It is not hypothetical coverage: a `die "… `docker compose up -d` succeeded …"` written
+      # while fixing the installer put a live COMMAND SUBSTITUTION inside an error message, which
+      # `sh -n` accepts because it is valid syntax. shellcheck flagged it as SC2006 on the exact
+      # line.
+      - name: Shellcheck the installer
+        run: |
+          set -euo pipefail
+          # Installed only if absent. The runner image is expected to carry it, but a gate that
+          # silently stops existing when an image changes is worse than one that spends 10s.
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+          fi
+          shellcheck --shell=sh install/install.sh
+
   smokes:
     name: End-to-end smokes
     runs-on: ubuntu-latest

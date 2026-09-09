@@ -40,6 +40,23 @@ generates for this install (mode 600), and two helper scripts — `./haive` and 
 (`.ps1` on Windows). Host ports are probed rather than assumed, so a second install, or a machine
 already running ddev, gets free ones instead of a bind error.
 
+`./haive` is how you run the install afterwards, and it is worth knowing before you need it:
+
+```bash
+cd ~/haive
+./haive up          # start it (or start it again)
+./haive logs api    # follow one service; ./haive logs for all of them
+./haive ps          # what is running
+./haive down        # stop it, keeping every volume
+```
+
+**If the first boot does not come up,** the install directory is already complete — the compose
+bundle, the `.env` and both helpers are written before anything is pulled. So it is a retry, not a
+reinstall: `./haive up`, and `./haive logs` to see why. Re-running the installer will not help and
+is refused anyway. The commonest cause is a pull that did not finish on a slow connection; the
+images are large and the first boot then also initialises the database, which on a laptop can take
+several minutes after the containers appear.
+
 **Before you use it, know what it can do:** the Haive worker mounts the Docker socket, which is
 equivalent to root on the host. That is how it runs AI CLIs in sandboxes. See
 [Docker socket exposure](#docker-socket-exposure) for the rootless alternative.

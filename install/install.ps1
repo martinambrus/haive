@@ -525,26 +525,57 @@ if ($NoStart) {
 
 Write-Step "Pulling images (this is the slow part)"
 $pull = Invoke-Native docker @('compose','-f','docker-compose.yml','-f','docker-compose.run.yml','pull','--quiet')
-if ($pull.ExitCode -ne 0) { Pop-Location; Die "could not pull the images. Check your network and that the release exists." }
+if ($pull.ExitCode -ne 0) {
+  Pop-Location
+  Die @"
+could not pull the images.
+       Check your network and that the release exists, then retry - the install itself is
+       written and complete:
+         cd $Dir; .\haive.ps1 up
+"@
+}
 
 Write-Step "Starting Haive"
 $up = Invoke-Native docker @('compose','-f','docker-compose.yml','-f','docker-compose.run.yml','up','-d') -Capture
 if ($up.ExitCode -ne 0) {
   Write-Host $up.Output
   Pop-Location
-  Die "the stack did not start. Look at the logs:  cd $Dir; .\haive.ps1 logs"
+  # The install directory is COMPLETE by now, so this is a retry rather than a reinstall.
+  Die @"
+the stack did not start.
+       The install is written and complete, so this is a retry, not a reinstall:
+         cd $Dir; .\haive.ps1 up
+       And to see why it failed:
+         cd $Dir; .\haive.ps1 logs
+"@
 }
 
 Write-Step "Waiting for the API"
+# 6 minutes, not 4. A FIRST boot initialises the Postgres data directory and applies the whole
+# baseline before the api can answer, on a machine that has just finished pulling several images.
+# The periodic note is not decoration: a silent multi-minute wait is indistinguishable from a hang,
+# which is what makes someone kill an installer on a stack that was about to come up.
 $port = $apiPort
 $healthy = $false
-for ($i = 0; $i -lt 120; $i++) {
+for ($i = 1; $i -le 180; $i++) {
   try {
     Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 3 | Out-Null
     $healthy = $true; break
-  } catch { Start-Sleep -Seconds 2 }
+  } catch {
+    if ($i % 15 -eq 0) { Write-Note ("waiting           {0}s - a first boot initialises the database" -f ($i * 2)) }
+    Start-Sleep -Seconds 2
+  }
 }
-if (-not $healthy) { Pop-Location; Die "the API never became healthy. Look at the logs:  cd $Dir; .\haive.ps1 logs api" }
+if (-not $healthy) {
+  Pop-Location
+  Die @"
+the API did not answer within 6 minutes.
+       The containers ARE running: the start step above succeeded, so this is a slow or stuck
+       start rather than a failed install. Watch it:
+         cd $Dir; .\haive.ps1 logs api
+       And once it answers, open http://localhost:$webPort
+"@
+}
 Write-Note "api               healthy"
 
 Pop-Location
