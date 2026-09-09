@@ -1,8 +1,8 @@
 # First-admin onboarding + registration gating
 
-> **Section A (first-admin) and D (setup detection) SHIPPED 2026-09-09.** `register` is first-run
-> aware, `GET /auth/registration-status` reports it, and `/setup` is the web entry point. B, C and
-> E-G remain. Three things this plan could not have known are recorded under "As built" at the end.
+> **Sections A (first-admin), B (registration mode) and D (setup detection) SHIPPED 2026-09-09.** `register` is first-run
+> aware, `GET /auth/registration-status` reports it and the mode, `/setup` is the web entry point,
+> and `CONFIG_KEYS.REGISTRATION_MODE` defaults to `closed` with an admin card. C and E-G remain. Three things this plan could not have known are recorded under "As built" at the end.
 >
 > Status: PROPOSED, 2026-08-25. Companion to `frictionless-bootstrapping-otter` (the one-line
 > installer), which HANDS OFF to this flow but does not define it. This plan is the app-level

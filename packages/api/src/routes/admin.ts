@@ -8,26 +8,28 @@ import {
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
   CONFIG_RUNTIME_LIMITS_CHANNEL,
-  configService,
-  decryptEmail,
   DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
   DEFAULT_CLI_PROMPT_RETENTION_DAYS,
   DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS,
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
   DEFAULT_CLI_TIMEOUT_LADDER,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
+  DISPLAY_CURRENCIES,
+  REGISTRATION_MODES,
+  SPEC_VIEW_MODES,
+  TERSENESS_LEVELS,
+  configService,
+  decryptEmail,
   deriveAgentConcurrency,
   deriveAgentSafetyMb,
   deriveRuntimeCaps,
+  isDisplayCurrency,
   logger,
   parseAllowanceWatchMode,
+  parseRegistrationMode,
   parseTimeoutLadder,
   readHostAvailableMb,
   readHostResources,
-  TERSENESS_LEVELS,
-  SPEC_VIEW_MODES,
-  DISPLAY_CURRENCIES,
-  isDisplayCurrency,
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
@@ -959,6 +961,35 @@ adminRoutes.put('/config/plan-canvas', async (c) => {
   await configService.set(CONFIG_KEYS.PLAN_CANVAS_ENABLED, enabled ? 'true' : 'false');
   log.info({ enabled }, 'global plan-canvas switch updated');
   return c.json({ enabled });
+});
+
+const registrationModeSchema = z.object({ mode: z.enum(REGISTRATION_MODES) });
+
+/**
+ * Who may create an account on this instance.
+ *
+ * The FIRST registration is exempt from whatever this says — an install whose own first account
+ * were refused would have no way in at all, which is the trap the first-run branch exists to
+ * remove. So this governs everyone AFTER the administrator.
+ */
+adminRoutes.get('/config/registration-mode', async (c) => {
+  const mode = parseRegistrationMode(await configService.get(CONFIG_KEYS.REGISTRATION_MODE));
+  return c.json({ mode });
+});
+
+adminRoutes.put('/config/registration-mode', async (c) => {
+  const { mode } = registrationModeSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.REGISTRATION_MODE, mode);
+  // Audited, unlike the neighbouring config toggles: this one decides who can obtain an account
+  // at all, so "who opened self-signup, and when" is a question worth being able to answer.
+  await recordAuditEvent(getDb(), {
+    actorUserId: c.get('userId'),
+    action: 'config.registration_mode',
+    targetType: 'system',
+    metadata: { mode },
+  });
+  log.info({ mode }, 'registration mode updated');
+  return c.json({ mode });
 });
 
 const ragEmbeddingSchema = z.object({

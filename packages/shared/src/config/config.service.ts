@@ -122,6 +122,11 @@ export const CONFIG_KEYS = {
   // itself is untouched, since removing a registered step would break the
   // forward walk for tasks already mid-flight.
   PLAN_CANVAS_ENABLED: 'config:plan:canvasEnabled',
+  /** Who may create an account once this install HAS one. Defaults to `closed` — the secure
+   *  default for a self-hosted product, and the first registration is exempt from it, so a fresh
+   *  install still works. Read per request off the ~30s config cache, so a flip needs no redeploy
+   *  and no live-retune channel (same reasoning as GLOBAL_PAUSE above). */
+  REGISTRATION_MODE: 'config:auth:registrationMode',
 
   // Catch-up for commits that reached a repository without Haive making them. Off makes
   // 01e-external-kb-sync and 01f-external-plan-sync self-skip, which restores byte-identical
@@ -623,6 +628,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',
   [CONFIG_KEYS.SANDBOX_NETWORK]: networkName('network'),
   [CONFIG_KEYS.PLAN_CANVAS_ENABLED]: 'true',
+  [CONFIG_KEYS.REGISTRATION_MODE]: 'closed',
   [CONFIG_KEYS.EXTERNAL_SYNC_ENABLED]: 'true',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.TEST_BROWSER_PROVISION_ENABLED]: 'true',

@@ -115,6 +115,10 @@ function runtimeLimitsFormOf(s: RuntimeLimitsSettings): RuntimeLimitsForm {
   };
 }
 
+/** Mirrors REGISTRATION_MODES in @haive/shared. Declared locally because web must not import the
+ *  shared barrel — the same reason the stats page re-declares its own row shapes. */
+type RegistrationMode = 'open' | 'invite' | 'closed';
+
 export default function AdminPage() {
   usePageTitle('Admin console');
   const [users, setUsers] = useState<AdminUser[] | null>(null);
@@ -152,6 +156,8 @@ export default function AdminPage() {
   const [ideEnabled, setIdeEnabled] = useState<boolean | null>(null);
   const [savingIde, setSavingIde] = useState(false);
   const [planCanvasEnabled, setPlanCanvasEnabled] = useState<boolean | null>(null);
+  const [registrationMode, setRegistrationMode] = useState<RegistrationMode | null>(null);
+  const [savingRegistrationMode, setSavingRegistrationMode] = useState(false);
   const [savingPlanCanvas, setSavingPlanCanvas] = useState(false);
   const [debugModeEnabled, setDebugModeEnabled] = useState<boolean | null>(null);
   const [savingDebugMode, setSavingDebugMode] = useState(false);
@@ -237,6 +243,7 @@ export default function AdminPage() {
         timeoutLadderData,
         ideData,
         planCanvasData,
+        registrationModeData,
         debugModeData,
         browserAccessData,
         dbAccessData,
@@ -274,6 +281,7 @@ export default function AdminPage() {
         ),
         api.get<{ enabled: boolean }>('/admin/config/ide'),
         api.get<{ enabled: boolean }>('/admin/config/plan-canvas'),
+        api.get<{ mode: RegistrationMode }>('/admin/config/registration-mode'),
         api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/db-access'),
@@ -323,6 +331,7 @@ export default function AdminPage() {
       setTimeoutRungs(timeoutLadderData.rungs);
       setIdeEnabled(ideData.enabled);
       setPlanCanvasEnabled(planCanvasData.enabled);
+      setRegistrationMode(registrationModeData.mode);
       setDebugModeEnabled(debugModeData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
       setDbAccessEnabled(dbAccessData.enabled);
@@ -905,6 +914,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update plan canvas switch');
     } finally {
       setSavingPlanCanvas(false);
+    }
+  }
+
+  async function saveRegistrationMode(next: RegistrationMode) {
+    setSavingRegistrationMode(true);
+    try {
+      const result = await api.put<{ mode: RegistrationMode }>('/admin/config/registration-mode', {
+        mode: next,
+      });
+      setRegistrationMode(result.mode);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update the registration mode');
+    } finally {
+      setSavingRegistrationMode(false);
     }
   }
 
@@ -2183,6 +2207,57 @@ export default function AdminPage() {
             {ideEnabled ? 'Enabled' : 'Disabled'}
             {savingIde && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
+        </Card>
+      )}
+
+      {registrationMode !== null && (
+        <Card
+          className={
+            registrationMode === 'open' ? 'border-amber-500/60 bg-amber-500/10' : undefined
+          }
+        >
+          <CardHeader>
+            <CardTitle>Who may create an account</CardTitle>
+            <CardDescription>
+              Applies to everyone AFTER the administrator — the first account on a fresh install is
+              always allowed, or nobody could ever get in. Takes effect within ~30s and is recorded
+              in the audit log.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex flex-col gap-2">
+            {(
+              [
+                ['closed', 'Closed', 'Nobody can register. Add people yourself.'],
+                ['invite', 'By invitation', 'Only someone holding a valid invite link may join.'],
+                ['open', 'Open', 'ANYONE who can reach this instance can create an account.'],
+              ] as const
+            ).map(([value, label, help]) => (
+              <label
+                key={value}
+                className="flex cursor-pointer items-start gap-2 text-sm text-neutral-200"
+              >
+                <input
+                  type="radio"
+                  name="registrationMode"
+                  className="mt-1 h-4 w-4"
+                  checked={registrationMode === value}
+                  disabled={savingRegistrationMode}
+                  onChange={() => void saveRegistrationMode(value)}
+                />
+                <span>
+                  <span className="font-medium">{label}</span>
+                  <span className="block text-xs text-neutral-400">{help}</span>
+                </span>
+              </label>
+            ))}
+            {savingRegistrationMode && <span className="text-xs text-neutral-500">saving…</span>}
+            {registrationMode === 'open' && (
+              <p className="text-xs text-amber-300">
+                Self-signup is on. Anyone who can reach this instance can create an account and
+                start tasks on it.
+              </p>
+            )}
+          </div>
         </Card>
       )}
 

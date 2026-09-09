@@ -8,8 +8,10 @@ import {
   computeEmailBlindIndex,
   encryptEmail,
   decryptEmail,
+  CONFIG_KEYS,
   configService,
   logger,
+  parseRegistrationMode,
   secretsService,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -64,6 +66,9 @@ authRoutes.post('/register', async (c) => {
 
   const passwordHash = await hashPassword(body.password);
   const emailEncrypted = encryptEmail(body.email, fieldKey);
+  // Read before the transaction, like the hashing above: it is a cached Redis read, and doing it
+  // under the bootstrap lock would serialise every registration behind a network round trip.
+  const mode = parseRegistrationMode(await configService.get(CONFIG_KEYS.REGISTRATION_MODE));
 
   // Hashing is deliberately outside the transaction below: bcrypt takes ~100ms and the transaction
   // holds a lock every other registration queues behind.
@@ -90,9 +95,7 @@ authRoutes.post('/register', async (c) => {
 
     const decision = decideRegistration({
       userCount,
-      // The mode arrives with the config key in the next slice; today registration is open once an
-      // admin exists, which is exactly what this instance already did.
-      mode: 'open',
+      mode,
       setupTokenConfigured: setupToken.length > 0,
       setupTokenMatches:
         setupToken.length > 0 && timingSafeEqualString(setupToken, body.setupToken),
@@ -163,6 +166,8 @@ authRoutes.get('/registration-status', async (c) => {
   return c.json({
     setupNeeded: userCount === 0,
     setupTokenRequired: userCount === 0 && setupToken.length > 0,
+    // So the register page can decline to offer a form that cannot succeed.
+    mode: parseRegistrationMode(await configService.get(CONFIG_KEYS.REGISTRATION_MODE)),
   });
 });
 
