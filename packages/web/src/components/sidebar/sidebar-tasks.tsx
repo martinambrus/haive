@@ -36,8 +36,15 @@ import {
   moveNode,
   pruneTree,
   renameFolder,
+  reorderNode,
   setClosedForKeys,
+  siblingOrderAfterDrop,
   toggleClosed,
+  dropIntentFromY,
+  isRepoContainer,
+  orderKey,
+  ROOT_CONTAINER,
+  type DropIntent,
   type RenderedNode,
   type SidebarTree,
 } from '@/lib/sidebar-tree';
@@ -71,7 +78,7 @@ export function SidebarTasks({
 }: SidebarTasksProps) {
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [error, setError] = useState(false);
-  const [dragOver, setDragOver] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<{ key: string; intent: DropIntent } | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
   /** Ids from the last fetch that returned EVERY unfinished task, which is the only
    *  evidence that a task missing from it has actually gone. Null otherwise — a failed
@@ -111,30 +118,89 @@ export function SidebarTasks({
     [onTreeChange],
   );
 
-  const onDrop = useCallback(
-    (e: DragEvent, target: string | null) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setDragOver(null);
-      const key = e.dataTransfer.getData('text/plain');
-      if (!key) return;
-      const next = moveNode(tree, key, target);
-      if (next === tree) return;
-      commit(next);
-    },
-    [commit, tree],
-  );
-
-  const dropProps = (target: string | null) => ({
+  /** A row: the middle band files INTO it when it is a container, the outer bands place the
+   *  dragged node before or after it among its siblings. `container` is what those siblings
+   *  live in, and `siblings` their current order. */
+  const rowDropProps = (
+    rowKey: string,
+    container: string,
+    siblings: string[],
+    allowInto: boolean,
+  ) => ({
     onDragOver: (e: DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
       e.dataTransfer.dropEffect = 'move';
-      setDragOver(target ?? '');
+      const r = e.currentTarget.getBoundingClientRect();
+      const intent = dropIntentFromY(e.clientY - r.top, r.height, allowInto);
+      setDragOver((prev) =>
+        prev && prev.key === rowKey && prev.intent === intent ? prev : { key: rowKey, intent },
+      );
     },
-    onDragLeave: () => setDragOver((k) => (k === (target ?? '') ? null : k)),
-    onDrop: (e: DragEvent) => onDrop(e, target),
+    // `dragleave` fires on every boundary crossing INSIDE the target too, and a row's own
+    // label is one of its children — so without this guard the marker blinks off exactly
+    // when the pointer reaches the part you aim at, and the drop reads as dead even though
+    // it lands. `relatedTarget` is the element being entered; null when the drag leaves the
+    // window, which is a real leave.
+    onDragLeave: (e: DragEvent) => {
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+      setDragOver((prev) => (prev?.key === rowKey ? null : prev));
+    },
+    onDrop: (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const dragKey = e.dataTransfer.getData('text/plain');
+      const r = e.currentTarget.getBoundingClientRect();
+      const intent = dropIntentFromY(e.clientY - r.top, r.height, allowInto);
+      setDragOver(null);
+      if (!dragKey || dragKey === rowKey) return;
+
+      if (intent === 'into') {
+        const next = moveNode(tree, dragKey, rowKey);
+        if (next !== tree) commit(next);
+        return;
+      }
+      // A repo group holds one repository's tasks and nothing else, so a node arriving from
+      // outside it has no meaning there — refuse rather than silently re-file it somewhere
+      // the user did not point at.
+      if (isRepoContainer(container) && !siblings.includes(dragKey)) return;
+      const nextSiblings = siblingOrderAfterDrop(siblings, dragKey, rowKey, intent);
+      if (nextSiblings === siblings) return;
+      const next = reorderNode(tree, dragKey, container, nextSiblings);
+      if (next !== tree) commit(next);
+    },
   });
+
+  /** The tree's own background: an un-file back to the root, appended. */
+  const rootDropProps = {
+    onDragOver: (e: DragEvent) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setDragOver((prev) => (prev && prev.key === '' ? prev : { key: '', intent: 'into' }));
+    },
+    onDragLeave: (e: DragEvent) => {
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+      setDragOver((prev) => (prev?.key === '' ? null : prev));
+    },
+    onDrop: (e: DragEvent) => {
+      e.preventDefault();
+      setDragOver(null);
+      const dragKey = e.dataTransfer.getData('text/plain');
+      if (!dragKey) return;
+      const next = moveNode(tree, dragKey, null);
+      if (next !== tree) commit(next);
+    },
+  };
+
+  /** Marker for the row under the pointer: a line where the node will land, or a filled
+   *  outline when it will go inside. Inset shadows so nothing shifts as it appears. */
+  const dropMarker = (rowKey: string): string => {
+    if (dragOver?.key !== rowKey) return '';
+    if (dragOver.intent === 'into') return 'bg-indigo-500/20 ring-1 ring-indigo-500';
+    return dragOver.intent === 'before'
+      ? 'shadow-[inset_0_2px_0_0_var(--color-indigo-500)]'
+      : 'shadow-[inset_0_-2px_0_0_var(--color-indigo-500)]';
+  };
 
   const dragProps = (key: string) => ({
     draggable: true,
@@ -145,7 +211,14 @@ export function SidebarTasks({
     },
   });
 
-  const renderNode = (node: RenderedNode<Task>, depth: number) => {
+  const renderNode = (
+    node: RenderedNode<Task>,
+    depth: number,
+    /** What this node is positioned WITHIN — the root, a folder id, or a repo group key. */
+    container: string,
+    /** The container's children in their current order, which a before/after drop rewrites. */
+    siblings: string[],
+  ) => {
     const pad = { paddingLeft: 4 + depth * 10 };
 
     if (node.kind === 'task') {
@@ -171,11 +244,13 @@ export function SidebarTasks({
             });
           }}
           {...dragProps(node.key)}
+          {...rowDropProps(node.key, container, siblings, false)}
           style={pad}
           title={`${task.title} — ${TASK_TONE_LABEL[tone]}`}
           className={cn(
             'block cursor-grab rounded px-1.5 py-1 transition-colors active:cursor-grabbing',
             TASK_TONE_CLASS[tone],
+            dropMarker(node.key),
           )}
         >
           <div className="truncate text-xs text-neutral-200">{task.title}</div>
@@ -186,15 +261,20 @@ export function SidebarTasks({
 
     if (node.kind === 'repo') {
       const closed = tree.closed.includes(node.key);
+      const taskKeys = node.tasks.map((t) => t.key);
       return (
         <div key={node.key}>
           <button
             type="button"
             onClick={() => onTreeChange(toggleClosed(tree, node.key))}
             {...dragProps(node.key)}
+            {...rowDropProps(node.key, container, siblings, false)}
             style={pad}
             title={node.name}
-            className="flex w-full cursor-grab items-center gap-1 rounded py-1 pr-1 text-left text-xs text-neutral-400 transition-colors hover:bg-neutral-800/60 hover:text-neutral-200 active:cursor-grabbing"
+            className={cn(
+              'flex w-full cursor-grab items-center gap-1 rounded py-1 pr-1 text-left text-xs text-neutral-400 transition-colors hover:bg-neutral-800/60 hover:text-neutral-200 active:cursor-grabbing',
+              dropMarker(node.key),
+            )}
           >
             {closed ? (
               <ChevronRight className="h-3 w-3 shrink-0" />
@@ -207,7 +287,9 @@ export function SidebarTasks({
               {node.tasks.length}
             </span>
           </button>
-          {!closed && <div>{node.tasks.map((t) => renderNode(t, depth + 1))}</div>}
+          {!closed && (
+            <div>{node.tasks.map((t) => renderNode(t, depth + 1, node.key, taskKeys))}</div>
+          )}
         </div>
       );
     }
@@ -216,18 +298,18 @@ export function SidebarTasks({
     // Captured rather than tested inline: a `renaming?.id === x` boolean does not narrow
     // `renaming` inside the callbacks below.
     const renameValue = renaming?.id === node.folder.id ? renaming.value : null;
+    const childKeys = node.children.map(orderKey);
     return (
-      <div
-        key={node.key}
-        {...dropProps(node.folder.id)}
-        className={cn(
-          'rounded',
-          dragOver === node.folder.id && 'bg-indigo-500/20 ring-1 ring-indigo-500',
-        )}
-      >
+      <div key={node.key} className="rounded">
+        {/* The bands live on the HEADER, not the wrapper: the wrapper spans the whole open
+            subtree, so a pointer two rows down would still be measured against its top. */}
         <div
+          {...rowDropProps(node.folder.id, container, siblings, true)}
           style={pad}
-          className="group/folder flex items-center gap-1 rounded py-1 pr-1 text-xs text-neutral-300 transition-colors hover:bg-neutral-800/60"
+          className={cn(
+            'group/folder flex items-center gap-1 rounded py-1 pr-1 text-xs text-neutral-300 transition-colors hover:bg-neutral-800/60',
+            dropMarker(node.folder.id),
+          )}
         >
           <button
             type="button"
@@ -299,7 +381,9 @@ export function SidebarTasks({
             </span>
           )}
         </div>
-        {!closed && <div>{node.children.map((c) => renderNode(c, depth + 1))}</div>}
+        {!closed && (
+          <div>{node.children.map((c) => renderNode(c, depth + 1, node.folder.id, childKeys))}</div>
+        )}
       </div>
     );
   };
@@ -310,6 +394,7 @@ export function SidebarTasks({
   // impossible for as long as a filter is on.
   const nodes = tasks ? buildSidebarTree(filterTasksByTone(tasks, filters), tree) : [];
   const collapsible = collectCollapsibleKeys(nodes);
+  const rootKeys = nodes.map(orderKey);
   const filtering = filters.length > 0;
 
   const setAll = (closed: boolean) => {
@@ -393,10 +478,10 @@ export function SidebarTasks({
       {/* The root is itself a drop target: dropping here un-files a task back to its
           repository group, which is otherwise unreachable once it has been moved. */}
       <div
-        {...dropProps(null)}
+        {...rootDropProps}
         className={cn(
           'min-h-0 flex-1 overflow-y-auto rounded pb-2',
-          dragOver === '' && 'bg-indigo-500/10 ring-1 ring-indigo-500/60',
+          dragOver?.key === '' && 'bg-indigo-500/10 ring-1 ring-indigo-500/60',
         )}
       >
         {tasks === null ? (
@@ -406,7 +491,7 @@ export function SidebarTasks({
             {filtering ? 'No tasks match the filter' : 'No active tasks'}
           </p>
         ) : (
-          nodes.map((n) => renderNode(n, 0))
+          nodes.map((n) => renderNode(n, 0, ROOT_CONTAINER, rootKeys))
         )}
       </div>
     </div>

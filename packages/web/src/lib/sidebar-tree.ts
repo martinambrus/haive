@@ -29,9 +29,18 @@ export interface SidebarTree {
   /** Folder and repo-group keys the user closed. Closed rather than open, so a new
    *  repository arrives expanded. */
   closed: string[];
+  /** Explicit position within a container, by node key. Sparse: a node with no entry keeps
+   *  its default position and sorts AFTER everything positioned by hand, so a task that
+   *  appears while a list is hand-sorted lands at the bottom instead of in the middle. */
+  order?: Record<string, number>;
 }
 
-export const EMPTY_SIDEBAR_TREE: SidebarTree = { folders: [], placements: {}, closed: [] };
+export const EMPTY_SIDEBAR_TREE: SidebarTree = {
+  folders: [],
+  placements: {},
+  closed: [],
+  order: {},
+};
 
 /** Task types the sidebar never lists.
  *
@@ -89,6 +98,34 @@ export type RenderedNode<T> = RenderedFolder<T> | RenderedRepo<T> | RenderedTask
 
 function byName(a: { name: string }, b: { name: string }): number {
   return a.name.localeCompare(b.name);
+}
+
+/** What a node is positioned WITHIN. '' is the root; otherwise a folder id, or a repo
+ *  group's own key. Repo groups are derived rather than stored, so they can hold an order
+ *  without ever being something the user files into. */
+export const ROOT_CONTAINER = '';
+
+export function isRepoContainer(container: string): boolean {
+  return container.startsWith('repo:');
+}
+
+/** The key a node is ordered by — the same string used as its `order` and `placements` key. */
+export function orderKey<T>(node: RenderedNode<T>): string {
+  return node.kind === 'folder' ? node.folder.id : node.key;
+}
+
+/** Impose the stored order on one level.
+ *
+ *  Stable, and unpositioned nodes score Infinity, so they keep the default arrangement
+ *  among themselves and follow the hand-placed ones. `Infinity - Infinity` is NaN, which a
+ *  comparator must never return, hence the equality branch. */
+function applyOrder<T>(nodes: RenderedNode<T>[], order: Record<string, number>): RenderedNode<T>[] {
+  if (nodes.length < 2) return nodes;
+  return [...nodes].sort((a, b) => {
+    const oa = order[orderKey(a)] ?? Number.POSITIVE_INFINITY;
+    const ob = order[orderKey(b)] ?? Number.POSITIVE_INFINITY;
+    return oa === ob ? 0 : oa - ob;
+  });
 }
 
 /**
@@ -156,16 +193,21 @@ export function buildSidebarTree<T extends SidebarTaskLike>(
   // half-written blob can: without it this recursion does not terminate.
   const seen = new Set<string>();
 
+  const order = tree.order ?? {};
+
   const renderFolder = (folder: SidebarFolder): RenderedFolder<T> => {
     seen.add(folder.id);
-    const children: RenderedNode<T>[] = [
-      ...(foldersByParent.get(folder.id) ?? [])
-        .filter((f) => !seen.has(f.id))
-        .sort((a, b) => a.order - b.order || byName(a, b))
-        .map(renderFolder),
-      ...(reposByFolder.get(folder.id) ?? []).sort(byName),
-      ...(loose.get(folder.id) ?? []),
-    ];
+    const children = applyOrder<T>(
+      [
+        ...(foldersByParent.get(folder.id) ?? [])
+          .filter((f) => !seen.has(f.id))
+          .sort((a, b) => a.order - b.order || byName(a, b))
+          .map(renderFolder),
+        ...(reposByFolder.get(folder.id) ?? []).sort(byName),
+        ...(loose.get(folder.id) ?? []),
+      ],
+      order,
+    );
     return {
       kind: 'folder',
       key: folder.id,
@@ -175,12 +217,20 @@ export function buildSidebarTree<T extends SidebarTaskLike>(
     };
   };
 
-  return [
-    ...(foldersByParent.get(null) ?? [])
-      .sort((a, b) => a.order - b.order || byName(a, b))
-      .map(renderFolder),
-    ...(reposByFolder.get(null) ?? []).sort(byName),
-  ];
+  // Tasks inside a repo group are orderable too, and that group is their container.
+  for (const group of repoGroups.values()) {
+    group.tasks = applyOrder<T>(group.tasks, order) as RenderedTask<T>[];
+  }
+
+  return applyOrder<T>(
+    [
+      ...(foldersByParent.get(null) ?? [])
+        .sort((a, b) => a.order - b.order || byName(a, b))
+        .map(renderFolder),
+      ...(reposByFolder.get(null) ?? []).sort(byName),
+    ],
+    order,
+  );
 }
 
 export function countTasks<T>(nodes: RenderedNode<T>[]): number {
@@ -246,6 +296,85 @@ export function moveNode(
   return { ...tree, placements };
 }
 
+/** Where a drop lands relative to the row under the pointer. */
+export type DropIntent = 'before' | 'into' | 'after';
+
+/**
+ * Resolve a drop intent from the pointer's position inside a row.
+ *
+ * Containers get a middle band that means "put it inside"; everything else splits in half,
+ * because "inside a task" is not a place. The bands are deliberately uneven — 25/50/25 —
+ * since filing into a folder is the commoner gesture and the row is only ~21px tall.
+ */
+export function dropIntentFromY(offsetY: number, height: number, allowInto: boolean): DropIntent {
+  if (height <= 0) return allowInto ? 'into' : 'before';
+  const y = offsetY / height;
+  if (!allowInto) return y < 0.5 ? 'before' : 'after';
+  if (y < 0.25) return 'before';
+  if (y > 0.75) return 'after';
+  return 'into';
+}
+
+/** The sibling order that results from moving `dragKey` before/after `refKey`. */
+export function siblingOrderAfterDrop(
+  siblings: string[],
+  dragKey: string,
+  refKey: string,
+  intent: 'before' | 'after',
+): string[] {
+  const without = siblings.filter((k) => k !== dragKey);
+  const at = without.indexOf(refKey);
+  if (at === -1) return siblings;
+  const insert = intent === 'before' ? at : at + 1;
+  return [...without.slice(0, insert), dragKey, ...without.slice(insert)];
+}
+
+/**
+ * Place `dragKey` among `siblingKeys` inside `container`, moving it there if it is arriving
+ * from somewhere else.
+ *
+ * Stamps an explicit position on EVERY sibling rather than only the moved one. A single
+ * value would have to sit between its neighbours', which needs either fractions that lose
+ * precision after enough drops or a renumber pass anyway — and a container holds few
+ * children, so rewriting the level is the cheaper answer as well as the exact one.
+ */
+export function reorderNode(
+  tree: SidebarTree,
+  dragKey: string,
+  container: string,
+  siblingKeys: string[],
+): SidebarTree {
+  if (!siblingKeys.includes(dragKey)) return tree;
+  let next = tree;
+
+  if (isRepoContainer(container)) {
+    // A repo group is derived from the tasks themselves, so it is not something to file
+    // INTO — but a task that was filed into a folder and then dragged back among its own
+    // repository's tasks is asking to be un-filed, and that is the only containment change
+    // this branch can mean.
+    if (tree.placements[dragKey] !== undefined) {
+      const placements = { ...tree.placements };
+      delete placements[dragKey];
+      next = { ...tree, placements };
+    }
+  } else {
+    const parentId = container === ROOT_CONTAINER ? null : container;
+    if (parentId !== null && !tree.folders.some((f) => f.id === parentId)) return tree;
+    const dragged = tree.folders.find((f) => f.id === dragKey);
+    // Same refusal as moveNode: a folder dropped inside its own subtree detaches the branch.
+    if (dragged && parentId !== null && isDescendant(tree.folders, parentId, dragged.id)) {
+      return tree;
+    }
+    next = moveNode(tree, dragKey, parentId);
+  }
+
+  const order = { ...(next.order ?? {}) };
+  siblingKeys.forEach((key, i) => {
+    order[key] = i;
+  });
+  return { ...next, order };
+}
+
 let folderSeq = 0;
 
 /** A folder id that does not depend on `crypto.randomUUID`, which is absent on
@@ -287,12 +416,15 @@ export function deleteFolder(tree: SidebarTree, id: string): SidebarTree {
     else if (parentId !== null) placements[key] = parentId;
     // else: drop the entry, which restores the default placement.
   }
+  const order = { ...(tree.order ?? {}) };
+  delete order[id];
   return {
     folders: tree.folders
       .filter((f) => f.id !== id)
       .map((f) => (f.parentId === id ? { ...f, parentId } : f)),
     placements,
     closed: tree.closed.filter((k) => k !== id),
+    order,
   };
 }
 
@@ -357,7 +489,12 @@ export function pruneTree(tree: SidebarTree, liveTaskIds: Iterable<string>): Sid
     if (key.startsWith('task:') && !live.has(key)) continue;
     placements[key] = folderId;
   }
-  return { ...tree, placements };
+  const order: Record<string, number> = {};
+  for (const [key, position] of Object.entries(tree.order ?? {})) {
+    if (key.startsWith('task:') && !live.has(key)) continue;
+    order[key] = position;
+  }
+  return { ...tree, placements, order };
 }
 
 /** Read a stored tree, discarding anything malformed.
@@ -392,5 +529,11 @@ export function normalizeSidebarTree(raw: unknown): SidebarTree {
   const closed = Array.isArray(value.closed)
     ? value.closed.filter((k): k is string => typeof k === 'string')
     : [];
-  return { folders, placements, closed };
+  const order: Record<string, number> = {};
+  if (value.order && typeof value.order === 'object' && !Array.isArray(value.order)) {
+    for (const [key, position] of Object.entries(value.order)) {
+      if (typeof position === 'number' && Number.isFinite(position)) order[key] = position;
+    }
+  }
+  return { folders, placements, closed, order };
 }

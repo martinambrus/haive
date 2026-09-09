@@ -10,7 +10,11 @@ import {
   normalizeSidebarTree,
   pruneTree,
   renameFolder,
+  reorderNode,
   setClosedForKeys,
+  siblingOrderAfterDrop,
+  dropIntentFromY,
+  ROOT_CONTAINER,
   type SidebarTaskLike,
   type SidebarTree,
 } from './sidebar-tree';
@@ -25,7 +29,7 @@ function task(id: string, repo: string | null, type = 'workflow'): SidebarTaskLi
 }
 
 function tree(over: Partial<SidebarTree> = {}): SidebarTree {
-  return { folders: [], placements: {}, closed: [], ...over };
+  return { folders: [], placements: {}, closed: [], order: {}, ...over };
 }
 
 describe('buildSidebarTree — the default arrangement', () => {
@@ -264,5 +268,126 @@ describe('setClosedForKeys', () => {
     expect(setClosedForKeys(base, ['a'], true)).toBe(base);
     expect(setClosedForKeys(base, ['b'], false)).toBe(base);
     expect(setClosedForKeys(base, [], true)).toBe(base);
+  });
+});
+
+describe('dropIntentFromY', () => {
+  it('splits a container three ways, with the middle band the widest', () => {
+    expect(dropIntentFromY(2, 20, true)).toBe('before');
+    expect(dropIntentFromY(10, 20, true)).toBe('into');
+    expect(dropIntentFromY(18, 20, true)).toBe('after');
+  });
+
+  // "Inside a task" is not a place, so a non-container is a straight half-and-half.
+  it('splits a non-container in half', () => {
+    expect(dropIntentFromY(4, 20, false)).toBe('before');
+    expect(dropIntentFromY(10, 20, false)).toBe('after');
+    expect(dropIntentFromY(16, 20, false)).toBe('after');
+  });
+
+  it('does not divide by a zero height', () => {
+    expect(dropIntentFromY(0, 0, true)).toBe('into');
+    expect(dropIntentFromY(0, 0, false)).toBe('before');
+  });
+});
+
+describe('siblingOrderAfterDrop', () => {
+  const sibs = ['a', 'b', 'c'];
+
+  it('moves a node before a later sibling', () => {
+    expect(siblingOrderAfterDrop(sibs, 'a', 'c', 'before')).toEqual(['b', 'a', 'c']);
+  });
+
+  it('moves a node after a later sibling', () => {
+    expect(siblingOrderAfterDrop(sibs, 'a', 'c', 'after')).toEqual(['b', 'c', 'a']);
+  });
+
+  // The dragged node is removed BEFORE the index is taken, or dropping it forward lands
+  // one slot short of where the marker was drawn.
+  it('accounts for its own removal when moving forward', () => {
+    expect(siblingOrderAfterDrop(sibs, 'b', 'c', 'after')).toEqual(['a', 'c', 'b']);
+  });
+
+  it('brings a node in from another container', () => {
+    expect(siblingOrderAfterDrop(['a', 'b', 'x'], 'x', 'a', 'before')).toEqual(['x', 'a', 'b']);
+  });
+
+  it('returns the input when the reference is not a sibling', () => {
+    expect(siblingOrderAfterDrop(sibs, 'a', 'zz', 'before')).toBe(sibs);
+  });
+});
+
+describe('reorderNode', () => {
+  it('stamps a position on every sibling, not only the moved one', () => {
+    const out = reorderNode(tree(), 'b', ROOT_CONTAINER, ['b', 'a', 'c']);
+    expect(out.order).toEqual({ b: 0, a: 1, c: 2 });
+  });
+
+  it('re-parents while positioning, for a node arriving from elsewhere', () => {
+    const start = tree({ folders: [{ id: 'f1', name: 'A', parentId: null, order: 1 }] });
+    const out = reorderNode(start, 'task:t1', 'f1', ['task:t1', 'task:t2']);
+    expect(out.placements['task:t1']).toBe('f1');
+    expect(out.order?.['task:t1']).toBe(0);
+  });
+
+  // Dragging a filed task back among its own repository's tasks means "un-file me".
+  it('un-files a task dropped back into its repo group', () => {
+    const start = tree({
+      folders: [{ id: 'f1', name: 'A', parentId: null, order: 1 }],
+      placements: { 'task:t1': 'f1' },
+    });
+    const out = reorderNode(start, 'task:t1', 'repo:r1', ['task:t2', 'task:t1']);
+    expect(out.placements['task:t1']).toBeUndefined();
+    expect(out.order).toEqual({ 'task:t2': 0, 'task:t1': 1 });
+  });
+
+  it('refuses a folder positioned inside its own subtree', () => {
+    const start = tree({
+      folders: [
+        { id: 'f1', name: 'A', parentId: null, order: 1 },
+        { id: 'f2', name: 'B', parentId: 'f1', order: 1 },
+      ],
+    });
+    expect(reorderNode(start, 'f1', 'f2', ['f1'])).toBe(start);
+  });
+
+  it('refuses when the dragged key is not among the siblings given', () => {
+    const t = tree();
+    expect(reorderNode(t, 'x', ROOT_CONTAINER, ['a', 'b'])).toBe(t);
+  });
+});
+
+describe('buildSidebarTree — explicit order', () => {
+  it('honours a stored position over the default name sort', () => {
+    const nodes = buildSidebarTree(
+      [task('t1', 'alpha'), task('t2', 'zulu')],
+      tree({ order: { 'repo:zulu': 0, 'repo:alpha': 1 } }),
+    );
+    expect(nodes.map((n) => (n.kind === 'repo' ? n.name : ''))).toEqual(['zulu', 'alpha']);
+  });
+
+  // A task that appears while a list is hand-sorted must not land in the middle of it.
+  it('puts unpositioned nodes after the positioned ones', () => {
+    const nodes = buildSidebarTree(
+      [task('t1', 'alpha'), task('t2', 'mike'), task('t3', 'zulu')],
+      tree({ order: { 'repo:zulu': 0 } }),
+    );
+    expect(nodes.map((n) => (n.kind === 'repo' ? n.name : ''))).toEqual(['zulu', 'alpha', 'mike']);
+  });
+
+  it('orders tasks inside a repository group', () => {
+    const nodes = buildSidebarTree(
+      [task('t1', 'alpha'), task('t2', 'alpha')],
+      tree({ order: { 'task:t2': 0, 'task:t1': 1 } }),
+    );
+    const group = nodes[0];
+    expect(group?.kind === 'repo' && group.tasks.map((t) => t.task.id)).toEqual(['t2', 't1']);
+  });
+});
+
+describe('pruneTree — order entries', () => {
+  it('drops positions for tasks that are gone, keeping folder and repo ones', () => {
+    const start = tree({ order: { 'task:t1': 0, 'task:t2': 1, 'repo:r': 2, f1: 3 } });
+    expect(pruneTree(start, ['t1']).order).toEqual({ 'task:t1': 0, 'repo:r': 2, f1: 3 });
   });
 });
