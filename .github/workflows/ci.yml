@@ -81,7 +81,16 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y -qq shellcheck
           fi
-          shellcheck --shell=sh install/install.sh
+          shellcheck --shell=sh install/install.sh install/test/boot-failures.sh
+
+      # The installer's BOOT block, which nothing else runs. `platform-checks.yml` installs with
+      # `--no-start` and boots through the generated `./haive`, deliberately — a full `up` pulls
+      # ~15 GB, 9.19 of it ollama, and once spent 50+ minutes — so pull/up/health has never
+      # executed in CI on any platform. This drives it with `docker` and `curl` STUBBED, which
+      # needs no daemon, no network and no images, and so belongs here rather than behind that
+      # pull.
+      - name: Installer boot-failure paths
+        run: sh install/test/boot-failures.sh
 
   smokes:
     name: End-to-end smokes
