@@ -4,13 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { usePageTitle } from '@/lib/use-page-title';
 import { formatBytes } from '@/lib/format-bytes';
-import {
-  api,
-  type AdminHealthResponse,
-  type AdminUser,
-  type AdminUserAction,
-  type AdminUserActionResponse,
-} from '@/lib/api-client';
+import { api, type AdminHealthResponse } from '@/lib/api-client';
 import {
   Badge,
   Button,
@@ -121,11 +115,8 @@ type RegistrationMode = 'open' | 'invite' | 'closed';
 
 export default function AdminPage() {
   usePageTitle('Admin console');
-  const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [health, setHealth] = useState<AdminHealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busyUserId, setBusyUserId] = useState<string | null>(null);
-  const [tempPassword, setTempPassword] = useState<{ userId: string; value: string } | null>(null);
   const [maxParallel, setMaxParallel] = useState<number | null>(null);
   const [maxParallelInput, setMaxParallelInput] = useState('');
   const [savingConcurrency, setSavingConcurrency] = useState(false);
@@ -235,7 +226,6 @@ export default function AdminPage() {
   const load = useCallback(async () => {
     try {
       const [
-        usersData,
         healthData,
         concurrencyData,
         steeringData,
@@ -271,7 +261,6 @@ export default function AdminPage() {
         globalPauseData,
         ragEmbeddingData,
       ] = await Promise.all([
-        api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
         api.get<{ enabled: boolean }>('/admin/config/steering'),
@@ -311,7 +300,6 @@ export default function AdminPage() {
         api.get<{ paused: boolean }>('/admin/config/global-pause'),
         api.get<RagEmbeddingSettings>('/admin/config/rag-embedding'),
       ]);
-      setUsers(usersData.users);
       setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
@@ -399,35 +387,6 @@ export default function AdminPage() {
       cancelled = true;
     };
   }, []);
-
-  async function runAction(user: AdminUser, action: AdminUserAction, role?: 'admin' | 'user') {
-    const payload: { action: AdminUserAction; role?: 'admin' | 'user' } = { action };
-    if (role) payload.role = role;
-
-    const confirmMessages: Record<AdminUserAction, string> = {
-      deactivate: `Deactivate ${user.email}? This revokes their active sessions.`,
-      activate: `Reactivate ${user.email}?`,
-      reset_password: `Reset password for ${user.email}? A new temporary password will be shown once.`,
-      set_role: `Change role for ${user.email} to ${role}?`,
-    };
-    if (!confirm(confirmMessages[action])) return;
-
-    setBusyUserId(user.id);
-    try {
-      const result = await api.post<AdminUserActionResponse>(
-        `/admin/users/${user.id}/action`,
-        payload,
-      );
-      if (result.temporaryPassword) {
-        setTempPassword({ userId: user.id, value: result.temporaryPassword });
-      }
-      await load();
-    } catch (err) {
-      setError((err as Error).message ?? 'Action failed');
-    } finally {
-      setBusyUserId(null);
-    }
-  }
 
   async function saveConcurrency() {
     const value = Number.parseInt(maxParallelInput, 10);
@@ -1077,6 +1036,11 @@ export default function AdminPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          <Link href="/admin/users">
+            <Button variant="secondary" size="sm">
+              Users
+            </Button>
+          </Link>
           <Link href="/admin/maintenance">
             <Button variant="secondary" size="sm">
               Maintenance &amp; upgrade
@@ -1131,17 +1095,19 @@ export default function AdminPage() {
 
       {health && (
         <section className="grid gap-3 md:grid-cols-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Users</CardTitle>
-              <CardDescription>
-                {health.users.active} active / {health.users.deactivated} deactivated
-              </CardDescription>
-            </CardHeader>
-            <p className="text-xs text-neutral-500">
-              {health.users.admins} admin{health.users.admins === 1 ? '' : 's'}
-            </p>
-          </Card>
+          <Link href="/admin/users" className="block">
+            <Card className="h-full transition-colors hover:border-neutral-700">
+              <CardHeader>
+                <CardTitle>Users</CardTitle>
+                <CardDescription>
+                  {health.users.active} active / {health.users.deactivated} deactivated
+                </CardDescription>
+              </CardHeader>
+              <p className="text-xs text-neutral-500">
+                {health.users.admins} admin{health.users.admins === 1 ? '' : 's'} - manage
+              </p>
+            </Card>
+          </Link>
           <Card>
             <CardHeader>
               <CardTitle>Tasks</CardTitle>
@@ -2542,95 +2508,6 @@ export default function AdminPage() {
           </label>
         </Card>
       )}
-
-      <section>
-        <h2 className="mb-3 text-lg font-semibold text-neutral-100">Users</h2>
-        {users === null ? (
-          <p className="text-sm text-neutral-500">Loading...</p>
-        ) : users.length === 0 ? (
-          <p className="text-sm text-neutral-500">No users.</p>
-        ) : (
-          <div className="grid gap-3">
-            {users.map((user) => (
-              <Card key={user.id}>
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="truncate text-base font-semibold text-neutral-50">
-                        {user.email}
-                      </h3>
-                      <Badge variant={user.role === 'admin' ? 'success' : 'default'}>
-                        {user.role}
-                      </Badge>
-                      <Badge variant={user.status === 'active' ? 'success' : 'warning'}>
-                        {user.status}
-                      </Badge>
-                    </div>
-                    <p className="mt-1 text-xs text-neutral-500">
-                      Created {new Date(user.createdAt).toLocaleString()} - token version{' '}
-                      {user.tokenVersion}
-                    </p>
-                    {tempPassword?.userId === user.id && (
-                      <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200">
-                        <div className="font-semibold">Temporary password (copy now):</div>
-                        <code className="break-all">{tempPassword.value}</code>
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex flex-shrink-0 flex-wrap gap-2">
-                    {user.status === 'active' ? (
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        disabled={busyUserId === user.id}
-                        onClick={() => runAction(user, 'deactivate')}
-                      >
-                        Deactivate
-                      </Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={busyUserId === user.id}
-                        onClick={() => runAction(user, 'activate')}
-                      >
-                        Activate
-                      </Button>
-                    )}
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={busyUserId === user.id}
-                      onClick={() => runAction(user, 'reset_password')}
-                    >
-                      Reset password
-                    </Button>
-                    {user.role === 'admin' ? (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={busyUserId === user.id}
-                        onClick={() => runAction(user, 'set_role', 'user')}
-                      >
-                        Demote
-                      </Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={busyUserId === user.id}
-                        onClick={() => runAction(user, 'set_role', 'admin')}
-                      >
-                        Promote
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              </Card>
-            ))}
-          </div>
-        )}
-      </section>
     </div>
   );
 }

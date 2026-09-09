@@ -21,6 +21,7 @@ import {
   computeEmailBlindIndex,
   configService,
   decryptEmail,
+  encryptEmail,
   deriveAgentConcurrency,
   deriveAgentSafetyMb,
   deriveRuntimeCaps,
@@ -101,6 +102,79 @@ adminRoutes.get('/users', async (c) => {
   }));
 
   return c.json({ users });
+});
+
+/** An account an administrator makes for someone, rather than one that person registers.
+ *
+ *  The password is MINTED here and shown once, never chosen by the admin: a password someone
+ *  else picked is one they can guess about, and the same generator already backs
+ *  `reset_password`. It lands with `must_change_password` set, so the shared secret this
+ *  hands over stops working as soon as its holder signs in and replaces it.
+ *
+ *  The duplicate check mirrors `POST /auth/register`, down to the 409, because the two routes
+ *  create the same row and an admin should not learn a different answer than a registrant. */
+const createUserSchema = z.object({
+  email: z.string().email().max(255),
+  role: z.enum(['admin', 'user']).default('user'),
+});
+
+adminRoutes.post('/users', async (c) => {
+  const body = createUserSchema.parse(await c.req.json());
+  const db = getDb();
+  const fieldKey = await configService.getEncryptionKey();
+  const pepper = await secretsService.getEmailBlindIndexPepper();
+  const blindIndex = computeEmailBlindIndex(body.email, pepper);
+
+  const existing = await db.query.users.findFirst({
+    where: eq(schema.users.emailBlindIndex, blindIndex),
+    columns: { id: true },
+  });
+  if (existing) throw new HttpError(409, 'Email already registered');
+
+  const temporaryPassword = generateTemporaryPassword();
+  const inserted = await db
+    .insert(schema.users)
+    .values({
+      emailEncrypted: encryptEmail(body.email, fieldKey),
+      emailBlindIndex: blindIndex,
+      passwordHash: await hashPassword(temporaryPassword),
+      role: body.role,
+      mustChangePassword: true,
+    })
+    .returning({
+      id: schema.users.id,
+      role: schema.users.role,
+      status: schema.users.status,
+      tokenVersion: schema.users.tokenVersion,
+      createdAt: schema.users.createdAt,
+      updatedAt: schema.users.updatedAt,
+    });
+
+  await recordAuditEvent(db, {
+    actorUserId: c.get('userId'),
+    action: 'user.create',
+    targetType: 'user',
+    targetId: inserted[0]!.id,
+    // No email: this table is not encrypted, and the row it points at already holds the address.
+    metadata: { role: body.role },
+  });
+  log.info({ userId: inserted[0]!.id, role: body.role }, 'user created by administrator');
+
+  return c.json(
+    {
+      user: {
+        id: inserted[0]!.id,
+        email: body.email,
+        role: inserted[0]!.role,
+        status: inserted[0]!.status,
+        tokenVersion: inserted[0]!.tokenVersion,
+        createdAt: inserted[0]!.createdAt.toISOString(),
+        updatedAt: inserted[0]!.updatedAt.toISOString(),
+      },
+      temporaryPassword,
+    },
+    201,
+  );
 });
 
 // Audit log viewer: paginated + filterable read over the append-only

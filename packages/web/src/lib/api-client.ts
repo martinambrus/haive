@@ -1242,6 +1242,12 @@ export interface AdminUserActionResponse {
   role?: 'admin' | 'user';
 }
 
+export interface AdminCreateUserResponse {
+  user: AdminUser;
+  /** Shown once and never retrievable again — the row stores only its hash. */
+  temporaryPassword: string;
+}
+
 export interface AdminHealthResponse {
   users: { total: number; active: number; deactivated: number; admins: number };
   tasks: Record<string, number>;
