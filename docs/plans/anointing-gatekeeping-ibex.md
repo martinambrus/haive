@@ -1,11 +1,13 @@
 # First-admin onboarding + registration gating
 
-> **Sections A (first-admin), B (registration mode), C (invites) and D (setup detection) SHIPPED
-> 2026-09-09.** `register` is first-run
-> aware, `GET /auth/registration-status` reports it and the mode, `/setup` is the web entry point,
-> `CONFIG_KEYS.REGISTRATION_MODE` defaults to `closed` with an admin card, and `user_invites`
-> (migration `0153`) plus `POST/GET/DELETE /admin/invites` give `closed` a legitimate way in.
-> E-G remain — the invite API has no UI panel yet. Three things this plan could not have known are recorded under "As built" at the end.
+> **SHIPPED IN FULL, 2026-09-09.** A (first-admin), B (registration mode), C (invites),
+> D (setup detection), E (`/admin/users` tab), F (add-user) and G (invite UX) are all in, plus the
+> forced password change this plan assumed existed and did not. `register` is first-run aware,
+> `GET /auth/registration-status` reports it and the mode, `/setup` is the web entry point,
+> `CONFIG_KEYS.REGISTRATION_MODE` defaults to `closed` with an admin card, `user_invites`
+> (migration `0153`) plus `POST/GET/DELETE /admin/invites` give `closed` a legitimate way in and
+> `/admin/users` is where an administrator does all of it. What this plan could not have known is
+> recorded under "As built" at the end.
 >
 > Status: PROPOSED, 2026-08-25. Companion to `frictionless-bootstrapping-otter` (the one-line
 > installer), which HANDS OFF to this flow but does not define it. This plan is the app-level
@@ -195,18 +197,36 @@ before exposure (local-first path), and to open the browser at `/setup`. Keep th
 this one owns the auth/user model, the installer owns getting the stack running to the point this
 flow can start.
 
-## As built — A and D, 2026-09-09
+## As built, 2026-09-09
 
 **Migration numbering moved under this plan's feet.** `packages/database/migrations/` now holds only
 `0000_baseline.sql`; the 0001-0152 history lives in `pre-baseline/` and is never executed. Section
 C's `user_invites` migration is therefore `0153_`, not `0001_` — which would sort correctly and read
 to a human as predating the baseline.
 
-**The plan assumes a forced password change that does not exist.** Verification item 8 says a
-user created by an admin "is forced to change it", but `reset_password` only mints a password and
-bumps `tokenVersion`; nothing marks the account, and no column carries the requirement.
-`PUT /user-settings/password` and its UI do exist, so it is a column's worth of work — and it closes
-the same gap in today's `reset_password`, which has always had it.
+**The plan assumed a forced password change that did not exist.** Verification item 8 says a user
+created by an admin "is forced to change it", but `reset_password` only minted a password and
+bumped `tokenVersion`; nothing marked the account. `users.must_change_password` (migration `0154`)
+is that mark: set wherever a password the holder did not choose is minted — `reset_password` and
+`POST /admin/users` both — and cleared by exactly one writer, `PUT /user-settings/password`, the
+only route where the holder chooses it. It closes the same gap `reset_password` always had.
+
+**Enforcing it is a CLIENT component, and that is measured rather than preferred.** The decision
+needs the path AND the flag, and no single place has both: middleware knows the path but not the
+visitor, while the `(app)` layout knows the visitor and a Server Component cannot learn its own
+route. Forwarding the path from middleware as a request header —
+`NextResponse.next({ request: { headers } })`, the documented way — MEASURED as breaking RSC
+navigation outright: one visit to `/settings/account` re-requested `?_rsc=` about a thousand times
+in 40 seconds and rendered a blank page, where the same visit without it is one request. `curl` is
+clean throughout, so it is invisible outside a browser. `ForcedPasswordGuard` uses `usePathname()`
+and withholds `children` rather than flashing them, and `router.refresh()` after a successful
+change is load-bearing: the layout read the flag when it rendered, so without it the guard keeps
+bouncing a user who has already complied.
+
+**A new column goes LAST in the Drizzle table.** `ALTER TABLE ADD COLUMN` appends while
+`drizzle-kit push` builds the table in declaration order, so a column declared anywhere else makes
+the two schemas differ by column ORDER and the schema-parity CI job red — with no migration that
+can fix it.
 
 **`/setup` had to be added to `packages/web/src/middleware.ts`'s `PUBLIC_PATHS`**, which the plan
 does not name. Without it the middleware bounces an unauthenticated visitor to `/login`, whose form
@@ -216,5 +236,13 @@ install this feature exists to rescue.
 Two implementation notes worth keeping. The decision is a pure function
 (`packages/api/src/lib/registration.ts`) because `packages/api` has no HTTP-level auth tests at all;
 the house style is extract-and-unit-test, with real-database work in the `*-smoke.ts` tier. And the
-race is closed with a TRANSACTION-scoped advisory lock around count-then-insert — MEASURED with
-eight simultaneous first-registrations against a live database: one admin, seven users.
+race is closed with a TRANSACTION-scoped advisory lock around count-then-insert.
+
+That race has a permanent test rather than a one-off measurement:
+`packages/api/test/first-admin-race-smoke.ts` fires five simultaneous first-registrations and
+asserts one 201 carrying `admin`, four 403s and exactly one row in `users`. (The losers are refused
+rather than admitted as users, which the original eight-way measurement predates — section B's
+default of `closed` is what changed that.) It carries its own negative control: with the advisory
+lock removed, FOUR of the five became administrators and four checks went red. It refuses a
+database that already holds users rather than emptying one, which is why it runs first in
+`smoke:ci`, against CI's freshly migrated database.
