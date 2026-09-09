@@ -28,6 +28,15 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+      # Without this the budget is retries*interval = 25s from container START, and a FIRST boot
+      # has to run initdb before it can answer at all. MEASURED on a hosted macOS runner under
+      # Colima: `dependency failed to start: container ci-postgres is unhealthy`, which took the
+      # whole stack with it because api, worker and db-migrate all gate on this check. A slow
+      # laptop or VM fails the same way; a dev machine never does.
+      #
+      # Free on a fast host: failures during the start period do not count toward retries, but a
+      # container that answers in 2s is still healthy in 2s.
+      start_period: 60s
     networks:
       - haive-network
 
@@ -50,6 +59,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      # Same reasoning as postgres, smaller allowance: redis has no initdb equivalent, so this
+      # only covers a contended host being slow to schedule it.
+      start_period: 15s
     networks:
       - haive-network
 
