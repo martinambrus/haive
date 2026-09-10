@@ -41,7 +41,41 @@ function ddevConfigPath(workspace: string): string {
   return path.join(workspace, '.ddev', 'config.yaml');
 }
 
+/** Files that identify a framework, checked before any composer.json.
+ *
+ *  A marker is a TRACKED file the framework itself ships, never a local config the
+ *  project gitignores — the workspace here is a git worktree, which materialises
+ *  tracked files only. That rules out the two obvious-looking markers: `wp-config.php`
+ *  (holds DB credentials and salts, universally gitignored) and Drupal's
+ *  `sites/default/settings.php`.
+ *
+ *  Composer is checked only AFTER these, because a composer.json is neither necessary
+ *  nor sufficient. MEASURED: Drupal 7.90 (`includes/bootstrap.inc` says so) ships no
+ *  composer.json at all, so a `drupal/core` regex reports `unknown` for every D7 site
+ *  — which left `migrationCommand` empty and silently skipped `drush updatedb` on
+ *  every one of them, and with it the D7 bootstrap pre-flight below that exists to
+ *  catch exactly the unusable database that skip then hides.
+ *
+ *  D7 and D8+ both resolve to `drupal`: the command and the pre-flight are identical,
+ *  so a second class would buy nothing. `includes/bootstrap.inc` is D7-ONLY — D8+ puts
+ *  it at `core/includes/bootstrap.inc` — so it is listed first and cannot claim a
+ *  modern site. */
+const FRAMEWORK_MARKERS: ReadonlyArray<readonly [Framework, readonly string[]]> = [
+  ['drupal', ['includes/bootstrap.inc', 'core/lib/Drupal.php']],
+  ['wordpress', ['wp-includes/version.php']],
+  ['laravel', ['artisan']],
+  ['symfony', ['bin/console']],
+  ['django', ['manage.py']],
+  ['rails', ['bin/rails', 'config/application.rb']],
+  ['prisma', ['prisma/schema.prisma']],
+];
+
 async function detectFramework(workspace: string): Promise<Framework> {
+  for (const [framework, markers] of FRAMEWORK_MARKERS) {
+    for (const marker of markers) {
+      if (await pathExists(path.join(workspace, ...marker.split('/')))) return framework;
+    }
+  }
   const composer = path.join(workspace, 'composer.json');
   if (await pathExists(composer)) {
     try {
@@ -53,10 +87,6 @@ async function detectFramework(workspace: string): Promise<Framework> {
       /* fall through */
     }
   }
-  if (await pathExists(path.join(workspace, 'manage.py'))) return 'django';
-  if (await pathExists(path.join(workspace, 'bin', 'rails'))) return 'rails';
-  if (await pathExists(path.join(workspace, 'wp-config.php'))) return 'wordpress';
-  if (await pathExists(path.join(workspace, 'prisma', 'schema.prisma'))) return 'prisma';
   return 'unknown';
 }
 
