@@ -175,6 +175,7 @@ export const SKIPPABLE_STEP_IDS: readonly string[] = [
   '01f-external-plan-sync',
   '03b-business-requirements',
   '06a-db-migrate',
+  '08b-test-management',
   '11a-gate-4-push',
   '11b-kb-commit',
   '11c-rag-reindex',

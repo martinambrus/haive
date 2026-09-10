@@ -11,6 +11,7 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
 import { ensureGitExcludeEntry, initGitWorkspace } from '../../../repo/git-init.js';
 import { findBranchClaimant } from '../../../repo/worktree-claims.js';
+import { carryUntrackedForTask } from '../../../repo/carry-untracked.js';
 import {
   WORKTREE_SUBDIR,
   sandboxWorktreePath,
@@ -383,6 +384,11 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     // runs as uid 1000. Repair both new and reused worktrees and fail before a
     // model call if the ownership cannot be made writable.
     await ensureSandboxWritableTree(worktreePath);
+
+    // `git worktree add` checks out TRACKED files only, so the repo's untracked runtime
+    // files (a test suite's .env, settings.local.php …) exist at the root and nowhere here.
+    // Runs for reused worktrees too, so one created before this existed is healed on retry.
+    await carryUntrackedForTask(ctx.db, ctx.taskId, ctx.repoPath, worktreePath);
 
     const sandboxWorktree = sandboxWorktreePath(ctx.sandboxWorkdir, branchName);
     // Durable record for the cancel reaper (removeTaskWorktree). This step's `output`
