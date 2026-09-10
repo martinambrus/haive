@@ -8,7 +8,10 @@ import { API_BASE, PASSWORD, registerUser, seedInvite, uniqueEmail } from '../he
  * `/register?invite=<token>`. The login form is unaffected.
  *
  * Inline errors are asserted through `role="alert"` rather than by their copy: the banner is a
- * live region, which is both the accessible behaviour and the durable selector.
+ * live region, which is both the accessible behaviour and the durable selector. The query is
+ * scoped to `<main>` because Next renders its own route announcer — an always-present, always-empty
+ * `role="alert"` at body level — so an unscoped one legitimately matches two elements. Scoping by
+ * the landmark rather than by Next's internal id keeps this off an implementation detail.
  */
 test.describe('auth forms (UI submission)', () => {
   test('register form: fill, submit, redirected to dashboard with cookies', async ({
@@ -65,7 +68,9 @@ test.describe('auth forms (UI submission)', () => {
       await page.getByLabel('Password').fill(PASSWORD);
       await page.getByRole('button', { name: 'Create account' }).click();
 
-      await expect(page.getByRole('alert')).toContainText('Email already registered');
+      await expect(page.getByRole('main').getByRole('alert')).toContainText(
+        'Email already registered',
+      );
       expect(page.url()).toContain('/register');
     } finally {
       if (inviteId) await sql`delete from user_invites where id = ${inviteId}`;
@@ -118,7 +123,7 @@ test.describe('auth forms (UI submission)', () => {
       await page.getByLabel('Password').fill('totally-wrong-password');
       await page.getByRole('button', { name: 'Sign in' }).click();
 
-      await expect(page.getByRole('alert')).toContainText(/invalid credentials/i);
+      await expect(page.getByRole('main').getByRole('alert')).toContainText(/invalid credentials/i);
       expect(page.url()).toMatch(/\/login$/);
 
       // The failure did not break the account: the right password still works.

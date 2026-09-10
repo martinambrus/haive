@@ -5,7 +5,6 @@ import {
   getSql,
   seedTaskFixture,
   type TaskFixture,
-  FIXTURE_FAILED_STEP_ID,
 } from '../helpers/db.js';
 import { registerUser, uniqueEmail } from '../helpers/auth.js';
 import { actionLabels, openActionMenu } from '../helpers/actions.js';
@@ -39,7 +38,10 @@ test.describe('task detail page', () => {
 
       // step action buttons present on failed step (scoped to the step card,
       // since "Retry" also appears as the task-level button at the page top)
-      const failingStepCard = page.locator(`[data-step-id="${FIXTURE_FAILED_STEP_ID}"]`);
+      // The card is keyed on the step ROW id, not the step_id slug — page.tsx renders
+      // `data-step-id={step.id}`. The old spec used the slug and never matched; it simply
+      // never ran to find out.
+      const failingStepCard = page.locator(`[data-step-id="${fixture.failedStepId}"]`);
       await expect(
         failingStepCard.getByRole('button', { name: 'Retry', exact: true }),
       ).toBeVisible();
@@ -112,7 +114,7 @@ test.describe('task detail page', () => {
     }
   });
 
-  test('clicking task-level Retry transitions task to queued', async ({ page }) => {
+  test('the header Retry recovers the failed step', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     let fixture: TaskFixture | null = null;
@@ -124,32 +126,42 @@ test.describe('task detail page', () => {
       await page.goto(`/tasks/${fixture.taskId}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
-      // Through the header menu, NOT `getByRole('button', { name: 'Retry' }).first()`. Once the
-      // task-level actions moved behind ActionMenu, the only Retry button left on the page was
-      // the STEP card's, so `.first()` quietly retried the step instead: it posts to
-      // /tasks/:id/steps/:id/action, emits step.retry rather than task.retried, and the poll
-      // below would then spin for its full 10s and fail — after the click had already done
-      // something. There is exactly one ActionMenu on this page, so the menu is unambiguous.
+      // The header's Retry is CONTEXTUAL and this test used to misread it. Whenever the task has
+      // a failed step, `primaryRecovery` makes the header offer that step's own recovery — "the
+      // header Retry and the failed step's own card must offer the SAME primary action" — so it
+      // posts to /tasks/:id/steps/:id/action and emits step.retry. `task.retried` fires only for
+      // a failed task with no failed step, which this fixture is not. Asserting it here could
+      // never have passed.
+      //
+      // It also goes through window.confirm, which Playwright DISMISSES by default — so without
+      // this handler the click did nothing at all and the failure looked like a timing problem.
+      page.on('dialog', (d) => {
+        void d.accept();
+      });
       const menu = await openActionMenu(page);
       await menu.getByRole('menuitem', { name: 'Retry', exact: true }).click();
 
-      // The retry transaction inserts task.retried in task_events and clears
-      // errorMessage synchronously. Both are race-proof even when the worker
-      // picks up the START job and re-fails the fixture task immediately.
+      // The step reset is synchronous in the handler's transaction, so this is race-proof even
+      // though the worker picks the task up and re-fails it moments later.
       const deadline = Date.now() + 10_000;
-      let retried = false;
+      let recovered = false;
       while (Date.now() < deadline) {
         const events = await sql<{ event_type: string }[]>`
           select event_type from task_events
-          where task_id = ${fixture.taskId} and event_type = 'task.retried'
+          where task_id = ${fixture.taskId} and event_type = 'step.retry'
         `;
         if (events.length > 0) {
-          retried = true;
+          recovered = true;
           break;
         }
         await new Promise((r) => setTimeout(r, 200));
       }
-      expect(retried).toBe(true);
+      expect(recovered, 'the header action recovers the failed step').toBe(true);
+
+      const step = await sql<{ status: string }[]>`
+        select status from task_steps where id = ${fixture.failedStepId}
+      `;
+      expect(step[0]!.status, 'the failed step is reset').not.toBe('failed');
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
       if (userId) await cleanupUser(sql, userId);

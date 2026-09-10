@@ -408,9 +408,13 @@ jobs:
               text,
               flags=re.MULTILINE,
           )
+          # The PARENT of the checkout, not $HOME. The filesystem-browser specs need a directory
+          # containing a real git repository at the root they browse, and this is the one place
+          # that is true by construction: its only child is the checkout. Pointed at $HOME the
+          # root is whatever the runner image happens to ship, which is not a fixture.
           text = re.sub(
               r'^HOST_REPO_ROOT=.*$',
-              'HOST_REPO_ROOT=' + os.path.expanduser('~'),
+              'HOST_REPO_ROOT=' + os.path.dirname(os.environ['GITHUB_WORKSPACE']),
               text,
               flags=re.MULTILINE,
           )

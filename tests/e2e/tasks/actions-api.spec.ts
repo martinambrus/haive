@@ -291,8 +291,12 @@ test.describe('step retry API', () => {
     }
   });
 
+  // These asserted 409. The handler says the opposite in as many words — "Any status is
+  // retryable — including `running` and `waiting_cli` on this step or any downstream" — and when
+  // the cascade is live it force-kills the task's sandboxes rather than refusing. So the contract
+  // to pin is that the step comes back RESET, whatever state it was in.
   for (const status of ['running', 'waiting_cli', 'pending'] as const) {
-    test(`retry on ${status} step returns 409`, async ({ page }) => {
+    test(`retry on a ${status} step resets it`, async ({ page }) => {
       const sql = getSql();
       let userId = '';
       let fixture: TaskFixture | null = null;
@@ -307,7 +311,10 @@ test.describe('step retry API', () => {
           `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
           { data: { action: 'retry' } },
         );
-        expect(res.status()).toBe(409);
+        expect(res.status()).toBe(200);
+
+        const after = await readStepRow(sql, fixture.failedStepId);
+        expect(after?.status, `a ${status} step should be reset by retry`).toBe('pending');
       } finally {
         if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
         if (userId) await cleanupUser(sql, userId);
@@ -316,7 +323,9 @@ test.describe('step retry API', () => {
     });
   }
 
-  test('retry rejected when downstream step is running (409)', async ({ page }) => {
+  // Also asserted 409, and also inverted: a running DOWNSTREAM step does not block a retry, it
+  // gets swept into the reset. That is the whole point of the cascade.
+  test('retry resets a running downstream step too', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     let fixture: TaskFixture | null = null;
@@ -332,13 +341,15 @@ test.describe('step retry API', () => {
         `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'retry' } },
       );
-      expect(res.status()).toBe(409);
-      const body = await res.text();
-      expect(body.toLowerCase()).toContain('downstream');
+      expect(res.status()).toBe(200);
 
-      // Step row must remain unchanged.
+      // Both the clicked step and the running one after it come back pending.
       const target = await readStepRow(sql, fixture.failedStepId);
-      expect(target?.status).toBe('done');
+      expect(target?.status, 'the clicked step is reset').toBe('pending');
+      const downstream = await readStepRow(sql, fixture.middleStepId);
+      expect(downstream?.status, 'the running downstream step is swept into the reset').toBe(
+        'pending',
+      );
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
       if (userId) await cleanupUser(sql, userId);

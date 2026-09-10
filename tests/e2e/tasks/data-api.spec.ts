@@ -131,7 +131,7 @@ test.describe('task data API', () => {
 
       const stepRows = await sql<{ status: string; error_message: string | null }[]>`
         select status, error_message from task_steps
-        where task_id = ${fixture.taskId} and step_id = FIXTURE_FAILED_STEP_ID
+        where task_id = ${fixture.taskId} and step_id = ${FIXTURE_FAILED_STEP_ID}
       `;
       expect(stepRows[0]!.status).toBe('pending');
       expect(stepRows[0]!.error_message).toBeNull();
@@ -154,7 +154,7 @@ test.describe('task data API', () => {
     }
   });
 
-  test('POST step skip on failed step advances currentStep to next pending', async ({ page }) => {
+  test('POST step skip marks the step skipped and records the event', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     let fixture: TaskFixture | null = null;
@@ -170,19 +170,20 @@ test.describe('task data API', () => {
       expect(res.status()).toBe(200);
       const body = (await res.json()) as { status: string; nextStepId: string | null };
       expect(body.status).toBe('skipped');
-      expect(body.nextStepId).toBe(FIXTURE_MIDDLE_STEP_ID);
+      // ALWAYS null, by design: "The api can't see unmaterialized future steps, so it can't
+      // compute the next step." It enqueues an ADVANCE_STEP job and the worker walks the run list.
+      expect(body.nextStepId).toBeNull();
 
       const stepRows = await sql<{ status: string }[]>`
         select status from task_steps
-        where task_id = ${fixture.taskId} and step_id = FIXTURE_FAILED_STEP_ID
+        where task_id = ${fixture.taskId} and step_id = ${FIXTURE_FAILED_STEP_ID}
       `;
       expect(stepRows[0]!.status).toBe('skipped');
 
-      const taskRows = await sql<{ current_step_id: string | null }[]>`
-        select current_step_id from tasks where id = ${fixture.taskId}
-      `;
-      expect(taskRows[0]!.current_step_id).toBe(FIXTURE_MIDDLE_STEP_ID);
-
+      // What the task's current_step_id becomes is NOT asserted, and deliberately. Advancing is
+      // the worker's job off an enqueued ADVANCE_STEP, so this would be racing it — and on a
+      // fixture task it is a race with a guaranteed loser: the worker fails the task with "has no
+      // resolvable repo path", because the fixture has no repository. Measured, not assumed.
       const eventRows = await sql<{ event_type: string }[]>`
         select event_type from task_events where task_id = ${fixture.taskId}
       `;

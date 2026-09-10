@@ -177,9 +177,10 @@ test.describe('tasks list and create', () => {
       await page.goto('/tasks');
       await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
 
-      // The page hides completed/cancelled tasks by default. The seed list
-      // includes one completed task, so flip both filters to surface them.
-      await page.getByRole('button', { name: 'Show completed' }).click();
+      // The page defaults to hiding finished work, and the seed list includes a completed task.
+      // The "Show completed" BUTTON this used to click no longer exists — the filter is a status
+      // select now, whose "All statuses" is the same intent expressed on the current UI.
+      await page.getByLabel('Filter by status').selectOption('');
 
       for (const s of seeds) {
         await expect(page.getByRole('heading', { level: 2, name: s.title })).toBeVisible();
@@ -228,10 +229,18 @@ test.describe('tasks list and create', () => {
       expect(onboardingBody.task.status).toBe('created');
       createdIds.push(onboardingBody.task.id);
 
+      // A workflow task REQUIRES a description — createTaskRequestSchema refines exactly that,
+      // and this request omitted it and expected 201. Both halves of the rule are pinned now.
+      const noDescription = await page.request.post(`${API_BASE}/tasks`, {
+        data: { type: 'workflow', title: `e2e workflow nodesc ${Date.now().toString(36)}` },
+      });
+      expect(noDescription.status(), 'a workflow task with no description is refused').toBe(400);
+
       const workflowRes = await page.request.post(`${API_BASE}/tasks`, {
         data: {
           type: 'workflow',
           title: `e2e workflow ${Date.now().toString(36)}`,
+          description: 'e2e workflow task description',
         },
       });
       expect(workflowRes.status()).toBe(201);

@@ -72,7 +72,10 @@ test.describe('app layout and navigation', () => {
     }
   });
 
-  test('dashboard cards link to /repos and /tasks', async ({ page }) => {
+  // The dashboard's own actions are "All tasks" and "Advanced statistics" — there is no
+  // repositories card on it at all. This asserted "Manage repositories" and "Manage tasks",
+  // neither of which the page has rendered for some time.
+  test('dashboard actions link to /tasks and /stats', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     try {
@@ -81,12 +84,12 @@ test.describe('app layout and navigation', () => {
 
       await page.goto('/dashboard');
 
-      await page.getByRole('button', { name: 'Manage repositories' }).click();
-      await expect(page).toHaveURL(/\/repos$/);
+      await page.getByRole('button', { name: 'All tasks' }).click();
+      await expect(page).toHaveURL(/\/tasks$/);
 
       await page.goto('/dashboard');
-      await page.getByRole('button', { name: 'Manage tasks' }).click();
-      await expect(page).toHaveURL(/\/tasks$/);
+      await page.getByRole('button', { name: 'Advanced statistics' }).click();
+      await expect(page).toHaveURL(/\/stats$/);
     } finally {
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });

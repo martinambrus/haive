@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { cleanupUser, getSql } from '../helpers/db.js';
-import { API_BASE, PASSWORD, registerUser, uniqueEmail } from '../helpers/auth.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 test.describe('cli providers', () => {
   test('GET /cli-providers/catalog is public and lists all providers', async ({ request }) => {
@@ -532,15 +532,10 @@ test.describe('cli providers', () => {
       );
       expect(missingRes.status()).toBe(404);
 
-      // Other user cannot clone user A's provider.
-      const otherCtx = await page.request.storageState();
-      void otherCtx;
-      const otherEmail = uniqueEmail('cli-clone-iso-b');
-      const otherRes = await page.request.post(`${API_BASE}/auth/register`, {
-        data: { email: otherEmail, password: PASSWORD },
-      });
-      expect(otherRes.status()).toBe(201);
-      otherUserId = ((await otherRes.json()) as { user: { id: string } }).user.id;
+      // Other user cannot clone user A's provider. Registering through the helper, like every
+      // other spec: a bare POST /auth/register is refused now, and this one was missed because it
+      // is inline rather than a call to the shared register function.
+      otherUserId = (await registerUser(sql, page.request, { prefix: 'cli-clone-iso-b' })).userId;
 
       const crossRes = await page.request.post(`${API_BASE}/cli-providers/${provider.id}/clone`);
       expect(crossRes.status()).toBe(404);

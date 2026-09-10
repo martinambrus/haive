@@ -79,7 +79,10 @@ test.describe('step retry/skip UI', () => {
       // Scope to the step card — the page also renders a task-level "Retry"
       // button at the top when the task is failed, which would otherwise
       // collide with this selector.
-      const stepCard = page.locator(`[data-step-id="${FIXTURE_FAILED_STEP_ID}"]`);
+      // The card is keyed on the step ROW id, not the step_id slug — page.tsx renders
+      // `data-step-id={step.id}`. The old spec used the slug and never matched; it simply
+      // never ran to find out.
+      const stepCard = page.locator(`[data-step-id="${fixture.failedStepId}"]`);
       const stepRetry = stepCard.getByRole('button', { name: 'Retry', exact: true });
       await expect(stepCard).toBeVisible();
       await expect(stepRetry).toBeVisible();
@@ -132,7 +135,7 @@ test.describe('step retry/skip UI', () => {
       });
 
       await gotoTaskDetail(page, fixture.taskId);
-      const stepCard = page.locator(`[data-step-id="${FIXTURE_FAILED_STEP_ID}"]`);
+      const stepCard = page.locator(`[data-step-id="${fixture.failedStepId}"]`);
       const skipButton = stepCard.getByRole('button', { name: 'Skip', exact: true });
       await expect(skipButton).toBeVisible();
 
