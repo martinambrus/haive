@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import {
   cleanupRepoFixture,
   cleanupTaskFixture,
@@ -8,25 +8,8 @@ import {
   seedTaskFixture,
   type RepoFixture,
   type TaskFixture,
-} from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+} from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 test.describe('multi-user isolation', () => {
   test('user B cannot see, fetch, mutate, or delete user A resources', async ({ playwright }) => {
@@ -43,8 +26,8 @@ test.describe('multi-user isolation', () => {
     try {
       const emailA = uniqueEmail('iso-a');
       const emailB = uniqueEmail('iso-b');
-      userAId = await registerAndGetUserId(ctxA, emailA);
-      userBId = await registerAndGetUserId(ctxB, emailB);
+      userAId = (await registerUser(sql, ctxA, { email: emailA })).userId;
+      userBId = (await registerUser(sql, ctxB, { email: emailB })).userId;
 
       repoFixture = await seedRepoFixture(sql, userAId, 'iso-a-repo');
       taskFixture = await seedTaskFixture(sql, userAId, 'iso-a-task');

@@ -1,25 +1,9 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupUser, getSql } from './helpers/db.js';
+import { expect, test } from '@playwright/test';
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
 const PLAINTEXT_SECRET = 'super-secret-token-pat-e2e';
 const PLAINTEXT_USERNAME = 'e2e-username';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function register(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
 
 test.describe('repo credentials CRUD', () => {
   test('GET /repo-credentials requires auth', async ({ playwright }) => {
@@ -37,7 +21,7 @@ test.describe('repo credentials CRUD', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cred-empty');
-      userId = await register(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const res = await page.request.get(`${API_BASE}/repo-credentials`);
       expect(res.status()).toBe(200);
@@ -54,7 +38,7 @@ test.describe('repo credentials CRUD', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cred-create');
-      userId = await register(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/repo-credentials`, {
         data: {
@@ -116,7 +100,7 @@ test.describe('repo credentials CRUD', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cred-del');
-      userId = await register(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/repo-credentials`, {
         data: {
@@ -153,7 +137,7 @@ test.describe('repo credentials CRUD', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cred-400');
-      userId = await register(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const res = await page.request.post(`${API_BASE}/repo-credentials`, {
         data: { label: 'only label' },

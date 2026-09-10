@@ -1,23 +1,6 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupUser, getSql } from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function register(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+import { expect, test } from '@playwright/test';
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 test.describe('auth extended endpoints', () => {
   test('GET /auth/me requires auth', async ({ playwright }) => {
@@ -36,7 +19,7 @@ test.describe('auth extended endpoints', () => {
     let userId = '';
     try {
       const email = uniqueEmail('me');
-      userId = await register(ctx, email);
+      userId = (await registerUser(sql, ctx, { email })).userId;
 
       const res = await ctx.get(`${API_BASE}/auth/me`);
       expect(res.status()).toBe(200);
@@ -67,7 +50,7 @@ test.describe('auth extended endpoints', () => {
     let userId = '';
     try {
       const email = uniqueEmail('refresh-rotate');
-      userId = await register(ctx, email);
+      userId = (await registerUser(sql, ctx, { email })).userId;
 
       const cookiesBefore = await ctx.storageState();
       const oldRefresh = cookiesBefore.cookies.find((c) => c.name === 'haive_refresh');
@@ -114,7 +97,7 @@ test.describe('auth extended endpoints', () => {
     let userId = '';
     try {
       const email = uniqueEmail('logout');
-      userId = await register(ctx, email);
+      userId = (await registerUser(sql, ctx, { email })).userId;
 
       const logoutRes = await ctx.post(`${API_BASE}/auth/logout`);
       expect(logoutRes.status()).toBe(200);
@@ -149,7 +132,7 @@ test.describe('auth extended endpoints', () => {
     let userId = '';
     try {
       const email = uniqueEmail('refresh-after-logout');
-      userId = await register(ctx, email);
+      userId = (await registerUser(sql, ctx, { email })).userId;
 
       const stateBefore = await ctx.storageState();
       const oldRefresh = stateBefore.cookies.find((c) => c.name === 'haive_refresh');
@@ -216,7 +199,7 @@ test.describe('auth extended endpoints', () => {
     const ctx = await playwright.request.newContext();
     try {
       const email = uniqueEmail('tampered');
-      userId = await register(ctx, email);
+      userId = (await registerUser(sql, ctx, { email })).userId;
 
       const state = await ctx.storageState();
       const access = state.cookies.find((c) => c.name === 'haive_access');

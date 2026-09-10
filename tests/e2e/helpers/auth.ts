@@ -47,9 +47,13 @@ export interface RegisteredUser {
 export async function registerUser(
   sql: postgres.Sql,
   request: APIRequestContext,
-  opts: { prefix: string; role?: 'admin' | 'user' },
+  /** `prefix` mints an address; `email` is for a spec that needs to know it first — a login test
+   *  that registers, then signs the same address in again. Exactly one is required. */
+  opts:
+    | { prefix: string; email?: never; role?: 'admin' | 'user' }
+    | { email: string; prefix?: never; role?: 'admin' | 'user' },
 ): Promise<RegisteredUser> {
-  const email = uniqueEmail(opts.prefix);
+  const email = opts.email ?? uniqueEmail(opts.prefix as string);
   const token = randomBytes(32).toString('base64url');
 
   // id and created_at default; email_blind_index stays null so the link is not bound to one
