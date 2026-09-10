@@ -426,7 +426,7 @@ describe('parseDdevProjectStatus', () => {
 describe('post-import table count', () => {
   it("asks postgres and mysql with each engine's own client and schema predicate", () => {
     expect(buildDdevTableCountCommand('/p', 'postgres')).toContain('ddev psql');
-    expect(buildDdevTableCountCommand('/p', 'postgres')).toContain("table_schema = 'public'");
+    expect(buildDdevTableCountCommand('/p', 'postgres')).toContain('information_schema.tables');
     expect(buildDdevTableCountCommand('/p', 'mariadb')).toContain('ddev mysql');
     expect(buildDdevTableCountCommand('/p', 'mariadb')).toContain('table_schema = database()');
   });
@@ -450,5 +450,21 @@ describe('post-import table count', () => {
   it('returns null when nothing in the output is a count', () => {
     expect(parseDdevTableCount('')).toBeNull();
     expect(parseDdevTableCount('psql: command not found\n')).toBeNull();
+  });
+});
+
+// A project whose tables live in a custom schema is a LIVE database. Counting only
+// `public` calls it empty, and the warm-start branch answers "empty" by restoring an
+// older snapshot OVER it — so a wrong probe here is a data-loss path, not a cosmetic
+// miscount.
+describe('table-count schema scope', () => {
+  it('counts EVERY non-system postgres schema, not just public', () => {
+    const cmd = buildDdevTableCountCommand('/p', 'postgres');
+    expect(cmd).toContain("not in ('pg_catalog', 'information_schema')");
+    expect(cmd).not.toContain("= 'public'");
+  });
+
+  it('leaves mysql alone — there a schema IS the database, so database() already covers it', () => {
+    expect(buildDdevTableCountCommand('/p', 'mariadb')).toContain('table_schema = database()');
   });
 });

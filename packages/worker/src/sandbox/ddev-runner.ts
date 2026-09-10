@@ -1393,10 +1393,17 @@ export function ddevImportDb(
  *  that is not there, a non-zero exit. Null is "unknown", never "empty": refusing an
  *  import on a probe that failed to run would block projects whose database is fine. */
 export function buildDdevTableCountCommand(projectDir: string, dbType: string | null): string {
-  const sql = 'select count(*) from information_schema.tables where table_schema = ';
+  const sql = 'select count(*) from information_schema.tables where table_schema ';
+  // EVERY non-system schema on postgres, not just `public`. A project whose tables
+  // live in a custom schema is a LIVE database, and counting only `public` reports
+  // it as empty — which the warm-start branch would answer by restoring an older
+  // snapshot OVER it. "Provably empty" is the whole basis for that restore being
+  // safe, so the probe has to be right about emptiness or it becomes a data-loss
+  // path. MySQL needs no equivalent: there a schema IS the database, so
+  // `database()` already covers everything the project can see.
   return dbType === 'postgres'
-    ? `cd ${projectDir} && ddev psql -tAc "${sql}'public'"`
-    : `cd ${projectDir} && ddev mysql -N -B -e "${sql}database()"`;
+    ? `cd ${projectDir} && ddev psql -tAc "${sql}not in ('pg_catalog', 'information_schema')"`
+    : `cd ${projectDir} && ddev mysql -N -B -e "${sql}= database()"`;
 }
 
 /** The table count from a client's stdout, or null when no count can be read.

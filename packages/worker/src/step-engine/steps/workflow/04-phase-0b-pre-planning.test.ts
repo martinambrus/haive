@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { logger } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { phase0bPrePlanningStep } from './04-phase-0b-pre-planning.js';
+import { phase0bPrePlanningStep, trimPlanIndexToWholeNodes } from './04-phase-0b-pre-planning.js';
 
 const base = {
   taskTitle: 'Add a logout button',
@@ -85,5 +85,42 @@ describe('04 pre-planning retry-then-degrade', () => {
     const out = await runApply(raw, false);
     expect(out.source).toBe('llm');
     expect(out.spec).toContain('# Spec');
+  });
+});
+
+// The plan component index is the dominant term in a planned run's spec prompt, so
+// the bound has to actually bind. Depth alone cannot do it: depth 1 is the floor,
+// and a plan that is merely WIDE is over budget at every depth — MEASURED on a
+// 1,001-node flat plan, a 273,104-char depth-one index reached the prompt intact.
+describe('trimPlanIndexToWholeNodes', () => {
+  const node = (n: number) => `## Component ${n}\n\`node:${'0'.repeat(8)}-${n}\`\nbody line\n`;
+
+  it('returns the input untouched when it already fits', () => {
+    const text = node(1) + node(2);
+    expect(trimPlanIndexToWholeNodes(text, 10_000)).toEqual({ text, omitted: 0 });
+  });
+
+  it('enforces the budget a wide plan blows through at every depth', () => {
+    const wide = Array.from({ length: 500 }, (_, i) => node(i)).join('');
+    const out = trimPlanIndexToWholeNodes(wide, 2_000);
+    expect(out.text.length).toBeLessThanOrEqual(2_000);
+    expect(out.omitted).toBeGreaterThan(0);
+  });
+
+  it('cuts on node boundaries, never mid-token — a half `node:<uuid>` would be quoted back as whole', () => {
+    const wide = Array.from({ length: 200 }, (_, i) => node(i)).join('');
+    const out = trimPlanIndexToWholeNodes(wide, 500);
+    // Every ref that survived is a COMPLETE line, and no heading is left bodyless.
+    for (const line of out.text.split('\n')) {
+      if (line.startsWith('`node:')) expect(line.endsWith('`')).toBe(true);
+    }
+    expect(out.text.endsWith('body line') || out.text.endsWith('')).toBe(true);
+  });
+
+  it('counts every omitted node, so the prompt can state the omission', () => {
+    const wide = Array.from({ length: 10 }, (_, i) => node(i)).join('');
+    const kept = trimPlanIndexToWholeNodes(wide, wide.length / 2);
+    expect(kept.omitted).toBeGreaterThan(0);
+    expect(kept.omitted).toBeLessThan(10);
   });
 });

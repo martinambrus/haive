@@ -133,24 +133,76 @@ const PLAN_INDEX_MAX_CHARS = 120_000;
  *  it were whole. Shallower keeps every rendered node intact, and breadth is what
  *  vocabulary needs. The reduction is STATED in the prompt — the same rule the impact
  *  diagram's own cap follows: reported, never silent. */
+/** Cut a rendered index down to whole NODES under `budget`.
+ *
+ *  Depth alone cannot enforce the bound: depth 1 is the floor, and a plan that is
+ *  merely WIDE — MEASURED on a 1,001-node flat plan, a 273,104-char depth-one index
+ *  reaching the prompt intact — is over budget at every depth. So the floor drops
+ *  whole nodes as well.
+ *
+ *  Cuts only on a markdown heading, which is where `renderPlanMarkdown` starts each
+ *  node, and keeps a PREFIX rather than a sample: a character slice can end mid-token
+ *  and leave a truncated `node:<uuid>` the writer would quote back as if it were
+ *  whole, which is the same reason the depth ladder exists. */
+export function trimPlanIndexToWholeNodes(
+  rendered: string,
+  budget: number,
+): { text: string; omitted: number } {
+  if (rendered.length <= budget) return { text: rendered, omitted: 0 };
+  // Group into whole node BLOCKS first (heading + its lines) and accept a block only
+  // when all of it fits. Testing the budget at the heading alone lets the block's own
+  // body push the result back over it.
+  const isHeading = (line: string): boolean => /^#{1,6}\s/.test(line);
+  const blocks: string[][] = [];
+  for (const line of rendered.split('\n')) {
+    if (blocks.length === 0 || isHeading(line)) blocks.push([line]);
+    else blocks[blocks.length - 1]!.push(line);
+  }
+  const kept: string[] = [];
+  let length = 0;
+  let omitted = 0;
+  let cutting = false;
+  for (const block of blocks) {
+    const text = block.join('\n');
+    const cost = kept.length === 0 ? text.length : text.length + 1;
+    if (cutting || length + cost > budget) {
+      cutting = true;
+      if (isHeading(block[0]!)) omitted += 1;
+      continue;
+    }
+    kept.push(text);
+    length += cost;
+  }
+  return { text: kept.join('\n'), omitted };
+}
+
 async function renderBoundedPlanIndex(ctx: StepContext, repositoryId: string): Promise<string> {
   let rendered = '';
-  for (let depth = PLAN_INDEX_MAX_DEPTH; depth >= 1; depth--) {
+  let depth = PLAN_INDEX_MAX_DEPTH;
+  for (; depth >= 1; depth--) {
     rendered = await renderPlanMarkdown(ctx.db, repositoryId, {
       titlesOnly: true,
       maxDepth: depth,
     });
-    if (rendered.length <= PLAN_INDEX_MAX_CHARS || depth === 1) {
-      if (depth === PLAN_INDEX_MAX_DEPTH) return rendered;
-      return (
-        `${rendered}\n_This index is bounded to ${depth} level(s) of the plan because the full ` +
-        `${PLAN_INDEX_MAX_DEPTH} levels do not fit the prompt. Components deeper than that exist ` +
-        `and are NOT listed — do not treat this as the whole plan, and do not invent ids for what ` +
-        `is missing._\n`
-      );
-    }
+    if (rendered.length <= PLAN_INDEX_MAX_CHARS) break;
   }
-  return rendered;
+  depth = Math.max(depth, 1);
+  const { text, omitted } = trimPlanIndexToWholeNodes(rendered, PLAN_INDEX_MAX_CHARS);
+  if (depth === PLAN_INDEX_MAX_DEPTH && omitted === 0) return rendered;
+  // Both reductions are STATED, and the warning against inventing ids is the point:
+  // the writer must name components from this index, so it has to know the index is
+  // partial rather than assume a missing component does not exist.
+  const notes: string[] = [];
+  if (depth < PLAN_INDEX_MAX_DEPTH) {
+    notes.push(
+      `bounded to ${depth} level(s) of the plan because the full ${PLAN_INDEX_MAX_DEPTH} do not fit`,
+    );
+  }
+  if (omitted > 0) notes.push(`${omitted} further component(s) omitted for size`);
+  return (
+    `${text}\n_This index is ${notes.join(', and ')}. Components that are not listed still EXIST ` +
+    `— do not treat this as the whole plan, and do not invent an id for one you cannot see._\n`
+  );
 }
 
 /** Silent when the repo has no plan. */
