@@ -304,10 +304,10 @@ describe('chooseAmendedSpec', () => {
 
   it('holds the line exactly at the heading floor', () => {
     const current = spec(40000, 20);
-    // 3 sections + the H1 = 4 headings, one under the floor; 4 + 1 = 5 meets it.
+    // 8 sections + the H1 = 9 headings, one under the floor; 9 + 1 = 10 meets it.
     // Both bodies clear the size floor, so only the heading count is in play.
-    expect(chooseAmendedSpec(current, spec(2500, 3)).rejected).not.toBeNull();
-    expect(chooseAmendedSpec(current, spec(2500, 4)).rejected).toBeNull();
+    expect(chooseAmendedSpec(current, spec(2500, 8)).rejected).not.toBeNull();
+    expect(chooseAmendedSpec(current, spec(2500, 9)).rejected).toBeNull();
   });
 
   it('holds the line exactly at the size floor', () => {
@@ -346,6 +346,30 @@ describe('chooseAmendedSpec', () => {
     expect(decision.spec).toBe(current);
     expect(decision.rejected?.headings).toBe(5);
     expect(decision.rejected!.amendedLength).toBeLessThan(2000);
+  });
+
+  it('discards a status document PADDED past the size floor', () => {
+    // Greptile #83 (fourth): the same shape at 2,419 chars. Size alone cannot
+    // separate it, so the heading floor is what has to — a status document has
+    // about five sections, a real spec at least fourteen.
+    const current = spec(50165, 33);
+    const padded =
+      [
+        '# Amendment status',
+        '',
+        '## What I verified',
+        '',
+        '## Fixes applied',
+        '',
+        '## Location',
+        '',
+        '## Note',
+        '',
+      ].join('\n') + 'prose about the work. '.repeat(120);
+    expect(padded.length).toBeGreaterThan(2000);
+    const decision = chooseAmendedSpec(current, padded);
+    expect(decision.spec).toBe(current);
+    expect(decision.rejected?.headings).toBe(5);
   });
 
   it('accepts anything when there is no current body to compare against', () => {

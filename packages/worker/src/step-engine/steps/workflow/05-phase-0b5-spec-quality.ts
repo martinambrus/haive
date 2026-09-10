@@ -206,9 +206,15 @@ const MIN_AMENDED_SPEC_RATIO = 0.5;
  *  MEASURED over all 72 spec bodies these steps have produced on the dev install:
  *  the 70 real ones carry 14-33 headings and 8,347-80,811 chars; the 2 that are
  *  not specs are the pointer and the review pass that inherited it, 0 headings
- *  and 50 chars. Five is ~2.8x below the smallest real spec and cleanly above a
- *  snippet or a diff, which carry a heading or two at most. */
-const MIN_AMENDED_SPEC_HEADINGS = 5;
+ *  and 50 chars.
+ *
+ *  Ten, and the number is calibrated against a STATUS DOCUMENT rather than a
+ *  snippet — that is the adversary actually observed. This was 5 on the reasoning
+ *  that a diff carries a heading or two; but the document the failing agent wrote
+ *  had five sections of its own, so 5 was not above the thing it had to be above
+ *  (greptile #83). Ten is still 1.4x below the smallest real spec, so it costs no
+ *  real correction, and 2x above that document. */
+const MIN_AMENDED_SPEC_HEADINGS = 10;
 
 /** Characters a SHORT amendment must also carry. Headings alone are not enough:
  *  a STATUS DOCUMENT has sections too.
