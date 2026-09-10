@@ -88,9 +88,12 @@ test.describe('step retry/skip UI', () => {
 
       await stepRetry.click();
 
-      const finalStatus = await waitForStepStatus(sql, fixture.failedStepId, 'pending');
-      expect(finalStatus).toBe('pending');
-
+      // Deliberately NOT polling for status === 'pending'. Retry writes that synchronously, then
+      // the worker picks the task up and moves it straight on — to running, and then back to
+      // failed, because a fixture task has no resolvable repo path. The poll ticks every 200ms,
+      // so whether it catches that window is a coin flip: CI reported this test flaky on exactly
+      // that race, passing on retry. The durable evidence is the event below, written in the same
+      // transaction as the flip, which is what this test's own comment already says.
       const taskState = await waitForTaskState(sql, fixture.taskId, {
         currentStepId: FIXTURE_FAILED_STEP_ID,
       });
@@ -98,8 +101,7 @@ test.describe('step retry/skip UI', () => {
 
       // The step.retry event is inserted in the same transaction as the
       // step flip, so it is observable even if the worker has already
-      // re-processed and re-failed the task (the fixture uses a fake
-      // step_id so the orchestrator cannot actually advance it).
+      // re-processed and re-failed the task.
       const events = await sql<{ event_type: string }[]>`
         select event_type from task_events
         where task_id = ${fixture.taskId} and event_type = 'step.retry'
