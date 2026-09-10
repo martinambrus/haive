@@ -1,45 +1,30 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupUser, getSql } from './helpers/db.js';
+import { expect, test } from '@playwright/test';
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { API_BASE, PASSWORD, registerUser, seedInvite, uniqueEmail } from '../helpers/auth.js';
 
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
-
-async function loginAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/login`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status()).toBe(200);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
-
+/**
+ * The register form is only reachable on an invitation link now — the page withholds it entirely
+ * while registration is closed — so every spec here that drives that form arrives at
+ * `/register?invite=<token>`. The login form is unaffected.
+ *
+ * Inline errors are asserted through `role="alert"` rather than by their copy: the banner is a
+ * live region, which is both the accessible behaviour and the durable selector. The query is
+ * scoped to `<main>` because Next renders its own route announcer — an always-present, always-empty
+ * `role="alert"` at body level — so an unscoped one legitimately matches two elements. Scoping by
+ * the landmark rather than by Next's internal id keeps this off an implementation detail.
+ */
 test.describe('auth forms (UI submission)', () => {
   test('register form: fill, submit, redirected to dashboard with cookies', async ({
     page,
     context,
-    playwright,
   }) => {
     const sql = getSql();
     let userId = '';
     try {
+      const invite = await seedInvite(sql);
       const email = uniqueEmail('reg-ui');
 
-      await page.goto('/register');
+      await page.goto(`/register?invite=${invite.token}`);
       await expect(page.getByRole('heading', { name: 'Create your Haive account' })).toBeVisible();
 
       await page.getByLabel('Email').fill(email);
@@ -53,14 +38,12 @@ test.describe('auth forms (UI submission)', () => {
       expect(cookies.some((c) => c.name === 'haive_access')).toBe(true);
       expect(cookies.some((c) => c.name === 'haive_refresh')).toBe(true);
 
-      // look up the created user via /auth/me for cleanup
       const meRes = await page.request.get(`${API_BASE}/auth/me`);
       expect(meRes.status()).toBe(200);
       userId = ((await meRes.json()) as { user: { id: string } }).user.id;
       expect(userId).toMatch(/^[0-9a-f-]{36}$/);
-      // unused but required by TS strict
-      void playwright;
     } finally {
+      // The invite was redeemed by the registration, so cleanupUser takes it with the user.
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
     }
@@ -69,19 +52,28 @@ test.describe('auth forms (UI submission)', () => {
   test('register form: duplicate email shows inline API error', async ({ page, playwright }) => {
     const sql = getSql();
     let userId = '';
+    let inviteId = '';
     const ctx = await playwright.request.newContext();
     try {
-      const email = uniqueEmail('reg-dupe-ui');
-      userId = await registerAndGetUserId(ctx, email);
+      const user = await registerUser(sql, ctx, { prefix: 'reg-dupe-ui' });
+      userId = user.userId;
 
-      await page.goto('/register');
-      await page.getByLabel('Email').fill(email);
+      // A second invite, because the FORM needs one to render at all. It stays unredeemed: the
+      // route rejects the duplicate email before it ever looks at the invite.
+      const invite = await seedInvite(sql);
+      inviteId = invite.id;
+
+      await page.goto(`/register?invite=${invite.token}`);
+      await page.getByLabel('Email').fill(user.email);
       await page.getByLabel('Password').fill(PASSWORD);
       await page.getByRole('button', { name: 'Create account' }).click();
 
-      await expect(page.getByText('Email already registered', { exact: true })).toBeVisible();
-      expect(page.url()).toMatch(/\/register$/);
+      await expect(page.getByRole('main').getByRole('alert')).toContainText(
+        'Email already registered',
+      );
+      expect(page.url()).toContain('/register');
     } finally {
+      if (inviteId) await sql`delete from user_invites where id = ${inviteId}`;
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
       await ctx.dispose();
@@ -96,13 +88,13 @@ test.describe('auth forms (UI submission)', () => {
     let userId = '';
     const ctx = await playwright.request.newContext();
     try {
-      const email = uniqueEmail('login-ui');
-      userId = await registerAndGetUserId(ctx, email);
+      const user = await registerUser(sql, ctx, { prefix: 'login-ui' });
+      userId = user.userId;
 
       await page.goto('/login');
       await expect(page.getByRole('heading', { name: 'Sign in to Haive' })).toBeVisible();
 
-      await page.getByLabel('Email').fill(email);
+      await page.getByLabel('Email').fill(user.email);
       await page.getByLabel('Password').fill(PASSWORD);
       await page.getByRole('button', { name: 'Sign in' }).click();
 
@@ -123,20 +115,22 @@ test.describe('auth forms (UI submission)', () => {
     let userId = '';
     const ctx = await playwright.request.newContext();
     try {
-      const email = uniqueEmail('login-wrong');
-      userId = await registerAndGetUserId(ctx, email);
+      const user = await registerUser(sql, ctx, { prefix: 'login-wrong' });
+      userId = user.userId;
 
       await page.goto('/login');
-      await page.getByLabel('Email').fill(email);
+      await page.getByLabel('Email').fill(user.email);
       await page.getByLabel('Password').fill('totally-wrong-password');
       await page.getByRole('button', { name: 'Sign in' }).click();
 
-      await expect(page.getByText(/invalid credentials/i)).toBeVisible();
+      await expect(page.getByRole('main').getByRole('alert')).toContainText(/invalid credentials/i);
       expect(page.url()).toMatch(/\/login$/);
 
-      // sanity: login still succeeds with correct password
-      const id = await loginAndGetUserId(ctx, email);
-      expect(id).toBe(userId);
+      // The failure did not break the account: the right password still works.
+      const ok = await ctx.post(`${API_BASE}/auth/login`, {
+        data: { email: user.email, password: PASSWORD },
+      });
+      expect(ok.status()).toBe(200);
     } finally {
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });

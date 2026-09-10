@@ -5,26 +5,10 @@ import {
   getSql,
   seedRepoFixture,
   type RepoFixture,
-} from './helpers/db.js';
+} from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
 const FAKE_UUID = '00000000-0000-4000-8000-000000000000';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
 
 interface FsEntry {
   name: string;
@@ -87,7 +71,7 @@ test.describe('misc routes', () => {
     let userId = '';
     try {
       const email = uniqueEmail('vg-ok');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const gitDir = await findFirstGitDir(page.request);
       test.skip(!gitDir, 'no git directory under filesystem root');
@@ -110,7 +94,7 @@ test.describe('misc routes', () => {
     let userId = '';
     try {
       const email = uniqueEmail('vg-no');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const nonGit = await findFirstNonGitDir(page.request);
       test.skip(!nonGit, 'no non-git directory under filesystem root');
@@ -132,7 +116,7 @@ test.describe('misc routes', () => {
     let userId = '';
     try {
       const email = uniqueEmail('vg-escape');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const res = await page.request.post(`${API_BASE}/filesystem/validate-git`, {
         data: { path: '/etc' },
@@ -162,7 +146,7 @@ test.describe('misc routes', () => {
     let fixture: RepoFixture | null = null;
     try {
       const email = uniqueEmail('refresh');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedRepoFixture(sql, userId, 'refresh');
 
       const beforeRows = await sql<{ updated_at: Date }[]>`
@@ -198,7 +182,7 @@ test.describe('misc routes', () => {
     let userId = '';
     try {
       const email = uniqueEmail('refresh-404');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const res = await page.request.post(`${API_BASE}/repos/${FAKE_UUID}/refresh-tree`);
       expect(res.status()).toBe(404);

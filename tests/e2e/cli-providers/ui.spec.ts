@@ -1,23 +1,7 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupUser, getSql } from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+import { expect, test } from '@playwright/test';
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
+import { invokeAction } from '../helpers/actions.js';
 
 test.describe('cli providers UI', () => {
   test('Add Claude Code from available card: fill form, submit, appears under Configured', async ({
@@ -27,7 +11,7 @@ test.describe('cli providers UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-ui-create');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       await page.goto('/cli-providers');
       await expect(page.getByRole('heading', { level: 1, name: 'CLI Providers' })).toBeVisible();
@@ -40,7 +24,7 @@ test.describe('cli providers UI', () => {
         .first()
         .click();
 
-      await page.waitForURL(/\/settings\/cli-providers\/new\?name=claude-code$/);
+      await page.waitForURL(/\/cli-providers\/new\?name=claude-code$/);
 
       await expect(page.getByRole('heading', { level: 1, name: /Add Claude Code/ })).toBeVisible();
 
@@ -49,7 +33,7 @@ test.describe('cli providers UI', () => {
 
       await page.getByRole('button', { name: 'Create', exact: true }).click();
 
-      await page.waitForURL(/\/settings\/cli-providers$/, { timeout: 10_000 });
+      await page.waitForURL(/\/cli-providers$/, { timeout: 10_000 });
 
       await expect(page.getByRole('heading', { level: 3, name: uniqueLabel })).toBeVisible();
 
@@ -70,7 +54,7 @@ test.describe('cli providers UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-ui-edit');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       // seed via API
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
@@ -114,7 +98,7 @@ test.describe('cli providers UI', () => {
     const PLAINTEXT = 'sk-ui-never-leak-this';
     try {
       const email = uniqueEmail('cli-ui-sec');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: {
@@ -137,7 +121,7 @@ test.describe('cli providers UI', () => {
 
       await page.getByRole('button', { name: 'Save', exact: true }).click();
 
-      await page.waitForURL(/\/settings\/cli-providers$/, { timeout: 10_000 });
+      await page.waitForURL(/\/cli-providers$/, { timeout: 10_000 });
 
       const rows = await sql<{ encrypted_value: string }[]>`
         select encrypted_value from cli_provider_secrets
@@ -157,7 +141,7 @@ test.describe('cli providers UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-ui-sec-del');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: {
@@ -185,7 +169,7 @@ test.describe('cli providers UI', () => {
       await secretsField.fill('');
 
       await page.getByRole('button', { name: 'Save', exact: true }).click();
-      await page.waitForURL(/\/settings\/cli-providers$/, { timeout: 10_000 });
+      await page.waitForURL(/\/cli-providers$/, { timeout: 10_000 });
 
       const rows = await sql<{ secret_name: string }[]>`
         select secret_name from cli_provider_secrets
@@ -203,7 +187,7 @@ test.describe('cli providers UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-ui-test-gate');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: { name: 'claude-code', label: 'Gate target', authMode: 'subscription' },
@@ -248,8 +232,14 @@ test.describe('cli providers UI', () => {
         },
         {
           name: 'authMode',
-          dirty: async () => page.locator('#authMode').selectOption('api_key'),
-          clean: async () => page.locator('#authMode').selectOption('subscription'),
+          // Braces, not a concise body: selectOption resolves to string[] where every sibling
+          // here resolves to void, and the mismatch is a type error the suite never ran to see.
+          dirty: async () => {
+            await page.locator('#authMode').selectOption('api_key');
+          },
+          clean: async () => {
+            await page.locator('#authMode').selectOption('subscription');
+          },
         },
         {
           name: 'sandboxDockerfileExtra',
@@ -295,7 +285,7 @@ test.describe('cli providers UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-ui-rebuild');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: { name: 'claude-code', label: 'Rebuild target', authMode: 'subscription' },
@@ -367,7 +357,7 @@ test.describe('cli providers UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-ui-clear');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: {
@@ -390,7 +380,7 @@ test.describe('cli providers UI', () => {
       await execField.fill('');
 
       await page.getByRole('button', { name: 'Save', exact: true }).click();
-      await page.waitForURL(/\/settings\/cli-providers$/, { timeout: 10_000 });
+      await page.waitForURL(/\/cli-providers$/, { timeout: 10_000 });
 
       const rows = await sql<{ executable_path: string | null }[]>`
         select executable_path from cli_providers where id = ${providerId}
@@ -407,7 +397,7 @@ test.describe('cli providers UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-ui-clone');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: {
@@ -422,7 +412,11 @@ test.describe('cli providers UI', () => {
       await expect(page.getByRole('heading', { level: 1, name: 'CLI Providers' })).toBeVisible();
       await expect(page.getByRole('heading', { level: 3, name: 'Clone me UI' })).toBeVisible();
 
-      await page.getByRole('button', { name: 'Clone', exact: true }).click();
+      // Clone is a menuitem now: a provider row offers test/edit/clone/delete, and ActionMenu
+      // collapses anything past one. Only this spec's own provider is listed, since it registers
+      // its own user — asserted, so the unscoped trigger cannot quietly become ambiguous.
+      await expect(page.getByRole('button', { name: 'Actions', exact: true })).toHaveCount(1);
+      await invokeAction(page, 'Clone');
 
       await expect(page.getByRole('heading', { level: 3, name: 'Clone me UI Copy' })).toBeVisible({
         timeout: 10_000,
@@ -451,7 +445,7 @@ test.describe('cli providers UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-ui-sec-cancel');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: {
@@ -484,7 +478,7 @@ test.describe('cli providers UI', () => {
       await expect(secretsField).toHaveValue('ANTHROPIC_API_KEY=');
 
       await page.getByRole('button', { name: 'Save', exact: true }).click();
-      await page.waitForURL(/\/settings\/cli-providers$/, { timeout: 10_000 });
+      await page.waitForURL(/\/cli-providers$/, { timeout: 10_000 });
 
       const after = await sql<{ secret_name: string; encrypted_value: string }[]>`
         select secret_name, encrypted_value from cli_provider_secrets

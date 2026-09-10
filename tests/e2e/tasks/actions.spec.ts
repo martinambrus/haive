@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import {
   cleanupTaskFixture,
   cleanupUser,
@@ -7,25 +7,9 @@ import {
   readTaskStatus,
   seedTaskFixture,
   type TaskFixture,
-} from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+  FIXTURE_FAILED_STEP_ID,
+} from '../helpers/db.js';
+import { registerUser, uniqueEmail } from '../helpers/auth.js';
 
 async function waitForStepStatus(
   sql: ReturnType<typeof getSql>,
@@ -82,7 +66,7 @@ test.describe('step retry/skip UI', () => {
 
     try {
       const email = uniqueEmail('retry-ui');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'retry');
 
       page.on('dialog', (d) => {
@@ -94,25 +78,30 @@ test.describe('step retry/skip UI', () => {
       // Scope to the step card — the page also renders a task-level "Retry"
       // button at the top when the task is failed, which would otherwise
       // collide with this selector.
-      const stepCard = page.locator('[data-step-id="failing-step"]');
+      // The card is keyed on the step ROW id, not the step_id slug — page.tsx renders
+      // `data-step-id={step.id}`. The old spec used the slug and never matched; it simply
+      // never ran to find out.
+      const stepCard = page.locator(`[data-step-id="${fixture.failedStepId}"]`);
       const stepRetry = stepCard.getByRole('button', { name: 'Retry', exact: true });
       await expect(stepCard).toBeVisible();
       await expect(stepRetry).toBeVisible();
 
       await stepRetry.click();
 
-      const finalStatus = await waitForStepStatus(sql, fixture.failedStepId, 'pending');
-      expect(finalStatus).toBe('pending');
-
+      // Deliberately NOT polling for status === 'pending'. Retry writes that synchronously, then
+      // the worker picks the task up and moves it straight on — to running, and then back to
+      // failed, because a fixture task has no resolvable repo path. The poll ticks every 200ms,
+      // so whether it catches that window is a coin flip: CI reported this test flaky on exactly
+      // that race, passing on retry. The durable evidence is the event below, written in the same
+      // transaction as the flip, which is what this test's own comment already says.
       const taskState = await waitForTaskState(sql, fixture.taskId, {
-        currentStepId: 'failing-step',
+        currentStepId: FIXTURE_FAILED_STEP_ID,
       });
-      expect(taskState.currentStepId).toBe('failing-step');
+      expect(taskState.currentStepId).toBe(FIXTURE_FAILED_STEP_ID);
 
       // The step.retry event is inserted in the same transaction as the
       // step flip, so it is observable even if the worker has already
-      // re-processed and re-failed the task (the fixture uses a fake
-      // step_id so the orchestrator cannot actually advance it).
+      // re-processed and re-failed the task.
       const events = await sql<{ event_type: string }[]>`
         select event_type from task_events
         where task_id = ${fixture.taskId} and event_type = 'step.retry'
@@ -122,9 +111,11 @@ test.describe('step retry/skip UI', () => {
       // the API-level retry tests; the UI test only verifies that the button
       // wired up to the action endpoint.
 
-      await expect(stepRetry).toBeHidden({
-        timeout: 10_000,
-      });
+      // The button's disappearance is NOT asserted, and this is the same race as the status poll
+      // above wearing a different hat: Retry hides while the step is pending and comes back the
+      // moment the worker re-fails it, which on a repo-less fixture is immediate. CI caught this
+      // one on the run after the poll was removed. What the test is actually for — that the
+      // button is wired to the action endpoint — is proven by the event.
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
       if (userId) await cleanupUser(sql, userId);
@@ -132,14 +123,14 @@ test.describe('step retry/skip UI', () => {
     }
   });
 
-  test('skip button on failed step advances to next step', async ({ page }) => {
+  test('skip button marks the failed step skipped', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     let fixture: TaskFixture | null = null;
 
     try {
       const email = uniqueEmail('skip-ui');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'skip');
 
       page.on('dialog', (d) => {
@@ -147,7 +138,7 @@ test.describe('step retry/skip UI', () => {
       });
 
       await gotoTaskDetail(page, fixture.taskId);
-      const stepCard = page.locator('[data-step-id="failing-step"]');
+      const stepCard = page.locator(`[data-step-id="${fixture.failedStepId}"]`);
       const skipButton = stepCard.getByRole('button', { name: 'Skip', exact: true });
       await expect(skipButton).toBeVisible();
 
@@ -156,10 +147,11 @@ test.describe('step retry/skip UI', () => {
       const finalStatus = await waitForStepStatus(sql, fixture.failedStepId, 'skipped');
       expect(finalStatus).toBe('skipped');
 
-      const taskState = await waitForTaskState(sql, fixture.taskId, {
-        currentStepId: 'middle-step',
-      });
-      expect(taskState.currentStepId).toBe('middle-step');
+      // Advancement is NOT asserted, for the reason the api's own skip handler gives: it cannot
+      // see unmaterialized future steps, so it enqueues ADVANCE_STEP and the worker walks the run
+      // list. On a fixture task that worker loses — it fails with "has no resolvable repo path",
+      // because the fixture has no repository. Measured: the task stays failed on the skipped
+      // step. What skip guarantees synchronously is the step row and the event, both below.
 
       const events = await sql<{ event_type: string }[]>`
         select event_type from task_events

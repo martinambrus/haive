@@ -2,6 +2,7 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { KeyRound } from 'lucide-react';
+import { AdminGuard } from '@/components/admin-guard';
 import { ForcedPasswordGuard } from '@/components/forced-password-guard';
 import { SidebarNav } from '@/components/sidebar-nav';
 import {
@@ -186,7 +187,10 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
               of left to fail every fetch behind a banner. Draining renders as a banner. */}
           <MaintenanceNotice role={data.user.role}>
             <ForcedPasswordGuard mustChangePassword={mustChangePassword}>
-              {children}
+              {/* Inside the password guard, not beside it: someone holding an administrator's
+                  minted password is sent to replace it wherever they were headed, admin
+                  console included. Role is the same one /auth/me already returned. */}
+              <AdminGuard role={data.user.role}>{children}</AdminGuard>
             </ForcedPasswordGuard>
           </MaintenanceNotice>
         </main>

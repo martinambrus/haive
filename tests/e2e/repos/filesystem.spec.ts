@@ -1,23 +1,6 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupUser, getSql } from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 interface FsEntry {
   name: string;
@@ -52,7 +35,7 @@ test.describe('filesystem browser UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('fs-list');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const listing = await fetchListing(page.request);
       const firstDir = listing.entries.find((e) => e.isDirectory && !e.hidden);
@@ -79,7 +62,7 @@ test.describe('filesystem browser UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('fs-nav');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const rootListing = await fetchListing(page.request);
       const targetDir = rootListing.entries.find((e) => e.isDirectory && !e.hidden);
@@ -114,7 +97,7 @@ test.describe('filesystem browser UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('fs-pick');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const listing = await fetchListing(page.request);
       const gitDir = listing.entries.find((e) => e.isDirectory && e.hasGit);
@@ -140,7 +123,7 @@ test.describe('filesystem browser UI', () => {
     let userId = '';
     try {
       const email = uniqueEmail('fs-hidden');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const listing = await fetchListing(page.request);
       const visibleDirs = listing.entries.filter((e) => e.isDirectory && !e.hidden).length;

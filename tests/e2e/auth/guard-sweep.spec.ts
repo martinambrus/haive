@@ -13,7 +13,11 @@ interface ApiRoute {
 
 const PROTECTED_API_ROUTES: ApiRoute[] = [
   { method: 'GET', path: '/auth/me' },
-  { method: 'POST', path: '/auth/logout' },
+  // NOT /auth/logout, which answers 200 unauthenticated and should: it carries no requireAuth,
+  // revokes the refresh token only if one was presented, and always clears the cookies. Requiring
+  // a valid session to log out is exactly how someone holding a dead cookie gets stranded — the
+  // loop route-access.ts exists to document. This spec asserted 401 and the route has never
+  // returned one.
 
   { method: 'GET', path: '/cli-providers' },
   { method: 'POST', path: '/cli-providers', body: {} },
@@ -73,6 +77,16 @@ const PROTECTED_WEB_PATHS = [
   '/cli-providers',
   '/cli-providers/new?name=claude-code',
   `/cli-providers/${FAKE_UUID}`,
+  '/stats',
+  '/settings',
+  '/settings/account',
+  // The console was absent from this sweep entirely. Signed OUT it must behave like any other
+  // protected page and land on /login — the role gate is a separate question, tested in
+  // route-access.test.ts and by the admin specs, and it only applies once there IS a session.
+  '/admin',
+  '/admin/users',
+  '/admin/pricing',
+  '/admin/audit',
 ];
 
 test.describe('auth guard sweep', () => {

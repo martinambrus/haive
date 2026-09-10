@@ -129,10 +129,18 @@ export function Badge({
   );
 }
 
+/** The error banner on ~80 call sites.
+ *
+ *  `role="alert"` because the component MOUNTS when the error appears — a null message renders
+ *  nothing — which is exactly the condition a live region is for: the failure is announced instead
+ *  of sitting silently below a form the user is still looking at the top of. */
 export function FormError({ message }: { message: string | null }) {
   if (!message) return null;
   return (
-    <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+    <div
+      role="alert"
+      className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300"
+    >
       {message}
     </div>
   );

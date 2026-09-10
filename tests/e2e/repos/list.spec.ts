@@ -1,29 +1,13 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import {
   cleanupRepoFixture,
   cleanupUser,
   getSql,
   seedRepoFixture,
   type RepoFixture,
-} from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+} from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
+import { invokeAction } from '../helpers/actions.js';
 
 test.describe('repositories', () => {
   test('GET /repos requires auth', async ({ request }) => {
@@ -36,7 +20,7 @@ test.describe('repositories', () => {
     let userId = '';
     try {
       const email = uniqueEmail('repos-empty');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const listRes = await page.request.get(`${API_BASE}/repos`);
       expect(listRes.status()).toBe(200);
@@ -58,7 +42,7 @@ test.describe('repositories', () => {
     let userId = '';
     try {
       const email = uniqueEmail('repos-outside');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const res = await page.request.post(`${API_BASE}/repos`, {
         data: {
@@ -81,7 +65,7 @@ test.describe('repositories', () => {
     let userId = '';
     try {
       const email = uniqueEmail('repos-missing');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const res = await page.request.post(`${API_BASE}/repos`, {
         data: {
@@ -102,7 +86,7 @@ test.describe('repositories', () => {
     let userId = '';
     try {
       const email = uniqueEmail('repos-nogit');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const res = await page.request.post(`${API_BASE}/repos`, {
         data: {
@@ -125,7 +109,7 @@ test.describe('repositories', () => {
     let userId = '';
     try {
       const email = uniqueEmail('fs');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const rootRes = await page.request.get(`${API_BASE}/filesystem`);
       expect(rootRes.status()).toBe(200);
@@ -150,7 +134,7 @@ test.describe('repositories', () => {
     let fixture: RepoFixture | null = null;
     try {
       const email = uniqueEmail('repos-seeded');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedRepoFixture(sql, userId, 'ui-list');
 
       page.on('dialog', (d) => {
@@ -160,7 +144,12 @@ test.describe('repositories', () => {
       await page.goto('/repos');
       await expect(page.getByRole('heading', { level: 2, name: fixture.name })).toBeVisible();
 
-      await page.getByRole('button', { name: 'Delete' }).click();
+      // Delete moved behind the row's "Actions" menu when repos gained more than one action, so
+      // it is a role="menuitem" now and a plain button query finds nothing. The spec registers
+      // its own user, so this list holds exactly the one repository it seeded — asserted rather
+      // than assumed, because that is what makes the unscoped trigger unambiguous.
+      await expect(page.getByRole('button', { name: 'Actions', exact: true })).toHaveCount(1);
+      await invokeAction(page, 'Delete');
 
       const deadline = Date.now() + 10_000;
       let gone = false;

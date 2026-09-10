@@ -54,6 +54,40 @@ export function decideRouteAccess(req: RouteRequest): RouteDecision {
   return { action: 'continue' };
 }
 
+/** Everything under the admin console. */
+export const ADMIN_PATH = '/admin';
+
+export interface AdminAccessRequest {
+  /** From `usePathname()`, nullable for the same reason as below. */
+  path: string | null;
+  role: 'admin' | 'user';
+}
+
+/**
+ * Send a non-admin who reached an admin URL back to their dashboard.
+ *
+ * UX only, and deliberately so — `requireAdmin` on the api is the authorisation boundary and stays
+ * the thing that actually refuses. Without this the page shell rendered, every `/admin/*` read
+ * failed, and the result was an admin console showing "Admin access required" instead of a visitor
+ * simply not being there. That is a worse answer than a redirect, not a safer one.
+ *
+ * The double-enforcement caveat on `decideForcedPasswordChange` does not apply here: that flag is
+ * hygiene the api deliberately does not gate, whereas admin genuinely is a boundary, and the role
+ * this reads comes from the same `/auth/me` session the api authorises against — so the two cannot
+ * disagree about who is an administrator.
+ *
+ * Fails OPEN on an unknown path, like its neighbour: redirecting a route we cannot identify is how
+ * a guard sends someone away from the page it was meant to protect.
+ */
+export function decideAdminAccess(req: AdminAccessRequest): RouteDecision {
+  if (req.role === 'admin') return { action: 'continue' };
+  if (!req.path) return { action: 'continue' };
+  if (req.path === ADMIN_PATH || req.path.startsWith(`${ADMIN_PATH}/`)) {
+    return { action: 'redirect', to: '/dashboard' };
+  }
+  return { action: 'continue' };
+}
+
 /** The one page a visitor who must replace their password is allowed to be on. */
 export const PASSWORD_CHANGE_PATH = '/settings/account';
 

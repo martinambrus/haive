@@ -1,30 +1,17 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import {
   cleanupTaskFixture,
   cleanupUser,
   getSql,
   seedTaskFixture,
   type TaskFixture,
-} from './helpers/db.js';
+  FIXTURE_FAILED_STEP_ID,
+  FIXTURE_LAST_STEP_ID,
+  FIXTURE_MIDDLE_STEP_ID,
+} from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
 const FAKE_UUID = '00000000-0000-4000-8000-000000000000';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
 
 test.describe('task data API', () => {
   test('GET /tasks/:id returns task + 3 seeded steps in order', async ({ page }) => {
@@ -33,7 +20,7 @@ test.describe('task data API', () => {
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('task-get');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'get');
 
       const res = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}`);
@@ -45,7 +32,11 @@ test.describe('task data API', () => {
       expect(body.task.id).toBe(fixture.taskId);
       expect(body.task.status).toBe('failed');
       expect(body.steps).toHaveLength(3);
-      expect(body.steps.map((s) => s.stepId)).toEqual(['failing-step', 'middle-step', 'last-step']);
+      expect(body.steps.map((s) => s.stepId)).toEqual([
+        FIXTURE_FAILED_STEP_ID,
+        FIXTURE_MIDDLE_STEP_ID,
+        FIXTURE_LAST_STEP_ID,
+      ]);
       expect(body.steps.map((s) => s.stepIndex)).toEqual([0, 1, 2]);
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
@@ -60,7 +51,7 @@ test.describe('task data API', () => {
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('task-steps');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'steps');
 
       const res = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}/steps`);
@@ -69,7 +60,7 @@ test.describe('task data API', () => {
         steps: Array<{ stepId: string; status: string; errorMessage: string | null }>;
       };
       expect(body.steps).toHaveLength(3);
-      const failing = body.steps.find((s) => s.stepId === 'failing-step');
+      const failing = body.steps.find((s) => s.stepId === FIXTURE_FAILED_STEP_ID);
       expect(failing?.status).toBe('failed');
       expect(failing?.errorMessage).toBe('kaboom');
     } finally {
@@ -85,7 +76,7 @@ test.describe('task data API', () => {
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('task-events');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'events');
 
       const res = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}/events`);
@@ -104,7 +95,7 @@ test.describe('task data API', () => {
     let userId = '';
     try {
       const email = uniqueEmail('task-404');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const get = await page.request.get(`${API_BASE}/tasks/${FAKE_UUID}`);
       expect(get.status()).toBe(404);
@@ -128,11 +119,11 @@ test.describe('task data API', () => {
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('step-retry');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'step-retry');
 
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'retry' } },
       );
       expect(res.status()).toBe(200);
@@ -140,7 +131,7 @@ test.describe('task data API', () => {
 
       const stepRows = await sql<{ status: string; error_message: string | null }[]>`
         select status, error_message from task_steps
-        where task_id = ${fixture.taskId} and step_id = 'failing-step'
+        where task_id = ${fixture.taskId} and step_id = ${FIXTURE_FAILED_STEP_ID}
       `;
       expect(stepRows[0]!.status).toBe('pending');
       expect(stepRows[0]!.error_message).toBeNull();
@@ -150,7 +141,7 @@ test.describe('task data API', () => {
       const taskRows = await sql<{ current_step_id: string | null }[]>`
         select current_step_id from tasks where id = ${fixture.taskId}
       `;
-      expect(taskRows[0]!.current_step_id).toBe('failing-step');
+      expect(taskRows[0]!.current_step_id).toBe(FIXTURE_FAILED_STEP_ID);
 
       const eventRows = await sql<{ event_type: string }[]>`
         select event_type from task_events where task_id = ${fixture.taskId}
@@ -163,35 +154,36 @@ test.describe('task data API', () => {
     }
   });
 
-  test('POST step skip on failed step advances currentStep to next pending', async ({ page }) => {
+  test('POST step skip marks the step skipped and records the event', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('step-skip');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'step-skip');
 
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'skip' } },
       );
       expect(res.status()).toBe(200);
       const body = (await res.json()) as { status: string; nextStepId: string | null };
       expect(body.status).toBe('skipped');
-      expect(body.nextStepId).toBe('middle-step');
+      // ALWAYS null, by design: "The api can't see unmaterialized future steps, so it can't
+      // compute the next step." It enqueues an ADVANCE_STEP job and the worker walks the run list.
+      expect(body.nextStepId).toBeNull();
 
       const stepRows = await sql<{ status: string }[]>`
         select status from task_steps
-        where task_id = ${fixture.taskId} and step_id = 'failing-step'
+        where task_id = ${fixture.taskId} and step_id = ${FIXTURE_FAILED_STEP_ID}
       `;
       expect(stepRows[0]!.status).toBe('skipped');
 
-      const taskRows = await sql<{ current_step_id: string | null }[]>`
-        select current_step_id from tasks where id = ${fixture.taskId}
-      `;
-      expect(taskRows[0]!.current_step_id).toBe('middle-step');
-
+      // What the task's current_step_id becomes is NOT asserted, and deliberately. Advancing is
+      // the worker's job off an enqueued ADVANCE_STEP, so this would be racing it — and on a
+      // fixture task it is a race with a guaranteed loser: the worker fails the task with "has no
+      // resolvable repo path", because the fixture has no repository. Measured, not assumed.
       const eventRows = await sql<{ event_type: string }[]>`
         select event_type from task_events where task_id = ${fixture.taskId}
       `;
@@ -209,7 +201,7 @@ test.describe('task data API', () => {
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('step-404');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'step-404');
 
       const res = await page.request.post(
@@ -230,12 +222,12 @@ test.describe('task data API', () => {
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('step-submit-409');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'step-submit-409');
 
       // failing-step is in status 'failed', not 'waiting_form'
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/submit`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/submit`,
         { data: { values: { foo: 'bar' } } },
       );
       expect(res.status()).toBe(409);
