@@ -143,6 +143,13 @@ export const CONFIG_KEYS = {
   // CLI agents in the cli-exec sandbox). Default true; set 'false' to disable
   // masking for every repo without per-repo edits or a redeploy.
   SECRET_MASK_ENABLED: 'config:sandbox:secretMaskEnabled',
+  // Global kill-switch for carrying a repository's untracked runtime files (the
+  // secret-mask glob set: .env, settings.local.php, service-account json …) from the
+  // repo root into each newly created worktree. `git worktree add` materialises tracked
+  // files only, so without this the app runtime boots against a tree missing exactly the
+  // files it cannot start without. Default true; 'false' leaves a worktree populated
+  // exactly as git checked it out.
+  WORKTREE_CARRY_UNTRACKED_ENABLED: 'config:worker:worktreeCarryUntrackedEnabled',
   // Global kill-switch for provisioning a test framework's browser runtime inside the
   // per-task DDEV web container (08b's selective run). Default true; 'false' leaves the
   // container untouched, so a repo whose suite needs a browser reports the gap through

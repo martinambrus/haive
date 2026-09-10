@@ -249,7 +249,7 @@ async function filterUntracked(workerRoot: string, matches: string[]): Promise<s
 
 /** Tracked paths (relative to repoRoot) per `git ls-files -z`, or null when the
  *  directory is not a git work tree / git is unavailable. */
-async function listTrackedFiles(repoRoot: string): Promise<Set<string> | null> {
+export async function listTrackedFiles(repoRoot: string): Promise<Set<string> | null> {
   try {
     const { stdout } = await execFileAsync('git', ['-C', repoRoot, 'ls-files', '-z'], {
       maxBuffer: 64 * 1024 * 1024,

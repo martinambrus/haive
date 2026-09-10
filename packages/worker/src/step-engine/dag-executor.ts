@@ -44,6 +44,7 @@ import { resolvePreferredCli } from './step-runner.js';
 import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
 import { worktreeDirName, worktreeDirPaths, WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
+import { carryUntrackedForTask } from '../repo/carry-untracked.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type {
   AdvanceStepParams,
@@ -187,6 +188,11 @@ async function createIssueWorktree(
   // Always check reused worktrees too: retry/recovery can encounter one created
   // by an older worker and left root-owned.
   await ensureSandboxWritableTree(worktreePath);
+
+  // Same gap as the spec artifact below, one level up: the repo's untracked runtime files
+  // (a suite's .env, settings.local.php …) are not carried by `git worktree add` either, so
+  // an issue worktree that runs the app or its tests would boot without them.
+  await carryUntrackedForTask(ctx.db, ctx.taskId, ctx.repoPath, worktreePath);
 
   // `.haive/` is git-excluded, so the approved-spec artifact gate 1 wrote into the
   // integration worktree is untracked and `git worktree add` does NOT carry it over.
