@@ -37,12 +37,6 @@ const ENV_SAMPLE_SUFFIXES = ['.sample', '.example', '.dist', '.template'] as con
  *  this repo. Mirrors 08b's own ROOT_SEARCH_SKIP. */
 const SPEC_SEARCH_SKIP = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage', '.git']);
 
-/** `--list` exits 0 if ANY requested spec enumerates, so the question this asks is "can the
- *  runner load NONE of these?". Bounded only to keep the command line sane; a repo with more
- *  specs than this is still answered honestly, because a single loadable spec among the
- *  sample exits 0. */
-const PREFLIGHT_SPEC_LIMIT = 50;
-
 /** How deep the spec search walks below the framework root. */
 const SPEC_SEARCH_MAX_DEPTH = 6;
 
@@ -96,27 +90,31 @@ export async function findMissingEnvFiles(
 }
 
 /**
- * Existing spec files under `root`, workspace-relative and sorted, capped at
- * PREFLIGHT_SPEC_LIMIT. Sorted so the probe command is identical run to run, which keeps a
- * replayed detect payload comparable to the one before it.
+ * Whether the repo ALREADY has at least one spec file under `root`.
+ *
+ * Existence, not a list: the probe enumerates the whole project, so no file list is passed
+ * to the runner and a sampled one would be actively wrong — a subset can consist entirely of
+ * specs that fail to load while a spec outside it is fine, which would park a repo whose
+ * suite actually runs.
+ *
+ * This guard is still needed because `--list` exits non-zero both for a suite that cannot
+ * load and for a project with no tests at all, and only the first is a block.
  */
-export async function findExistingSpecFiles(workspace: string, root: string): Promise<string[]> {
-  const out: string[] = [];
-  const walk = async (rel: string, depth: number): Promise<void> => {
-    if (depth > SPEC_SEARCH_MAX_DEPTH || out.length >= PREFLIGHT_SPEC_LIMIT) return;
+export async function hasExistingSpecFile(workspace: string, root: string): Promise<boolean> {
+  const walk = async (rel: string, depth: number): Promise<boolean> => {
+    if (depth > SPEC_SEARCH_MAX_DEPTH) return false;
     const entries = await readdir(path.join(workspace, rel), { withFileTypes: true }).catch(
       () => [],
     );
-    for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
-      if (out.length >= PREFLIGHT_SPEC_LIMIT) return;
+    for (const entry of entries) {
       if (SPEC_SEARCH_SKIP.has(entry.name)) continue;
       const childRel = rel ? path.posix.join(rel, entry.name) : entry.name;
-      if (entry.isDirectory()) await walk(childRel, depth + 1);
-      else if (entry.isFile() && SPEC_FILE_RE.test(entry.name)) out.push(childRel);
+      if (entry.isFile() && SPEC_FILE_RE.test(entry.name)) return true;
+      if (entry.isDirectory() && (await walk(childRel, depth + 1))) return true;
     }
+    return false;
   };
-  await walk(root, 0);
-  return out;
+  return walk(root, 0);
 }
 
 /**

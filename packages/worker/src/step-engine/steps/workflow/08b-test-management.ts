@@ -29,8 +29,8 @@ import {
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import {
-  findExistingSpecFiles,
   findMissingEnvFiles,
+  hasExistingSpecFile,
   preflightGateSchema,
   type TestPreflightBlock,
 } from './_test-preflight.js';
@@ -296,6 +296,35 @@ export function buildCollectCommand(
     ...run,
     args: [...run.args.slice(0, subcommand + 1), '--list', ...run.args.slice(subcommand + 1)],
   };
+}
+
+/**
+ * The framework's enumerate command for the WHOLE project — no file arguments.
+ *
+ * The pre-flight asks "can this runner load ANY test in this project?", and that question
+ * must not be answered from a subset: a sampled file list can consist entirely of specs that
+ * fail to load while a spec outside the sample is fine, which would park a repo whose suite
+ * actually runs. Passing no paths puts the question to Playwright's own config resolution
+ * instead, which is also what a human running the command by hand would get.
+ *
+ * Same guards as buildCollectCommand: Playwright only, and never the ddev-playwright addon,
+ * whose flag pass-through is unmeasured.
+ */
+export function buildEnumerateAllCommand(
+  framework: TestFramework | null,
+  opts: { ddev: boolean; ddevPlaywrightAddon: boolean; root?: string | null },
+): TestCommand | null {
+  if (framework !== 'playwright') return null;
+  if (opts.ddev && opts.ddevPlaywrightAddon) return null;
+  if (opts.root === null) return null;
+  const root = opts.root ?? '';
+  if (opts.ddev)
+    return {
+      kind: 'ddev',
+      args: [...ddevExecPrefix(root), 'npx', 'playwright', 'test', '--list'],
+      cwd: root,
+    };
+  return { kind: 'host', args: ['npx', 'playwright', 'test', '--list'], cwd: root };
 }
 
 async function readJson(file: string): Promise<Record<string, unknown> | null> {
@@ -570,13 +599,13 @@ async function runTestPreflight(
   const missing = await findMissingEnvFiles(d.workspacePath, [root, '']);
   if (missing.length === 0) return null;
 
-  const specs = await findExistingSpecFiles(d.workspacePath, root);
   // Nothing to enumerate is not evidence of a broken environment — a repo whose suite is
-  // empty and one whose suite cannot load both list zero tests, and only the second is a
-  // block. The tester writing the first specs is the normal path here.
-  if (specs.length === 0) return null;
+  // empty and one whose suite cannot load both list zero tests and exit non-zero, and only
+  // the second is a block. The tester writing the first specs is the normal path here.
+  // Existence only: the probe below enumerates the whole project, never this list.
+  if (!(await hasExistingSpecFile(d.workspacePath, root))) return null;
 
-  const collect = buildCollectCommand(d.primary, specs, {
+  const collect = buildEnumerateAllCommand(d.primary, {
     ddev: d.ddev,
     ddevPlaywrightAddon: d.ddevPlaywrightAddon,
     root,
@@ -593,8 +622,8 @@ async function runTestPreflight(
   if (!listed || listed.exitCode === 0) return null;
 
   ctx.logger.info(
-    { specs: specs.length, missing: missing.map((m) => m.expected) },
-    'test pre-flight: runner enumerated none of the existing specs',
+    { missing: missing.map((m) => m.expected) },
+    'test pre-flight: runner enumerated no test in the project',
   );
   return { command: listed.command, output: listed.output, missing };
 }

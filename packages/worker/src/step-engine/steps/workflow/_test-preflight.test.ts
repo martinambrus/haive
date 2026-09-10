@@ -3,10 +3,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  findExistingSpecFiles,
   findMissingEnvFiles,
+  hasExistingSpecFile,
   preflightGateSchema,
 } from './_test-preflight.js';
+import { buildEnumerateAllCommand } from './08b-test-management.js';
 
 const dirs: string[] = [];
 async function tmp(): Promise<string> {
@@ -69,36 +70,68 @@ describe('findMissingEnvFiles', () => {
   });
 });
 
-describe('findExistingSpecFiles', () => {
-  it('finds specs below the framework root, sorted', async () => {
+describe('hasExistingSpecFile', () => {
+  it('finds a spec nested below the framework root', async () => {
     const ws = await tmp();
-    await write(ws, 'test-playwright/tests/b.spec.ts');
-    await write(ws, 'test-playwright/tests/a.spec.ts');
     await write(ws, 'test-playwright/tests/nested/c.test.tsx');
 
-    expect(await findExistingSpecFiles(ws, 'test-playwright')).toEqual([
-      'test-playwright/tests/a.spec.ts',
-      'test-playwright/tests/b.spec.ts',
-      'test-playwright/tests/nested/c.test.tsx',
-    ]);
+    expect(await hasExistingSpecFile(ws, 'test-playwright')).toBe(true);
   });
 
   it('ignores installed dependencies and build output', async () => {
     const ws = await tmp();
     await write(ws, 'test-playwright/node_modules/pkg/x.spec.ts');
     await write(ws, 'test-playwright/dist/y.spec.js');
-    await write(ws, 'test-playwright/tests/real.spec.ts');
 
-    expect(await findExistingSpecFiles(ws, 'test-playwright')).toEqual([
-      'test-playwright/tests/real.spec.ts',
-    ]);
+    expect(await hasExistingSpecFile(ws, 'test-playwright')).toBe(false);
   });
 
-  it('returns nothing for a suite that does not exist yet', async () => {
+  it('is false for a suite that does not exist yet', async () => {
     const ws = await tmp();
     await write(ws, 'test-playwright/playwright.config.ts');
 
-    expect(await findExistingSpecFiles(ws, 'test-playwright')).toEqual([]);
+    // `--list` exits non-zero for an empty project too, so without this guard the pre-flight
+    // would park a repo whose tests the tester has simply not written yet.
+    expect(await hasExistingSpecFile(ws, 'test-playwright')).toBe(false);
+  });
+});
+
+describe('buildEnumerateAllCommand', () => {
+  const opts = { ddev: true, ddevPlaywrightAddon: false, root: 'test-playwright' };
+
+  it('passes NO file paths, so no sampled subset can decide the verdict', () => {
+    // A file list drawn from the repo can consist entirely of specs that fail to load while a
+    // spec outside it is fine — that would park a repo whose suite actually runs.
+    const cmd = buildEnumerateAllCommand('playwright', opts);
+    expect(cmd?.args).toEqual([
+      'exec',
+      '-d',
+      '/var/www/html/test-playwright',
+      'npx',
+      'playwright',
+      'test',
+      '--list',
+    ]);
+    expect(cmd?.args.some((a) => a.endsWith('.ts') || a.endsWith('.js'))).toBe(false);
+  });
+
+  it('runs on the host without a ddev prefix', () => {
+    expect(buildEnumerateAllCommand('playwright', { ...opts, ddev: false })).toEqual({
+      kind: 'host',
+      args: ['npx', 'playwright', 'test', '--list'],
+      cwd: 'test-playwright',
+    });
+  });
+
+  it('declines the frameworks and shapes it has not measured', () => {
+    expect(buildEnumerateAllCommand('vitest', opts)).toBeNull();
+    expect(buildEnumerateAllCommand(null, opts)).toBeNull();
+    // The addon's flag pass-through is unmeasured — same guard buildCollectCommand states.
+    expect(
+      buildEnumerateAllCommand('playwright', { ...opts, ddevPlaywrightAddon: true }),
+    ).toBeNull();
+    // null root = no config file found anywhere.
+    expect(buildEnumerateAllCommand('playwright', { ...opts, root: null })).toBeNull();
   });
 });
 
