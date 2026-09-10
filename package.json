@@ -11,7 +11,7 @@
     "dev:worker": "pnpm --filter @haive/worker dev",
     "build": "turbo run build",
     "test": "turbo run test",
-    "test:e2e": "playwright test --project=chromium --pass-with-no-tests",
+    "test:e2e": "playwright test --project=chromium",
     "test:visual": "bash scripts/visual.sh",
     "pretest:e2e": "playwright install chromium",
     "test:e2e:setup": "playwright install --with-deps chromium",
