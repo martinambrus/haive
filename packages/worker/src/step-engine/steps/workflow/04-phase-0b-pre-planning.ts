@@ -108,11 +108,52 @@ interface PrePlanningDetect {
   reviewDimensionIds: string[];
 }
 
+/** The deepest the index is ever rendered, and the character budget that shrinks it
+ *  when a plan is too big for that depth to be affordable.
+ *
+ *  A GUARD RAIL, not a tuning change: 120k sits above every index MEASURED on a run
+ *  that went well, so it trims nothing that has been observed working and only bounds
+ *  the tail. Rendered index vs whole spec prompt, measured: a 174-node plan 93,035 of
+ *  124,215 chars (75%), a 193-node plan 115,620 of 133,331 (87%), a 544-node plan
+ *  158,274 of 219,412 (72%). So the index is the dominant term in EVERY planned run
+ *  and lowering this is the biggest single lever on spec-phase cost — but whether a
+ *  shallower index costs spec quality has not been measured, so it is not assumed
+ *  here. Drop it to ~40k to halve the spec prompt, and compare the specs. */
+const PLAN_INDEX_MAX_DEPTH = 3;
+const PLAN_INDEX_MAX_CHARS = 120_000;
+
 /** The plan canvas as a compact index for the spec prompt: titles, ids, kinds and
- *  statuses down to three levels, with no bodies. The whole plan would swamp the
- *  prompt and most of it is irrelevant to any one task; what the spec writer needs
- *  is the VOCABULARY — which components exist and what they are called — so its
- *  "Affected components" section names real ones. Silent when the repo has no plan. */
+ *  statuses, with no bodies. The whole plan would swamp the prompt and most of it is
+ *  irrelevant to any one task; what the spec writer needs is the VOCABULARY — which
+ *  components exist and what they are called — so its "Affected components" section
+ *  names real ones.
+ *
+ *  Depth is stepped DOWN rather than the text cut, because a character slice would
+ *  end mid-node and leave a truncated `node:<uuid>` the writer could quote back as if
+ *  it were whole. Shallower keeps every rendered node intact, and breadth is what
+ *  vocabulary needs. The reduction is STATED in the prompt — the same rule the impact
+ *  diagram's own cap follows: reported, never silent. */
+async function renderBoundedPlanIndex(ctx: StepContext, repositoryId: string): Promise<string> {
+  let rendered = '';
+  for (let depth = PLAN_INDEX_MAX_DEPTH; depth >= 1; depth--) {
+    rendered = await renderPlanMarkdown(ctx.db, repositoryId, {
+      titlesOnly: true,
+      maxDepth: depth,
+    });
+    if (rendered.length <= PLAN_INDEX_MAX_CHARS || depth === 1) {
+      if (depth === PLAN_INDEX_MAX_DEPTH) return rendered;
+      return (
+        `${rendered}\n_This index is bounded to ${depth} level(s) of the plan because the full ` +
+        `${PLAN_INDEX_MAX_DEPTH} levels do not fit the prompt. Components deeper than that exist ` +
+        `and are NOT listed — do not treat this as the whole plan, and do not invent ids for what ` +
+        `is missing._\n`
+      );
+    }
+  }
+  return rendered;
+}
+
+/** Silent when the repo has no plan. */
 async function loadPlanIndex(
   ctx: StepContext,
 ): Promise<{ planIndex: string; seededNodes: string; planRepositoryId: string | null }> {
@@ -128,10 +169,7 @@ async function loadPlanIndex(
     if (!(await findPlanRoot(ctx.db, repositoryId))) {
       return { planIndex: '', seededNodes: '', planRepositoryId: repositoryId };
     }
-    const planIndex = await renderPlanMarkdown(ctx.db, repositoryId, {
-      titlesOnly: true,
-      maxDepth: 3,
-    });
+    const planIndex = await renderBoundedPlanIndex(ctx, repositoryId);
     return {
       planIndex,
       seededNodes: await renderSeededNodesFor(ctx, repositoryId),
