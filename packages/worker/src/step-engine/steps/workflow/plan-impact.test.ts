@@ -194,11 +194,21 @@ describe('planImpactBlock', () => {
     expect(planImpactBlock(ctx(), solo)).not.toContain('NOTE:');
   });
 
-  it('tells a DAG coder to report, never to edit', () => {
+  it('tells a DAG coder this is blast radius, not file ownership', () => {
+    // The list is the same one the implementer gets, derived at 04 before the DAG
+    // plan exists — so a coder's OWN assigned files appear in it. Read as an
+    // ownership list it makes an issue refuse its own scope (task 4905067c).
     const out = planImpactBlock(ctx(), dag);
-    expect(out).toContain('Do NOT edit these files');
-    expect(out).toContain('merge conflict at the level barrier');
+    expect(out).toContain('NOT a list of files you may not touch');
+    expect(out).toContain('your issue wins');
+    expect(out).not.toContain('belong to other issues');
+    expect(out).not.toContain('Do NOT edit these files');
+  });
+
+  it("still routes another issue's work into concerns rather than the worktree", () => {
+    const out = planImpactBlock(ctx(), dag);
     expect(out).toContain('`concerns`');
+    expect(out).toContain('level barrier');
   });
 
   it('tells the single implementer that fixing a broken consumer IS in scope', () => {
