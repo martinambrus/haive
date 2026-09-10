@@ -2,6 +2,7 @@ import {
   CLI_DISPATCH_STEP_IDS,
   CLI_DISPATCH_STEPS,
   PROVIDER_SENSITIVE_STEP_IDS,
+  SKIPPABLE_STEP_IDS,
 } from '@haive/shared';
 import type { StepRegistry } from '../registry.js';
 import { PATH_STEP_SETS, PATH_REQUIRED_TARGETS } from '../../orchestrator/execution-paths.js';
@@ -33,7 +34,35 @@ export function registerAllSteps(registry: StepRegistry): void {
   registerPlanSteps(registry);
   assertProviderSensitiveListInSync(registry);
   assertCliDispatchListInSync(registry);
+  assertSkippableListInSync(registry);
   assertPathStepSetsClosed(registry);
+}
+
+/** Startup sanity check: SKIPPABLE_STEP_IDS in @haive/shared is what the api's Skip
+ *  handler enforces (it cannot import this registry). It must match the set of step
+ *  definitions with `metadata.allowSkip === true`.
+ *
+ *  This was the one shared step-id constant WITHOUT such a check, and it is the only one
+ *  that drifted: 07c-ddev-reconcile set the flag in its first commit (06abea1f) and was
+ *  never added to the list, so for three months its Skip button did not render and the api
+ *  would have answered 409. Drift fails silently in both directions — a missing entry
+ *  removes a capability, an extra one lets the api accept a skip the worker never
+ *  sanctioned — which is exactly the shape its two siblings above already guard against. */
+function assertSkippableListInSync(registry: StepRegistry): void {
+  const actual = new Set(
+    registry
+      .all()
+      .filter((d) => d.metadata.allowSkip === true)
+      .map((d) => d.metadata.id),
+  );
+  const declared = new Set(SKIPPABLE_STEP_IDS);
+  const missing = [...actual].filter((id) => !declared.has(id));
+  const extra = [...declared].filter((id) => !actual.has(id));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `SKIPPABLE_STEP_IDS out of sync with StepDefinition.metadata.allowSkip — missing in shared: [${missing.join(', ')}], extra in shared: [${extra.join(', ')}]`,
+    );
+  }
 }
 
 /** Startup sanity check for execution-path filtering (execution-paths.ts). Every
