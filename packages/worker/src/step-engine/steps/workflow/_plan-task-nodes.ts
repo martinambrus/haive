@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { loadPlanEdges, loadPlanNodes } from '@haive/shared/plan';
 import type { PlanNodeRecord } from '@haive/shared/plan';
@@ -30,10 +30,21 @@ export async function loadSeededPlanNodes(
   ctx: StepContext,
   repositoryId: string,
 ): Promise<SeededPlanNodes | null> {
+  // `implements` ONLY — the role a PERSON's choice carries. `touched` rows are
+  // written by this step's own `recordTouchedPlanNodes` from the spec's
+  // `## Affected components`, so reading every role feeds each round's blast
+  // radius back into the next round's prompt, rendered in full WITH BODIES.
+  // MEASURED on task 681f0f99: 5 links at task creation, +157 the moment 04
+  // round 0 ended, +201 the moment round 1 ended — 363 nodes re-rendered, and
+  // the seeded block went 9,493 -> 232,365 chars while the whole spec prompt
+  // went 219,412 -> 441,506. The same role split already keeps
+  // `completePlanNodesForTask` from greening a node this task merely touched.
   const links = await ctx.db
     .select({ nodeId: schema.planNodeTasks.nodeId })
     .from(schema.planNodeTasks)
-    .where(eq(schema.planNodeTasks.taskId, ctx.taskId));
+    .where(
+      and(eq(schema.planNodeTasks.taskId, ctx.taskId), eq(schema.planNodeTasks.role, 'implements')),
+    );
   if (links.length === 0) return null;
 
   const seeded = new Set(links.map((l) => l.nodeId));
