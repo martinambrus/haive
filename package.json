@@ -16,6 +16,7 @@
     "test:e2e:setup": "playwright install --with-deps chromium",
     "smoke": "pnpm --filter @haive/worker smoke:all",
     "typecheck": "turbo run typecheck",
+    "typecheck:e2e": "tsc --noEmit -p tests",
     "clean": "turbo run clean && rm -rf node_modules .turbo",
     "db:push": "pnpm --filter @haive/database push",
     "db:studio": "pnpm --filter @haive/database studio",

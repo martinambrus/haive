@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // Playwright transpiles specs with esbuild and never type-checks them, and `pnpm typecheck`
+    // runs per workspace package — `tests/` is in neither, so nothing checked these files at all.
+    // A spec calling a helper with the wrong arguments used to surface only as a runtime failure.
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "incremental": false,
+    // page.evaluate bodies run in the browser and reference DOM globals.
+    "lib": ["ES2024", "DOM"],
+    "types": ["node"]
+  },
+  "include": ["e2e/**/*.ts"]
+}

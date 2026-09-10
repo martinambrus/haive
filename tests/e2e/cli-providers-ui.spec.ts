@@ -248,8 +248,14 @@ test.describe('cli providers UI', () => {
         },
         {
           name: 'authMode',
-          dirty: async () => page.locator('#authMode').selectOption('api_key'),
-          clean: async () => page.locator('#authMode').selectOption('subscription'),
+          // Braces, not a concise body: selectOption resolves to string[] where every sibling
+          // here resolves to void, and the mismatch is a type error the suite never ran to see.
+          dirty: async () => {
+            await page.locator('#authMode').selectOption('api_key');
+          },
+          clean: async () => {
+            await page.locator('#authMode').selectOption('subscription');
+          },
         },
         {
           name: 'sandboxDockerfileExtra',
