@@ -49,8 +49,9 @@ export interface StepMetadata {
    *  provider change (it does not have access to the worker step registry). */
   providerSensitive?: boolean;
   /** When true, the user-facing Skip step action is permitted for this step.
-   *  Skip is otherwise disabled across the workflow; only steps that opt in
-   *  (currently 06a-db-migrate) may be skipped. The API skip handler enforces this. */
+   *  Skip is otherwise disabled across the workflow; only steps that opt in may be
+   *  skipped. Setting this is HALF the change — add the id to SKIPPABLE_STEP_IDS
+   *  too, or the api answers `canSkip: false` and the button never renders. */
   allowSkip?: boolean;
   /** When true, a local in-stack Ollama model is BLOCKED from running this step
    *  by default — these steps rewrite long-lived project files (skills, working
@@ -169,12 +170,17 @@ export const STEP_MINING_SEATS: Record<string, readonly CliRoleDescriptor[]> = {
 /** Step ids whose StepDefinition sets `metadata.allowSkip = true`. The user
  *  Skip action is permitted ONLY on these; the API skip handler enforces it
  *  (the api can't import the worker step registry). Keep in sync with the
- *  `allowSkip: true` flags on StepDefinition metadata. */
+ *  `allowSkip: true` flags on StepDefinition metadata — `skippable-step-sync.test.ts`
+ *  asserts both directions, because a one-sided edit here fails SILENTLY: the api
+ *  answers `canSkip: false` and the button simply never renders, which reads as
+ *  "this step is not skippable" rather than as a bug. */
 export const SKIPPABLE_STEP_IDS: readonly string[] = [
   '01e-external-kb-sync',
   '01f-external-plan-sync',
   '03b-business-requirements',
   '06a-db-migrate',
+  '07c-ddev-reconcile',
+  '08b-test-management',
   '11a-gate-4-push',
   '11b-kb-commit',
   '11c-rag-reindex',
