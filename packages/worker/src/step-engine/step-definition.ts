@@ -18,8 +18,10 @@ export interface StepContext {
   workspacePath: string;
   sandboxWorkdir: string;
   cliProviderId: string | null;
-  /** Fix-loop round this step row belongs to (0 = original pass). round > 0 means
-   *  a fix re-run; steps branch on it to enter fix mode (e.g. 07 implement). */
+  /** Round this step row belongs to (0 = original pass). Bumped by BOTH loops — the fix
+   *  loop (loop_back) and the revise loop's forward fork (a human gate-1 spec reject) — so
+   *  `round > 0` does NOT mean "fix re-run". To branch into fix mode, ask isFixRound /
+   *  loadFixLoopDiagnosis, which key on the recorded request for this round. */
   round: number;
   db: Database;
   logger: Logger;
