@@ -1808,10 +1808,31 @@ async function ensureDdevStartedInner(
         timeoutMs: 300_000,
       });
       if (warm.exitCode === 0) {
-        // Deliberately NO restoreLatestSnapshot: the container survived, so its
-        // nested DB volume survived and holds the live (possibly newer) DB. A
-        // repo-volume snapshot is OLDER — restoring it here would clobber the
-        // live DB. Skip it even when a snapshot exists.
+        // Normally NO restoreLatestSnapshot here: the container survived, so its
+        // nested DB volume survived and holds the live (possibly newer) DB, and a
+        // repo-volume snapshot is OLDER — restoring it would clobber that.
+        //
+        // That reasoning holds only while the DB really is live, and "the container
+        // survived" is an INFERENCE, not a check. MEASURED on task ef954a3d: the
+        // import succeeded and wrote a 55.7 MB snapshot, the project later came back
+        // through this branch against an EMPTY nested volume, `ddev start` returned 0,
+        // the restore was skipped on the assumption above, and the task then ran ~8
+        // more hours and two gate-2 rejections against a database with zero tables —
+        // every request answering `relation "semaphore" does not exist`. The snapshot
+        // restored in 82s when finally asked.
+        //
+        // So verify the assumption instead of trusting it. Restoring over a PROVABLY
+        // EMPTY database cannot clobber a live one, which is the whole reason the skip
+        // exists — and an unreadable count (null) is not evidence of emptiness, so it
+        // keeps today's behaviour.
+        const tables = await countDdevTablesUnknownEngine(existing);
+        if (tables === 0) {
+          log.warn(
+            { taskId },
+            'warm start came back to an EMPTY database — restoring the durability snapshot',
+          );
+          await restoreLatestSnapshot(existing, taskId);
+        }
         return existing;
       }
       // A version-constraint rejection is not a wedged runner — a cold rebuild cannot
@@ -1893,14 +1914,36 @@ async function ensureDdevStartedInner(
  *  project with no imported DB) is the normal no-op case. Tolerant by design —
  *  keyed only on exit codes, never on snapshot-list output formatting. */
 async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): Promise<void> {
+  const failures: string[] = [];
   for (const name of [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)]) {
     const res = await ddevSnapshotRestore(handle, name);
     if (res.exitCode === 0) {
       log.info({ taskId, snapshot: name }, 'restored DDEV DB snapshot after cold boot');
       return;
     }
+    failures.push(`${name}: ${res.output.slice(-300)}`);
   }
-  log.info({ taskId }, 'no DDEV DB snapshot to restore (first boot or no imported DB)');
+  // "No snapshot existed" and "every restore FAILED" are different facts and used to
+  // log the same benign info line, so a broken restore read as a project that never
+  // had a database — and the run carried on against an empty one. `ddev snapshot
+  // restore` on an absent name is itself an error, so absence cannot be told from
+  // failure by exit code alone; what separates them is that a real failure has
+  // something to say, which is why the output is carried here.
+  log.warn(
+    { taskId, attempts: failures },
+    'no DDEV DB snapshot could be restored — first boot, no imported DB, or every restore failed',
+  );
+}
+
+/** Table count for a caller with no parsed `.ddev/config.yaml` in hand: ask postgres,
+ *  then mysql, and take the first client that answers. Null when neither does, which
+ *  is "unknown" and never "empty" — see ddevCountTables. */
+async function countDdevTablesUnknownEngine(handle: DdevRunnerHandle): Promise<number | null> {
+  for (const dbType of ['postgres', null]) {
+    const n = await ddevCountTables(handle, dbType, { timeoutMs: 60_000 });
+    if (n !== null) return n;
+  }
+  return null;
 }
 
 /** Run a ddev subcommand with live per-line streaming for the progress UI. The
