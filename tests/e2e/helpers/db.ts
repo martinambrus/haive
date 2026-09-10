@@ -8,6 +8,21 @@ export function getSql(): postgres.Sql {
   return postgres(url, { max: 1, idle_timeout: 5 });
 }
 
+/**
+ * The failed step's id, and why it is not an arbitrary string.
+ *
+ * The user-facing Skip action is ALLOWLISTED server-side: `isStepSkippable` admits only the ids in
+ * `SKIPPABLE_STEP_IDS` (plus `01-worktree-setup` on a `run_app` task), the skip handler answers 409
+ * for anything else, and `canSkip` comes back false so the UI never renders the button. A synthetic
+ * id like `failing-step` therefore cannot be skipped at all, which is what the earlier fixture used.
+ *
+ * If this id is ever dropped from that allowlist the skip specs fail loudly with a 409 naming it —
+ * which is the right failure, and better than a fixture that silently stops covering the action.
+ */
+export const FIXTURE_FAILED_STEP_ID = '11a-gate-4-push';
+export const FIXTURE_MIDDLE_STEP_ID = '11b-kb-commit';
+export const FIXTURE_LAST_STEP_ID = '11c-rag-reindex';
+
 export interface TaskFixture {
   taskId: string;
   failedStepId: string;
@@ -38,7 +53,7 @@ export async function seedTaskFixture(
     ) values (
       ${taskId}, ${userId}, 'workflow',
       ${`e2e retry/skip ${titleSuffix} ${randomBytes(3).toString('hex')}`},
-      'failed', 'simulated failure', 'failing-step', 0, ${now}, ${now}
+      'failed', 'simulated failure', ${FIXTURE_FAILED_STEP_ID}, 0, ${now}, ${now}
     )
   `;
 
@@ -47,9 +62,9 @@ export async function seedTaskFixture(
       id, task_id, step_id, step_index, title, status, error_message,
       ended_at, created_at, updated_at
     ) values
-      (${failedStepId}, ${taskId}, 'failing-step', 0, 'Failing step', 'failed', 'kaboom', ${now}, ${now}, ${now}),
-      (${middleStepId}, ${taskId}, 'middle-step', 1, 'Middle step', 'pending', null, null, ${now}, ${now}),
-      (${lastStepId}, ${taskId}, 'last-step', 2, 'Last step', 'pending', null, null, ${now}, ${now})
+      (${failedStepId}, ${taskId}, ${FIXTURE_FAILED_STEP_ID}, 0, 'Failing step', 'failed', 'kaboom', ${now}, ${now}, ${now}),
+      (${middleStepId}, ${taskId}, ${FIXTURE_MIDDLE_STEP_ID}, 1, 'Middle step', 'pending', null, null, ${now}, ${now}),
+      (${lastStepId}, ${taskId}, ${FIXTURE_LAST_STEP_ID}, 2, 'Last step', 'pending', null, null, ${now}, ${now})
   `;
 
   return { taskId, failedStepId, middleStepId, lastStepId };
@@ -89,6 +104,9 @@ export async function cleanupRepoFixture(sql: postgres.Sql, repoId: string): Pro
 
 export async function cleanupUser(sql: postgres.Sql, userId: string): Promise<void> {
   await sql`delete from refresh_tokens where user_id = ${userId}`;
+  // Before the user, not after: `consumed_by_user_id` is ON DELETE SET NULL, so deleting the user
+  // first would strand the redeemed invite with nothing left to identify it by.
+  await sql`delete from user_invites where consumed_by_user_id = ${userId}`;
   await sql`delete from users where id = ${userId}`;
 }
 
