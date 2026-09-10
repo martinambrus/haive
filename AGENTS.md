@@ -613,9 +613,24 @@ merge.** MEASURED across five runs of one task, per-issue DAG reviewers against 
 (Opus 5 medium, no plan), 131 of 349 (gpt-6-astra) — consistently ~50%, and the merged result is
 then reviewed AGAIN by 07b, 08c, 08c2 and 08d. On the max-effort run that is ~487 of 1,096 CLI
 minutes, 44% of the whole run. That per-issue layer is the `sprintReviewEnabled` checkbox on
-06-run-config ("AI-review each issue before merge"), default ON — it is a real control, not a
-constant, and turning it off is the largest single lever on run cost that changes no code. What
-has NOT been measured is whether the global layers catch what it catches, so the default stands.
+06-run-config ("AI-review each issue before merge"), default ON.
+
+**Do NOT reach for that checkbox as a cost lever — it is two features under one flag.**
+`resolveReviewPhase` (the ~50%) reviews issues that SUCCEEDED, as the merge gate
+`runLevelMerge` keys on. `resolveEscalationPhase` (issue-advisor -> replanner) handles issues
+that FAILED, costs nothing when none did, and sits inside the same `if (plan.reviewEnabled)`.
+So turning review off ALSO turns off failure recovery, and the `coderFailed.length > 0 &&
+!plan.reviewEnabled` branch then fails the whole level on one failed coder. Both halves landed
+the same day — `e37a39c7` (per-issue review gate) and `79e321ad` (escalation hierarchy) — which
+is how they came to share a flag. Neither `dag-review-smoke` nor `dag-escalation-smoke` runs
+with it false, so that combination is UNTESTED as well as unsafe.
+
+Splitting them is the fix: escalation always available, per-issue review the toggle. Only then
+is the default an empirical question — and what has NOT been measured either way is whether
+07b/08c/08c2/08d catch what the per-issue reviewer catches. Retrofitting review onto a failure
+is NOT the alternative: it gates SUCCEEDED issues before merge, and by the time a defect
+surfaces at 07b, `cleanupLevelWorktrees` has destroyed the per-issue worktrees. The retroactive
+path already exists and is the fix loop, in the integration worktree.
 
 Two neighbouring numbers to read before concluding anything from a DAG run: `issueCount` and
 `levelCount` (`06b-sprint-planning.output`). Levels are BARRIERS, so parallelism tracks the
