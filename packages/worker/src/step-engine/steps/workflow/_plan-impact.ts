@@ -244,10 +244,17 @@ export interface PlanImpactBlockOptions {
    * - `implementer`: the single implementation agent. It holds the whole worktree,
    *   so a consumer whose contract the change breaks is legitimately its to fix —
    *   which is what the scope fence already says.
-   * - `dag-coder`: owns ONE issue in ONE worktree merged at a level barrier.
-   *   Editing a file another issue owns produces a merge conflict, and git is
-   *   unavailable to it, so the block is strictly read-only and routes a needed
-   *   change into `concerns`.
+   * - `dag-coder`: owns ONE issue in ONE worktree merged at a level barrier. The
+   *   list is the SAME blast radius the implementer gets — it is derived from the
+   *   plan's edges and `plan_node_code_links`, both computed at 04 before the DAG
+   *   plan exists, so it says nothing about which issue owns which file and the
+   *   coder's OWN assigned files routinely appear in it. Reading it as an
+   *   ownership list is what this arm must not do: MEASURED, ISSUE-002 of task
+   *   4905067c found its own `estimated_files` entry listed here, refused to wire
+   *   its helper in, and returned `failed_unrecoverable`. What is true is that a
+   *   sibling may be editing the same file in its own worktree, so the arm asks
+   *   for a small edit and routes work belonging to a DIFFERENT issue into
+   *   `concerns` — git is unavailable to it and the barrier does the merging.
    * - `tester`: writes and audits tests. Changes no application code, and reads the
    *   list to find coverage that has fallen behind rather than components to touch.
    */
@@ -279,7 +286,7 @@ const CLOSING: Record<PlanImpactBlockOptions['role'], string> = {
   implementer:
     'If your change alters a contract one of these relies on, fixing it is part of THIS change — that is already in scope. If it does not, leave it alone.',
   'dag-coder':
-    'Do NOT edit these files — they belong to other issues in this run and editing them causes a merge conflict at the level barrier. Read them if your change alters something they rely on, and if one genuinely needs a change, say so in `concerns` instead of making it.',
+    'This is a blast-radius list, NOT a list of files you may not touch: a file your own issue is assigned can appear here, and your issue wins — implement it. What it does mean is that a sibling coder may be editing the same file in its own worktree, so keep any edit to a listed file as small as your issue needs. Work that belongs to a DIFFERENT issue goes in `concerns` rather than into your worktree — git is unavailable to you and the level barrier merges these branches.',
   // The second sentence is not optional. Links accrue one task at a time, so most
   // components carry none for a long while, and a tester reading an empty list as
   // "this has no tests" writes a duplicate of a suite it never opened.
