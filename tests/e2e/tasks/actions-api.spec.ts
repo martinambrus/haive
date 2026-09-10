@@ -6,6 +6,7 @@ import {
   readTaskStatus,
   seedTaskFixture,
   type TaskFixture,
+  FIXTURE_FAILED_STEP_ID,
 } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 import type postgres from 'postgres';
@@ -173,7 +174,7 @@ test.describe('step retry API', () => {
       await setTaskStatus(sql, fixture.taskId, 'completed');
 
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'retry' } },
       );
       const resBody = await res.text();
@@ -200,7 +201,7 @@ test.describe('step retry API', () => {
       // ids). currentStepId is durable because markTaskFailed doesn't touch
       // it; step rows are durable because failure path doesn't update them.
       const taskRow = await readTaskStatus(sql, fixture.taskId);
-      expect(taskRow?.currentStepId).toBe('failing-step');
+      expect(taskRow?.currentStepId).toBe(FIXTURE_FAILED_STEP_ID);
 
       const events = await sql<{ payload: Record<string, unknown> }[]>`
         select payload from task_events
@@ -242,7 +243,7 @@ test.describe('step retry API', () => {
       await setTaskStatus(sql, fixture.taskId, 'waiting_user');
 
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'retry' } },
       );
       expect(res.status()).toBe(200);
@@ -270,7 +271,7 @@ test.describe('step retry API', () => {
       await sql`update task_steps set status = 'skipped' where id = ${fixture.failedStepId}`;
 
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'retry' } },
       );
       expect(res.status()).toBe(200);
@@ -303,7 +304,7 @@ test.describe('step retry API', () => {
         await sql`update task_steps set status = ${status}::step_status where id = ${fixture.failedStepId}`;
 
         const res = await page.request.post(
-          `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+          `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
           { data: { action: 'retry' } },
         );
         expect(res.status()).toBe(409);
@@ -328,7 +329,7 @@ test.describe('step retry API', () => {
       await sql`update task_steps set status = 'running', started_at = now() where id = ${fixture.middleStepId}`;
 
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'retry' } },
       );
       expect(res.status()).toBe(409);
@@ -371,7 +372,7 @@ test.describe('step retry API', () => {
       `;
 
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'retry' } },
       );
       expect(res.status()).toBe(200);

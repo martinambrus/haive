@@ -1,29 +1,14 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import {
   cleanupTaskFixture,
   cleanupUser,
   getSql,
   seedTaskFixture,
   type TaskFixture,
-} from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+  FIXTURE_FAILED_STEP_ID,
+} from '../helpers/db.js';
+import { registerUser, uniqueEmail } from '../helpers/auth.js';
+import { actionLabels, openActionMenu } from '../helpers/actions.js';
 
 test.describe('task detail page', () => {
   test('renders heading, status, all step cards, error, and tab switching', async ({ page }) => {
@@ -32,7 +17,7 @@ test.describe('task detail page', () => {
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('task-detail');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'detail');
 
       await page.goto(`/tasks/${fixture.taskId}`);
@@ -54,7 +39,7 @@ test.describe('task detail page', () => {
 
       // step action buttons present on failed step (scoped to the step card,
       // since "Retry" also appears as the task-level button at the page top)
-      const failingStepCard = page.locator('[data-step-id="failing-step"]');
+      const failingStepCard = page.locator(`[data-step-id="${FIXTURE_FAILED_STEP_ID}"]`);
       await expect(
         failingStepCard.getByRole('button', { name: 'Retry', exact: true }),
       ).toBeVisible();
@@ -62,18 +47,25 @@ test.describe('task detail page', () => {
         failingStepCard.getByRole('button', { name: 'Skip', exact: true }),
       ).toBeVisible();
 
-      // task-level Retry button visible (status=failed). Both step-level and
-      // task-level buttons are labeled "Retry" — match by count rather than
-      // strict locator, since the strict-mode locator now has 2 matches.
-      await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(2);
+      // The task's own actions live behind the header's "Actions" menu — ActionMenu collapses
+      // two or more into a role="menu" — while a failed step card keeps its Retry as a plain
+      // button. So the only Retry BUTTON on the page is the step's, and the task-level one is a
+      // menuitem. That distinction is the whole point: they post to different routes.
+      await expect(
+        page.getByRole('button', { name: 'Retry', exact: true }),
+        'the step card owns the only plain Retry button',
+      ).toHaveCount(1);
 
-      // Pause/Resume are not implemented in the current API/UI.
-      await expect(page.getByRole('button', { name: 'Pause' })).toHaveCount(0);
-      await expect(page.getByRole('button', { name: 'Resume' })).toHaveCount(0);
-
-      // Cancel IS visible for failed tasks — page.tsx exposes Cancel for any
-      // status not in {completed, cancelled} so failed tasks remain abortable.
-      await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
+      const labels = await actionLabels(page);
+      expect(labels).toContain('Retry');
+      // Cancel stays available on a failed task: the page offers it for any status outside
+      // {completed, cancelled}, so a failed task remains abortable.
+      expect(labels).toContain('Cancel');
+      // Resume is Pause's complement and must not be offered on a task nobody paused. This
+      // replaces an assertion that claimed Pause/Resume were "not implemented" — they are
+      // (POST /tasks/:id/action handles both); it passed only because the menu was shut.
+      expect(labels).not.toContain('Resume');
+      await page.keyboard.press('Escape');
 
       // Tabs present + switch to Activity
       await page.getByRole('button', { name: 'Activity' }).click();
@@ -94,7 +86,7 @@ test.describe('task detail page', () => {
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('task-activity');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'activity');
 
       await sql`
@@ -126,16 +118,20 @@ test.describe('task detail page', () => {
     let fixture: TaskFixture | null = null;
     try {
       const email = uniqueEmail('task-detail-retry');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'retry-task');
 
       await page.goto(`/tasks/${fixture.taskId}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
-      // The page renders 2 "Retry" buttons (task-level in the page header,
-      // step-level in the failing step card). Click the task-level one — it's
-      // the first match, in the page-header region.
-      await page.getByRole('button', { name: 'Retry', exact: true }).first().click();
+      // Through the header menu, NOT `getByRole('button', { name: 'Retry' }).first()`. Once the
+      // task-level actions moved behind ActionMenu, the only Retry button left on the page was
+      // the STEP card's, so `.first()` quietly retried the step instead: it posts to
+      // /tasks/:id/steps/:id/action, emits step.retry rather than task.retried, and the poll
+      // below would then spin for its full 10s and fail — after the click had already done
+      // something. There is exactly one ActionMenu on this page, so the menu is unambiguous.
+      const menu = await openActionMenu(page);
+      await menu.getByRole('menuitem', { name: 'Retry', exact: true }).click();
 
       // The retry transaction inserts task.retried in task_events and clears
       // errorMessage synchronously. Both are race-proof even when the worker

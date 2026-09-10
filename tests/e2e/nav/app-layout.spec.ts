@@ -1,23 +1,6 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupUser, getSql } from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+import { expect, test } from '@playwright/test';
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 test.describe('app layout and navigation', () => {
   test('sidebar renders branding, email, and all nav links', async ({ page }) => {
@@ -25,7 +8,7 @@ test.describe('app layout and navigation', () => {
     let userId = '';
     try {
       const email = uniqueEmail('nav-sidebar');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       await page.goto('/dashboard');
       await expect(page).toHaveURL(/\/dashboard$/);
@@ -53,7 +36,7 @@ test.describe('app layout and navigation', () => {
     let userId = '';
     try {
       const email = uniqueEmail('nav-walk');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       await page.goto('/dashboard');
       const aside = page.locator('aside');
@@ -94,7 +77,7 @@ test.describe('app layout and navigation', () => {
     let userId = '';
     try {
       const email = uniqueEmail('dash-cards');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       await page.goto('/dashboard');
 
@@ -115,7 +98,7 @@ test.describe('app layout and navigation', () => {
     let userId = '';
     try {
       const email = uniqueEmail('nav-logout');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       await page.goto('/dashboard');
       await page.locator('aside').getByRole('button', { name: 'Sign out' }).click();

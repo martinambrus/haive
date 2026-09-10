@@ -5,6 +5,9 @@ import {
   getSql,
   seedTaskFixture,
   type TaskFixture,
+  FIXTURE_FAILED_STEP_ID,
+  FIXTURE_LAST_STEP_ID,
+  FIXTURE_MIDDLE_STEP_ID,
 } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
@@ -29,7 +32,11 @@ test.describe('task data API', () => {
       expect(body.task.id).toBe(fixture.taskId);
       expect(body.task.status).toBe('failed');
       expect(body.steps).toHaveLength(3);
-      expect(body.steps.map((s) => s.stepId)).toEqual(['failing-step', 'middle-step', 'last-step']);
+      expect(body.steps.map((s) => s.stepId)).toEqual([
+        FIXTURE_FAILED_STEP_ID,
+        FIXTURE_MIDDLE_STEP_ID,
+        FIXTURE_LAST_STEP_ID,
+      ]);
       expect(body.steps.map((s) => s.stepIndex)).toEqual([0, 1, 2]);
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
@@ -53,7 +60,7 @@ test.describe('task data API', () => {
         steps: Array<{ stepId: string; status: string; errorMessage: string | null }>;
       };
       expect(body.steps).toHaveLength(3);
-      const failing = body.steps.find((s) => s.stepId === 'failing-step');
+      const failing = body.steps.find((s) => s.stepId === FIXTURE_FAILED_STEP_ID);
       expect(failing?.status).toBe('failed');
       expect(failing?.errorMessage).toBe('kaboom');
     } finally {
@@ -116,7 +123,7 @@ test.describe('task data API', () => {
       fixture = await seedTaskFixture(sql, userId, 'step-retry');
 
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'retry' } },
       );
       expect(res.status()).toBe(200);
@@ -124,7 +131,7 @@ test.describe('task data API', () => {
 
       const stepRows = await sql<{ status: string; error_message: string | null }[]>`
         select status, error_message from task_steps
-        where task_id = ${fixture.taskId} and step_id = 'failing-step'
+        where task_id = ${fixture.taskId} and step_id = FIXTURE_FAILED_STEP_ID
       `;
       expect(stepRows[0]!.status).toBe('pending');
       expect(stepRows[0]!.error_message).toBeNull();
@@ -134,7 +141,7 @@ test.describe('task data API', () => {
       const taskRows = await sql<{ current_step_id: string | null }[]>`
         select current_step_id from tasks where id = ${fixture.taskId}
       `;
-      expect(taskRows[0]!.current_step_id).toBe('failing-step');
+      expect(taskRows[0]!.current_step_id).toBe(FIXTURE_FAILED_STEP_ID);
 
       const eventRows = await sql<{ event_type: string }[]>`
         select event_type from task_events where task_id = ${fixture.taskId}
@@ -157,24 +164,24 @@ test.describe('task data API', () => {
       fixture = await seedTaskFixture(sql, userId, 'step-skip');
 
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'skip' } },
       );
       expect(res.status()).toBe(200);
       const body = (await res.json()) as { status: string; nextStepId: string | null };
       expect(body.status).toBe('skipped');
-      expect(body.nextStepId).toBe('middle-step');
+      expect(body.nextStepId).toBe(FIXTURE_MIDDLE_STEP_ID);
 
       const stepRows = await sql<{ status: string }[]>`
         select status from task_steps
-        where task_id = ${fixture.taskId} and step_id = 'failing-step'
+        where task_id = ${fixture.taskId} and step_id = FIXTURE_FAILED_STEP_ID
       `;
       expect(stepRows[0]!.status).toBe('skipped');
 
       const taskRows = await sql<{ current_step_id: string | null }[]>`
         select current_step_id from tasks where id = ${fixture.taskId}
       `;
-      expect(taskRows[0]!.current_step_id).toBe('middle-step');
+      expect(taskRows[0]!.current_step_id).toBe(FIXTURE_MIDDLE_STEP_ID);
 
       const eventRows = await sql<{ event_type: string }[]>`
         select event_type from task_events where task_id = ${fixture.taskId}
@@ -219,7 +226,7 @@ test.describe('task data API', () => {
 
       // failing-step is in status 'failed', not 'waiting_form'
       const res = await page.request.post(
-        `${API_BASE}/tasks/${fixture.taskId}/steps/failing-step/submit`,
+        `${API_BASE}/tasks/${fixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/submit`,
         { data: { values: { foo: 'bar' } } },
       );
       expect(res.status()).toBe(409);

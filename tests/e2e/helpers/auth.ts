@@ -38,6 +38,39 @@ export interface RegisteredUser {
   email: string;
 }
 
+export interface SeededInvite {
+  id: string;
+  /** The raw token. Exists only here and in whatever redeems it, exactly as in the product. */
+  token: string;
+}
+
+/**
+ * Put a generic, unexpired invitation in the database and hand back its raw token.
+ *
+ * Separate from `registerUser` because the UI specs need the token BEFORE anyone registers — the
+ * register page only renders its form when the mode is `open` or the visitor arrived with
+ * `?invite=<token>`, so the token is what the page is being driven with.
+ */
+export async function seedInvite(
+  sql: postgres.Sql,
+  opts: { role?: 'admin' | 'user' } = {},
+): Promise<SeededInvite> {
+  const token = randomBytes(32).toString('base64url');
+  // id and created_at default; email_blind_index stays null so the link is not bound to one
+  // address. An hour is far longer than any run and short enough to be self-cleaning if a
+  // teardown is ever missed.
+  const rows = await sql<{ id: string }[]>`
+    insert into user_invites (token_hash, role, expires_at)
+    values (
+      ${hashInviteToken(token)},
+      ${opts.role ?? 'user'},
+      ${new Date(Date.now() + 60 * 60 * 1000)}
+    )
+    returning id
+  `;
+  return { id: rows[0]!.id, token };
+}
+
 /**
  * Register a user and leave `request` carrying its session cookies.
  *
@@ -54,21 +87,7 @@ export async function registerUser(
     | { email: string; prefix?: never; role?: 'admin' | 'user' },
 ): Promise<RegisteredUser> {
   const email = opts.email ?? uniqueEmail(opts.prefix as string);
-  const token = randomBytes(32).toString('base64url');
-
-  // id and created_at default; email_blind_index stays null so the link is not bound to one
-  // address. An hour is far longer than any run and short enough to be self-cleaning if a
-  // teardown is ever missed.
-  const inserted = await sql<{ id: string }[]>`
-    insert into user_invites (token_hash, role, expires_at)
-    values (
-      ${hashInviteToken(token)},
-      ${opts.role ?? 'user'},
-      ${new Date(Date.now() + 60 * 60 * 1000)}
-    )
-    returning id
-  `;
-  const inviteId = inserted[0]!.id;
+  const { id: inviteId, token } = await seedInvite(sql, { role: opts.role });
 
   const res = await request.post(`${API_BASE}/auth/register`, {
     data: { email, password: PASSWORD, inviteToken: token },

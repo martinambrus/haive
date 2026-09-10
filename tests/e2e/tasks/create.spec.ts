@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import {
   cleanupRepoFixture,
   cleanupTaskFixture,
@@ -7,25 +7,8 @@ import {
   getSql,
   seedRepoFixture,
   type RepoFixture,
-} from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+} from '../helpers/db.js';
+import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 test.describe('tasks list and create', () => {
   test('fresh user sees empty tasks list and "No tasks yet" card', async ({ page }) => {
@@ -33,7 +16,7 @@ test.describe('tasks list and create', () => {
     let userId = '';
     try {
       const email = uniqueEmail('tasks-empty');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       await page.goto('/tasks');
       await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
@@ -50,7 +33,7 @@ test.describe('tasks list and create', () => {
     let userId = '';
     try {
       const email = uniqueEmail('tasks-no-repos');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       await page.goto('/tasks/new');
       await expect(page.getByRole('heading', { level: 1, name: 'New task' })).toBeVisible();
@@ -72,7 +55,7 @@ test.describe('tasks list and create', () => {
     let repoFixture: RepoFixture | null = null;
     try {
       const email = uniqueEmail('tasks-create');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       repoFixture = await seedRepoFixture(sql, userId, 'tasks-create');
 
       const providerRes = await page.request.post(`${API_BASE}/cli-providers`, {
@@ -148,7 +131,7 @@ test.describe('tasks list and create', () => {
     const taskIds: string[] = [];
     try {
       const email = uniqueEmail('tasks-list-multi');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const base = Date.now();
       const seeds = [
@@ -229,7 +212,7 @@ test.describe('tasks list and create', () => {
     const createdIds: string[] = [];
     try {
       const email = uniqueEmail('tasks-type-variants');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const onboardingRes = await page.request.post(`${API_BASE}/tasks`, {
         data: {

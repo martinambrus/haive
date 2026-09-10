@@ -73,6 +73,16 @@ const PROTECTED_WEB_PATHS = [
   '/cli-providers',
   '/cli-providers/new?name=claude-code',
   `/cli-providers/${FAKE_UUID}`,
+  '/stats',
+  '/settings',
+  '/settings/account',
+  // The console was absent from this sweep entirely. Signed OUT it must behave like any other
+  // protected page and land on /login — the role gate is a separate question, tested in
+  // route-access.test.ts and by the admin specs, and it only applies once there IS a session.
+  '/admin',
+  '/admin/users',
+  '/admin/pricing',
+  '/admin/audit',
 ];
 
 test.describe('auth guard sweep', () => {

@@ -8,6 +8,7 @@ import {
   seedTaskFixture,
   type RepoFixture,
   type TaskFixture,
+  FIXTURE_FAILED_STEP_ID,
 } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
 
@@ -98,19 +99,19 @@ test.describe('multi-user isolation', () => {
       expect(bDelRepo.status()).toBe(404);
 
       const bRetryStep = await ctxB.post(
-        `${API_BASE}/tasks/${taskFixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${taskFixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'retry' } },
       );
       expect(bRetryStep.status()).toBe(404);
 
       const bSkipStep = await ctxB.post(
-        `${API_BASE}/tasks/${taskFixture.taskId}/steps/failing-step/action`,
+        `${API_BASE}/tasks/${taskFixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/action`,
         { data: { action: 'skip' } },
       );
       expect(bSkipStep.status()).toBe(404);
 
       const bSubmitStep = await ctxB.post(
-        `${API_BASE}/tasks/${taskFixture.taskId}/steps/failing-step/submit`,
+        `${API_BASE}/tasks/${taskFixture.taskId}/steps/${FIXTURE_FAILED_STEP_ID}/submit`,
         { data: { values: { hijack: true } } },
       );
       expect(bSubmitStep.status()).toBe(404);

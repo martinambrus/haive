@@ -1,23 +1,6 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupUser, getSql } from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+import { expect, test } from '@playwright/test';
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { API_BASE, PASSWORD, registerUser, uniqueEmail } from '../helpers/auth.js';
 
 test.describe('cli providers', () => {
   test('GET /cli-providers/catalog is public and lists all providers', async ({ request }) => {
@@ -31,8 +14,17 @@ test.describe('cli providers', () => {
         supportsSubagents: boolean;
       }>;
     };
-    expect(body.providers.length).toBe(9);
+    // Deliberately NOT a count. This asserted `toBe(9)` and broke the day openrouter was added
+    // as the tenth — a failure that reported "the catalog is wrong" when the catalog was right.
+    // Growing the list of shipped providers is not a regression; a malformed entry, a duplicate
+    // name, or a missing provider is. So assert the shape and the membership, never the size.
     const names = body.providers.map((p) => p.name);
+    expect(new Set(names).size, 'provider names must be unique').toBe(names.length);
+    for (const p of body.providers) {
+      expect(p.name, `${p.name}: name`).toBeTruthy();
+      expect(p.displayName, `${p.name}: displayName`).toBeTruthy();
+      expect(typeof p.supportsSubagents, `${p.name}: supportsSubagents`).toBe('boolean');
+    }
     expect(names).toEqual(
       expect.arrayContaining([
         'claude-code',
@@ -44,6 +36,7 @@ test.describe('cli providers', () => {
         'ollama',
         'muse',
         'grok',
+        'openrouter',
       ]),
     );
     const claudeCode = body.providers.find((p) => p.name === 'claude-code');
@@ -60,7 +53,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-empty');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const listRes = await page.request.get(`${API_BASE}/cli-providers`);
       expect(listRes.status()).toBe(200);
@@ -85,7 +78,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-create');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: {
@@ -135,7 +128,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-patch');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: { name: 'codex', label: 'Codex', authMode: 'api_key' },
@@ -173,7 +166,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-patch-clear');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: {
@@ -227,7 +220,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-delete');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: { name: 'gemini', label: 'Gemini', authMode: 'api_key' },
@@ -256,7 +249,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-secrets');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: { name: 'claude-code', label: 'Claude Code', authMode: 'api_key' },
@@ -316,7 +309,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-build-flip');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: { name: 'claude-code', label: 'Build flip', authMode: 'subscription' },
@@ -350,7 +343,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-patch-flip');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: { name: 'claude-code', label: 'Patch target', authMode: 'subscription' },
@@ -406,7 +399,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-clone');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: {
@@ -483,7 +476,7 @@ test.describe('cli providers', () => {
     let userId = '';
     try {
       const email = uniqueEmail('cli-clone-n');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: { name: 'gemini', label: 'Gemini', authMode: 'api_key' },
@@ -527,7 +520,7 @@ test.describe('cli providers', () => {
     let otherUserId = '';
     try {
       const email = uniqueEmail('cli-clone-iso');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
 
       const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: { name: 'codex', label: 'Codex', authMode: 'api_key' },

@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import {
   cleanupTaskFixture,
   cleanupUser,
@@ -7,25 +7,10 @@ import {
   readTaskStatus,
   seedTaskFixture,
   type TaskFixture,
-} from './helpers/db.js';
-
-const API_BASE = process.env.PLAYWRIGHT_API_BASE ?? 'http://localhost:3001';
-const PASSWORD = 'e2e-password-12345';
-
-function uniqueEmail(prefix: string): string {
-  const stamp = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${stamp}-${rand}@haive-e2e.test`;
-}
-
-async function registerAndGetUserId(request: APIRequestContext, email: string): Promise<string> {
-  const res = await request.post(`${API_BASE}/auth/register`, {
-    data: { email, password: PASSWORD },
-  });
-  expect(res.status(), `register failed: ${await res.text()}`).toBe(201);
-  const body = (await res.json()) as { user: { id: string } };
-  return body.user.id;
-}
+  FIXTURE_FAILED_STEP_ID,
+  FIXTURE_MIDDLE_STEP_ID,
+} from '../helpers/db.js';
+import { registerUser, uniqueEmail } from '../helpers/auth.js';
 
 async function waitForStepStatus(
   sql: ReturnType<typeof getSql>,
@@ -82,7 +67,7 @@ test.describe('step retry/skip UI', () => {
 
     try {
       const email = uniqueEmail('retry-ui');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'retry');
 
       page.on('dialog', (d) => {
@@ -94,7 +79,7 @@ test.describe('step retry/skip UI', () => {
       // Scope to the step card — the page also renders a task-level "Retry"
       // button at the top when the task is failed, which would otherwise
       // collide with this selector.
-      const stepCard = page.locator('[data-step-id="failing-step"]');
+      const stepCard = page.locator(`[data-step-id="${FIXTURE_FAILED_STEP_ID}"]`);
       const stepRetry = stepCard.getByRole('button', { name: 'Retry', exact: true });
       await expect(stepCard).toBeVisible();
       await expect(stepRetry).toBeVisible();
@@ -105,9 +90,9 @@ test.describe('step retry/skip UI', () => {
       expect(finalStatus).toBe('pending');
 
       const taskState = await waitForTaskState(sql, fixture.taskId, {
-        currentStepId: 'failing-step',
+        currentStepId: FIXTURE_FAILED_STEP_ID,
       });
-      expect(taskState.currentStepId).toBe('failing-step');
+      expect(taskState.currentStepId).toBe(FIXTURE_FAILED_STEP_ID);
 
       // The step.retry event is inserted in the same transaction as the
       // step flip, so it is observable even if the worker has already
@@ -139,7 +124,7 @@ test.describe('step retry/skip UI', () => {
 
     try {
       const email = uniqueEmail('skip-ui');
-      userId = await registerAndGetUserId(page.request, email);
+      userId = (await registerUser(sql, page.request, { email })).userId;
       fixture = await seedTaskFixture(sql, userId, 'skip');
 
       page.on('dialog', (d) => {
@@ -147,7 +132,7 @@ test.describe('step retry/skip UI', () => {
       });
 
       await gotoTaskDetail(page, fixture.taskId);
-      const stepCard = page.locator('[data-step-id="failing-step"]');
+      const stepCard = page.locator(`[data-step-id="${FIXTURE_FAILED_STEP_ID}"]`);
       const skipButton = stepCard.getByRole('button', { name: 'Skip', exact: true });
       await expect(skipButton).toBeVisible();
 
@@ -157,9 +142,9 @@ test.describe('step retry/skip UI', () => {
       expect(finalStatus).toBe('skipped');
 
       const taskState = await waitForTaskState(sql, fixture.taskId, {
-        currentStepId: 'middle-step',
+        currentStepId: FIXTURE_MIDDLE_STEP_ID,
       });
-      expect(taskState.currentStepId).toBe('middle-step');
+      expect(taskState.currentStepId).toBe(FIXTURE_MIDDLE_STEP_ID);
 
       const events = await sql<{ event_type: string }[]>`
         select event_type from task_events
