@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
 import {
+  chooseAmendedSpec,
   parseCorrectorOutput,
   parseSpecQualityOutput,
   phase0b5SpecQualityStep,
@@ -223,6 +224,57 @@ describe('parseCorrectorOutput', () => {
 
   it('returns amendedSpec null when the key is absent', () => {
     expect(parseCorrectorOutput('```json\n{"accepted":[]}\n```')?.amendedSpec).toBeNull();
+  });
+});
+
+describe('chooseAmendedSpec', () => {
+  const spec = (chars: number) => `# Spec\n\n${'x'.repeat(Math.max(0, chars - 9))}`;
+
+  it('keeps the current body when the corrector returned nothing', () => {
+    const current = spec(40000);
+    expect(chooseAmendedSpec(current, null).spec).toBe(current);
+    expect(chooseAmendedSpec(current, undefined).spec).toBe(current);
+    expect(chooseAmendedSpec(current, '   \n  ').spec).toBe(current);
+    expect(chooseAmendedSpec(current, null).rejected).toBeNull();
+  });
+
+  it('discards a pointer left behind by a corrector that ran out of room', () => {
+    // The real failure, verbatim: 50 chars replacing 58,774.
+    const current = spec(58774);
+    const decision = chooseAmendedSpec(
+      current,
+      '<see /tmp/amend/spec.md — full body emitted below>',
+    );
+    expect(decision.spec).toBe(current);
+    expect(decision.rejected).toEqual({
+      amendedLength: 50,
+      currentLength: current.trim().length,
+      preview: '<see /tmp/amend/spec.md — full body emitted below>',
+    });
+  });
+
+  it('accepts every ratio a real correction has produced', () => {
+    // MEASURED range across 20 corrector passes on the dev install: 1.017-1.355.
+    const current = spec(40000);
+    for (const ratio of [1.017, 1.155, 1.355]) {
+      expect(chooseAmendedSpec(current, spec(Math.round(40000 * ratio))).rejected).toBeNull();
+    }
+  });
+
+  it('draws the line at half the current body', () => {
+    const current = spec(40000);
+    expect(chooseAmendedSpec(current, spec(20001)).rejected).toBeNull();
+    expect(chooseAmendedSpec(current, spec(19000)).rejected).not.toBeNull();
+  });
+
+  it('accepts anything when there is no current body to compare against', () => {
+    expect(chooseAmendedSpec('', 'tiny').spec).toBe('tiny');
+    expect(chooseAmendedSpec('   ', 'tiny').rejected).toBeNull();
+  });
+
+  it('returns the amended body untrimmed so the spec keeps its own formatting', () => {
+    const amended = `\n${spec(40000)}\n\n`;
+    expect(chooseAmendedSpec(spec(40000), amended).spec).toBe(amended);
   });
 });
 

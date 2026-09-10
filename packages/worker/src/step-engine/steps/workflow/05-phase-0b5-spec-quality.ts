@@ -171,6 +171,56 @@ export function parseCorrectorOutput(raw: unknown): { amendedSpec: string | null
   return null;
 }
 
+/** Smallest fraction of the spec it was given that a corrector's `amendedSpec`
+ *  may be and still be believable as the FULL revised body the prompt demands.
+ *
+ *  MEASURED across every corrector pass on the dev install that had a prior body
+ *  (20 passes over 3 tasks): a real correction GROWS the spec — ratios run 1.017
+ *  to 1.355 and not one of them shrinks it. The single outlier is the failure
+ *  this exists for: a corrector that ran out of output room, wrote the body to a
+ *  file inside its own sandbox and returned the POINTER — 50 chars against
+ *  58,774, ratio 0.0009. It replaced the spec, `latestSpec` carried it forward
+ *  through two more passes, and it reached gate 1 as the entire "Full
+ *  specification".
+ *
+ *  A ratio of lengths rather than a match on that pointer's wording: the next
+ *  agent to run out of room will word it differently. Half is ~2x below the
+ *  smallest real correction and ~550x above the failure. */
+const MIN_AMENDED_SPEC_RATIO = 0.5;
+
+export interface AmendedSpecDecision {
+  /** The body to carry forward. */
+  spec: string;
+  /** Set when the amendment was discarded, with the lengths that decided it. */
+  rejected: { amendedLength: number; currentLength: number; preview: string } | null;
+}
+
+/** Choose between a corrector's amended body and the one it was handed.
+ *
+ *  A correction is contracted to be the FULL revised body, so one that collapses
+ *  to a fraction of its input is not a correction — it is a diff, a snippet or a
+ *  pointer, and taking it destroys the spec silently. Keeping the current body
+ *  costs the pass and nothing more: the loop re-reviews and the next corrector
+ *  gets another go, exactly as it already does when `amendedSpec` is absent.
+ *
+ *  NOT applied to 05a's manual branch, where a person edited the file by hand
+ *  and a deliberate cut is theirs to make. */
+export function chooseAmendedSpec(
+  current: string,
+  amended: string | null | undefined,
+): AmendedSpecDecision {
+  const next = typeof amended === 'string' ? amended.trim() : '';
+  if (next.length === 0) return { spec: current, rejected: null };
+  const currentLength = current.trim().length;
+  if (currentLength > 0 && next.length < currentLength * MIN_AMENDED_SPEC_RATIO) {
+    return {
+      spec: current,
+      rejected: { amendedLength: next.length, currentLength, preview: next.slice(0, 200) },
+    };
+  }
+  return { spec: amended as string, rejected: null };
+}
+
 function coerceVerdict(value: unknown, hasBlockingFinding: boolean): SpecVerdict {
   if (value === 'APPROVED' || value === 'NEEDS_REVISION' || value === 'BLOCKING_AMBIGUITY') {
     return value;
@@ -611,14 +661,17 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
     if (roleForIteration(args.iteration) === ROLE_CORRECTOR) {
       const correction = parseCorrectorOutput(args.llmOutput ?? null);
       const lastReview = latestReview(args.previousIterations);
-      const amendedSpec =
-        correction?.amendedSpec && correction.amendedSpec.trim().length > 0
-          ? correction.amendedSpec
-          : workingSpec;
+      const decision = chooseAmendedSpec(workingSpec, correction?.amendedSpec);
+      if (decision.rejected) {
+        ctx.logger.warn(
+          { iteration: args.iteration, ...decision.rejected, source: 'correct' },
+          'spec correction discarded — amendedSpec is too short to be the full spec body',
+        );
+      }
       ctx.logger.info(
         {
           iteration: args.iteration,
-          amended: Boolean(correction?.amendedSpec),
+          amended: decision.spec !== workingSpec,
           source: 'correct',
         },
         'spec correction applied',
@@ -628,7 +681,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
         score: lastReview?.score ?? 5,
         findings: lastReview?.findings ?? [],
         source: 'correct',
-        spec: amendedSpec,
+        spec: decision.spec,
       };
     }
 
