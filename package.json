@@ -12,6 +12,8 @@
     "build": "turbo run build",
     "test": "turbo run test",
     "test:e2e": "playwright test --pass-with-no-tests",
+    "pretest:e2e": "playwright install chromium",
+    "test:e2e:setup": "playwright install --with-deps chromium",
     "smoke": "pnpm --filter @haive/worker smoke:all",
     "typecheck": "turbo run typecheck",
     "clean": "turbo run clean && rm -rf node_modules .turbo",

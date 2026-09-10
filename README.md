@@ -252,13 +252,22 @@ pnpm db:studio      # drizzle-kit studio
 
 # Tests
 pnpm test           # vitest across all packages
-pnpm test:e2e       # playwright against dev compose stack
+pnpm test:e2e       # playwright against dev compose stack (provisions chromium first)
+pnpm test:e2e:setup # chromium plus the system libraries it links against (needs sudo)
 
 # Quality
 pnpm typecheck
 pnpm format
 pnpm format:check
 ```
+
+Playwright no longer downloads browsers on install, so `pnpm install` provisions
+none and `playwright test` fails with `Executable doesn't exist at
+.../chromium_headless_shell-<rev>/...` until one is fetched. `pretest:e2e` does that
+for you, which is why `pnpm test:e2e` is the command to run rather than
+`playwright test` directly. Reach for `pnpm test:e2e:setup` only on a host that is
+also missing chromium's system libraries — it shells out to apt through sudo, so it
+is deliberately not what the ordinary run does.
 
 ## Browser IDE (Editor tab)
 
