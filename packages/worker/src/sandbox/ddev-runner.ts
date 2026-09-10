@@ -1839,6 +1839,25 @@ async function ensureDdevStartedInner(
             'warm start came back to an EMPTY database — restoring the durability snapshot',
           );
           await restoreLatestSnapshot(existing, taskId);
+          // Recovery has to be VERIFIED, not attempted: a restore that exits 0 having
+          // applied nothing is the same class of lie as an import that does. Re-count
+          // rather than trust the exit code.
+          //
+          // Still empty is only a failure when there WAS something to restore. A project
+          // that never imported a database has no snapshot and an empty DB is its
+          // ordinary state — throwing there would break every greenfield repo and every
+          // task with no dump. With a snapshot present the run cannot proceed: every
+          // later step would read a database this has already proved is empty, which is
+          // exactly the ~8 hours and two gate-2 rejections task ef954a3d spent.
+          const recovered = await countDdevTablesUnknownEngine(existing);
+          if (recovered === 0 && (await hasDurabilitySnapshot(taskId, repoSubpath))) {
+            throw new Error(
+              'The DDEV database is empty and its durability snapshot could not be restored. ' +
+                'The snapshot exists on the repo volume, so this is a restore failure rather ' +
+                'than a project without a database — re-import the dump, or delete the ' +
+                `snapshot to start clean. Task ${taskId}.`,
+            );
+          }
         }
         return existing;
       }
@@ -1940,6 +1959,29 @@ async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): 
     { taskId, attempts: failures },
     'no DDEV DB snapshot could be restored — first boot, no imported DB, or every restore failed',
   );
+}
+
+/** Whether this task left a durability snapshot on the repo volume.
+ *
+ *  Separates the two ways a restore comes back empty-handed, which `ddev snapshot
+ *  restore` cannot: it errors on an ABSENT name exactly as it does on one it failed to
+ *  apply. A project that never imported a database has no snapshot, and an empty DB is
+ *  simply its state — a greenfield repo, or any task with no dump. One that HAS a
+ *  snapshot and still could not restore it is a run that must not continue.
+ *
+ *  Reads the directory rather than parsing `ddev snapshot --list`: DDEV appends an
+ *  engine suffix to the name it was given (`…-postgres_17.zst`), so the match is a
+ *  prefix on a filename, not a column in human-facing output. */
+async function hasDurabilitySnapshot(taskId: string, repoSubpath: string): Promise<boolean> {
+  const dir = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath, '.ddev', 'db_snapshots');
+  const names = [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)];
+  try {
+    const entries = await readdir(dir);
+    return entries.some((entry) => names.some((name) => entry.startsWith(name)));
+  } catch {
+    // No directory is the common case (no snapshot was ever taken) and never an error.
+    return false;
+  }
 }
 
 /** Table count for a caller with no parsed `.ddev/config.yaml` in hand: ask postgres,
