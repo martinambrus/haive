@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
 import {
   chooseAmendedSpec,
+  headingRetention,
   parseCorrectorOutput,
   parseSpecQualityOutput,
   phase0b5SpecQualityStep,
@@ -228,7 +229,12 @@ describe('parseCorrectorOutput', () => {
 });
 
 describe('chooseAmendedSpec', () => {
-  const spec = (chars: number) => `# Spec\n\n${'x'.repeat(Math.max(0, chars - 9))}`;
+  // A spec-shaped body: `sections` H2 headings, padded to `chars`.
+  const spec = (chars: number, sections = 20) => {
+    const heads = Array.from({ length: sections }, (_, i) => `## Section ${i + 1}\n\nprose.\n`);
+    const head = `# Spec\n\n${heads.join('\n')}`;
+    return head + 'x'.repeat(Math.max(0, chars - head.length));
+  };
 
   it('keeps the current body when the corrector returned nothing', () => {
     const current = spec(40000);
@@ -239,8 +245,8 @@ describe('chooseAmendedSpec', () => {
   });
 
   it('discards a pointer left behind by a corrector that ran out of room', () => {
-    // The real failure, verbatim: 50 chars replacing 58,774.
-    const current = spec(58774);
+    // The real failure, verbatim: 50 chars replacing 58,774, retaining no heading.
+    const current = spec(58774, 33);
     const decision = chooseAmendedSpec(
       current,
       '<see /tmp/amend/spec.md — full body emitted below>',
@@ -249,6 +255,7 @@ describe('chooseAmendedSpec', () => {
     expect(decision.rejected).toEqual({
       amendedLength: 50,
       currentLength: current.trim().length,
+      headingRetention: 0,
       preview: '<see /tmp/amend/spec.md — full body emitted below>',
     });
   });
@@ -261,10 +268,39 @@ describe('chooseAmendedSpec', () => {
     }
   });
 
-  it('draws the line at half the current body', () => {
+  it('takes a long-enough body on its length alone, structure unexamined', () => {
     const current = spec(40000);
-    expect(chooseAmendedSpec(current, spec(20001)).rejected).toBeNull();
-    expect(chooseAmendedSpec(current, spec(19000)).rejected).not.toBeNull();
+    // Half the length and NOT one heading in common — the ratio path admits it,
+    // because only a short body is asked to prove it is still a document.
+    const renamed = spec(20001).replace(/## Section /g, '## Renamed ');
+    expect(chooseAmendedSpec(current, renamed).rejected).toBeNull();
+  });
+
+  it('admits a SHORT body that still carries the spec sections', () => {
+    // Greptile #83: a corrector legitimately deletes a large obsolete section and
+    // returns the full revised body, which is then a fraction of its input. It
+    // keeps the headings of everything it did not delete, so it is admitted.
+    const current = spec(40000, 20);
+    const trimmed = spec(3000, 14); // 7.5% of the length, 14 of 20 sections kept
+    const decision = chooseAmendedSpec(current, trimmed);
+    expect(decision.rejected).toBeNull();
+    expect(decision.spec).toBe(trimmed);
+  });
+
+  it('discards a short body that dropped nearly every section', () => {
+    // A snippet rather than a revision: 3 of 20 sections is not the document.
+    // Retention counts the H1 too, so 4 of 21 headings survive.
+    const current = spec(40000, 20);
+    const decision = chooseAmendedSpec(current, spec(3000, 3));
+    expect(decision.spec).toBe(current);
+    expect(decision.rejected?.headingRetention).toBeCloseTo(4 / 21, 5);
+  });
+
+  it('falls back to length alone when the current body has no headings', () => {
+    const current = 'plain prose with no headings at all. '.repeat(500);
+    const decision = chooseAmendedSpec(current, 'still prose, much shorter.');
+    expect(decision.spec).toBe(current);
+    expect(decision.rejected?.headingRetention).toBeNull();
   });
 
   it('accepts anything when there is no current body to compare against', () => {
@@ -275,6 +311,20 @@ describe('chooseAmendedSpec', () => {
   it('returns the amended body untrimmed so the spec keeps its own formatting', () => {
     const amended = `\n${spec(40000)}\n\n`;
     expect(chooseAmendedSpec(spec(40000), amended).spec).toBe(amended);
+  });
+});
+
+describe('headingRetention', () => {
+  it('is null when the current body has no heading to check against', () => {
+    expect(headingRetention('no headings here', '# One\n\nbody')).toBeNull();
+  });
+
+  it('ignores level and surrounding whitespace, and is case-insensitive', () => {
+    expect(headingRetention('# Goal\n## Risks\n', '   ### goal   \n#  RISKS\n')).toBe(1);
+  });
+
+  it('does not count a heading the amendment invented', () => {
+    expect(headingRetention('# A\n# B\n', '# A\n# C\n# D\n')).toBe(0.5);
   });
 });
 

@@ -172,7 +172,7 @@ export function parseCorrectorOutput(raw: unknown): { amendedSpec: string | null
 }
 
 /** Smallest fraction of the spec it was given that a corrector's `amendedSpec`
- *  may be and still be believable as the FULL revised body the prompt demands.
+ *  may be and still be taken on its length alone.
  *
  *  MEASURED across every corrector pass on the dev install that had a prior body
  *  (20 passes over 3 tasks): a real correction GROWS the spec — ratios run 1.017
@@ -184,24 +184,74 @@ export function parseCorrectorOutput(raw: unknown): { amendedSpec: string | null
  *  specification".
  *
  *  A ratio of lengths rather than a match on that pointer's wording: the next
- *  agent to run out of room will word it differently. Half is ~2x below the
- *  smallest real correction and ~550x above the failure. */
+ *  agent to run out of room will word it differently. */
 const MIN_AMENDED_SPEC_RATIO = 0.5;
+
+/** Fraction of the current spec's headings a SHORT amendment must still carry to
+ *  be admitted anyway.
+ *
+ *  Length is not proof of completeness — a corrector that deletes a large
+ *  obsolete section returns a shorter body that IS the full revised spec, and
+ *  the ratio alone would discard it. Structure is the sharper test. MEASURED
+ *  over the same 20 passes: every real correction retains 0.875-1.000 of the
+ *  previous heading set (19 of 19, 16 of them exactly 1.000), while the pointer
+ *  retains 0.000 — a clean gap where the length ratio has 1.017 against 0.0009.
+ *
+ *  So a body that is short but still carries the document's sections is a spec;
+ *  one that carries none of them is a pointer or a snippet. Half is ~1.75x below
+ *  the lowest real retention and infinitely above the failure's. This only ever
+ *  ADMITS — no amendment the ratio already accepts is re-examined — so every one
+ *  of the 19 measured corrections behaves exactly as it did before. */
+const MIN_AMENDED_SPEC_HEADING_RETENTION = 0.5;
+
+/** ATX headings, h1-h3, normalised for comparison. Setext headings are not
+ *  matched: no spec produced by these steps has used one, and a false EMPTY set
+ *  only turns the structural check off (falling back to the ratio), never on. */
+const SPEC_HEADING = /^ {0,3}#{1,3}\s+(.+?)\s*$/gm;
+
+function specHeadings(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(SPEC_HEADING)) out.add(m[1]!.trim().toLowerCase());
+  return out;
+}
+
+/** How much of `current`'s heading set `next` still carries. Null when `current`
+ *  has no headings at all — there is then nothing to check against, and a
+ *  fabricated 0 or 1 would silently decide the call either way. */
+export function headingRetention(current: string, next: string): number | null {
+  const before = specHeadings(current);
+  if (before.size === 0) return null;
+  const after = specHeadings(next);
+  let kept = 0;
+  for (const h of before) if (after.has(h)) kept += 1;
+  return kept / before.size;
+}
 
 export interface AmendedSpecDecision {
   /** The body to carry forward. */
   spec: string;
-  /** Set when the amendment was discarded, with the lengths that decided it. */
-  rejected: { amendedLength: number; currentLength: number; preview: string } | null;
+  /** Set when the amendment was discarded, with what decided it. */
+  rejected: {
+    amendedLength: number;
+    currentLength: number;
+    /** Null when the current body carried no headings to check against. */
+    headingRetention: number | null;
+    preview: string;
+  } | null;
 }
 
 /** Choose between a corrector's amended body and the one it was handed.
  *
- *  A correction is contracted to be the FULL revised body, so one that collapses
- *  to a fraction of its input is not a correction — it is a diff, a snippet or a
- *  pointer, and taking it destroys the spec silently. Keeping the current body
- *  costs the pass and nothing more: the loop re-reviews and the next corrector
- *  gets another go, exactly as it already does when `amendedSpec` is absent.
+ *  A correction is contracted to be the FULL revised body, so one that is both a
+ *  fraction of its input AND has dropped the document's sections is not a
+ *  correction — it is a diff, a snippet or a pointer, and taking it destroys the
+ *  spec silently. Keeping the current body costs the pass and nothing more: the
+ *  loop re-reviews and the next corrector gets another go, exactly as it already
+ *  does when `amendedSpec` is absent.
+ *
+ *  Two ways in, and the second is why length is not the whole test: a body that
+ *  is short because it deleted an obsolete section still carries the headings of
+ *  everything it kept.
  *
  *  NOT applied to 05a's manual branch, where a person edited the file by hand
  *  and a deliberate cut is theirs to make. */
@@ -212,13 +262,20 @@ export function chooseAmendedSpec(
   const next = typeof amended === 'string' ? amended.trim() : '';
   if (next.length === 0) return { spec: current, rejected: null };
   const currentLength = current.trim().length;
-  if (currentLength > 0 && next.length < currentLength * MIN_AMENDED_SPEC_RATIO) {
-    return {
-      spec: current,
-      rejected: { amendedLength: next.length, currentLength, preview: next.slice(0, 200) },
-    };
-  }
-  return { spec: amended as string, rejected: null };
+  const accept = { spec: amended as string, rejected: null };
+  if (currentLength === 0) return accept;
+  if (next.length >= currentLength * MIN_AMENDED_SPEC_RATIO) return accept;
+  const retention = headingRetention(current, next);
+  if (retention !== null && retention >= MIN_AMENDED_SPEC_HEADING_RETENTION) return accept;
+  return {
+    spec: current,
+    rejected: {
+      amendedLength: next.length,
+      currentLength,
+      headingRetention: retention,
+      preview: next.slice(0, 200),
+    },
+  };
 }
 
 function coerceVerdict(value: unknown, hasBlockingFinding: boolean): SpecVerdict {
