@@ -422,6 +422,16 @@ jobs:
               f.write(text)
           PY
 
+      # The browsed root needs more than the checkout in it. Its only child is a git repository,
+      # which satisfies the specs looking for one but permanently skips the two that need a
+      # NON-git directory and a HIDDEN one — and a test that can never run is barely better than
+      # a deleted one. Two directories turn the root into a complete fixture.
+      - name: Seed the browsable filesystem root
+        run: |
+          root="$(dirname "$GITHUB_WORKSPACE")"
+          mkdir -p "$root/e2e-plain-dir" "$root/.e2e-hidden-dir"
+          ls -a "$root"
+
       - name: Build compose images
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 
