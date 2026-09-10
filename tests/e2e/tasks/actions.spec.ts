@@ -111,9 +111,11 @@ test.describe('step retry/skip UI', () => {
       // the API-level retry tests; the UI test only verifies that the button
       // wired up to the action endpoint.
 
-      await expect(stepRetry).toBeHidden({
-        timeout: 10_000,
-      });
+      // The button's disappearance is NOT asserted, and this is the same race as the status poll
+      // above wearing a different hat: Retry hides while the step is pending and comes back the
+      // moment the worker re-fails it, which on a repo-less fixture is immediate. CI caught this
+      // one on the run after the poll was removed. What the test is actually for — that the
+      // button is wired to the action endpoint — is proven by the event.
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
       if (userId) await cleanupUser(sql, userId);
