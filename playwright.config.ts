@@ -13,9 +13,32 @@ export default defineConfig({
     video: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
+  // Baselines are compared byte-for-byte, so they are only meaningful if the thing that renders
+  // them is fixed. `scripts/visual.sh` runs this project inside a pinned Playwright image for that
+  // reason, and the specs refuse to run outside it — hence no `{platform}` in the path below:
+  // there is only ever one platform producing these.
+  snapshotPathTemplate: '{testDir}/__screenshots__/{testFileName}/{arg}{ext}',
+  expect: {
+    toHaveScreenshot: {
+      // Font antialiasing still differs by a pixel here and there even in a fixed image; this is
+      // tight enough to catch a moved element and loose enough not to fail on a rendered edge.
+      maxDiffPixelRatio: 0.01,
+      animations: 'disabled',
+      caret: 'hide',
+      scale: 'css',
+    },
+  },
   projects: [
     {
       name: 'chromium',
+      // The visual project is opt-in: it needs the pinned container, and a normal run must not
+      // try to compare screenshots taken wherever the developer happens to be.
+      testIgnore: '**/visual/**',
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'visual',
+      testDir: './tests/e2e/visual',
       use: { ...devices['Desktop Chrome'] },
     },
   ],

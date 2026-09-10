@@ -254,12 +254,20 @@ pnpm db:studio      # drizzle-kit studio
 pnpm test           # vitest across all packages
 pnpm test:e2e       # playwright against dev compose stack (provisions chromium first)
 pnpm test:e2e:setup # chromium plus the system libraries it links against (needs sudo)
+pnpm test:visual    # visual baselines, inside a pinned Playwright image
+pnpm typecheck:e2e  # type-check the specs (they are outside the workspace build)
 
 # Quality
 pnpm typecheck
 pnpm format
 pnpm format:check
 ```
+
+`pnpm test:visual` is separate because screenshot comparison is only meaningful when one fixed
+environment renders both sides. It runs the `visual` project inside a pinned
+`mcr.microsoft.com/playwright` image (`scripts/visual.sh`), and the specs refuse to run outside it
+— a baseline taken on your host would differ from CI's on font antialiasing alone. Pass
+`--update-snapshots` to rewrite the baselines, and review the resulting images before committing.
 
 Playwright no longer downloads browsers on install, so `pnpm install` provisions
 none and `playwright test` fails with `Executable doesn't exist at
