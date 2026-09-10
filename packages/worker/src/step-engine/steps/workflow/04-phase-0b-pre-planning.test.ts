@@ -2,7 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { logger } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { phase0bPrePlanningStep, trimPlanIndexToWholeNodes } from './04-phase-0b-pre-planning.js';
+import {
+  phase0bPrePlanningStep,
+  planIndexOmissionNotice,
+  trimPlanIndexToWholeNodes,
+} from './04-phase-0b-pre-planning.js';
 
 const base = {
   taskTitle: 'Add a logout button',
@@ -122,5 +126,37 @@ describe('trimPlanIndexToWholeNodes', () => {
     const kept = trimPlanIndexToWholeNodes(wide, wide.length / 2);
     expect(kept.omitted).toBeGreaterThan(0);
     expect(kept.omitted).toBeLessThan(10);
+  });
+});
+
+// The notice is part of what reaches the prompt, so the reserve held back for it has
+// to actually cover it — otherwise a full-width trim returns MORE than the cap the
+// notice announces (measured: content trimmed to 119,999 came back 120,256).
+describe('planIndexOmissionNotice', () => {
+  it('fits the reserve at its longest — deepest reduction and a 6-digit omitted count', () => {
+    const longest = planIndexOmissionNotice(1, 999_999);
+    expect(longest.length).toBeLessThan(400);
+  });
+
+  it('states BOTH reductions when both happened', () => {
+    const notice = planIndexOmissionNotice(1, 42);
+    expect(notice).toContain('bounded to 1 level');
+    expect(notice).toContain('42 further component(s) omitted');
+  });
+
+  it('names only the reduction that happened', () => {
+    expect(planIndexOmissionNotice(3, 7)).not.toContain('bounded to');
+    expect(planIndexOmissionNotice(1, 0)).not.toContain('omitted for size');
+  });
+
+  it('always warns against inventing an id for a component it could not list', () => {
+    expect(planIndexOmissionNotice(1, 5)).toContain('do not invent an id');
+  });
+
+  it('trim plus notice stays inside the cap it announces', () => {
+    const node = (n: number) => `## Component ${n}\n\`node:aaaaaaaa-${n}\`\nbody\n`;
+    const wide = Array.from({ length: 4000 }, (_, i) => node(i)).join('');
+    const { text, omitted } = trimPlanIndexToWholeNodes(wide, 120_000 - 400);
+    expect(`${text}${planIndexOmissionNotice(1, omitted)}`.length).toBeLessThanOrEqual(120_000);
   });
 });

@@ -122,6 +122,12 @@ interface PrePlanningDetect {
 const PLAN_INDEX_MAX_DEPTH = 3;
 const PLAN_INDEX_MAX_CHARS = 120_000;
 
+/** Held back from the budget for the omission notice, which is itself part of what
+ *  reaches the prompt. Without the reserve a full-width trim returns MORE than the cap
+ *  it announces. The notice is a fixed template plus two small numbers, so a constant
+ *  is enough — `planIndexOmissionNotice` is asserted to stay inside it. */
+const PLAN_INDEX_NOTICE_RESERVE = 400;
+
 /** The plan canvas as a compact index for the spec prompt: titles, ids, kinds and
  *  statuses, with no bodies. The whole plan would swamp the prompt and most of it is
  *  irrelevant to any one task; what the spec writer needs is the VOCABULARY — which
@@ -176,6 +182,25 @@ export function trimPlanIndexToWholeNodes(
   return { text: kept.join('\n'), omitted };
 }
 
+/** What the prompt is told about a reduced index.
+ *
+ *  The warning against inventing ids is the point of it: the writer must name
+ *  components from this index, so it has to know the index is PARTIAL rather than
+ *  read a missing component as one that does not exist. */
+export function planIndexOmissionNotice(depth: number, omitted: number): string {
+  const notes: string[] = [];
+  if (depth < PLAN_INDEX_MAX_DEPTH) {
+    notes.push(
+      `bounded to ${depth} level(s) of the plan because the full ${PLAN_INDEX_MAX_DEPTH} do not fit`,
+    );
+  }
+  if (omitted > 0) notes.push(`${omitted} further component(s) omitted for size`);
+  return (
+    `\n_This index is ${notes.join(', and ')}. Components that are not listed still EXIST — ` +
+    `do not treat this as the whole plan, and do not invent an id for one you cannot see._\n`
+  );
+}
+
 async function renderBoundedPlanIndex(ctx: StepContext, repositoryId: string): Promise<string> {
   let rendered = '';
   let depth = PLAN_INDEX_MAX_DEPTH;
@@ -187,22 +212,16 @@ async function renderBoundedPlanIndex(ctx: StepContext, repositoryId: string): P
     if (rendered.length <= PLAN_INDEX_MAX_CHARS) break;
   }
   depth = Math.max(depth, 1);
-  const { text, omitted } = trimPlanIndexToWholeNodes(rendered, PLAN_INDEX_MAX_CHARS);
-  if (depth === PLAN_INDEX_MAX_DEPTH && omitted === 0) return rendered;
-  // Both reductions are STATED, and the warning against inventing ids is the point:
-  // the writer must name components from this index, so it has to know the index is
-  // partial rather than assume a missing component does not exist.
-  const notes: string[] = [];
-  if (depth < PLAN_INDEX_MAX_DEPTH) {
-    notes.push(
-      `bounded to ${depth} level(s) of the plan because the full ${PLAN_INDEX_MAX_DEPTH} do not fit`,
-    );
-  }
-  if (omitted > 0) notes.push(`${omitted} further component(s) omitted for size`);
-  return (
-    `${text}\n_This index is ${notes.join(', and ')}. Components that are not listed still EXIST ` +
-    `— do not treat this as the whole plan, and do not invent an id for one you cannot see._\n`
+  // A full-depth render that already fits carries no notice and is returned as it is.
+  // Everything else gets one, and the notice is part of what reaches the prompt — so
+  // the trim has to hold room for it, or the finished index exceeds the very bound the
+  // notice announces (MEASURED: content trimmed to 119,999 returned 120,256).
+  if (depth === PLAN_INDEX_MAX_DEPTH && rendered.length <= PLAN_INDEX_MAX_CHARS) return rendered;
+  const { text, omitted } = trimPlanIndexToWholeNodes(
+    rendered,
+    PLAN_INDEX_MAX_CHARS - PLAN_INDEX_NOTICE_RESERVE,
   );
+  return `${text}${planIndexOmissionNotice(depth, omitted)}`;
 }
 
 /** Silent when the repo has no plan. */
