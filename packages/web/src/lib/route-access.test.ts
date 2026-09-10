@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  decideAdminAccess,
   decideForcedPasswordChange,
   decideRouteAccess,
   PASSWORD_CHANGE_PATH,
@@ -127,5 +128,37 @@ describe('a password an administrator minted', () => {
         },
       );
     }
+  });
+});
+
+describe('the admin console gate', () => {
+  it('sends a non-admin away from the console and every page under it', () => {
+    for (const path of ['/admin', '/admin/users', '/admin/pricing', '/admin/audit']) {
+      expect(decideAdminAccess({ path, role: 'user' }), path).toEqual({
+        action: 'redirect',
+        to: '/dashboard',
+      });
+    }
+  });
+
+  it('leaves an administrator alone', () => {
+    for (const path of ['/admin', '/admin/users', '/dashboard', null]) {
+      expect(decideAdminAccess({ path, role: 'admin' }), String(path)).toEqual({
+        action: 'continue',
+      });
+    }
+  });
+
+  // A prefix test would send a non-admin away from any route that merely STARTS with the same
+  // letters. The boundary is the path separator, not the string.
+  it('does not claim a route that only begins like the console', () => {
+    for (const path of ['/administrators', '/admin-tools', '/adminx']) {
+      expect(decideAdminAccess({ path, role: 'user' }), path).toEqual({ action: 'continue' });
+    }
+  });
+
+  // Fails OPEN, same as its neighbour: a path we cannot identify might be the destination.
+  it('continues when the path is unknown', () => {
+    expect(decideAdminAccess({ path: null, role: 'user' })).toEqual({ action: 'continue' });
   });
 });
