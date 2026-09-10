@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
 import {
   chooseAmendedSpec,
-  headingRetention,
+  specHeadingCount,
   parseCorrectorOutput,
   parseSpecQualityOutput,
   phase0b5SpecQualityStep,
@@ -230,9 +230,10 @@ describe('parseCorrectorOutput', () => {
 
 describe('chooseAmendedSpec', () => {
   // A spec-shaped body: `sections` H2 headings, padded to `chars`.
-  const spec = (chars: number, sections = 20) => {
-    const heads = Array.from({ length: sections }, (_, i) => `## Section ${i + 1}\n\nprose.\n`);
-    const head = `# Spec\n\n${heads.join('\n')}`;
+  // NOTE the H1 counts too, so this body carries `sections + 1` headings.
+  const spec = (chars: number, sections = 20, label = 'Section', title = 'Spec') => {
+    const heads = Array.from({ length: sections }, (_, i) => `## ${label} ${i + 1}\n\nprose.\n`);
+    const head = `# ${title}\n\n${heads.join('\n')}`;
     return head + 'x'.repeat(Math.max(0, chars - head.length));
   };
 
@@ -245,7 +246,7 @@ describe('chooseAmendedSpec', () => {
   });
 
   it('discards a pointer left behind by a corrector that ran out of room', () => {
-    // The real failure, verbatim: 50 chars replacing 58,774, retaining no heading.
+    // The real failure, verbatim: 50 chars replacing 58,774, carrying no heading.
     const current = spec(58774, 33);
     const decision = chooseAmendedSpec(
       current,
@@ -255,7 +256,7 @@ describe('chooseAmendedSpec', () => {
     expect(decision.rejected).toEqual({
       amendedLength: 50,
       currentLength: current.trim().length,
-      headingRetention: 0,
+      headings: 0,
       preview: '<see /tmp/amend/spec.md — full body emitted below>',
     });
   });
@@ -270,37 +271,42 @@ describe('chooseAmendedSpec', () => {
 
   it('takes a long-enough body on its length alone, structure unexamined', () => {
     const current = spec(40000);
-    // Half the length and NOT one heading in common — the ratio path admits it,
-    // because only a short body is asked to prove it is still a document.
-    const renamed = spec(20001).replace(/## Section /g, '## Renamed ');
-    expect(chooseAmendedSpec(current, renamed).rejected).toBeNull();
+    // Half the length and only two headings — the ratio path admits it, because
+    // only a SHORT body is asked to prove it is a document.
+    expect(chooseAmendedSpec(current, spec(20001, 1)).rejected).toBeNull();
   });
 
-  it('admits a SHORT body that still carries the spec sections', () => {
-    // Greptile #83: a corrector legitimately deletes a large obsolete section and
-    // returns the full revised body, which is then a fraction of its input. It
-    // keeps the headings of everything it did not delete, so it is admitted.
+  it('admits a SHORT body that deleted most of the spec', () => {
+    // Greptile #83 (first): a corrector legitimately removes a large obsolete
+    // section and returns the full revised body, a fraction of its input.
     const current = spec(40000, 20);
-    const trimmed = spec(3000, 14); // 7.5% of the length, 14 of 20 sections kept
-    const decision = chooseAmendedSpec(current, trimmed);
+    const trimmed = spec(3000, 14);
+    expect(chooseAmendedSpec(current, trimmed).spec).toBe(trimmed);
+  });
+
+  it('admits a SHORT body that renamed every section', () => {
+    // Greptile #83 (second): a complete revision may restructure outright. The
+    // heading COUNT is what is checked, so nothing here compares section names.
+    const current = spec(40000, 20, 'Section', 'Original Title');
+    const restructured = spec(3000, 14, 'Totally Different Heading', 'Rewritten Title');
+    const decision = chooseAmendedSpec(current, restructured);
     expect(decision.rejected).toBeNull();
-    expect(decision.spec).toBe(trimmed);
+    expect(decision.spec).toBe(restructured);
   });
 
-  it('discards a short body that dropped nearly every section', () => {
-    // A snippet rather than a revision: 3 of 20 sections is not the document.
-    // Retention counts the H1 too, so 4 of 21 headings survive.
+  it('discards a short body that is not a document', () => {
+    // A snippet rather than a revision: 2 headings is not a specification.
     const current = spec(40000, 20);
-    const decision = chooseAmendedSpec(current, spec(3000, 3));
+    const decision = chooseAmendedSpec(current, '## Fixed\n\n- did X\n\n## Notes\n\n- y\n');
     expect(decision.spec).toBe(current);
-    expect(decision.rejected?.headingRetention).toBeCloseTo(4 / 21, 5);
+    expect(decision.rejected?.headings).toBe(2);
   });
 
-  it('falls back to length alone when the current body has no headings', () => {
-    const current = 'plain prose with no headings at all. '.repeat(500);
-    const decision = chooseAmendedSpec(current, 'still prose, much shorter.');
-    expect(decision.spec).toBe(current);
-    expect(decision.rejected?.headingRetention).toBeNull();
+  it('holds the line exactly at the heading floor', () => {
+    const current = spec(40000, 20);
+    // 3 sections + the H1 = 4 headings, one under the floor; 4 + 1 = 5 meets it.
+    expect(chooseAmendedSpec(current, spec(500, 3)).rejected).not.toBeNull();
+    expect(chooseAmendedSpec(current, spec(500, 4)).rejected).toBeNull();
   });
 
   it('accepts anything when there is no current body to compare against', () => {
@@ -314,17 +320,21 @@ describe('chooseAmendedSpec', () => {
   });
 });
 
-describe('headingRetention', () => {
-  it('is null when the current body has no heading to check against', () => {
-    expect(headingRetention('no headings here', '# One\n\nbody')).toBeNull();
+describe('specHeadingCount', () => {
+  it('counts h1-h3, ignoring level, case and surrounding whitespace', () => {
+    expect(specHeadingCount('# Goal\n## Risks\n   ### plan   \n')).toBe(3);
   });
 
-  it('ignores level and surrounding whitespace, and is case-insensitive', () => {
-    expect(headingRetention('# Goal\n## Risks\n', '   ### goal   \n#  RISKS\n')).toBe(1);
+  it('counts DISTINCT headings, so a repeated one does not inflate the weight', () => {
+    expect(specHeadingCount('# A\n## a\n### A  \n')).toBe(1);
   });
 
-  it('does not count a heading the amendment invented', () => {
-    expect(headingRetention('# A\n# B\n', '# A\n# C\n# D\n')).toBe(0.5);
+  it('is zero for a body with no heading at all', () => {
+    expect(specHeadingCount('<see /tmp/amend/spec.md — full body emitted below>')).toBe(0);
+  });
+
+  it('does not count a hash that is not a heading', () => {
+    expect(specHeadingCount('a #tag mid-line\n#no-space\n')).toBe(0);
   });
 });
 

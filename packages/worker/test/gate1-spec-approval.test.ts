@@ -5,6 +5,7 @@ import {
   buildSpecSummary,
   extractMermaidBlocks,
   gate1SpecApprovalStep,
+  summariseIteration,
 } from '../src/step-engine/steps/workflow/06-gate-1-spec-approval.js';
 
 describe('buildSpecSummary', () => {
@@ -268,6 +269,39 @@ describe('gate-1 summary carries the spec diagrams', () => {
 
   it('omits the diagram heading when the spec draws none', () => {
     expect(summaryBody({ specBody: '# Spec\n\nprose only.' })).not.toContain('## Diagram');
+  });
+});
+
+describe('summariseIteration', () => {
+  const pass = (over: Record<string, unknown> = {}) => ({
+    iteration: 2,
+    applyOutput: { verdict: 'NEEDS_REVISION', score: 7, findings: [], ...over },
+  });
+
+  it('reads as it always did when nothing was discarded', () => {
+    expect(summariseIteration(pass())).toBe(
+      'Iteration 3: NEEDS_REVISION, score 7/10, 0 finding(s) (0 blocking / 0 advisory)',
+    );
+  });
+
+  it('says a discarded amendment out loud, with the sizes that decided it', () => {
+    // A corrector whose amendedSpec was not a complete spec is a no-op on the
+    // body, which is otherwise indistinguishable from one that found nothing to
+    // change. The approver must never read that silence as agreement.
+    const line = summariseIteration(
+      pass({ amendmentDiscarded: { amendedLength: 50, currentLength: 58774, headings: 0 } }),
+    );
+    expect(line).toContain('amendment discarded as not a complete spec');
+    expect(line).toContain('50 chars against 58,774');
+    expect(line).toContain('the previous body was kept');
+  });
+
+  it('still renders when the record predates the sizes', () => {
+    // task_steps.iterations is PERSISTED, so a pass recorded before this field
+    // existed replays here and must not produce "undefined chars".
+    const line = summariseIteration(pass({ amendmentDiscarded: {} }));
+    expect(line).toContain('amendment discarded as not a complete spec');
+    expect(line).not.toContain('undefined');
   });
 });
 

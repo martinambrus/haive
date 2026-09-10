@@ -9,7 +9,7 @@
 import postgres from 'postgres';
 import {
   chooseAmendedSpec,
-  headingRetention,
+  specHeadingCount,
 } from '../src/step-engine/steps/workflow/05-phase-0b5-spec-quality.js';
 
 const sql = postgres(process.env.DATABASE_URL!);
@@ -53,7 +53,7 @@ console.log(
     'prevLen'.padStart(8),
     'nextLen'.padStart(8),
     'ratio'.padStart(7),
-    'retain'.padStart(7),
+    'headings'.padStart(8),
     'verdict',
   ].join(' '),
 );
@@ -61,7 +61,7 @@ console.log(
 for (const p of pairs) {
   const d = chooseAmendedSpec(p.prev, p.next);
   const ratio = p.next.length / p.prev.length;
-  const retain = headingRetention(p.prev, p.next);
+  const headings = specHeadingCount(p.next);
   const verdict = d.rejected ? 'REJECTED' : 'accepted';
   if (d.rejected) rejected += 1;
   else accepted += 1;
@@ -73,7 +73,7 @@ for (const p of pairs) {
       String(p.prev.length).padStart(8),
       String(p.next.length).padStart(8),
       ratio.toFixed(4).padStart(7),
-      (retain === null ? 'n/a' : retain.toFixed(3)).padStart(7),
+      String(headings).padStart(8),
       verdict,
     ].join(' '),
   );

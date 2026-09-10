@@ -74,6 +74,13 @@ export interface SpecQualityApply {
    *  corrections set the amended body. Gate 1 prefers this over the original
    *  04-pre-planning spec. */
   spec: string;
+  /** Set when this pass returned an `amendedSpec` that was not a complete spec
+   *  and was discarded (see `chooseAmendedSpec`). The pass is then a no-op on the
+   *  body, which nothing downstream could otherwise tell from a corrector that
+   *  found nothing to change — so it rides the persisted apply output and gate 1
+   *  states it in the iteration history. Optional: passes recorded before this
+   *  existed carry none, and every reader must render without it. */
+  amendmentDiscarded?: DiscardedAmendment;
 }
 
 interface PrePlanningOutput {
@@ -187,71 +194,60 @@ export function parseCorrectorOutput(raw: unknown): { amendedSpec: string | null
  *  agent to run out of room will word it differently. */
 const MIN_AMENDED_SPEC_RATIO = 0.5;
 
-/** Fraction of the current spec's headings a SHORT amendment must still carry to
- *  be admitted anyway.
+/** Headings a SHORT amendment must carry to be admitted anyway.
  *
- *  Length is not proof of completeness — a corrector that deletes a large
- *  obsolete section returns a shorter body that IS the full revised spec, and
- *  the ratio alone would discard it. Structure is the sharper test. MEASURED
- *  over the same 20 passes: every real correction retains 0.875-1.000 of the
- *  previous heading set (19 of 19, 16 of them exactly 1.000), while the pointer
- *  retains 0.000 — a clean gap where the length ratio has 1.017 against 0.0009.
+ *  Length is not proof of completeness. A corrector may legitimately delete a
+ *  large obsolete section, or rewrite the document's structure outright, and
+ *  still return the FULL revised body — which the ratio alone discards. So the
+ *  second test asks whether the body is a SPECIFICATION IN ITS OWN RIGHT, and
+ *  nothing about its relation to the previous one: renaming or reordering every
+ *  section cannot move this number.
  *
- *  So a body that is short but still carries the document's sections is a spec;
- *  one that carries none of them is a pointer or a snippet. Half is ~1.75x below
- *  the lowest real retention and infinitely above the failure's. This only ever
- *  ADMITS — no amendment the ratio already accepts is re-examined — so every one
- *  of the 19 measured corrections behaves exactly as it did before. */
-const MIN_AMENDED_SPEC_HEADING_RETENTION = 0.5;
+ *  MEASURED over all 72 spec bodies these steps have produced on the dev install:
+ *  the 70 real ones carry 14-33 headings and 8,347-80,811 chars; the 2 that are
+ *  not specs are the pointer and the review pass that inherited it, 0 headings
+ *  and 50 chars. Five is ~2.8x below the smallest real spec and cleanly above a
+ *  snippet or a diff, which carry a heading or two at most. */
+const MIN_AMENDED_SPEC_HEADINGS = 5;
 
-/** ATX headings, h1-h3, normalised for comparison. Setext headings are not
- *  matched: no spec produced by these steps has used one, and a false EMPTY set
- *  only turns the structural check off (falling back to the ratio), never on. */
+/** ATX headings, h1-h3, normalised. Setext headings are not matched: no spec
+ *  produced by these steps has used one, and a false LOW count only makes the
+ *  structural check stricter, never laxer — the ratio still admits on its own. */
 const SPEC_HEADING = /^ {0,3}#{1,3}\s+(.+?)\s*$/gm;
 
-function specHeadings(text: string): Set<string> {
-  const out = new Set<string>();
-  for (const m of text.matchAll(SPEC_HEADING)) out.add(m[1]!.trim().toLowerCase());
-  return out;
+/** Distinct headings in a body — the structural weight of the document. */
+export function specHeadingCount(text: string): number {
+  const seen = new Set<string>();
+  for (const m of text.matchAll(SPEC_HEADING)) seen.add(m[1]!.trim().toLowerCase());
+  return seen.size;
 }
 
-/** How much of `current`'s heading set `next` still carries. Null when `current`
- *  has no headings at all — there is then nothing to check against, and a
- *  fabricated 0 or 1 would silently decide the call either way. */
-export function headingRetention(current: string, next: string): number | null {
-  const before = specHeadings(current);
-  if (before.size === 0) return null;
-  const after = specHeadings(next);
-  let kept = 0;
-  for (const h of before) if (after.has(h)) kept += 1;
-  return kept / before.size;
+export interface DiscardedAmendment {
+  amendedLength: number;
+  currentLength: number;
+  headings: number;
+  preview: string;
 }
 
 export interface AmendedSpecDecision {
   /** The body to carry forward. */
   spec: string;
   /** Set when the amendment was discarded, with what decided it. */
-  rejected: {
-    amendedLength: number;
-    currentLength: number;
-    /** Null when the current body carried no headings to check against. */
-    headingRetention: number | null;
-    preview: string;
-  } | null;
+  rejected: DiscardedAmendment | null;
 }
 
 /** Choose between a corrector's amended body and the one it was handed.
  *
  *  A correction is contracted to be the FULL revised body, so one that is both a
- *  fraction of its input AND has dropped the document's sections is not a
- *  correction — it is a diff, a snippet or a pointer, and taking it destroys the
- *  spec silently. Keeping the current body costs the pass and nothing more: the
- *  loop re-reviews and the next corrector gets another go, exactly as it already
- *  does when `amendedSpec` is absent.
+ *  fraction of its input AND is not a structured document is not a correction —
+ *  it is a diff, a snippet or a pointer, and taking it destroys the spec
+ *  silently. Keeping the current body costs the pass and nothing more: the loop
+ *  re-reviews and the next corrector gets another go, exactly as it already does
+ *  when `amendedSpec` is absent, and the discard is stated on the apply output so
+ *  gate 1 shows it rather than leaving it in a log line.
  *
- *  Two ways in, and the second is why length is not the whole test: a body that
- *  is short because it deleted an obsolete section still carries the headings of
- *  everything it kept.
+ *  Two ways in, and the second is why length is not the whole test: a revision
+ *  that deleted or restructured most of the document is still a document.
  *
  *  NOT applied to 05a's manual branch, where a person edited the file by hand
  *  and a deliberate cut is theirs to make. */
@@ -265,16 +261,11 @@ export function chooseAmendedSpec(
   const accept = { spec: amended as string, rejected: null };
   if (currentLength === 0) return accept;
   if (next.length >= currentLength * MIN_AMENDED_SPEC_RATIO) return accept;
-  const retention = headingRetention(current, next);
-  if (retention !== null && retention >= MIN_AMENDED_SPEC_HEADING_RETENTION) return accept;
+  const headings = specHeadingCount(next);
+  if (headings >= MIN_AMENDED_SPEC_HEADINGS) return accept;
   return {
     spec: current,
-    rejected: {
-      amendedLength: next.length,
-      currentLength,
-      headingRetention: retention,
-      preview: next.slice(0, 200),
-    },
+    rejected: { amendedLength: next.length, currentLength, headings, preview: next.slice(0, 200) },
   };
 }
 
@@ -722,7 +713,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
       if (decision.rejected) {
         ctx.logger.warn(
           { iteration: args.iteration, ...decision.rejected, source: 'correct' },
-          'spec correction discarded — amendedSpec is too short to be the full spec body',
+          'spec correction discarded — amendedSpec is not a complete spec body',
         );
       }
       ctx.logger.info(
@@ -739,6 +730,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
         findings: lastReview?.findings ?? [],
         source: 'correct',
         spec: decision.spec,
+        ...(decision.rejected ? { amendmentDiscarded: decision.rejected } : {}),
       };
     }
 
