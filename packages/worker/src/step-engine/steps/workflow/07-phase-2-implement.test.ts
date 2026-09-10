@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import {
   salvageImplementOutput,
@@ -173,21 +174,39 @@ describe('phase2ImplementStep prior-fix-rounds ledger', () => {
 // The fix loop re-enters at this step by a hardcoded target, and this step is the only
 // reader of the diagnosis — so a DAG task that skipped every fix round burned its whole
 // round budget re-running the review chain against unchanged code (task 681f0f99).
-function sprintModeDb(mode: string | null) {
-  const rows = mode === null ? [] : [{ detectOutput: null, output: { mode }, iterations: [] }];
+// The inverse costs as much: the round counter is shared with the revise loop, so keying
+// on `round > 0` ran a second full implementation on top of a finished DAG build whenever
+// a human had rejected the spec at gate 1 (task ef954a3d).
+function shouldRunDb(mode: string | null, requestedRounds: FixRequest[]) {
+  const stepRows = mode === null ? [] : [{ detectOutput: null, output: { mode }, iterations: [] }];
+  const eventRows = requestedRounds.map((r) => ({
+    payload: { round: r.round, diagnosis: r.diagnosis ?? 'tests failed' },
+  }));
+  let rows: unknown[] = stepRows;
   const chain: Record<string, unknown> = {};
   Object.assign(chain, {
     select: () => chain,
-    from: () => chain,
+    from: (table: unknown) => {
+      rows = table === schema.taskEvents ? eventRows : stepRows;
+      return chain;
+    },
     where: () => chain,
     orderBy: () => chain,
     limit: async () => rows,
+    // isFixRound awaits the builder directly (no .limit); loadPreviousStepOutput ends at
+    // .limit(1). Both have to resolve off the same fake.
+    then: (resolve: (v: unknown) => unknown) => Promise.resolve(rows).then(resolve),
   });
   return chain;
 }
 
-const shouldRunCtx = (mode: string | null, round: number) =>
-  ({ db: sprintModeDb(mode), taskId: 't1', round }) as unknown as StepContext;
+interface FixRequest {
+  round: number;
+  diagnosis?: string;
+}
+
+const shouldRunCtx = (mode: string | null, round: number, requested: FixRequest[] = []) =>
+  ({ db: shouldRunDb(mode, requested), taskId: 't1', round }) as unknown as StepContext;
 
 describe('07 shouldRun', () => {
   it('skips the initial DAG build — 06c-dag-execute implements it', async () => {
@@ -195,8 +214,32 @@ describe('07 shouldRun', () => {
   });
 
   it('runs every DAG FIX round, so the fix-loop diagnosis is actually read', async () => {
-    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 1))).toBe(true);
-    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 4))).toBe(true);
+    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 1, [{ round: 1 }]))).toBe(true);
+    expect(
+      await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 4, [{ round: 2 }, { round: 4 }])),
+    ).toBe(true);
+  });
+
+  it('still skips a DAG round the REVISE loop forked — no fix was requested for it', async () => {
+    // Gate-1 spec reject routes back to 04 and bumps the round, so 06b/06c can first run at
+    // round 2. `round > 0` read that as a fix round and ran a whole second implementation on
+    // top of the DAG build (task ef954a3d: 06c took 3h35m, then this step started with a null
+    // fixContext). No fix_loop.requested exists for the round, so it is not a fix round.
+    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 2))).toBe(false);
+  });
+
+  it('skips when the only recorded request belongs to a DIFFERENT round', async () => {
+    expect(await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 3, [{ round: 1 }]))).toBe(
+      false,
+    );
+  });
+
+  it('runs on a request whose diagnosis is empty — presence, not content', async () => {
+    // loadFixLoopDiagnosis returns null for an empty diagnosis; reusing it as the gate would
+    // read a real fix round as an original pass and skip the only step that fixes anything.
+    expect(
+      await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 1, [{ round: 1, diagnosis: '' }])),
+    ).toBe(true);
   });
 
   it('runs in single mode at every round', async () => {
