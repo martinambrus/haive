@@ -38,6 +38,41 @@ export interface RegisteredUser {
   email: string;
 }
 
+/**
+ * Make sure this run's account is never the install's FIRST one.
+ *
+ * `decideRegistration` exempts the first account from the registration mode and makes it the
+ * administrator, whatever an invite says — that is what stops a closed default locking an owner
+ * out of their own install. It also means that on an empty database (which is every CI run) the
+ * first spec to register gets `admin` and a 201 where the suite expected `user` and a 403. Two
+ * separate specs failed on exactly that, and both looked like flakes because they passed as soon
+ * as something else had registered first.
+ *
+ * Fixing it per spec would leave the next author to rediscover it, so it is fixed here: claim the
+ * first-account slot with a bootstrap owner once, and every later registration is an ordinary one.
+ * On an install that already has accounts — any dev machine — this costs one COUNT and does
+ * nothing. The bootstrap owner is deliberately left behind: it is what a real install looks like,
+ * and CI tears its database down anyway.
+ */
+export async function ensureInstallHasAnAccount(
+  sql: postgres.Sql,
+  request: APIRequestContext,
+): Promise<void> {
+  const rows = await sql<{ n: number }[]>`select count(*)::int as n from users`;
+  if ((rows[0]?.n ?? 0) > 0) return;
+
+  const token = randomBytes(32).toString('base64url');
+  await sql`
+    insert into user_invites (token_hash, role, expires_at)
+    values (${hashInviteToken(token)}, 'admin', ${new Date(Date.now() + 60 * 60 * 1000)})
+  `;
+  // Not asserted: another worker may have won the race and created the first account between the
+  // count and this call, which is a success for our purposes either way.
+  await request.post(`${API_BASE}/auth/register`, {
+    data: { email: uniqueEmail('install-owner'), password: PASSWORD, inviteToken: token },
+  });
+}
+
 export interface SeededInvite {
   id: string;
   /** The raw token. Exists only here and in whatever redeems it, exactly as in the product. */
@@ -87,6 +122,7 @@ export async function registerUser(
     | { email: string; prefix?: never; role?: 'admin' | 'user' },
 ): Promise<RegisteredUser> {
   const email = opts.email ?? uniqueEmail(opts.prefix as string);
+  await ensureInstallHasAnAccount(sql, request);
   const { id: inviteId, token } = await seedInvite(sql, { role: opts.role });
 
   const res = await request.post(`${API_BASE}/auth/register`, {

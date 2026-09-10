@@ -1,6 +1,13 @@
 import { expect, test } from '@playwright/test';
 import { cleanupUser, getSql } from '../helpers/db.js';
-import { API_BASE, PASSWORD, registerUser, seedInvite, uniqueEmail } from '../helpers/auth.js';
+import {
+  API_BASE,
+  PASSWORD,
+  ensureInstallHasAnAccount,
+  registerUser,
+  seedInvite,
+  uniqueEmail,
+} from '../helpers/auth.js';
 
 test.describe('auth', () => {
   test('unauthenticated dashboard redirects to login', async ({ page }) => {
@@ -13,6 +20,15 @@ test.describe('auth', () => {
   // `closed` by default, and the page withholds the whole form rather than collecting an email
   // and a password it would then answer 403 to. Asserting the absence is the honest version.
   test('register page offers no form while registration is closed', async ({ page }) => {
+    // An install with NO accounts is in first-run setup, where registration is legitimately
+    // open — so this assertion is only meaningful once the install has an owner.
+    const sql = getSql();
+    try {
+      await ensureInstallHasAnAccount(sql, page.request);
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
+
     await page.goto('/register');
     await expect(page.getByRole('heading', { name: 'Registration is closed' })).toBeVisible();
     await expect(page.getByLabel('Email')).toHaveCount(0);
@@ -27,6 +43,7 @@ test.describe('auth', () => {
     const sql = getSql();
     let inviteId = '';
     try {
+      await ensureInstallHasAnAccount(sql, page.request);
       const invite = await seedInvite(sql);
       inviteId = invite.id;
 
