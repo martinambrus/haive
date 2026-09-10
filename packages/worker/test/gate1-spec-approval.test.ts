@@ -308,6 +308,15 @@ describe('the affected-components section', () => {
     ]);
   });
 
+  it('starts closed, with the count in the preview', () => {
+    // The approver's first read is the spec. This section is tall — depth groups,
+    // relation sub-groups and a diagram per radius — and the summary still states
+    // how wide the radius is, so nothing is hidden by starting collapsed.
+    const s = section(affected());
+    expect(s.defaultOpen).toBe(false);
+    expect(s.preview).toBe('1 named • 2 reached');
+  });
+
   it('carries every cap through instead of letting a short list read as complete', () => {
     const s = section(
       affected({

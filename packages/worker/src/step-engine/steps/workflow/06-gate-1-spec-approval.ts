@@ -71,7 +71,11 @@ function affectedComponentsSection(
       // The structured payload IS the content — see `planImpact` on the form
       // schema, which says why `body` is empty rather than a second rendering.
       body: '',
-      defaultOpen: true,
+      // Closed by default: the approver's first read is the spec, and this
+      // section is tall (depth groups, relation sub-groups, a diagram per
+      // radius). `preview` carries the count, so nothing is hidden — the header
+      // still states how wide the radius is before it is opened.
+      defaultOpen: false,
       planImpact: {
         repositoryId,
         named: a.named.map((n) => ({
