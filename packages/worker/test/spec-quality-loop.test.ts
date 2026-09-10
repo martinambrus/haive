@@ -280,7 +280,7 @@ describe('chooseAmendedSpec', () => {
     // Greptile #83 (first): a corrector legitimately removes a large obsolete
     // section and returns the full revised body, a fraction of its input.
     const current = spec(40000, 20);
-    const trimmed = spec(3000, 14);
+    const trimmed = spec(3000, 14); // 7.5% of the length, still a real document
     expect(chooseAmendedSpec(current, trimmed).spec).toBe(trimmed);
   });
 
@@ -305,8 +305,47 @@ describe('chooseAmendedSpec', () => {
   it('holds the line exactly at the heading floor', () => {
     const current = spec(40000, 20);
     // 3 sections + the H1 = 4 headings, one under the floor; 4 + 1 = 5 meets it.
-    expect(chooseAmendedSpec(current, spec(500, 3)).rejected).not.toBeNull();
-    expect(chooseAmendedSpec(current, spec(500, 4)).rejected).toBeNull();
+    // Both bodies clear the size floor, so only the heading count is in play.
+    expect(chooseAmendedSpec(current, spec(2500, 3)).rejected).not.toBeNull();
+    expect(chooseAmendedSpec(current, spec(2500, 4)).rejected).toBeNull();
+  });
+
+  it('holds the line exactly at the size floor', () => {
+    const current = spec(40000, 20);
+    // Both bodies carry 21 headings, so only the size is in play.
+    expect(chooseAmendedSpec(current, spec(1999, 20)).rejected).not.toBeNull();
+    expect(chooseAmendedSpec(current, spec(2000, 20)).rejected).toBeNull();
+  });
+
+  it('discards a STATUS DOCUMENT that has sections but no specification in it', () => {
+    // Greptile #83 (third), and not a hypothetical shape: the agent behind the
+    // original failure wrote exactly this — a verification table, a "fixes
+    // applied" paragraph, then the pointer — and escaped only because it put the
+    // prose outside the JSON. Headings alone must not be enough.
+    const current = spec(51038, 33);
+    const statusDoc = [
+      '# Amendment status',
+      '',
+      '## What I verified',
+      '',
+      'All four findings validated against the code on disk.',
+      '',
+      '## Fixes applied',
+      '',
+      'Goal-table ranges, placement rule, spacer tables.',
+      '',
+      '## Location',
+      '',
+      'The full revised body is at /tmp/amend/spec.md (70 KB).',
+      '',
+      '## Note',
+      '',
+      'All six code fences preserved verbatim.',
+    ].join('\n');
+    const decision = chooseAmendedSpec(current, statusDoc);
+    expect(decision.spec).toBe(current);
+    expect(decision.rejected?.headings).toBe(5);
+    expect(decision.rejected!.amendedLength).toBeLessThan(2000);
   });
 
   it('accepts anything when there is no current body to compare against', () => {

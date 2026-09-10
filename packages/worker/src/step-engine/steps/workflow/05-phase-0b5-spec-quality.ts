@@ -210,6 +210,22 @@ const MIN_AMENDED_SPEC_RATIO = 0.5;
  *  snippet or a diff, which carry a heading or two at most. */
 const MIN_AMENDED_SPEC_HEADINGS = 5;
 
+/** Characters a SHORT amendment must also carry. Headings alone are not enough:
+ *  a STATUS DOCUMENT has sections too.
+ *
+ *  This is not a hypothetical shape. The agent behind the original failure wrote
+ *  exactly one — a "What I verified" table, a "Fixes applied" paragraph, then the
+ *  pointer — and only escaped this guard because it put that prose OUTSIDE the
+ *  JSON and the bare pointer inside. The next one may not split them, and five
+ *  decorative headings would then carry a few hundred characters past a
+ *  heading-only check (greptile #83, measured at 464 chars against 51,038).
+ *
+ *  Size is what separates the two: every real spec body measured is at least
+ *  8,347 chars, so 2,000 is ~4x below the smallest one and ~4x above that
+ *  pointer. Both floors must be met, because either alone has a shape that walks
+ *  through it. */
+const MIN_AMENDED_SPEC_CHARS = 2000;
+
 /** ATX headings, h1-h3, normalised. Setext headings are not matched: no spec
  *  produced by these steps has used one, and a false LOW count only makes the
  *  structural check stricter, never laxer — the ratio still admits on its own. */
@@ -246,8 +262,10 @@ export interface AmendedSpecDecision {
  *  when `amendedSpec` is absent, and the discard is stated on the apply output so
  *  gate 1 shows it rather than leaving it in a log line.
  *
- *  Two ways in, and the second is why length is not the whole test: a revision
- *  that deleted or restructured most of the document is still a document.
+ *  Two ways in. The second is why a length ratio is not the whole test — a
+ *  revision that deleted or restructured most of the document is still a
+ *  document — and it asks for BOTH structure and substance, because a status
+ *  document reporting where the real body went has sections of its own.
  *
  *  NOT applied to 05a's manual branch, where a person edited the file by hand
  *  and a deliberate cut is theirs to make. */
@@ -262,7 +280,9 @@ export function chooseAmendedSpec(
   if (currentLength === 0) return accept;
   if (next.length >= currentLength * MIN_AMENDED_SPEC_RATIO) return accept;
   const headings = specHeadingCount(next);
-  if (headings >= MIN_AMENDED_SPEC_HEADINGS) return accept;
+  if (headings >= MIN_AMENDED_SPEC_HEADINGS && next.length >= MIN_AMENDED_SPEC_CHARS) {
+    return accept;
+  }
   return {
     spec: current,
     rejected: { amendedLength: next.length, currentLength, headings, preview: next.slice(0, 200) },
