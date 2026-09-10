@@ -357,3 +357,170 @@ jobs:
       - name: Teardown
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v
+
+  # The e2e suite has never run in CI, which is how one product change (registration closing)
+  # silently killed 17 of 18 specs. It boots the same stack `compose-boot` does — deliberately its
+  # own job rather than extra steps on that one, so that "the stack boots" and "the app works" stay
+  # separately readable, and so renaming nothing breaks an existing required check.
+  e2e:
+    name: End-to-end (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.34.5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      # Nothing under tests/ imports @haive/shared or @haive/database, so the workspace build the
+      # other jobs need is skipped here on purpose — the specs talk to the stack over HTTP and SQL.
+      - name: Typecheck the suite
+        run: pnpm typecheck:e2e
+
+      - name: Seed .env for compose
+        run: |
+          cp .env.example .env
+          python3 - <<'PY'
+          import os, re, secrets
+          path = '.env'
+          with open(path, 'r') as f:
+              text = f.read()
+          text = re.sub(
+              r'^CONFIG_ENCRYPTION_KEY=.*$',
+              'CONFIG_ENCRYPTION_KEY=' + secrets.token_hex(32),
+              text,
+              flags=re.MULTILINE,
+          )
+          text = re.sub(
+              r'^JWT_SECRET=.*$',
+              'JWT_SECRET=' + secrets.token_urlsafe(48),
+              text,
+              flags=re.MULTILINE,
+          )
+          text = re.sub(
+              r'^HOST_REPO_ROOT=.*$',
+              'HOST_REPO_ROOT=' + os.path.expanduser('~'),
+              text,
+              flags=re.MULTILINE,
+          )
+          with open(path, 'w') as f:
+              f.write(text)
+          PY
+
+      - name: Build compose images
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml build
+
+      # Explicit service names, never a bare `up`: ollama and the two proxy sidecars carry no
+      # `profiles:` gate, so `up` with no arguments would also pull ~9 GB of ollama that no spec
+      # touches.
+      - name: Start infrastructure
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis mailpit
+
+      - name: Wait for postgres + redis health
+        run: |
+          for svc in postgres redis; do
+            for i in $(seq 1 30); do
+              status=$(docker inspect --format '{{.State.Health.Status}}' haive-$svc 2>/dev/null || echo missing)
+              if [ "$status" = "healthy" ]; then
+                echo "$svc healthy"
+                break
+              fi
+              if [ $i -eq 30 ]; then
+                echo "$svc not healthy after 60s (status=$status)"
+                docker compose -f docker-compose.yml -f docker-compose.dev.yml logs $svc
+                exit 1
+              fi
+              sleep 2
+            done
+          done
+
+      - name: Apply database migrations
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm db-migrate
+
+      # api first and alone, exactly as compose-boot does it: it is what populates the shared
+      # node_modules volume that worker and web then mount.
+      - name: Start api (populates shared node_modules volume)
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d api
+
+      # Neither packages/api/Dockerfile nor packages/web/Dockerfile declares a HEALTHCHECK, and
+      # web's `depends_on: api` is not conditioned on health, so compose can never report when
+      # either is actually serving. These probes are the only thing that knows.
+      - name: Probe api /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:3001/health >/dev/null 2>&1; then
+              echo "api healthy"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "api /health unreachable after 120s"
+              docker compose -f docker-compose.yml -f docker-compose.dev.yml logs api
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Start worker, web
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d worker web
+
+      - name: Probe web root
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/ || echo 000)
+            if [ "$code" = "200" ] || [ "$code" = "307" ] || [ "$code" = "308" ]; then
+              echo "web responded $code"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "web root unreachable after 120s (last=$code)"
+              docker compose -f docker-compose.yml -f docker-compose.dev.yml logs web
+              exit 1
+            fi
+            sleep 2
+          done
+
+      # --with-deps because a bare runner has none of chromium's shared libraries. `pnpm test:e2e`
+      # runs `playwright install chromium` through its pretest hook, which then finds the browser
+      # already present and costs a version check.
+      - name: Install the Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run the suite
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:3000
+          PLAYWRIGHT_API_BASE: http://localhost:3001
+          PLAYWRIGHT_DATABASE_URL: postgres://haive:haive_dev_password@localhost:5432/haive
+        run: pnpm test:e2e
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+      - name: Dump service status
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
+
+      - name: Capture logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --tail 300
+
+      - name: Teardown
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v
