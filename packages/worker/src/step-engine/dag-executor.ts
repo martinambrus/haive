@@ -1278,6 +1278,16 @@ export function replannerPrompt(
             .join('\n');
         });
 
+  // `plan.levels` is planner-authored KEYS too and renders OUTSIDE the fence — the
+  // same hole as the header, one field over. JSON.stringify escapes quotes and
+  // control characters, so it cannot break the line, but it still places arbitrary
+  // planner text in the controlling region. Reduced through the same safeKey.
+  const safeLevels = (Array.isArray(plan.levels) ? (plan.levels as unknown[]) : []).map((lvl) =>
+    (Array.isArray(lvl) ? (lvl as unknown[]) : []).map((k) =>
+      safeKey(typeof k === 'string' ? k : String(k)),
+    ),
+  );
+
   return [
     `The DAG has broad failure: ${failed.length} issue(s) could not be implemented (${failed
       .map((f) => safeKey(f.issueKey))
@@ -1293,7 +1303,7 @@ export function replannerPrompt(
     ...edges,
     UNTRUSTED_CLOSE,
     '',
-    `Current dependency levels: ${JSON.stringify(plan.levels)}`,
+    `Current dependency levels: ${JSON.stringify(safeLevels)}`,
     'Decide how to proceed. Emit ONE JSON object inside a ```json fenced code block:',
     '{ "action": "CONTINUE|MODIFY_DAG|REDUCE_SCOPE|ABORT", "reasoning": "...", "skip_downstream": ["<issue ids to skip>"], "new_levels": [["ISSUE-..."]] }',
     'CONTINUE: skip the failed issues, proceed. REDUCE_SCOPE: drop low-priority issues. MODIFY_DAG: restructure (provide new_levels). ABORT: stop the workflow with a failure report.',
