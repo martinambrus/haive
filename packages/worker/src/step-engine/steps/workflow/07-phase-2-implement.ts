@@ -12,7 +12,12 @@ import {
   retrievalGuidanceLines,
 } from '../_retrieval-guidance.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
-import { FIX_LOOP_TARGET_STEP_ID, loadFixLoopDiagnosis, loadPriorFixContext } from './_fix-loop.js';
+import {
+  FIX_LOOP_TARGET_STEP_ID,
+  isFixRound,
+  loadFixLoopDiagnosis,
+  loadPriorFixContext,
+} from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
@@ -218,19 +223,26 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
-    // Single mode (or a legacy task with no 06b) always runs. DAG mode splits by ROUND:
-    // 06c-dag-execute owns the initial build, so round 0 skips — but every FIX round is
-    // this step's, because it is the only reader of loadFixLoopDiagnosis and the fix loop
-    // re-enters at a hardcoded FIX_LOOP_TARGET_STEP_ID. Skipping a fix round left the
-    // diagnosis unread and re-ran the whole review chain against unchanged code until the
-    // round cap: task 681f0f99 spent 3 rounds that way, each recording a fix_loop.requested
-    // nothing consumed. Pointing the loop at 06c instead is not the alternative — after a
-    // successful build every level is checkpointed, so resolveDagPhase resolves without
-    // dispatching an agent, and the issue worktrees were removed at checkpoint. The tree a
-    // fix pass must edit is 01-worktree-setup's integration worktree in both modes.
+    // Single mode (or a legacy task with no 06b) always runs. DAG mode SPLITS BY WHICH LOOP
+    // ENTERED THE ROUND: 06c-dag-execute owns the build, this step owns every FIX round —
+    // it is the only reader of loadFixLoopDiagnosis and the fix loop re-enters at a
+    // hardcoded FIX_LOOP_TARGET_STEP_ID. Skipping a fix round left the diagnosis unread and
+    // re-ran the whole review chain against unchanged code until the round cap: task
+    // 681f0f99 spent 3 rounds that way, each recording a fix_loop.requested nothing
+    // consumed. Pointing the loop at 06c instead is not the alternative — after a successful
+    // build every level is checkpointed, so resolveDagPhase resolves without dispatching an
+    // agent, and the issue worktrees were removed at checkpoint. The tree a fix pass must
+    // edit is 01-worktree-setup's integration worktree in both modes.
+    //
+    // The test is isFixRound, NOT `ctx.round > 0`: the round counter is shared with the
+    // revise loop, so a human gate-1 spec reject forks it forward before 06b has even
+    // chosen a mode. Task ef954a3d rejected at gate 1 twice, reached 06b/06c at round 2,
+    // and then ran this step at that same round with fixContext null — a second full
+    // from-scratch implementation on top of a DAG build that had just taken 3h35m.
     const sprint = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06b-sprint-planning');
     const mode = (sprint?.output as { mode?: string } | null)?.mode;
-    return mode !== 'dag' || ctx.round > 0;
+    if (mode !== 'dag') return true;
+    return await isFixRound(ctx);
   },
 
   async detect(ctx: StepContext): Promise<ImplementDetect> {

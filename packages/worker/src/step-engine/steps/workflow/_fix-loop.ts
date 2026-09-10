@@ -386,6 +386,32 @@ export async function loadFixLoopDiagnosis(
   return null;
 }
 
+/** Was THIS round entered by the fix loop?
+ *
+ *  `ctx.round` alone cannot answer it: the counter is shared with the revise loop, which forks a
+ *  round forward on a human gate-1 spec reject (task-queue.ts, case 'revise') without any fix
+ *  having been requested. The presence of a recorded request is the invariant — every path that
+ *  re-enters the implementation step records one at the target round first: the normal loop_back,
+ *  the oscillation gate, the round-cap escalation (recorded up front so Continue can re-enter),
+ *  and restartLoop, which returns loop_back too. The round-cap counter already keys on the events
+ *  rather than the number for the same reason.
+ *
+ *  Presence, not content: `loadFixLoopDiagnosis` returns null for an EMPTY diagnosis, so reusing
+ *  it here would read a real fix round as an original pass. */
+export async function isFixRound(ctx: StepContext): Promise<boolean> {
+  if (ctx.round <= 0) return false;
+  const rows = await ctx.db
+    .select({ payload: schema.taskEvents.payload })
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, ctx.taskId),
+        eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+      ),
+    );
+  return rows.some((r) => (r.payload as { round?: number } | null)?.round === ctx.round);
+}
+
 /** Source steps whose fix-loop diagnoses are OBJECTIVE/runtime failures the implementation
  *  had to satisfy (build, runtime, tests, code review, human verification) — NOT 07b's own
  *  validator findings, which it re-derives each pass. Their diagnoses become "honored
