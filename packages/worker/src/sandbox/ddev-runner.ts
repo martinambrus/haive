@@ -1372,6 +1372,63 @@ export function ddevImportDb(
   );
 }
 
+/** Count the tables the project's database actually holds.
+ *
+ *  `ddev import-db` exits 0 for an import that created NOTHING — a dump for the wrong
+ *  engine, a truncated stream, an archive whose restore wrote no statements — so exit
+ *  code alone cannot say whether a database arrived. MEASURED on task ef954a3d: the
+ *  step recorded `"imported": true, "DDEV started; database dump imported"` against a
+ *  database with ZERO tables, the site answered every request with `relation
+ *  "semaphore" does not exist`, and the workflow only found out ~20 hours later when a
+ *  developer could not test it at Gate 2 — by which point no code change could fix it.
+ *
+ *  `ddev psql` / `ddev mysql` rather than `ddev exec -s db <client>`: DDEV owns the
+ *  credentials in both, so this needs no knowledge of the db user or password.
+ *  `information_schema.tables` is ANSI and exists on both engines; only the client and
+ *  the schema predicate differ. Anything that is not postgres is treated as
+ *  mysql/mariadb, the same reading `buildDdevImportCommand` already takes of a null
+ *  dbType (an absent `database:` block is DDEV's mariadb default).
+ *
+ *  Returns null when the count could not be READ — an unparseable answer, a client
+ *  that is not there, a non-zero exit. Null is "unknown", never "empty": refusing an
+ *  import on a probe that failed to run would block projects whose database is fine. */
+export function buildDdevTableCountCommand(projectDir: string, dbType: string | null): string {
+  const sql = 'select count(*) from information_schema.tables where table_schema = ';
+  return dbType === 'postgres'
+    ? `cd ${projectDir} && ddev psql -tAc "${sql}'public'"`
+    : `cd ${projectDir} && ddev mysql -N -B -e "${sql}database()"`;
+}
+
+/** The table count from a client's stdout, or null when no count can be read.
+ *
+ *  The last all-digit LINE, not the first number in the stream: DDEV prefixes its own
+ *  log lines freely and the psql/mysql answer is the bare number on a line of its own,
+ *  so anchoring on the whole line is what keeps a stray "17" inside a log sentence from
+ *  being read as the count. */
+export function parseDdevTableCount(output: string): number | null {
+  const digits = output
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^\d+$/.test(l));
+  const last = digits.at(-1);
+  return last === undefined ? null : Number(last);
+}
+
+export async function ddevCountTables(
+  handle: DdevRunnerHandle,
+  dbType: string | null,
+  opts: { timeoutMs?: number } = {},
+): Promise<number | null> {
+  const res = await runnerShellStreaming(
+    handle,
+    buildDdevTableCountCommand(handle.projectDir, dbType),
+    undefined,
+    opts.timeoutMs ?? 120_000,
+  );
+  if (res.exitCode !== 0) return null;
+  return parseDdevTableCount(res.output);
+}
+
 /** Extract `raw.primary_url` from `ddev ... -j` output. The `-j` flag emits
  *  newline-delimited JSON, one object per line, and the describe payload (the
  *  object carrying `.raw.primary_url`) can be PRECEDED by stray log lines — e.g. a

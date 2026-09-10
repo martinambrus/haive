@@ -13,6 +13,7 @@ import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
 import { hashDdevInputs } from '../_ddev-inputs-hash.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import {
+  ddevCountTables,
   ddevImportDb,
   ddevSnapshot,
   ddevImportSnapshotName,
@@ -328,15 +329,18 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       const format: DumpImportFormat = d.dumpWorkerPath
         ? await sniffDumpFormat(d.dumpWorkerPath)
         : { pgRestore: false, gzipped: false };
+      // Read once: the engine decides both whether a pg archive can be restored at
+      // all and which client the post-import table count speaks.
+      const cfgText = d.workspace
+        ? await readFile(ddevConfigPath(d.workspace), 'utf8').catch(() => null)
+        : null;
+      const dbType = cfgText === null ? null : parseDdevConfig(cfgText).dbType;
       if (format.pgRestore) {
         // pg_restore only exists in a postgres db container. An absent `database:`
         // block means DDEV's mariadb default, so a null dbType is still "not
         // postgres"; only an unreadable config leaves the engine unknown, and then
         // the restore itself reports the mismatch.
-        const cfgText = d.workspace
-          ? await readFile(ddevConfigPath(d.workspace), 'utf8').catch(() => null)
-          : null;
-        if (cfgText !== null && parseDdevConfig(cfgText).dbType !== 'postgres') {
+        if (cfgText !== null && dbType !== 'postgres') {
           throw new Error(
             'The uploaded dump is a PostgreSQL archive (pg_dump -Fc/-Ft), but this ' +
               "project's DDEV database is not postgres. Upload a plain .sql dump, or switch the " +
@@ -354,6 +358,25 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       );
       if (imp.exitCode !== 0) {
         throw new Error(`ddev import-db failed: ${imp.output.slice(-1500)}`);
+      }
+      // Exit 0 is not proof a database arrived — see ddevCountTables. Only a
+      // CONFIDENT zero blocks; null means the probe could not be read, which is not
+      // evidence the database is empty and must not fail a project that is fine.
+      const tables = await ddevCountTables(handle, dbType);
+      if (tables === 0) {
+        throw new Error(
+          'The database dump imported without error but the database is EMPTY (0 tables). ' +
+            'The dump is most likely for a different engine than this project, or truncated. ' +
+            `This project's DDEV database is ${dbType ?? 'mysql/mariadb (DDEV default)'} — ` +
+            'upload a dump taken from that engine and retry. Import output: ' +
+            imp.output.slice(-800),
+        );
+      }
+      if (tables === null) {
+        ctx.logger.warn(
+          { taskId: ctx.taskId, dbType },
+          'post-import table count could not be read — import left unverified',
+        );
       }
       imported = true;
       // Durability snapshot of the freshly-imported DB. It lives on the repo

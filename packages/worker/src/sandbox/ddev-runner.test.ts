@@ -13,6 +13,8 @@ import {
   ddevRegistryMirrorUrl,
   buildRegistryDaemonJson,
   budgetContainerLogs,
+  buildDdevTableCountCommand,
+  parseDdevTableCount,
 } from './ddev-runner.js';
 
 // Pure recovery-path decision for ensureDdevStartedInner. The orchestrator gathers
@@ -415,5 +417,38 @@ describe('parseDdevProjectStatus', () => {
         dockerdUp: true,
       }),
     ).toBe('warm-start');
+  });
+});
+
+// A `ddev import-db` that exits 0 having created nothing is the case this pair exists
+// for: task ef954a3d recorded `"imported": true` against a database with zero tables and
+// the workflow only found out ~20 hours later, at Gate 2.
+describe('post-import table count', () => {
+  it("asks postgres and mysql with each engine's own client and schema predicate", () => {
+    expect(buildDdevTableCountCommand('/p', 'postgres')).toContain('ddev psql');
+    expect(buildDdevTableCountCommand('/p', 'postgres')).toContain("table_schema = 'public'");
+    expect(buildDdevTableCountCommand('/p', 'mariadb')).toContain('ddev mysql');
+    expect(buildDdevTableCountCommand('/p', 'mariadb')).toContain('table_schema = database()');
+  });
+
+  it("treats an unknown engine as mysql — DDEV's default when no database block is set", () => {
+    expect(buildDdevTableCountCommand('/p', null)).toContain('ddev mysql');
+  });
+
+  it('reads the count from a clean answer', () => {
+    expect(parseDdevTableCount('412\n')).toBe(412);
+  });
+
+  it('reads ZERO as a count, never as "no answer" — that is the whole failure', () => {
+    expect(parseDdevTableCount('0\n')).toBe(0);
+  });
+
+  it('takes the last all-digit LINE, so a number inside a DDEV log line is not the count', () => {
+    expect(parseDdevTableCount('Container ddev-x-db  Running for 17 seconds\n412\n')).toBe(412);
+  });
+
+  it('returns null when nothing in the output is a count', () => {
+    expect(parseDdevTableCount('')).toBeNull();
+    expect(parseDdevTableCount('psql: command not found\n')).toBeNull();
   });
 });
