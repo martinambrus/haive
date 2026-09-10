@@ -37,9 +37,6 @@ const ENV_SAMPLE_SUFFIXES = ['.sample', '.example', '.dist', '.template'] as con
  *  this repo. Mirrors 08b's own ROOT_SEARCH_SKIP. */
 const SPEC_SEARCH_SKIP = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage', '.git']);
 
-/** How deep the spec search walks below the framework root. */
-const SPEC_SEARCH_MAX_DEPTH = 6;
-
 const SPEC_FILE_RE = /\.(spec|test)\.[cm]?[jt]sx?$/;
 
 /** An env file the project's own template says should exist, and does not. */
@@ -99,10 +96,15 @@ export async function findMissingEnvFiles(
  *
  * This guard is still needed because `--list` exits non-zero both for a suite that cannot
  * load and for a project with no tests at all, and only the first is a block.
+ *
+ * No depth cap: a spec nested deeper than an arbitrary limit would be read as "this project
+ * has no tests", which silently disables the pre-flight for exactly the repo it should guard.
+ * Unbounded is safe here because the walk short-circuits on the first spec, SPEC_SEARCH_SKIP
+ * excludes the dirs that make a tree deep (node_modules, vendor, dist, build), and
+ * `Dirent.isDirectory()` is false for a symlink, so no link can be followed into a cycle.
  */
 export async function hasExistingSpecFile(workspace: string, root: string): Promise<boolean> {
-  const walk = async (rel: string, depth: number): Promise<boolean> => {
-    if (depth > SPEC_SEARCH_MAX_DEPTH) return false;
+  const walk = async (rel: string): Promise<boolean> => {
     const entries = await readdir(path.join(workspace, rel), { withFileTypes: true }).catch(
       () => [],
     );
@@ -110,11 +112,11 @@ export async function hasExistingSpecFile(workspace: string, root: string): Prom
       if (SPEC_SEARCH_SKIP.has(entry.name)) continue;
       const childRel = rel ? path.posix.join(rel, entry.name) : entry.name;
       if (entry.isFile() && SPEC_FILE_RE.test(entry.name)) return true;
-      if (entry.isDirectory() && (await walk(childRel, depth + 1))) return true;
+      if (entry.isDirectory() && (await walk(childRel))) return true;
     }
     return false;
   };
-  return walk(root, 0);
+  return walk(root);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -76,6 +76,21 @@ describe('hasExistingSpecFile', () => {
     await write(ws, 'test-playwright/tests/nested/c.test.tsx');
 
     expect(await hasExistingSpecFile(ws, 'test-playwright')).toBe(true);
+  });
+
+  it('finds a spec at any depth — a cap would silently disable the pre-flight', async () => {
+    const ws = await tmp();
+    await write(ws, `test-playwright/${'a/'.repeat(12)}deep.spec.ts`);
+
+    expect(await hasExistingSpecFile(ws, 'test-playwright')).toBe(true);
+  });
+
+  it('does not follow a symlinked directory, so no link can cycle the walk', async () => {
+    const ws = await tmp();
+    await write(ws, 'test-playwright/tests/keep.txt');
+    await symlink(path.join(ws, 'test-playwright'), path.join(ws, 'test-playwright/tests/loop'));
+
+    expect(await hasExistingSpecFile(ws, 'test-playwright')).toBe(false);
   });
 
   it('ignores installed dependencies and build output', async () => {
