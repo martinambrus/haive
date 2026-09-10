@@ -155,6 +155,12 @@ export const CONFIG_KEYS = {
   // container untouched, so a repo whose suite needs a browser reports the gap through
   // 08b's degradedNote instead of having it repaired.
   TEST_BROWSER_PROVISION_ENABLED: 'config:worker:testBrowserProvisionEnabled',
+  // Global kill-switch for 08b's pre-flight probe: before the tester agent runs, enumerate
+  // the repo's EXISTING suite when an env-file hint says the workspace may be missing one,
+  // and park the step on a Retry gate when the runner can load nothing. Default true;
+  // 'false' makes 08b's detect and form byte-identical to what they were before it existed,
+  // leaving the post-run enumerate guard as the only backstop.
+  TEST_PREFLIGHT_ENABLED: 'config:worker:testPreflightEnabled',
   // Global kill-switch for direct browser access: when 'true' (default), each
   // per-task runner publishes its app port to 127.0.0.1 at startup so the user
   // can open the app in their own browser (localhost + *.ddev.site URLs), a fast

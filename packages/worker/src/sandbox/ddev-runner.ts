@@ -214,6 +214,15 @@ export function runnerHandleForTask(taskId: string, repoSubpath: string): DdevRu
   return { container: runnerName(taskId), projectDir: `/repos/${repoSubpath}` };
 }
 
+/** True when this task's runner container is already up, WITHOUT booting one.
+ *
+ *  For a caller that wants to use the runner opportunistically but must not wait on it:
+ *  `ensureAppServing` blocks in the runtime admission gate, which a step's detect() must
+ *  never do. False here means "not available right now", never "this repo has no runner". */
+export function ddevRunnerRunning(handle: DdevRunnerHandle): Promise<boolean> {
+  return containerRunning(handle.container);
+}
+
 /** Launch a per-task DinD runner with the repo volume mounted, and wait for its
  *  nested dockerd. Labeled haive.task.id (so the existing cancel sweep + boot
  *  reaper find it) and haive.ddev (so killTaskDdevRunners can target it with

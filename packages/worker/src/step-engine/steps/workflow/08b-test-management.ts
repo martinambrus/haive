@@ -3,7 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import type { FormSchema } from '@haive/shared';
+import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
@@ -16,13 +16,24 @@ import {
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
-import { runnerHandleForTask, ddevExec, DDEV_PROJECT_MOUNT } from '../../../sandbox/ddev-runner.js';
+import {
+  runnerHandleForTask,
+  ddevExec,
+  ddevRunnerRunning,
+  DDEV_PROJECT_MOUNT,
+} from '../../../sandbox/ddev-runner.js';
 import {
   ensureDdevPlaywrightBrowsers,
   killStalePlaywrightRuns,
 } from '../../../sandbox/ddev-playwright.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
+import {
+  findExistingSpecFiles,
+  findMissingEnvFiles,
+  preflightGateSchema,
+  type TestPreflightBlock,
+} from './_test-preflight.js';
 import { cleanText, contentFingerprint } from '../../task-ledger.js';
 
 // Phase 5b — Test management (legacy phase5b-test-management.md). Runs straight
@@ -69,6 +80,11 @@ interface TestManagementDetect {
    *  a spec that named no component, or a disabled canvas — the prompt is then
    *  what it always was. */
   planImpact: string;
+  /** Set only when the pre-flight probe RAN and the runner could load none of the repo's
+   *  existing tests. Optional and absent by default: `task_steps.detect_output` is persisted
+   *  and replayed, so a payload written before this existed must still render the ordinary
+   *  form — which is exactly what an absent field produces. */
+  preflight?: TestPreflightBlock | null;
 }
 
 interface TestRunResult {
@@ -526,6 +542,63 @@ async function runTestCommand(
  *  so it gets a fraction of the run's budget rather than sharing it. */
 const COLLECT_TIMEOUT_MS = 120_000;
 
+/**
+ * Ask the runner to enumerate the repo's EXISTING specs before a tester agent is dispatched,
+ * and report the block when it can load none of them.
+ *
+ * Gated on a structural hint (an `.env` a template says should exist and does not) so a repo
+ * without one pays nothing at all. The hint never decides — the probe's EXIT CODE does, which
+ * is the same invariant the post-run enumerate guard reads and the reason neither has to parse
+ * the runner's prose.
+ *
+ * Every "cannot tell" answers null and lets the step run exactly as before: the probe is a way
+ * to fail EARLY, never a new way to fail. The runtime is used only if it is ALREADY up —
+ * `ensureAppServing` blocks in the runtime admission gate, which detect() must never do.
+ */
+async function runTestPreflight(
+  ctx: StepContext,
+  d: TestManagementDetect,
+): Promise<TestPreflightBlock | null> {
+  if (!(await configService.getBoolean(CONFIG_KEYS.TEST_PREFLIGHT_ENABLED, true))) return null;
+  // Playwright only, the same discipline buildCollectCommand states for its list mode: adding
+  // a framework means measuring what its enumerate mode prints and exits with, first.
+  if (d.primary !== 'playwright') return null;
+
+  const root = primaryFrameworkRoot(d);
+  if (root === null) return null;
+
+  const missing = await findMissingEnvFiles(d.workspacePath, [root, '']);
+  if (missing.length === 0) return null;
+
+  const specs = await findExistingSpecFiles(d.workspacePath, root);
+  // Nothing to enumerate is not evidence of a broken environment — a repo whose suite is
+  // empty and one whose suite cannot load both list zero tests, and only the second is a
+  // block. The tester writing the first specs is the normal path here.
+  if (specs.length === 0) return null;
+
+  const collect = buildCollectCommand(d.primary, specs, {
+    ddev: d.ddev,
+    ddevPlaywrightAddon: d.ddevPlaywrightAddon,
+    root,
+  });
+  if (!collect) return null;
+  if (collect.kind === 'ddev') {
+    if (!d.repoSubpath) return null;
+    if (!(await ddevRunnerRunning(runnerHandleForTask(ctx.taskId, d.repoSubpath)))) return null;
+  }
+
+  const listed = await runTestCommand(ctx, d, collect, COLLECT_TIMEOUT_MS).catch(() => null);
+  // A probe that could not be RUN proves nothing; only one that ran and refused to enumerate
+  // anything is a block.
+  if (!listed || listed.exitCode === 0) return null;
+
+  ctx.logger.info(
+    { specs: specs.length, missing: missing.map((m) => m.expected) },
+    'test pre-flight: runner enumerated none of the existing specs',
+  );
+  return { command: listed.command, output: listed.output, missing };
+}
+
 /** Budget for the prior-pass block. Mirrors loadPriorFixContext's (400 chars per entry,
  *  4000 for the block) so this loop and the round-level one read the same way. */
 const PRIOR_PASS_ENTRY_LIMIT = 400;
@@ -602,6 +675,11 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
     description:
       "Keeps the project's automated tests in sync with the change: a tester agent creates/updates/removes tests per your choice, then the related tests run selectively with a fix loop.",
     requiresCli: false,
+    // Test management is genuinely optional, and the pre-flight gate below can park the step
+    // on a precondition only a human can clear. Skipping has to be reachable from there, or
+    // the gate is a dead end. Keep in sync with SKIPPABLE_STEP_IDS — the api cannot import
+    // this registry.
+    allowSkip: true,
   },
 
   // ensureAppServing can throw; without a route a DDEV boot failure would hard-fail
@@ -647,7 +725,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         (plan?.output as { spec?: string } | null)?.spec) ||
       '';
 
-    return {
+    const detected: TestManagementDetect = {
       workspacePath: workspace,
       sandboxWorktreePath: sandbox,
       frameworks: infra.frameworks,
@@ -663,9 +741,16 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       // coverage that has fallen behind rather than components to touch.
       planImpact: planImpactBlock(await loadPlanImpactContext(ctx), { role: 'tester' }),
     };
+    // Last, and on the fully-built payload: the probe reuses the same command builders the
+    // real run does, so it needs the roots and the ddev fields already resolved.
+    return { ...detected, preflight: await runTestPreflight(ctx, detected) };
   },
 
   form(_ctx, detected): FormSchema {
+    // The runner could load none of the repo's existing tests, so a tester pass would write
+    // tests nothing can execute. Park instead of spending it — the gate is a retry schema, so
+    // it holds even under auto-continue, and Retry re-runs detect once the file exists.
+    if (detected.preflight) return preflightGateSchema(detected.preflight);
     // Name where each framework is rooted: a project the runner cannot find is otherwise
     // indistinguishable here from one that works, and this form is where a human would look.
     const infra = detected.frameworks
