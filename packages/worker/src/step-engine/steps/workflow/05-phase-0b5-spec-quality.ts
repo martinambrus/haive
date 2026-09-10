@@ -74,6 +74,13 @@ export interface SpecQualityApply {
    *  corrections set the amended body. Gate 1 prefers this over the original
    *  04-pre-planning spec. */
   spec: string;
+  /** Set when this pass returned an `amendedSpec` that was not a complete spec
+   *  and was discarded (see `chooseAmendedSpec`). The pass is then a no-op on the
+   *  body, which nothing downstream could otherwise tell from a corrector that
+   *  found nothing to change — so it rides the persisted apply output and gate 1
+   *  states it in the iteration history. Optional: passes recorded before this
+   *  existed carry none, and every reader must render without it. */
+  amendmentDiscarded?: DiscardedAmendment;
 }
 
 interface PrePlanningOutput {
@@ -169,6 +176,123 @@ export function parseCorrectorOutput(raw: unknown): { amendedSpec: string | null
     return { amendedSpec: typeof obj.amendedSpec === 'string' ? obj.amendedSpec : null };
   }
   return null;
+}
+
+/** Smallest fraction of the spec it was given that a corrector's `amendedSpec`
+ *  may be and still be taken on its length alone.
+ *
+ *  MEASURED across every corrector pass on the dev install that had a prior body
+ *  (20 passes over 3 tasks): a real correction GROWS the spec — ratios run 1.017
+ *  to 1.355 and not one of them shrinks it. The single outlier is the failure
+ *  this exists for: a corrector that ran out of output room, wrote the body to a
+ *  file inside its own sandbox and returned the POINTER — 50 chars against
+ *  58,774, ratio 0.0009. It replaced the spec, `latestSpec` carried it forward
+ *  through two more passes, and it reached gate 1 as the entire "Full
+ *  specification".
+ *
+ *  A ratio of lengths rather than a match on that pointer's wording: the next
+ *  agent to run out of room will word it differently. */
+const MIN_AMENDED_SPEC_RATIO = 0.5;
+
+/** Headings a SHORT amendment must carry to be admitted anyway.
+ *
+ *  Length is not proof of completeness. A corrector may legitimately delete a
+ *  large obsolete section, or rewrite the document's structure outright, and
+ *  still return the FULL revised body — which the ratio alone discards. So the
+ *  second test asks whether the body is a SPECIFICATION IN ITS OWN RIGHT, and
+ *  nothing about its relation to the previous one: renaming or reordering every
+ *  section cannot move this number.
+ *
+ *  MEASURED over all 72 spec bodies these steps have produced on the dev install:
+ *  the 70 real ones carry 14-33 headings and 8,347-80,811 chars; the 2 that are
+ *  not specs are the pointer and the review pass that inherited it, 0 headings
+ *  and 50 chars.
+ *
+ *  Ten, and the number is calibrated against a STATUS DOCUMENT rather than a
+ *  snippet — that is the adversary actually observed. This was 5 on the reasoning
+ *  that a diff carries a heading or two; but the document the failing agent wrote
+ *  had five sections of its own, so 5 was not above the thing it had to be above
+ *  (greptile #83). Ten is still 1.4x below the smallest real spec, so it costs no
+ *  real correction, and 2x above that document. */
+const MIN_AMENDED_SPEC_HEADINGS = 10;
+
+/** Characters a SHORT amendment must also carry. Headings alone are not enough:
+ *  a STATUS DOCUMENT has sections too.
+ *
+ *  This is not a hypothetical shape. The agent behind the original failure wrote
+ *  exactly one — a "What I verified" table, a "Fixes applied" paragraph, then the
+ *  pointer — and only escaped this guard because it put that prose OUTSIDE the
+ *  JSON and the bare pointer inside. The next one may not split them, and five
+ *  decorative headings would then carry a few hundred characters past a
+ *  heading-only check (greptile #83, measured at 464 chars against 51,038).
+ *
+ *  Size is what separates the two: every real spec body measured is at least
+ *  8,347 chars, so 2,000 is ~4x below the smallest one and ~4x above that
+ *  pointer. Both floors must be met, because either alone has a shape that walks
+ *  through it. */
+const MIN_AMENDED_SPEC_CHARS = 2000;
+
+/** ATX headings, h1-h3, normalised. Setext headings are not matched: no spec
+ *  produced by these steps has used one, and a false LOW count only makes the
+ *  structural check stricter, never laxer — the ratio still admits on its own. */
+const SPEC_HEADING = /^ {0,3}#{1,3}\s+(.+?)\s*$/gm;
+
+/** Distinct headings in a body — the structural weight of the document. */
+export function specHeadingCount(text: string): number {
+  const seen = new Set<string>();
+  for (const m of text.matchAll(SPEC_HEADING)) seen.add(m[1]!.trim().toLowerCase());
+  return seen.size;
+}
+
+export interface DiscardedAmendment {
+  amendedLength: number;
+  currentLength: number;
+  headings: number;
+  preview: string;
+}
+
+export interface AmendedSpecDecision {
+  /** The body to carry forward. */
+  spec: string;
+  /** Set when the amendment was discarded, with what decided it. */
+  rejected: DiscardedAmendment | null;
+}
+
+/** Choose between a corrector's amended body and the one it was handed.
+ *
+ *  A correction is contracted to be the FULL revised body, so one that is both a
+ *  fraction of its input AND is not a structured document is not a correction —
+ *  it is a diff, a snippet or a pointer, and taking it destroys the spec
+ *  silently. Keeping the current body costs the pass and nothing more: the loop
+ *  re-reviews and the next corrector gets another go, exactly as it already does
+ *  when `amendedSpec` is absent, and the discard is stated on the apply output so
+ *  gate 1 shows it rather than leaving it in a log line.
+ *
+ *  Two ways in. The second is why a length ratio is not the whole test — a
+ *  revision that deleted or restructured most of the document is still a
+ *  document — and it asks for BOTH structure and substance, because a status
+ *  document reporting where the real body went has sections of its own.
+ *
+ *  NOT applied to 05a's manual branch, where a person edited the file by hand
+ *  and a deliberate cut is theirs to make. */
+export function chooseAmendedSpec(
+  current: string,
+  amended: string | null | undefined,
+): AmendedSpecDecision {
+  const next = typeof amended === 'string' ? amended.trim() : '';
+  if (next.length === 0) return { spec: current, rejected: null };
+  const currentLength = current.trim().length;
+  const accept = { spec: amended as string, rejected: null };
+  if (currentLength === 0) return accept;
+  if (next.length >= currentLength * MIN_AMENDED_SPEC_RATIO) return accept;
+  const headings = specHeadingCount(next);
+  if (headings >= MIN_AMENDED_SPEC_HEADINGS && next.length >= MIN_AMENDED_SPEC_CHARS) {
+    return accept;
+  }
+  return {
+    spec: current,
+    rejected: { amendedLength: next.length, currentLength, headings, preview: next.slice(0, 200) },
+  };
 }
 
 function coerceVerdict(value: unknown, hasBlockingFinding: boolean): SpecVerdict {
@@ -611,14 +735,17 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
     if (roleForIteration(args.iteration) === ROLE_CORRECTOR) {
       const correction = parseCorrectorOutput(args.llmOutput ?? null);
       const lastReview = latestReview(args.previousIterations);
-      const amendedSpec =
-        correction?.amendedSpec && correction.amendedSpec.trim().length > 0
-          ? correction.amendedSpec
-          : workingSpec;
+      const decision = chooseAmendedSpec(workingSpec, correction?.amendedSpec);
+      if (decision.rejected) {
+        ctx.logger.warn(
+          { iteration: args.iteration, ...decision.rejected, source: 'correct' },
+          'spec correction discarded — amendedSpec is not a complete spec body',
+        );
+      }
       ctx.logger.info(
         {
           iteration: args.iteration,
-          amended: Boolean(correction?.amendedSpec),
+          amended: decision.spec !== workingSpec,
           source: 'correct',
         },
         'spec correction applied',
@@ -628,7 +755,8 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
         score: lastReview?.score ?? 5,
         findings: lastReview?.findings ?? [],
         source: 'correct',
-        spec: amendedSpec,
+        spec: decision.spec,
+        ...(decision.rejected ? { amendmentDiscarded: decision.rejected } : {}),
       };
     }
 

@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { parseCorrectorOutput } from './05-phase-0b5-spec-quality.js';
+import { chooseAmendedSpec, parseCorrectorOutput } from './05-phase-0b5-spec-quality.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
@@ -254,15 +254,18 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
 
       if (action === 'agent') {
         const fixed = parseCorrectorOutput(args.llmOutput ?? null);
-        const spec =
-          fixed?.amendedSpec && fixed.amendedSpec.trim().length > 0
-            ? fixed.amendedSpec
-            : detected.spec;
+        const decision = chooseAmendedSpec(detected.spec, fixed?.amendedSpec);
+        if (decision.rejected) {
+          ctx.logger.warn(
+            { action, ...decision.rejected },
+            'resolve-spec-warnings: agent fix discarded — amendedSpec is too short to be the full spec body',
+          );
+        }
         ctx.logger.info(
-          { action, amended: Boolean(fixed?.amendedSpec) },
+          { action, amended: decision.spec !== detected.spec },
           'resolve-spec-warnings: agent fix applied',
         );
-        return { spec, action };
+        return { spec: decision.spec, action };
       }
 
       if (action === 'manual') {

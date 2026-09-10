@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
 import {
+  chooseAmendedSpec,
+  specHeadingCount,
   parseCorrectorOutput,
   parseSpecQualityOutput,
   phase0b5SpecQualityStep,
@@ -223,6 +225,179 @@ describe('parseCorrectorOutput', () => {
 
   it('returns amendedSpec null when the key is absent', () => {
     expect(parseCorrectorOutput('```json\n{"accepted":[]}\n```')?.amendedSpec).toBeNull();
+  });
+});
+
+describe('chooseAmendedSpec', () => {
+  // A spec-shaped body: `sections` H2 headings, padded to `chars`.
+  // NOTE the H1 counts too, so this body carries `sections + 1` headings.
+  const spec = (chars: number, sections = 20, label = 'Section', title = 'Spec') => {
+    const heads = Array.from({ length: sections }, (_, i) => `## ${label} ${i + 1}\n\nprose.\n`);
+    const head = `# ${title}\n\n${heads.join('\n')}`;
+    return head + 'x'.repeat(Math.max(0, chars - head.length));
+  };
+
+  it('keeps the current body when the corrector returned nothing', () => {
+    const current = spec(40000);
+    expect(chooseAmendedSpec(current, null).spec).toBe(current);
+    expect(chooseAmendedSpec(current, undefined).spec).toBe(current);
+    expect(chooseAmendedSpec(current, '   \n  ').spec).toBe(current);
+    expect(chooseAmendedSpec(current, null).rejected).toBeNull();
+  });
+
+  it('discards a pointer left behind by a corrector that ran out of room', () => {
+    // The real failure, verbatim: 50 chars replacing 58,774, carrying no heading.
+    const current = spec(58774, 33);
+    const decision = chooseAmendedSpec(
+      current,
+      '<see /tmp/amend/spec.md — full body emitted below>',
+    );
+    expect(decision.spec).toBe(current);
+    expect(decision.rejected).toEqual({
+      amendedLength: 50,
+      currentLength: current.trim().length,
+      headings: 0,
+      preview: '<see /tmp/amend/spec.md — full body emitted below>',
+    });
+  });
+
+  it('accepts every ratio a real correction has produced', () => {
+    // MEASURED range across 20 corrector passes on the dev install: 1.017-1.355.
+    const current = spec(40000);
+    for (const ratio of [1.017, 1.155, 1.355]) {
+      expect(chooseAmendedSpec(current, spec(Math.round(40000 * ratio))).rejected).toBeNull();
+    }
+  });
+
+  it('takes a long-enough body on its length alone, structure unexamined', () => {
+    const current = spec(40000);
+    // Half the length and only two headings — the ratio path admits it, because
+    // only a SHORT body is asked to prove it is a document.
+    expect(chooseAmendedSpec(current, spec(20001, 1)).rejected).toBeNull();
+  });
+
+  it('admits a SHORT body that deleted most of the spec', () => {
+    // Greptile #83 (first): a corrector legitimately removes a large obsolete
+    // section and returns the full revised body, a fraction of its input.
+    const current = spec(40000, 20);
+    const trimmed = spec(3000, 14); // 7.5% of the length, still a real document
+    expect(chooseAmendedSpec(current, trimmed).spec).toBe(trimmed);
+  });
+
+  it('admits a SHORT body that renamed every section', () => {
+    // Greptile #83 (second): a complete revision may restructure outright. The
+    // heading COUNT is what is checked, so nothing here compares section names.
+    const current = spec(40000, 20, 'Section', 'Original Title');
+    const restructured = spec(3000, 14, 'Totally Different Heading', 'Rewritten Title');
+    const decision = chooseAmendedSpec(current, restructured);
+    expect(decision.rejected).toBeNull();
+    expect(decision.spec).toBe(restructured);
+  });
+
+  it('discards a short body that is not a document', () => {
+    // A snippet rather than a revision: 2 headings is not a specification.
+    const current = spec(40000, 20);
+    const decision = chooseAmendedSpec(current, '## Fixed\n\n- did X\n\n## Notes\n\n- y\n');
+    expect(decision.spec).toBe(current);
+    expect(decision.rejected?.headings).toBe(2);
+  });
+
+  it('holds the line exactly at the heading floor', () => {
+    const current = spec(40000, 20);
+    // 8 sections + the H1 = 9 headings, one under the floor; 9 + 1 = 10 meets it.
+    // Both bodies clear the size floor, so only the heading count is in play.
+    expect(chooseAmendedSpec(current, spec(2500, 8)).rejected).not.toBeNull();
+    expect(chooseAmendedSpec(current, spec(2500, 9)).rejected).toBeNull();
+  });
+
+  it('holds the line exactly at the size floor', () => {
+    const current = spec(40000, 20);
+    // Both bodies carry 21 headings, so only the size is in play.
+    expect(chooseAmendedSpec(current, spec(1999, 20)).rejected).not.toBeNull();
+    expect(chooseAmendedSpec(current, spec(2000, 20)).rejected).toBeNull();
+  });
+
+  it('discards a STATUS DOCUMENT that has sections but no specification in it', () => {
+    // Greptile #83 (third), and not a hypothetical shape: the agent behind the
+    // original failure wrote exactly this — a verification table, a "fixes
+    // applied" paragraph, then the pointer — and escaped only because it put the
+    // prose outside the JSON. Headings alone must not be enough.
+    const current = spec(51038, 33);
+    const statusDoc = [
+      '# Amendment status',
+      '',
+      '## What I verified',
+      '',
+      'All four findings validated against the code on disk.',
+      '',
+      '## Fixes applied',
+      '',
+      'Goal-table ranges, placement rule, spacer tables.',
+      '',
+      '## Location',
+      '',
+      'The full revised body is at /tmp/amend/spec.md (70 KB).',
+      '',
+      '## Note',
+      '',
+      'All six code fences preserved verbatim.',
+    ].join('\n');
+    const decision = chooseAmendedSpec(current, statusDoc);
+    expect(decision.spec).toBe(current);
+    expect(decision.rejected?.headings).toBe(5);
+    expect(decision.rejected!.amendedLength).toBeLessThan(2000);
+  });
+
+  it('discards a status document PADDED past the size floor', () => {
+    // Greptile #83 (fourth): the same shape at 2,419 chars. Size alone cannot
+    // separate it, so the heading floor is what has to — a status document has
+    // about five sections, a real spec at least fourteen.
+    const current = spec(50165, 33);
+    const padded =
+      [
+        '# Amendment status',
+        '',
+        '## What I verified',
+        '',
+        '## Fixes applied',
+        '',
+        '## Location',
+        '',
+        '## Note',
+        '',
+      ].join('\n') + 'prose about the work. '.repeat(120);
+    expect(padded.length).toBeGreaterThan(2000);
+    const decision = chooseAmendedSpec(current, padded);
+    expect(decision.spec).toBe(current);
+    expect(decision.rejected?.headings).toBe(5);
+  });
+
+  it('accepts anything when there is no current body to compare against', () => {
+    expect(chooseAmendedSpec('', 'tiny').spec).toBe('tiny');
+    expect(chooseAmendedSpec('   ', 'tiny').rejected).toBeNull();
+  });
+
+  it('returns the amended body untrimmed so the spec keeps its own formatting', () => {
+    const amended = `\n${spec(40000)}\n\n`;
+    expect(chooseAmendedSpec(spec(40000), amended).spec).toBe(amended);
+  });
+});
+
+describe('specHeadingCount', () => {
+  it('counts h1-h3, ignoring level, case and surrounding whitespace', () => {
+    expect(specHeadingCount('# Goal\n## Risks\n   ### plan   \n')).toBe(3);
+  });
+
+  it('counts DISTINCT headings, so a repeated one does not inflate the weight', () => {
+    expect(specHeadingCount('# A\n## a\n### A  \n')).toBe(1);
+  });
+
+  it('is zero for a body with no heading at all', () => {
+    expect(specHeadingCount('<see /tmp/amend/spec.md — full body emitted below>')).toBe(0);
+  });
+
+  it('does not count a hash that is not a heading', () => {
+    expect(specHeadingCount('a #tag mid-line\n#no-space\n')).toBe(0);
   });
 });
 

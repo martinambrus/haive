@@ -71,7 +71,11 @@ function affectedComponentsSection(
       // The structured payload IS the content — see `planImpact` on the form
       // schema, which says why `body` is empty rather than a second rendering.
       body: '',
-      defaultOpen: true,
+      // Closed by default: the approver's first read is the spec, and this
+      // section is tall (depth groups, relation sub-groups, a diagram per
+      // radius). `preview` carries the count, so nothing is hidden — the header
+      // still states how wide the radius is before it is opened.
+      defaultOpen: false,
       planImpact: {
         repositoryId,
         named: a.named.map((n) => ({
@@ -115,6 +119,9 @@ interface SpecQualityOutput {
   score?: number;
   findings?: QualityFinding[];
   spec?: string;
+  /** Present when 05 discarded that pass's `amendedSpec` as not a complete spec.
+   *  Optional because iteration records written before it existed have none. */
+  amendmentDiscarded?: { amendedLength?: number; currentLength?: number; headings?: number };
 }
 
 interface IterationEntry {
@@ -132,7 +139,9 @@ function formatFinding(f: QualityFinding): string {
   return `[${sev.toUpperCase()}] ${dim}: ${comment}`;
 }
 
-function summariseIteration(entry: IterationEntry): string {
+/** One line per spec-quality pass for the gate's iteration history. Exported
+ *  for its unit test, like `buildSpecSummary` and `extractMermaidBlocks`. */
+export function summariseIteration(entry: IterationEntry): string {
   const idx = (entry.iteration ?? 0) + 1;
   const out = entry.applyOutput;
   const verdict = typeof out?.verdict === 'string' ? out.verdict : '?';
@@ -141,7 +150,18 @@ function summariseIteration(entry: IterationEntry): string {
   const severities = findings.map((f) => coerceReviewSeverity(f.severity, 'low'));
   const blocking = severities.filter(isBlockingSeverity).length;
   const advisory = severities.length - blocking;
-  return `Iteration ${idx}: ${verdict}, score ${score}, ${findings.length} finding(s) (${blocking} blocking / ${advisory} advisory)`;
+  const line = `Iteration ${idx}: ${verdict}, score ${score}, ${findings.length} finding(s) (${blocking} blocking / ${advisory} advisory)`;
+  // A discarded amendment makes the pass a no-op on the spec, which is otherwise
+  // indistinguishable from a corrector that found nothing to change. Said out
+  // loud for the same reason `## Not reviewed` is: an approver must never read
+  // silence as agreement.
+  const discarded = out?.amendmentDiscarded;
+  if (!discarded) return line;
+  const size =
+    typeof discarded.amendedLength === 'number' && typeof discarded.currentLength === 'number'
+      ? ` (${discarded.amendedLength.toLocaleString()} chars against ${discarded.currentLength.toLocaleString()})`
+      : '';
+  return `${line} — amendment discarded as not a complete spec${size}; the previous body was kept`;
 }
 
 /** Pick the first chunk of meaningful prose from a markdown spec body so

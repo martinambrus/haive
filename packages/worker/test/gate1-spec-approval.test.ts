@@ -5,6 +5,7 @@ import {
   buildSpecSummary,
   extractMermaidBlocks,
   gate1SpecApprovalStep,
+  summariseIteration,
 } from '../src/step-engine/steps/workflow/06-gate-1-spec-approval.js';
 
 describe('buildSpecSummary', () => {
@@ -271,6 +272,39 @@ describe('gate-1 summary carries the spec diagrams', () => {
   });
 });
 
+describe('summariseIteration', () => {
+  const pass = (over: Record<string, unknown> = {}) => ({
+    iteration: 2,
+    applyOutput: { verdict: 'NEEDS_REVISION', score: 7, findings: [], ...over },
+  });
+
+  it('reads as it always did when nothing was discarded', () => {
+    expect(summariseIteration(pass())).toBe(
+      'Iteration 3: NEEDS_REVISION, score 7/10, 0 finding(s) (0 blocking / 0 advisory)',
+    );
+  });
+
+  it('says a discarded amendment out loud, with the sizes that decided it', () => {
+    // A corrector whose amendedSpec was not a complete spec is a no-op on the
+    // body, which is otherwise indistinguishable from one that found nothing to
+    // change. The approver must never read that silence as agreement.
+    const line = summariseIteration(
+      pass({ amendmentDiscarded: { amendedLength: 50, currentLength: 58774, headings: 0 } }),
+    );
+    expect(line).toContain('amendment discarded as not a complete spec');
+    expect(line).toContain('50 chars against 58,774');
+    expect(line).toContain('the previous body was kept');
+  });
+
+  it('still renders when the record predates the sizes', () => {
+    // task_steps.iterations is PERSISTED, so a pass recorded before this field
+    // existed replays here and must not produce "undefined chars".
+    const line = summariseIteration(pass({ amendmentDiscarded: {} }));
+    expect(line).toContain('amendment discarded as not a complete spec');
+    expect(line).not.toContain('undefined');
+  });
+});
+
 describe('the affected-components section', () => {
   const affected = (over: Record<string, unknown> = {}) => ({
     ...detectedStub(),
@@ -306,6 +340,15 @@ describe('the affected-components section', () => {
       { nodeId: 'n2', title: 'SMTP transport', depth: 1, viaKind: 'depends_on', reversed: false },
       { nodeId: 'n3', title: 'Theme contract', depth: 2, viaKind: 'affects', reversed: true },
     ]);
+  });
+
+  it('starts closed, with the count in the preview', () => {
+    // The approver's first read is the spec. This section is tall — depth groups,
+    // relation sub-groups and a diagram per radius — and the summary still states
+    // how wide the radius is, so nothing is hidden by starting collapsed.
+    const s = section(affected());
+    expect(s.defaultOpen).toBe(false);
+    expect(s.preview).toBe('1 named • 2 reached');
   });
 
   it('carries every cap through instead of letting a short list read as complete', () => {
