@@ -20,12 +20,18 @@ export default defineConfig({
   snapshotPathTemplate: '{testDir}/__screenshots__/{testFileName}/{arg}{ext}',
   expect: {
     toHaveScreenshot: {
-      // Font antialiasing still differs by a pixel here and there even in a fixed image; this is
-      // tight enough to catch a moved element and loose enough not to fail on a rendered edge.
-      maxDiffPixelRatio: 0.01,
+      // 0.1%, not 1%. At 1280x800 one percent is ten thousand pixels — enough for a button to
+      // move, or for Next's dev-tools badge to appear, without the comparison noticing. MEASURED:
+      // that badge is ~0.35% of the viewport and slipped under the old threshold, so a stale
+      // baseline containing it kept "passing". The rendering environment is pinned, so the only
+      // thing this tolerance has to absorb is the odd antialiased edge.
+      maxDiffPixelRatio: 0.001,
       animations: 'disabled',
       caret: 'hide',
       scale: 'css',
+      // Hides Next's dev-tools badge, which carries a live issue count and would otherwise
+      // change a baseline whenever the dev server's warning count did. See the file.
+      stylePath: './tests/e2e/visual/screenshot.css',
     },
   },
   projects: [

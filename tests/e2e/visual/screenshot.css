@@ -1,0 +1,12 @@
+/* Applied to every visual-regression screenshot (playwright.config.ts → expect.toHaveScreenshot).
+ *
+ * Next's dev-tools overlay renders a floating badge into `nextjs-portal`, and it carries a live
+ * ISSUE COUNT — "1 Issue" — so a baseline containing it changes whenever the dev server's warning
+ * count does, which has nothing to do with the page under test. It is also dev-only chrome that no
+ * user of a built app ever sees.
+ *
+ * Hidden rather than masked: a mask paints a box into the baseline, which is still a picture of
+ * something that is not the product. */
+nextjs-portal {
+  display: none !important;
+}

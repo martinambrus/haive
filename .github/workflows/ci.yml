@@ -517,6 +517,16 @@ jobs:
           PLAYWRIGHT_DATABASE_URL: postgres://haive:haive_dev_password@localhost:5432/haive
         run: pnpm test:e2e
 
+      # Its own step, and after the suite: it pulls a ~2 GB pinned browser image, so a failure in
+      # the ordinary specs should surface without paying for that first. The baselines were
+      # generated in this same image, which is the only reason comparing them here means anything.
+      - name: Visual regression
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:3000
+          PLAYWRIGHT_API_BASE: http://localhost:3001
+          PLAYWRIGHT_DATABASE_URL: postgres://haive:haive_dev_password@localhost:5432/haive
+        run: bash scripts/visual.sh
+
       - name: Upload the Playwright report
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
