@@ -1849,8 +1849,11 @@ async function ensureDdevStartedInner(
           // task with no dump. With a snapshot present the run cannot proceed: every
           // later step would read a database this has already proved is empty, which is
           // exactly the ~8 hours and two gate-2 rejections task ef954a3d spent.
-          const recovered = await countDdevTablesUnknownEngine(existing);
-          if (recovered === 0 && (await hasDurabilitySnapshot(taskId, repoSubpath))) {
+          const verdict = warmStartRecoveryVerdict({
+            recoveredTables: await countDdevTablesUnknownEngine(existing),
+            snapshotExists: await hasDurabilitySnapshot(taskId, repoSubpath),
+          });
+          if (verdict === 'unrecovered') {
             throw new Error(
               'The DDEV database is empty and its durability snapshot could not be restored. ' +
                 'The snapshot exists on the repo volume, so this is a restore failure rather ' +
@@ -1959,6 +1962,26 @@ async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): 
     { taskId, attempts: failures },
     'no DDEV DB snapshot could be restored — first boot, no imported DB, or every restore failed',
   );
+}
+
+/** Whether a warm start that came back EMPTY may carry on after attempting recovery.
+ *
+ *  The asymmetry is the point, and it is easy to get backwards. An unreadable count
+ *  (`null`) is "unknown", and unknown is a safe FIRST reading — nothing has been
+ *  established, so nothing should act. It is not a safe SECOND reading: by then the
+ *  database has been PROVED empty, and a probe that cannot be read does not overturn
+ *  that evidence. So proceeding requires a positive non-zero count, not merely the
+ *  absence of a zero.
+ *
+ *  With no snapshot there was nothing to recover and an empty database is simply the
+ *  project's state — a greenfield repo, or any task with no dump. */
+export function warmStartRecoveryVerdict(args: {
+  recoveredTables: number | null;
+  snapshotExists: boolean;
+}): 'ok' | 'unrecovered' {
+  if (!args.snapshotExists) return 'ok';
+  const proved = args.recoveredTables !== null && args.recoveredTables > 0;
+  return proved ? 'ok' : 'unrecovered';
 }
 
 /** Whether this task left a durability snapshot on the repo volume.

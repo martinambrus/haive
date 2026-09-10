@@ -15,6 +15,7 @@ import {
   budgetContainerLogs,
   buildDdevTableCountCommand,
   parseDdevTableCount,
+  warmStartRecoveryVerdict,
 } from './ddev-runner.js';
 
 // Pure recovery-path decision for ensureDdevStartedInner. The orchestrator gathers
@@ -466,5 +467,35 @@ describe('table-count schema scope', () => {
 
   it('leaves mysql alone — there a schema IS the database, so database() already covers it', () => {
     expect(buildDdevTableCountCommand('/p', 'mariadb')).toContain('table_schema = database()');
+  });
+});
+
+// The asymmetry here is easy to get backwards. `null` (unreadable count) is a safe
+// FIRST reading — nothing established, so nothing acts. It is not a safe SECOND one:
+// by then the database has been PROVED empty and an unreadable probe does not
+// overturn that. Task ef954a3d spent ~8 hours and two gate-2 rejections on exactly
+// the state this decides about.
+describe('warmStartRecoveryVerdict', () => {
+  it('proceeds when recovery is PROVED — a positive non-zero count', () => {
+    expect(warmStartRecoveryVerdict({ recoveredTables: 160, snapshotExists: true })).toBe('ok');
+  });
+
+  it('refuses when the snapshot is still not in the database', () => {
+    expect(warmStartRecoveryVerdict({ recoveredTables: 0, snapshotExists: true })).toBe(
+      'unrecovered',
+    );
+  });
+
+  it('refuses an UNREADABLE count once the database is known empty — absence of a zero is not proof', () => {
+    expect(warmStartRecoveryVerdict({ recoveredTables: null, snapshotExists: true })).toBe(
+      'unrecovered',
+    );
+  });
+
+  it('carries on with no snapshot — nothing to recover, so empty is just the project', () => {
+    // A greenfield repo, or any task that imported no dump. Throwing here would break
+    // every one of them.
+    expect(warmStartRecoveryVerdict({ recoveredTables: 0, snapshotExists: false })).toBe('ok');
+    expect(warmStartRecoveryVerdict({ recoveredTables: null, snapshotExists: false })).toBe('ok');
   });
 });
