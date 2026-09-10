@@ -1180,16 +1180,88 @@ export function advisorPrompt(issue: DagIssueRow, spec: string): string {
     .join('\n');
 }
 
-function replannerPrompt(plan: DagPlanRow, failed: DagIssueRow[]): string {
+/** Per failed issue, how much of its free-prose failure text the prompt carries.
+ *  Same axis `advisorPrompt` caps on its reviewer verdict — the issue COUNT is
+ *  bounded by the level width, the text is not. */
+const REPLAN_REASON_CHARS = 1200;
+
+/**
+ * What the replanner is asked to decide, and — the part that used to be missing —
+ * what it needs to decide it.
+ *
+ * It used to be handed the failed issues' KEYS and `plan.levels`, nothing else,
+ * while holding full `DagIssueRow`s the whole time. A key names an issue it
+ * cannot read and levels are a grouping, not the edges, so every one of the four
+ * actions was unjustifiable from the prompt: CONTINUE and REDUCE_SCOPE need to
+ * know what breaks downstream, MODIFY_DAG needs the edges to restructure. The
+ * only reachable answer was ABORT, which is what it returned — MEASURED on task
+ * 4905067c, verbatim: "ISSUE-002's failure details and dependency edges are
+ * unavailable in the workspace."
+ *
+ * `all` is every issue in the plan, not just the failed ones: the dependents of a
+ * failed issue are the rows whose `depends_on` names it, and those sit at LATER
+ * levels. Best-effort — an empty `all` omits the edge block rather than asserting
+ * a graph nobody read.
+ */
+export function replannerPrompt(
+  plan: DagPlanRow,
+  failed: DagIssueRow[],
+  all: DagIssueRow[],
+): string {
+  const dependsOn = (i: DagIssueRow): string[] => (i.dependsOn ?? []) as string[];
+  const reason = (i: DagIssueRow): string =>
+    (i.errorMessage ?? i.concerns ?? '').trim().replace(/\s+/g, ' ').slice(0, REPLAN_REASON_CHARS);
+
+  const detail = failed.map((f) => {
+    const r = reason(f);
+    return [
+      `- ${f.issueKey}: ${f.title}`,
+      f.provides ? `  Deliverable: ${f.provides}` : '',
+      f.lastAdvisorAction ? `  Advisor's last action: ${f.lastAdvisorAction}` : '',
+      // errorMessage first, then concerns — the same precedence loadDroppedIssues
+      // uses, for the same reason: concerns is what the coder chose to say.
+      r ? `  Why it failed: ${r}` : '  Why it failed: not recorded',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  });
+
+  const edges =
+    all.length === 0
+      ? []
+      : failed.map((f) => {
+          const dependents = all
+            .filter((i) => dependsOn(i).includes(f.issueKey))
+            .map((i) => i.issueKey);
+          const needs = dependsOn(f);
+          return [
+            dependents.length > 0
+              ? `- ${f.issueKey} is required by: ${dependents.join(', ')}`
+              : `- ${f.issueKey} is required by: nothing downstream`,
+            needs.length > 0 ? `  ${f.issueKey} itself depends on: ${needs.join(', ')}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n');
+        });
+
   return [
     `The DAG has broad failure: ${failed.length} issue(s) could not be implemented (${failed
       .map((f) => f.issueKey)
       .join(', ')}).`,
+    '',
+    'The failed issues:',
+    ...detail,
+    edges.length > 0 ? '\nDependency edges:' : '',
+    ...edges,
+    '',
     `Current dependency levels: ${JSON.stringify(plan.levels)}`,
     'Decide how to proceed. Emit ONE JSON object inside a ```json fenced code block:',
     '{ "action": "CONTINUE|MODIFY_DAG|REDUCE_SCOPE|ABORT", "reasoning": "...", "skip_downstream": ["<issue ids to skip>"], "new_levels": [["ISSUE-..."]] }',
     'CONTINUE: skip the failed issues, proceed. REDUCE_SCOPE: drop low-priority issues. MODIFY_DAG: restructure (provide new_levels). ABORT: stop the workflow with a failure report.',
-  ].join('\n');
+    'Everything you need is above — do not go looking in the workspace for the failure report or the issue graph, and do not ABORT for want of them.',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 export function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): AdvisorOutput {
@@ -1409,7 +1481,13 @@ async function ingestAdvisor(
 }
 
 async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promise<boolean> {
-  const prompt = replannerPrompt(ea.plan, failed);
+  // Every issue in the plan, not just this level's: a failed issue's dependents sit
+  // at LATER levels, and they are the whole question CONTINUE/REDUCE_SCOPE answers.
+  const all = (await ea.db
+    .select()
+    .from(schema.taskDagIssues)
+    .where(eq(schema.taskDagIssues.dagPlanId, ea.plan.id))) as DagIssueRow[];
+  const prompt = replannerPrompt(ea.plan, failed, all);
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ea.db,
     ea.params.userId,
@@ -1808,9 +1886,10 @@ export async function resolveDagPhase(
       // artifact the pointer names is copied into each worktree separately.
       const specView = await resolveSpecView(ctx);
       // Once per dispatch pass, not per issue: the blast radius is a property of
-      // the task. `role: 'dag-coder'` — a coder owns ONE worktree merged at the level
-      // barrier, so editing a file another issue owns is a merge conflict, and the
-      // block tells it to report rather than edit.
+      // the task, and it is the same set for every issue — it carries no per-issue
+      // ownership and a coder's own assigned files appear in it. `role: 'dag-coder'`
+      // says exactly that, and asks for a small edit plus `concerns` rather than a
+      // refusal; see the arm's note in `_plan-impact.ts`.
       const planImpact = planImpactBlock(await loadPlanImpactContext(ctx), { role: 'dag-coder' });
       let dispatched = 0;
       for (const issue of undispatched) {

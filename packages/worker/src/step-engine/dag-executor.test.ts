@@ -10,6 +10,7 @@ import {
   reviewerPrompt,
   fixCoderPrompt,
   advisorPrompt,
+  replannerPrompt,
   pickFatalProviderError,
   fixRequiredIsCosmetic,
   parseReviewerOutput,
@@ -451,5 +452,90 @@ describe('06c-dag-execute apply: an issue dropped from the merge is disclosed', 
     } as Parameters<typeof dagExecuteStep.apply>[1]);
     expect(out.ran).toBe(true);
     expect(out.degradedNote).toBeUndefined();
+  });
+});
+
+describe('replannerPrompt', () => {
+  type Issue = Parameters<typeof replannerPrompt>[1][number];
+  const issue = (o: Record<string, unknown>) => o as unknown as Issue;
+  const plan = { levels: [['ISSUE-001', 'ISSUE-002'], ['ISSUE-003']] } as unknown as Parameters<
+    typeof replannerPrompt
+  >[0];
+
+  const failed = [
+    issue({
+      issueKey: 'ISSUE-002',
+      title: 'Unsigned gas PDF cache freshness',
+      provides: 'a cache invalidation helper',
+      dependsOn: ['ISSUE-001'],
+      lastAdvisorAction: 'ESCALATE_TO_REPLAN',
+      errorMessage: null,
+      concerns: 'Required integration   files were\nnot wired in.',
+    }),
+  ];
+  const all = [
+    ...failed,
+    issue({ issueKey: 'ISSUE-001', dependsOn: [] }),
+    issue({ issueKey: 'ISSUE-003', dependsOn: ['ISSUE-002'] }),
+  ];
+
+  it('carries the failure detail the replanner has to rule on', () => {
+    const out = replannerPrompt(plan, failed, all);
+    expect(out).toContain('ISSUE-002: Unsigned gas PDF cache freshness');
+    expect(out).toContain('Deliverable: a cache invalidation helper');
+    expect(out).toContain("Advisor's last action: ESCALATE_TO_REPLAN");
+    // Whitespace collapsed so a multi-line concerns blob cannot break the bullet list.
+    expect(out).toContain('Why it failed: Required integration files were not wired in.');
+  });
+
+  it('names the downstream issues that need the failed one', () => {
+    const out = replannerPrompt(plan, failed, all);
+    expect(out).toContain('ISSUE-002 is required by: ISSUE-003');
+    expect(out).toContain('ISSUE-002 itself depends on: ISSUE-001');
+  });
+
+  it('says so rather than staying silent when nothing depends on the failure', () => {
+    const out = replannerPrompt(plan, failed, [failed[0]!]);
+    expect(out).toContain('ISSUE-002 is required by: nothing downstream');
+  });
+
+  it('omits the edge block when the issue set could not be read', () => {
+    const out = replannerPrompt(plan, failed, []);
+    expect(out).not.toContain('Dependency edges:');
+    expect(out).toContain('Current dependency levels:');
+  });
+
+  it('records that the reason is missing instead of dropping the bullet', () => {
+    const out = replannerPrompt(
+      plan,
+      [issue({ issueKey: 'ISSUE-009', title: 'x', dependsOn: [] })],
+      [],
+    );
+    expect(out).toContain('Why it failed: not recorded');
+  });
+
+  it('prefers errorMessage over the coder-authored concerns', () => {
+    const out = replannerPrompt(
+      plan,
+      [issue({ issueKey: 'ISSUE-002', title: 'x', errorMessage: 'timed out', concerns: 'advice' })],
+      [],
+    );
+    expect(out).toContain('Why it failed: timed out');
+    expect(out).not.toContain('advice');
+  });
+
+  it('caps the free-prose reason', () => {
+    const out = replannerPrompt(
+      plan,
+      [issue({ issueKey: 'ISSUE-002', title: 'x', concerns: 'z'.repeat(5000) })],
+      [],
+    );
+    expect(out).toContain('z'.repeat(1200));
+    expect(out).not.toContain('z'.repeat(1201));
+  });
+
+  it('tells it not to ABORT for inputs the prompt already carries', () => {
+    // The measured failure: it went looking in the workspace, found nothing, aborted.
+    expect(replannerPrompt(plan, failed, all)).toContain('do not ABORT for want of them');
   });
 });
