@@ -53,10 +53,14 @@ test.describe('task detail page', () => {
       // two or more into a role="menu" — while a failed step card keeps its Retry as a plain
       // button. So the only Retry BUTTON on the page is the step's, and the task-level one is a
       // menuitem. That distinction is the whole point: they post to different routes.
+      // EVERY step card carries its own Retry button — retry is permitted on any status, not
+      // only a failed one — so the count tracks the number of cards. What matters is that the
+      // task-level action is not among them: it is a menuitem, asserted below.
+      const stepCards = page.locator('[data-step-id]');
       await expect(
         page.getByRole('button', { name: 'Retry', exact: true }),
-        'the step card owns the only plain Retry button',
-      ).toHaveCount(1);
+        'each step card has a Retry button and the header has none',
+      ).toHaveCount(await stepCards.count());
 
       const labels = await actionLabels(page);
       expect(labels).toContain('Retry');

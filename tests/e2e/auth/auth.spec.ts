@@ -140,12 +140,26 @@ test.describe('auth', () => {
     }
   });
 
-  test('an unknown email cannot register itself in', async ({ page }) => {
-    const res = await page.request.post(`${API_BASE}/auth/register`, {
-      data: { email: uniqueEmail('uninvited'), password: PASSWORD },
-    });
-    expect(res.status(), 'registration is closed without an invite').toBe(403);
-    const body = (await res.json()) as { error?: string };
-    expect(body.error ?? '').toMatch(/closed/i);
+  // Seeds a user FIRST, and that is the whole point rather than tidiness: decideRegistration
+  // exempts the first account on an install, so on a fresh CI database whichever registration
+  // runs first legitimately succeeds and becomes the administrator. Asserting the closed gate
+  // without guaranteeing a user exists made this pass or fail on test ORDER — it was reported
+  // flaky on exactly that, and it quietly minted a stray admin when it lost the race.
+  test('an uninvited email cannot register once the install has an account', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'gate-seed' })).userId;
+
+      const res = await page.request.post(`${API_BASE}/auth/register`, {
+        data: { email: uniqueEmail('uninvited'), password: PASSWORD },
+      });
+      expect(res.status(), 'registration is closed without an invite').toBe(403);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error ?? '').toMatch(/closed/i);
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
   });
 });
