@@ -35,6 +35,7 @@ import { initDatabase, getDb } from '../src/db.js';
 import { importPlanMirror, reconcilePlanMirror, writePlanMirror } from '../src/plan/mirror.js';
 import { completePlanNodesForTask } from '../src/plan/task-link.js';
 import { resolveAffectedComponents } from '../src/step-engine/steps/workflow/_affected-components.js';
+import { loadSeededPlanNodes } from '../src/step-engine/steps/workflow/_plan-task-nodes.js';
 
 const log = logger.child({ module: 'plan-patch-smoke' });
 
@@ -1214,6 +1215,21 @@ async function main(): Promise<void> {
     afterRole.find((n) => n.id === touchedNodeId)?.status === 'todo',
     afterRole.find((n) => n.id === touchedNodeId)?.status,
   );
+  // The same role split bounds the SPEC PROMPT. `recordTouchedPlanNodes` writes a
+  // `touched` row for every component the spec named, so a seeded set that read
+  // every role fed each round's blast radius back into the next round's prompt with
+  // full node bodies — MEASURED on task 681f0f99, 5 links at creation grew to 363
+  // and the seeded block went 9,493 to 232,365 chars across two rounds.
+  const seededForSpec = await loadSeededPlanNodes(
+    { db, taskId: roleTask!.id } as unknown as Parameters<typeof loadSeededPlanNodes>[0],
+    freshRepoB!.id,
+  );
+  check(
+    'the spec prompt is seeded from implements links only',
+    seededForSpec?.nodes.length === 1 && seededForSpec.nodes[0]?.id === implNodeId,
+    seededForSpec?.nodes.map((n) => n.id),
+  );
+
   await db.delete(schema.tasks).where(eq(schema.tasks.id, roleTask!.id));
   // Clean up after this section. The pull reconcile below counts nodes that
   // exist only locally, and two fixture nodes left behind are two local-only

@@ -1372,6 +1372,70 @@ export function ddevImportDb(
   );
 }
 
+/** Count the tables the project's database actually holds.
+ *
+ *  `ddev import-db` exits 0 for an import that created NOTHING — a dump for the wrong
+ *  engine, a truncated stream, an archive whose restore wrote no statements — so exit
+ *  code alone cannot say whether a database arrived. MEASURED on task ef954a3d: the
+ *  step recorded `"imported": true, "DDEV started; database dump imported"` against a
+ *  database with ZERO tables, the site answered every request with `relation
+ *  "semaphore" does not exist`, and the workflow only found out ~20 hours later when a
+ *  developer could not test it at Gate 2 — by which point no code change could fix it.
+ *
+ *  `ddev psql` / `ddev mysql` rather than `ddev exec -s db <client>`: DDEV owns the
+ *  credentials in both, so this needs no knowledge of the db user or password.
+ *  `information_schema.tables` is ANSI and exists on both engines; only the client and
+ *  the schema predicate differ. Anything that is not postgres is treated as
+ *  mysql/mariadb, the same reading `buildDdevImportCommand` already takes of a null
+ *  dbType (an absent `database:` block is DDEV's mariadb default).
+ *
+ *  Returns null when the count could not be READ — an unparseable answer, a client
+ *  that is not there, a non-zero exit. Null is "unknown", never "empty": refusing an
+ *  import on a probe that failed to run would block projects whose database is fine. */
+export function buildDdevTableCountCommand(projectDir: string, dbType: string | null): string {
+  const sql = 'select count(*) from information_schema.tables where table_schema ';
+  // EVERY non-system schema on postgres, not just `public`. A project whose tables
+  // live in a custom schema is a LIVE database, and counting only `public` reports
+  // it as empty — which the warm-start branch would answer by restoring an older
+  // snapshot OVER it. "Provably empty" is the whole basis for that restore being
+  // safe, so the probe has to be right about emptiness or it becomes a data-loss
+  // path. MySQL needs no equivalent: there a schema IS the database, so
+  // `database()` already covers everything the project can see.
+  return dbType === 'postgres'
+    ? `cd ${projectDir} && ddev psql -tAc "${sql}not in ('pg_catalog', 'information_schema')"`
+    : `cd ${projectDir} && ddev mysql -N -B -e "${sql}= database()"`;
+}
+
+/** The table count from a client's stdout, or null when no count can be read.
+ *
+ *  The last all-digit LINE, not the first number in the stream: DDEV prefixes its own
+ *  log lines freely and the psql/mysql answer is the bare number on a line of its own,
+ *  so anchoring on the whole line is what keeps a stray "17" inside a log sentence from
+ *  being read as the count. */
+export function parseDdevTableCount(output: string): number | null {
+  const digits = output
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^\d+$/.test(l));
+  const last = digits.at(-1);
+  return last === undefined ? null : Number(last);
+}
+
+export async function ddevCountTables(
+  handle: DdevRunnerHandle,
+  dbType: string | null,
+  opts: { timeoutMs?: number } = {},
+): Promise<number | null> {
+  const res = await runnerShellStreaming(
+    handle,
+    buildDdevTableCountCommand(handle.projectDir, dbType),
+    undefined,
+    opts.timeoutMs ?? 120_000,
+  );
+  if (res.exitCode !== 0) return null;
+  return parseDdevTableCount(res.output);
+}
+
 /** Extract `raw.primary_url` from `ddev ... -j` output. The `-j` flag emits
  *  newline-delimited JSON, one object per line, and the describe payload (the
  *  object carrying `.raw.primary_url`) can be PRECEDED by stray log lines — e.g. a
@@ -1751,10 +1815,53 @@ async function ensureDdevStartedInner(
         timeoutMs: 300_000,
       });
       if (warm.exitCode === 0) {
-        // Deliberately NO restoreLatestSnapshot: the container survived, so its
-        // nested DB volume survived and holds the live (possibly newer) DB. A
-        // repo-volume snapshot is OLDER — restoring it here would clobber the
-        // live DB. Skip it even when a snapshot exists.
+        // Normally NO restoreLatestSnapshot here: the container survived, so its
+        // nested DB volume survived and holds the live (possibly newer) DB, and a
+        // repo-volume snapshot is OLDER — restoring it would clobber that.
+        //
+        // That reasoning holds only while the DB really is live, and "the container
+        // survived" is an INFERENCE, not a check. MEASURED on task ef954a3d: the
+        // import succeeded and wrote a 55.7 MB snapshot, the project later came back
+        // through this branch against an EMPTY nested volume, `ddev start` returned 0,
+        // the restore was skipped on the assumption above, and the task then ran ~8
+        // more hours and two gate-2 rejections against a database with zero tables —
+        // every request answering `relation "semaphore" does not exist`. The snapshot
+        // restored in 82s when finally asked.
+        //
+        // So verify the assumption instead of trusting it. Restoring over a PROVABLY
+        // EMPTY database cannot clobber a live one, which is the whole reason the skip
+        // exists — and an unreadable count (null) is not evidence of emptiness, so it
+        // keeps today's behaviour.
+        const tables = await countDdevTablesUnknownEngine(existing);
+        if (tables === 0) {
+          log.warn(
+            { taskId },
+            'warm start came back to an EMPTY database — restoring the durability snapshot',
+          );
+          await restoreLatestSnapshot(existing, taskId);
+          // Recovery has to be VERIFIED, not attempted: a restore that exits 0 having
+          // applied nothing is the same class of lie as an import that does. Re-count
+          // rather than trust the exit code.
+          //
+          // Still empty is only a failure when there WAS something to restore. A project
+          // that never imported a database has no snapshot and an empty DB is its
+          // ordinary state — throwing there would break every greenfield repo and every
+          // task with no dump. With a snapshot present the run cannot proceed: every
+          // later step would read a database this has already proved is empty, which is
+          // exactly the ~8 hours and two gate-2 rejections task ef954a3d spent.
+          const verdict = warmStartRecoveryVerdict({
+            recoveredTables: await countDdevTablesUnknownEngine(existing),
+            snapshotExists: await hasDurabilitySnapshot(taskId, repoSubpath),
+          });
+          if (verdict === 'unrecovered') {
+            throw new Error(
+              'The DDEV database is empty and its durability snapshot could not be restored. ' +
+                'The snapshot exists on the repo volume, so this is a restore failure rather ' +
+                'than a project without a database — re-import the dump, or delete the ' +
+                `snapshot to start clean. Task ${taskId}.`,
+            );
+          }
+        }
         return existing;
       }
       // A version-constraint rejection is not a wedged runner — a cold rebuild cannot
@@ -1836,14 +1943,79 @@ async function ensureDdevStartedInner(
  *  project with no imported DB) is the normal no-op case. Tolerant by design —
  *  keyed only on exit codes, never on snapshot-list output formatting. */
 async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): Promise<void> {
+  const failures: string[] = [];
   for (const name of [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)]) {
     const res = await ddevSnapshotRestore(handle, name);
     if (res.exitCode === 0) {
       log.info({ taskId, snapshot: name }, 'restored DDEV DB snapshot after cold boot');
       return;
     }
+    failures.push(`${name}: ${res.output.slice(-300)}`);
   }
-  log.info({ taskId }, 'no DDEV DB snapshot to restore (first boot or no imported DB)');
+  // "No snapshot existed" and "every restore FAILED" are different facts and used to
+  // log the same benign info line, so a broken restore read as a project that never
+  // had a database — and the run carried on against an empty one. `ddev snapshot
+  // restore` on an absent name is itself an error, so absence cannot be told from
+  // failure by exit code alone; what separates them is that a real failure has
+  // something to say, which is why the output is carried here.
+  log.warn(
+    { taskId, attempts: failures },
+    'no DDEV DB snapshot could be restored — first boot, no imported DB, or every restore failed',
+  );
+}
+
+/** Whether a warm start that came back EMPTY may carry on after attempting recovery.
+ *
+ *  The asymmetry is the point, and it is easy to get backwards. An unreadable count
+ *  (`null`) is "unknown", and unknown is a safe FIRST reading — nothing has been
+ *  established, so nothing should act. It is not a safe SECOND reading: by then the
+ *  database has been PROVED empty, and a probe that cannot be read does not overturn
+ *  that evidence. So proceeding requires a positive non-zero count, not merely the
+ *  absence of a zero.
+ *
+ *  With no snapshot there was nothing to recover and an empty database is simply the
+ *  project's state — a greenfield repo, or any task with no dump. */
+export function warmStartRecoveryVerdict(args: {
+  recoveredTables: number | null;
+  snapshotExists: boolean;
+}): 'ok' | 'unrecovered' {
+  if (!args.snapshotExists) return 'ok';
+  const proved = args.recoveredTables !== null && args.recoveredTables > 0;
+  return proved ? 'ok' : 'unrecovered';
+}
+
+/** Whether this task left a durability snapshot on the repo volume.
+ *
+ *  Separates the two ways a restore comes back empty-handed, which `ddev snapshot
+ *  restore` cannot: it errors on an ABSENT name exactly as it does on one it failed to
+ *  apply. A project that never imported a database has no snapshot, and an empty DB is
+ *  simply its state — a greenfield repo, or any task with no dump. One that HAS a
+ *  snapshot and still could not restore it is a run that must not continue.
+ *
+ *  Reads the directory rather than parsing `ddev snapshot --list`: DDEV appends an
+ *  engine suffix to the name it was given (`…-postgres_17.zst`), so the match is a
+ *  prefix on a filename, not a column in human-facing output. */
+async function hasDurabilitySnapshot(taskId: string, repoSubpath: string): Promise<boolean> {
+  const dir = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath, '.ddev', 'db_snapshots');
+  const names = [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)];
+  try {
+    const entries = await readdir(dir);
+    return entries.some((entry) => names.some((name) => entry.startsWith(name)));
+  } catch {
+    // No directory is the common case (no snapshot was ever taken) and never an error.
+    return false;
+  }
+}
+
+/** Table count for a caller with no parsed `.ddev/config.yaml` in hand: ask postgres,
+ *  then mysql, and take the first client that answers. Null when neither does, which
+ *  is "unknown" and never "empty" — see ddevCountTables. */
+async function countDdevTablesUnknownEngine(handle: DdevRunnerHandle): Promise<number | null> {
+  for (const dbType of ['postgres', null]) {
+    const n = await ddevCountTables(handle, dbType, { timeoutMs: 60_000 });
+    if (n !== null) return n;
+  }
+  return null;
 }
 
 /** Run a ddev subcommand with live per-line streaming for the progress UI. The

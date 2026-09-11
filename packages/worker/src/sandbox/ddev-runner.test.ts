@@ -13,6 +13,9 @@ import {
   ddevRegistryMirrorUrl,
   buildRegistryDaemonJson,
   budgetContainerLogs,
+  buildDdevTableCountCommand,
+  parseDdevTableCount,
+  warmStartRecoveryVerdict,
 } from './ddev-runner.js';
 
 // Pure recovery-path decision for ensureDdevStartedInner. The orchestrator gathers
@@ -415,5 +418,84 @@ describe('parseDdevProjectStatus', () => {
         dockerdUp: true,
       }),
     ).toBe('warm-start');
+  });
+});
+
+// A `ddev import-db` that exits 0 having created nothing is the case this pair exists
+// for: task ef954a3d recorded `"imported": true` against a database with zero tables and
+// the workflow only found out ~20 hours later, at Gate 2.
+describe('post-import table count', () => {
+  it("asks postgres and mysql with each engine's own client and schema predicate", () => {
+    expect(buildDdevTableCountCommand('/p', 'postgres')).toContain('ddev psql');
+    expect(buildDdevTableCountCommand('/p', 'postgres')).toContain('information_schema.tables');
+    expect(buildDdevTableCountCommand('/p', 'mariadb')).toContain('ddev mysql');
+    expect(buildDdevTableCountCommand('/p', 'mariadb')).toContain('table_schema = database()');
+  });
+
+  it("treats an unknown engine as mysql — DDEV's default when no database block is set", () => {
+    expect(buildDdevTableCountCommand('/p', null)).toContain('ddev mysql');
+  });
+
+  it('reads the count from a clean answer', () => {
+    expect(parseDdevTableCount('412\n')).toBe(412);
+  });
+
+  it('reads ZERO as a count, never as "no answer" — that is the whole failure', () => {
+    expect(parseDdevTableCount('0\n')).toBe(0);
+  });
+
+  it('takes the last all-digit LINE, so a number inside a DDEV log line is not the count', () => {
+    expect(parseDdevTableCount('Container ddev-x-db  Running for 17 seconds\n412\n')).toBe(412);
+  });
+
+  it('returns null when nothing in the output is a count', () => {
+    expect(parseDdevTableCount('')).toBeNull();
+    expect(parseDdevTableCount('psql: command not found\n')).toBeNull();
+  });
+});
+
+// A project whose tables live in a custom schema is a LIVE database. Counting only
+// `public` calls it empty, and the warm-start branch answers "empty" by restoring an
+// older snapshot OVER it — so a wrong probe here is a data-loss path, not a cosmetic
+// miscount.
+describe('table-count schema scope', () => {
+  it('counts EVERY non-system postgres schema, not just public', () => {
+    const cmd = buildDdevTableCountCommand('/p', 'postgres');
+    expect(cmd).toContain("not in ('pg_catalog', 'information_schema')");
+    expect(cmd).not.toContain("= 'public'");
+  });
+
+  it('leaves mysql alone — there a schema IS the database, so database() already covers it', () => {
+    expect(buildDdevTableCountCommand('/p', 'mariadb')).toContain('table_schema = database()');
+  });
+});
+
+// The asymmetry here is easy to get backwards. `null` (unreadable count) is a safe
+// FIRST reading — nothing established, so nothing acts. It is not a safe SECOND one:
+// by then the database has been PROVED empty and an unreadable probe does not
+// overturn that. Task ef954a3d spent ~8 hours and two gate-2 rejections on exactly
+// the state this decides about.
+describe('warmStartRecoveryVerdict', () => {
+  it('proceeds when recovery is PROVED — a positive non-zero count', () => {
+    expect(warmStartRecoveryVerdict({ recoveredTables: 160, snapshotExists: true })).toBe('ok');
+  });
+
+  it('refuses when the snapshot is still not in the database', () => {
+    expect(warmStartRecoveryVerdict({ recoveredTables: 0, snapshotExists: true })).toBe(
+      'unrecovered',
+    );
+  });
+
+  it('refuses an UNREADABLE count once the database is known empty — absence of a zero is not proof', () => {
+    expect(warmStartRecoveryVerdict({ recoveredTables: null, snapshotExists: true })).toBe(
+      'unrecovered',
+    );
+  });
+
+  it('carries on with no snapshot — nothing to recover, so empty is just the project', () => {
+    // A greenfield repo, or any task that imported no dump. Throwing here would break
+    // every one of them.
+    expect(warmStartRecoveryVerdict({ recoveredTables: 0, snapshotExists: false })).toBe('ok');
+    expect(warmStartRecoveryVerdict({ recoveredTables: null, snapshotExists: false })).toBe('ok');
   });
 });
