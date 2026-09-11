@@ -39,6 +39,11 @@ export interface AgentCandidate {
   source?: 'scan' | 'llm' | 'bundle';
   /** Full structured body; set for LLM-generated and bundle-sourced agents. */
   body?: AgentSpec;
+  /** Why the model set this agent to NOT recommended, shown under its checkbox.
+   *  A box that silently unticks itself is the same complaint the Tier-1 safety net
+   *  had: a decision with no visible reason. Only set when the model declined it —
+   *  a recommended agent needs no justification. */
+  declineReason?: string;
 }
 
 export interface AgentDiscoveryDetect {
@@ -585,7 +590,7 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '',
     '## Instructions',
     '1. Review the file tree, key config files, and the technology inventory above.',
-    '2. For each predefined agent, decide if it is relevant to this project (true/false).',
+    '2. For each predefined agent, decide if it is relevant to this project (true/false). For every one you set to FALSE, add an entry to `declined` saying why — it stays on the form as an unticked box, and without a reason the user is left guessing. Judge a bundle-sourced agent by its BODY, not its name: a bundle the user imported may still describe work this repository does not do.',
     '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Every Tier 1 row must appear in EXACTLY ONE of `custom` or `skipped` — an inventory row you simply leave out of both is treated as an oversight and re-added for you, so a deliberate omission only survives if you state it in `skipped`.',
     '4. You MAY suggest additional technical agents not in the inventory if the file tree or config files show another framework/library/tool with non-trivial usage that the inventory missed.',
     '5. Do NOT propose agents for business domain concepts (entities, workflows, validation rules, UI flows specific to this app). Those become skills.',
@@ -612,6 +617,9 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '  },',
     '  "skipped": [',
     '    { "id": "<inventory-row-agent-id>", "reason": "why this row needs no specialist" }',
+    '  ],',
+    '  "declined": [',
+    '    { "id": "<predefined-agent-id>", "reason": "why it is not a fit for THIS repository" }',
     '  ],',
     '  "custom": [',
     '    {',
@@ -665,6 +673,7 @@ function parseAgentBody(
   predefined: Record<string, boolean>;
   custom: LlmAgentSuggestion[];
   skipped: SkippedInventoryRow[];
+  declined: SkippedInventoryRow[];
 } | null {
   const obj = JSON.parse(candidate) as Record<string, unknown>;
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
@@ -688,6 +697,7 @@ function parseAgentBody(
     predefined: predefinedIsObject ? (obj.predefined as Record<string, boolean>) : {},
     custom: customIsArray ? (obj.custom as LlmAgentSuggestion[]) : [],
     skipped: parseSkipped(obj.skipped),
+    declined: parseSkipped(obj.declined),
   };
 }
 
@@ -950,6 +960,7 @@ function enrichCandidates(
     predefined: Record<string, boolean>;
     custom: LlmAgentSuggestion[];
     skipped?: SkippedInventoryRow[];
+    declined?: SkippedInventoryRow[];
   } | null;
   if (typeof extracted === 'string') {
     const parsed = parseLlmAgentOutputWithDiagnostic(extracted);
@@ -964,14 +975,20 @@ function enrichCandidates(
       predefined: Record<string, boolean>;
       custom: LlmAgentSuggestion[];
       skipped?: SkippedInventoryRow[];
+      declined?: SkippedInventoryRow[];
     } | null;
   }
   if (llmResult) {
     // Update recommendation flags for predefined agents
     if (llmResult.predefined) {
+      const reasonById = new Map((llmResult.declined ?? []).map((d) => [d.id, d.reason]));
       for (const c of candidates) {
         if (c.id in llmResult.predefined) {
           c.recommended = llmResult.predefined[c.id]!;
+          // Carried only for a DECLINE. A reason attached to something still ticked
+          // would render as an objection to a recommendation.
+          const reason = reasonById.get(c.id);
+          if (!c.recommended && reason) c.declineReason = reason;
         }
       }
     }
@@ -1210,6 +1227,7 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     const options = enriched.map((c) => ({
       value: c.id,
       label: `${c.label}${c.count > 0 ? ` (${c.count} files)` : ''} — ${c.hint}`,
+      ...(c.declineReason ? { description: `Not recommended: ${c.declineReason}` } : {}),
       ...(c.source === 'llm'
         ? { badge: 'AI-suggested', badgeColor: 'amber' as const }
         : c.source === 'bundle'

@@ -684,6 +684,16 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
               <InlineMarkdown body={opt.label} />
               {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
             </label>
+            {/* Sub-text under the box, as the radio renderers already do. 06_5 puts the
+                model's reason here for an agent it declined — an option that unticks
+                itself with no visible reason is a decision the user cannot audit. The
+                indent clears the checkbox so the text lines up with the label. */}
+            {opt.description && (
+              <InlineMarkdown
+                body={opt.description}
+                className="ml-6 mt-0.5 text-xs text-neutral-400"
+              />
+            )}
             {opt.details?.kind === 'diff' && <DiffDisclosure details={opt.details} />}
           </div>
         );

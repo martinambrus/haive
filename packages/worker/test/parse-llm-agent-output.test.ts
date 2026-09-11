@@ -46,12 +46,12 @@ describe('parseLlmAgentOutput', () => {
     expect(parseLlmAgentOutput(raw)).toBeNull();
   });
 
-  it('normalises missing predefined/custom/skipped to empty defaults', () => {
+  it('normalises every missing list to an empty default', () => {
     const raw = '```json\n{}\n```';
     const out = parseLlmAgentOutput(raw);
     // `skipped` normalises the same way the other two do: a response written before the
     // field existed parses to an empty list, so the Tier-1 safety net sees no rejections
     // and behaves exactly as it did.
-    expect(out).toEqual({ predefined: {}, custom: [], skipped: [] });
+    expect(out).toEqual({ predefined: {}, custom: [], skipped: [], declined: [] });
   });
 });

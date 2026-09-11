@@ -91,4 +91,24 @@ describe('parseLlmAgentOutputWithDiagnostic — skipped rows', () => {
     );
     expect(result?.skipped).toEqual([]);
   });
+
+  // A predefined agent the model turns OFF stays on the form as an unticked box. Without
+  // a reason the user is left guessing — MEASURED, two bundle agents the user had
+  // deliberately imported were unticked with nothing shown, and the only way to learn why
+  // was to read the raw invocation.
+  it('carries a decline reason for a predefined agent', () => {
+    const { result } = parseLlmAgentOutputWithDiagnostic(
+      wrap(
+        '{"predefined":{"bundle-x":false},"custom":[],"declined":[{"id":"bundle-x","reason":"body describes game modding, not Drupal"}]}',
+      ),
+    );
+    expect(result?.declined).toEqual([
+      { id: 'bundle-x', reason: 'body describes game modding, not Drupal' },
+    ]);
+  });
+
+  it('is an empty list when the model declines nothing', () => {
+    const { result } = parseLlmAgentOutputWithDiagnostic(wrap('{"predefined":{},"custom":[]}'));
+    expect(result?.declined).toEqual([]);
+  });
 });
