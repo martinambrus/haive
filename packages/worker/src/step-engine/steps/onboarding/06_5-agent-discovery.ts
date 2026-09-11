@@ -3,7 +3,12 @@ import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { agentSpecSchema, mapWithConcurrency, type FormSchema } from '@haive/shared';
+import {
+  agentSpecSchema,
+  mapWithConcurrency,
+  FRAMEWORK_PATTERNS,
+  type FormSchema,
+} from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import type { AgentColor, AgentSpec } from './_agent-templates.js';
@@ -16,6 +21,7 @@ import {
   resolveConfirmedProject,
 } from './_helpers.js';
 import {
+  FILE_COUNT_THRESHOLD,
   buildTechInventory,
   renderTechInventoryTable,
   type TechInventory,
@@ -566,11 +572,11 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Predefined agents (from deterministic scan)',
     predefinedList,
     '',
-    '## Secondary technology inventory (deterministic dep scan + import grep, threshold 5+ files for non-framework categories)',
+    `## Secondary technology inventory (deterministic dep scan + import grep, threshold ${FILE_COUNT_THRESHOLD}+ files for non-framework categories)`,
     inventoryTable,
     '',
     '### Tier 1 — REQUIRED specialists (build / framework / db / orm / graphics / queue / search / pdf / api)',
-    'Each row below is a non-trivial DSL, protocol, or surface that benefits from focused expertise. You MUST emit a `<name>-specialist` custom agent for every row, UNLESS the row is literally covered by one of the predefined agents above (state the overlap explicitly when skipping). Do NOT skip a row by labelling it "boilerplate", "config-only", or "common knowledge" — the deterministic scanner has already enforced a usage threshold; if it is on this list, it is significant enough.',
+    `Each row below is a candidate surface that may benefit from focused expertise. Emit a \`<name>-specialist\` custom agent for every row unless you can say WHY it does not deserve one, and put every such row in \`skipped\` with its reason. The scanner's bar is only ${FILE_COUNT_THRESHOLD} referencing files, so a row can be a dependency of a dependency rather than something this project works in — judge from the file tree, not from the row's presence. Two reasons are worth stating explicitly when they apply: the row is already covered by a predefined agent above, or its matches are third-party code (a vendored library, a bundled polyfill, contrib) rather than code maintained here. Do NOT skip on a bare "boilerplate" or "common knowledge" label with no evidence.`,
     mandatoryList,
     '',
     '### Tier 2 — OPTIONAL specialists (http / css / state / auth / logging / testing / other)',
@@ -580,7 +586,7 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Instructions',
     '1. Review the file tree, key config files, and the technology inventory above.',
     '2. For each predefined agent, decide if it is relevant to this project (true/false).',
-    '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Tier 1 rows that are NOT skipped MUST appear in `custom`.',
+    '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Every Tier 1 row must appear in EXACTLY ONE of `custom` or `skipped` — an inventory row you simply leave out of both is treated as an oversight and re-added for you, so a deliberate omission only survives if you state it in `skipped`.',
     '4. You MAY suggest additional technical agents not in the inventory if the file tree or config files show another framework/library/tool with non-trivial usage that the inventory missed.',
     '5. Do NOT propose agents for business domain concepts (entities, workflows, validation rules, UI flows specific to this app). Those become skills.',
     '6. For each custom agent, provide a FULL structured body with the following fields, tailored to this repository:',
@@ -604,6 +610,9 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '  "predefined": {',
     '    "<agent-id>": true|false',
     '  },',
+    '  "skipped": [',
+    '    { "id": "<inventory-row-agent-id>", "reason": "why this row needs no specialist" }',
+    '  ],',
     '  "custom": [',
     '    {',
     '      "id": "my-agent",',
@@ -652,7 +661,11 @@ interface ParseAgentBodyOpts {
 function parseAgentBody(
   candidate: string,
   opts: ParseAgentBodyOpts = {},
-): { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null {
+): {
+  predefined: Record<string, boolean>;
+  custom: LlmAgentSuggestion[];
+  skipped: SkippedInventoryRow[];
+} | null {
   const obj = JSON.parse(candidate) as Record<string, unknown>;
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
   const predefinedIsObject =
@@ -674,7 +687,36 @@ function parseAgentBody(
   return {
     predefined: predefinedIsObject ? (obj.predefined as Record<string, boolean>) : {},
     custom: customIsArray ? (obj.custom as LlmAgentSuggestion[]) : [],
+    skipped: parseSkipped(obj.skipped),
   };
+}
+
+/** A Tier-1 inventory row the model deliberately declined, with its reason.
+ *
+ *  The response had no way to say this: an inventory row was either in `custom` or
+ *  absent, so a judged rejection and an oversight were the same bytes, and
+ *  `injectMissingTier1Specialists` could only assume oversight. MEASURED on a live
+ *  Drupal 7 run — the model was shown `Symfony (framework, 4 files)`, whose matches are
+ *  a `polyfill-mbstring` vendored inside PhpSpreadsheet, correctly left it out, and the
+ *  net put `symfony-specialist` back on the user's form. */
+export interface SkippedInventoryRow {
+  id: string;
+  reason: string;
+}
+
+/** Tolerant: a missing field, a non-array, or an entry without a usable id yields
+ *  nothing. A malformed rejection must lose the row to the safety net rather than
+ *  suppress a specialist on an id nobody can read. */
+function parseSkipped(raw: unknown): SkippedInventoryRow[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SkippedInventoryRow[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const { id, reason } = entry as { id?: unknown; reason?: unknown };
+    if (typeof id !== 'string' || id.trim().length === 0) continue;
+    out.push({ id: id.trim(), reason: typeof reason === 'string' ? reason : '' });
+  }
+  return out;
 }
 
 export function parseLlmAgentOutputWithDiagnostic(raw: string): {
@@ -853,11 +895,16 @@ export function buildAgentSpecFromLlm(
 export function injectMissingTier1Specialists(
   candidates: AgentCandidate[],
   inventory: TechInventory,
+  skipped: readonly SkippedInventoryRow[] = [],
 ): void {
   const existingIds = new Set(candidates.map((c) => c.id));
+  // An id the model REJECTED is not a gap to fill. Only a row it neither proposed nor
+  // ruled on is treated as dropped — which is what this net was always for.
+  const rejected = new Set(skipped.flatMap((r) => [r.id, r.id.replace(/-specialist$/, '')]));
   for (const it of inventory.items) {
     if (!MANDATORY_CATEGORIES.has(it.category)) continue;
     const id = `${it.name}-specialist`;
+    if (rejected.has(id) || rejected.has(it.name)) continue;
     if (existingIds.has(id) || existingIds.has(it.name)) continue;
     const label = `${it.displayName} specialist`;
     const hint = `${it.category} expertise for ${it.displayName}`;
@@ -899,7 +946,11 @@ function enrichCandidates(
   ) {
     extracted = (llmOutput as { result: unknown }).result;
   }
-  let llmResult: { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null;
+  let llmResult: {
+    predefined: Record<string, boolean>;
+    custom: LlmAgentSuggestion[];
+    skipped?: SkippedInventoryRow[];
+  } | null;
   if (typeof extracted === 'string') {
     const parsed = parseLlmAgentOutputWithDiagnostic(extracted);
     llmResult = parsed.result;
@@ -912,6 +963,7 @@ function enrichCandidates(
     llmResult = extracted as {
       predefined: Record<string, boolean>;
       custom: LlmAgentSuggestion[];
+      skipped?: SkippedInventoryRow[];
     } | null;
   }
   if (llmResult) {
@@ -950,7 +1002,7 @@ function enrichCandidates(
      user always sees a build / framework / db / orm / graphics / queue /
      search / pdf / api specialist for every inventory hit. */
   if (detected.__techInventory) {
-    injectMissingTier1Specialists(candidates, detected.__techInventory);
+    injectMissingTier1Specialists(candidates, detected.__techInventory, llmResult?.skipped ?? []);
   }
 
   return candidates;
@@ -1083,7 +1135,15 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     const keyFiles = await collectKeyFiles(ctx.repoPath);
 
     await ctx.emitProgress('Building secondary technology inventory...');
-    const techInventory = await buildTechInventory(ctx.repoPath);
+    // Third-party trees are not this project's stack. The framework's own excludePaths
+    // name them (`sites/all/libraries/` on Drupal 7), and IGNORE_DIRS cannot — it matches
+    // a bare directory NAME, so a library vendored at a path slips through.
+    const frameworkPattern = framework
+      ? FRAMEWORK_PATTERNS[framework as keyof typeof FRAMEWORK_PATTERNS]
+      : undefined;
+    const techInventory = await buildTechInventory(ctx.repoPath, {
+      excludePaths: frameworkPattern?.excludePaths ?? [],
+    });
 
     await ctx.emitProgress(
       `Found ${candidates.length} agent candidates, ${fileTree.split('\n').length} files mapped, ${techInventory.items.length} secondary technologies. Waiting for LLM analysis...`,

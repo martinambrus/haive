@@ -1033,6 +1033,7 @@ async function walkSourceFiles(
   depth: number,
   maxDepth: number,
   filesByExt: Map<string, string[]>,
+  excludePrefixes: readonly string[] = [],
 ): Promise<void> {
   if (depth > maxDepth) return;
   let entries: Dirent[];
@@ -1045,7 +1046,9 @@ async function walkSourceFiles(
     if (IGNORE_DIRS.has(e.name)) continue;
     const childRel = rel ? path.join(rel, e.name) : e.name;
     if (e.isDirectory()) {
-      await walkSourceFiles(repoPath, childRel, depth + 1, maxDepth, filesByExt);
+      const norm = childRel.split(path.sep).join('/');
+      if (excludePrefixes.some((p) => norm === p || norm.startsWith(`${p}/`))) continue;
+      await walkSourceFiles(repoPath, childRel, depth + 1, maxDepth, filesByExt, excludePrefixes);
     } else if (e.isFile()) {
       const dot = e.name.lastIndexOf('.');
       if (dot < 0) continue;
@@ -1157,11 +1160,22 @@ function findCatalogMatches(
    uses LWJGL across 2 files) don't drop out of inventory. The catalog only
    covers well-known significant techs, so 2 imports is plausibly enough
    signal to warrant a specialist agent. */
-const FILE_COUNT_THRESHOLD = 2;
+/** Minimum files referencing a tech before it surfaces. Deliberately low — it is a
+ *  DISCOVERY floor, not a significance bar. Anything downstream that tells a reader
+ *  (or a model) this number means the tech matters is overstating it: 2 files can be a
+ *  vendored polyfill. Exported so the agent-discovery prompt quotes the real value
+ *  instead of drifting from it, which it did — the prompt claimed 5. */
+export const FILE_COUNT_THRESHOLD = 2;
 
 export interface BuildTechInventoryOptions {
-  /** Override file-count threshold. Defaults to 5. */
+  /** Override file-count threshold. Defaults to FILE_COUNT_THRESHOLD (2). */
   threshold?: number;
+  /** Repo-relative directory prefixes to skip, on top of IGNORE_DIRS. IGNORE_DIRS matches
+   *  a bare NAME (`vendor`, `node_modules`), which cannot express a third-party tree that
+   *  lives at a path — `sites/all/libraries/` on Drupal 7, where a PhpSpreadsheet-bundled
+   *  `symfony/polyfill-mbstring` counted as the Symfony FRAMEWORK. Callers that know the
+   *  framework pass its `FRAMEWORK_PATTERNS.excludePaths`. */
+  excludePaths?: readonly string[];
   /** Override directory walk depth. Defaults to 6. */
   maxDepth?: number;
 }
@@ -1176,8 +1190,12 @@ export async function buildTechInventory(
   const { deps, manifests } = await collectAllDeps(repoPath);
   const matches = findCatalogMatches(deps);
 
+  const excludePrefixes = (options.excludePaths ?? [])
+    .map((p) => p.replace(/^\/+|\/+$/g, ''))
+    .filter((p) => p.length > 0);
+
   const filesByExt = new Map<string, string[]>();
-  await walkSourceFiles(repoPath, '', 0, maxDepth, filesByExt);
+  await walkSourceFiles(repoPath, '', 0, maxDepth, filesByExt, excludePrefixes);
   const counts = await countAllTechMatches(repoPath, filesByExt);
 
   const items: TechItem[] = [];
