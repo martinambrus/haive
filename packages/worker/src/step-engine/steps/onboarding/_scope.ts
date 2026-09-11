@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { Database } from '@haive/database';
 import type { TreeNode } from '@haive/shared';
+import { AGENT_TOOLING_DIRS } from './_scope-seed.js';
 import { ROOT_FILES_SCOPE } from '@haive/shared/scope-tree';
 import { stripManagedKnowledgeGlobs } from '@haive/shared/knowledge-paths';
 import { loadPreviousStepOutput } from './_helpers.js';
@@ -170,8 +171,29 @@ export async function loadRepoScopeExcludeGlobs(
 export async function loadMiningScopeExcludeGlobs(db: Database, taskId: string): Promise<string[]> {
   const prev = await loadPreviousStepOutput(db, taskId, '06_7-scope-selection');
   const globs = (prev?.output as { excludeGlobs?: string[] } | null)?.excludeGlobs;
-  if (Array.isArray(globs)) return stripManagedKnowledgeGlobs(globs);
-  return loadScopeExcludeGlobs(db, taskId);
+  const base = Array.isArray(globs)
+    ? stripManagedKnowledgeGlobs(globs)
+    : await loadScopeExcludeGlobs(db, taskId);
+  return withAgentToolingDirs(base);
+}
+
+/** Add the agent-tooling dirs, whether or not they existed when the scope was chosen.
+ *
+ *  `computeSeedExcludeGlobs` filters every seed through the directory tree, so a tooling
+ *  dir that does not exist yet cannot be seeded — and 06_7 runs BEFORE 07-generate-files
+ *  creates them. MEASURED on a live run: 06_7 finished at 11:40:53, 07 wrote
+ *  `.codex/agents/` at 11:54:53, and the KB miner was then handed 34 of Haive's own
+ *  generated agent definitions as project source. `.claude` escaped only because that
+ *  repo already had one from a previous workflow.
+ *
+ *  Enforced at LOAD rather than fixed in the seed so every mining step and every
+ *  already-onboarded repo gets it with no backfill — the same shape as
+ *  `stripManagedKnowledgeGlobs`, which this function sits beside for the same reason: a
+ *  structural rule about what mining means, not a scope preference the user expressed.
+ *  Consumers anchor on a whole path segment, so naming a dir the repo does not have is
+ *  inert. */
+function withAgentToolingDirs(globs: string[]): string[] {
+  return [...new Set([...globs, ...AGENT_TOOLING_DIRS])];
 }
 
 /** Resolve the repository id behind a task (null when the task has none, or on a
