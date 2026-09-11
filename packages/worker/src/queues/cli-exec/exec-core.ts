@@ -64,6 +64,7 @@ import {
 } from './resolvers.js';
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
 import { resolveSecretMasks } from './secret-mask.js';
+import { resolveRipgrepConfigEnv } from './ripgrep-config.js';
 import { worktreeGitfileMask } from './gitfile-mask.js';
 import { consumePreemptionMark } from './preempt-mark.js';
 import { resolveDdevGeneratedMasks } from './ddev-generated-mask.js';
@@ -553,6 +554,12 @@ export async function executeCliSpec(
   ) {
     mergedSpec.env.ENABLE_PROMPT_CACHING_1H = '1';
   }
+  // ripgrep reads a config ONLY from this variable, never from a `.ripgreprc` in the
+  // working directory, so without it the file 01_5-ripgrep-config generates is inert and
+  // every type-scoped search silently misses the extensions it exists to add. Set only
+  // when the file is really there — a path to a missing one makes ripgrep warn on every
+  // invocation. See resolveRipgrepConfigEnv.
+  Object.assign(mergedSpec.env, await resolveRipgrepConfigEnv(repoMount, sandboxWorkdir));
   const spawner: CliSpawner = createSandboxSpawner(
     wrapperContent,
     sandboxImage,
