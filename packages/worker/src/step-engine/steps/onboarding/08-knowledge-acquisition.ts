@@ -13,6 +13,7 @@ import {
   scopeInstructionLines,
 } from './_scope.js';
 import { techAnchorFacets } from '../_repo-stack.js';
+import { KB_DRAFT_DIR, resolveBodies } from './_kb-body-file.js';
 import {
   resolveStackVersions,
   type ConfirmedStackValues,
@@ -85,6 +86,9 @@ interface KbEntry {
   id: string;
   title: string;
   sections: { heading: string; body: string }[];
+  /** Set instead of `sections` when the agent staged the body under `.haive/kb-draft/`.
+   *  Resolved by `resolveBodies` at the top of apply, so nothing downstream sees it. */
+  bodyPath?: string;
   confidence?: 'high' | 'medium' | 'low';
   sourceFiles?: string[];
   /** Uppercase stem (no extension) like "ARCHITECTURE" to force a canonical filename
@@ -295,7 +299,26 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '',
     '## Output format',
     '',
-    'Emit exactly ONE JSON object inside a ```json fenced code block:',
+    `WRITE EACH BODY TO A FILE, then describe it in the JSON. For every entry and every`,
+    `update, use your file-writing tool to create \`${KB_DRAFT_DIR}/<id>.md\` holding ONLY`,
+    `the section content, as level-2 markdown headings:`,
+    '',
+    '    ## Section Name',
+    '',
+    '    Detailed markdown content...',
+    '',
+    '    ## Another Section',
+    '',
+    `Then set \`"bodyPath": "${KB_DRAFT_DIR}/<id>.md"\` on that entry and OMIT its`,
+    '`sections` array. Do not write a `# Title` line and do not write a `## Source files`',
+    'section — both are generated from the fields you supply.',
+    '',
+    'This is not a style preference. A whole knowledge base does not fit in one reply, and',
+    'an answer shortened to fit is worse than the one you would have written. Writing each',
+    'body as its own file removes that limit, so write them in full and keep the JSON',
+    'small. Inline `sections` are still accepted for a short entry.',
+    '',
+    'Then emit exactly ONE JSON object inside a ```json fenced code block:',
     '```',
     '{',
     '  "entries": [',
@@ -309,16 +332,14 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '      "tech": "<required when category is tech_pattern, anti_pattern, best_practice, or quick_reference — e.g. node-pty, gradle, lwjgl2>",',
     '      "scope": "local | global",',
     '      "facets": { "framework": ["<token>"], "language": ["<lang>"], "phpMajor": ["<n>"], "nodeMajor": ["<n>"] },',
-    '      "sections": [',
-    '        { "heading": "Section Name", "body": "Detailed markdown content..." }',
-    '      ]',
+    `      "bodyPath": "${KB_DRAFT_DIR}/<id>.md"`,
     '    }',
     '  ],',
     '  "placements": [',
     '    { "path": "<existing knowledge_base file path from the list above>", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug, required when category is a tech bucket>", "scope": "local | global (omit for local)" }',
     '  ],',
     '  "updates": [',
-    '    { "path": "<existing knowledge_base file to IMPROVE>", "title": "...", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug when a tech bucket>", "sections": [ { "heading": "Section", "body": "improved markdown — preserve correct content, revise stale parts, add new findings" } ] }',
+    `    { "path": "<existing knowledge_base file to IMPROVE>", "title": "...", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug when a tech bucket>", "bodyPath": "<draft file holding the improved markdown — preserve correct content, revise stale parts, add new findings>" }`,
     '  ]',
     '}',
     '```',
@@ -514,6 +535,8 @@ export interface KbUpdate {
   confidence?: 'high' | 'medium' | 'low';
   sourceFiles?: string[];
   sections: { heading: string; body: string }[];
+  /** As KbEntry.bodyPath. */
+  bodyPath?: string;
 }
 
 function isValidUpdate(val: unknown): val is KbUpdate {
@@ -521,6 +544,9 @@ function isValidUpdate(val: unknown): val is KbUpdate {
   const v = val as Record<string, unknown>;
   if (typeof v.path !== 'string' || v.path.length === 0) return false;
   if (typeof v.title !== 'string') return false;
+  if (typeof v.bodyPath === 'string' && v.bodyPath.length > 0 && v.sections === undefined) {
+    return true;
+  }
   if (!Array.isArray(v.sections) || v.sections.length === 0) return false;
   for (const s of v.sections as unknown[]) {
     if (!s || typeof s !== 'object') return false;
@@ -568,6 +594,11 @@ function isValidEntry(val: unknown): val is KbEntry {
   if (!val || typeof val !== 'object') return false;
   const v = val as Record<string, unknown>;
   if (typeof v.id !== 'string' || typeof v.title !== 'string') return false;
+  // Bodies may be STAGED in a file instead of carried inline — `resolveBodies` fills
+  // them in before anything downstream runs, so an entry that names one is complete.
+  if (typeof v.bodyPath === 'string' && v.bodyPath.length > 0 && v.sections === undefined) {
+    return true;
+  }
   if (!Array.isArray(v.sections)) return false;
   for (const s of v.sections as unknown[]) {
     if (!s || typeof s !== 'object') return false;
@@ -1266,6 +1297,10 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     );
 
     const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
+    // Created here, not left to the agent's tool: if that tool does not create parents,
+    // every body write fails and the step silently produces nothing.
+    await mkdir(path.join(ctx.repoPath, KB_DRAFT_DIR), { recursive: true });
+
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
     const fileTree = await collectShortFileTree(ctx.repoPath, scopeExclude);
 
@@ -1493,9 +1528,26 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     const kbDir = path.join(ctx.repoPath, KB_DIR);
     await mkdir(kbDir, { recursive: true });
 
-    const entries = extractEntries(args.llmOutput ?? null);
+    const rawEntries = extractEntries(args.llmOutput ?? null);
     const placements = parseKbPlacements(args.llmOutput ?? null);
-    const updates = parseKbUpdates(args.llmOutput ?? null);
+    const rawUpdates = parseKbUpdates(args.llmOutput ?? null);
+
+    // Bodies staged under `.haive/kb-draft/` are read back here, BEFORE routing,
+    // promotion or rendering — so every path below sees an ordinary entry and none of
+    // them learned a new shape. A failure drops that entry and is reported: one
+    // unreadable body must not discard the fifteen beside it that are fine, and an entry
+    // published with no sections would put a blank page under a canonical KB name.
+    const entryBodies = await resolveBodies(ctx.repoPath, rawEntries);
+    const updateBodies = await resolveBodies(ctx.repoPath, rawUpdates);
+    const entries = entryBodies.resolved;
+    const updates = updateBodies.resolved;
+    const bodyFailures = [...entryBodies.failures, ...updateBodies.failures];
+    if (bodyFailures.length > 0) {
+      ctx.logger.warn(
+        { count: bodyFailures.length, reasons: bodyFailures.slice(0, 5).map((f) => f.reason) },
+        'kb: staged body files could not be read; those entries were dropped',
+      );
+    }
     const llmAvailable = entries.length > 0 || placements.length > 0 || updates.length > 0;
     const written: {
       id: string;
