@@ -73,10 +73,8 @@ export async function mcpSettingsDefaultFor(repoPath: string): Promise<string> {
 
 interface ToolingDetect {
   primaryLanguage: string;
-  framework: string;
   containerType: string;
   databaseType: string | null;
-  hasPhpExtendedExtensions: boolean;
   cliDisplayName: string | null;
   cliSupportsMcp: boolean;
   cliSupportsLsp: boolean;
@@ -98,7 +96,7 @@ interface ToolingDetect {
 }
 
 interface EnvDetectData {
-  project: { primaryLanguage: string; framework?: string };
+  project: { primaryLanguage: string };
   container: { type: string; databaseType: string | null };
 }
 
@@ -179,11 +177,6 @@ export const toolingInfrastructureStep: StepDefinition<
       };
     }
 
-    // Check step 01.5 ripgrep output for PHP-candidate extensions (.inc, .module, etc.)
-    const rgPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01_5-ripgrep-config');
-    const rgDetect = rgPrev?.detect as { extensions?: { ext: string; isPhp: boolean }[] } | null;
-    const hasPhpExtendedExtensions = (rgDetect?.extensions ?? []).some((e) => e.isPhp);
-
     const cliMeta = await loadCliProviderMetadata(ctx.db, ctx.cliProviderId);
 
     // Resolve current rtk_enabled by walking task → repository. New repos
@@ -241,10 +234,8 @@ export const toolingInfrastructureStep: StepDefinition<
 
     return {
       primaryLanguage: data.project.primaryLanguage,
-      framework: data.project.framework ?? 'unknown',
       containerType: data.container.type,
       databaseType: data.container.databaseType,
-      hasPhpExtendedExtensions,
       cliDisplayName: cliMeta?.displayName ?? null,
       cliSupportsMcp: cliMeta?.supportsMcp ?? false,
       cliSupportsLsp: cliMeta?.supportsLsp ?? false,
