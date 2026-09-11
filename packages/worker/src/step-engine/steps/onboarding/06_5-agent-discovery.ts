@@ -1224,23 +1224,33 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
       ),
     );
 
-    const options = enriched.map((c) => ({
-      value: c.id,
-      label: `${c.label}${c.count > 0 ? ` (${c.count} files)` : ''} — ${c.hint}`,
-      ...(c.declineReason ? { description: `Not recommended: ${c.declineReason}` } : {}),
-      ...(c.source === 'llm'
-        ? { badge: 'AI-suggested', badgeColor: 'amber' as const }
-        : c.source === 'bundle'
-          ? { badge: 'From bundle', badgeColor: 'indigo' as const }
-          : {}),
-    }));
-    // These agents are always pre-selected regardless of LLM recommendations
+    // Pre-selected whatever the model says, because workflow steps name them directly
+    // (_agent-selector, 03-phase-0a-discovery, 11-phase-8-learning). The tick is what the
+    // user reads, so the sub-text below has to agree with the TICK, not with the
+    // `recommended` flag — a box that is checked while saying "Not recommended" is the
+    // same unexplained contradiction the reason was added to remove.
     const ALWAYS_SELECTED = new Set([
       'code-reviewer',
       'security-auditor',
       'knowledge-miner',
       'learning-recorder',
     ]);
+    const options = enriched.map((c) => ({
+      value: c.id,
+      label: `${c.label}${c.count > 0 ? ` (${c.count} files)` : ''} — ${c.hint}`,
+      ...(c.declineReason
+        ? {
+            description: ALWAYS_SELECTED.has(c.id)
+              ? `Kept regardless — later workflow steps call this agent by name. The model advised against it: ${c.declineReason}`
+              : `Not recommended: ${c.declineReason}`,
+          }
+        : {}),
+      ...(c.source === 'llm'
+        ? { badge: 'AI-suggested', badgeColor: 'amber' as const }
+        : c.source === 'bundle'
+          ? { badge: 'From bundle', badgeColor: 'indigo' as const }
+          : {}),
+    }));
     const defaults = enriched
       .filter((c) => c.recommended || ALWAYS_SELECTED.has(c.id))
       .map((c) => c.id);
