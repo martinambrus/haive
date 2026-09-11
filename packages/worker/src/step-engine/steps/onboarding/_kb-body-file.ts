@@ -1,4 +1,4 @@
-import { chown, mkdir, readFile, stat } from 'node:fs/promises';
+import { chown, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 /** Where a KB miner stages an entry's body before the step files it. Inside the
@@ -153,6 +153,27 @@ export async function prepareAgentWritableDir(
     for (const dir of ancestorsWithin(repoPath, abs)) await chown(dir, owner.uid, owner.gid);
   } catch (err) {
     logger?.warn({ err, relDir }, 'could not hand the draft dir to the sandbox user');
+  }
+}
+
+/** Drop the staging dir once its bodies have been filed.
+ *
+ *  The drafts are scratch, and they are scratch INSIDE the repo: `.haive/` is not
+ *  gitignored and `12-post-onboarding` stages `.haive/install.json` by name rather than
+ *  the directory, so on an ordinary repo they sit in the user's `git status` for good —
+ *  and on one onboarding has to `git init` itself (uploaded or blank) that step stages the
+ *  WHOLE tree with `git add -A`, which commits every draft into the first commit.
+ *
+ *  Best-effort: a staging dir that will not delete is untidy, never a reason to fail a
+ *  knowledge base that is already written. */
+export async function discardKbDrafts(
+  repoPath: string,
+  logger?: { warn: (obj: unknown, msg?: string) => void },
+): Promise<void> {
+  try {
+    await rm(path.resolve(repoPath, KB_DRAFT_DIR), { recursive: true, force: true });
+  } catch (err) {
+    logger?.warn({ err }, 'could not remove the kb draft dir');
   }
 }
 

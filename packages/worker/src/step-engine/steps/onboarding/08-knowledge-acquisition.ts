@@ -17,6 +17,7 @@ import {
   KB_DRAFT_DIR,
   prepareAgentWritableDir,
   readKbBodyFile,
+  discardKbDrafts,
   resolveBodies,
 } from './_kb-body-file.js';
 import {
@@ -1867,12 +1868,18 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       );
     }
 
+    // The drafts have been filed; keep them only when something could not be read, since
+    // that is the one case where the files on disk are the evidence a human needs and a
+    // retry re-runs the whole mining pass anyway.
+    if (bodyFailures.length === 0) await discardKbDrafts(ctx.repoPath, ctx.logger);
+
     ctx.logger.info(
       {
         written: written.length,
         placements: placements.length,
         llmAvailable,
         topicCount: entries.length,
+        draftsKept: bodyFailures.length > 0,
       },
       'knowledge base written',
     );

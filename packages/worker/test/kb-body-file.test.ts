@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  discardKbDrafts,
   KB_DRAFT_DIR,
   KbBodyPathError,
   parseSectionsFromMarkdown,
@@ -159,6 +160,38 @@ describe('resolveBodies', () => {
 // The step's own validators must accept an entry whose body is staged, and must keep
 // accepting one that carries it inline — a model ignoring the new contract, or a payload
 // replayed from before it existed, has to behave exactly as it did.
+describe('discardKbDrafts', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'haive-kbdraft-'));
+    await mkdir(path.join(dir, KB_DRAFT_DIR), { recursive: true });
+    await writeFile(path.join(dir, KB_DRAFT_DIR, 'arch.md'), '## Overview\n\nbody\n');
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // `.haive/` is not gitignored and 12-post-onboarding stages `.haive/install.json` by
+  // name, so a left-behind draft sits in the user's `git status` for good — and on a repo
+  // onboarding has to `git init` itself that step runs `git add -A` and commits them all.
+  it('removes the staging dir', async () => {
+    await discardKbDrafts(dir);
+    await expect(stat(path.join(dir, KB_DRAFT_DIR))).rejects.toThrow();
+  });
+
+  // Nothing else under `.haive/` is ours to delete.
+  it('leaves the rest of .haive alone', async () => {
+    await writeFile(path.join(dir, '.haive', 'install.json'), '{}');
+    await discardKbDrafts(dir);
+    expect((await stat(path.join(dir, '.haive', 'install.json'))).isFile()).toBe(true);
+  });
+
+  it('is a no-op when the dir was never created', async () => {
+    await rm(path.join(dir, KB_DRAFT_DIR), { recursive: true, force: true });
+    await expect(discardKbDrafts(dir)).resolves.toBeUndefined();
+  });
+});
+
 describe('08 entry/update validation with a staged body', () => {
   const fence = (obj: unknown): string => '```json\n' + JSON.stringify(obj) + '\n```';
 
