@@ -1,0 +1,154 @@
+import { expect, test } from '@playwright/test';
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { registerUser } from '../helpers/auth.js';
+
+/**
+ * The settings section: seven tabs, each one user-scoped row.
+ *
+ * Two depths, deliberately. The tab-bar test is REACHABILITY only — each tab navigates and
+ * renders a heading of its own, which is what catches a renamed route or a layout that takes the
+ * whole section down. Git Identity then carries the ROUND TRIP for the section: type, save,
+ * reload, still there, plus null rather than '' when cleared. That half needs a browser because a
+ * unit test on the route cannot see the form that feeds it.
+ *
+ * So six tabs have no save coverage here, and that is a stated gap rather than an oversight: one
+ * save test per tab is six fixtures and six teardowns for one shared GET/PUT shape, and the shape
+ * is what Git Identity already proves.
+ */
+
+const TABS = [
+  { label: 'Account', path: '/settings/account' },
+  { label: 'Editor', path: '/settings/ide' },
+  { label: 'Git Credentials', path: '/settings/credentials' },
+  { label: 'Git Identity', path: '/settings/git-identity' },
+  { label: 'Global KB', path: '/settings/global-kb' },
+  { label: 'Integrations', path: '/settings/integrations' },
+  { label: 'Notifications', path: '/settings/notifications' },
+] as const;
+
+test.describe('settings', () => {
+  test('/settings redirects to the account tab', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'settings-root' })).userId;
+
+      // The section has no landing page of its own — the layout is a tab bar. Signed OUT this
+      // path lands on /login, which the guard sweep covers; signed IN it must reach a real tab
+      // rather than a 404, which is what a bookmark or a pasted link gets.
+      await page.goto('/settings');
+      await expect(page).toHaveURL(/\/settings\/account$/);
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('every tab is reachable from the tab bar', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'settings-tabs' })).userId;
+      await page.goto('/settings/account');
+
+      for (const tab of TABS) {
+        await page.getByRole('link', { name: tab.label, exact: true }).click();
+        // Generous, because the stack under test is a DEV build that compiles a route on its
+        // first visit — the server log shows "Compiling /settings/global-kb" and the navigation
+        // simply has not landed yet at five seconds. Nothing about the product is slow here, and
+        // CI runs the same dev images.
+        await expect(page, `${tab.label} should navigate to ${tab.path}`).toHaveURL(
+          new RegExp(`${tab.path}$`),
+          { timeout: 30_000 },
+        );
+        // Something of the tab's own rendered, not merely a URL change: every one of these
+        // pages fetches its row on mount, and a failed fetch leaves an empty shell behind.
+        await expect(page.getByRole('heading').first()).toBeVisible();
+      }
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('the git identity round-trips through a reload', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'settings-git' })).userId;
+
+      await page.goto('/settings/git-identity');
+      await expect(page.getByText('Commit author')).toBeVisible();
+      // The form renders once its GET resolves — but `reactStrictMode` is on, so in a DEV build
+      // React invokes that effect TWICE and the second resolution re-seeds the fields from the
+      // server. Typing before it lands is typing into a value about to be overwritten: CI caught
+      // exactly that, with Name (typed first) empty and Email (typed second) intact, while the
+      // page reported "Git identity saved." Waiting for the fetches to stop is the fix, and CI
+      // runs the same dev images, so this is not a local-only concern.
+      await page.waitForLoadState('networkidle');
+
+      await page.getByLabel('Name', { exact: true }).fill('E2E Committer');
+      await page.getByLabel('Email', { exact: true }).fill('committer@haive-e2e.test');
+      await page.getByRole('button', { name: 'Save' }).click();
+
+      // Stored on the USER row rather than a settings blob, which is why this is worth
+      // asserting at the database as well: it is the identity every commit the product makes
+      // will carry.
+      await expect
+        .poll(
+          async () => {
+            const rows = await sql<{ git_name: string | null; git_email: string | null }[]>`
+              select git_name, git_email from users where id = ${userId}
+            `;
+            return rows[0];
+          },
+          { timeout: 10_000 },
+        )
+        .toEqual({ git_name: 'E2E Committer', git_email: 'committer@haive-e2e.test' });
+
+      await page.reload();
+      await expect(page.getByLabel('Name', { exact: true })).toHaveValue('E2E Committer');
+      await expect(page.getByLabel('Email', { exact: true })).toHaveValue(
+        'committer@haive-e2e.test',
+      );
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('clearing the git identity stores null rather than an empty string', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'settings-git-clear' })).userId;
+      await sql`update users set git_name = 'Old Name', git_email = 'old@haive-e2e.test' where id = ${userId}`;
+
+      await page.goto('/settings/git-identity');
+      await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Old Name');
+      // Same double-effect: the second load would restore 'Old Name' over the cleared field.
+      await page.waitForLoadState('networkidle');
+
+      await page.getByLabel('Name', { exact: true }).fill('');
+      await page.getByLabel('Email', { exact: true }).fill('');
+      await page.getByRole('button', { name: 'Save' }).click();
+
+      // NULL, not ''. The route maps an empty string to null deliberately, and anything reading
+      // this later asks "is there an identity", which an empty string answers wrongly.
+      await expect
+        .poll(
+          async () => {
+            const rows = await sql<{ git_name: string | null; git_email: string | null }[]>`
+              select git_name, git_email from users where id = ${userId}
+            `;
+            return rows[0];
+          },
+          { timeout: 10_000 },
+        )
+        .toEqual({ git_name: null, git_email: null });
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+});
