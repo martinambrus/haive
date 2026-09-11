@@ -66,7 +66,7 @@ export async function resolveInvocationCost(
     modelIdentity?.served ?? modelIdentity?.requested ?? provider?.model ?? null,
   );
 
-  const cacheTtl = await resolveCacheTtl();
+  const cacheTtl = await resolveCacheTtl(providerName, authMode);
   const reportedCostUsd =
     typeof tokenUsage.costUsd === 'number' && Number.isFinite(tokenUsage.costUsd)
       ? tokenUsage.costUsd
@@ -214,7 +214,42 @@ async function loadFeedGate(
  *  dead (never written, all-null). try/catch because configService is not backed in
  *  the unit environment, and a cost detail must never throw where a step would notice
  *  (same lesson as augmentPromptWithTerseness). */
-async function resolveCacheTtl(): Promise<CacheTtl> {
+/** Whether this invocation's cache writes were made under the 1-hour TTL REGARDLESS of
+ *  `PROMPT_CACHING_1H`, and so must be priced at the 1h rate.
+ *
+ *  Anthropic gives SUBSCRIPTION auth the 1-hour prompt cache unconditionally. MEASURED on
+ *  this install across 48 consecutive claude-code invocations 5-60 minutes apart: 95.3% of
+ *  their prompt tokens were cache READS, which a 5-minute TTL cannot produce. The 5-minute
+ *  write rate therefore describes a TTL those runs never used, understating the bucket by
+ *  1.6x on claude-opus-5 (0.00000625 against 0.00001).
+ *
+ *  `PROMPT_CACHING_1H` never governed this and could not: it opts API-key / Bedrock /
+ *  Vertex runs INTO the 1h TTL, a real behaviour change there and a no-op on subscription.
+ *
+ *  Keep the SCOPE in view before extending this. Subscription claude-code resolves
+ *  `source: 'reported'` — the binary's own cost, which is accurate against real Anthropic —
+ *  and that branch returns before any rate is applied, carrying `cacheTtl` as metadata
+ *  only. MEASURED on this install: 2,387 rows reported against 17 computed, so the rate
+ *  this chooses moves roughly $12 in total. What it mainly buys is that the recorded
+ *  `cost.cacheTtl` stops claiming 5m for runs that had an hour — a field an admin page and
+ *  any later analysis both read.
+ *
+ *  Scoped to `claude-code` because it is the ONLY provider that reports cache-creation
+ *  tokens at all (MEASURED: 2,380 invocations, 168.9 M tokens, zero from every other
+ *  provider), and because the claude-family wrappers point the same binary at endpoints
+ *  with their own caching — Anthropic's TTL says nothing about z.ai or Ollama. */
+export function subscriptionClaudeIsAlready1h(
+  providerName: string | null,
+  authMode: string | null,
+): boolean {
+  return providerName === 'claude-code' && authMode === 'subscription';
+}
+
+async function resolveCacheTtl(
+  providerName: CliProviderName | null,
+  authMode: string | null,
+): Promise<CacheTtl> {
+  if (subscriptionClaudeIsAlready1h(providerName, authMode)) return '1h';
   try {
     return (await configService.getBoolean(CONFIG_KEYS.PROMPT_CACHING_1H, false)) ? '1h' : '5m';
   } catch (err) {
