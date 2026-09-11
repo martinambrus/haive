@@ -58,10 +58,10 @@ One task type, `deep_scan`, composed of module steps plus core steps from the ca
 
 **1 · `scan-scope`** — detect + form, and the only step that runs before any CLI fans out.
 **Every dimension is optional.** The set is `REVIEW_DIMENSIONS` (`shared/src/review/dimensions.ts`)
-— the same fourteen every reviewing step already scores a change against — plus **coherence** and
-**comment-debt**, which the module owns. Sixteen in total, individually selectable, none mandatory or
-implied, and there is no "scan everything" path that skips the form: an empty selection dispatches
-nothing rather than falling back to all sixteen.
+— the same fourteen every reviewing step already scores a change against — plus **coherence**,
+**comment-debt** and **dead-code**, which the module owns. Seventeen in total, individually
+selectable, none mandatory or implied, and there is no "scan everything" path that skips the form: an
+empty selection dispatches nothing rather than falling back to all seventeen.
 
 **Import that constant; do not re-list the names.** This plan was written before it existed
 (`3741548b` 13:58, `99c176df` 15:15, both 2026-09-04) and its prose list had already drifted: it
@@ -72,14 +72,18 @@ and eleven sites, worded three ways). A module that restates the list reintroduc
 fifteenth core dimension would then silently not be scanned. `resolveReviewDimensions` also already
 does what the form needs — canonical ordering, unknown-id tolerance, NULL-means-all.
 
-**Both module-owned dimensions stay OUT of the core constant, for two different reasons.**
+**All three module-owned dimensions stay OUT of the core constant, for three different reasons.**
 Coherence, because no change-scoped reviewer can score it (that is the dimension's whole argument,
 below): putting it in core would list it on `06-run-config` and in the repo policy where nothing
 would ever review it, and 07b's `## Not reviewed` disclosure would then be wrong, since it reports a
-dimension as unscored only when it was deliberately excluded. Comment-debt, because adding a
-fifteenth core entry re-numbers and re-indents `numberedDimensionBlock`, which `dimensions.test.ts`
-asserts byte-for-byte against the original 07b literal precisely because every install that has not
-touched the setting still renders it — a prompt regression for everyone, to serve one module.
+dimension as unscored only when it was deliberately excluded. Dead-code, because change-scoped
+dead-code detection ALREADY EXISTS outside the fourteen — it is 07b's Step 5, and that step is
+additionally allowed to EDIT ("REMOVE dead code immediately") where a dimension only scores — so a
+core entry would duplicate a protocol step that is already there and give the same job a second,
+weaker home. Comment-debt, because adding a fifteenth core entry re-numbers and re-indents
+`numberedDimensionBlock`, which `dimensions.test.ts` asserts byte-for-byte against the original 07b
+literal precisely because every install that has not touched the setting still renders it — a prompt
+regression for everyone, to serve one module. That last reason binds all three.
 
 **Two of the four missed dimensions carry change-scoped criteria and must be restated** for a
 whole-tree read, or the agent is handed a prompt pointing at steps `deep_scan` does not have:
@@ -94,15 +98,15 @@ carries as `dimension` and what the dashboard filters on.
 Detect seeds a proposed set from the repo's own dimension POLICY (`repositories.review_dimensions`,
 NULL = all fourteen) intersected with the onboarding tech inventory (`onboarding/_tech-inventory.ts`)
 rather than asking cold — a repo that has already scoped accessibility out of its reviews must not
-get it pre-ticked here. `coherence` and `comment-debt` are not in that policy and seed on. A seed is a pre-ticked box
-the user can clear, never a floor. Also on the form: scope (whole repo or subtree) and a **budget**
-in agent invocations.
+get it pre-ticked here. `coherence`, `comment-debt` and `dead-code` are not in that policy and seed
+on. A seed is a pre-ticked box the user can clear, never a floor. Also on the form: scope (whole repo
+or subtree) and a **budget** in agent invocations.
 
 **2 · `scan-analyze`** — `agentMining` fan-out, **one agent per selected dimension over the whole
-tree** (not per component). Sixteen dimensions is at most sixteen invocations, drained 5 at a time by
-`MAX_PARALLEL_AGENTS_PER_TASK`; per-component splitting is a later refinement for a dimension that
-times out, not v1. Each agent returns structured findings (`path`, `line`, `severity`, `dimension`,
-`issue`, `fix`) and carries `REPO_IS_DATA_LINES` from `steps/_untrusted-repo.ts`.
+tree** (not per component). Seventeen dimensions is at most seventeen invocations, drained 5 at a
+time by `MAX_PARALLEL_AGENTS_PER_TASK`; per-component splitting is a later refinement for a dimension
+that times out, not v1. Each agent returns structured findings (`path`, `line`, `severity`,
+`dimension`, `issue`, `fix`) and carries `REPO_IS_DATA_LINES` from `steps/_untrusted-repo.ts`.
 
 **Reuse the multi-model fan-out here; do not rebuild it.** This step fans out across **dimensions**
 (N different prompts, one model each). `purring-marinating-peacock.md` fans out across **models** (one
@@ -115,8 +119,8 @@ dependency and builds none of it. In particular it must NOT introduce a consolid
 `buildConsolidatorPrompt` is generic by design and lives in core.
 
 **Optional, never a prerequisite.** Phase 2b is that plan's hardest piece and may be deferred, so
-`deep_scan` must run correctly single-model. The scope step's budget knob governs the cost: 16
-dimensions x 3 members + 16 consolidators is 64 invocations, drained 5 at a time — thirteen serial
+`deep_scan` must run correctly single-model. The scope step's budget knob governs the cost: 17
+dimensions x 3 members + 17 consolidators is 68 invocations, drained 5 at a time — fourteen serial
 batches. Multi-model is opt-in per run, and deselecting dimensions is the other lever on that number.
 
 **3 · `scan-verify`** — second mining wave via `MiningWaveError`, reusing the three-lens refuter
@@ -150,11 +154,12 @@ finding asks one extra thing — **which side is authoritative** — because "th
 fix until a person says which one is right. Left unanswered it stays recorded and unplanned rather
 than guessed at.
 
-**Volume is the failure mode this step must survive**, and `comment-debt` is where it bites: every
-file has comments, so that dimension can reproduce "502 tasks" through triage volume rather than
+**Volume is the failure mode this step must survive**, and the two accretion dimensions are where it
+bites: every file has comments, and a long-lived tree collects unreferenced symbols the same way, so
+`comment-debt` and `dead-code` can each reproduce "502 tasks" through triage volume rather than
 through a loop, and a form rendering two thousand checkboxes is no answer. The budget at step 1 is
-per-invocation and bounds no findings, so the cap is per-dimension and per-file — `comment-debt`
-reports at most N findings per file, ranked by span, and the coverage record names what it truncated.
+per-invocation and bounds no findings, so the cap is per-dimension and per-file — each reports at most
+N findings per file, ranked by span, and the coverage record names what it truncated.
 
 **6 · `scan-plan-remediation`** — deterministic, **no LLM**. Selected findings become DAG rows:
 `task_dag_plans` (mode `'dag'`), `task_dag_levels`, `task_dag_issues` (`title` ← issue,
@@ -165,9 +170,9 @@ planner did. A coherence finding names TWO files and so breaks that rule as stat
 **connected component** of the paths a finding names, not by a single path, or two issues could each
 claim one side of the same conflict and reintroduce exactly the collision the rule exists to prevent.
 Every other dimension names one path, where connected components degenerate to one-issue-per-file —
-so this changes nothing for the other fifteen, `comment-debt` included: each of its findings names one
-path, and several comment findings in a file being fixed by one agent is the right unit anyway. All at
-level 0 unless a dependency is declared.
+so this changes nothing for the other sixteen, `comment-debt` and `dead-code` included: each of their
+findings names one path, and several such findings in a file being fixed by one agent is the right
+unit anyway. All at level 0 unless a dependency is declared.
 
 One cheap post-check falls out of that: when every finding in an issue is `comment-debt`, the
 remediation diff must touch **comment lines only** — a mechanical assertion no other dimension can
@@ -186,9 +191,9 @@ a workflow task ends.
 
 ### The coherence dimension
 
-Fourteen of the sixteen ask "is this code wrong". This one asks **"do two parts of this project
-contradict each other"**. A rule, a KB page, a doc, a code comment and the code itself all state
-intent, and when two of them state OPPOSITE intent every agent that reads them afterwards is
+The other sixteen each ask a question about code in one place. This one asks **"do two parts of this
+project contradict each other"**. A rule, a KB page, a doc, a code comment and the code itself all
+state intent, and when two of them state OPPOSITE intent every agent that reads them afterwards is
 miscalibrated — silently, and in a direction nobody chose. The shape to detect: one place says always
 write expanded prose comments, another says never write them, keep comments terse except for named
 exceptions. Neither is a defect alone; together they are, and **no change-scoped reviewer can ever see
@@ -212,7 +217,8 @@ narrows the code side only** — the rules and KB a subtree must agree with live
 those stay in its reading set whatever the scope.
 
 Four things this dimension must get right, none of which the core fourteen need (`comment-debt`
-needs its own analogue of the second and the fourth — see its section):
+needs its own analogue of the second and the fourth, and `dead-code` its own analogue of the second —
+see their sections):
 
 - **A finding is a PAIR, not a location.** It cites both sides as `file:line` and quotes the
   incompatible text from each. Without the second side it is neither refutable nor fixable, and a
@@ -293,6 +299,57 @@ such findings in one file collapse to one, with no error, no log, and nothing do
 The fix is the device coherence uses for its pair, for both of its reasons at once: `issue` carries
 the offending comment's own opening text verbatim, which makes the finding unique AND refutable.
 
+### The dead-code dimension
+
+Dead code is the one gap the codebase names out loud and then declines to close. `07b`'s Step 5 is
+**"Dead code detection (SCOPED TO MODIFIED FILES ONLY - do not scan the whole codebase)"**, and its
+own wording says what it hunts: "unused functions/code left behind by refactoring". The other half is
+`DEFAULT_AGENT_RULES`' surgical-changes bullet — "do not delete pre-existing dead code unless asked,
+mention it instead" — so an agent that SEES dead code outside its change is told to leave it and say
+so, and nothing anywhere collects the mentions. Both rules are right for a change-scoped task, and
+together they guarantee accretion: every refactor Haive itself runs can orphan a symbol its own
+reviewer is forbidden to touch. Same gap shape as coherence and comment-debt, same argument, same
+answer.
+
+**Its own remediation is a refactor, so it seeds the next scan.** Deleting an unreferenced function
+can leave that function's only helper unreferenced in turn, and one pass sees the tree as it was.
+That cascade is deliberately not chased within a run: a re-scan reports what is new (see Convergence),
+which is already the mechanism, and a within-run fixpoint is the archive's loop under another name.
+
+Three things this dimension must get right:
+
+- **Zero static references is EVIDENCE, not a verdict.** The dominant false-positive class is code
+  reached by something other than a call site: framework hooks matched by NAME (`hook_form_alter`, a
+  Rails callback), routes, services and event subscribers declared in config or annotations, DI
+  containers, template-resolved functions, anything reached through a computed or interpolated name,
+  a public surface consumed outside this repo, test-only helpers, and method overrides — in this
+  repository `cliAdapterRegistry.get()` hands out a `BaseCliAdapter`, so every caller invokes the
+  base type and a find-references on `ZaiAdapter.effortEnv` lands on nothing. A legacy Drupal tree
+  is mostly the first of those. So a finding must state HOW it established there is no caller —
+  find-references where the tooling offers it, a grep for the bare symbol name otherwise, and an
+  explicit look at the project's config, annotations and naming conventions — and the refutation
+  lens is "does ANY reference exist, including a dynamic, configured or convention-matched one", not
+  "is this code wrong". Same panel, same inverted 2-of-3 default, different question, and the prompt
+  must say so. **Subtree scope narrows where findings are RAISED, never where references are
+  SEARCHED**: a symbol unreferenced inside a subtree is routinely called from outside it, so a scan
+  that searches only the subtree reports every one of its exports as dead.
+- **The verdict set is remove or keep — there is no compaction.** Unlike `comment-debt` there is no
+  middle verdict to default to, so removal gets no opt-in of its own on the scope form; the human
+  gate is `scan-triage`, which is where every deletion is chosen anyway. What the finding carries
+  instead is the BLAST RADIUS — the symbol, its span, and what becomes unreferenced once it goes —
+  because approving a deletion whose consequences are not on the form is the one thing triage cannot
+  do well.
+- **It breaks the fingerprint dedupe the same way `comment-debt` does, and takes the same fix.**
+  "unused function, zero references" is templated by nature, and `findingFingerprint` strips exactly
+  the line numbers that would separate two instances in one file. `issue` carries the SYMBOL NAME
+  verbatim, which makes the finding unique AND refutable at once.
+
+**Its seam with `comment-debt` is commented-out code**, which 07b's Step 5 counts as dead code and
+this module's `delete` verdict counts as a comment. **`comment-debt` owns it**: it is a comment, its
+removal is already that dimension's verdict, and routing it here would put it behind a
+static-reference check that means nothing for text no parser ever sees. `dead-code` owns live,
+parsed, unreferenced code. Say so in both prompts, as with the other two seams.
+
 ### Convergence
 
 There is none of the archive's kind. The run is bounded by **the budget chosen at step 1**, and
@@ -319,6 +376,8 @@ cross-cutting rule says the latter but not the former, and this module does both
   `step-engine/review-dimension-context.ts`
 - Fan-out + refuter panel to copy: `steps/workflow/08c-code-review.ts`
 - Whole-tree step precedent: `steps/onboarding/07_7-secret-sweep.ts`
+- Change-scoped dead-code detection that `dead-code` extends whole-tree:
+  `steps/workflow/07b-phase-4-validate.ts`, Step 5 and the Step 4 refactoring-impact check
 - Findings persistence + fingerprint: `steps/workflow/_review-findings.ts`
 - DAG rows + executor: `packages/database/src/schema/task-dag.ts`, `step-engine/dag-executor.ts`
 - Untrusted-tree clause: `steps/_untrusted-repo.ts`
@@ -330,10 +389,10 @@ cross-cutting rule says the latter but not the former, and this module does both
 
 **Unit (in the module's own suite):**
 - Dimension selection produces exactly the expected agent fan-out, and an empty selection dispatches
-  nothing rather than defaulting to all sixteen. No dimension survives being deselected.
-- The fan-out set equals `REVIEW_DIMENSIONS` plus `coherence` and `comment-debt` — asserted against
-  the imported constant, not a literal, so a dimension added to core fails this test until the module
-  handles it. No count is hardcoded anywhere but prose.
+  nothing rather than defaulting to all seventeen. No dimension survives being deselected.
+- The fan-out set equals `REVIEW_DIMENSIONS` plus `coherence`, `comment-debt` and `dead-code` —
+  asserted against the imported constant, not a literal, so a dimension added to core fails this test
+  until the module handles it. No count is hardcoded anywhere but prose.
 - The verifier tally: 2-of-3 dismisses (inverted from `08c`), and an unreadable voter does not.
 - `scan-plan-remediation` puts two findings in one file into ONE issue, and two files into two.
 - Findings already recorded are deduped on a re-scan; a repeat run reports only what is new, and a
@@ -350,11 +409,19 @@ cross-cutting rule says the latter but not the former, and this module does both
   `07a-code-simplify.ts`'s provenance comment, both of which must survive.
 - A comment restating the line below is raised as `delete`; a history paragraph is raised as `compact`
   with replacement text; with delete not opted in, no finding carries a delete verdict.
+- A symbol with zero static references but a non-call-site consumer is NOT raised: fixtures for a
+  name-matched framework hook, a service declared in config, and a method override. Run the last
+  against this repository's own `cli-adapters/`, where every `override` in `zai.ts` is reached only
+  through the `BaseCliAdapter` that `registry.ts` hands out and all of them must survive.
+- Two dead-code findings in ONE file produce TWO rows — the same fingerprint regression as
+  `comment-debt`, mutation-checked by dropping the symbol name from `issue`.
+- With scope set to a subtree, a symbol referenced only from OUTSIDE that subtree is not raised, and a
+  dead-code finding carries the blast radius of its removal.
 - The per-file cap: the coverage record names the file and the count it truncated.
 
 **End to end on the dev stack:**
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
-   `review_findings` with `deep-scan:` reviewer ids and the coverage record names the fourteen
+   `review_findings` with `deep-scan:` reviewer ids and the coverage record names the fifteen
    dimensions that did not run.
 2. Triage two findings in one file; confirm remediation creates one DAG issue, one worktree, and
    merges.
@@ -364,6 +431,9 @@ cross-cutting rule says the latter but not the former, and this module does both
 3c. Run `comment-debt` alone over this repo; confirm the comments `AGENTS.md` demands survive, that
    two findings in one file are two rows, and that coherence and `comment-debt` do not both raise the
    comment-rule example.
+3d. Run `dead-code` alone over this repo; confirm no adapter override or registry-reached symbol is
+   raised, that a commented-out block is raised by `comment-debt` and not by this dimension, and that
+   remediating one finding and re-scanning surfaces any symbol the deletion newly orphaned.
 4. Install path: publish to the registry, install with a scoped token, verify `docker history` shows
    no token, and the module reaches `active` only on the loader's boot report.
 
