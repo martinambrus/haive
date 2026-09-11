@@ -544,6 +544,37 @@ async function detectStack(
     language = 'php';
   }
 
+  // Not every framework has a manifest to be named in. Drupal 7's core ships no
+  // composer.json at all, and a D7 site that carries one for libraries alone names no
+  // `drupal/*` in it either — both land here unrecognised. `includes/bootstrap.inc` is
+  // where D7 boots and D8+ moved it under `core/`, so its presence at the root is D7
+  // and nothing else. MEASURED on a live repo (9,245 files, no composer.json, that file
+  // present): classified `general`, which cost the scope pickers their entire framework
+  // seed — `includes/`, `sites/all/libraries/` and `sites/default/files/` are the D7
+  // excludes, all three exist there, and none was offered, leaving 1,941 files of core
+  // and vendored libraries to be picked as custom code and indexed for RAG.
+  //
+  // `general` counts as unrecognised here, not as an answer: it is what the composer
+  // branch above writes when it parsed a manifest and recognised nothing in it.
+  if (!framework || framework === 'general') {
+    if (await pathExists(path.join(repoPath, 'includes', 'bootstrap.inc'))) {
+      framework = 'drupal7';
+      language = 'php';
+    }
+  }
+
+  // Last resort: the project owner's own declaration. DDEV's `type:` (and Lando's
+  // `recipe:`) has been captured as `frameworkHint` since this step was written and
+  // read by nothing — MEASURED on the same repo, `drupal7` sat in the detect output
+  // beside a `general` verdict. Accepted only when it names a framework we already
+  // model, because that vocabulary is DDEV's own: `magento2`, `typo3` and `backdrop`
+  // have no pattern here, and its generic `php` must never become a claim.
+  if ((!framework || framework === 'general') && container.frameworkHint) {
+    if (container.frameworkHint in FRAMEWORK_PATTERNS) {
+      framework = container.frameworkHint as FrameworkName;
+    }
+  }
+
   if (!framework) framework = 'general';
 
   // Runtime language majors from the repo's own manifests, so version-scoping the
@@ -862,6 +893,9 @@ async function detectCommands(repoPath: string): Promise<string[]> {
 /** Test seam for detectCommands, which is otherwise reachable only through a
  *  full detect() run against a real repository. */
 export const detectCommandsForTest = detectCommands;
+
+/** Test seam for detectStack, same reason. */
+export const detectStackForTest = detectStack;
 
 async function collectConfigFileContents(repoPath: string): Promise<string> {
   const candidates = [
