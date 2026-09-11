@@ -1,11 +1,16 @@
 import { stat } from 'node:fs/promises';
-import type { FormSchema } from '@haive/shared';
+import { FRAMEWORK_PATTERNS, type FormSchema } from '@haive/shared';
 import { coerceReviewSeverity, normalizeCweId } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson } from '../workflow/_agent-json.js';
 import { recordReviewFindings } from '../workflow/_review-findings.js';
+import { resolveConfirmedProject } from './_helpers.js';
+import { readComposerJson } from './_scope.js';
+import { composerExcludeDirs } from './_scope-seed.js';
+import { collectCodeFiles } from './_rag-collect.js';
+import { scanForOpaquePaths, type OpaquePathHit } from './_opaque-path-scan.js';
 
 // Onboarding — committed-secret sweep. Nothing in Haive looked for a secret that is
 // already IN the repository. `secret-mask` performs the opposite operation (it hides
@@ -29,6 +34,10 @@ const SWEEP_TIMEOUT_MS = 30 * 60 * 1000;
 /** Enough to show the user the shape of the problem; the durable rows carry them all. */
 const MAX_LISTED_IN_FORM = 25;
 
+/** Candidate paths handed to the model. A cap because this is an aid, not a report: past
+ *  a few dozen the block stops being a list to rule on and starts being noise to skim. */
+const OPAQUE_PATH_CAP = 40;
+
 export interface SecretFinding {
   severity: ReviewSeverity;
   path: string;
@@ -44,6 +53,11 @@ export interface SecretFinding {
 interface SecretSweepDetect {
   repoPath: string;
   scannable: boolean;
+  /** Registration paths carrying a generated-looking segment, found deterministically so
+   *  recall does not depend on whether this run has semantic search. Optional: a detect
+   *  payload persisted before this existed replays without them. */
+  opaquePaths?: OpaquePathHit[];
+  opaquePathsOmitted?: number;
 }
 
 export interface SecretSweepApply {
@@ -99,11 +113,41 @@ const SWEEP_RULES = [
   '{ "findings": [ { "severity": "critical|high|medium|low", "path": "<file>", "line": 0, "symbol": "<enclosing function/key>", "kind": "<what sort of credential>", "cwe": "CWE-798", "issue": "<what is committed and what it unlocks — never the value>", "fix": "<rotate it, then remove it from the tree and from history>" } ] }',
 ] as const;
 
+/** The candidate block, or nothing when the pre-scan found none.
+ *
+ *  Framed as candidates to RULE ON rather than as findings: most are ordinary, and a
+ *  block that reads as an accusation produces an obedient report instead of a judgement.
+ *  The omission count is stated because a silently truncated list reads as a complete
+ *  one — the same rule `changedFilesBlock` follows. */
+function opaquePathBlock(d: SecretSweepDetect): string[] {
+  const hits = d.opaquePaths ?? [];
+  if (hits.length === 0) return [];
+  const omitted = d.opaquePathsOmitted ?? 0;
+  return [
+    '',
+    'CANDIDATE registration paths — a deterministic pre-scan found these quoted paths',
+    'carrying a segment that looks generated rather than named. Most will be ordinary:',
+    'build hashes, vendored package paths, pack-format strings. Rule on each one, and',
+    'report ONLY those where the segment is what authorizes the request. Read the',
+    'registration around it — a route whose access check is `TRUE`, or absent, is the',
+    'case that matters. This list is an aid, NOT the boundary of your search.',
+    ...hits.map((h) => `- ${h.file}:${h.line} — \`${h.literal}\` (segment: \`${h.segment}\`)`),
+    ...(omitted > 0
+      ? [`- ...and ${omitted} more not listed; say so if you think the cap hid something.`]
+      : []),
+  ];
+}
+
 function buildPrompt(args: LlmBuildArgs): string {
   const d = args.detected as SecretSweepDetect;
-  return [...SWEEP_RULES, '', ...REPO_IS_DATA_LINES, '', `Repository root: ${d.repoPath}`].join(
-    '\n',
-  );
+  return [
+    ...SWEEP_RULES,
+    ...opaquePathBlock(d),
+    '',
+    ...REPO_IS_DATA_LINES,
+    '',
+    `Repository root: ${d.repoPath}`,
+  ].join('\n');
 }
 
 /** The sweeper's own report names a findings list; a JSON fixture it opened while
@@ -171,7 +215,46 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
     if (!scannable) {
       ctx.logger.warn({ repoPath: ctx.repoPath }, 'secret sweep has no readable repository root');
     }
-    return { repoPath: ctx.repoPath, scannable };
+    // Candidate registration paths carrying a generated-looking segment. Deterministic
+    // because the sweep's recall must not depend on a tool the run may not have:
+    // MEASURED across three onboarding runs of one repo, the two whose prompt wired
+    // `rag_search` found the secret route segments and the `ragMode: 'none'` task —
+    // told to "discover with grep / ripgrep instead" — missed them TWICE, before and
+    // after the class was named in the prompt. There is no keyword to grep for in
+    // `cron-trash-cleanup/19dd78sa09dsa`.
+    //
+    // Scoped by the framework's own excludePaths (plus composer's declared layout) only
+    // to keep the LIST readable — MEASURED, without it 28 of 31 candidates were
+    // `includes/password.inc`'s base64 alphabet, core tar pack-format strings and
+    // vendored `polyfill-mbstring`. It is not the sweep's boundary: the prompt still
+    // says to search the whole tree, and this is an aid on top of that.
+    let opaquePaths: OpaquePathHit[] = [];
+    let opaquePathsOmitted = 0;
+    if (scannable) {
+      try {
+        const { framework } = await resolveConfirmedProject(ctx.db, ctx.taskId);
+        const pattern = framework
+          ? FRAMEWORK_PATTERNS[framework as keyof typeof FRAMEWORK_PATTERNS]
+          : undefined;
+        const files = await collectCodeFiles(ctx.repoPath, {
+          exclude: [
+            ...(pattern?.excludePaths ?? []),
+            ...composerExcludeDirs(await readComposerJson(ctx.repoPath)),
+          ],
+        });
+        const scan = await scanForOpaquePaths(ctx.repoPath, files, OPAQUE_PATH_CAP);
+        opaquePaths = scan.hits;
+        opaquePathsOmitted = scan.omitted;
+      } catch (err) {
+        // An aid, never a gate: a sweep with no candidate list is the sweep that shipped
+        // before this existed, and must still run.
+        ctx.logger.warn(
+          { err },
+          'secret sweep: opaque-path pre-scan failed; continuing without it',
+        );
+      }
+    }
+    return { repoPath: ctx.repoPath, scannable, opaquePaths, opaquePathsOmitted };
   },
 
   llm: {

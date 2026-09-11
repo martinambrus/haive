@@ -44,3 +44,54 @@ describe('secret sweep prompt', () => {
     expect(prompt()).toMatch(/Finding nothing is a normal and welcome result/);
   });
 });
+
+// The pre-scan exists because recall must not depend on whether a run has semantic
+// search. It is an AID: the prompt still says to search the whole tree.
+describe('secret sweep candidate block', () => {
+  const promptWith = (detected: Record<string, unknown>): string =>
+    secretSweepStep.llm!.buildPrompt({
+      detected: { repoPath: '/repo', scannable: true, ...detected },
+      formValues: {},
+    } as unknown as LlmBuildArgs);
+
+  const hit = {
+    file: 'sites/all/modules/activit/activit.module',
+    line: 1116,
+    literal: 'cron-trash-cleanup/19dd78sa09dsa',
+    segment: '19dd78sa09dsa',
+  };
+
+  it('lists a candidate with its file, line and segment', () => {
+    const p = promptWith({ opaquePaths: [hit], opaquePathsOmitted: 0 });
+    expect(p).toContain('sites/all/modules/activit/activit.module:1116');
+    expect(p).toContain('cron-trash-cleanup/19dd78sa09dsa');
+    expect(p).toContain('segment: `19dd78sa09dsa`');
+  });
+
+  // Framed as candidates, not findings: most are ordinary, and a block that reads as an
+  // accusation produces an obedient report instead of a judgement.
+  it('frames them as candidates to rule on, not as findings', () => {
+    const p = promptWith({ opaquePaths: [hit] });
+    expect(p).toMatch(/Most will be ordinary/);
+    expect(p).toMatch(/report ONLY those where the segment is what authorizes the request/);
+    expect(p).toMatch(/an aid, NOT the boundary of your search/);
+  });
+
+  // A silently truncated list reads as a complete one.
+  it('states the omission when the cap hid something', () => {
+    expect(promptWith({ opaquePaths: [hit], opaquePathsOmitted: 7 })).toMatch(
+      /and 7 more not listed/,
+    );
+  });
+
+  it('says nothing at all when the pre-scan found none', () => {
+    expect(promptWith({ opaquePaths: [], opaquePathsOmitted: 0 })).not.toMatch(/CANDIDATE/);
+  });
+
+  // A detect payload persisted before the pre-scan existed must still render.
+  it('renders a payload that predates the field', () => {
+    const p = promptWith({});
+    expect(p).not.toMatch(/CANDIDATE/);
+    expect(p).toMatch(/You are a SECRET SWEEPER/);
+  });
+});
