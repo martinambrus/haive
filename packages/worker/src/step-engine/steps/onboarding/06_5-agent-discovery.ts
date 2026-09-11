@@ -26,7 +26,8 @@ import {
   renderTechInventoryTable,
   type TechInventory,
 } from './_tech-inventory.js';
-import { noSubagentInstructionLines } from './_scope.js';
+import { noSubagentInstructionLines, readComposerJson } from './_scope.js';
+import { composerExcludeDirs } from './_scope-seed.js';
 
 export interface AgentCandidate {
   id: string;
@@ -1159,8 +1160,18 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     const frameworkPattern = framework
       ? FRAMEWORK_PATTERNS[framework as keyof typeof FRAMEWORK_PATTERNS]
       : undefined;
+    // Composer is AUTHORITATIVE where it speaks, and the hardcoded pattern is the
+    // fallback: `extra.installer-paths` says where contrib actually lands whatever the
+    // docroot is called (`web/`, `docroot/`, the repo root), which no static list can
+    // know. The same pair already backs the scope pickers via `computeSeedExcludeGlobs`;
+    // without it here, a Drupal site with a non-default docroot had its contrib counted
+    // as this project's own stack. `composerExcludeDirs` keeps any path with a `custom`
+    // segment in scope, so this never hides hand-written code.
     const techInventory = await buildTechInventory(ctx.repoPath, {
-      excludePaths: frameworkPattern?.excludePaths ?? [],
+      excludePaths: [
+        ...(frameworkPattern?.excludePaths ?? []),
+        ...composerExcludeDirs(await readComposerJson(ctx.repoPath)),
+      ],
     });
 
     await ctx.emitProgress(

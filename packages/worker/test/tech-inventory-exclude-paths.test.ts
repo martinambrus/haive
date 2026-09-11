@@ -3,6 +3,7 @@ import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { buildTechInventory } from '../src/step-engine/steps/onboarding/_tech-inventory.js';
+import { composerExcludeDirs } from '../src/step-engine/steps/onboarding/_scope-seed.js';
 
 // IGNORE_DIRS matches a bare directory NAME (`vendor`, `node_modules`), which cannot
 // express a third-party tree that lives at a PATH. MEASURED on a live Drupal 7 repo: a
@@ -70,5 +71,68 @@ describe('buildTechInventory — excludePaths', () => {
 
   it('is unchanged from the old behaviour when given no paths', async () => {
     expect(names(await buildTechInventory(dir, {}))).toEqual(names(await buildTechInventory(dir)));
+  });
+});
+
+// Composer is authoritative where it speaks: `extra.installer-paths` says where contrib
+// actually lands whatever the docroot is called, which no static list can know. A Drupal
+// 9+ project can put modules anywhere composer.json tells it to, so the hardcoded
+// FRAMEWORK_PATTERNS entry is the fallback, not the rule.
+describe('buildTechInventory — composer-declared layout', () => {
+  let dir: string;
+
+  const write = async (rel: string, body: string): Promise<void> => {
+    const abs = path.join(dir, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, body);
+  };
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'haive-techinv-composer-'));
+    // A non-default docroot: nothing here matches FRAMEWORK_PATTERNS.drupal's bare paths.
+    for (const n of ['a', 'b', 'c']) {
+      await write(
+        `docroot/modules/contrib/vendored/${n}.php`,
+        '<?php\nuse Symfony\\Component\\Yaml;\n',
+      );
+    }
+    for (const n of ['a', 'b', 'c']) {
+      await write(
+        `docroot/modules/custom/mine/${n}.module`,
+        '<?php function x_menu(){} hook_menu();',
+      );
+    }
+  });
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const names = async (excludePaths: string[]): Promise<string[]> =>
+    (await buildTechInventory(dir, { excludePaths })).items.map((i) => i.name).sort();
+
+  it('counts contrib as this project"s stack when only the static list is used', async () => {
+    // FRAMEWORK_PATTERNS.drupal names `modules/contrib/`, which this repo does not have.
+    expect(await names(['modules/contrib/', 'web/modules/contrib/'])).toContain('symfony');
+  });
+
+  it('drops it once composer.json declares the real path', async () => {
+    const composer = {
+      extra: { 'installer-paths': { 'docroot/modules/contrib/{$name}': ['type:drupal-module'] } },
+    };
+    const declared = composerExcludeDirs(composer);
+    expect(declared).toEqual(['docroot/modules/contrib']);
+    expect(await names(declared)).not.toContain('symfony');
+  });
+
+  it('keeps a custom path composer also installs into', async () => {
+    const composer = {
+      extra: {
+        'installer-paths': {
+          'docroot/modules/contrib/{$name}': ['type:drupal-module'],
+          'docroot/modules/custom/{$name}': ['type:drupal-module'],
+        },
+      },
+    };
+    expect(await names(composerExcludeDirs(composer))).toContain('drupal-7');
   });
 });

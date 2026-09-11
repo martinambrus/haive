@@ -895,17 +895,64 @@ export type TerminalControlFrame = TerminalResizeFrame;
 export const FRAMEWORK_PATTERNS = {
   wordpress: {
     indicators: ['wp-content/', 'wp-admin/', 'wp-includes/'],
-    excludePaths: ['wp-admin/', 'wp-includes/', 'wp-content/plugins/', 'wp-content/themes/'],
+    // `wp-content/themes/` is deliberately NOT here: it is this framework's
+    // `customPaths`, i.e. the place a WordPress project's own code lives. A directory
+    // cannot be both where you work and a directory excluded from scope, and excluding
+    // it hid the one thing most WP repos are. `uploads/` is the media library —
+    // WordPress's analogue of Drupal's `sites/default/files/`.
+    excludePaths: [
+      'wp-admin/',
+      'wp-includes/',
+      'wp-content/plugins/',
+      'wp-content/uploads/',
+      'wp-content/upgrade/',
+      'wp-content/cache/',
+      'wp-content/languages/',
+    ],
     customPaths: ['wp-content/themes/'],
   },
   drupal: {
     indicators: ['core/', 'modules/', 'themes/', 'sites/'],
-    excludePaths: ['core/', 'modules/contrib/', 'themes/contrib/', 'vendor/'],
+    // Drupal 8+. The `web/` twin of each entry covers the composer template
+    // (drupal/recommended-project), whose docroot is a subdirectory — without it a
+    // composer-managed site excluded nothing, since none of the bare paths exist at
+    // its repo root. Absent directories are dropped by the consumers, so carrying
+    // both layouts costs nothing on either.
+    excludePaths: [
+      'core/',
+      'modules/contrib/',
+      'themes/contrib/',
+      'profiles/contrib/',
+      'libraries/',
+      'sites/default/files/',
+      'vendor/',
+      'web/core/',
+      'web/modules/contrib/',
+      'web/themes/contrib/',
+      'web/profiles/contrib/',
+      'web/libraries/',
+      'web/sites/default/files/',
+    ],
     customPaths: ['modules/custom/', 'themes/custom/'],
   },
   drupal7: {
     indicators: ['sites/all/modules/', 'sites/all/themes/', 'includes/bootstrap.inc'],
-    excludePaths: ['sites/all/libraries/', 'sites/default/files/', 'includes/'],
+    // On Drupal 7 the ROOT `modules/`, `themes/` and `profiles/` are CORE — contrib and
+    // custom live under `sites/`, which is why excluding them here does not touch
+    // `sites/all/modules`. Consumers anchor on a whole path segment, so `modules` never
+    // matches `sites/all/modules`. MEASURED on a live repo: root `modules/` alone
+    // carried 112 directories of core into the scope picker, and core
+    // `modules/simpletest` is what made the tech scanner report a Drupal 8+ namespace.
+    excludePaths: [
+      'includes/',
+      'misc/',
+      'modules/',
+      'profiles/',
+      'scripts/',
+      'themes/',
+      'sites/all/libraries/',
+      'sites/default/files/',
+    ],
     customPaths: ['sites/all/modules/custom/', 'sites/all/themes/custom/'],
   },
   rails: {
