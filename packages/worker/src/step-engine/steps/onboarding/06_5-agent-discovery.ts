@@ -524,7 +524,7 @@ const MANDATORY_CATEGORIES: ReadonlySet<string> = new Set([
   'api',
 ]);
 
-function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
+export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
   const detected = args.detected as AgentDiscoveryDetect;
   const fileTree = detected.__fileTree ?? '(no file tree)';
   const inventory = detected.__techInventory ?? { items: [], scannedManifests: [] };
@@ -591,7 +591,7 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Instructions',
     '1. Review the file tree, key config files, and the technology inventory above.',
     '2. For each predefined agent, decide if it is relevant to this project (true/false). For every one you set to FALSE, add an entry to `declined` saying why — it stays on the form as an unticked box, and without a reason the user is left guessing. Judge a bundle-sourced agent by its BODY, not its name: a bundle the user imported may still describe work this repository does not do.',
-    '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Every Tier 1 row must appear in EXACTLY ONE of `custom` or `skipped` — an inventory row you simply leave out of both is treated as an oversight and re-added for you, so a deliberate omission only survives if you state it in `skipped`.',
+    '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Every Tier 1 row must appear in EXACTLY ONE of `custom` or `skipped`. Put a row in `skipped` ONLY when you are not emitting it — `skipped` is the rejection list, not a place to note what you did, and an entry saying "not skipped, emitted below" contradicts itself. A row you leave out of BOTH is read as an oversight and re-added for you, so a deliberate omission survives only if it is in `skipped`.',
     '4. You MAY suggest additional technical agents not in the inventory if the file tree or config files show another framework/library/tool with non-trivial usage that the inventory missed.',
     '5. Do NOT propose agents for business domain concepts (entities, workflows, validation rules, UI flows specific to this app). Those become skills.',
     '6. For each custom agent, provide a FULL structured body with the following fields, tailored to this repository:',
@@ -607,6 +607,7 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '   - outputFormat: a code-block (triple-backtick fenced) showing the structured shape the agent should emit.',
     '   - qualityCriteria: 3-5 bullets describing verifiable post-conditions.',
     '   - antiPatterns: 3-5 bullets describing what this agent MUST NOT do (each a concrete failure mode, not generic advice).',
+    '7. Ground every custom agent in THIS repository: across its body, cite at least TWO real paths copied from the file tree above (a directory or a file). An agent whose body would read the same for any project using that technology has not been tailored to this one.',
     '',
     '## Required output format',
     'Emit exactly ONE JSON object inside a ```json fenced code block:',
