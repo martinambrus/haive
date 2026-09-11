@@ -106,6 +106,7 @@ export async function buildFileTree(dir: string, prefix = ''): Promise<string[]>
 export function detectFramework(fileTree: string[]): FrameworkName | null {
   let bestMatch: FrameworkName | null = null;
   let bestScore = 0;
+  let bestRatio = 0;
 
   for (const [framework, config] of Object.entries(FRAMEWORK_PATTERNS) as [
     FrameworkName,
@@ -120,8 +121,18 @@ export function detectFramework(fileTree: string[]): FrameworkName | null {
       return acc + (matches ? 1 : 0);
     }, 0);
 
-    if (score > bestScore) {
+    // A tie goes to the pattern that matched most COMPLETELY, because the patterns
+    // that tie are a general/specific pair and the specific one is the answer.
+    // MEASURED on a live Drupal 7 repo: `drupal` matches 3 of its 4 indicators
+    // (`modules/`, `themes/`, `sites/` — D7 has all three, only `core/` is D8+) and
+    // `drupal7` matches 3 of 3, so comparing the raw score alone kept whichever came
+    // first in FRAMEWORK_PATTERNS and reported that site as `drupal`. Ratio never
+    // overrides a higher score: a real D8 site matches all four and drops `drupal7`
+    // to zero, since it has no `sites/all/` and no root `includes/bootstrap.inc`.
+    const ratio = score / config.indicators.length;
+    if (score > bestScore || (score === bestScore && ratio > bestRatio)) {
       bestScore = score;
+      bestRatio = ratio;
       bestMatch = framework;
     }
   }
