@@ -361,7 +361,11 @@ test.describe('cli providers', () => {
             `;
             return r[0]?.sandbox_image_build_status;
           },
-          { timeout: 10_000 },
+          // 10s was not enough on a CI runner: this waits for the WORKER to finish reconciling a
+          // sandbox image — a cache hit, but one that queues behind whatever else the run is
+          // doing. Raised rather than removed, because the flip it waits for is exactly what the
+          // next assertion is about.
+          { timeout: 45_000 },
         )
         .toBe('ready');
 

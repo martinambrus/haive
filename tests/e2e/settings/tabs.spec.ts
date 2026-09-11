@@ -74,6 +74,13 @@ test.describe('settings', () => {
 
       await page.goto('/settings/git-identity');
       await expect(page.getByText('Commit author')).toBeVisible();
+      // The form renders once its GET resolves — but `reactStrictMode` is on, so in a DEV build
+      // React invokes that effect TWICE and the second resolution re-seeds the fields from the
+      // server. Typing before it lands is typing into a value about to be overwritten: CI caught
+      // exactly that, with Name (typed first) empty and Email (typed second) intact, while the
+      // page reported "Git identity saved." Waiting for the fetches to stop is the fix, and CI
+      // runs the same dev images, so this is not a local-only concern.
+      await page.waitForLoadState('networkidle');
 
       await page.getByLabel('Name', { exact: true }).fill('E2E Committer');
       await page.getByLabel('Email', { exact: true }).fill('committer@haive-e2e.test');
@@ -114,6 +121,8 @@ test.describe('settings', () => {
 
       await page.goto('/settings/git-identity');
       await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Old Name');
+      // Same double-effect: the second load would restore 'Old Name' over the cleared field.
+      await page.waitForLoadState('networkidle');
 
       await page.getByLabel('Name', { exact: true }).fill('');
       await page.getByLabel('Email', { exact: true }).fill('');
