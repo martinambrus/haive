@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { chown, mkdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 /** Where a KB miner stages an entry's body before the step files it. Inside the
@@ -125,4 +125,45 @@ export async function resolveBodies<T extends WithOptionalBodyPath>(
     }
   }
   return { resolved, failures };
+}
+
+/** Create a directory the SANDBOXED AGENT can write into.
+ *
+ *  The worker runs as root and the CLI sandbox runs as uid 1000, so a plain `mkdir` here
+ *  produces a `root:root 0755` directory the agent cannot write — MEASURED, an 8-minute
+ *  run wrote zero bodies into exactly that. The repo root is already chowned to the
+ *  sandbox user (`chownRepoVolume`, see 01c-ddev-env), so this matches the PARENT's
+ *  ownership rather than hardcoding 1000, which keeps it correct wherever that uid
+ *  differs.
+ *
+ *  Best-effort: on a host where chown is not permitted the directory still exists, the
+ *  agent falls back to inline sections, and the step behaves as it did before any of
+ *  this — a degraded path, not a broken one. */
+export async function prepareAgentWritableDir(
+  repoPath: string,
+  relDir: string,
+  logger?: { warn: (obj: unknown, msg?: string) => void },
+): Promise<void> {
+  const abs = path.resolve(repoPath, relDir);
+  await mkdir(abs, { recursive: true });
+  try {
+    const owner = await stat(repoPath);
+    // Every level we created, not just the leaf: `.haive/` is root-owned from earlier
+    // steps and an unwritable parent defeats a writable child.
+    for (const dir of ancestorsWithin(repoPath, abs)) await chown(dir, owner.uid, owner.gid);
+  } catch (err) {
+    logger?.warn({ err, relDir }, 'could not hand the draft dir to the sandbox user');
+  }
+}
+
+/** Every directory from `repoPath` (exclusive) down to `abs` (inclusive). */
+function ancestorsWithin(repoPath: string, abs: string): string[] {
+  const out: string[] = [];
+  let cur = abs;
+  const root = path.resolve(repoPath);
+  while (cur !== root && cur.startsWith(root + path.sep)) {
+    out.push(cur);
+    cur = path.dirname(cur);
+  }
+  return out.reverse();
 }

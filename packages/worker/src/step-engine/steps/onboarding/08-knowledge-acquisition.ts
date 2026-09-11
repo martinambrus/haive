@@ -13,7 +13,12 @@ import {
   scopeInstructionLines,
 } from './_scope.js';
 import { techAnchorFacets } from '../_repo-stack.js';
-import { KB_DRAFT_DIR, resolveBodies } from './_kb-body-file.js';
+import {
+  KB_DRAFT_DIR,
+  prepareAgentWritableDir,
+  readKbBodyFile,
+  resolveBodies,
+} from './_kb-body-file.js';
 import {
   resolveStackVersions,
   type ConfirmedStackValues,
@@ -59,6 +64,9 @@ interface KnowledgeDetect {
   /** Transient — pre-existing KB files (from a prior orchestration) the LLM
    *  should reuse + re-place rather than regenerate. Stripped before persisting. */
   __existingKb?: ExistingKbFile[];
+  /** Section count per entry id for bodies staged in files. Just the number: `detected`
+   *  is persisted to `detect_output`, so the sections themselves must not live here. */
+  __sectionCounts?: Record<string, number>;
 }
 
 interface ExistingKbFile {
@@ -1299,7 +1307,14 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
     // Created here, not left to the agent's tool: if that tool does not create parents,
     // every body write fails and the step silently produces nothing.
-    await mkdir(path.join(ctx.repoPath, KB_DRAFT_DIR), { recursive: true });
+    //
+    // And chowned to whatever owns the repo, because the worker runs as ROOT while the
+    // sandboxed CLI runs as uid 1000 — MEASURED, a plain mkdir left `.haive/kb-draft`
+    // root:root 0755 and the agent could not write a single body into it. `.haive/` has
+    // been root-owned since it was introduced and that was harmless while only Haive
+    // wrote there; this is the first thing to ask the AGENT for a file in it. Matching
+    // the repo root rather than hardcoding 1000 keeps it right wherever the uid differs.
+    await prepareAgentWritableDir(ctx.repoPath, KB_DRAFT_DIR, ctx.logger);
 
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
     const fileTree = await collectShortFileTree(ctx.repoPath, scopeExclude);
@@ -1358,6 +1373,26 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         parseKbUpdates(raw).length === 0
       );
     },
+  },
+
+  /** Read the staged bodies once, before the sync `form()` needs their size. The runner
+   *  awaits this exactly where a step may produce an artifact the form refers to, which
+   *  is precisely this case. Only counts are kept — see `__sectionCounts`. */
+  async prepareForm(ctx, detected, llmOutput): Promise<void> {
+    const staged = [
+      ...extractEntries(llmOutput ?? null).map((e) => ({ id: e.id, bodyPath: e.bodyPath })),
+      ...parseKbUpdates(llmOutput ?? null).map((u) => ({ id: u.path, bodyPath: u.bodyPath })),
+    ].filter((x): x is { id: string; bodyPath: string } => typeof x.bodyPath === 'string');
+    if (staged.length === 0) return;
+    const counts: Record<string, number> = {};
+    for (const x of staged) {
+      try {
+        counts[x.id] = (await readKbBodyFile(ctx.repoPath, x.bodyPath)).length;
+      } catch {
+        counts[x.id] = 0; // apply reports the real failure; the form just shows a number
+      }
+    }
+    detected.__sectionCounts = counts;
   },
 
   form(ctx, detected, llmOutput): FormSchema {
@@ -1419,7 +1454,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       const totalSources = new Set(entries.flatMap((e) => e.sourceFiles ?? [])).size;
       const options = entries.map((e) => {
         const srcCount = e.sourceFiles?.length ?? 0;
-        const sectionCount = e.sections.length;
+        // A staged body has no inline sections here — `form()` is SYNC and the file is
+        // read in prepareForm, which leaves only its COUNT behind. Falling back to 0
+        // rather than throwing: this expression failing is what took the whole step down
+        // once already, and a label is not worth a failed run.
+        const sectionCount = e.sections?.length ?? detected.__sectionCounts?.[e.id] ?? 0;
         const detail =
           srcCount > 0
             ? `${sectionCount} sections from ${srcCount} source files`

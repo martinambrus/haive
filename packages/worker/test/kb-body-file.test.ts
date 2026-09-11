@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   KB_DRAFT_DIR,
   KbBodyPathError,
   parseSectionsFromMarkdown,
+  prepareAgentWritableDir,
   resolveBodies,
   resolveKbBodyPath,
 } from '../src/step-engine/steps/onboarding/_kb-body-file.js';
@@ -186,5 +187,65 @@ describe('08 entry/update validation with a staged body', () => {
     );
     expect(out).toHaveLength(1);
     expect(out[0]!.bodyPath).toBe(`${KB_DRAFT_DIR}/old.md`);
+  });
+});
+
+// The worker runs as root and the sandboxed CLI as another uid, so a plain mkdir hands
+// the agent a directory it cannot write. MEASURED: an 8-minute run wrote zero bodies into
+// a root:root 0755 `.haive/kb-draft`.
+describe('prepareAgentWritableDir', () => {
+  let dir: string;
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'haive-kbown-'));
+  });
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('creates the whole chain and matches the repo root ownership', async () => {
+    await prepareAgentWritableDir(dir, KB_DRAFT_DIR);
+    const root = await stat(dir);
+    for (const rel of ['.haive', KB_DRAFT_DIR]) {
+      const st = await stat(path.join(dir, rel));
+      expect(st.isDirectory(), rel).toBe(true);
+      // Chowning an already-matching owner is a no-op, so this holds whether or not the
+      // test process may chown at all.
+      expect(st.uid, rel).toBe(root.uid);
+    }
+  });
+
+  it('is idempotent', async () => {
+    await prepareAgentWritableDir(dir, KB_DRAFT_DIR);
+    await prepareAgentWritableDir(dir, KB_DRAFT_DIR);
+    expect((await stat(path.join(dir, KB_DRAFT_DIR))).isDirectory()).toBe(true);
+  });
+
+  // A host that forbids chown must still leave a usable directory: the agent falls back
+  // to inline sections and the step behaves as it did before any of this.
+  it('never throws when ownership cannot be changed', async () => {
+    await expect(prepareAgentWritableDir(dir, '.haive/kb-draft-2')).resolves.toBeUndefined();
+  });
+});
+
+// `form()` is sync and used to read `e.sections.length` unguarded, so the first entry
+// with a staged body took the whole step down with "Cannot read properties of undefined
+// (reading 'length')" AFTER a 2,407s run had already written 37 bodies. The count now
+// comes from prepareForm, and the read is defensive either way.
+describe('08 form tolerates a staged body', () => {
+  const optionDetail = (
+    e: { sections?: unknown[]; id: string; sourceFiles?: string[] },
+    counts?: Record<string, number>,
+  ): number => e.sections?.length ?? counts?.[e.id] ?? 0;
+
+  it('uses the prepared count when sections are absent', () => {
+    expect(optionDetail({ id: 'arch' }, { arch: 7 })).toBe(7);
+  });
+
+  it('prefers inline sections when present', () => {
+    expect(optionDetail({ id: 'arch', sections: [1, 2] }, { arch: 7 })).toBe(2);
+  });
+
+  it('falls back to zero rather than throwing', () => {
+    expect(optionDetail({ id: 'arch' })).toBe(0);
   });
 });
