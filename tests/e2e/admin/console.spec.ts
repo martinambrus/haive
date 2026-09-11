@@ -86,7 +86,13 @@ test.describe('admin console', () => {
         timeout: 30_000,
       });
 
-      const before = await sql<{ n: number }[]>`select count(*)::int as n from user_invites`;
+      // Scoped to THIS admin, not the whole table. A global count is a shared counter: the
+      // helper seeds an invite per registration, so any other spec starting in this window moves
+      // it and the assertion fails on a row this test never touched. `created_by` is the column
+      // the teardown below already keys on.
+      const before = await sql<{ n: number }[]>`
+        select count(*)::int as n from user_invites where created_by = ${userId}
+      `;
       await page.getByRole('button', { name: 'Create invitation' }).click();
 
       // The raw token is shown ONCE and never stored, so the assertion is on the row it created
@@ -94,7 +100,9 @@ test.describe('admin console', () => {
       await expect
         .poll(
           async () => {
-            const rows = await sql<{ n: number }[]>`select count(*)::int as n from user_invites`;
+            const rows = await sql<{ n: number }[]>`
+              select count(*)::int as n from user_invites where created_by = ${userId}
+            `;
             return rows[0]!.n;
           },
           { timeout: 10_000 },

@@ -5,10 +5,15 @@ import { registerUser } from '../helpers/auth.js';
 /**
  * The settings section: seven tabs, each one user-scoped row.
  *
- * Cheap breadth rather than depth, and aimed at one failure in particular — a tab that renders
- * while its save is broken. Every one of these is a GET that fills a form and a PUT that stores
- * it, so the thing worth proving is the round trip: type, save, reload, still there. A unit test
- * on the route cannot see the form that feeds it.
+ * Two depths, deliberately. The tab-bar test is REACHABILITY only — each tab navigates and
+ * renders a heading of its own, which is what catches a renamed route or a layout that takes the
+ * whole section down. Git Identity then carries the ROUND TRIP for the section: type, save,
+ * reload, still there, plus null rather than '' when cleared. That half needs a browser because a
+ * unit test on the route cannot see the form that feeds it.
+ *
+ * So six tabs have no save coverage here, and that is a stated gap rather than an oversight: one
+ * save test per tab is six fixtures and six teardowns for one shared GET/PUT shape, and the shape
+ * is what Git Identity already proves.
  */
 
 const TABS = [

@@ -261,7 +261,7 @@ test.describe('sidebar task tree', () => {
     }
   });
 
-  test('a task dragged into a folder is filed there, and dropping it on the root un-files it', async ({
+  test('a task dragged into a folder is filed there and stays filed across a reload', async ({
     page,
   }) => {
     const sql = getSql();
