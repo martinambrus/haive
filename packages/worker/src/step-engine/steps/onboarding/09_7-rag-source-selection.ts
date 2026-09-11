@@ -1,8 +1,8 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { DetectResult, FormSchema, TreeNode } from '@haive/shared';
+import type { FormSchema, TreeNode } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from './_helpers.js';
+import { resolveConfirmedProject, loadPreviousStepOutput } from './_helpers.js';
 import { buildFullExtensionSet, type ExtensionInfo } from './_extension-registry.js';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import {
@@ -66,10 +66,7 @@ export const ragSourceSelectionStep: StepDefinition<
 
   async detect(ctx: StepContext): Promise<RagSourceSelectionDetect> {
     await ctx.emitProgress('Loading project metadata...');
-    const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
-    const envData = (envPrev?.detect as DetectResult | null)?.data as
-      { project?: { framework?: string } } | undefined;
-    const framework = envData?.project?.framework ?? null;
+    const { framework } = await resolveConfirmedProject(ctx.db, ctx.taskId);
 
     await ctx.emitProgress('Loading extension data...');
     const rgPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01_5-ripgrep-config');

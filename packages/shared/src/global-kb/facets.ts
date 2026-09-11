@@ -55,8 +55,12 @@ interface EnvDetectDataish {
 }
 
 /** User overrides from the 02-detection-confirmation form, restricted to the
- *  fields that affect version facets. Confirmed values win over raw detection. */
+ *  fields that affect stack facets. Confirmed values win over raw detection —
+ *  correcting a misdetection at that gate is the entire reason the fields are
+ *  editable, so a value a person typed must not lose to one a scan guessed. */
 export interface ConfirmedStackValues {
+  framework?: string | null;
+  primaryLanguage?: string | null;
   phpVersion?: string | null;
   nodeVersion?: string | null;
   databaseType?: string | null;
@@ -104,15 +108,21 @@ export function extractProjectFacets(
   const data = (root.data ?? root.enrichedData ?? root) as EnvDetectDataish;
   if (!data || typeof data !== 'object') return facets;
 
-  const framework = data.project?.framework;
+  const detectedFramework = data.project?.framework ?? null;
+  const framework = confirmed?.framework || detectedFramework;
   if (typeof framework === 'string' && framework) facets.framework.push(framework);
 
+  // `frameworkMajor` was parsed from the manifest key belonging to the DETECTED
+  // framework, so it only describes the confirmed one while the two agree. Pairing
+  // a corrected `laravel` with a major read from `drupal/core` would anchor the KB
+  // to a version of something this project is not.
   const frameworkMajor = data.project?.frameworkMajor;
-  if (typeof frameworkMajor === 'string' && frameworkMajor) {
+  if (framework === detectedFramework && typeof frameworkMajor === 'string' && frameworkMajor) {
     facets.frameworkMajor.push(frameworkMajor);
   }
 
-  const lang = data.project?.primaryLanguage ?? data.stack?.language ?? null;
+  const lang =
+    confirmed?.primaryLanguage || data.project?.primaryLanguage || data.stack?.language || null;
   if (typeof lang === 'string' && lang) facets.language.push(lang.toLowerCase());
 
   const v = resolveStackVersions(data, confirmed);

@@ -3,12 +3,7 @@ import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import {
-  agentSpecSchema,
-  mapWithConcurrency,
-  type DetectResult,
-  type FormSchema,
-} from '@haive/shared';
+import { agentSpecSchema, mapWithConcurrency, type FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import type { AgentColor, AgentSpec } from './_agent-templates.js';
@@ -17,8 +12,8 @@ import { extractFencedJson } from '../_fenced-json.js';
 import {
   countFilesMatching,
   listFilesMatching,
-  loadPreviousStepOutput,
   pathExists,
+  resolveConfirmedProject,
 } from './_helpers.js';
 import {
   buildTechInventory,
@@ -1058,11 +1053,10 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
 
   async detect(ctx: StepContext): Promise<AgentDiscoveryDetect> {
     await ctx.emitProgress('Loading project metadata...');
-    const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
-    const envData = (envPrev?.detect as DetectResult | null)?.data as
-      { project?: { framework?: string; primaryLanguage?: string } } | undefined;
-    const framework = envData?.project?.framework ?? null;
-    const language = envData?.project?.primaryLanguage ?? null;
+    const { framework, primaryLanguage: language } = await resolveConfirmedProject(
+      ctx.db,
+      ctx.taskId,
+    );
 
     await ctx.emitProgress('Scanning repository for file patterns...');
     const candidates = await discoverAgentCandidates(ctx.repoPath, framework);
