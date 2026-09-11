@@ -55,13 +55,18 @@ describe('ensureGlobalKbSchema', () => {
     expect(sql).toContain(
       "status IN ('skeleton','enriching','draft','active','archived','failed')",
     );
-    // Facet filter support: broad default-jsonb_ops GIN + per-array expression GIN.
+    // Facet filter support: the broad default-jsonb_ops GIN, and NO per-dimension
+    // expression GIN — `buildFacetClause`'s leading `NOT (facets ? dim)` makes the
+    // whole OR unindexable, so those six only ever cost writes (measured: with
+    // enable_seqscan off, Postgres still refused an index path for an INDEXED
+    // dimension). They are dropped on every ensure so an old install converges.
     expect(sql).toContain('USING GIN (facets)');
-    expect(sql).toContain("USING GIN ((facets->'framework'))");
-    // JSONB key casing must be preserved (facet keys are camelCase); only the
-    // index NAME is lowercased.
-    expect(sql).toContain("USING GIN ((facets->'phpMajor'))");
-    expect(sql).toContain('idx_global_rag_facets_phpmajor');
+    expect(sql).not.toContain("USING GIN ((facets->'framework'))");
+    expect(sql).toContain('DROP INDEX IF EXISTS idx_global_rag_facets_framework');
+    // Only the index NAME was ever lowercased; the JSONB key is camelCase, which is
+    // exactly what a hand-written DROP list gets wrong.
+    expect(sql).toContain('DROP INDEX IF EXISTS idx_global_rag_facets_phpmajor');
+    expect(sql).not.toContain('idx_global_rag_facets_phpMajor');
     // tsvector trigger.
     expect(sql).toContain('trg_global_content_tsv');
   });

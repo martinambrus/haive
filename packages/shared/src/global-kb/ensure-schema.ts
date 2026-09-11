@@ -6,11 +6,30 @@ const log = logger.child({ module: 'global-kb-schema' });
 const ENTRIES_TABLE = 'global_kb_entries';
 const VECTORS_TABLE = 'ai_rag_embeddings';
 
-// Facet dimensions that get a dedicated expression GIN index (the hot ones used
-// by the query-time facet filter, §3.4). `facets` JSONB lives on the vectors
-// table; a broad GIN(facets) (default jsonb_ops, NOT jsonb_path_ops) backs the
-// `?` / `?|` operators, and these per-array indexes speed the common dimensions.
-const FACET_DIMENSIONS = ['framework', 'language', 'phpMajor', 'nodeMajor', 'packages', 'tags'];
+// Per-dimension expression GIN indexes this store used to create, dropped on every
+// ensure so an install that has them converges. NO QUERY CAN USE THEM. The one facet
+// filter in the codebase (`buildFacetClause`, shared/src/rag/search.ts) reads
+//   NOT (facets ? '<dim>') OR jsonb_array_length(facets->'<dim>') = 0 OR (facets->'<dim>') ?| $n
+// and GIN finds rows that HAVE a key, never rows that LACK one — so the first branch is
+// unindexable, and an OR needs every branch indexable to build a BitmapOr. MEASURED with
+// `SET enable_seqscan = off`, which prices a seq scan prohibitively: Postgres still
+// answered `Seq Scan ... Disabled: true` for an indexed dimension AND an unindexed one,
+// i.e. no index path existed either way.
+//
+// That negation is the SEMANTICS — an entry constraining no dimension matches every
+// project — so it cannot be indexed away without reshaping the table. Listing only six
+// of the nine dimensions therefore looked like a gap to close, and closing it would have
+// added three more indexes no query can use. The dimension list is kept here rather than
+// the six literal names because only the index NAME was lowercased; the JSONB key stays
+// camelCase, and that asymmetry is what a hand-written DROP list gets wrong.
+const RETIRED_FACET_INDEX_DIMENSIONS = [
+  'framework',
+  'language',
+  'phpMajor',
+  'nodeMajor',
+  'packages',
+  'tags',
+];
 
 /** Idempotent schema creation for the global KB store (both the source-of-truth
  *  `global_kb_entries` and the global `ai_rag_embeddings` vector table), run on
@@ -143,14 +162,13 @@ export async function ensureGlobalKbSchema(
     `CREATE INDEX IF NOT EXISTS idx_global_rag_content_tsv ON ${VECTORS_TABLE} USING GIN (content_tsv)`,
   );
 
-  // Facet indexes: broad default-jsonb_ops GIN (supports ? / ?|) + per-array.
+  // Broad default-jsonb_ops GIN (NOT jsonb_path_ops), kept: it is the general-purpose
+  // index for `?` / `?|` / `@>` against the whole column.
   await conn.pg.unsafe(
     `CREATE INDEX IF NOT EXISTS idx_global_rag_facets ON ${VECTORS_TABLE} USING GIN (facets)`,
   );
-  for (const dim of FACET_DIMENSIONS) {
-    await conn.pg.unsafe(
-      `CREATE INDEX IF NOT EXISTS idx_global_rag_facets_${dim.toLowerCase()} ON ${VECTORS_TABLE} USING GIN ((facets->'${dim}'))`,
-    );
+  for (const dim of RETIRED_FACET_INDEX_DIMENSIONS) {
+    await conn.pg.unsafe(`DROP INDEX IF EXISTS idx_global_rag_facets_${dim.toLowerCase()}`);
   }
 
   // tsvector auto-update trigger (mirror ensureRagSchema; distinct trigger name
