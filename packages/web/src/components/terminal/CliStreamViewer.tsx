@@ -727,59 +727,66 @@ export function CliStreamViewer({
             </button>
           )}
         </div>
-        {!isReplay && (
-          <div className="flex items-center gap-3 text-xs text-neutral-400">
-            {steerable && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void sendSteer();
-                }}
-                className="flex items-center gap-1"
-              >
-                <input
-                  value={steerText}
-                  onChange={(e) => setSteerText(e.target.value)}
-                  placeholder="Steer the agent…"
-                  disabled={steering || state !== 'connected'}
-                  className="w-48 rounded border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-200 placeholder:text-neutral-600 disabled:opacity-50"
-                />
-                <button
-                  type="submit"
-                  disabled={steering || state !== 'connected' || steerText.trim().length === 0}
-                  className="rounded border border-indigo-600 px-2 py-0.5 text-indigo-300 hover:bg-indigo-950 disabled:opacity-50"
-                >
-                  {steering ? 'Sending…' : 'Steer'}
-                </button>
-              </form>
-            )}
-            {steers.length > 0 && (
-              <div className="relative" ref={steerListRef}>
-                <button
-                  type="button"
-                  onClick={() => setSteerListOpen((v) => !v)}
-                  className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
-                  title="Sent steers"
-                  aria-label={`Sent steers (${steers.length})`}
-                  aria-expanded={steerListOpen}
-                >
-                  <SteerIcon />
-                  <span className="tabular-nums">{steers.length}</span>
-                </button>
-                {steerListOpen && <SteerList steers={steers} />}
-              </div>
-            )}
-            <span>Read-only — use Cancel to stop the running CLI</span>
-            <button
-              type="button"
-              onClick={() => void cancelActiveCli()}
-              disabled={cancelling || state !== 'connected'}
-              className="rounded border border-red-700 px-2 py-0.5 text-red-300 hover:bg-red-950 disabled:opacity-50"
+        <div className="flex items-center gap-3 text-xs text-neutral-400">
+          {!isReplay && steerable && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void sendSteer();
+              }}
+              className="flex items-center gap-1"
             >
-              {cancelling ? 'Cancelling…' : 'Cancel CLI'}
-            </button>
-          </div>
-        )}
+              <input
+                value={steerText}
+                onChange={(e) => setSteerText(e.target.value)}
+                placeholder="Steer the agent…"
+                disabled={steering || state !== 'connected'}
+                className="w-48 rounded border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-200 placeholder:text-neutral-600 disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={steering || state !== 'connected' || steerText.trim().length === 0}
+                className="rounded border border-indigo-600 px-2 py-0.5 text-indigo-300 hover:bg-indigo-950 disabled:opacity-50"
+              >
+                {steering ? 'Sending…' : 'Steer'}
+              </button>
+            </form>
+          )}
+          {/* Deliberately NOT behind `!isReplay`, unlike everything else in this row: a
+              finished invocation renders as a replay, which is exactly when someone
+              reopens a terminal to read what it was steered with. Behind the guard the
+              history restored above had no render site and only ever showed during the
+              live run — the one state that never needed restoring. */}
+          {steers.length > 0 && (
+            <div className="relative" ref={steerListRef}>
+              <button
+                type="button"
+                onClick={() => setSteerListOpen((v) => !v)}
+                className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
+                title="Sent steers"
+                aria-label={`Sent steers (${steers.length})`}
+                aria-expanded={steerListOpen}
+              >
+                <SteerIcon />
+                <span className="tabular-nums">{steers.length}</span>
+              </button>
+              {steerListOpen && <SteerList steers={steers} />}
+            </div>
+          )}
+          {!isReplay && (
+            <>
+              <span>Read-only — use Cancel to stop the running CLI</span>
+              <button
+                type="button"
+                onClick={() => void cancelActiveCli()}
+                disabled={cancelling || state !== 'connected'}
+                className="rounded border border-red-700 px-2 py-0.5 text-red-300 hover:bg-red-950 disabled:opacity-50"
+              >
+                {cancelling ? 'Cancelling…' : 'Cancel CLI'}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {showTabs && (
