@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { agentSpecSchema, mapWithConcurrency, type FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
@@ -984,7 +984,18 @@ async function loadBundleAgentCandidates(ctx: StepContext): Promise<AgentCandida
     })
     .from(schema.customBundleItems)
     .innerJoin(schema.customBundles, eq(schema.customBundleItems.bundleId, schema.customBundles.id))
-    .where(eq(schema.customBundles.repositoryId, repositoryId));
+    // AGENT items only, as 09_5-skill-generation already selects `kind = 'skill'`.
+    // Without it every skill in the bundle was fed to `agentSpecSchema` and warned with
+    // ~10 issues on the way out — MEASURED, a one-skill bundle logged a full
+    // "failed schema validation" report for `skills/<name>/SKILL.md` on every run. The
+    // skill was still picked up by 09_5, so nothing was lost; what was lost is the
+    // warning's meaning, since a genuinely broken AGENT reads exactly the same.
+    .where(
+      and(
+        eq(schema.customBundles.repositoryId, repositoryId),
+        eq(schema.customBundleItems.kind, 'agent'),
+      ),
+    );
 
   const out: AgentCandidate[] = [];
   for (const item of items) {

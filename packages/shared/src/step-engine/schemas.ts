@@ -137,8 +137,56 @@ function coerceField(field: FormField, raw: unknown, issues: string[], visible =
       }
       return raw as string[];
     }
-    default:
+    case 'bundle-composer': {
+      // The bundles chosen for this repository, as the composer reports them: entries
+      // are `{ id, name, sourceType, status, itemCount }`, and a bare id string is
+      // accepted because `extractBundleIdsFromValues` (06_3) reads both. Only the id
+      // is checked here — the row itself is re-read from the database at apply, which
+      // is what decides whether the bundle exists and whether it synced.
+      //
+      // A MISSING case fell through to `default: return undefined`, which STRIPPED the
+      // whole selection while still reporting `success: true` — MEASURED end to end: the
+      // browser posted `{"bundles":[{...}]}`, the API stored it and logged fieldCount 1,
+      // then the runner re-validated, wrote `{}` back over the row, and apply recorded
+      // `bundleIds: []`, so the step showed no bundle and could raise no
+      // syncing/failed warning for one. Exactly the `directory-tree` failure above.
+      if (!Array.isArray(raw)) {
+        issues.push(`${field.id}: expected an array of bundles`);
+        return undefined;
+      }
+      for (const entry of raw) {
+        const id =
+          typeof entry === 'string'
+            ? entry
+            : entry && typeof entry === 'object' && 'id' in entry
+              ? (entry as { id: unknown }).id
+              : undefined;
+        if (typeof id !== 'string' || id.length === 0) {
+          issues.push(`${field.id}: every entry needs a non-empty id`);
+          return undefined;
+        }
+      }
+      return raw;
+    }
+    // Display-only fields carry no value, so dropping them is correct. Listed
+    // explicitly rather than left to `default` so the exhaustiveness check below
+    // still holds.
+    case 'note':
+    case 'global-kb-status':
       return undefined;
+    // `accordion` never reaches here — processField recurses into its leaves and
+    // returns — but it is part of FormField, so it has to be named for the check.
+    case 'accordion':
+      return undefined;
+    default: {
+      // Every field type is handled above, and a NEW one fails the build here rather
+      // than silently losing whatever the user submitted for it. That is not
+      // hypothetical: this switch has dropped a real selection twice, `directory-tree`
+      // and `bundle-composer`, and both times it reported success while doing it.
+      const unhandled: never = field;
+      void unhandled;
+      return undefined;
+    }
   }
 }
 
@@ -161,6 +209,9 @@ function defaultFor(field: FormField): unknown {
       return field.default ?? null;
     case 'file-upload':
       return null;
+    case 'bundle-composer':
+      // A list field: "no bundles" is an empty list, not a null.
+      return [];
     default:
       return null;
   }
