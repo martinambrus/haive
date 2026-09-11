@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -28,6 +28,49 @@ const DEFAULT_MCP_SETTINGS_JSON: string = (() => {
   return config ? config.content : '{\n  "mcpServers": {}\n}';
 })();
 
+/** The textarea's starting content: Haive's managed servers, plus any OTHER server
+ *  this repo already has on disk.
+ *
+ *  The field used to default to DEFAULT_MCP_SETTINGS_JSON unconditionally, and apply()
+ *  writes whatever it holds straight to `.claude/mcp_settings.json`. That file is
+ *  user-owned — 07-generate-files guards it behind `writeIfAllowed` — but 04 runs first
+ *  and had already replaced it, so the later gate protected a file that was gone. A
+ *  re-onboard therefore dropped every server the user had added, silently, at a gate
+ *  showing them a config that was not theirs. This mirrors what `rtkEnabled` above
+ *  already does: seed the field from the saved state, not from a build-time constant.
+ *
+ *  The managed entries are refreshed rather than preserved, because their args track the
+ *  SANDBOX IMAGE and a stale copy is broken rather than merely old — MEASURED on this
+ *  repo, a committed config carried `--channel=stable`, which asks for a Chrome the image
+ *  does not ship instead of `--executable-path=/usr/bin/chromium`. A deliberate edit to
+ *  one of those is still visible in the textarea before submit; a dropped server was not.
+ *
+ *  With no extra servers the constant is returned VERBATIM, so a repo that has only the
+ *  managed set — every repo on this install — renders the exact bytes it always did. */
+export async function mcpSettingsDefaultFor(repoPath: string): Promise<string> {
+  const raw = await readFile(path.join(repoPath, '.claude/mcp_settings.json'), 'utf8').catch(
+    () => null,
+  );
+  if (raw === null) return DEFAULT_MCP_SETTINGS_JSON;
+
+  let onDisk: Record<string, unknown>;
+  let managed: Record<string, unknown>;
+  try {
+    onDisk = (JSON.parse(raw) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
+    managed =
+      (JSON.parse(DEFAULT_MCP_SETTINGS_JSON) as { mcpServers?: Record<string, unknown> })
+        .mcpServers ?? {};
+  } catch {
+    // Unparseable on disk: nothing can be preserved from it, and the gate must still
+    // render. The user sees the managed set and their file is replaced only on submit.
+    return DEFAULT_MCP_SETTINGS_JSON;
+  }
+
+  const extra = Object.entries(onDisk).filter(([name]) => !(name in managed));
+  if (extra.length === 0) return DEFAULT_MCP_SETTINGS_JSON;
+  return JSON.stringify({ mcpServers: { ...managed, ...Object.fromEntries(extra) } }, null, 2);
+}
+
 interface ToolingDetect {
   primaryLanguage: string;
   framework: string;
@@ -47,6 +90,8 @@ interface ToolingDetect {
   rtkVersionLabel: string;
   /** "version (latest)" label shown in the MCP (.claude/mcp_settings.json) field. */
   chromeVersionLabel: string;
+  /** Starting content for the MCP textarea: managed servers plus this repo's own. */
+  mcpSettingsDefault: string;
   /** Per-LSP-option version badge (option value → "version (latest)"). Absent for
    *  the unpinnable servers (rust → rust-analyzer, java → jdtls). */
   lspVersionByOption: Record<string, string>;
@@ -207,6 +252,7 @@ export const toolingInfrastructureStep: StepDefinition<
       repositoryId,
       rtkVersionLabel: fmtVersion(rtkVersionPin, 'rtk'),
       chromeVersionLabel: fmtVersion(chromeMcpPin, 'chrome-devtools-mcp'),
+      mcpSettingsDefault: await mcpSettingsDefaultFor(ctx.repoPath),
       lspVersionByOption,
     };
   },
@@ -306,7 +352,7 @@ export const toolingInfrastructureStep: StepDefinition<
               : `WARNING: ${detected.cliDisplayName ?? 'the current CLI'} does not support MCP in haive. Settings will be saved but ignored until you switch to a CLI that does (e.g. Claude Code, Codex, Gemini, Z.AI). `) +
             'Written verbatim to .claude/mcp_settings.json and passed to Claude Code via --mcp-config. Pre-filled with the Chrome DevTools MCP server used by browser-testing workflow steps. Add additional servers inside the mcpServers object (e.g. filesystem, git, postgres). Leave empty to disable all MCP servers — a stub config (`{"mcpServers": {}}`) is written so CLI providers that pass --mcp-config still load successfully.' +
             ` Chrome DevTools MCP currently ${detected.chromeVersionLabel ?? 'latest'}.`,
-          default: DEFAULT_MCP_SETTINGS_JSON,
+          default: detected.mcpSettingsDefault ?? DEFAULT_MCP_SETTINGS_JSON,
           rows: 14,
         },
         ...(detected.cliSupportsLsp
