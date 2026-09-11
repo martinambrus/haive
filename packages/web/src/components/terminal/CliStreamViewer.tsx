@@ -6,7 +6,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
-import { api, apiWebSocketUrl } from '@/lib/api-client';
+import { api, apiWebSocketUrl, type TaskEvent } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
 import { copyTerminalSelection } from '@/lib/terminal-copy';
 import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
@@ -20,6 +20,9 @@ type TerminalTab = 'clean' | 'raw';
 interface CliStreamViewerProps {
   invocationId: string;
   taskId: string;
+  /** UUID of the task_steps row this terminal belongs to. Used to restore the steer
+   *  history on remount; without it the list simply starts empty, as it always did. */
+  stepRowId?: string;
   /** Called when the CLI stream ends (exit frame received). The page uses
    *  this to switch back to the Steps tab automatically. */
   onExit?: (code: number) => void;
@@ -86,7 +89,13 @@ const CLEAN_STICK_THRESHOLD_PX = 24;
 // CLI's stdin); `consumed` = drained by the model at a tool-call boundary (the
 // worker's steer_consumed frame); `unconsumed` = the run ended before it drained;
 // `error` = the API rejected it (e.g. the turn already finished).
-type SteerStatus = 'sent' | 'consumed' | 'unconsumed' | 'error';
+//
+// `historical` = restored from `steering.nudge` task events after a remount. The list
+// lived only in component state, so closing the terminal threw it away even though the
+// steers were durable. Only the SEND is recorded, never the outcome, so a restored entry
+// claims no status rather than reporting a `sent` that may long since have been consumed
+// — the same rule the step banners follow about copy that outlives its state.
+type SteerStatus = 'sent' | 'consumed' | 'unconsumed' | 'error' | 'historical';
 interface SteerEntry {
   id: string;
   text: string;
@@ -97,6 +106,7 @@ interface SteerEntry {
 export function CliStreamViewer({
   invocationId,
   taskId,
+  stepRowId,
   onExit,
   fill = false,
   height,
@@ -136,6 +146,38 @@ export function CliStreamViewer({
   // rows flip to `unconsumed` when the run exits.
   const [steers, setSteers] = useState<SteerEntry[]>([]);
   const [steerListOpen, setSteerListOpen] = useState(false);
+
+  // Restore what this step has already been steered with. Runs once per mount and only
+  // SEEDS: a live `sent` or `steer_consumed` frame arriving later appends as usual, and
+  // an id already present is not duplicated, so a reopened terminal during a live run
+  // shows history then keeps tracking.
+  useEffect(() => {
+    if (!stepRowId) return;
+    let cancelled = false;
+    void api
+      .get<{ events: TaskEvent[] }>(`/tasks/${taskId}/events?type=steering.nudge`)
+      .then((data) => {
+        if (cancelled) return;
+        const restored: SteerEntry[] = (data.events ?? [])
+          .filter((e) => e.taskStepId === stepRowId)
+          .map((e) => ({
+            id: `history:${e.id}`,
+            text: typeof e.payload?.text === 'string' ? e.payload.text : '(no text recorded)',
+            status: 'historical' as const,
+          }));
+        if (restored.length === 0) return;
+        setSteers((prev) => {
+          const seen = new Set(prev.map((p) => p.id));
+          return [...restored.filter((r) => !seen.has(r.id)), ...prev];
+        });
+      })
+      .catch(() => {
+        // History is a convenience; a terminal that cannot fetch it still works.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, stepRowId]);
   const steerListRef = useRef<HTMLDivElement | null>(null);
   const onExitRef = useRef(onExit);
 
@@ -1040,6 +1082,15 @@ function SteerStatusIcon({ status }: { status: SteerStatus }) {
       return (
         <span className="mt-0.5 text-neutral-500" title="The run ended before this was applied">
           —
+        </span>
+      );
+    case 'historical':
+      return (
+        <span
+          className="mt-0.5 text-neutral-500"
+          title="Sent earlier in this step — the outcome is not recorded"
+        >
+          ↺
         </span>
       );
     case 'error':

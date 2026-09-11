@@ -286,6 +286,7 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
               <InvocationPanel
                 key={inv.id}
                 taskId={taskId}
+                stepRowId={stepRowId}
                 invocation={inv}
                 total={count}
                 statusMessage={statusMessage}
@@ -366,6 +367,7 @@ function LoadOlderRuns({
 
 interface InvocationPanelProps {
   taskId: string;
+  stepRowId: string;
   invocation: CliInvocationSummary;
   label: string | null;
   /** Total runs in this step (api-wide, not the loaded window). The in-panel status box only
@@ -383,6 +385,7 @@ interface InvocationPanelProps {
 
 function InvocationPanel({
   taskId,
+  stepRowId,
   invocation,
   label,
   total,
@@ -526,7 +529,7 @@ function InvocationPanel({
           })()}
         {invocation.startedAt && <span>{new Date(invocation.startedAt).toLocaleTimeString()}</span>}
       </button>
-      {expanded && <InvocationBody taskId={taskId} invocation={invocation} />}
+      {expanded && <InvocationBody taskId={taskId} stepRowId={stepRowId} invocation={invocation} />}
       {/* Persistent provider-verdict banner, BELOW the terminal and read from the invocation row
           (not the stream), so it survives the CLI ending and the 600s stream expiry: a provider
           refusing the prompt, or silently swapping the served model. See cli-stream-status.ts. */}
@@ -578,9 +581,11 @@ function InvocationPanel({
  */
 function InvocationBody({
   taskId,
+  stepRowId,
   invocation,
 }: {
   taskId: string;
+  stepRowId: string;
   invocation: CliInvocationSummary;
 }) {
   const [replay, setReplay] = useState<CliInvocationOutput | null>(null);
@@ -620,6 +625,7 @@ function InvocationBody({
         <CliStreamViewer
           invocationId={invocation.id}
           taskId={taskId}
+          stepRowId={stepRowId}
           height="h-[400px]"
           cleanSupported={invocation.mode !== 'subagent_sequential'}
           // Null while this run is queued, which is what keeps the stream-health badge quiet
@@ -630,6 +636,7 @@ function InvocationBody({
         <CliStreamViewer
           invocationId={invocation.id}
           taskId={taskId}
+          stepRowId={stepRowId}
           staticOutput={replay.streamLog}
           staticCleanOutput={replay.cleanOutput}
           staticExitCode={replay.exitCode}
