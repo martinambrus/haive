@@ -626,6 +626,7 @@ function InvocationBody({
           invocationId={invocation.id}
           taskId={taskId}
           stepRowId={stepRowId}
+          promptChars={invocation.promptChars}
           height="h-[400px]"
           cleanSupported={invocation.mode !== 'subagent_sequential'}
           // Null while this run is queued, which is what keeps the stream-health badge quiet
@@ -637,8 +638,10 @@ function InvocationBody({
           invocationId={invocation.id}
           taskId={taskId}
           stepRowId={stepRowId}
+          promptChars={invocation.promptChars}
           staticOutput={replay.streamLog}
           staticCleanOutput={replay.cleanOutput}
+          staticCleanTranscript={replay.cleanTranscript ?? null}
           staticExitCode={replay.exitCode}
           cleanSupported={invocation.mode !== 'subagent_sequential'}
           height="h-[400px]"

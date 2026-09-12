@@ -1119,6 +1119,10 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
     createdAt: schema.cliInvocations.createdAt,
     errorMessage: schema.cliInvocations.errorMessage,
     tokenUsage: schema.cliInvocations.tokenUsage,
+    // Size only, never the prompt itself — the median row is ~95 KB and the largest 1.19 MB,
+    // and this list is polled every 2s per step. It lets the terminal label its collapsed
+    // "initial prompt" turn before anyone pays to fetch the body.
+    promptChars: sql<number>`length(${schema.cliInvocations.prompt})`,
     // The reasoning-effort level this run actually got, and where it came from. Recorded
     // per invocation because nothing else keeps it: the preference row holds only its
     // CURRENT value, so comparing two past runs at different levels is otherwise guesswork.

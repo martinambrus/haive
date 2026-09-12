@@ -1314,6 +1314,7 @@ taskRoutes.get('/:id/cli-invocations/:invocationId/output', async (c) => {
       id: true,
       rawOutput: true,
       streamLog: true,
+      cleanTranscript: true,
       exitCode: true,
       errorMessage: true,
       endedAt: true,
@@ -1331,11 +1332,45 @@ taskRoutes.get('/:id/cli-invocations/:invocationId/output', async (c) => {
     streamLog: inv.streamLog ?? inv.rawOutput ?? '',
     // Clean tab: the model's parsed prose (assistant text / agent_message).
     cleanOutput: inv.rawOutput ?? '',
+    // Clean tab, structured: the same prose split into turns, with each mid-run steer at the
+    // position it was injected. NULL on every row written before the column existed and on a
+    // run that produced no prose — the viewer falls back to `cleanOutput` there, which is
+    // exactly today's rendering. Never a REPLACEMENT for it: that string is still what the
+    // step parsers consumed, so the two are served together on purpose.
+    cleanTranscript: inv.cleanTranscript ?? null,
     exitCode: inv.exitCode,
     errorMessage: inv.errorMessage,
     durationMs: inv.durationMs,
     isActive: inv.endedAt === null,
   });
+});
+
+/** The prompt this invocation was dispatched with, for the Clean tab's collapsed "initial
+ *  prompt" turn.
+ *
+ *  Its own route rather than a field on /output, for two reasons. /output is called only on
+ *  the REPLAY path, so a live run would have no prompt to show. And prompts are large —
+ *  MEASURED across every row on the dev install: median 95 KB, mean 119 KB, largest 1.19 MB —
+ *  so shipping one on every terminal open, or on the 2s invocation poll, would cost far more
+ *  than the disclosure is worth. Fetched once, only when a reader actually expands the turn. */
+taskRoutes.get('/:id/cli-invocations/:invocationId/prompt', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const invocationId = c.req.param('invocationId');
+  const db = getDb();
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+  const inv = await db.query.cliInvocations.findFirst({
+    where: and(eq(schema.cliInvocations.id, invocationId), eq(schema.cliInvocations.taskId, id)),
+    columns: { id: true, prompt: true },
+  });
+  if (!inv) throw new HttpError(404, 'CLI invocation not found');
+  // Blanked rather than nulled by the prompt retention sweep, which is why '' is a normal
+  // answer here and not a missing row.
+  return c.json({ id: inv.id, prompt: inv.prompt });
 });
 
 taskRoutes.patch('/:id/cli-provider', async (c) => {

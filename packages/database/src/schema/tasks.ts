@@ -911,10 +911,7 @@ export const cliInvocations = pgTable(
      *  model. `trigger` is stored verbatim rather than as a checked union so a value the
      *  binary adds later is recorded instead of dropped.
      *  Keep in sync with `InvocationCompaction` in @haive/shared — this package cannot
-     *  import shared (circular; same note as tokenUsage above). Migration 0155.
-     *
-     *  Declared LAST because ALTER TABLE ADD COLUMN appends while drizzle-kit push builds
-     *  the table in declaration order; anywhere else and schema-parity goes red. */
+     *  import shared (circular; same note as tokenUsage above). Migration 0155. */
     compaction: jsonb('compaction').$type<{
       events: Array<{
         trigger: string | null;
@@ -923,6 +920,42 @@ export const cliInvocations = pgTable(
         cumulativeDroppedTokens: number | null;
         durationMs: number | null;
       }>;
+    }>(),
+    /** The Clean tab's ordered transcript: the model's prose turns with each mid-run steer
+     *  at the position it was injected. Accumulated during the run from the same two
+     *  callbacks that publish the `text` and `steer` stream frames, so what a viewer watched
+     *  live and what it replays afterwards are the same events written twice and cannot
+     *  drift.
+     *
+     *  A SECOND column rather than folding the steer into rawOutput, because rawOutput is
+     *  not a display field: step-runner feeds it to the step's parser (`parsedOutput ??
+     *  rawOutput`), merge-resolver reads a fix verdict out of it and dag-executor a coder
+     *  result. A human sentence in there is handed to a JSON parser as the agent's answer.
+     *
+     *  BOUNDED like streamLog (see clean-transcript-buffer.ts): whole SEGMENTS are dropped
+     *  from the middle and the loss is stated in `elided`, never truncated mid-turn — which
+     *  is why this is an object and not a bare array, matching every other jsonb artifact
+     *  column on this table.
+     *
+     *  NULL means "nothing recorded": every row written before this column existed (no
+     *  backfill — a finished run's turn ORDER cannot be reconstructed from rawOutput plus
+     *  the steering.nudge events, and inventing one is worse than admitting there is none),
+     *  and any run that produced neither model prose nor a steer, where rawOutput already is
+     *  the whole answer.
+     *  Keep in sync with `CleanTranscript` in @haive/shared — this package cannot import
+     *  shared (circular; same note as tokenUsage above). Migration 0156.
+     *
+     *  Declared LAST because ALTER TABLE ADD COLUMN appends while drizzle-kit push builds
+     *  the table in declaration order; anywhere else and schema-parity goes red. */
+    cleanTranscript: jsonb('clean_transcript').$type<{
+      segments: Array<{
+        kind: 'model' | 'user';
+        text: string;
+        at: number;
+        steerId?: string;
+        consumed?: boolean;
+      }>;
+      elided?: { segments: number; chars: number; afterIndex: number };
     }>(),
   },
   (table) => [

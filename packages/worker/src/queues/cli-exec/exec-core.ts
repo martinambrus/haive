@@ -48,6 +48,8 @@ import {
 } from './model-identity.js';
 import { looksLikeJson, proseForClean } from './clean-output.js';
 import { createStreamLogBuffer } from './stream-log-buffer.js';
+import { createCleanTranscriptBuffer } from './clean-transcript-buffer.js';
+import { createSteerEcho } from './steer-echo.js';
 import { createSteerForwarder, type SteerForwarder } from './steer-forwarder.js';
 import { createSteerTracker } from './steer-tracker.js';
 import { getRedis } from '../../redis.js';
@@ -584,6 +586,10 @@ export async function executeCliSpec(
   // results here. The collectors and the live Redis publish are fed separately, so
   // the bound only trims the persisted replay. See stream-log-buffer.ts.
   const streamBuf = createStreamLogBuffer();
+  // The Clean tab's own transcript: the model's prose turns with each steer at the position
+  // it was injected. Fed from the same two callbacks that publish the `text` and `steer`
+  // frames, so what a viewer watches live and what it replays cannot drift apart.
+  const cleanBuf = createCleanTranscriptBuffer();
   const headerText = formatCliHeader(mergedSpec, sandboxWorkdir);
   if (invocationId) {
     await publishCliChunk(invocationId, 'stdout', headerText);
@@ -600,11 +606,10 @@ export async function executeCliSpec(
   // as a dedicated `text` frame so the terminal viewer's Clean tab can render
   // readable output instead of the raw NDJSON. Live runs only (needs an
   // invocation stream); replay reuses the persisted rawOutput.
-  const onProseText = invocationId
-    ? (text: string) => {
-        void publishCliChunk(invocationId, 'text', text);
-      }
-    : undefined;
+  const onProseText = (text: string) => {
+    cleanBuf.pushModel(text);
+    if (invocationId) void publishCliChunk(invocationId, 'text', text);
+  };
   // Mid-run steering: for a steerable invocation, subscribe a dedicated Redis
   // connection to this invocation's steer channel and forward each message to
   // the CLI's stdin. The collector's onResult latches the forwarder closed (end
@@ -623,12 +628,20 @@ export async function executeCliSpec(
     // The forwarder records each written steer; the boundary callback (fed to
     // the collector below) reports them consumed when Claude drains the queue.
     const tracker = createSteerTracker();
+    const echo = createSteerEcho({ invocationId, clean: cleanBuf, raw: streamBuf });
     steer = createSteerForwarder({
       subscriber: sub,
-      onWritten: (s) => tracker.recordWritten(s),
+      steerFlag: mergedSpec.steerFlag === true,
+      // Tracking stays first and unconditional — a system wind-down must still be reported
+      // consumed exactly as it is today. The echo is what filters it out of the transcript.
+      onWritten: (s) => {
+        tracker.recordWritten(s);
+        echo(s);
+      },
     });
     onSteerBoundary = () => {
       for (const s of tracker.drainConsumed()) {
+        cleanBuf.markConsumed(s.id);
         void publishCliSteerConsumed(invocationId, s.id);
       }
     };
@@ -731,6 +744,10 @@ export async function executeCliSpec(
     if (steer) steer.teardown();
   }
   const streamLog = streamBuf.toString();
+  // Both persisted transcripts travel together through every return branch below — one token
+  // to copy instead of two, so a branch added later cannot pick up the Raw tab and forget the
+  // Clean one.
+  const persisted = { streamLog, cleanTranscript: cleanBuf.toTranscript() } as const;
   // Raw CLI stdout+stderr tail for provider-fatal classification. rawOutput is
   // now sanitized for the Clean tab (prose or empty), so it can no longer carry
   // an API error the classifier needs. Excludes the header/prompt (which
@@ -777,7 +794,7 @@ export async function executeCliSpec(
         // place it does. `capturedLog` is set by that adapter alone, so both of
         // these are no-ops on the codex path.
         modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
-        streamLog,
+        ...persisted,
         providerDiagnosticLog: result.capturedLog ?? undefined,
       };
     }
@@ -794,7 +811,7 @@ export async function executeCliSpec(
         `${jsonlCliName} emitted no agent message`,
       tokenUsage,
       modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
-      streamLog,
+      ...persisted,
       providerErrorScan,
       providerDiagnosticLog: result.capturedLog ?? undefined,
     };
@@ -877,7 +894,7 @@ export async function executeCliSpec(
       tokenUsage: collector.getTokenUsage(),
       modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
       compaction: compactionFrom(collector.getCompactions()),
-      streamLog,
+      ...persisted,
     };
   }
 
@@ -917,7 +934,7 @@ export async function executeCliSpec(
       // is recorded on the failure branch too — the compaction is a fact about the run
       // whether or not it produced a result event.
       compaction: compactionFrom(collector.getCompactions()),
-      streamLog,
+      ...persisted,
       providerErrorScan,
     };
   }
@@ -941,7 +958,7 @@ export async function executeCliSpec(
         tokenUsage: extracted.tokenUsage,
         // gemini names its models only as the keys of stats.models.
         modelIdentity: modelIdentityFrom({ geminiModels: extracted.models }),
-        streamLog,
+        ...persisted,
       };
     }
     // Extraction failed. A JSON envelope here (the wrapper we could not unwrap,
@@ -961,7 +978,7 @@ export async function executeCliSpec(
         ),
         tokenUsage: null,
         modelIdentity: modelIdentityFrom(),
-        streamLog,
+        ...persisted,
         providerErrorScan,
       };
     }
@@ -988,7 +1005,7 @@ export async function executeCliSpec(
       stream: collector.getModelIdentity(),
       antigravityLog: result.capturedLog ?? null,
     }),
-    streamLog,
+    ...persisted,
     providerErrorScan,
     providerDiagnosticLog: result.capturedLog ?? undefined,
   };
@@ -1165,7 +1182,7 @@ async function scheduleSoftTimeout(
     try {
       // id '' marks it as not a user steer. publishCliSteerConsumed drops an empty
       // steerId, so the wind-down never ticks a row in the user's steer list.
-      const payload = JSON.stringify({ id: '', text: CLI_SOFT_TIMEOUT_WIND_DOWN });
+      const payload = JSON.stringify({ id: '', system: true, text: CLI_SOFT_TIMEOUT_WIND_DOWN });
       void getRedis()
         .publish(`${STEER_IN_CHANNEL_PREFIX}${invocationId}`, payload)
         .then(() => log.info({ invocationId, delayMs, percent }, 'soft timeout: wind-down sent'))

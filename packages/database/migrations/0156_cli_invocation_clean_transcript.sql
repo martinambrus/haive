@@ -1,0 +1,56 @@
+-- cli_invocations.clean_transcript — the Clean tab as a CONVERSATION rather than a blob.
+--
+-- raw_output is what the Clean tab replays today, and it is one string of model prose. A
+-- steer is invisible in it: the text is written to the CLI's stdin as an NDJSON user message
+-- (steer-forwarder.ts) and the binary never echoes it back, so the only trace a finished run
+-- leaves is a contentless steer_consumed frame that expires with the Redis stream. Reopen the
+-- terminal an hour later and the run reads as though nobody intervened.
+--
+-- A SECOND column rather than appending the steer to raw_output, because raw_output is not
+-- just a display field: step-runner.ts feeds it to the step's parser (`parsedOutput ??
+-- rawOutput`), merge-resolver.ts parses a fix agent's verdict out of it, and dag-executor
+-- reads a coder result from it. Putting a human sentence in there hands the user's words to a
+-- JSON parser as the agent's answer. The steer belongs beside the prose, not inside it.
+--
+-- ORDERED SEGMENTS, not two lists. What makes a steer readable is WHERE it landed — which
+-- model turn it interrupted — and that ordering exists only while the run is streaming. The
+-- steering.nudge task_events record that a steer was SENT and stay the source for the mining
+-- digest and the legacy remount restore; they cannot say where it landed. Segments are
+-- accumulated from the same two callbacks that publish the `text` and `steer` stream frames,
+-- so the live view and this replay are the same events written twice.
+--
+-- BOUNDED, for the reason stream-log-buffer.ts records: the replay endpoint ships the whole
+-- column to the browser, and the worst stream_log row on this instance was 90 MB. Prose is far
+-- smaller than a raw transcript — MEASURED on the dev install before this shipped, across
+-- 3,174 rows carrying a raw_output the median is 5,782 characters, the 99th percentile 65,877
+-- and the largest ever recorded 199,202 (the 08-knowledge-acquisition run that motivated
+-- staged agent bodies). So the 1 MiB budget is five times the worst case on record, not a
+-- guess at one. "Smaller" is still not a bound, and a long agentic run emits a text block per
+-- turn, so whole SEGMENTS are dropped from the middle (a half-cut turn reads as a complete
+-- one) and the loss is stated in `elided`. That is why this is an object and not a bare array
+-- — the same shape every other jsonb artifact column on this table already uses, so `->>`
+-- access stays available.
+--
+-- A user turn carries its own outcome (`consumed`), because the per-steer status is otherwise
+-- live-session state that a reload throws away — which is exactly what the popover this
+-- replaces did.
+--
+-- NULL means "nothing recorded" and is the normal state: every row written before this column
+-- existed (no backfill — a finished run's turn ORDER cannot be reconstructed from raw_output
+-- and the steering.nudge events, and inventing an order is worse than admitting there is
+-- none), and any run whose stream produced neither model prose nor a steer, where raw_output
+-- already IS the whole answer. That second case is load-bearing rather than tidy: on the
+-- gemini and plain-text paths the answer never travels through onProseText, so a transcript
+-- written there would shadow the only copy of it. The API serves this as an optional field
+-- beside the existing cleanOutput and the web falls back to today's rendering when it is null,
+-- so a legacy row and a new one both render correctly with no data migration.
+--
+-- Additive and idempotent, no FK, no index, nothing joins on it. Aged off by the existing
+-- stream-log retention sweep, on the same window and in the same statement — a separate window
+-- would be a promise the adjacent column does not keep. Rollback: revert the code, which
+-- leaves the column unwritten and unread (the API stops serving the field and the web falls
+-- back to cleanOutput), then optionally
+--   ALTER TABLE "cli_invocations" DROP COLUMN IF EXISTS "clean_transcript";
+-- That statement stands alone.
+
+ALTER TABLE "cli_invocations" ADD COLUMN IF NOT EXISTS "clean_transcript" jsonb;

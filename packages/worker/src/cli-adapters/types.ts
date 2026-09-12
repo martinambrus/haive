@@ -92,6 +92,11 @@ export interface CliCommandSpec {
   /** Written to the CLI's stdin immediately after start (the prompt as an NDJSON
    *  user-message). Only present when steerable. */
   stdinInitial?: string;
+  /** amp only: emit `"steer": true` on every MID-RUN stdin user-message. amp reads it as
+   *  "queue this and apply it at the next interruption point"; the claude binary has no such
+   *  field and must not see it. Never set on `stdinInitial` — there is no turn in progress to
+   *  interrupt. Meaningful only alongside `steerable`. */
+  steerFlag?: boolean;
   /** The prompt, delivered over stdin because it is too large to pass as an
    *  argument (see prompt-delivery.ts). The runner writes it and then CLOSES
    *  stdin — that close is the difference from `stdinInitial`, which stays open

@@ -21,7 +21,7 @@ export const STREAM_TTL_SECONDS = 600;
 export const CLI_STREAM_LIVE_TTL_SECONDS = 3 * 60 * 60; // 3h
 
 export type StreamFrameKind =
-  'stdout' | 'stderr' | 'text' | 'exit' | 'steer_consumed' | 'retry' | 'retry_resolved';
+  'stdout' | 'stderr' | 'text' | 'exit' | 'steer' | 'steer_consumed' | 'retry' | 'retry_resolved';
 
 export function streamKey(invocationId: string): string {
   return `${STREAM_PREFIX}${invocationId}`;
@@ -53,6 +53,45 @@ export async function publishCliChunk(
       .exec();
   } catch (err) {
     log.warn({ err, invocationId }, 'publishCliChunk failed');
+  }
+}
+
+/** Publish a `steer` frame: a user message was just WRITTEN to the running CLI's stdin.
+ *
+ *  Carries the TEXT, because nothing else does — the binary never echoes an injected steer
+ *  (see the boundary comment in stream.ts), so without this frame the Clean tab has no copy
+ *  of what the user said and the model's reply reads as an answer to nothing.
+ *
+ *  An empty id is NOT dropped here, unlike `publishCliSteerConsumed`: a legacy bare-string
+ *  steer still changed the run and still belongs in the transcript. There is simply nothing
+ *  to correlate it with later. The soft-timeout wind-down never reaches this function at all
+ *  — it is marked `system` at its source and filtered before the echo. */
+export async function publishCliSteer(
+  invocationId: string | null | undefined,
+  steer: { id: string; text: string },
+): Promise<void> {
+  if (!invocationId || !steer.text) return;
+  try {
+    // Same TTL refresh as publishCliChunk: any write keeps the live stream from leaking.
+    await getRedis()
+      .multi()
+      .xadd(
+        streamKey(invocationId),
+        'MAXLEN',
+        '~',
+        STREAM_MAXLEN,
+        '*',
+        'stream',
+        'steer',
+        'id',
+        steer.id,
+        'text',
+        steer.text,
+      )
+      .expire(streamKey(invocationId), CLI_STREAM_LIVE_TTL_SECONDS)
+      .exec();
+  } catch (err) {
+    log.warn({ err, invocationId }, 'publishCliSteer failed');
   }
 }
 

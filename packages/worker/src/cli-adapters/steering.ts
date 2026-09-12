@@ -1,18 +1,27 @@
 /**
- * Helpers for Claude-family mid-run steering (claude-code / zai / ollama, all on
- * the `claude` binary). Steering uses stream-json INPUT mode: the prompt and any
- * later steer messages are newline-delimited JSON user-message lines written to
- * the CLI's stdin, which it applies at the next tool-call boundary.
+ * Helpers for mid-run steering. The Claude-family adapters (claude-code / zai / ollama /
+ * muse / openrouter, all on the `claude` binary) use stream-json INPUT mode: the prompt and
+ * any later steer messages are newline-delimited JSON user-message lines written to the
+ * CLI's stdin, which it applies at the next tool-call boundary.
+ *
+ * amp reads the same line shape under `--stream-json-input` and shares the message helper
+ * below; only its `steer` marker differs. Its argv is built in its own adapter, since it is
+ * not a `claude` binary and shares none of the flags.
  */
 
-/** One NDJSON user-message line (newline-terminated) for claude stream-json
- *  input. Used for the initial prompt and for each mid-run steer. The text is
- *  JSON.stringify'd so embedded quotes/newlines cannot break the frame or inject
- *  extra events. */
-export function steeringUserMessageLine(text: string): string {
+/** One NDJSON user-message line (newline-terminated) for stream-json input. Used for the
+ *  initial prompt and for each mid-run steer. The text is JSON.stringify'd so embedded
+ *  quotes/newlines cannot break the frame or inject extra events.
+ *
+ *  `steer` is amp's queue marker — "handle this at the next interruption point while the
+ *  agent is busy". The claude binary has no such field, so it is opt-in and OMITTED by
+ *  default, which keeps the claude-family line byte-identical to what shipped. It is also
+ *  never set on an INITIAL message: there is no turn in progress to interrupt. */
+export function steeringUserMessageLine(text: string, opts: { steer?: boolean } = {}): string {
   return (
     JSON.stringify({
       type: 'user',
+      ...(opts.steer === true ? { steer: true } : {}),
       message: { role: 'user', content: [{ type: 'text', text }] },
     }) + '\n'
   );

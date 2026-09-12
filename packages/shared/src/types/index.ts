@@ -181,6 +181,41 @@ export interface InvocationCompaction {
   events: CompactionEvent[];
 }
 
+/** One turn of the Clean tab's transcript. `model` is the prose the CLI produced; `user` is
+ *  a mid-run steer, recorded at the position it was INJECTED so the model turn beneath it
+ *  reads as the reply.
+ *
+ *  `at` is when the turn entered the transcript — for a steer, when it was written to the
+ *  CLI's stdin, not when the model drained it. `consumed` is that second fact and is what
+ *  makes the outcome survive a reload: absent means nothing is known (a turn from a run that
+ *  ended before the boundary, or one recorded before this field existed), which the viewer
+ *  renders as "outcome not recorded" rather than inventing a verdict. */
+export interface CleanTranscriptSegment {
+  kind: 'model' | 'user';
+  text: string;
+  at: number;
+  /** Client steer id, so a user turn can be correlated with its later `steer_consumed`
+   *  frame. Absent on a legacy id-less steer. */
+  steerId?: string;
+  consumed?: boolean;
+}
+
+/** The Clean tab's ordered transcript for one invocation, persisted to
+ *  `cli_invocations.clean_transcript`. An object rather than a bare array for the reason
+ *  `InvocationCompaction` gives, plus one of its own: the elision statement has to live
+ *  somewhere that is not a segment, or a truncated transcript would need a third `kind` that
+ *  an older viewer would not know how to render.
+ *
+ *  A NULL column means "nothing recorded": a row written before this existed, or a run that
+ *  produced neither prose nor a steer — where `rawOutput` is already the whole answer and a
+ *  transcript would shadow it. */
+export interface CleanTranscript {
+  segments: CleanTranscriptSegment[];
+  /** Present only when the run exceeded the transcript budget. The gap always sits directly
+   *  after `afterIndex`, so the viewer can place the marker instead of guessing. */
+  elided?: { segments: number; chars: number; afterIndex: number };
+}
+
 export type RepoSource =
   | 'local_path'
   | 'git_https'

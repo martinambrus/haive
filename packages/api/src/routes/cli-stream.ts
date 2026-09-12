@@ -76,6 +76,7 @@ interface StreamFrameOut {
     | 'exit'
     | 'error'
     | 'pong'
+    | 'steer'
     | 'steer_consumed'
     | 'retry'
     | 'retry_resolved';
@@ -95,9 +96,16 @@ interface StreamFrameOut {
   data?: string;
   code?: number;
   message?: string;
-  /** On the `steer_consumed` frame: the client steer id that was just drained at
-   *  a tool-call boundary, so the viewer can tick the matching list row. */
+  /** On the `steer` and `steer_consumed` frames: the client steer id. On `steer` it lets the
+   *  viewer reconcile the frame with the turn the sender already rendered optimistically; on
+   *  `steer_consumed` it ticks that same turn. Empty for a legacy id-less steer. */
   id?: string;
+  /** On the `steer` frame: what the user wrote. Its own field rather than `data`, because
+   *  `data` belongs to `output` — and a steer deliberately is NOT an output frame: the
+   *  viewer routes any non-`text` output straight into xterm, so an output-shaped steer
+   *  would be echoed raw by any client that has not shipped the inline rendering, and it
+   *  would restamp the stall clock as if the CLI had spoken. */
+  text?: string;
   /** On the `retry` frame: the CLI's own api_retry fields, forwarded verbatim so the viewer
    *  words the reason rather than the wire format doing it. `errorStatus` is absent when no HTTP
    *  response arrived at all — which is itself the signal that the transport failed. */
@@ -190,6 +198,7 @@ async function runStreamSession(
           sawExit = true;
         } else if (
           frame.type === 'output' ||
+          frame.type === 'steer' ||
           frame.type === 'steer_consumed' ||
           frame.type === 'retry' ||
           frame.type === 'retry_resolved'
@@ -262,6 +271,10 @@ function fieldsToFrame(fields: string[]): StreamFrameOut | null {
     if (typeof data === 'string') {
       return { type: 'output', stream, data };
     }
+  }
+  if (stream === 'steer') {
+    const text = map.get('text');
+    if (typeof text === 'string') return { type: 'steer', text, id: map.get('id') ?? '' };
   }
   if (stream === 'steer_consumed') {
     const id = map.get('id');

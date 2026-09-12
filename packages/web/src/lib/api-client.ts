@@ -1118,6 +1118,10 @@ export interface CliInvocationSummary {
   /** This terminal's own latest activity line (per-invocation), shown as its live
    *  status. Null until the first line / for non-streaming invocations. */
   statusMessage: string | null;
+  /** Size of the dispatched prompt in characters — the size only, never the text, which is
+   *  fetched on demand. Lets the terminal label its collapsed "initial prompt" turn without
+   *  putting a median 95 KB body on a 2s poll. */
+  promptChars?: number;
   /** Token usage extracted from the CLI's structured output. Null for plain
    *  CLIs (antigravity), failed extractions, and rows written before capture
    *  existed. Semantics are provider-native. */
@@ -1177,12 +1181,32 @@ export interface CliInvocationListResponse {
   totalCount?: number;
 }
 
+/** The persisted Clean-tab transcript, as `cli_invocations.clean_transcript` stores it.
+ *  Mirrors `CleanTranscript` in @haive/shared, which web must not import. */
+export interface StoredCleanTranscript {
+  segments: Array<{
+    kind: 'model' | 'user';
+    text: string;
+    at: number;
+    steerId?: string;
+    consumed?: boolean;
+  }>;
+  /** Present only when the run exceeded the transcript budget; the gap sits directly after
+   *  `afterIndex`. */
+  elided?: { segments: number; chars: number; afterIndex: number };
+}
+
 export interface CliInvocationOutput {
   id: string;
   /** Raw live-stream transcript for the Raw tab (header + NDJSON + stderr). */
   streamLog: string;
   /** Parsed model prose for the Clean tab (assistant text / agent_message). */
   cleanOutput: string;
+  /** The same prose split into ordered turns, with each mid-run steer at the position it was
+   *  injected. Null on every row written before the column existed and on a run that produced
+   *  no prose — the viewer then falls back to `cleanOutput`, which is exactly the rendering
+   *  that shipped before this. Optional, so an older API simply omits it. */
+  cleanTranscript?: StoredCleanTranscript | null;
   exitCode: number | null;
   errorMessage: string | null;
   durationMs: number | null;

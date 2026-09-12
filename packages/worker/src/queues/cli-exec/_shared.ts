@@ -1,6 +1,7 @@
 import { Queue } from 'bullmq';
 import {
   logger,
+  type CleanTranscript,
   type CliTokenUsage,
   type InvocationCompaction,
   type ModelIdentity,
@@ -80,6 +81,13 @@ export interface ExecutionOutcome {
    *  execution path doesn't capture a stream (e.g. agent-mining trace
    *  serialized post-hoc). */
   streamLog?: string | null;
+  /** The Clean tab's ordered transcript — the model's prose turns with each mid-run steer at
+   *  the position it was injected. Persisted to cli_invocations.clean_transcript.
+   *
+   *  Null when this execution path captures no stream, AND whenever the run produced no model
+   *  prose: a transcript is the only thing the viewer renders once present, so one holding
+   *  user turns alone would hide an answer that only rawOutput carries. */
+  cleanTranscript?: CleanTranscript | null;
   /** Raw CLI stdout+stderr tail (NO header/prompt) used ONLY to classify
    *  provider-fatal failures (rate-limit/auth/5xx). rawOutput is sanitized for
    *  the Clean tab and may be prose or empty, so it can no longer carry the API
