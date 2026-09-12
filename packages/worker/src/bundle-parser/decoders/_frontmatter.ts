@@ -62,7 +62,23 @@ export function parseInlineArray(value: string): string[] {
 /** Extract the first H1 heading (`# Title`) from a markdown body. Returns
  *  null when no H1 is present. */
 export function firstH1(body: string): string | null {
+  // Skip fenced code. A `#` inside a fence is a SHELL COMMENT, not a heading, and reading
+  // one as the document title mislabels the item everywhere it is then shown. MEASURED on an
+  // imported Drupal reviewer agent whose body opens a ```bash block with
+  // `# These MUST pass before committing`: that became its title, so agent discovery was
+  // asked to judge a code reviewer presented as a commit gate — and one model declined it on
+  // exactly that description. The file has no real H1, so with the fence respected the title
+  // falls back to the id, which is what the caller wants.
+  let openFence: string | null = null;
   for (const raw of body.split(/\r?\n/)) {
+    const fence = /^\s{0,3}(`{3,}|~{3,})/.exec(raw)?.[1];
+    if (fence) {
+      // CommonMark: a closing fence uses the same character and is at least as long.
+      if (openFence === null) openFence = fence;
+      else if (fence[0] === openFence[0] && fence.length >= openFence.length) openFence = null;
+      continue;
+    }
+    if (openFence !== null) continue;
     const match = raw.match(/^#\s+(.+?)\s*$/);
     if (match && match[1]) return match[1];
   }

@@ -101,6 +101,70 @@ describe('decoders', () => {
     expect(parsed.title).toBe('Code Reviewer');
   });
 
+  // A `#` inside a fence is a SHELL COMMENT, not a heading. MEASURED on an imported Drupal
+  // reviewer agent whose body opens a ```bash block with `# These MUST pass before
+  // committing`: that became its title, so agent discovery judged a code reviewer presented
+  // as a commit gate, and one model declined it citing exactly that description.
+  it('does not take a title from a comment inside a code fence', () => {
+    const md = [
+      '---',
+      'name: drupal-reviewer',
+      'description: Expert Drupal code reviewer.',
+      '---',
+      'You are a senior Drupal developer performing thorough code review.',
+      '',
+      '## Pre-Review: Local Checks',
+      '',
+      '```bash',
+      '# These MUST pass before committing',
+      './vendor/bin/phpcs -p modules/custom/',
+      '```',
+      '',
+      '## Review Checklist',
+      '',
+    ].join('\n');
+    const spec = agentSpecSchema.parse(decodeClaudeAgent(md, '.claude/agents/drupal-reviewer.md'));
+    // No real H1 in the document, so the id is the honest fallback.
+    expect(spec.title).toBe('drupal-reviewer');
+    expect(spec.coreMission).toContain('These MUST pass before committing');
+  });
+
+  it('still takes a real H1, and prefers it over later headings', () => {
+    const md = [
+      '---',
+      'name: reviewer',
+      'description: d',
+      '---',
+      '```sh',
+      '# not a heading',
+      '```',
+      '',
+      '# Real Title',
+      '',
+      '# Later Title',
+      '',
+    ].join('\n');
+    expect(agentSpecSchema.parse(decodeClaudeAgent(md, 'a/reviewer.md')).title).toBe('Real Title');
+  });
+
+  it('closes a fence only on a matching, long-enough marker', () => {
+    const md = [
+      '---',
+      'name: reviewer',
+      'description: d',
+      '---',
+      '````md',
+      '```',
+      '# still inside the outer fence',
+      '```',
+      '````',
+      '',
+      '# Outside',
+      '',
+    ].join('\n');
+    expect(agentSpecSchema.parse(decodeClaudeAgent(md, 'a/reviewer.md')).title).toBe('Outside');
+  });
+
   it('decodeCodexAgent extracts triple-quoted developer_instructions', () => {
     const toml = [
       'name = "planner"',
