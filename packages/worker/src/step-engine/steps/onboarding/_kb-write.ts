@@ -19,10 +19,20 @@ export interface KbWrite {
   content: string;
 }
 
+/** Escape EVERY regex metacharacter, backslash included, so a path means only itself.
+ *
+ *  Hand-escaping just the dot is what the single-root version did, and it was incomplete in
+ *  a way no current input reaches — these constants hold only alphanumerics, `.`, `-`, `_`
+ *  and `/`. Incomplete anyway: a backslash in the input would have survived into the pattern
+ *  as an escape character and changed what the next character meant. `/` is deliberately NOT
+ *  escaped here, because the caller turns it into a separator class after this runs. */
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** Matches a leading knowledge-base root written with either separator. Derived from the
- *  constants so the pattern cannot drift from the paths it strips: dots are escaped
- *  and each `/` becomes a separator class. Safe because both hold only
- *  alphanumerics, `.`, `-`, `_` and `/`.
+ *  constants so the pattern cannot drift from the paths it strips: every metacharacter is
+ *  escaped, then each `/` becomes a separator class.
  *
  *  The LEGACY root is stripped too. A model names a path it saw on disk, and a repo whose
  *  knowledge predates `.haive-data/` has that tree right there — MEASURED, one run reported
@@ -31,7 +41,7 @@ export interface KbWrite {
  *  rather than an error". */
 const KB_ROOT_PREFIX_RE = new RegExp(
   `^(?:${[KB_DIR, LEGACY_KB_DIR]
-    .map((d) => d.replace(/\./g, '\\.').replace(/\//g, '[/\\\\]'))
+    .map((d) => escapeRegexLiteral(d).replace(/\//g, '[/\\\\]'))
     .join('|')})[/\\\\]`,
 );
 
