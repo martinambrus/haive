@@ -47,6 +47,41 @@ const DEFAULT_MCP_SETTINGS_JSON: string = (() => {
  *
  *  With no extra servers the constant is returned VERBATIM, so a repo that has only the
  *  managed set — every repo on this install — renders the exact bytes it always did. */
+/** Merge the repo's own servers back into a submitted config. Used only when the user
+ *  ticked the opt-in — the textarea default never carries them. */
+export function mergeRepoOwnedMcpServers(
+  submitted: string,
+  repoOwned: Record<string, unknown>,
+): string {
+  if (Object.keys(repoOwned).length === 0) return submitted;
+  let current: Record<string, unknown>;
+  try {
+    current = (JSON.parse(submitted) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
+  } catch {
+    // Unparseable submission: the user's own text is what gets written, and silently
+    // replacing it with a merged object would discard what they typed.
+    return submitted;
+  }
+  return JSON.stringify({ mcpServers: { ...current, ...repoOwned } }, null, 2) + '\n';
+}
+
+/** The repo's own (non-managed) server definitions, by name. */
+export async function repoOwnedMcpServers(repoPath: string): Promise<Record<string, unknown>> {
+  const raw = await readFile(path.join(repoPath, '.claude/mcp_settings.json'), 'utf8').catch(
+    () => null,
+  );
+  if (raw === null) return {};
+  try {
+    const onDisk = (JSON.parse(raw) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
+    const managed =
+      (JSON.parse(DEFAULT_MCP_SETTINGS_JSON) as { mcpServers?: Record<string, unknown> })
+        .mcpServers ?? {};
+    return Object.fromEntries(Object.entries(onDisk).filter(([name]) => !(name in managed)));
+  } catch {
+    return {};
+  }
+}
+
 export async function mcpSettingsDefaultFor(repoPath: string): Promise<string> {
   const raw = await readFile(path.join(repoPath, '.claude/mcp_settings.json'), 'utf8').catch(
     () => null,
@@ -66,9 +101,13 @@ export async function mcpSettingsDefaultFor(repoPath: string): Promise<string> {
     return DEFAULT_MCP_SETTINGS_JSON;
   }
 
-  const extra = Object.entries(onDisk).filter(([name]) => !(name in managed));
-  if (extra.length === 0) return DEFAULT_MCP_SETTINGS_JSON;
-  return JSON.stringify({ mcpServers: { ...managed, ...Object.fromEntries(extra) } }, null, 2);
+  // Deliberately NOT merged in: these are repository-controlled commands the CLI would
+  // execute, and a prefilled textarea is accepted by submitting the form. They reach the
+  // written file only through the explicit opt-in beside this field. A passive warning was
+  // tried first and is not a gate — the default still carried them.
+  void onDisk;
+  void managed;
+  return DEFAULT_MCP_SETTINGS_JSON;
 }
 
 /** Names of the servers the prefill carried over from the repo's own file.
@@ -359,13 +398,28 @@ export const toolingInfrastructureStep: StepDefinition<
           min: 128,
           max: 8192,
         },
+        // Opt-in for the repo's own MCP servers. Default FALSE and placed immediately before
+        // the textarea: these are repository-controlled commands the CLI executes, so the
+        // safe state has to be the one you get by submitting without reading.
+        ...(detected.repoOwnedMcpServers && detected.repoOwnedMcpServers.length > 0
+          ? [
+              {
+                type: 'checkbox' as const,
+                id: 'keepRepoMcpServers',
+                label: `Also keep ${detected.repoOwnedMcpServers.length} MCP server definition${detected.repoOwnedMcpServers.length === 1 ? '' : 's'} already in this repository (${detected.repoOwnedMcpServers.join(', ')})`,
+                description:
+                  'This repository ships its own .claude/mcp_settings.json. Each definition in it is a command the CLI will EXECUTE. They are left out of the box below unless you tick this — tick it only if you recognise them, and read them on disk first if you did not add them yourself.',
+                default: false,
+              },
+            ]
+          : []),
         {
           type: 'textarea',
           id: 'mcpSettingsJson',
           label: 'MCP server definitions (.claude/mcp_settings.json)',
           description:
             (detected.repoOwnedMcpServers && detected.repoOwnedMcpServers.length > 0
-              ? `REVIEW BEFORE SUBMITTING: ${detected.repoOwnedMcpServers.length} server definition${detected.repoOwnedMcpServers.length === 1 ? '' : 's'} below came from this repository's own .claude/mcp_settings.json (${detected.repoOwnedMcpServers.join(', ')}), not from haive. Each one is a command this CLI will execute. Keep them only if you recognise them; delete any you do not. `
+              ? `This repository's own ${detected.repoOwnedMcpServers.length} server definition${detected.repoOwnedMcpServers.length === 1 ? ' is' : 's are'} NOT included below; tick the box above to keep ${detected.repoOwnedMcpServers.length === 1 ? 'it' : 'them'}, and ${detected.repoOwnedMcpServers.length === 1 ? 'it is' : 'they are'} then merged into whatever you leave here. `
               : '') +
             (detected.cliSupportsMcp
               ? ''
@@ -428,7 +482,13 @@ export const toolingInfrastructureStep: StepDefinition<
     // exist with valid JSON; an empty textarea writes the
     // `{"mcpServers": {}}` stub. Step 07 still rewrites the file under its
     // overwrite gate for re-runs.
-    const mcpInput = typeof tooling.mcpSettingsJson === 'string' ? tooling.mcpSettingsJson : '';
+    let mcpInput = typeof tooling.mcpSettingsJson === 'string' ? tooling.mcpSettingsJson : '';
+    // Repository-controlled servers are added ONLY on the explicit opt-in. Re-read from disk
+    // rather than trusting a submitted copy, so the names the user ticked are the ones the
+    // file actually holds.
+    if (tooling.keepRepoMcpServers === true) {
+      mcpInput = mergeRepoOwnedMcpServers(mcpInput, await repoOwnedMcpServers(ctx.repoPath));
+    }
     const mcpPath = path.join(ctx.repoPath, '.claude/mcp_settings.json');
     await mkdir(path.dirname(mcpPath), { recursive: true });
     await writeFile(mcpPath, mcpSettingsFileContent(mcpInput), 'utf8');
