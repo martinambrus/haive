@@ -46,7 +46,11 @@ const promptFor = (candidates: unknown[]): string =>
 // SimpleTest .test files under modules/" when 75 of the 77 were the project's OWN Playwright
 // specs — and the scanner's regex cannot match a bare `.test` file at all.
 describe('candidate rows carry checkable evidence', () => {
-  it('names example matched files beside the count', () => {
+  // Per DIRECTORY, not the first N paths: walk order is not representative, and MEASURED the
+  // same 77 rendered as four examples put two CONTRIB files first (`sites/` sorts before
+  // `test-playwright/`), after which the model concluded "the remaining scan matches are
+  // contrib-bundled files this project never edits" — from a sample that was accurate.
+  it('breaks the count down by directory, largest first', () => {
     const out = promptFor([
       {
         id: 'test-writer',
@@ -54,16 +58,53 @@ describe('candidate rows carry checkable evidence', () => {
         hint: 'writes tests',
         count: 77,
         recommended: true,
-        sampleFiles: [
-          'test-playwright/tests/functionality-validation/a.spec.ts',
-          'test-playwright/tests/data-validation/b.spec.ts',
+        matchDirs: [
+          { dir: 'test-playwright/tests/functionality-validation', count: 62 },
+          { dir: 'test-playwright/tests/data-validation', count: 11 },
+          { dir: 'sites/all/modules/views/tests', count: 1 },
         ],
+        matchDirTotal: 6,
       },
     ]);
     expect(out).toContain(
-      '77 matching files, e.g. test-playwright/tests/functionality-validation/a.spec.ts',
+      '77 matching files, by directory: test-playwright/tests/functionality-validation (62)',
     );
-    expect(out).toContain('+75 more');
+    expect(out).toContain('+3 more directories');
+  });
+
+  // Zero is weak evidence for a curated role, and saying only "the scan ran and found none"
+  // made it the LEAD argument in three declines on one run, quoted back verbatim.
+  it('tells the model a zero count is weak evidence, not a reason', () => {
+    const out = promptFor([
+      {
+        id: 'api-route-dev',
+        label: 'API route developer',
+        hint: 'routes',
+        count: 0,
+        recommended: true,
+        matchDirs: [],
+        matchDirTotal: 0,
+      },
+    ]);
+    expect(out).toContain('weak evidence for a curated role');
+    expect(out).toContain('decline on what the repo DOES');
+  });
+
+  // An agent named in a repo's OLD workflow docs is not thereby covered here.
+  it('warns that pre-existing .claude/ files describe a prior setup', () => {
+    const out = promptFor([
+      {
+        id: 'code-reviewer',
+        label: 'Code reviewer',
+        hint: 'reviews',
+        count: 1,
+        recommended: true,
+        matchDirs: [{ dir: 'src', count: 1 }],
+        matchDirTotal: 1,
+      },
+    ]);
+    expect(out).toContain('from a PRIOR setup');
+    expect(out).toContain('never as evidence about which agent runs when');
   });
 
   // "Nothing was looked for" and "nothing was found" license opposite conclusions.
@@ -87,7 +128,8 @@ describe('candidate rows carry checkable evidence', () => {
         hint: 'routes',
         count: 0,
         recommended: true,
-        sampleFiles: [],
+        matchDirs: [],
+        matchDirTotal: 0,
       },
     ]);
     expect(scannedEmpty).toContain('the scan ran and found none');
@@ -101,7 +143,8 @@ describe('candidate rows carry checkable evidence', () => {
         hint: 'reviews',
         count: 1,
         recommended: true,
-        sampleFiles: ['a.ts'],
+        matchDirs: [{ dir: '.', count: 1 }],
+        matchDirTotal: 1,
       },
     ]);
     expect(out).toContain('a path, a symbol, a config key, a line you opened');

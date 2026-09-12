@@ -29,16 +29,26 @@ export interface AgentCandidate {
   label: string;
   hint: string;
   count: number;
-  /** A few of the paths the scan actually matched, shown with the count.
+  /** WHERE the scan's matches live, as a per-directory count, largest first.
    *
-   *  A bare count is unfalsifiable, and a model asked to justify a decision will invent
-   *  what it cannot see. MEASURED on a live run: `Test writer (77 files)` was declined with
-   *  "the 77 scanner matches are Drupal core SimpleTest .test files under modules/" — the
-   *  count was in fact 75 of the project's OWN Playwright specs under `test-playwright/`
-   *  plus 2 contrib files, and the scanner's regex cannot match a bare `.test` file at all.
-   *  Naming the paths makes that claim impossible to make. Absent for candidates that carry
-   *  no file pattern, which is a different thing from matching nothing. */
-  sampleFiles?: string[];
+   *  A bare count is unfalsifiable, and a model asked to justify a decision will describe
+   *  what it cannot see. MEASURED: `Test writer (77 files)` was declined as "Drupal core
+   *  SimpleTest .test files under modules/" when 75 of the 77 were the project's OWN
+   *  Playwright specs and the regex cannot match a bare `.test` file at all.
+   *
+   *  A per-directory count rather than the first N paths, because walk order is not
+   *  representative and a sample inherits its bias: the same 77 rendered as four example
+   *  paths put two CONTRIB files first (`sites/` sorts before `test-playwright/`), and the
+   *  next run concluded "the remaining scan matches are contrib-bundled files this project
+   *  never edits" — wrong in the opposite direction, from a sample that was accurate.
+   *  Counts per directory cannot mislead by ordering and answer the question a reader
+   *  actually has: is this surface mine or third-party?
+   *
+   *  Absent for candidates with no file pattern, which is a different thing from matching
+   *  nothing. */
+  matchDirs?: { dir: string; count: number }[];
+  /** Distinct directories the matches span, so the render can state what it omitted. */
+  matchDirTotal?: number;
   recommended: boolean;
   /** 'scan' for deterministic file-pattern matches, 'llm' for AI-suggested,
    *  'bundle' for items pulled in from a custom user bundle. */
@@ -350,20 +360,28 @@ const FRAMEWORK_AGENTS: Record<string, FrameworkAgent[]> = {
 /* Scanning                                                            */
 /* ------------------------------------------------------------------ */
 
-/** How many matched paths to keep per candidate — enough to characterise WHERE the matches
- *  live, which is the question a reviewer actually asks of a count. */
-const SCAN_SAMPLE_SIZE = 4;
+/** How many directories to name per candidate. Three separates "all mine", "all
+ *  third-party" and "split" without turning a row into a listing. */
+const SCAN_DIR_LIMIT = 3;
 
 async function scanPattern(
   repo: string,
   pattern: Pattern,
-): Promise<{ count: number; sample: string[] }> {
+): Promise<{ count: number; dirs: { dir: string; count: number }[]; dirTotal: number }> {
   if (pattern.requireDir) {
     const dir = path.join(repo, pattern.requireDir);
-    if (!(await pathExists(dir))) return { count: 0, sample: [] };
+    if (!(await pathExists(dir))) return { count: 0, dirs: [], dirTotal: 0 };
   }
   const matches = await listFilesMatching(repo, pattern.predicate, 5);
-  return { count: matches.length, sample: matches.slice(0, SCAN_SAMPLE_SIZE) };
+  const byDir = new Map<string, number>();
+  for (const rel of matches) {
+    const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '.';
+    byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
+  }
+  const dirs = [...byDir.entries()]
+    .map(([dir, count]) => ({ dir, count }))
+    .sort((a, b) => b.count - a.count || a.dir.localeCompare(b.dir));
+  return { count: matches.length, dirs: dirs.slice(0, SCAN_DIR_LIMIT), dirTotal: dirs.length };
 }
 
 export async function discoverAgentCandidates(
@@ -390,7 +408,7 @@ export async function discoverAgentCandidates(
   const countById = new Map(scanResults.map((r) => [r.id, r.count]));
   // Absent for an id with no pattern, which the prompt renders differently from zero
   // matches: "nothing was looked for" and "nothing was found" are different facts.
-  const sampleById = new Map(scanResults.map((r) => [r.id, r.sample]));
+  const dirsById = new Map(scanResults.map((r) => [r.id, r]));
 
   // Build candidate list: baselines first, then framework-specific
   const candidates: AgentCandidate[] = [];
@@ -403,7 +421,9 @@ export async function discoverAgentCandidates(
       label: def.label,
       hint: def.hint,
       count,
-      ...(sampleById.has(def.id) ? { sampleFiles: sampleById.get(def.id) } : {}),
+      ...(dirsById.has(def.id)
+        ? { matchDirs: dirsById.get(def.id)!.dirs, matchDirTotal: dirsById.get(def.id)!.dirTotal }
+        : {}),
       recommended: true, // baselines always recommended
     });
     usedIds.add(def.id);
@@ -417,7 +437,9 @@ export async function discoverAgentCandidates(
       label: fa.label,
       hint: fa.hint,
       count,
-      ...(sampleById.has(fa.id) ? { sampleFiles: sampleById.get(fa.id) } : {}),
+      ...(dirsById.has(fa.id)
+        ? { matchDirs: dirsById.get(fa.id)!.dirs, matchDirTotal: dirsById.get(fa.id)!.dirTotal }
+        : {}),
       recommended: count >= THRESHOLD || true, // framework agents always recommended
     });
     usedIds.add(fa.id);
@@ -618,13 +640,23 @@ function renderBundleAgentBodies(candidates: readonly AgentCandidate[]): string[
  *  Drupal 7 repo it scores 0 for a surface that exists and lives in `hook_menu()`. */
 function renderCandidateRow(c: AgentCandidate): string {
   const head = `- ${c.id}: ${c.label} — ${c.hint}`;
-  if (c.sampleFiles === undefined) {
+  if (c.matchDirs === undefined) {
     return `${head} (no file-pattern scan for this agent — judge it from the file tree, and do not read the absence of a count as evidence either way)`;
   }
-  if (c.count === 0) return `${head} (0 matching files — the scan ran and found none)`;
-  const shown = c.sampleFiles.join(', ');
-  const more = c.count > c.sampleFiles.length ? `, +${c.count - c.sampleFiles.length} more` : '';
-  return `${head} (${c.count} matching files, e.g. ${shown}${more})`;
+  // Stated as a NON-signal on purpose. A curated agent's worth is its ROLE, not a file
+  // count, and these patterns are written for JS-shaped layouts — MEASURED, `api-route-dev`
+  // matches only `app/api/`, `src/routes/`, `routes/`, `src/api/` and `pages/api/`, so a
+  // Drupal 7 repo scores 0 for a routing surface that exists in `hook_menu()`. Saying "the
+  // scan ran and found none" without this made zero the LEAD argument in three declines on
+  // one run, quoted back verbatim.
+  if (c.count === 0) {
+    return `${head} (0 matching files — the scan ran and found none, which is weak evidence for a curated role like this one: these patterns target common JS/framework layouts and miss whole ecosystems, so decline on what the repo DOES, not on this number)`;
+  }
+  const shown = c.matchDirs.map((d) => `${d.dir} (${d.count})`).join(', ');
+  const omitted = (c.matchDirTotal ?? c.matchDirs.length) - c.matchDirs.length;
+  const more =
+    omitted > 0 ? `, +${omitted} more ${omitted === 1 ? 'directory' : 'directories'}` : '';
+  return `${head} (${c.count} matching files, by directory: ${shown}${more})`;
 }
 
 export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
@@ -695,7 +727,8 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Instructions',
     '1. Review the file tree, key config files, and the technology inventory above.',
     '2. For each predefined agent, decide if it is relevant to this project (true/false). For every one you set to FALSE, add an entry to `declined` saying why — it stays on the form as an unticked box, and without a reason the user is left guessing. Judge a bundle-sourced agent by its BODY, not its name: a bundle the user imported may still describe work this repository does not do.',
-    'A reason must rest on something a reader can check: a path, a symbol, a config key, a line you opened. Where a row shows example matching files, those files are what its count is made of — do not describe them as something else. If you did not open anything and are reasoning from the stack alone, say so in the reason ("inferred from the framework, not verified") rather than asserting a fact about files you have not read. A confident wrong reason is worse than an admitted inference, because the user cannot tell them apart on the form.',
+    'A reason must rest on something a reader can check: a path, a symbol, a config key, a line you opened. Where a row breaks its count down by directory, that is where its matches are — do not describe them as something else. If you did not open anything and are reasoning from the stack alone, say so in the reason ("inferred from the framework, not verified") rather than asserting a fact about files you have not read. A confident wrong reason is worse than an admitted inference, because the user cannot tell them apart on the form.',
+    'One trap: a repository may already contain `.claude/agents/`, `.claude/workflow/` or `.claude/knowledge_base/` files from a PRIOR setup — often a different orchestrator with its own agent names and phase documents. Those describe what that setup did, NOT what runs here, and an agent named in one of them is not thereby covered. MEASURED twice on one repo: an agent was declined as "already owned by <name>, dispatched by name in phase5b-test-management.md", a real file from the repo\'s old workflow naming an agent this system never dispatches — while the agent being declined IS one it dispatches by name. Cite such a file as evidence about the REPOSITORY (what it tests, how it is built) and never as evidence about which agent runs when.',
     '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Every Tier 1 row must appear in EXACTLY ONE of `custom` or `skipped`. Put a row in `skipped` ONLY when you are not emitting it — `skipped` is the rejection list, not a place to note what you did, and an entry saying "not skipped, emitted below" contradicts itself. A row you leave out of BOTH is read as an oversight and re-added for you, so a deliberate omission survives only if it is in `skipped`.',
     '4. You MAY suggest additional technical agents not in the inventory if the file tree or config files show another framework/library/tool with non-trivial usage that the inventory missed.',
     '5. Do NOT propose agents for business domain concepts (entities, workflows, validation rules, UI flows specific to this app). Those become skills.',
