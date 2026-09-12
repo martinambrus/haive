@@ -3,7 +3,6 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
-import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, pathExists } from './_helpers.js';
 
@@ -69,7 +68,7 @@ export const verifyFilesStep: StepDefinition<
     index: 8,
     title: 'Verify generated files',
     description:
-      'Checks that the generated agents, skills, commands, knowledge base files and workflow config exist with the minimum required counts.',
+      'Checks that the generated agents, skills, commands and workflow config exist with the minimum required counts. Not the knowledge base: 08-knowledge-acquisition writes that one step later.',
     requiresCli: false,
     providerSensitive: true,
   },
@@ -106,14 +105,6 @@ export const verifyFilesStep: StepDefinition<
       label: '.claude/skills has at least 1 SKILL.md',
       passed: skillsCount >= 1,
       detail: `found ${skillsCount}`,
-    });
-
-    const kbCount = await countMatching(repo, `${KB_DIR}/`, '.md');
-    checks.push({
-      id: 'knowledge_base_dir',
-      label: `${KB_DIR} has at least 3 markdown files`,
-      passed: kbCount >= 3,
-      detail: `found ${kbCount}`,
     });
 
     const workflowConfigPath = path.join(repo, '.claude', 'workflow-config.json');

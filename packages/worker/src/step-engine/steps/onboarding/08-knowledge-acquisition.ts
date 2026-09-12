@@ -84,6 +84,10 @@ interface ExistingKbFile {
   title: string;
 }
 
+/** A `written` row promoted to the global KB carries no repo file, so its `filePath` is
+ *  this sentinel rather than a path. */
+const GLOBAL_KB_FILE_PATH_PREFIX = 'global-kb:';
+
 interface KnowledgeApply {
   written: {
     id: string;
@@ -100,6 +104,9 @@ interface KnowledgeApply {
   unknownPaths?: string[];
   /** `legacy/` imports deleted because an update folded their content into a newer page. */
   mergedRemoved?: string[];
+  /** Markdown files under `KB_DIR` once this step finished. `07_5-verify-files` used to
+   *  count them one step before they existed, so it failed on every run ever recorded. */
+  kbFileCount: number;
 }
 
 type KbCategory = 'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
@@ -1803,7 +1810,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
               globalPromoted += 1;
               written.push({
                 id: src.relPath,
-                filePath: `global-kb:${promo.id}`,
+                filePath: `${GLOBAL_KB_FILE_PATH_PREFIX}${promo.id}`,
                 source: 'global',
               });
             } else if (promo?.deduped) {
@@ -1922,7 +1929,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         );
         if (promo && !promo.deduped) {
           globalPromoted += 1;
-          written.push({ id: e.id, filePath: `global-kb:${promo.id}`, source: 'global' });
+          written.push({
+            id: e.id,
+            filePath: `${GLOBAL_KB_FILE_PATH_PREFIX}${promo.id}`,
+            source: 'global',
+          });
         }
       }
 
@@ -1979,6 +1990,26 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       );
     }
 
+    // Every page this step believes it wrote has to be on disk. Asserted against the step's
+    // OWN intent rather than a constant: a run where the user selected two topics is a
+    // two-page knowledge base and not a defect, which is why the fixed ">= 3" this replaces
+    // could not live at `07_5-verify-files` and cannot live here either. Thrown BEFORE the
+    // discard below, so a run that lost a page keeps its drafts as the evidence.
+    const expectedOnDisk = written
+      .map((w) => w.filePath)
+      .filter((fp) => !fp.startsWith(GLOBAL_KB_FILE_PATH_PREFIX));
+    const missingPages: string[] = [];
+    for (const fp of expectedOnDisk) {
+      if (!(await pathExists(fp))) missingPages.push(path.relative(ctx.repoPath, fp));
+    }
+    if (missingPages.length > 0) {
+      throw new Error(
+        `knowledge base incomplete: ${missingPages.length} of ${expectedOnDisk.length} pages ` +
+          `this step wrote are not on disk under ${KB_DIR} ` +
+          `(${missingPages.slice(0, 5).join(', ')})`,
+      );
+    }
+
     // The drafts have been filed; keep them only when something could not be read, since
     // that is the one case where the files on disk are the evidence a human needs and a
     // retry re-runs the whole mining pass anyway.
@@ -2000,6 +2031,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         draftsKept: bodyFailures.length > 0,
         unknownPaths: unknownPaths.length,
         mergedRemoved: mergedRemoved.length,
+        kbFileCount: finalFiles.length,
       },
       'knowledge base written',
     );
@@ -2008,6 +2040,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       topicCount: entries.length,
       llmAvailable,
       globalPromoted,
+      kbFileCount: finalFiles.length,
       ...(unknownPaths.length > 0 ? { unknownPaths } : {}),
       ...(mergedRemoved.length > 0 ? { mergedRemoved } : {}),
     };
