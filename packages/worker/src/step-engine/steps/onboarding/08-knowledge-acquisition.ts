@@ -3,6 +3,8 @@ import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { migrateLegacyKnowledge } from './_kb-legacy.js';
+import { sanitizeKbRelPath } from './_kb-write.js';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
@@ -197,6 +199,17 @@ async function scanExistingKb(repoPath: string): Promise<ExistingKbFile[]> {
   }
   out.sort((a, b) => a.relPath.localeCompare(b.relPath));
   return out;
+}
+
+/** The `existingByPath` key for a path the model reported.
+ *
+ *  It names what it saw, and a repo whose knowledge predates `.haive-data/` still shows that
+ *  tree, so the reported path may carry either root — or none, matching the prompt's own
+ *  listing. `sanitizeKbRelPath` strips both, which is what makes the lookup agree with the
+ *  scan instead of silently missing and dropping the item. */
+function existingKbKey(reported: string): string {
+  const safe = sanitizeKbRelPath(reported);
+  return safe.ok ? safe.normalized : reported;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1327,6 +1340,23 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     await ctx.emitProgress('Reading README...');
     const readmeExcerpt = await readReadmeExcerpt(ctx.repoPath);
 
+    // BEFORE the scan, so a knowledge base that predates `.haive-data/` is visible to the
+    // reuse prompt below exactly as it was when `KB_DIR` was `.claude/knowledge_base`.
+    // Without this the scan returns nothing, the prompt offers no existing files, and a real
+    // project's accumulated knowledge is silently regenerated from scratch.
+    const migrated = await migrateLegacyKnowledge(ctx.repoPath, ctx.logger);
+    if (migrated.moved.length > 0) {
+      await ctx.emitProgress(
+        `Migrated ${migrated.moved.length} knowledge file(s) from .claude/ into ${KB_DIR}.`,
+      );
+    }
+    if (migrated.skipped.length > 0) {
+      ctx.logger.warn(
+        { skipped: migrated.skipped.slice(0, 10), count: migrated.skipped.length },
+        'kb: left legacy knowledge files in place because the canonical slot was taken',
+      );
+    }
+
     const existingKb = await scanExistingKb(ctx.repoPath);
     if (existingKb.length > 0) {
       await ctx.emitProgress(
@@ -1623,7 +1653,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // a write is indistinguishable from "nothing to do" unless it is stated.
     const unknownPaths: string[] = [];
     for (const u of updates) {
-      const src = existingByPath.get(u.path);
+      const src = existingByPath.get(existingKbKey(u.path));
       if (!src) {
         unknownPaths.push(u.path);
         continue;
@@ -1655,7 +1685,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // 1b. Placements: move the (accurate) existing file verbatim to its slot, OR
     //     re-route a now-global file to the cross-repo KB and delete it locally.
     for (const p of placements) {
-      const src = existingByPath.get(p.path);
+      const src = existingByPath.get(existingKbKey(p.path));
       if (!src) {
         unknownPaths.push(p.path);
         continue;

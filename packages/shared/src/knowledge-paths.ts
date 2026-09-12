@@ -27,6 +27,27 @@ export const LEARNING_DRAFTS_DIR = '.haive/learning-drafts';
 
 export const KB_DIR = `${HAIVE_DATA_DIR}/knowledge_base`;
 export const LEARNINGS_DIR = `${HAIVE_DATA_DIR}/learnings`;
+
+/** Where knowledge lived before `.haive-data/` — and still lives in any repo whose KB
+ *  predates that move.
+ *
+ *  These are NOT a fallback read path; they are a MIGRATION SOURCE. Onboarding's whole
+ *  reuse-existing-KB feature was written for a knowledge base "copied in from a prior
+ *  orchestration", and back when `KB_DIR` was `.claude/knowledge_base` it found one for
+ *  free. The move declared such trees "simply ignored" on the grounds that all data then
+ *  was demo data — true of Haive's own repos, false of any project carrying real knowledge
+ *  from the legacy markdown workflow. MEASURED on one: 41 files, tracked, committed months
+ *  before the move with messages like "chore: sync knowledge from TASK-2026-179", and
+ *  invisible to every reader after it. */
+export const LEGACY_KB_DIR = '.claude/knowledge_base';
+export const LEGACY_LEARNINGS_DIR = '.claude/learnings';
+
+/** Every knowledge root a repo may carry, canonical first. Pairs each legacy dir with the
+ *  canonical dir its contents belong in. */
+export const LEGACY_KNOWLEDGE_MIGRATIONS = [
+  { from: LEGACY_KB_DIR, to: KB_DIR },
+  { from: LEGACY_LEARNINGS_DIR, to: LEARNINGS_DIR },
+] as const;
 export const INVESTIGATIONS_DIR = `${KB_DIR}/investigations`;
 
 /** Path prefixes the RAG collectors walk to pick knowledge markdown out of a
