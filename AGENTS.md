@@ -241,9 +241,18 @@ stream-json`, stdin held open, one NDJSON user-message per steer.
   --execute and --stream-json", quoted from the shipped image's own `--help`) plus a
   top-level `"steer": true`, which means "apply at the next interruption point while the
   agent is busy". `-x, --execute [message]` takes an OPTIONAL value, so bare `-x` with the
-  message on stdin is the shape the adapter already used for an oversized prompt. amp exits
-  only once stdin closes AND the assistant is done — which is what the forwarder's
-  `onResult` latch plus its 750 ms grace already do.
+  message on stdin is the shape the adapter already used for an oversized prompt.
+  MEASURED against 0.0.1789200043-gdb3b35, because two things had to hold before the flag
+  could be set. Its stream DOES emit the `user` + `tool_result` event `onBoundary` keys on
+  (`system, user, assistant, user, assistant, result` for a one-tool run) — without it
+  `steer_consumed` would never publish and every amp steer would sit at "queued" until exit
+  relabelled it "the run ended before this was applied", telling the user their steer was
+  ignored when it was not. And a `steer: true` line written 6s INTO a run was received and
+  applied: the agent abandoned its original task and answered the steer verbatim, then
+  exited 0 once stdin closed — which is what makes the forwarder's `onResult` latch plus its
+  750 ms grace the right shutdown for it. amp also echoes each stdin message back as a
+  text-only `user` event, which is harmless in both directions: `onBoundary` ignores a user
+  event carrying no `tool_result`, and `onText` reads assistant blocks only.
 - **codex** — NO. `codex exec` is fire-and-forget; `turn/steer` exists only in `codex
 app-server`, a JSON-RPC 2.0 stdio protocol. Adopting it is a second transport (request
   correlation, thread lifecycle, its own event stream replacing `codex-jsonl`, approvals),

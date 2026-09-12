@@ -14,6 +14,23 @@ export class AmpAdapter extends BaseCliAdapter {
   // grok solely over ACP, gemini not at all, and antigravity's stream-json input is
   // sequential turns (its docs say to wait for `result` before writing again), which is a
   // queued follow-up and not a steer.
+  //
+  // MEASURED against amp 0.0.1789200043-gdb3b35 in the shipped sandbox image, not taken from
+  // the docs. Two things had to hold before this flag could be true:
+  //   - its stream emits `{"type":"user", content:[{"type":"tool_result"}]}`, which is what
+  //     stream.ts keys onBoundary on. Without that event `steer_consumed` would never
+  //     publish, and every amp steer would sit at "queued" until exit relabelled it "the run
+  //     ended before this was applied" — telling the user their steer was ignored when it was
+  //     not. Observed sequence for a one-tool run: system, user, assistant, user, assistant,
+  //     result.
+  //   - a `steer: true` line written 6s INTO a run is received and applied: the agent
+  //     abandoned its original task and answered the steer verbatim. amp then exited 0 once
+  //     stdin closed, which is what makes the forwarder's onResult latch plus its grace the
+  //     right shutdown for it.
+  // amp also echoes each stdin message back as a text-only `user` event. That is harmless in
+  // both directions: onBoundary ignores a user event with no tool_result (pinned by
+  // stream-onboundary.test.ts) and onText reads assistant blocks only, so it neither fakes a
+  // boundary nor duplicates the turn in the Clean tab.
   override readonly supportsSteering = true;
   readonly supportsCliAuth = true;
   readonly supportsMcp = false;
