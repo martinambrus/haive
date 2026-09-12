@@ -35,6 +35,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `valiant-dancing-parrot` | Task up/down vote scoring | **Shipped** `c4d9acb` |
 | `yielding-preempting-dijkstra` | Vote-driven agent-slot preemption | **Shipped** `19bf74e` |
 | `external-change-catchup` | KB + plan catch-up for commits made outside Haive | **Shipped** `f177e2f` / `e799f08` / `7a01345`, plus `ca4b64b` for a tree-resolution defect found reviewing slice 2. Repo-page drift badge deferred by design |
+| `codex-app-server-steering` | Steer codex through its app-server JSON-RPC protocol | Not started; feasibility spike done 2026-09-12 against codex-cli 0.154.0 — steering, no-TTY stdio, zero approvals and per-turn usage all confirmed on live runs. Scope question (first-class provider vs steering alone) is in the plan |
 | `frictionless-bootstrapping-otter` | One-line install (RUN-IT) | Not started; extended 2026-09-07 with the install-time channel, macOS as a first-class RUN-IT target, and a Docker Desktop Extension as the no-terminal path |
 | `kind-riding-dream` | Deep project analysis — resellable module | Not started; depends optionally on `purring-marinating-peacock` phase 2b |
 | `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | Not started |
