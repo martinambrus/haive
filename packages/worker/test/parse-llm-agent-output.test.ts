@@ -49,9 +49,10 @@ describe('parseLlmAgentOutput', () => {
   it('normalises every missing list to an empty default', () => {
     const raw = '```json\n{}\n```';
     const out = parseLlmAgentOutput(raw);
-    // `skipped` normalises the same way the other two do: a response written before the
-    // field existed parses to an empty list, so the Tier-1 safety net sees no rejections
-    // and behaves exactly as it did.
-    expect(out).toEqual({ predefined: {}, custom: [], skipped: [], declined: [] });
+    // Every list normalises the same way: a response written before one of these fields
+    // existed parses to an empty list, so the Tier-1 safety net sees no rejections and
+    // behaves exactly as it did — and a model that emits no `kept` simply supplies no
+    // retention reasons, which is the pre-existing behaviour rather than a failure.
+    expect(out).toEqual({ predefined: {}, custom: [], skipped: [], declined: [], kept: [] });
   });
 });

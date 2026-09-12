@@ -72,9 +72,11 @@ describe('candidate rows carry checkable evidence', () => {
     expect(out).toContain('+3 more directories');
   });
 
-  // Zero is weak evidence for a curated role, and saying only "the scan ran and found none"
-  // made it the LEAD argument in three declines on one run, quoted back verbatim.
-  it('tells the model a zero count is weak evidence, not a reason', () => {
+  // Two opposite failures came from the same number: "the scan ran and found none" alone
+  // made zero the LEAD argument in three declines, and pushing back the other way aimed at
+  // the wrong half — those declines were mostly CORRECT, while the models that KEPT the
+  // agent never had to say why. So the row must read neutrally in both directions.
+  it('presents a zero count as settling nothing either way', () => {
     const out = promptFor([
       {
         id: 'api-route-dev',
@@ -86,8 +88,29 @@ describe('candidate rows carry checkable evidence', () => {
         matchDirTotal: 0,
       },
     ]);
-    expect(out).toContain('weak evidence for a curated role');
-    expect(out).toContain('decline on what the repo DOES');
+    expect(out).toContain('settles nothing on its own in either direction');
+    expect(out).toContain('hook_menu()');
+  });
+
+  // A `true` needed no justification, so retention was unauditable while rejection was
+  // fully reasoned — MEASURED, three CLIs kept an API-route agent on a repo with no routing
+  // layer, all three wrote the id explicitly, and there was simply no reason to read.
+  it('requires a reason for keeping a zero-match agent', () => {
+    const out = promptFor([
+      {
+        id: 'api-route-dev',
+        label: 'API route developer',
+        hint: 'routes',
+        count: 0,
+        recommended: true,
+        matchDirs: [],
+        matchDirTotal: 0,
+      },
+    ]);
+    expect(out).toContain('"kept": [');
+    expect(out).toContain('a `true` on a row showing 0 matching files needs a reason too');
+    // Scoped: only where the count and the verdict disagree.
+    expect(out).toContain('Only those rows');
   });
 
   // An agent named in a repo's OLD workflow docs is not thereby covered here.
@@ -119,7 +142,11 @@ describe('candidate rows carry checkable evidence', () => {
       },
     ]);
     expect(unscanned).toContain('no file-pattern scan for this agent');
-    expect(unscanned).not.toContain('0 matching files');
+    // Scoped to the ROW: the `kept` rule elsewhere in the prompt legitimately says
+    // "0 matching files" when describing when a reason is required.
+    const row = unscanned.split('\n').find((l) => l.startsWith('- api-route-dev:'));
+    expect(row).toBeDefined();
+    expect(row).not.toContain('0 matching files');
 
     const scannedEmpty = promptFor([
       {

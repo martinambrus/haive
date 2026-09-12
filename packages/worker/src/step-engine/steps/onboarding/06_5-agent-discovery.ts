@@ -60,6 +60,14 @@ export interface AgentCandidate {
    *  had: a decision with no visible reason. Only set when the model declined it —
    *  a recommended agent needs no justification. */
   declineReason?: string;
+  /** Why a zero-match candidate was kept anyway, shown under its ticked box.
+   *
+   *  A `true` needed no justification, so retention was unauditable while rejection was
+   *  fully reasoned — MEASURED, three CLIs kept `api-route-dev` on a repo with no routing
+   *  layer and all four wrote the id explicitly, so nothing had defaulted through; there was
+   *  simply no reason to read. The asymmetry made "nobody else declined it" look like a
+   *  signal when it carried almost nothing. */
+  keepReason?: string;
 }
 
 export interface AgentDiscoveryDetect {
@@ -643,14 +651,15 @@ function renderCandidateRow(c: AgentCandidate): string {
   if (c.matchDirs === undefined) {
     return `${head} (no file-pattern scan for this agent — judge it from the file tree, and do not read the absence of a count as evidence either way)`;
   }
-  // Stated as a NON-signal on purpose. A curated agent's worth is its ROLE, not a file
-  // count, and these patterns are written for JS-shaped layouts — MEASURED, `api-route-dev`
-  // matches only `app/api/`, `src/routes/`, `routes/`, `src/api/` and `pages/api/`, so a
-  // Drupal 7 repo scores 0 for a routing surface that exists in `hook_menu()`. Saying "the
-  // scan ran and found none" without this made zero the LEAD argument in three declines on
-  // one run, quoted back verbatim.
+  // Deliberately SYMMETRIC. Two opposite failures were measured on one repo from the same
+  // number: saying only "the scan ran and found none" made zero the LEAD argument in three
+  // declines, quoted verbatim — and pushing back the other way ("weak evidence, decline on
+  // what the repo does") aimed at the wrong half, because those zero-based declines were
+  // mostly CORRECT (`api-route-dev` and `config-manager` both verified sound) while the three
+  // models that KEPT api-route-dev never had to say why. So the row states the fact and both
+  // readings, and the `kept` rule below is what makes a retention auditable instead.
   if (c.count === 0) {
-    return `${head} (0 matching files — the scan ran and found none, which is weak evidence for a curated role like this one: these patterns target common JS/framework layouts and miss whole ecosystems, so decline on what the repo DOES, not on this number)`;
+    return `${head} (0 matching files — the scan ran and found none. These patterns target common JS/framework layouts, so a zero can mean the surface lives somewhere they do not look — Drupal routes are \`hook_menu()\` entries in .module files, not route files — or that it genuinely is not here. The number settles nothing on its own in either direction)`;
   }
   const shown = c.matchDirs.map((d) => `${d.dir} (${d.count})`).join(', ');
   const omitted = (c.matchDirTotal ?? c.matchDirs.length) - c.matchDirs.length;
@@ -728,6 +737,7 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '1. Review the file tree, key config files, and the technology inventory above.',
     '2. For each predefined agent, decide if it is relevant to this project (true/false). For every one you set to FALSE, add an entry to `declined` saying why — it stays on the form as an unticked box, and without a reason the user is left guessing. Judge a bundle-sourced agent by its BODY, not its name: a bundle the user imported may still describe work this repository does not do.',
     'A reason must rest on something a reader can check: a path, a symbol, a config key, a line you opened. Where a row breaks its count down by directory, that is where its matches are — do not describe them as something else. If you did not open anything and are reasoning from the stack alone, say so in the reason ("inferred from the framework, not verified") rather than asserting a fact about files you have not read. A confident wrong reason is worse than an admitted inference, because the user cannot tell them apart on the form.',
+    'Symmetry rule: a `true` on a row showing 0 matching files needs a reason too — add it to `kept`. Only those rows: where the scan found matches, or where no scan ran, the count is not in tension with your verdict and no entry is needed. MEASURED on one repo, three CLIs kept an API-route agent on a codebase whose routes are all `hook_menu()` entries and whose row showed zero matches, and all three wrote the id explicitly — so nothing had defaulted through, there was simply no reason to read, while the one CLI that declined it had to justify itself. Retention was unauditable and rejection was not, which made "everyone else kept it" look like agreement when it carried almost nothing.',
     'One trap: a repository may already contain `.claude/agents/`, `.claude/workflow/` or `.claude/knowledge_base/` files from a PRIOR setup — often a different orchestrator with its own agent names and phase documents. Those describe what that setup did, NOT what runs here, and an agent named in one of them is not thereby covered. MEASURED twice on one repo: an agent was declined as "already owned by <name>, dispatched by name in phase5b-test-management.md", a real file from the repo\'s old workflow naming an agent this system never dispatches — while the agent being declined IS one it dispatches by name. Cite such a file as evidence about the REPOSITORY (what it tests, how it is built) and never as evidence about which agent runs when.',
     '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Every Tier 1 row must appear in EXACTLY ONE of `custom` or `skipped`. Put a row in `skipped` ONLY when you are not emitting it — `skipped` is the rejection list, not a place to note what you did, and an entry saying "not skipped, emitted below" contradicts itself. A row you leave out of BOTH is read as an oversight and re-added for you, so a deliberate omission survives only if it is in `skipped`.',
     '4. You MAY suggest additional technical agents not in the inventory if the file tree or config files show another framework/library/tool with non-trivial usage that the inventory missed.',
@@ -759,6 +769,9 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '  ],',
     '  "declined": [',
     '    { "id": "<predefined-agent-id>", "reason": "why it is not a fit for THIS repository" }',
+    '  ],',
+    '  "kept": [',
+    '    { "id": "<predefined-agent-id you set TRUE whose row showed 0 matching files>", "reason": "what work in THIS repository it owns" }',
     '  ],',
     '  "custom": [',
     '    {',
@@ -813,6 +826,9 @@ function parseAgentBody(
   custom: LlmAgentSuggestion[];
   skipped: SkippedInventoryRow[];
   declined: SkippedInventoryRow[];
+  /** Why a candidate the SCAN found nothing for is still worth keeping. Required only
+   *  where the deterministic signal and the verdict disagree — see the prompt rule. */
+  kept: SkippedInventoryRow[];
 } | null {
   const obj = JSON.parse(candidate) as Record<string, unknown>;
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
@@ -837,6 +853,7 @@ function parseAgentBody(
     custom: customIsArray ? (obj.custom as LlmAgentSuggestion[]) : [],
     skipped: parseSkipped(obj.skipped),
     declined: parseSkipped(obj.declined),
+    kept: parseSkipped(obj.kept),
   };
 }
 
@@ -876,6 +893,7 @@ export function parseLlmAgentOutputWithDiagnostic(raw: string): {
     custom: LlmAgentSuggestion[];
     skipped: SkippedInventoryRow[];
     declined: SkippedInventoryRow[];
+    kept: SkippedInventoryRow[];
   } | null;
   diagnostic: AgentParseDiagnostic | null;
 } {
@@ -1107,6 +1125,7 @@ function enrichCandidates(
     custom: LlmAgentSuggestion[];
     skipped?: SkippedInventoryRow[];
     declined?: SkippedInventoryRow[];
+    kept?: SkippedInventoryRow[];
   } | null;
   if (typeof extracted === 'string') {
     const parsed = parseLlmAgentOutputWithDiagnostic(extracted);
@@ -1128,6 +1147,7 @@ function enrichCandidates(
     // Update recommendation flags for predefined agents
     if (llmResult.predefined) {
       const reasonById = new Map((llmResult.declined ?? []).map((d) => [d.id, d.reason]));
+      const keptById = new Map((llmResult.kept ?? []).map((k) => [k.id, k.reason]));
       for (const c of candidates) {
         if (c.id in llmResult.predefined) {
           c.recommended = llmResult.predefined[c.id]!;
@@ -1135,6 +1155,12 @@ function enrichCandidates(
           // would render as an objection to a recommendation.
           const reason = reasonById.get(c.id);
           if (!c.recommended && reason) c.declineReason = reason;
+          // The mirror of declineReason: only meaningful where the scan found nothing and
+          // the model kept it anyway, which is exactly where a bare `true` hid a judgement.
+          if (c.recommended && c.count === 0) {
+            const keep = keptById.get(c.id);
+            if (keep) c.keepReason = keep;
+          }
         }
       }
     }
@@ -1400,7 +1426,9 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
               ? `Kept regardless — later workflow steps call this agent by name. The model advised against it: ${c.declineReason}`
               : `Not recommended: ${c.declineReason}`,
           }
-        : {}),
+        : c.keepReason
+          ? { description: `Kept despite no file matches: ${c.keepReason}` }
+          : {}),
       ...(c.source === 'llm'
         ? { badge: 'AI-suggested', badgeColor: 'amber' as const }
         : c.source === 'bundle'
