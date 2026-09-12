@@ -50,6 +50,11 @@ export interface SecretFinding {
   /** What kind of credential it looks like ('aws access key', 'private key', ...). */
   kind?: string;
   cwe?: string;
+  /** Short sha that introduced the secret, when it survives only in history. Structural
+   *  rather than prose: without it a reader checks the CURRENT file, finds 3 lines where
+   *  the finding said line 25, and concludes the model invented it — which is exactly the
+   *  wrong call to make about a real leak the tree no longer shows. */
+  commit?: string;
   issue: string;
   fix?: string;
 }
@@ -152,12 +157,17 @@ const SWEEP_RULES = [
   'shows whether it was ever committed. Do NOT edit any file and do NOT run any git command',
   'that writes.',
   '',
+  'When a secret survives only in HISTORY, set `commit` to the short sha that introduced it',
+  'and let `path` and `line` describe the file AS OF that commit. Say so in `issue` too. A',
+  'history finding without its sha sends the reader to a working-tree file that no longer',
+  'has the secret, where the honest conclusion is that you made it up.',
+  '',
   'Finding nothing is a normal and welcome result: return an empty findings array rather',
   'than padding it.',
   '',
   'Emit ONE JSON object inside a ```json fenced code block with the shape:',
   '{',
-  '  "findings": [ { "severity": "critical|high|medium|low", "path": "<file>", "line": 0, "symbol": "<enclosing function/key>", "kind": "<what sort of credential>", "cwe": "CWE-798", "issue": "<what is committed and what it unlocks — never the value>", "fix": "<rotate it, then remove it from the tree and from history>" } ],',
+  '  "findings": [ { "severity": "critical|high|medium|low", "path": "<file>", "line": 0, "symbol": "<enclosing function/key>", "kind": "<what sort of credential>", "cwe": "CWE-798", "commit": "<short sha, only when the secret is history-only>", "issue": "<what is committed and what it unlocks — never the value>", "fix": "<rotate it, then remove it from the tree and from history>" } ],',
   '  "dismissed": [ { "path": "<file>", "line": 0, "reason": "<why this candidate is not a committed secret>" } ]',
   '}',
 ] as const;
@@ -245,6 +255,12 @@ export function parseSweepReport(raw: unknown): SweepReport {
             symbol: typeof f.symbol === 'string' ? f.symbol : undefined,
             kind: typeof f.kind === 'string' ? f.kind : undefined,
             cwe: normalizeCweId(f.cwe) ?? undefined,
+            // A sha and nothing else: the field exists to be checked with `git show`, so a
+            // sentence in it would be worse than an absent one.
+            commit:
+              typeof f.commit === 'string' && /^[0-9a-f]{7,40}$/i.test(f.commit.trim())
+                ? f.commit.trim()
+                : undefined,
             issue: typeof f.issue === 'string' ? f.issue : '',
             fix: typeof f.fix === 'string' ? f.fix : undefined,
           };
@@ -283,7 +299,10 @@ export function unruledCandidates(hits: readonly OpaquePathHit[], report: SweepR
 /** One finding as the form renders it. The secret's value is never here — the sweeper is
  *  told not to emit it, and `recordReviewFindings` blanks any snippet that arrives anyway. */
 function findingLine(f: SecretFinding): string {
-  const where = f.line ? `${f.path}:${f.line}` : f.path;
+  const at = f.line ? `${f.path}:${f.line}` : f.path;
+  // Named as history, so nobody opens the working-tree file and reads its absence as proof
+  // the finding is invented.
+  const where = f.commit ? `${at} @ ${f.commit} (in git history)` : at;
   const kind = f.kind ? ` ${f.kind}` : '';
   return `**${f.severity.toUpperCase()}**${kind} — \`${where}\`${f.symbol ? ` (${f.symbol})` : ''}\n${f.issue}${f.fix ? `\n\n_Fix:_ ${f.fix}` : ''}`;
 }

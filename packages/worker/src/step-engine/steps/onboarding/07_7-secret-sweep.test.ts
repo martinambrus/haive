@@ -262,3 +262,44 @@ describe('secretSweepStep.llm.buildPrompt', () => {
     expect(prompt).toContain('do NOT run any git command');
   });
 });
+
+describe('history-only findings carry their commit', () => {
+  it('keeps a sha and drops prose, because the field exists to be run through git show', () => {
+    const [withSha, withProse] = parseSecretFindings(
+      fenced({
+        findings: [
+          { severity: 'high', path: 'a.json', line: 17, issue: 'x', commit: ' fa0d49f ' },
+          { severity: 'high', path: 'b.json', line: 1, issue: 'x', commit: 'an old commit' },
+        ],
+      }),
+    );
+    expect(withSha!.commit).toBe('fa0d49f');
+    expect(withProse!.commit).toBeUndefined();
+  });
+
+  it('names the commit in the form so nobody reads the working tree as a refutation', () => {
+    // MEASURED: two real history-only leaks were reported against files whose CURRENT
+    // contents are 25 and 3 lines long, and checking those files is what makes a correct
+    // finding look invented.
+    const schema = secretSweepStep.form!(
+      {} as never,
+      { repoPath: '/repo', scannable: true },
+      fenced({
+        findings: [
+          {
+            severity: 'critical',
+            path: '.claude/mcp_settings.json',
+            line: 17,
+            issue: 'x',
+            commit: 'fa0d49f',
+          },
+          { severity: 'high', path: 'live.env', line: 2, issue: 'y' },
+        ],
+      }),
+    )!;
+    const bodies = schema.fields.map((f) => (f as { body?: string }).body ?? '');
+    expect(bodies[0]).toContain('.claude/mcp_settings.json:17 @ fa0d49f (in git history)');
+    expect(bodies[1]).toContain('live.env:2');
+    expect(bodies[1]).not.toContain('git history');
+  });
+});
