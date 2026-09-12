@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { KB_DIR, LEGACY_KB_DIR } from '@haive/shared/knowledge-paths';
 import { pathExists } from './_helpers.js';
 
 /* ------------------------------------------------------------------ */
@@ -19,12 +19,30 @@ export interface KbWrite {
   content: string;
 }
 
-/** Matches a leading `<KB_DIR>/` written with either separator. Derived from the
- *  constant so the pattern cannot drift from the path it strips: dots are escaped
- *  and each `/` becomes a separator class. Safe because KB_DIR holds only
- *  alphanumerics, `.`, `-`, `_` and `/`. */
+/** Escape EVERY regex metacharacter, backslash included, so a path means only itself.
+ *
+ *  Hand-escaping just the dot is what the single-root version did, and it was incomplete in
+ *  a way no current input reaches — these constants hold only alphanumerics, `.`, `-`, `_`
+ *  and `/`. Incomplete anyway: a backslash in the input would have survived into the pattern
+ *  as an escape character and changed what the next character meant. `/` is deliberately NOT
+ *  escaped here, because the caller turns it into a separator class after this runs. */
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Matches a leading knowledge-base root written with either separator. Derived from the
+ *  constants so the pattern cannot drift from the paths it strips: every metacharacter is
+ *  escaped, then each `/` becomes a separator class.
+ *
+ *  The LEGACY root is stripped too. A model names a path it saw on disk, and a repo whose
+ *  knowledge predates `.haive-data/` has that tree right there — MEASURED, one run reported
+ *  all 41 of its files under `.claude/knowledge_base/`. Stripping only the new root left
+ *  those unmatched, which the move's own commit predicted would "get a nested directory
+ *  rather than an error". */
 const KB_ROOT_PREFIX_RE = new RegExp(
-  `^${KB_DIR.replace(/\./g, '\\.').replace(/\//g, '[/\\\\]')}[/\\\\]`,
+  `^(?:${[KB_DIR, LEGACY_KB_DIR]
+    .map((d) => escapeRegexLiteral(d).replace(/\//g, '[/\\\\]'))
+    .join('|')})[/\\\\]`,
 );
 
 export interface SafeRelPath {

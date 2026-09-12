@@ -3,6 +3,8 @@ import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { migrateLegacyKnowledge } from './_kb-legacy.js';
+import { sanitizeKbRelPath } from './_kb-write.js';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
@@ -87,6 +89,10 @@ interface KnowledgeApply {
   llmAvailable: boolean;
   /** Count of entries promoted to the global KB as drafts (not written to disk). */
   globalPromoted: number;
+  /** Existing-file paths the agent asked to re-place or improve that the KB scan does not
+   *  know, so nothing was applied for them. Present only when non-empty: a step output is
+   *  what a later reader has, and a silent skip is indistinguishable from nothing to do. */
+  unknownPaths?: string[];
 }
 
 type KbCategory = 'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
@@ -195,6 +201,17 @@ async function scanExistingKb(repoPath: string): Promise<ExistingKbFile[]> {
   return out;
 }
 
+/** The `existingByPath` key for a path the model reported.
+ *
+ *  It names what it saw, and a repo whose knowledge predates `.haive-data/` still shows that
+ *  tree, so the reported path may carry either root — or none, matching the prompt's own
+ *  listing. `sanitizeKbRelPath` strips both, which is what makes the lookup agree with the
+ *  scan instead of silently missing and dropping the item. */
+function existingKbKey(reported: string): string {
+  const safe = sanitizeKbRelPath(reported);
+  return safe.ok ? safe.normalized : reported;
+}
+
 /* ------------------------------------------------------------------ */
 /* LLM prompt                                                          */
 /* ------------------------------------------------------------------ */
@@ -222,6 +239,13 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
           '    genuinely new findings — never drop correct sections or rewrite from scratch.',
           '  Prefer KEEP unless a file is genuinely stale; either way it lands at its canonical',
           '  slot. Emit `entries` ONLY for topics that no existing file covers (genuine gaps).',
+          '',
+          "A file under `legacy/` is this project's OWN earlier knowledge on a topic that a",
+          'newer page already covers — it was accumulated over many past tasks, so treat it as',
+          'evidence, not as clutter. MERGE it: emit ONE `updates` entry for the NEWER page whose',
+          '`sections` fold in everything the legacy file still gets right, and do NOT emit a',
+          'placement that would publish the legacy copy as a page of its own. Say nothing about',
+          'the merge in the body — the result should read as one page.',
           '',
           ...existingKb.map((f) => `- ${f.relPath} — ${f.title}`),
           '',
@@ -1323,6 +1347,27 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     await ctx.emitProgress('Reading README...');
     const readmeExcerpt = await readReadmeExcerpt(ctx.repoPath);
 
+    // BEFORE the scan, so a knowledge base that predates `.haive-data/` is visible to the
+    // reuse prompt below exactly as it was when `KB_DIR` was `.claude/knowledge_base`.
+    // Without this the scan returns nothing, the prompt offers no existing files, and a real
+    // project's accumulated knowledge is silently regenerated from scratch.
+    const migrated = await migrateLegacyKnowledge(ctx.repoPath, ctx.logger);
+    if (migrated.moved.length + migrated.pendingMerge.length > 0) {
+      await ctx.emitProgress(
+        `Migrated ${migrated.moved.length + migrated.pendingMerge.length} knowledge file(s) from .claude/ into ${KB_DIR}` +
+          (migrated.pendingMerge.length > 0
+            ? ` (${migrated.pendingMerge.length} under legacy/ to merge into the page that displaced it)`
+            : '') +
+          '.',
+      );
+    }
+    if (migrated.skipped.length > 0) {
+      ctx.logger.warn(
+        { skipped: migrated.skipped.slice(0, 10), count: migrated.skipped.length },
+        'kb: left some legacy knowledge files in place',
+      );
+    }
+
     const existingKb = await scanExistingKb(ctx.repoPath);
     if (existingKb.length > 0) {
       await ctx.emitProgress(
@@ -1611,9 +1656,19 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // 1a. Updates (auto-applied): write the improved content to the canonical
     //     slot, replacing the stale file. Preserve-correct-content is enforced by
     //     the prompt; git tracks the rewrite as the review/rollback.
+    // Paths the agent named that the KB scan does not know. Collected rather than merely
+    // skipped: MEASURED on a real run, 40 placements and 1 update — every item it reported —
+    // named files under a legacy `.claude/knowledge_base/` tree that `scanExistingKb` does not
+    // read, so all 41 were dropped by these two `continue`s while the step reported success and
+    // wrote its 28 new entries. One of them carried an 8,750-byte ARCHITECTURE body. Absence of
+    // a write is indistinguishable from "nothing to do" unless it is stated.
+    const unknownPaths: string[] = [];
     for (const u of updates) {
-      const src = existingByPath.get(u.path);
-      if (!src) continue;
+      const src = existingByPath.get(existingKbKey(u.path));
+      if (!src) {
+        unknownPaths.push(u.path);
+        continue;
+      }
       const dest = routePlacement(u) ?? src.relPath;
       if (takenDest.has(dest)) continue;
       takenDest.add(dest);
@@ -1641,8 +1696,12 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // 1b. Placements: move the (accurate) existing file verbatim to its slot, OR
     //     re-route a now-global file to the cross-repo KB and delete it locally.
     for (const p of placements) {
-      const src = existingByPath.get(p.path);
-      if (!src || handledSrc.has(src.relPath)) continue;
+      const src = existingByPath.get(existingKbKey(p.path));
+      if (!src) {
+        unknownPaths.push(p.path);
+        continue;
+      }
+      if (handledSrc.has(src.relPath)) continue;
       if (isGlobalRoutedPlacement(p) && rerouteSet.has(p.path)) {
         // Re-route candidate: a reusable house-standard file the user kept ticked.
         // Same deterministic backstop as the entry path — promote only when it is
@@ -1873,6 +1932,13 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // retry re-runs the whole mining pass anyway.
     if (bodyFailures.length === 0) await discardKbDrafts(ctx.repoPath, ctx.logger);
 
+    if (unknownPaths.length > 0) {
+      ctx.logger.warn(
+        { count: unknownPaths.length, sample: unknownPaths.slice(0, 5), kbDir: KB_DIR },
+        'kb: reported existing-file paths are not in the knowledge base; those were not applied',
+      );
+    }
+
     ctx.logger.info(
       {
         written: written.length,
@@ -1880,9 +1946,16 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         llmAvailable,
         topicCount: entries.length,
         draftsKept: bodyFailures.length > 0,
+        unknownPaths: unknownPaths.length,
       },
       'knowledge base written',
     );
-    return { written, topicCount: entries.length, llmAvailable, globalPromoted };
+    return {
+      written,
+      topicCount: entries.length,
+      llmAvailable,
+      globalPromoted,
+      ...(unknownPaths.length > 0 ? { unknownPaths } : {}),
+    };
   },
 };
