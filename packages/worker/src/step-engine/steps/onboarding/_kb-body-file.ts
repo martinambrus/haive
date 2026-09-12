@@ -85,6 +85,28 @@ export async function readKbBodyFile(repoPath: string, declared: string): Promis
   return sections;
 }
 
+/** Read one staged body as RAW TEXT.
+ *
+ *  The sibling of `readKbBodyFile` for a consumer that wants the markdown as written
+ *  rather than split into sections: 09_2 proposes ONE section per answer, so its body is
+ *  already the content under a single heading and parsing it into sections would discard
+ *  the shape the reviewer is about to approve.
+ *
+ *  Empty is a failure for the same reason a missing file is: the index said the agent
+ *  wrote it, and an approved-but-blank KB section is worse than one that never arrived. */
+export async function readKbBodyText(repoPath: string, declared: string): Promise<string> {
+  const abs = resolveKbBodyPath(repoPath, declared);
+  let text: string;
+  try {
+    text = await readFile(abs, 'utf8');
+  } catch {
+    throw new KbBodyPathError(`contentPath declared but not written: ${declared}`);
+  }
+  const trimmed = text.trim();
+  if (trimmed.length === 0) throw new KbBodyPathError(`contentPath is empty: ${declared}`);
+  return trimmed;
+}
+
 /** Anything carrying sections that may instead be staged in a file. */
 export interface WithOptionalBodyPath {
   sections?: KbSection[];

@@ -8,6 +8,12 @@ import {
   scopeInstructionLines,
 } from './_scope.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import {
+  discardKbDrafts,
+  KB_DRAFT_DIR,
+  prepareAgentWritableDir,
+  readKbBodyText,
+} from './_kb-body-file.js';
 import type { KbWrite } from './_kb-write.js';
 import type { KbFileSummary, KnowledgeQaPrepApply } from './09-qa.js';
 import type { EnrichedAgentQuestion, KnowledgeQaSuggestionsApply } from './09_1-qa-suggestions.js';
@@ -27,6 +33,14 @@ export interface AnswerRecord {
    *  the human reviews the answers. */
   proposedWrite?: KbWrite;
 }
+
+/** A `proposedWrite` as the MODEL emitted it: the body is either inline or staged in a
+ *  file. Local to this step on purpose — `apply` resolves it to a plain `KbWrite` before
+ *  anything is stored, so 09_3-qa-review and `KbWrite` itself never learn a second shape. */
+type StagedKbWrite = Omit<KbWrite, 'content'> & { content?: string; contentPath?: string };
+
+/** One answer before its staged body has been read back. */
+type StagedAnswer = Omit<AnswerRecord, 'proposedWrite'> & { proposedWrite?: StagedKbWrite };
 
 export interface UnansweredRecord {
   question: string;
@@ -239,7 +253,17 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     '## Output format',
     '',
-    'Emit exactly ONE JSON object inside a ```json fenced code block:',
+    `WRITE EACH PROPOSED SECTION TO A FILE. For every answer that needs a proposedWrite, use`,
+    `your file-writing tool to create \`${KB_DRAFT_DIR}/<answer-slug>.md\` holding ONLY that`,
+    `section's markdown body — no \`## \` heading line, since \`section\` already names it — then`,
+    `set \`"contentPath"\` to that path and OMIT \`"content"\`.`,
+    '',
+    'This is not a style preference. Every answer you write travels back in ONE reply, and a',
+    'reply long enough to carry all of them is one you will start shortening to fit. Writing',
+    'each body as its own file removes that limit, so write them in full and keep the JSON',
+    'small. An inline `content` string is still accepted for a short section.',
+    '',
+    'Then emit exactly ONE JSON object inside a ```json fenced code block:',
     '```',
     '{',
     '  "answers": [',
@@ -251,7 +275,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '      "proposedWrite": {',
     '        "relPath": "BUSINESS_LOGIC.md",',
     '        "section": "Order partial-delivery semantics",',
-    '        "content": "Multi-paragraph markdown content to APPEND under a new H2 heading."',
+    `        "contentPath": "${KB_DRAFT_DIR}/<answer-slug>.md"`,
     '      }',
     '    }',
     '  ],',
@@ -275,7 +299,8 @@ function buildPrompt(args: LlmBuildArgs): string {
     '  Pick an existing file when possible (see list above); only create new files when no existing',
     '  file fits. New files belong under `QA/<slug>.md` unless a canonical home is obvious.',
     '- proposedWrite.section: an H2 heading that will be appended to the file (do not include the `## ` prefix).',
-    '- proposedWrite.content: markdown body for that section. No leading/trailing blank lines.',
+    '- proposedWrite.contentPath: the staged file holding that section body. Use `content` inline',
+    '  only for a short section; one of the two is required.',
     '- unanswered: include any user question for which neither KB nor code provided an answer.',
     '',
     'Constraints:',
@@ -299,7 +324,7 @@ export class QaResolveParseError extends Error {
 }
 
 interface ParsedResolve {
-  answers: AnswerRecord[];
+  answers: StagedAnswer[];
   unanswered: UnansweredRecord[];
 }
 
@@ -324,7 +349,10 @@ export function parseQaResolveOutput(raw: unknown): ParsedResolve {
 
 /** Parse an answer's optional `proposedWrite`. Required for source `code`/`user`
  *  (the new section to add), absent/ignored for `kb` (already in the KB). */
-function parseProposedWrite(raw: unknown, source: 'kb' | 'code' | 'user'): KbWrite | undefined {
+function parseProposedWrite(
+  raw: unknown,
+  source: 'kb' | 'code' | 'user',
+): StagedKbWrite | undefined {
   if (raw === undefined || raw === null) {
     if (source === 'kb') return undefined;
     throw new QaResolveParseError(`answers.proposedWrite required for source "${source}"`);
@@ -339,10 +367,18 @@ function parseProposedWrite(raw: unknown, source: 'kb' | 'code' | 'user'): KbWri
   if (typeof v.section !== 'string' || v.section.length === 0) {
     throw new QaResolveParseError('answers.proposedWrite.section missing or empty');
   }
-  if (typeof v.content !== 'string' || v.content.length === 0) {
-    throw new QaResolveParseError('answers.proposedWrite.content missing or empty');
+  const inline = typeof v.content === 'string' && v.content.length > 0;
+  const staged = typeof v.contentPath === 'string' && v.contentPath.length > 0;
+  if (!inline && !staged) {
+    throw new QaResolveParseError('answers.proposedWrite needs content or contentPath');
   }
-  return { relPath: v.relPath, section: v.section, content: v.content };
+  return {
+    relPath: v.relPath,
+    section: v.section,
+    // Inline wins, so a model that ignores the staging contract — or a stored output
+    // replayed from before it existed — behaves exactly as it always did.
+    ...(inline ? { content: v.content as string } : { contentPath: v.contentPath as string }),
+  };
 }
 
 function validateResolve(parsed: unknown): ParsedResolve {
@@ -356,7 +392,7 @@ function validateResolve(parsed: unknown): ParsedResolve {
     throw new QaResolveParseError('"answers" and "unanswered" must be arrays');
   }
 
-  const answers: AnswerRecord[] = [];
+  const answers: StagedAnswer[] = [];
   for (const item of answersRaw as unknown[]) {
     if (!item || typeof item !== 'object') {
       throw new QaResolveParseError('answers entry is not an object');
@@ -430,6 +466,10 @@ export const knowledgeQaResolveStep: StepDefinition<
 
     const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
 
+    // The agent stages each proposed section here, so the dir has to exist and be
+    // writable by the sandbox user before the prompt names it.
+    await prepareAgentWritableDir(ctx.repoPath, KB_DRAFT_DIR, ctx.logger);
+
     ctx.logger.info(
       { agentQuestionCount: agentQuestions.length, kbFileCount: kbFiles.length },
       'qa-resolve detect complete',
@@ -456,13 +496,55 @@ export const knowledgeQaResolveStep: StepDefinition<
     const userQuestionCount = splitUserQuestions(values[USER_QUESTIONS_FIELD]).length;
     const agentQuestionCount = collectAgentAnswers(detected.agentQuestions, values).length;
 
+    // Read back any body the agent staged in a file, BEFORE anything is stored, so
+    // 09_3-qa-review sees an ordinary answer. An answer whose body cannot be read moves
+    // to `unanswered` rather than being dropped: the reviewer must see that the question
+    // was worked and lost its section, and approving a blank KB section is worse than
+    // approving nothing.
+    const answers: AnswerRecord[] = [];
+    const unanswered: UnansweredRecord[] = [...parsed.unanswered];
+    let staged = 0;
+    for (const a of parsed.answers) {
+      const w = a.proposedWrite;
+      if (!w) {
+        answers.push({ ...a, proposedWrite: undefined });
+        continue;
+      }
+      if (typeof w.content === 'string' && w.content.length > 0) {
+        answers.push({
+          ...a,
+          proposedWrite: { relPath: w.relPath, section: w.section, content: w.content },
+        });
+        continue;
+      }
+      try {
+        const content = await readKbBodyText(ctx.repoPath, w.contentPath as string);
+        staged++;
+        answers.push({ ...a, proposedWrite: { relPath: w.relPath, section: w.section, content } });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        ctx.logger.warn(
+          { question: a.question, reason },
+          'qa-resolve: staged section could not be read',
+        );
+        unanswered.push({
+          question: a.question,
+          reason: `proposed KB section could not be read: ${reason}`,
+        });
+      }
+    }
+    const bodyFailures = parsed.answers.length - answers.length;
+    if (bodyFailures === 0) await discardKbDrafts(ctx.repoPath, ctx.logger);
+
     ctx.logger.info(
       {
         userQuestionCount,
         agentQuestionCount,
-        answerCount: parsed.answers.length,
-        unansweredCount: parsed.unanswered.length,
-        proposedWriteCount: parsed.answers.filter((a) => a.proposedWrite).length,
+        answerCount: answers.length,
+        unansweredCount: unanswered.length,
+        proposedWriteCount: answers.filter((a) => a.proposedWrite).length,
+        stagedBodies: staged,
+        bodyFailures,
       },
       'qa-resolve apply complete (answers gathered; KB write deferred to 09_3-qa-review)',
     );
@@ -470,8 +552,8 @@ export const knowledgeQaResolveStep: StepDefinition<
     return {
       userQuestionCount,
       agentQuestionCount,
-      answers: parsed.answers,
-      unanswered: parsed.unanswered,
+      answers,
+      unanswered,
     };
   },
 };
