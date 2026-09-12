@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
+import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import {
@@ -9,6 +10,7 @@ import {
   CLI_RULES_END,
   getCliProviderMetadata,
   resolveEffectiveRules,
+  unmanagedAgentsDir,
 } from '@haive/shared';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
@@ -73,6 +75,12 @@ export interface GenerateFilesDetect {
   agentTargets: AgentRenderTarget[];
   plannedAgents: string[];
   existingFiles: string[];
+  /** Files already sitting in an agent target dir that this run does not manage and
+   *  that no live `onboarding_artifacts` row claims — agent definitions an older
+   *  workflow left behind. The CLI's own sub-agent pick list reads them, so they
+   *  compete with the agent Haive wrote for the same job. OPTIONAL: a detect output
+   *  persisted before this existed must still apply. */
+  unmanagedAgentFiles?: { dir: string; files: string[] }[];
   /** Per-repo RTK opt-in. Read from `repositories.rtk_enabled` in detect();
    *  drives the rtk-config template items in the manifest expansion. */
   rtkEnabled: boolean;
@@ -221,6 +229,10 @@ export interface GenerateFilesApply {
   wroteFiles: string[];
   skippedFiles: string[];
   agentCount: number;
+  /** Unmanaged agent definitions moved out of the pick list, when the user asked.
+   *  Present only when something moved — a step output is what a later reader has,
+   *  and an empty array is indistinguishable from a run that never offered it. */
+  quarantinedAgentFiles?: { from: string; to: string }[];
 }
 
 /** Table-style index listing every agent by `name` and `description`. Mirrors the
@@ -411,6 +423,87 @@ function resolveAgents(
   return out;
 }
 
+/** Agent files in a target dir that this run does not manage.
+ *
+ *  Only files whose extension that target's CLI actually READS are reported — being in
+ *  the pick list is the whole reason they matter, so a stray `.md` in a TOML dir is
+ *  inert and left alone — and only regular files, so a subdirectory someone made stays
+ *  where it is. A path carrying a live `onboarding_artifacts` row is never reported:
+ *  that row is the upgrade path's claim on the file, and moving it would leave the row
+ *  pointing at nothing. */
+export async function findUnmanagedAgentFiles(
+  repoPath: string,
+  targets: AgentRenderTarget[],
+  agents: AgentSpec[],
+  claimedPaths: ReadonlySet<string>,
+): Promise<{ dir: string; files: string[] }[]> {
+  const out: { dir: string; files: string[] }[] = [];
+  for (const target of targets) {
+    const ext = target.format === 'toml' ? 'toml' : 'md';
+    const managed = new Set<string>(agents.map((a) => `${a.id}.${ext}`));
+    managed.add('README.md');
+    let entries: Dirent[];
+    try {
+      entries = await readdir(path.join(repoPath, target.dir), { withFileTypes: true });
+    } catch {
+      continue; // no such dir — the ordinary case on a first onboarding
+    }
+    const files = entries
+      .filter((e) => e.isFile())
+      .map((e) => e.name)
+      .filter((name) => name.endsWith(`.${ext}`))
+      .filter((name) => !managed.has(name))
+      .filter((name) => !claimedPaths.has(`${target.dir}/${name}`))
+      .sort();
+    if (files.length > 0) out.push({ dir: target.dir, files });
+  }
+  return out;
+}
+
+/** Names are shown, not just counted: the choice is "are these still wanted", which
+ *  nobody can answer from a number. */
+const UNMANAGED_NAMES_SHOWN = 12;
+
+function unmanagedFilesDescription(groups: { dir: string; files: string[] }[]): string {
+  const parts = groups.map((g) => {
+    const shown = g.files.slice(0, UNMANAGED_NAMES_SHOWN);
+    const rest = g.files.length - shown.length;
+    const names = shown.map((n) => `\`${n}\``).join(', ');
+    const tail = rest > 0 ? `, and ${rest} more` : '';
+    return `\`${g.dir}/\` to \`${unmanagedAgentsDir(g.dir)}/\`: ${names}${tail}`;
+  });
+  parts.push(
+    'Nothing is deleted and one `git mv` undoes it. Leave this off to keep them where ' +
+      'they are: an agent you wrote yourself lands in this list too, because Haive ' +
+      'cannot tell it apart from one an older workflow left behind.',
+  );
+  return parts.join('\n\n');
+}
+
+/** The one file Haive writes into the quarantine dir. Somebody finding a new folder in
+ *  their repo has to be able to tell what it is and how to undo it. Carries no manifest
+ *  of what moved, so a second run rewrites it identically. */
+function legacyAgentsReadme(agentsDir: string, legacyDir: string): string {
+  return [
+    '# Legacy agent definitions',
+    '',
+    `These agent definitions were in \`${agentsDir}/\` before onboarding and Haive does not`,
+    'manage them: no template renders them and no upgrade reconciles them. Your CLI reads',
+    `every definition in \`${agentsDir}/\`, so while they sat there they competed with the`,
+    'agents Haive wrote for the same jobs.',
+    '',
+    'They are kept, not deleted. To put one back:',
+    '',
+    '```sh',
+    `git mv ${legacyDir}/<name> ${agentsDir}/<name>`,
+    '```',
+    '',
+    `A restored definition may again be picked over the \`${agentsDir}/\` agent covering the`,
+    'same ground, which is the situation this directory exists to end.',
+    '',
+  ].join('\n');
+}
+
 export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFilesApply> = {
   metadata: {
     id: '07-generate-files',
@@ -582,12 +675,39 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       if (await pathExists(path.join(ctx.repoPath, rel))) existingFiles.push(rel);
     }
 
+    const taskRows = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    const repositoryId = taskRows[0]?.repositoryId ?? null;
+    const claimedPaths = new Set<string>();
+    if (repositoryId) {
+      const claimed = await ctx.db
+        .select({ diskPath: schema.onboardingArtifacts.diskPath })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        );
+      for (const row of claimed) claimedPaths.add(row.diskPath);
+    }
+    const unmanagedAgentFiles = await findUnmanagedAgentFiles(
+      ctx.repoPath,
+      agentTargets,
+      agents,
+      claimedPaths,
+    );
+
     ctx.logger.info(
       {
         framework,
         language,
         plannedAgents: plannedAgents.length,
         existingFiles: existingFiles.length,
+        unmanagedAgentFiles: unmanagedAgentFiles.reduce((n, g) => n + g.files.length, 0),
       },
       'generate-files detect complete',
     );
@@ -604,6 +724,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       agentTargets,
       plannedAgents,
       existingFiles,
+      unmanagedAgentFiles,
       rtkEnabled,
       enabledCliProviders,
     };
@@ -614,24 +735,39 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       detected.existingFiles.length > 0
         ? ` ${detected.existingFiles.length} existing file(s) may be overwritten if you enable overwrite.`
         : '';
+    const unmanaged = detected.unmanagedAgentFiles ?? [];
+    const unmanagedCount = unmanaged.reduce((n, g) => n + g.files.length, 0);
+    const fields: FormSchema['fields'] = [
+      {
+        type: 'checkbox',
+        id: 'overwrite',
+        label: 'Overwrite existing files',
+        default: false,
+      },
+    ];
+    // Default OFF, like its neighbour: the move is reversible but it is the user's
+    // tree, and an agent they wrote by hand is indistinguishable here from one an
+    // older workflow left behind.
+    if (unmanagedCount > 0) {
+      fields.push({
+        type: 'checkbox',
+        id: 'quarantineUnmanagedAgents',
+        label: `Move ${unmanagedCount} unmanaged agent definition(s) out of the agent director${unmanaged.length === 1 ? 'y' : 'ies'}`,
+        description: unmanagedFilesDescription(unmanaged),
+        default: false,
+      });
+    }
     return {
       title: 'Generate workflow files',
       description: `Plans to write ${detected.plannedAgents.length} agent file(s) plus .claude/workflow-config.json.${existingSummary}`,
-      fields: [
-        {
-          type: 'checkbox',
-          id: 'overwrite',
-          label: 'Overwrite existing files',
-          default: false,
-        },
-      ],
+      fields,
       submitLabel: 'Generate files',
     };
   },
 
   async apply(ctx, args): Promise<GenerateFilesApply> {
     const detected = args.detected as GenerateFilesDetect;
-    const values = args.formValues as { overwrite?: boolean };
+    const values = args.formValues as { overwrite?: boolean; quarantineUnmanagedAgents?: boolean };
     const overwrite = values.overwrite === true;
     const customBodies = new Map((detected.customAgentSpecs ?? []).map((s) => [s.id, s]));
     const agents = resolveAgents(detected.framework, detected.acceptedAgentIds, customBodies);
@@ -639,6 +775,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const wroteFiles: string[] = [];
     const skippedFiles: string[] = [];
     const appendedFiles: string[] = [];
+    const quarantinedAgentFiles: { from: string; to: string }[] = [];
 
     const writeIfAllowed = async (rel: string, contents: string): Promise<void> => {
       const full = path.join(ctx.repoPath, rel);
@@ -719,6 +856,38 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         await writeIfAllowed(`${target.dir}/README.md`, agentsIndexMarkdown(agents, indexExt));
       }
     }
+
+    // Unmanaged definitions out of the pick list, only when asked. Moved rather than
+    // deleted, and to a SIBLING dir rather than a subdirectory — see unmanagedAgentsDir.
+    if (values.quarantineUnmanagedAgents === true) {
+      for (const group of detected.unmanagedAgentFiles ?? []) {
+        const destDir = unmanagedAgentsDir(group.dir);
+        for (const name of group.files) {
+          const from = `${group.dir}/${name}`;
+          const to = `${destDir}/${name}`;
+          const fullTo = path.join(ctx.repoPath, to);
+          // Never clobber: a name already quarantined is an earlier run's file, and
+          // which of the two a person wants is not ours to decide.
+          if (await pathExists(fullTo)) {
+            skippedFiles.push(from);
+            continue;
+          }
+          await mkdir(path.dirname(fullTo), { recursive: true });
+          await rename(path.join(ctx.repoPath, from), fullTo);
+          quarantinedAgentFiles.push({ from, to });
+        }
+        if (quarantinedAgentFiles.some((q) => q.to.startsWith(`${destDir}/`))) {
+          const readmeRel = `${destDir}/README.md`;
+          await writeFile(
+            path.join(ctx.repoPath, readmeRel),
+            legacyAgentsReadme(group.dir, destDir),
+            'utf8',
+          );
+          wroteFiles.push(readmeRel);
+        }
+      }
+    }
+
     if (wantsLocalPhpLsp(detected.lspLanguages)) {
       for (const f of DRUPAL_LSP_FILES) {
         await writeIfAllowed(f.rel, f.content + '\n');
@@ -814,6 +983,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         appended: appendedFiles.length,
         skipped: skippedFiles.length,
         agents: agents.length,
+        quarantined: quarantinedAgentFiles.length,
       },
       'generate-files apply complete',
     );
@@ -821,6 +991,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       wroteFiles: [...wroteFiles, ...appendedFiles],
       skippedFiles,
       agentCount: agents.length,
+      ...(quarantinedAgentFiles.length > 0 ? { quarantinedAgentFiles } : {}),
     };
   },
 };

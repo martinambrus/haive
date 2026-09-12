@@ -14,12 +14,7 @@ import { RetryableParseError } from '../../step-definition.js';
 import type { AgentColor, AgentSpec } from './_agent-templates.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { extractFencedJson } from '../_fenced-json.js';
-import {
-  countFilesMatching,
-  listFilesMatching,
-  pathExists,
-  resolveConfirmedProject,
-} from './_helpers.js';
+import { listFilesMatching, pathExists, resolveConfirmedProject } from './_helpers.js';
 import {
   FILE_COUNT_THRESHOLD,
   buildTechInventory,
@@ -34,6 +29,26 @@ export interface AgentCandidate {
   label: string;
   hint: string;
   count: number;
+  /** WHERE the scan's matches live, as a per-directory count, largest first.
+   *
+   *  A bare count is unfalsifiable, and a model asked to justify a decision will describe
+   *  what it cannot see. MEASURED: `Test writer (77 files)` was declined as "Drupal core
+   *  SimpleTest .test files under modules/" when 75 of the 77 were the project's OWN
+   *  Playwright specs and the regex cannot match a bare `.test` file at all.
+   *
+   *  A per-directory count rather than the first N paths, because walk order is not
+   *  representative and a sample inherits its bias: the same 77 rendered as four example
+   *  paths put two CONTRIB files first (`sites/` sorts before `test-playwright/`), and the
+   *  next run concluded "the remaining scan matches are contrib-bundled files this project
+   *  never edits" — wrong in the opposite direction, from a sample that was accurate.
+   *  Counts per directory cannot mislead by ordering and answer the question a reader
+   *  actually has: is this surface mine or third-party?
+   *
+   *  Absent for candidates with no file pattern, which is a different thing from matching
+   *  nothing. */
+  matchDirs?: { dir: string; count: number }[];
+  /** Distinct directories the matches span, so the render can state what it omitted. */
+  matchDirTotal?: number;
   recommended: boolean;
   /** 'scan' for deterministic file-pattern matches, 'llm' for AI-suggested,
    *  'bundle' for items pulled in from a custom user bundle. */
@@ -45,6 +60,14 @@ export interface AgentCandidate {
    *  had: a decision with no visible reason. Only set when the model declined it —
    *  a recommended agent needs no justification. */
   declineReason?: string;
+  /** Why a zero-match candidate was kept anyway, shown under its ticked box.
+   *
+   *  A `true` needed no justification, so retention was unauditable while rejection was
+   *  fully reasoned — MEASURED, three CLIs kept `api-route-dev` on a repo with no routing
+   *  layer and all four wrote the id explicitly, so nothing had defaulted through; there was
+   *  simply no reason to read. The asymmetry made "nobody else declined it" look like a
+   *  signal when it carried almost nothing. */
+  keepReason?: string;
 }
 
 export interface AgentDiscoveryDetect {
@@ -345,12 +368,28 @@ const FRAMEWORK_AGENTS: Record<string, FrameworkAgent[]> = {
 /* Scanning                                                            */
 /* ------------------------------------------------------------------ */
 
-async function scanPattern(repo: string, pattern: Pattern): Promise<number> {
+/** How many directories to name per candidate. Three separates "all mine", "all
+ *  third-party" and "split" without turning a row into a listing. */
+const SCAN_DIR_LIMIT = 3;
+
+async function scanPattern(
+  repo: string,
+  pattern: Pattern,
+): Promise<{ count: number; dirs: { dir: string; count: number }[]; dirTotal: number }> {
   if (pattern.requireDir) {
     const dir = path.join(repo, pattern.requireDir);
-    if (!(await pathExists(dir))) return 0;
+    if (!(await pathExists(dir))) return { count: 0, dirs: [], dirTotal: 0 };
   }
-  return countFilesMatching(repo, pattern.predicate, 5);
+  const matches = await listFilesMatching(repo, pattern.predicate, 5);
+  const byDir = new Map<string, number>();
+  for (const rel of matches) {
+    const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '.';
+    byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
+  }
+  const dirs = [...byDir.entries()]
+    .map(([dir, count]) => ({ dir, count }))
+    .sort((a, b) => b.count - a.count || a.dir.localeCompare(b.dir));
+  return { count: matches.length, dirs: dirs.slice(0, SCAN_DIR_LIMIT), dirTotal: dirs.length };
 }
 
 export async function discoverAgentCandidates(
@@ -372,9 +411,12 @@ export async function discoverAgentCandidates(
   const scanResults = await mapWithConcurrency(
     uniquePatterns,
     await resolveParallelCap(),
-    async (p) => ({ id: p.id, count: await scanPattern(repo, p) }),
+    async (p) => ({ id: p.id, ...(await scanPattern(repo, p)) }),
   );
   const countById = new Map(scanResults.map((r) => [r.id, r.count]));
+  // Absent for an id with no pattern, which the prompt renders differently from zero
+  // matches: "nothing was looked for" and "nothing was found" are different facts.
+  const dirsById = new Map(scanResults.map((r) => [r.id, r]));
 
   // Build candidate list: baselines first, then framework-specific
   const candidates: AgentCandidate[] = [];
@@ -387,6 +429,9 @@ export async function discoverAgentCandidates(
       label: def.label,
       hint: def.hint,
       count,
+      ...(dirsById.has(def.id)
+        ? { matchDirs: dirsById.get(def.id)!.dirs, matchDirTotal: dirsById.get(def.id)!.dirTotal }
+        : {}),
       recommended: true, // baselines always recommended
     });
     usedIds.add(def.id);
@@ -400,6 +445,9 @@ export async function discoverAgentCandidates(
       label: fa.label,
       hint: fa.hint,
       count,
+      ...(dirsById.has(fa.id)
+        ? { matchDirs: dirsById.get(fa.id)!.dirs, matchDirTotal: dirsById.get(fa.id)!.dirTotal }
+        : {}),
       recommended: count >= THRESHOLD || true, // framework agents always recommended
     });
     usedIds.add(fa.id);
@@ -525,14 +573,107 @@ const MANDATORY_CATEGORIES: ReadonlySet<string> = new Set([
   'api',
 ]);
 
+/** Per-agent and total budgets for the imported bodies below.
+ *
+ *  Bounded because a bundle can hold many agents and a single imported body is a whole
+ *  markdown document — MEASURED, one Drupal reviewer agent's body is 5.8k chars on its own.
+ *  Both caps state their elision in the prompt rather than trimming silently, the same rule
+ *  the fan-out summary budget follows. */
+const BUNDLE_BODY_CHARS = 1_500;
+const BUNDLE_BODY_TOTAL_CHARS = 6_000;
+
+/** The bodies of bundle-sourced agents, so "judge it by its BODY" is answerable.
+ *
+ *  The instruction to judge an imported agent by its body rather than its name predates
+ *  anything supplying one: candidates rendered as `id: label — hint`, and `AgentCandidate.
+ *  body` — populated for exactly these — was never written into the prompt. MEASURED on a
+ *  live run, the model was handed `drupal-reviewer: These MUST pass before committing —
+ *  Expert Drupal code reviewer…` and declined it, saying no agent body was supplied and a
+ *  commit-gate description alone could not establish Drupal 7 compatibility. It was right;
+ *  the three other CLIs accepted the same agent on the same non-evidence. */
+function renderBundleAgentBodies(candidates: readonly AgentCandidate[]): string[] {
+  const bundled = candidates.filter((c) => c.source === 'bundle' && c.body);
+  if (bundled.length === 0) return [];
+  const lines: string[] = [
+    '## Imported agent bodies (from your custom bundles)',
+    '',
+    'These are the FULL definitions behind the bundle-sourced rows above — judge them on this,',
+    'not on their name or one-line description. A bundle the user imported may still describe',
+    'work this repository does not do; say so in `declined` with the reason if it does.',
+    '',
+  ];
+  let spent = 0;
+  let omitted = 0;
+  for (const c of bundled) {
+    if (spent >= BUNDLE_BODY_TOTAL_CHARS) {
+      omitted++;
+      continue;
+    }
+    const mission = (c.body?.coreMission ?? '').trim();
+    const slice =
+      mission.length > BUNDLE_BODY_CHARS ? mission.slice(0, BUNDLE_BODY_CHARS) : mission;
+    spent += slice.length;
+    lines.push(
+      `### ${c.id}`,
+      c.body?.description ? `Description: ${c.body.description}` : '',
+      slice.length > 0 ? slice : '(this bundle item carries no body text)',
+      mission.length > slice.length
+        ? `[body truncated at ${BUNDLE_BODY_CHARS} of ${mission.length} chars — judge on what is shown]`
+        : '',
+      '',
+    );
+  }
+  if (omitted > 0) {
+    lines.push(
+      `[${omitted} further imported ${omitted === 1 ? 'body' : 'bodies'} omitted for length — treat those rows as unverified and say so if you decline them]`,
+      '',
+    );
+  }
+  return lines.filter((l) => l !== '');
+}
+
+/** One candidate row, with the EVIDENCE behind its count.
+ *
+ *  A bare `(77 matching files)` is unfalsifiable, and a model asked to justify a decision
+ *  will describe what it cannot see. MEASURED on a live run, `Test writer (77 files)` was
+ *  declined with "the 77 scanner matches are Drupal core SimpleTest .test files under
+ *  modules/" — in fact 75 were the project's OWN Playwright specs under `test-playwright/`,
+ *  and the scanner's regex requires `.test.<ext>` so it cannot match a bare `.test` file at
+ *  all. The conclusion may still have been right; the stated reason was invented, and a
+ *  sample of the paths is what makes that impossible.
+ *
+ *  A candidate with NO pattern says so, rather than rendering `0 matching files`. "Nothing
+ *  was looked for" and "nothing was found" license opposite conclusions — `api-route-dev`
+ *  only matches `app/api/`, `src/routes/`, `routes/`, `src/api/` and `pages/api/`, so on a
+ *  Drupal 7 repo it scores 0 for a surface that exists and lives in `hook_menu()`. */
+function renderCandidateRow(c: AgentCandidate): string {
+  const head = `- ${c.id}: ${c.label} — ${c.hint}`;
+  if (c.matchDirs === undefined) {
+    return `${head} (no file-pattern scan for this agent — judge it from the file tree, and do not read the absence of a count as evidence either way)`;
+  }
+  // Deliberately SYMMETRIC. Two opposite failures were measured on one repo from the same
+  // number: saying only "the scan ran and found none" made zero the LEAD argument in three
+  // declines, quoted verbatim — and pushing back the other way ("weak evidence, decline on
+  // what the repo does") aimed at the wrong half, because those zero-based declines were
+  // mostly CORRECT (`api-route-dev` and `config-manager` both verified sound) while the three
+  // models that KEPT api-route-dev never had to say why. So the row states the fact and both
+  // readings, and the `kept` rule below is what makes a retention auditable instead.
+  if (c.count === 0) {
+    return `${head} (0 matching files — the scan ran and found none. These patterns target common JS/framework layouts, so a zero can mean the surface lives somewhere they do not look — Drupal routes are \`hook_menu()\` entries in .module files, not route files — or that it genuinely is not here. The number settles nothing on its own in either direction)`;
+  }
+  const shown = c.matchDirs.map((d) => `${d.dir} (${d.count})`).join(', ');
+  const omitted = (c.matchDirTotal ?? c.matchDirs.length) - c.matchDirs.length;
+  const more =
+    omitted > 0 ? `, +${omitted} more ${omitted === 1 ? 'directory' : 'directories'}` : '';
+  return `${head} (${c.count} matching files, by directory: ${shown}${more})`;
+}
+
 export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
   const detected = args.detected as AgentDiscoveryDetect;
   const fileTree = detected.__fileTree ?? '(no file tree)';
   const inventory = detected.__techInventory ?? { items: [], scannedManifests: [] };
 
-  const predefinedList = detected.candidates
-    .map((c) => `- ${c.id}: ${c.label} — ${c.hint} (${c.count} matching files)`)
-    .join('\n');
+  const predefinedList = detected.candidates.map((c) => renderCandidateRow(c)).join('\n');
 
   const baselineIds = new Set(detected.candidates.map((c) => c.id));
   const inventoryNotInBaseline = inventory.items.filter(
@@ -560,7 +701,9 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Agents vs skills — IMPORTANT',
     'AGENTS = technical / framework expertise (how to write a Drupal hook, how to use TCPDF, how to query PostgreSQL with CTEs, how to call LWJGL OpenGL bindings).',
     'SKILLS = business / domain knowledge (what an "inspection" is, the order-fulfilment state machine, which fields belong to which form).',
-    'You are picking AGENTS only. Do NOT propose agents whose value would come from understanding business entities, workflows, or domain rules — those become skills in a later step.',
+    'That split governs the agents YOU PROPOSE: do not invent a custom agent whose value would come from understanding business entities, workflows, or domain rules — those become skills in a later step.',
+    'It does NOT govern the predefined list below. Those are curated roles that already earned their place, and several work ON business-facing material by design — a requirements writer produces prose for stakeholders, an adversary attacks business-logic flaws. Judge each on whether THIS project has that work to do, never on whether the role sounds technical enough. Some are dispatched BY NAME by a later workflow step, so declining one removes a tuned definition that step would otherwise use and falls back to a generic persona.',
+    'Judge each predefined agent on its own. Declining one is not a reason to decline another that touches the same subject.',
     '',
     ...noSubagentInstructionLines(),
     '## Project info',
@@ -578,6 +721,7 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Predefined agents (from deterministic scan)',
     predefinedList,
     '',
+    ...renderBundleAgentBodies(detected.candidates),
     `## Secondary technology inventory (deterministic dep scan + import grep, threshold ${FILE_COUNT_THRESHOLD}+ files for non-framework categories)`,
     inventoryTable,
     '',
@@ -592,6 +736,9 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Instructions',
     '1. Review the file tree, key config files, and the technology inventory above.',
     '2. For each predefined agent, decide if it is relevant to this project (true/false). For every one you set to FALSE, add an entry to `declined` saying why — it stays on the form as an unticked box, and without a reason the user is left guessing. Judge a bundle-sourced agent by its BODY, not its name: a bundle the user imported may still describe work this repository does not do.',
+    'A reason must rest on something a reader can check: a path, a symbol, a config key, a line you opened. Where a row breaks its count down by directory, that is where its matches are — do not describe them as something else. If you did not open anything and are reasoning from the stack alone, say so in the reason ("inferred from the framework, not verified") rather than asserting a fact about files you have not read. A confident wrong reason is worse than an admitted inference, because the user cannot tell them apart on the form.',
+    'Symmetry rule: a `true` on a row showing 0 matching files needs a reason too — add it to `kept`. Only those rows: where the scan found matches, or where no scan ran, the count is not in tension with your verdict and no entry is needed. MEASURED on one repo, three CLIs kept an API-route agent on a codebase whose routes are all `hook_menu()` entries and whose row showed zero matches, and all three wrote the id explicitly — so nothing had defaulted through, there was simply no reason to read, while the one CLI that declined it had to justify itself. Retention was unauditable and rejection was not, which made "everyone else kept it" look like agreement when it carried almost nothing.',
+    'One trap: a repository may already contain `.claude/agents/`, `.claude/workflow/` or `.claude/knowledge_base/` files from a PRIOR setup — often a different orchestrator with its own agent names and phase documents. Those describe what that setup did, NOT what runs here, and an agent named in one of them is not thereby covered. MEASURED twice on one repo: an agent was declined as "already owned by <name>, dispatched by name in phase5b-test-management.md", a real file from the repo\'s old workflow naming an agent this system never dispatches — while the agent being declined IS one it dispatches by name. Cite such a file as evidence about the REPOSITORY (what it tests, how it is built) and never as evidence about which agent runs when.',
     '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Every Tier 1 row must appear in EXACTLY ONE of `custom` or `skipped`. Put a row in `skipped` ONLY when you are not emitting it — `skipped` is the rejection list, not a place to note what you did, and an entry saying "not skipped, emitted below" contradicts itself. A row you leave out of BOTH is read as an oversight and re-added for you, so a deliberate omission survives only if it is in `skipped`.',
     '4. You MAY suggest additional technical agents not in the inventory if the file tree or config files show another framework/library/tool with non-trivial usage that the inventory missed.',
     '5. Do NOT propose agents for business domain concepts (entities, workflows, validation rules, UI flows specific to this app). Those become skills.',
@@ -622,6 +769,9 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '  ],',
     '  "declined": [',
     '    { "id": "<predefined-agent-id>", "reason": "why it is not a fit for THIS repository" }',
+    '  ],',
+    '  "kept": [',
+    '    { "id": "<predefined-agent-id you set TRUE whose row showed 0 matching files>", "reason": "what work in THIS repository it owns" }',
     '  ],',
     '  "custom": [',
     '    {',
@@ -676,6 +826,9 @@ function parseAgentBody(
   custom: LlmAgentSuggestion[];
   skipped: SkippedInventoryRow[];
   declined: SkippedInventoryRow[];
+  /** Why a candidate the SCAN found nothing for is still worth keeping. Required only
+   *  where the deterministic signal and the verdict disagree — see the prompt rule. */
+  kept: SkippedInventoryRow[];
 } | null {
   const obj = JSON.parse(candidate) as Record<string, unknown>;
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
@@ -700,6 +853,7 @@ function parseAgentBody(
     custom: customIsArray ? (obj.custom as LlmAgentSuggestion[]) : [],
     skipped: parseSkipped(obj.skipped),
     declined: parseSkipped(obj.declined),
+    kept: parseSkipped(obj.kept),
   };
 }
 
@@ -739,6 +893,7 @@ export function parseLlmAgentOutputWithDiagnostic(raw: string): {
     custom: LlmAgentSuggestion[];
     skipped: SkippedInventoryRow[];
     declined: SkippedInventoryRow[];
+    kept: SkippedInventoryRow[];
   } | null;
   diagnostic: AgentParseDiagnostic | null;
 } {
@@ -970,6 +1125,7 @@ function enrichCandidates(
     custom: LlmAgentSuggestion[];
     skipped?: SkippedInventoryRow[];
     declined?: SkippedInventoryRow[];
+    kept?: SkippedInventoryRow[];
   } | null;
   if (typeof extracted === 'string') {
     const parsed = parseLlmAgentOutputWithDiagnostic(extracted);
@@ -991,6 +1147,7 @@ function enrichCandidates(
     // Update recommendation flags for predefined agents
     if (llmResult.predefined) {
       const reasonById = new Map((llmResult.declined ?? []).map((d) => [d.id, d.reason]));
+      const keptById = new Map((llmResult.kept ?? []).map((k) => [k.id, k.reason]));
       for (const c of candidates) {
         if (c.id in llmResult.predefined) {
           c.recommended = llmResult.predefined[c.id]!;
@@ -998,6 +1155,12 @@ function enrichCandidates(
           // would render as an objection to a recommendation.
           const reason = reasonById.get(c.id);
           if (!c.recommended && reason) c.declineReason = reason;
+          // The mirror of declineReason: only meaningful where the scan found nothing and
+          // the model kept it anyway, which is exactly where a bare `true` hid a judgement.
+          if (c.recommended && c.count === 0) {
+            const keep = keptById.get(c.id);
+            if (keep) c.keepReason = keep;
+          }
         }
       }
     }
@@ -1263,7 +1426,9 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
               ? `Kept regardless — later workflow steps call this agent by name. The model advised against it: ${c.declineReason}`
               : `Not recommended: ${c.declineReason}`,
           }
-        : {}),
+        : c.keepReason
+          ? { description: `Kept despite no file matches: ${c.keepReason}` }
+          : {}),
       ...(c.source === 'llm'
         ? { badge: 'AI-suggested', badgeColor: 'amber' as const }
         : c.source === 'bundle'

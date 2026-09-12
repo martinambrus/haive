@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import {
   ChevronDown,
   ChevronRight,
@@ -14,6 +15,7 @@ import {
   Plus,
   Trash2,
 } from 'lucide-react';
+import { activeTaskIdFromPath } from '@/lib/active-task';
 import { api, type Task } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
 import { formatDuration } from '@/lib/format-duration';
@@ -76,6 +78,8 @@ export function SidebarTasks({
   onToggleFilter,
   originLabel,
 }: SidebarTasksProps) {
+  // Which task the right-hand pane is showing, so its sidebar row can say so.
+  const activeTaskId = activeTaskIdFromPath(usePathname());
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [error, setError] = useState(false);
   const [dragOver, setDragOver] = useState<{ key: string; intent: DropIntent } | null>(null);
@@ -224,6 +228,7 @@ export function SidebarTasks({
     if (node.kind === 'task') {
       const task = node.task;
       const tone = taskTone(task);
+      const isOpen = task.id === activeTaskId;
       const effort = (task.timing?.workMs ?? 0) + (task.timing?.userActiveMs ?? 0);
       const tokens = task.tokenUsage?.totalTokens ?? 0;
       // The step the task sits on, as the server derives it ("Spec audit (broad) (spec rev 1)").
@@ -253,10 +258,17 @@ export function SidebarTasks({
           {...dragProps(node.key)}
           {...rowDropProps(node.key, container, siblings, false)}
           style={pad}
-          title={`${task.title} — ${TASK_TONE_LABEL[tone]}${phase ? ` — ${phase}` : ''}`}
+          aria-current={isOpen ? 'page' : undefined}
+          title={`${task.title} — ${TASK_TONE_LABEL[tone]}${phase ? ` — ${phase}` : ''}${isOpen ? ' — currently open' : ''}`}
           className={cn(
             'block cursor-grab rounded px-1.5 py-1 transition-colors active:cursor-grabbing',
             TASK_TONE_CLASS[tone],
+            // An OUTLINE, not a tint: the row's background already carries its status
+            // (running / waiting / failed / idle), so marking "open" with another fill would
+            // either collide with that meaning or be mistaken for it. A ring is a free
+            // channel, reads on all four tones, and `ring-inset` keeps it inside the rounded
+            // box so nothing reflows when the selection moves.
+            isOpen && 'ring-1 ring-inset ring-white/70',
             dropMarker(node.key),
           )}
         >

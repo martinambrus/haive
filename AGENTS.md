@@ -256,7 +256,17 @@ stream-json`, stdin held open, one NDJSON user-message per steer.
 - **codex** — NO. `codex exec` is fire-and-forget; `turn/steer` exists only in `codex
 app-server`, a JSON-RPC 2.0 stdio protocol. Adopting it is a second transport (request
   correlation, thread lifecycle, its own event stream replacing `codex-jsonl`, approvals),
-  not a flag.
+  not a flag. `codex queue --thread <id> --message <text>` looks like the way in and is NOT:
+  MEASURED against 0.154.0 on a live authenticated run, it accepts the message and persists
+  it (`Queued message <id> for thread <id>`, exit 0) while the running `exec` never sees it —
+  a three-command run kept going and answered its original prompt, with zero trace of the
+  queued text, and a later `exec resume` with its own prompt did not deliver it either. The
+  `thread/queue/{add,list,delete,start,changed}` RPCs in the binary belong to the app-server
+  the TUI talks to (hence `--remote <ADDR>`); `exec` subscribes to none of them. Its stdin is
+  likewise one-shot — it prints `Reading additional input from stdin...` and waits for EOF
+  before the first turn. Two prerequisites DO already hold if anyone adopts app-server:
+  `thread.started` is the FIRST stream event and carries the `thread_id`, and the adapter
+  passes no `--ephemeral`, so every run has a rollout to address.
 - **grok** — NO. Headless `-p` streams are read-only and the REPL needs a TTY (piped stdin
   dies ENXIO, already recorded in `grok.ts`). Only ACP (`grok agent stdio`) is bidirectional.
 - **antigravity** — NO, and it is the closest miss. It already passes `--input-format

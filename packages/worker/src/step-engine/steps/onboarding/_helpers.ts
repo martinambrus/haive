@@ -1,7 +1,7 @@
 import { readdir, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_PROVIDER_CATALOG,
@@ -9,6 +9,43 @@ import {
   type CliProviderMetadata,
   type CliProviderName,
 } from '@haive/shared';
+
+/** When the run that produced this step's agent output started.
+ *
+ *  The cutoff for judging a staged body stale. Keyed on the INVOCATION rather than the step:
+ *  a step row survives a retry and an orphan re-dispatch, so its own `started_at` would
+ *  happily vouch for a body written by an attempt that no longer exists. Falls back to the
+ *  newest live invocation on the step for callers that have no id in hand (prepareForm).
+ *
+ *  Returns undefined rather than a guess when nothing can be resolved — a bypass stub or a
+ *  step whose output came from a fan-out has no single run, and inventing a cutoff there
+ *  would reject bodies for being written at the wrong time by a clock nobody consulted. */
+export async function loadRunStartedAt(
+  db: Database,
+  taskStepId: string,
+  invocationId?: string | null,
+): Promise<Date | undefined> {
+  if (invocationId) {
+    const rows = await db
+      .select({ startedAt: schema.cliInvocations.startedAt })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.id, invocationId))
+      .limit(1);
+    return rows[0]?.startedAt ?? undefined;
+  }
+  const rows = await db
+    .select({ startedAt: schema.cliInvocations.startedAt })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.startedAt))
+    .limit(1);
+  return rows[0]?.startedAt ?? undefined;
+}
 
 export async function loadCliProviderMetadata(
   db: Database,

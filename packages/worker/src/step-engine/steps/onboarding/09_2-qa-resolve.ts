@@ -1,7 +1,7 @@
 import type { FormField, FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from './_helpers.js';
+import { loadPreviousStepOutput, loadRunStartedAt } from './_helpers.js';
 import {
   loadMiningScopeExcludeGlobs,
   noSubagentInstructionLines,
@@ -501,6 +501,7 @@ export const knowledgeQaResolveStep: StepDefinition<
     // to `unanswered` rather than being dropped: the reviewer must see that the question
     // was worked and lost its section, and approving a blank KB section is worse than
     // approving nothing.
+    const runStartedAt = await loadRunStartedAt(ctx.db, ctx.taskStepId, args.llmInvocationId);
     const answers: AnswerRecord[] = [];
     const unanswered: UnansweredRecord[] = [...parsed.unanswered];
     let staged = 0;
@@ -518,7 +519,7 @@ export const knowledgeQaResolveStep: StepDefinition<
         continue;
       }
       try {
-        const content = await readKbBodyText(ctx.repoPath, w.contentPath as string);
+        const content = await readKbBodyText(ctx.repoPath, w.contentPath as string, runStartedAt);
         staged++;
         answers.push({ ...a, proposedWrite: { relPath: w.relPath, section: w.section, content } });
       } catch (err) {

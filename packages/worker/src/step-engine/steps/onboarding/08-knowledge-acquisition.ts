@@ -3,11 +3,16 @@ import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
-import { migrateLegacyKnowledge } from './_kb-legacy.js';
+import { LEGACY_IMPORT_SUBDIR, migrateLegacyKnowledge } from './_kb-legacy.js';
 import { sanitizeKbRelPath } from './_kb-write.js';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import {
+  listFilesMatching,
+  loadPreviousStepOutput,
+  loadRunStartedAt,
+  pathExists,
+} from './_helpers.js';
 import {
   isDeniedFile,
   loadMiningScopeExcludeGlobs,
@@ -79,6 +84,10 @@ interface ExistingKbFile {
   title: string;
 }
 
+/** A `written` row promoted to the global KB carries no repo file, so its `filePath` is
+ *  this sentinel rather than a path. */
+const GLOBAL_KB_FILE_PATH_PREFIX = 'global-kb:';
+
 interface KnowledgeApply {
   written: {
     id: string;
@@ -93,6 +102,11 @@ interface KnowledgeApply {
    *  know, so nothing was applied for them. Present only when non-empty: a step output is
    *  what a later reader has, and a silent skip is indistinguishable from nothing to do. */
   unknownPaths?: string[];
+  /** `legacy/` imports deleted because an update folded their content into a newer page. */
+  mergedRemoved?: string[];
+  /** Markdown files under `KB_DIR` once this step finished. `07_5-verify-files` used to
+   *  count them one step before they existed, so it failed on every run ever recorded. */
+  kbFileCount: number;
 }
 
 type KbCategory = 'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
@@ -247,6 +261,11 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
           'placement that would publish the legacy copy as a page of its own. Say nothing about',
           'the merge in the body — the result should read as one page.',
           '',
+          'List every legacy page you folded in as `mergedFrom` on that SAME update entry, so',
+          'the merged copy is removed once the page is written. Omit it if you merged nothing:',
+          'a legacy page you leave out simply stays, which is untidy but loses nothing, whereas',
+          'naming one you did NOT actually fold in discards knowledge that is then in no page.',
+          '',
           ...existingKb.map((f) => `- ${f.relPath} — ${f.title}`),
           '',
         ]
@@ -372,7 +391,7 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '    { "path": "<existing knowledge_base file path from the list above>", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug, required when category is a tech bucket>", "scope": "local | global (omit for local)" }',
     '  ],',
     '  "updates": [',
-    `    { "path": "<existing knowledge_base file to IMPROVE>", "title": "...", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug when a tech bucket>", "bodyPath": "<draft file holding the improved markdown — preserve correct content, revise stale parts, add new findings>" }`,
+    `    { "path": "<existing knowledge_base file to IMPROVE>", "title": "...", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug when a tech bucket>", "bodyPath": "<draft file holding the improved markdown — preserve correct content, revise stale parts, add new findings>", "mergedFrom": ["legacy/<FILE>.md — omit unless you folded a legacy page into this one"] }`,
     '  ]',
     '}',
     '```',
@@ -570,6 +589,10 @@ export interface KbUpdate {
   sections: { heading: string; body: string }[];
   /** As KbEntry.bodyPath. */
   bodyPath?: string;
+  /** Legacy pages whose content this update folded in, so apply can delete them once the
+   *  merged page is written. Honoured ONLY for paths under the `legacy/` import dir — see
+   *  the removal site for why that restriction is load-bearing. */
+  mergedFrom?: string[];
 }
 
 function isValidUpdate(val: unknown): val is KbUpdate {
@@ -577,6 +600,13 @@ function isValidUpdate(val: unknown): val is KbUpdate {
   const v = val as Record<string, unknown>;
   if (typeof v.path !== 'string' || v.path.length === 0) return false;
   if (typeof v.title !== 'string') return false;
+  // Optional, and a malformed one is DROPPED rather than failing the update: losing the
+  // merged page would be a far worse outcome than leaving a legacy duplicate behind.
+  if (v.mergedFrom !== undefined) {
+    if (!Array.isArray(v.mergedFrom) || v.mergedFrom.some((x) => typeof x !== 'string')) {
+      delete v.mergedFrom;
+    }
+  }
   if (typeof v.bodyPath === 'string' && v.bodyPath.length > 0 && v.sections === undefined) {
     return true;
   }
@@ -1430,10 +1460,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       ...parseKbUpdates(llmOutput ?? null).map((u) => ({ id: u.path, bodyPath: u.bodyPath })),
     ].filter((x): x is { id: string; bodyPath: string } => typeof x.bodyPath === 'string');
     if (staged.length === 0) return;
+    const notBefore = await loadRunStartedAt(ctx.db, ctx.taskStepId);
     const counts: Record<string, number> = {};
     for (const x of staged) {
       try {
-        counts[x.id] = (await readKbBodyFile(ctx.repoPath, x.bodyPath)).length;
+        counts[x.id] = (await readKbBodyFile(ctx.repoPath, x.bodyPath, notBefore)).length;
       } catch {
         counts[x.id] = 0; // apply reports the real failure; the form just shows a number
       }
@@ -1622,8 +1653,12 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // them learned a new shape. A failure drops that entry and is reported: one
     // unreadable body must not discard the fifteen beside it that are fine, and an entry
     // published with no sections would put a blank page under a canonical KB name.
-    const entryBodies = await resolveBodies(ctx.repoPath, rawEntries);
-    const updateBodies = await resolveBodies(ctx.repoPath, rawUpdates);
+    // A body older than the run that declared it belongs to an attempt that no longer
+    // exists — see resolveStagedFile. Keyed on the invocation, because the step row outlives
+    // both a retry and an orphan re-dispatch.
+    const runStartedAt = await loadRunStartedAt(ctx.db, ctx.taskStepId, args.llmInvocationId);
+    const entryBodies = await resolveBodies(ctx.repoPath, rawEntries, runStartedAt);
+    const updateBodies = await resolveBodies(ctx.repoPath, rawUpdates, runStartedAt);
     const entries = entryBodies.resolved;
     const updates = updateBodies.resolved;
     const bodyFailures = [...entryBodies.failures, ...updateBodies.failures];
@@ -1663,6 +1698,8 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // wrote its 28 new entries. One of them carried an 8,750-byte ARCHITECTURE body. Absence of
     // a write is indistinguishable from "nothing to do" unless it is stated.
     const unknownPaths: string[] = [];
+    /** Legacy pages deleted because an update folded their content into a newer page. */
+    const mergedRemoved: string[] = [];
     for (const u of updates) {
       const src = existingByPath.get(existingKbKey(u.path));
       if (!src) {
@@ -1687,6 +1724,28 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           'utf8',
         );
         if (dest !== src.relPath) await rm(path.join(kbDir, src.relPath), { force: true });
+        // The legacy copies this page absorbed. Removed only AFTER the merged page is on
+        // disk, so a failed write leaves the original where it is rather than deleting the
+        // one surviving copy of that knowledge.
+        //
+        // Restricted to the `legacy/` import dir, and that is the whole safety of this
+        // feature rather than a tidiness rule: `mergedFrom` is agent-supplied, so without it
+        // a model naming any KB page there — or the very page it just wrote — would have it
+        // deleted. Files under `legacy/` are ones THIS step imported and whose content is by
+        // construction duplicated in the page that displaced them.
+        for (const merged of u.mergedFrom ?? []) {
+          const rel = existingKbKey(merged);
+          const safe = sanitizeKbRelPath(rel);
+          if (!safe.ok || !safe.normalized.startsWith(`${LEGACY_IMPORT_SUBDIR}/`)) {
+            ctx.logger.warn(
+              { path: merged, dest },
+              'kb: refusing to delete a merged source outside the legacy import dir',
+            );
+            continue;
+          }
+          await rm(path.join(kbDir, safe.normalized), { force: true });
+          mergedRemoved.push(safe.normalized);
+        }
         written.push({ id: src.relPath, filePath: destPath, source: 'updated' });
       } catch (err) {
         ctx.logger.warn({ err, path: u.path, dest }, 'kb update write failed');
@@ -1751,7 +1810,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
               globalPromoted += 1;
               written.push({
                 id: src.relPath,
-                filePath: `global-kb:${promo.id}`,
+                filePath: `${GLOBAL_KB_FILE_PATH_PREFIX}${promo.id}`,
                 source: 'global',
               });
             } else if (promo?.deduped) {
@@ -1870,7 +1929,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         );
         if (promo && !promo.deduped) {
           globalPromoted += 1;
-          written.push({ id: e.id, filePath: `global-kb:${promo.id}`, source: 'global' });
+          written.push({
+            id: e.id,
+            filePath: `${GLOBAL_KB_FILE_PATH_PREFIX}${promo.id}`,
+            source: 'global',
+          });
         }
       }
 
@@ -1927,6 +1990,26 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       );
     }
 
+    // Every page this step believes it wrote has to be on disk. Asserted against the step's
+    // OWN intent rather than a constant: a run where the user selected two topics is a
+    // two-page knowledge base and not a defect, which is why the fixed ">= 3" this replaces
+    // could not live at `07_5-verify-files` and cannot live here either. Thrown BEFORE the
+    // discard below, so a run that lost a page keeps its drafts as the evidence.
+    const expectedOnDisk = written
+      .map((w) => w.filePath)
+      .filter((fp) => !fp.startsWith(GLOBAL_KB_FILE_PATH_PREFIX));
+    const missingPages: string[] = [];
+    for (const fp of expectedOnDisk) {
+      if (!(await pathExists(fp))) missingPages.push(path.relative(ctx.repoPath, fp));
+    }
+    if (missingPages.length > 0) {
+      throw new Error(
+        `knowledge base incomplete: ${missingPages.length} of ${expectedOnDisk.length} pages ` +
+          `this step wrote are not on disk under ${KB_DIR} ` +
+          `(${missingPages.slice(0, 5).join(', ')})`,
+      );
+    }
+
     // The drafts have been filed; keep them only when something could not be read, since
     // that is the one case where the files on disk are the evidence a human needs and a
     // retry re-runs the whole mining pass anyway.
@@ -1947,6 +2030,8 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         topicCount: entries.length,
         draftsKept: bodyFailures.length > 0,
         unknownPaths: unknownPaths.length,
+        mergedRemoved: mergedRemoved.length,
+        kbFileCount: finalFiles.length,
       },
       'knowledge base written',
     );
@@ -1955,7 +2040,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       topicCount: entries.length,
       llmAvailable,
       globalPromoted,
+      kbFileCount: finalFiles.length,
       ...(unknownPaths.length > 0 ? { unknownPaths } : {}),
+      ...(mergedRemoved.length > 0 ? { mergedRemoved } : {}),
     };
   },
 };
