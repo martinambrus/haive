@@ -71,6 +71,28 @@ export async function mcpSettingsDefaultFor(repoPath: string): Promise<string> {
   return JSON.stringify({ mcpServers: { ...managed, ...Object.fromEntries(extra) } }, null, 2);
 }
 
+/** Names of the servers the prefill carried over from the repo's own file.
+ *
+ *  These are REPOSITORY-CONTROLLED commands: the file is user-owned and usually holds servers
+ *  the user added, but a cloned repo can ship one too, and the prefilled value is accepted by
+ *  submitting the form. So the field NAMES them rather than merging them in silently — the
+ *  same stance the review dimensions take, where a skipped one is disclosed and never implied. */
+export async function repoOwnedMcpServerNames(repoPath: string): Promise<string[]> {
+  const raw = await readFile(path.join(repoPath, '.claude/mcp_settings.json'), 'utf8').catch(
+    () => null,
+  );
+  if (raw === null) return [];
+  try {
+    const onDisk = (JSON.parse(raw) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
+    const managed =
+      (JSON.parse(DEFAULT_MCP_SETTINGS_JSON) as { mcpServers?: Record<string, unknown> })
+        .mcpServers ?? {};
+    return Object.keys(onDisk).filter((name) => !(name in managed));
+  } catch {
+    return [];
+  }
+}
+
 interface ToolingDetect {
   primaryLanguage: string;
   containerType: string;
@@ -90,6 +112,9 @@ interface ToolingDetect {
   chromeVersionLabel: string;
   /** Starting content for the MCP textarea: managed servers plus this repo's own. */
   mcpSettingsDefault: string;
+  /** Servers the prefill carried over from the repo's own file, named in the field so
+   *  submitting unchanged is an informed choice rather than a blind one. */
+  repoOwnedMcpServers?: string[];
   /** Per-LSP-option version badge (option value → "version (latest)"). Absent for
    *  the unpinnable servers (rust → rust-analyzer, java → jdtls). */
   lspVersionByOption: Record<string, string>;
@@ -244,6 +269,7 @@ export const toolingInfrastructureStep: StepDefinition<
       rtkVersionLabel: fmtVersion(rtkVersionPin, 'rtk'),
       chromeVersionLabel: fmtVersion(chromeMcpPin, 'chrome-devtools-mcp'),
       mcpSettingsDefault: await mcpSettingsDefaultFor(ctx.repoPath),
+      repoOwnedMcpServers: await repoOwnedMcpServerNames(ctx.repoPath),
       lspVersionByOption,
     };
   },
@@ -338,6 +364,9 @@ export const toolingInfrastructureStep: StepDefinition<
           id: 'mcpSettingsJson',
           label: 'MCP server definitions (.claude/mcp_settings.json)',
           description:
+            (detected.repoOwnedMcpServers && detected.repoOwnedMcpServers.length > 0
+              ? `REVIEW BEFORE SUBMITTING: ${detected.repoOwnedMcpServers.length} server definition${detected.repoOwnedMcpServers.length === 1 ? '' : 's'} below came from this repository's own .claude/mcp_settings.json (${detected.repoOwnedMcpServers.join(', ')}), not from haive. Each one is a command this CLI will execute. Keep them only if you recognise them; delete any you do not. `
+              : '') +
             (detected.cliSupportsMcp
               ? ''
               : `WARNING: ${detected.cliDisplayName ?? 'the current CLI'} does not support MCP in haive. Settings will be saved but ignored until you switch to a CLI that does (e.g. Claude Code, Codex, Gemini, Z.AI). `) +
