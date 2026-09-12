@@ -26,6 +26,7 @@ import {
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
   ONBOARDING_TOOLING_INFRA_KEYS,
   sha256Hex,
+  unmanagedAgentsDir,
 } from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
@@ -69,6 +70,12 @@ const INIT_COMMIT_MESSAGE = [
 const BASE_STAGE_PATHS = [
   '.gitignore',
   '.claude/agents/',
+  // 07 moves unmanaged agent definitions to a SIBLING of the agents dir, so this
+  // commit has to reach it: without it the commit records the deletions from
+  // `.claude/agents/` and none of the additions, which reads as Haive deleting them.
+  // Absent paths are filtered out before `git add`, so this costs nothing when the
+  // user declined the move.
+  `${unmanagedAgentsDir('.claude/agents')}/`,
   '.claude/skills/',
   '.claude/workflow/',
   '.claude/mcp_settings.json',
@@ -102,7 +109,10 @@ async function resolveStagePaths(
   for (const row of providerRows) {
     if (!row.enabled) continue;
     const meta = getCliProviderMetadata(row.name as CliProviderName);
-    if (meta.projectAgentsDir) paths.add(`${meta.projectAgentsDir}/`);
+    if (meta.projectAgentsDir) {
+      paths.add(`${meta.projectAgentsDir}/`);
+      paths.add(`${unmanagedAgentsDir(meta.projectAgentsDir)}/`);
+    }
     if (meta.projectSkillsDir) paths.add(`${meta.projectSkillsDir}/`);
   }
   // Stage every tracked onboarding artifact for this repo so the AGENTS.md

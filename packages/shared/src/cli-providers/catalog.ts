@@ -492,6 +492,16 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
 
 export const CLI_PROVIDER_LIST: CliProviderMetadata[] = Object.values(CLI_PROVIDER_CATALOG);
 
+/** Where onboarding moves agent definitions it does not manage, so a CLI's own
+ *  `<agents dir>/*.md` pick list stops offering them.
+ *
+ *  A SIBLING of the agents directory, never a subdirectory of it: whether the claude
+ *  binary recurses is INFERENCE (it carries `agents/*.md` doc strings and no `**` md
+ *  glob at all) rather than a measurement, and a sibling is correct either way. */
+export function unmanagedAgentsDir(projectAgentsDir: string): string {
+  return `${projectAgentsDir}-legacy`;
+}
+
 /** Provider names whose reported costUsd is a real backend price (safe to sum as $).
  *  Used by the token telemetry to keep local/subscription/mispriced $ out of the
  *  headline cost. See CliProviderMetadata.costBasis. */
