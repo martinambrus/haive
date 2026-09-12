@@ -1281,6 +1281,11 @@ taskRoutes.post('/:id/steer-active-cli', async (c) => {
   await appendTaskEvent(db, id, active.taskStepId, 'steering.nudge', {
     text,
     targetStepId: active.taskStepId,
+    // WHICH run was steered, not just which step. A step can hold many invocations (a
+    // retry, a multi-agent fan-out), and without this the terminal can only filter by step
+    // — so every panel replayed every panel's steers and misattributed what each agent was
+    // actually told.
+    invocationId: active.id,
     round,
     source: 'ui',
   });

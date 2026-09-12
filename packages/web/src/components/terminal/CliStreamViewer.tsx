@@ -6,6 +6,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
+import { restoreSteers } from '@/lib/steer-history';
 import { api, apiWebSocketUrl, type TaskEvent } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
 import { copyTerminalSelection } from '@/lib/terminal-copy';
@@ -147,7 +148,7 @@ export function CliStreamViewer({
   const [steers, setSteers] = useState<SteerEntry[]>([]);
   const [steerListOpen, setSteerListOpen] = useState(false);
 
-  // Restore what this step has already been steered with. Runs once per mount and only
+  // Restore what THIS invocation has already been steered with. Runs once per mount and only
   // SEEDS: a live `sent` or `steer_consumed` frame arriving later appends as usual, and
   // an id already present is not duplicated, so a reopened terminal during a live run
   // shows history then keeps tracking.
@@ -158,13 +159,7 @@ export function CliStreamViewer({
       .get<{ events: TaskEvent[] }>(`/tasks/${taskId}/events?type=steering.nudge`)
       .then((data) => {
         if (cancelled) return;
-        const restored: SteerEntry[] = (data.events ?? [])
-          .filter((e) => e.taskStepId === stepRowId)
-          .map((e) => ({
-            id: `history:${e.id}`,
-            text: typeof e.payload?.text === 'string' ? e.payload.text : '(no text recorded)',
-            status: 'historical' as const,
-          }));
+        const restored: SteerEntry[] = restoreSteers(data.events, stepRowId, invocationId);
         if (restored.length === 0) return;
         setSteers((prev) => {
           const seen = new Set(prev.map((p) => p.id));
@@ -177,7 +172,7 @@ export function CliStreamViewer({
     return () => {
       cancelled = true;
     };
-  }, [taskId, stepRowId]);
+  }, [taskId, stepRowId, invocationId]);
   const steerListRef = useRef<HTMLDivElement | null>(null);
   const onExitRef = useRef(onExit);
 
