@@ -30,10 +30,23 @@ function makeCtx(repo: string): StepContext {
     repoPath: repo,
     workspacePath: repo,
     cliProviderId: null,
-    db: {} as unknown as Database,
+    db: noRowsDb(),
     logger: logger.child({ test: 'knowledge-acquisition' }),
     emitProgress: async () => {},
   };
+}
+
+/** Minimal `db` for apply(): it resolves the run's start time to decide whether a staged
+ *  body predates the attempt that declared it. No rows means no cutoff, which is the
+ *  behaviour these cases want. */
+function noRowsDb(): Database {
+  const chain = {
+    from: () => chain,
+    where: () => chain,
+    orderBy: () => chain,
+    limit: async () => [] as unknown[],
+  };
+  return { select: () => chain } as unknown as Database;
 }
 
 describe('parseKbEntries', () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readFile, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -229,6 +229,65 @@ describe('prepareAgentWritableDir isolates attempts', () => {
     await writeFile(path.join(dir, '.haive', 'install.json'), '{"keep":true}');
     await prepareAgentWritableDir(dir, KB_DRAFT_DIR);
     expect(await readFile(path.join(dir, '.haive', 'install.json'), 'utf8')).toContain('keep');
+  });
+});
+
+// `prepareAgentWritableDir` empties the staging dir per attempt, which closes staleness for
+// a RETRY because detect re-runs. An invocation orphaned by a worker restart is RE-DISPATCHED
+// WITHOUT detect, so the killed run's bodies survive at the same deterministic names.
+// MEASURED: 14 of them did, and only the agent happening to rewrite every path it declared
+// kept stale content out of the knowledge base.
+describe('a staged body older than its run is refused', () => {
+  let dir: string;
+  const runStart = new Date('2026-09-12T16:26:00Z');
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'haive-kbstale-'));
+    await mkdir(path.join(dir, KB_DRAFT_DIR), { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function stage(name: string, mtime: string): Promise<string> {
+    const abs = path.join(dir, KB_DRAFT_DIR, name);
+    await writeFile(abs, '## H\n\nbody\n');
+    const when = new Date(mtime);
+    await utimes(abs, when, when);
+    return `${KB_DRAFT_DIR}/${name}`;
+  }
+
+  it('refuses a body left by the attempt that was killed', async () => {
+    const declared = await stage('architecture.md', '2026-09-12T16:05:00Z');
+    await expect(readKbBodyFile(dir, declared, runStart)).rejects.toThrow(/predates this run/);
+    await expect(readKbBodyText(dir, declared, runStart)).rejects.toThrow(KbBodyPathError);
+  });
+
+  it('accepts a body this run wrote', async () => {
+    const declared = await stage('architecture.md', '2026-09-12T16:31:00Z');
+    await expect(readKbBodyText(dir, declared, runStart)).resolves.toContain('body');
+  });
+
+  // A false rejection discards a body the agent really wrote, which is the worse direction to
+  // be wrong in, so a small clock difference is forgiven.
+  it('forgives sub-second clock slop either side of the boundary', async () => {
+    const declared = await stage('architecture.md', '2026-09-12T16:25:59Z');
+    await expect(readKbBodyText(dir, declared, runStart)).resolves.toContain('body');
+  });
+
+  // No cutoff is knowable for a bypass stub or a fan-out, and inventing one would reject good
+  // bodies against a clock nobody consulted.
+  it('applies no cutoff when none is given', async () => {
+    const declared = await stage('architecture.md', '2020-01-01T00:00:00Z');
+    await expect(readKbBodyText(dir, declared)).resolves.toContain('body');
+  });
+
+  it('drops only the stale entries and keeps the fresh ones beside them', async () => {
+    const stale = await stage('stale.md', '2026-09-12T16:05:00Z');
+    const fresh = await stage('fresh.md', '2026-09-12T16:33:00Z');
+    const r = await resolveBodies(dir, [{ bodyPath: fresh }, { bodyPath: stale }], runStart);
+    expect(r.resolved).toHaveLength(1);
+    expect(r.failures).toHaveLength(1);
+    expect(r.failures[0]!.reason).toMatch(/predates this run/);
   });
 });
 

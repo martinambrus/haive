@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { Database } from '@haive/database';
 import {
   parseQaPrepOutput,
   QaPrepParseError,
@@ -373,6 +374,19 @@ describe('parseQaResolveOutput', () => {
 /* knowledgeQaResolveStep.apply (gather-only — no KB write)            */
 /* ------------------------------------------------------------------ */
 
+/** Minimal `db` for apply(): it resolves the run's start time to decide whether a staged
+ *  body predates the attempt that declared it. No rows means no cutoff, which is the
+ *  behaviour these cases want. */
+function noRowsDb(): Database {
+  const chain = {
+    from: () => chain,
+    where: () => chain,
+    orderBy: () => chain,
+    limit: async () => [] as unknown[],
+  };
+  return { select: () => chain } as unknown as Database;
+}
+
 describe('knowledgeQaResolveStep.apply', () => {
   let tmpRoot: string;
   let kbDir: string;
@@ -396,9 +410,7 @@ describe('knowledgeQaResolveStep.apply', () => {
       workspacePath: tmpRoot,
       sandboxWorkdir: '/repo',
       cliProviderId: null,
-      // The apply function only uses logger; the rest is stubbed.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      db: undefined as any,
+      db: noRowsDb(),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       logger: { info() {}, warn() {}, error() {}, debug() {} } as any,
       async emitProgress() {},

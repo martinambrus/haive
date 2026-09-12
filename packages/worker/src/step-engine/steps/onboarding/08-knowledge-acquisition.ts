@@ -7,7 +7,12 @@ import { migrateLegacyKnowledge } from './_kb-legacy.js';
 import { sanitizeKbRelPath } from './_kb-write.js';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import {
+  listFilesMatching,
+  loadPreviousStepOutput,
+  loadRunStartedAt,
+  pathExists,
+} from './_helpers.js';
 import {
   isDeniedFile,
   loadMiningScopeExcludeGlobs,
@@ -1430,10 +1435,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       ...parseKbUpdates(llmOutput ?? null).map((u) => ({ id: u.path, bodyPath: u.bodyPath })),
     ].filter((x): x is { id: string; bodyPath: string } => typeof x.bodyPath === 'string');
     if (staged.length === 0) return;
+    const notBefore = await loadRunStartedAt(ctx.db, ctx.taskStepId);
     const counts: Record<string, number> = {};
     for (const x of staged) {
       try {
-        counts[x.id] = (await readKbBodyFile(ctx.repoPath, x.bodyPath)).length;
+        counts[x.id] = (await readKbBodyFile(ctx.repoPath, x.bodyPath, notBefore)).length;
       } catch {
         counts[x.id] = 0; // apply reports the real failure; the form just shows a number
       }
@@ -1622,8 +1628,12 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // them learned a new shape. A failure drops that entry and is reported: one
     // unreadable body must not discard the fifteen beside it that are fine, and an entry
     // published with no sections would put a blank page under a canonical KB name.
-    const entryBodies = await resolveBodies(ctx.repoPath, rawEntries);
-    const updateBodies = await resolveBodies(ctx.repoPath, rawUpdates);
+    // A body older than the run that declared it belongs to an attempt that no longer
+    // exists — see resolveStagedFile. Keyed on the invocation, because the step row outlives
+    // both a retry and an orphan re-dispatch.
+    const runStartedAt = await loadRunStartedAt(ctx.db, ctx.taskStepId, args.llmInvocationId);
+    const entryBodies = await resolveBodies(ctx.repoPath, rawEntries, runStartedAt);
+    const updateBodies = await resolveBodies(ctx.repoPath, rawUpdates, runStartedAt);
     const entries = entryBodies.resolved;
     const updates = updateBodies.resolved;
     const bodyFailures = [...entryBodies.failures, ...updateBodies.failures];

@@ -77,7 +77,20 @@ export function resolveKbBodyPath(repoPath: string, declared: string): string {
  *  wherever it sits. The regular-file check then rejects a fifo or device, which would hang or
  *  misread rather than escape. TOCTOU is not a live concern here: the CLI has exited by the
  *  time apply reads these, and nothing else writes the directory. */
-async function resolveStagedFile(repoPath: string, declared: string): Promise<string> {
+/** How much clock slop to forgive when deciding a body predates its run.
+ *
+ *  The invocation's `started_at` comes from the worker's clock and the mtime from the
+ *  filesystem's; both are the same host here, so the gap should be zero. A false REJECTION
+ *  discards a body the agent really did write, which is the worse direction to be wrong in,
+ *  so a couple of seconds are forgiven. Negligible against the minutes-long gap that an
+ *  actual stale body carries. */
+const STALE_BODY_GRACE_MS = 2_000;
+
+async function resolveStagedFile(
+  repoPath: string,
+  declared: string,
+  notBefore?: Date,
+): Promise<string> {
   const lexical = resolveKbBodyPath(repoPath, declared);
   let real: string;
   let root: string;
@@ -92,6 +105,18 @@ async function resolveStagedFile(repoPath: string, declared: string): Promise<st
   }
   const st = await lstat(real);
   if (!st.isFile()) throw new KbBodyPathError(`bodyPath is not a regular file: ${declared}`);
+  // A body older than the run that declared it is not that run's work. Body paths are
+  // deterministic, so an attempt that declares a path and fails to write it would otherwise
+  // publish whatever an EARLIER attempt left at the same name. `prepareAgentWritableDir`
+  // empties the directory per attempt and closes that for a RETRY, where detect re-runs — but
+  // an invocation orphaned by a worker restart is RE-DISPATCHED without detect, so the killed
+  // run's bodies survive. MEASURED: 14 of them did, and only the agent happening to rewrite
+  // every path it declared kept stale content out of the knowledge base.
+  if (notBefore && st.mtimeMs < notBefore.getTime() - STALE_BODY_GRACE_MS) {
+    throw new KbBodyPathError(
+      `bodyPath predates this run — left by an earlier attempt: ${declared}`,
+    );
+  }
   return real;
 }
 
@@ -101,8 +126,12 @@ async function resolveStagedFile(repoPath: string, declared: string): Promise<st
  *  the agent wrote it, and publishing a blank page under a canonical KB name is worse
  *  than failing the entry — an empty ARCHITECTURE.md reads as "this project has no
  *  architecture" to every later reader, human and agent. */
-export async function readKbBodyFile(repoPath: string, declared: string): Promise<KbSection[]> {
-  const abs = await resolveStagedFile(repoPath, declared);
+export async function readKbBodyFile(
+  repoPath: string,
+  declared: string,
+  notBefore?: Date,
+): Promise<KbSection[]> {
+  const abs = await resolveStagedFile(repoPath, declared, notBefore);
   let text: string;
   try {
     text = await readFile(abs, 'utf8');
@@ -125,8 +154,12 @@ export async function readKbBodyFile(repoPath: string, declared: string): Promis
  *
  *  Empty is a failure for the same reason a missing file is: the index said the agent
  *  wrote it, and an approved-but-blank KB section is worse than one that never arrived. */
-export async function readKbBodyText(repoPath: string, declared: string): Promise<string> {
-  const abs = await resolveStagedFile(repoPath, declared);
+export async function readKbBodyText(
+  repoPath: string,
+  declared: string,
+  notBefore?: Date,
+): Promise<string> {
+  const abs = await resolveStagedFile(repoPath, declared, notBefore);
   let text: string;
   try {
     text = await readFile(abs, 'utf8');
@@ -159,6 +192,7 @@ export interface WithOptionalBodyPath {
 export async function resolveBodies<T extends WithOptionalBodyPath>(
   repoPath: string,
   items: readonly T[],
+  notBefore?: Date,
 ): Promise<{ resolved: T[]; failures: { item: T; reason: string }[] }> {
   const resolved: T[] = [];
   const failures: { item: T; reason: string }[] = [];
@@ -172,7 +206,10 @@ export async function resolveBodies<T extends WithOptionalBodyPath>(
       continue;
     }
     try {
-      resolved.push({ ...item, sections: await readKbBodyFile(repoPath, item.bodyPath) });
+      resolved.push({
+        ...item,
+        sections: await readKbBodyFile(repoPath, item.bodyPath, notBefore),
+      });
     } catch (err) {
       failures.push({ item, reason: err instanceof Error ? err.message : String(err) });
     }
