@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -298,6 +298,96 @@ describe('parseKbPlacements', () => {
       '```',
     ].join('\n');
     expect(parseKbPlacements(raw)).toHaveLength(1);
+  });
+});
+
+// A legacy page imported under `legacy/` has its content folded into the page that
+// displaced it, and then nothing referenced it — so it lingered as a duplicate of knowledge
+// now living in the merged page. `mergedFrom` is how the agent says which ones it absorbed.
+describe('knowledgeAcquisitionStep.apply — merged legacy sources', () => {
+  async function seedLegacy(kbDir: string): Promise<void> {
+    await mkdir(path.join(kbDir, 'legacy'), { recursive: true });
+    await writeFile(path.join(kbDir, 'ARCHITECTURE.md'), '# Architecture\n\nFresh.\n', 'utf8');
+    await writeFile(
+      path.join(kbDir, 'legacy', 'ARCHITECTURE.md'),
+      '# Architecture\n\nAccumulated.\n',
+      'utf8',
+    );
+  }
+
+  function updateRaw(mergedFrom: string[] | undefined): string {
+    return [
+      '```json',
+      JSON.stringify({
+        entries: [],
+        updates: [
+          {
+            path: 'ARCHITECTURE.md',
+            title: 'Architecture',
+            canonical: 'ARCHITECTURE',
+            ...(mergedFrom ? { mergedFrom } : {}),
+            sections: [{ heading: 'Overview', body: 'Fresh plus accumulated.' }],
+          },
+        ],
+      }),
+      '```',
+    ].join('\n');
+  }
+
+  it('deletes the legacy copy it folded in, and only after the merged page is written', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
+    await seedLegacy(kbDir);
+
+    const out = await knowledgeAcquisitionStep.apply(ctx, {
+      detected: { framework: null, language: null },
+      formValues: { selectedTopics: [] },
+      llmOutput: updateRaw(['legacy/ARCHITECTURE.md']),
+    });
+
+    expect(out.mergedRemoved).toEqual(['legacy/ARCHITECTURE.md']);
+    await expect(stat(path.join(kbDir, 'legacy', 'ARCHITECTURE.md'))).rejects.toThrow();
+    // The merged page is there, carrying the folded content.
+    expect(await readFile(path.join(kbDir, 'ARCHITECTURE.md'), 'utf8')).toContain(
+      'Fresh plus accumulated',
+    );
+  });
+
+  it('leaves the legacy copy alone when the agent reports no merge', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
+    await seedLegacy(kbDir);
+
+    const out = await knowledgeAcquisitionStep.apply(ctx, {
+      detected: { framework: null, language: null },
+      formValues: { selectedTopics: [] },
+      llmOutput: updateRaw(undefined),
+    });
+
+    expect(out.mergedRemoved).toBeUndefined();
+    expect(await readFile(path.join(kbDir, 'legacy', 'ARCHITECTURE.md'), 'utf8')).toContain(
+      'Accumulated',
+    );
+  });
+
+  // `mergedFrom` is agent-supplied, so this restriction is the whole safety of the feature:
+  // without it, a model naming any KB page — or the very page it just wrote — has it deleted.
+  it('refuses to delete a reported path outside the legacy import dir', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
+    await seedLegacy(kbDir);
+    await writeFile(path.join(kbDir, 'BUSINESS_LOGIC.md'), '# BL\n\nKeep me.\n', 'utf8');
+
+    const out = await knowledgeAcquisitionStep.apply(ctx, {
+      detected: { framework: null, language: null },
+      formValues: { selectedTopics: [] },
+      llmOutput: updateRaw(['BUSINESS_LOGIC.md', 'ARCHITECTURE.md', '../../etc/passwd']),
+    });
+
+    expect(out.mergedRemoved).toBeUndefined();
+    expect(await readFile(path.join(kbDir, 'BUSINESS_LOGIC.md'), 'utf8')).toContain('Keep me');
+    // Including the page the update itself just wrote.
+    expect(await readFile(path.join(kbDir, 'ARCHITECTURE.md'), 'utf8')).toContain('accumulated');
   });
 });
 
