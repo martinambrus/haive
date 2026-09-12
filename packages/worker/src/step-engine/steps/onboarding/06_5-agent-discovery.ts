@@ -1,12 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   agentSpecSchema,
   mapWithConcurrency,
-  type DetectResult,
+  FRAMEWORK_PATTERNS,
   type FormSchema,
 } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
@@ -17,15 +17,17 @@ import { extractFencedJson } from '../_fenced-json.js';
 import {
   countFilesMatching,
   listFilesMatching,
-  loadPreviousStepOutput,
   pathExists,
+  resolveConfirmedProject,
 } from './_helpers.js';
 import {
+  FILE_COUNT_THRESHOLD,
   buildTechInventory,
   renderTechInventoryTable,
   type TechInventory,
 } from './_tech-inventory.js';
-import { noSubagentInstructionLines } from './_scope.js';
+import { noSubagentInstructionLines, readComposerJson } from './_scope.js';
+import { composerExcludeDirs } from './_scope-seed.js';
 
 export interface AgentCandidate {
   id: string;
@@ -38,6 +40,11 @@ export interface AgentCandidate {
   source?: 'scan' | 'llm' | 'bundle';
   /** Full structured body; set for LLM-generated and bundle-sourced agents. */
   body?: AgentSpec;
+  /** Why the model set this agent to NOT recommended, shown under its checkbox.
+   *  A box that silently unticks itself is the same complaint the Tier-1 safety net
+   *  had: a decision with no visible reason. Only set when the model declined it —
+   *  a recommended agent needs no justification. */
+  declineReason?: string;
 }
 
 export interface AgentDiscoveryDetect {
@@ -518,7 +525,7 @@ const MANDATORY_CATEGORIES: ReadonlySet<string> = new Set([
   'api',
 ]);
 
-function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
+export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
   const detected = args.detected as AgentDiscoveryDetect;
   const fileTree = detected.__fileTree ?? '(no file tree)';
   const inventory = detected.__techInventory ?? { items: [], scannedManifests: [] };
@@ -571,11 +578,11 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Predefined agents (from deterministic scan)',
     predefinedList,
     '',
-    '## Secondary technology inventory (deterministic dep scan + import grep, threshold 5+ files for non-framework categories)',
+    `## Secondary technology inventory (deterministic dep scan + import grep, threshold ${FILE_COUNT_THRESHOLD}+ files for non-framework categories)`,
     inventoryTable,
     '',
     '### Tier 1 — REQUIRED specialists (build / framework / db / orm / graphics / queue / search / pdf / api)',
-    'Each row below is a non-trivial DSL, protocol, or surface that benefits from focused expertise. You MUST emit a `<name>-specialist` custom agent for every row, UNLESS the row is literally covered by one of the predefined agents above (state the overlap explicitly when skipping). Do NOT skip a row by labelling it "boilerplate", "config-only", or "common knowledge" — the deterministic scanner has already enforced a usage threshold; if it is on this list, it is significant enough.',
+    `Each row below is a candidate surface that may benefit from focused expertise. Emit a \`<name>-specialist\` custom agent for every row unless you can say WHY it does not deserve one, and put every such row in \`skipped\` with its reason. The scanner's bar is only ${FILE_COUNT_THRESHOLD} referencing files, so a row can be a dependency of a dependency rather than something this project works in — judge from the file tree, not from the row's presence. Two reasons are worth stating explicitly when they apply: the row is already covered by a predefined agent above, or its matches are third-party code (a vendored library, a bundled polyfill, contrib) rather than code maintained here. Do NOT skip on a bare "boilerplate" or "common knowledge" label with no evidence.`,
     mandatoryList,
     '',
     '### Tier 2 — OPTIONAL specialists (http / css / state / auth / logging / testing / other)',
@@ -584,8 +591,8 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '',
     '## Instructions',
     '1. Review the file tree, key config files, and the technology inventory above.',
-    '2. For each predefined agent, decide if it is relevant to this project (true/false).',
-    '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Tier 1 rows that are NOT skipped MUST appear in `custom`.',
+    '2. For each predefined agent, decide if it is relevant to this project (true/false). For every one you set to FALSE, add an entry to `declined` saying why — it stays on the form as an unticked box, and without a reason the user is left guessing. Judge a bundle-sourced agent by its BODY, not its name: a bundle the user imported may still describe work this repository does not do.',
+    '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Every Tier 1 row must appear in EXACTLY ONE of `custom` or `skipped`. Put a row in `skipped` ONLY when you are not emitting it — `skipped` is the rejection list, not a place to note what you did, and an entry saying "not skipped, emitted below" contradicts itself. A row you leave out of BOTH is read as an oversight and re-added for you, so a deliberate omission survives only if it is in `skipped`.',
     '4. You MAY suggest additional technical agents not in the inventory if the file tree or config files show another framework/library/tool with non-trivial usage that the inventory missed.',
     '5. Do NOT propose agents for business domain concepts (entities, workflows, validation rules, UI flows specific to this app). Those become skills.',
     '6. For each custom agent, provide a FULL structured body with the following fields, tailored to this repository:',
@@ -601,6 +608,7 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '   - outputFormat: a code-block (triple-backtick fenced) showing the structured shape the agent should emit.',
     '   - qualityCriteria: 3-5 bullets describing verifiable post-conditions.',
     '   - antiPatterns: 3-5 bullets describing what this agent MUST NOT do (each a concrete failure mode, not generic advice).',
+    '7. Ground every custom agent in THIS repository: across its body, cite at least TWO real paths copied from the file tree above (a directory or a file). An agent whose body would read the same for any project using that technology has not been tailored to this one.',
     '',
     '## Required output format',
     'Emit exactly ONE JSON object inside a ```json fenced code block:',
@@ -609,6 +617,12 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '  "predefined": {',
     '    "<agent-id>": true|false',
     '  },',
+    '  "skipped": [',
+    '    { "id": "<inventory-row-agent-id>", "reason": "why this row needs no specialist" }',
+    '  ],',
+    '  "declined": [',
+    '    { "id": "<predefined-agent-id>", "reason": "why it is not a fit for THIS repository" }',
+    '  ],',
     '  "custom": [',
     '    {',
     '      "id": "my-agent",',
@@ -657,7 +671,12 @@ interface ParseAgentBodyOpts {
 function parseAgentBody(
   candidate: string,
   opts: ParseAgentBodyOpts = {},
-): { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null {
+): {
+  predefined: Record<string, boolean>;
+  custom: LlmAgentSuggestion[];
+  skipped: SkippedInventoryRow[];
+  declined: SkippedInventoryRow[];
+} | null {
   const obj = JSON.parse(candidate) as Record<string, unknown>;
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
   const predefinedIsObject =
@@ -679,11 +698,48 @@ function parseAgentBody(
   return {
     predefined: predefinedIsObject ? (obj.predefined as Record<string, boolean>) : {},
     custom: customIsArray ? (obj.custom as LlmAgentSuggestion[]) : [],
+    skipped: parseSkipped(obj.skipped),
+    declined: parseSkipped(obj.declined),
   };
 }
 
+/** A Tier-1 inventory row the model deliberately declined, with its reason.
+ *
+ *  The response had no way to say this: an inventory row was either in `custom` or
+ *  absent, so a judged rejection and an oversight were the same bytes, and
+ *  `injectMissingTier1Specialists` could only assume oversight. MEASURED on a live
+ *  Drupal 7 run — the model was shown `Symfony (framework, 4 files)`, whose matches are
+ *  a `polyfill-mbstring` vendored inside PhpSpreadsheet, correctly left it out, and the
+ *  net put `symfony-specialist` back on the user's form. */
+export interface SkippedInventoryRow {
+  id: string;
+  reason: string;
+}
+
+/** Tolerant: a missing field, a non-array, or an entry without a usable id yields
+ *  nothing. A malformed rejection must lose the row to the safety net rather than
+ *  suppress a specialist on an id nobody can read. */
+function parseSkipped(raw: unknown): SkippedInventoryRow[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SkippedInventoryRow[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const { id, reason } = entry as { id?: unknown; reason?: unknown };
+    if (typeof id !== 'string' || id.trim().length === 0) continue;
+    out.push({ id: id.trim(), reason: typeof reason === 'string' ? reason : '' });
+  }
+  return out;
+}
+
 export function parseLlmAgentOutputWithDiagnostic(raw: string): {
-  result: { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null;
+  // `skipped`/`declined` are the rejection channels parseAgentBody already returns; naming
+  // them here is what lets a typed caller read them at all.
+  result: {
+    predefined: Record<string, boolean>;
+    custom: LlmAgentSuggestion[];
+    skipped: SkippedInventoryRow[];
+    declined: SkippedInventoryRow[];
+  } | null;
   diagnostic: AgentParseDiagnostic | null;
 } {
   // Custom agent bodies include an `outputFormat` field that is itself a
@@ -858,11 +914,16 @@ export function buildAgentSpecFromLlm(
 export function injectMissingTier1Specialists(
   candidates: AgentCandidate[],
   inventory: TechInventory,
+  skipped: readonly SkippedInventoryRow[] = [],
 ): void {
   const existingIds = new Set(candidates.map((c) => c.id));
+  // An id the model REJECTED is not a gap to fill. Only a row it neither proposed nor
+  // ruled on is treated as dropped — which is what this net was always for.
+  const rejected = new Set(skipped.flatMap((r) => [r.id, r.id.replace(/-specialist$/, '')]));
   for (const it of inventory.items) {
     if (!MANDATORY_CATEGORIES.has(it.category)) continue;
     const id = `${it.name}-specialist`;
+    if (rejected.has(id) || rejected.has(it.name)) continue;
     if (existingIds.has(id) || existingIds.has(it.name)) continue;
     const label = `${it.displayName} specialist`;
     const hint = `${it.category} expertise for ${it.displayName}`;
@@ -904,7 +965,12 @@ function enrichCandidates(
   ) {
     extracted = (llmOutput as { result: unknown }).result;
   }
-  let llmResult: { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null;
+  let llmResult: {
+    predefined: Record<string, boolean>;
+    custom: LlmAgentSuggestion[];
+    skipped?: SkippedInventoryRow[];
+    declined?: SkippedInventoryRow[];
+  } | null;
   if (typeof extracted === 'string') {
     const parsed = parseLlmAgentOutputWithDiagnostic(extracted);
     llmResult = parsed.result;
@@ -917,14 +983,21 @@ function enrichCandidates(
     llmResult = extracted as {
       predefined: Record<string, boolean>;
       custom: LlmAgentSuggestion[];
+      skipped?: SkippedInventoryRow[];
+      declined?: SkippedInventoryRow[];
     } | null;
   }
   if (llmResult) {
     // Update recommendation flags for predefined agents
     if (llmResult.predefined) {
+      const reasonById = new Map((llmResult.declined ?? []).map((d) => [d.id, d.reason]));
       for (const c of candidates) {
         if (c.id in llmResult.predefined) {
           c.recommended = llmResult.predefined[c.id]!;
+          // Carried only for a DECLINE. A reason attached to something still ticked
+          // would render as an objection to a recommendation.
+          const reason = reasonById.get(c.id);
+          if (!c.recommended && reason) c.declineReason = reason;
         }
       }
     }
@@ -955,7 +1028,7 @@ function enrichCandidates(
      user always sees a build / framework / db / orm / graphics / queue /
      search / pdf / api specialist for every inventory hit. */
   if (detected.__techInventory) {
-    injectMissingTier1Specialists(candidates, detected.__techInventory);
+    injectMissingTier1Specialists(candidates, detected.__techInventory, llmResult?.skipped ?? []);
   }
 
   return candidates;
@@ -989,7 +1062,18 @@ async function loadBundleAgentCandidates(ctx: StepContext): Promise<AgentCandida
     })
     .from(schema.customBundleItems)
     .innerJoin(schema.customBundles, eq(schema.customBundleItems.bundleId, schema.customBundles.id))
-    .where(eq(schema.customBundles.repositoryId, repositoryId));
+    // AGENT items only, as 09_5-skill-generation already selects `kind = 'skill'`.
+    // Without it every skill in the bundle was fed to `agentSpecSchema` and warned with
+    // ~10 issues on the way out — MEASURED, a one-skill bundle logged a full
+    // "failed schema validation" report for `skills/<name>/SKILL.md` on every run. The
+    // skill was still picked up by 09_5, so nothing was lost; what was lost is the
+    // warning's meaning, since a genuinely broken AGENT reads exactly the same.
+    .where(
+      and(
+        eq(schema.customBundles.repositoryId, repositoryId),
+        eq(schema.customBundleItems.kind, 'agent'),
+      ),
+    );
 
   const out: AgentCandidate[] = [];
   for (const item of items) {
@@ -1058,11 +1142,10 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
 
   async detect(ctx: StepContext): Promise<AgentDiscoveryDetect> {
     await ctx.emitProgress('Loading project metadata...');
-    const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
-    const envData = (envPrev?.detect as DetectResult | null)?.data as
-      { project?: { framework?: string; primaryLanguage?: string } } | undefined;
-    const framework = envData?.project?.framework ?? null;
-    const language = envData?.project?.primaryLanguage ?? null;
+    const { framework, primaryLanguage: language } = await resolveConfirmedProject(
+      ctx.db,
+      ctx.taskId,
+    );
 
     await ctx.emitProgress('Scanning repository for file patterns...');
     const candidates = await discoverAgentCandidates(ctx.repoPath, framework);
@@ -1078,7 +1161,25 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     const keyFiles = await collectKeyFiles(ctx.repoPath);
 
     await ctx.emitProgress('Building secondary technology inventory...');
-    const techInventory = await buildTechInventory(ctx.repoPath);
+    // Third-party trees are not this project's stack. The framework's own excludePaths
+    // name them (`sites/all/libraries/` on Drupal 7), and IGNORE_DIRS cannot — it matches
+    // a bare directory NAME, so a library vendored at a path slips through.
+    const frameworkPattern = framework
+      ? FRAMEWORK_PATTERNS[framework as keyof typeof FRAMEWORK_PATTERNS]
+      : undefined;
+    // Composer is AUTHORITATIVE where it speaks, and the hardcoded pattern is the
+    // fallback: `extra.installer-paths` says where contrib actually lands whatever the
+    // docroot is called (`web/`, `docroot/`, the repo root), which no static list can
+    // know. The same pair already backs the scope pickers via `computeSeedExcludeGlobs`;
+    // without it here, a Drupal site with a non-default docroot had its contrib counted
+    // as this project's own stack. `composerExcludeDirs` keeps any path with a `custom`
+    // segment in scope, so this never hides hand-written code.
+    const techInventory = await buildTechInventory(ctx.repoPath, {
+      excludePaths: [
+        ...(frameworkPattern?.excludePaths ?? []),
+        ...composerExcludeDirs(await readComposerJson(ctx.repoPath)),
+      ],
+    });
 
     await ctx.emitProgress(
       `Found ${candidates.length} agent candidates, ${fileTree.split('\n').length} files mapped, ${techInventory.items.length} secondary technologies. Waiting for LLM analysis...`,
@@ -1142,22 +1243,33 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
       ),
     );
 
-    const options = enriched.map((c) => ({
-      value: c.id,
-      label: `${c.label}${c.count > 0 ? ` (${c.count} files)` : ''} — ${c.hint}`,
-      ...(c.source === 'llm'
-        ? { badge: 'AI-suggested', badgeColor: 'amber' as const }
-        : c.source === 'bundle'
-          ? { badge: 'From bundle', badgeColor: 'indigo' as const }
-          : {}),
-    }));
-    // These agents are always pre-selected regardless of LLM recommendations
+    // Pre-selected whatever the model says, because workflow steps name them directly
+    // (_agent-selector, 03-phase-0a-discovery, 11-phase-8-learning). The tick is what the
+    // user reads, so the sub-text below has to agree with the TICK, not with the
+    // `recommended` flag — a box that is checked while saying "Not recommended" is the
+    // same unexplained contradiction the reason was added to remove.
     const ALWAYS_SELECTED = new Set([
       'code-reviewer',
       'security-auditor',
       'knowledge-miner',
       'learning-recorder',
     ]);
+    const options = enriched.map((c) => ({
+      value: c.id,
+      label: `${c.label}${c.count > 0 ? ` (${c.count} files)` : ''} — ${c.hint}`,
+      ...(c.declineReason
+        ? {
+            description: ALWAYS_SELECTED.has(c.id)
+              ? `Kept regardless — later workflow steps call this agent by name. The model advised against it: ${c.declineReason}`
+              : `Not recommended: ${c.declineReason}`,
+          }
+        : {}),
+      ...(c.source === 'llm'
+        ? { badge: 'AI-suggested', badgeColor: 'amber' as const }
+        : c.source === 'bundle'
+          ? { badge: 'From bundle', badgeColor: 'indigo' as const }
+          : {}),
+    }));
     const defaults = enriched
       .filter((c) => c.recommended || ALWAYS_SELECTED.has(c.id))
       .map((c) => c.id);

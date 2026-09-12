@@ -1281,6 +1281,11 @@ taskRoutes.post('/:id/steer-active-cli', async (c) => {
   await appendTaskEvent(db, id, active.taskStepId, 'steering.nudge', {
     text,
     targetStepId: active.taskStepId,
+    // WHICH run was steered, not just which step. A step can hold many invocations (a
+    // retry, a multi-agent fan-out), and without this the terminal can only filter by step
+    // — so every panel replayed every panel's steers and misattributed what each agent was
+    // actually told.
+    invocationId: active.id,
     round,
     source: 'ui',
   });
@@ -1447,10 +1452,18 @@ taskRoutes.get('/:id/events', async (c) => {
     columns: { id: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  // `?type=` narrows to one event type. The Activity tab wants everything; a caller
+  // restoring one widget's history (the terminal's steer list) wants a handful, and a
+  // long task carries hundreds of events it would otherwise download to discard.
+  const type = c.req.query('type');
   const events = await db
     .select()
     .from(schema.taskEvents)
-    .where(eq(schema.taskEvents.taskId, id))
+    .where(
+      type
+        ? and(eq(schema.taskEvents.taskId, id), eq(schema.taskEvents.eventType, type))
+        : eq(schema.taskEvents.taskId, id),
+    )
     .orderBy(asc(schema.taskEvents.createdAt));
   return c.json({ events });
 });

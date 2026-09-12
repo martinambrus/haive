@@ -68,10 +68,15 @@ export interface CliProviderMetadata {
    *  each vendor's docs: claude-code/zai use `.claude/agents/`; gemini uses
    *  `.gemini/agents/`; codex uses `.codex/agents/`. */
   projectAgentsDir: string | null;
-  /** File format the CLI expects for agent definitions. Claude-family and
-   *  gemini read markdown with YAML frontmatter; codex reads TOML — the
-   *  current generator only emits markdown, so codex agent writes are
-   *  skipped until a TOML emitter exists. Null iff projectAgentsDir is null. */
+  /** File format the CLI expects for agent definitions. Claude-family and gemini
+   *  read markdown with YAML frontmatter; codex reads TOML, which
+   *  `buildAgentFileToml` emits in Codex's own schema (`name`, `description`,
+   *  `developer_instructions`). 07-generate-files writes every enabled CLI's dir in
+   *  its own format — VERIFIED on a live repo carrying 15 `.codex/agents/*.toml`
+   *  beside 15 `.claude/agents/*.md` and `.gemini/agents/*.md`. Only the
+   *  `README.md` index is markdown in every target, which is why a codex dir holds
+   *  one fewer `.toml` than the others hold `.md`. Null iff projectAgentsDir is
+   *  null. */
   agentFileFormat: 'markdown' | 'toml' | null;
   /** Whether this provider's reported costUsd is a trustworthy real backend price.
    *  - 'metered': real per-token price from the provider's own backend (claude-code,

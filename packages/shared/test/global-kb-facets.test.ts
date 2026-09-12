@@ -123,3 +123,51 @@ describe('extractProjectFacets', () => {
     expect(facets.dbMajor).toEqual([]);
   });
 });
+
+// 02-detection-confirmation exists so a person can correct a misdetection, and
+// `07-generate-files` already overlays what they typed. Reading the raw scan here left
+// the global KB scoped to the framework the user had just rejected.
+describe('extractProjectFacets — confirmed overrides', () => {
+  const detected = {
+    data: {
+      project: { framework: 'drupal7', frameworkMajor: '7', primaryLanguage: 'php' },
+      stack: { runtimeVersions: { php: '8.3' } },
+    },
+  };
+
+  it('prefers the framework the user confirmed', () => {
+    const f = extractProjectFacets(detected, { framework: 'laravel' });
+    expect(f.framework).toEqual(['laravel']);
+  });
+
+  // frameworkMajor was parsed from the DETECTED framework's manifest key, so pairing a
+  // corrected framework with it would anchor the KB to a version of something else.
+  it('drops frameworkMajor when the framework was overridden', () => {
+    expect(extractProjectFacets(detected, { framework: 'laravel' }).frameworkMajor).toEqual([]);
+  });
+
+  it('keeps frameworkMajor when the user confirmed what was detected', () => {
+    expect(extractProjectFacets(detected, { framework: 'drupal7' }).frameworkMajor).toEqual(['7']);
+  });
+
+  // The form submits every field, so an untouched one arrives as '' — that is not a
+  // decision to erase what was detected.
+  it('ignores an empty confirmed value rather than erasing detection', () => {
+    const f = extractProjectFacets(detected, { framework: '', primaryLanguage: '' });
+    expect(f.framework).toEqual(['drupal7']);
+    expect(f.frameworkMajor).toEqual(['7']);
+    expect(f.language).toEqual(['php']);
+  });
+
+  it('prefers the confirmed primary language', () => {
+    expect(extractProjectFacets(detected, { primaryLanguage: 'Python' }).language).toEqual([
+      'python',
+    ]);
+  });
+
+  it('falls back to raw detection when nothing was confirmed', () => {
+    const f = extractProjectFacets(detected, null);
+    expect(f.framework).toEqual(['drupal7']);
+    expect(f.language).toEqual(['php']);
+  });
+});

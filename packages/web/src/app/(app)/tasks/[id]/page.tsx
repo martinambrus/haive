@@ -1037,18 +1037,33 @@ export default function TaskDetailPage() {
       .catch(() => setProviders([]));
   }, []);
 
-  // Default terminal CLI to the task's bound provider when known, else the
-  // first enabled provider. User can switch via the dropdown above the shell.
+  // Default terminal CLI to the task's bound provider when known, else the first
+  // enabled provider. User can switch via the dropdown above the shell.
+  //
+  // `/cli-providers` and `/tasks/:id` are independent fetches and the small one lands
+  // first, so on arrival `task` is still null and the fallback is chosen — and because
+  // the guard was "already set, leave it alone", that fallback then stood for the life
+  // of the page. `/cli-providers` orders by `desc(createdAt)`, so the fallback is the
+  // NEWEST provider: a task running claude-code opened its shell on whichever CLI was
+  // configured most recently. Only a user PICK is sticky now; a default gets corrected
+  // the moment the task says what it is actually running on.
+  const terminalCliPickedRef = useRef(false);
   useEffect(() => {
-    if (terminalCliProviderId) return;
+    if (terminalCliPickedRef.current) return;
     const taskProvider = task?.cliProviderId ?? null;
     if (taskProvider && providers.some((p) => p.id === taskProvider)) {
       setTerminalCliProviderId(taskProvider);
       return;
     }
+    if (terminalCliProviderId) return;
     const fallback = providers.find((p) => p.enabled)?.id ?? providers[0]?.id ?? null;
     if (fallback) setTerminalCliProviderId(fallback);
   }, [providers, task?.cliProviderId, terminalCliProviderId]);
+
+  const selectTerminalCliProvider = useCallback((nextId: string) => {
+    terminalCliPickedRef.current = true;
+    setTerminalCliProviderId(nextId);
+  }, []);
 
   // The single step (if any) currently blocked on user input. Its focused-and-
   // visible time is tracked as "user active time"; everything else pauses.
@@ -2009,7 +2024,7 @@ export default function TaskDetailPage() {
           repositoryName={task.repository?.name ?? null}
           providers={providers}
           selectedCliProviderId={terminalCliProviderId}
-          onSelectCliProvider={setTerminalCliProviderId}
+          onSelectCliProvider={selectTerminalCliProvider}
         />
       )}
 

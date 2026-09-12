@@ -6,7 +6,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
-import { api, apiWebSocketUrl } from '@/lib/api-client';
+import { restoreSteers } from '@/lib/steer-history';
+import { api, apiWebSocketUrl, type TaskEvent } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
 import { copyTerminalSelection } from '@/lib/terminal-copy';
 import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
@@ -20,6 +21,9 @@ type TerminalTab = 'clean' | 'raw';
 interface CliStreamViewerProps {
   invocationId: string;
   taskId: string;
+  /** UUID of the task_steps row this terminal belongs to. Used to restore the steer
+   *  history on remount; without it the list simply starts empty, as it always did. */
+  stepRowId?: string;
   /** Called when the CLI stream ends (exit frame received). The page uses
    *  this to switch back to the Steps tab automatically. */
   onExit?: (code: number) => void;
@@ -86,7 +90,13 @@ const CLEAN_STICK_THRESHOLD_PX = 24;
 // CLI's stdin); `consumed` = drained by the model at a tool-call boundary (the
 // worker's steer_consumed frame); `unconsumed` = the run ended before it drained;
 // `error` = the API rejected it (e.g. the turn already finished).
-type SteerStatus = 'sent' | 'consumed' | 'unconsumed' | 'error';
+//
+// `historical` = restored from `steering.nudge` task events after a remount. The list
+// lived only in component state, so closing the terminal threw it away even though the
+// steers were durable. Only the SEND is recorded, never the outcome, so a restored entry
+// claims no status rather than reporting a `sent` that may long since have been consumed
+// — the same rule the step banners follow about copy that outlives its state.
+type SteerStatus = 'sent' | 'consumed' | 'unconsumed' | 'error' | 'historical';
 interface SteerEntry {
   id: string;
   text: string;
@@ -97,6 +107,7 @@ interface SteerEntry {
 export function CliStreamViewer({
   invocationId,
   taskId,
+  stepRowId,
   onExit,
   fill = false,
   height,
@@ -136,6 +147,32 @@ export function CliStreamViewer({
   // rows flip to `unconsumed` when the run exits.
   const [steers, setSteers] = useState<SteerEntry[]>([]);
   const [steerListOpen, setSteerListOpen] = useState(false);
+
+  // Restore what THIS invocation has already been steered with. Runs once per mount and only
+  // SEEDS: a live `sent` or `steer_consumed` frame arriving later appends as usual, and
+  // an id already present is not duplicated, so a reopened terminal during a live run
+  // shows history then keeps tracking.
+  useEffect(() => {
+    if (!stepRowId) return;
+    let cancelled = false;
+    void api
+      .get<{ events: TaskEvent[] }>(`/tasks/${taskId}/events?type=steering.nudge`)
+      .then((data) => {
+        if (cancelled) return;
+        const restored: SteerEntry[] = restoreSteers(data.events, stepRowId, invocationId);
+        if (restored.length === 0) return;
+        setSteers((prev) => {
+          const seen = new Set(prev.map((p) => p.id));
+          return [...restored.filter((r) => !seen.has(r.id)), ...prev];
+        });
+      })
+      .catch(() => {
+        // History is a convenience; a terminal that cannot fetch it still works.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, stepRowId, invocationId]);
   const steerListRef = useRef<HTMLDivElement | null>(null);
   const onExitRef = useRef(onExit);
 
@@ -685,59 +722,66 @@ export function CliStreamViewer({
             </button>
           )}
         </div>
-        {!isReplay && (
-          <div className="flex items-center gap-3 text-xs text-neutral-400">
-            {steerable && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void sendSteer();
-                }}
-                className="flex items-center gap-1"
-              >
-                <input
-                  value={steerText}
-                  onChange={(e) => setSteerText(e.target.value)}
-                  placeholder="Steer the agent…"
-                  disabled={steering || state !== 'connected'}
-                  className="w-48 rounded border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-200 placeholder:text-neutral-600 disabled:opacity-50"
-                />
-                <button
-                  type="submit"
-                  disabled={steering || state !== 'connected' || steerText.trim().length === 0}
-                  className="rounded border border-indigo-600 px-2 py-0.5 text-indigo-300 hover:bg-indigo-950 disabled:opacity-50"
-                >
-                  {steering ? 'Sending…' : 'Steer'}
-                </button>
-              </form>
-            )}
-            {steers.length > 0 && (
-              <div className="relative" ref={steerListRef}>
-                <button
-                  type="button"
-                  onClick={() => setSteerListOpen((v) => !v)}
-                  className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
-                  title="Sent steers"
-                  aria-label={`Sent steers (${steers.length})`}
-                  aria-expanded={steerListOpen}
-                >
-                  <SteerIcon />
-                  <span className="tabular-nums">{steers.length}</span>
-                </button>
-                {steerListOpen && <SteerList steers={steers} />}
-              </div>
-            )}
-            <span>Read-only — use Cancel to stop the running CLI</span>
-            <button
-              type="button"
-              onClick={() => void cancelActiveCli()}
-              disabled={cancelling || state !== 'connected'}
-              className="rounded border border-red-700 px-2 py-0.5 text-red-300 hover:bg-red-950 disabled:opacity-50"
+        <div className="flex items-center gap-3 text-xs text-neutral-400">
+          {!isReplay && steerable && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void sendSteer();
+              }}
+              className="flex items-center gap-1"
             >
-              {cancelling ? 'Cancelling…' : 'Cancel CLI'}
-            </button>
-          </div>
-        )}
+              <input
+                value={steerText}
+                onChange={(e) => setSteerText(e.target.value)}
+                placeholder="Steer the agent…"
+                disabled={steering || state !== 'connected'}
+                className="w-48 rounded border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-200 placeholder:text-neutral-600 disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={steering || state !== 'connected' || steerText.trim().length === 0}
+                className="rounded border border-indigo-600 px-2 py-0.5 text-indigo-300 hover:bg-indigo-950 disabled:opacity-50"
+              >
+                {steering ? 'Sending…' : 'Steer'}
+              </button>
+            </form>
+          )}
+          {/* Deliberately NOT behind `!isReplay`, unlike everything else in this row: a
+              finished invocation renders as a replay, which is exactly when someone
+              reopens a terminal to read what it was steered with. Behind the guard the
+              history restored above had no render site and only ever showed during the
+              live run — the one state that never needed restoring. */}
+          {steers.length > 0 && (
+            <div className="relative" ref={steerListRef}>
+              <button
+                type="button"
+                onClick={() => setSteerListOpen((v) => !v)}
+                className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
+                title="Sent steers"
+                aria-label={`Sent steers (${steers.length})`}
+                aria-expanded={steerListOpen}
+              >
+                <SteerIcon />
+                <span className="tabular-nums">{steers.length}</span>
+              </button>
+              {steerListOpen && <SteerList steers={steers} />}
+            </div>
+          )}
+          {!isReplay && (
+            <>
+              <span>Read-only — use Cancel to stop the running CLI</span>
+              <button
+                type="button"
+                onClick={() => void cancelActiveCli()}
+                disabled={cancelling || state !== 'connected'}
+                className="rounded border border-red-700 px-2 py-0.5 text-red-300 hover:bg-red-950 disabled:opacity-50"
+              >
+                {cancelling ? 'Cancelling…' : 'Cancel CLI'}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {showTabs && (
@@ -1040,6 +1084,15 @@ function SteerStatusIcon({ status }: { status: SteerStatus }) {
       return (
         <span className="mt-0.5 text-neutral-500" title="The run ended before this was applied">
           —
+        </span>
+      );
+    case 'historical':
+      return (
+        <span
+          className="mt-0.5 text-neutral-500"
+          title="Sent earlier in this step — the outcome is not recorded"
+        >
+          ↺
         </span>
       );
     case 'error':

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -8,6 +8,7 @@ import {
   type AgentQuestion,
 } from '../src/step-engine/steps/onboarding/09-qa.js';
 import type { EnrichedAgentQuestion } from '../src/step-engine/steps/onboarding/09_1-qa-suggestions.js';
+import { KB_DRAFT_DIR } from '../src/step-engine/steps/onboarding/_kb-body-file.js';
 import {
   buildResolveForm,
   collectAgentAnswers,
@@ -433,6 +434,113 @@ describe('knowledgeQaResolveStep.apply', () => {
     expect(out.agentQuestionCount).toBe(0);
     // Nothing is written here — that is 09_3-qa-review's job.
     expect(await readdir(kbDir)).toHaveLength(0);
+  });
+
+  // A proposed section travels back inside ONE reply, and a reply long enough to carry
+  // every answer is one the model starts shortening to fit. MEASURED on one repo, the same
+  // step run three times on the same questions emitted 40,218 / 28,717 / 40,706 chars for
+  // 23 answers each — the middle run 29% fewer characters for 16% MORE output tokens.
+  describe('staged proposedWrite bodies', () => {
+    async function stage(name: string, body: string): Promise<void> {
+      await mkdir(path.join(tmpRoot, KB_DRAFT_DIR), { recursive: true });
+      await writeFile(path.join(tmpRoot, KB_DRAFT_DIR, name), body);
+    }
+
+    const answer = (proposedWrite: object) => ({
+      answers: [{ question: 'q', answer: 'a', source: 'code', proposedWrite }],
+      unanswered: [],
+    });
+
+    it('reads a staged body back into content', async () => {
+      await stage('sec.md', 'Staged markdown body.\n');
+      const out = await knowledgeQaResolveStep.apply(makeCtx(), {
+        detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
+        formValues: { userQuestions: '' },
+        llmOutput: fence(
+          answer({ relPath: 'X.md', section: 'Y', contentPath: `${KB_DRAFT_DIR}/sec.md` }),
+        ),
+      });
+      expect(out.answers).toHaveLength(1);
+      expect(out.answers[0]!.proposedWrite?.content).toBe('Staged markdown body.');
+      expect(out.unanswered).toHaveLength(0);
+    });
+
+    it('discards the staging dir once every body is filed', async () => {
+      await stage('sec.md', 'Body.\n');
+      await knowledgeQaResolveStep.apply(makeCtx(), {
+        detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
+        formValues: { userQuestions: '' },
+        llmOutput: fence(
+          answer({ relPath: 'X.md', section: 'Y', contentPath: `${KB_DRAFT_DIR}/sec.md` }),
+        ),
+      });
+      await expect(stat(path.join(tmpRoot, KB_DRAFT_DIR))).rejects.toThrow();
+    });
+
+    // The reviewer must SEE that a question was worked and lost its section — approving a
+    // blank KB section is worse than approving nothing, and silently dropping the answer
+    // would make it look like the question was never asked.
+    it('moves an unreadable body to unanswered and keeps the good answers', async () => {
+      await stage('good.md', 'Good body.\n');
+      const out = await knowledgeQaResolveStep.apply(makeCtx(), {
+        detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
+        formValues: { userQuestions: '' },
+        llmOutput: fence({
+          answers: [
+            {
+              question: 'kept',
+              answer: 'a',
+              source: 'code',
+              proposedWrite: {
+                relPath: 'X.md',
+                section: 'Y',
+                contentPath: `${KB_DRAFT_DIR}/good.md`,
+              },
+            },
+            {
+              question: 'lost',
+              answer: 'a',
+              source: 'code',
+              proposedWrite: {
+                relPath: 'X.md',
+                section: 'Z',
+                contentPath: `${KB_DRAFT_DIR}/never.md`,
+              },
+            },
+          ],
+          unanswered: [],
+        }),
+      });
+      expect(out.answers.map((a) => a.question)).toEqual(['kept']);
+      expect(out.unanswered).toHaveLength(1);
+      expect(out.unanswered[0]!.question).toBe('lost');
+      expect(out.unanswered[0]!.reason).toMatch(/could not be read/);
+    });
+
+    it('keeps inline content working and needs no file', async () => {
+      const out = await knowledgeQaResolveStep.apply(makeCtx(), {
+        detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
+        formValues: { userQuestions: '' },
+        llmOutput: fence(answer({ relPath: 'X.md', section: 'Y', content: 'Inline body.' })),
+      });
+      expect(out.answers[0]!.proposedWrite?.content).toBe('Inline body.');
+    });
+
+    it('refuses a contentPath that escapes the staging dir', async () => {
+      const out = await knowledgeQaResolveStep.apply(makeCtx(), {
+        detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
+        formValues: { userQuestions: '' },
+        llmOutput: fence(
+          answer({
+            relPath: 'X.md',
+            section: 'Y',
+            contentPath: `${KB_DRAFT_DIR}/../../etc/passwd`,
+          }),
+        ),
+      });
+      expect(out.answers).toHaveLength(0);
+      expect(out.unanswered[0]!.reason).toMatch(/must sit under/);
+    });
   });
 
   it('throws when LLM output is unparseable, surfacing failure for retry', async () => {

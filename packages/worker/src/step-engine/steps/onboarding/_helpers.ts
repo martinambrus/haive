@@ -73,6 +73,56 @@ export async function loadPreviousStepOutput(
   };
 }
 
+/** Which value wins for one confirmable project field.
+ *
+ *  Only a non-empty confirmed value wins: the form submits every field, so an untouched
+ *  one arrives as '' and must not erase what the scan found. */
+function pickConfirmed(
+  confirmed: Record<string, unknown> | undefined,
+  detected: Record<string, unknown> | undefined,
+  key: string,
+): string | null {
+  const c = confirmed?.[key];
+  if (typeof c === 'string' && c.trim().length > 0) return c;
+  const d = detected?.[key];
+  return typeof d === 'string' && d.length > 0 ? d : null;
+}
+
+/** The precedence rule, separated from the two DB reads so it can be tested without
+ *  standing up a query builder. */
+export function mergeConfirmedProject(
+  detectedProject: Record<string, unknown> | undefined,
+  confirmedValues: Record<string, unknown> | undefined,
+): { framework: string | null; primaryLanguage: string | null } {
+  return {
+    framework: pickConfirmed(confirmedValues, detectedProject, 'framework'),
+    primaryLanguage: pickConfirmed(confirmedValues, detectedProject, 'primaryLanguage'),
+  };
+}
+
+/** What this run is actually working with: 01-env-detect's scan, overlaid with the
+ *  values the user confirmed at 02.
+ *
+ *  Reading the detect payload alone makes a correction at that gate do nothing, which is
+ *  the opposite of what a confirmation step is for. It also split the run in two:
+ *  `07-generate-files` already overlays the confirmed values (`extractProjectInfo`), so a
+ *  corrected framework decided WHICH agent templates got written while the raw one still
+ *  decided which agents were offered (06_5), what the scope pickers excluded (06_7, 09_7)
+ *  and how the global KB was scoped. One answer per run. */
+export async function resolveConfirmedProject(
+  db: Database,
+  taskId: string,
+): Promise<{ framework: string | null; primaryLanguage: string | null }> {
+  const [envPrev, confirmPrev] = await Promise.all([
+    loadPreviousStepOutput(db, taskId, '01-env-detect'),
+    loadPreviousStepOutput(db, taskId, '02-detection-confirmation'),
+  ]);
+  return mergeConfirmedProject(
+    (envPrev?.detect as { data?: { project?: Record<string, unknown> } } | null)?.data?.project,
+    (confirmPrev?.output as { values?: Record<string, unknown> } | null)?.values,
+  );
+}
+
 export async function pathExists(p: string): Promise<boolean> {
   try {
     await stat(p);
