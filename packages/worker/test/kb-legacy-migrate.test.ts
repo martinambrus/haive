@@ -8,7 +8,10 @@ import {
   LEGACY_KB_DIR,
   LEGACY_LEARNINGS_DIR,
 } from '@haive/shared/knowledge-paths';
-import { migrateLegacyKnowledge } from '../src/step-engine/steps/onboarding/_kb-legacy.js';
+import {
+  LEGACY_IMPORT_SUBDIR,
+  migrateLegacyKnowledge,
+} from '../src/step-engine/steps/onboarding/_kb-legacy.js';
 import { sanitizeKbRelPath } from '../src/step-engine/steps/onboarding/_kb-write.js';
 
 // Onboarding's reuse path was written for a KB "copied in from a prior orchestration" and
@@ -40,6 +43,7 @@ describe('migrateLegacyKnowledge', () => {
     expect(r.moved.sort()).toEqual(
       [`${KB_DIR}/ARCHITECTURE.md`, `${KB_DIR}/TECH_PATTERNS/drupal7/INDEX.md`].sort(),
     );
+    expect(r.pendingMerge).toEqual([]);
     expect(r.skipped).toEqual([]);
     expect(await readFile(path.join(dir, KB_DIR, 'ARCHITECTURE.md'), 'utf8')).toContain(
       'Architecture',
@@ -56,24 +60,29 @@ describe('migrateLegacyKnowledge', () => {
     expect(r.moved).toEqual([`${LEARNINGS_DIR}/2026-01-lesson.md`]);
   });
 
-  // Canonical content is the newer claim — 08 may have just generated it. MEASURED on a
-  // repo onboarded after the move, 7 of its 41 legacy filenames collide with fresh ones.
-  it('never overwrites a taken canonical slot, and says what it left', async () => {
+  // The collision topics are the ones with the MOST history behind them — months of
+  // task-by-task syncs against one agent's fresh read. Keeping only the newer page loses the
+  // wrong half, so the legacy copy is imported where the reuse prompt can see both.
+  it('imports a colliding file under legacy/ instead of overwriting or abandoning it', async () => {
     await write(`${KB_DIR}/ARCHITECTURE.md`, '# Fresh canonical\n');
-    await write(`${LEGACY_KB_DIR}/ARCHITECTURE.md`, '# Stale legacy\n');
+    await write(`${LEGACY_KB_DIR}/ARCHITECTURE.md`, '# Accumulated legacy\n');
 
     const r = await migrateLegacyKnowledge(dir);
 
     expect(r.moved).toEqual([]);
-    expect(r.skipped).toEqual([`${LEGACY_KB_DIR}/ARCHITECTURE.md`]);
+    expect(r.pendingMerge).toEqual([`${KB_DIR}/${LEGACY_IMPORT_SUBDIR}/ARCHITECTURE.md`]);
+    expect(r.skipped).toEqual([]);
+    // The newer page is untouched...
     expect(await readFile(path.join(dir, KB_DIR, 'ARCHITECTURE.md'), 'utf8')).toContain('Fresh');
-    // The skipped file keeps its directory rather than being silently destroyed.
-    expect(await readFile(path.join(dir, LEGACY_KB_DIR, 'ARCHITECTURE.md'), 'utf8')).toContain(
-      'Stale',
-    );
+    // ...and the accumulated one is inside the KB, where scanExistingKb recurses to it.
+    expect(
+      await readFile(path.join(dir, KB_DIR, LEGACY_IMPORT_SUBDIR, 'ARCHITECTURE.md'), 'utf8'),
+    ).toContain('Accumulated');
+    // Nothing stranded outside the knowledge base.
+    await expect(stat(path.join(dir, LEGACY_KB_DIR))).rejects.toThrow();
   });
 
-  it('moves what it can when one name collides', async () => {
+  it('mixes straight moves and legacy imports in one pass', async () => {
     await write(`${KB_DIR}/ARCHITECTURE.md`, '# Fresh\n');
     await write(`${LEGACY_KB_DIR}/ARCHITECTURE.md`, '# Stale\n');
     await write(`${LEGACY_KB_DIR}/BUSINESS_LOGIC.md`, '# Logic\n');
@@ -81,13 +90,38 @@ describe('migrateLegacyKnowledge', () => {
     const r = await migrateLegacyKnowledge(dir);
 
     expect(r.moved).toEqual([`${KB_DIR}/BUSINESS_LOGIC.md`]);
-    expect(r.skipped).toEqual([`${LEGACY_KB_DIR}/ARCHITECTURE.md`]);
+    expect(r.pendingMerge).toEqual([`${KB_DIR}/${LEGACY_IMPORT_SUBDIR}/ARCHITECTURE.md`]);
+  });
+
+  // 08 rewrites the root index from whatever the KB ends up holding, so importing a stale
+  // copy would publish a generated artifact as knowledge.
+  it('leaves a colliding root INDEX.md alone rather than importing it', async () => {
+    await write(`${KB_DIR}/INDEX.md`, '# Generated index\n');
+    await write(`${LEGACY_KB_DIR}/INDEX.md`, '# Old index\n');
+
+    const r = await migrateLegacyKnowledge(dir);
+
+    expect(r.moved).toEqual([]);
+    expect(r.pendingMerge).toEqual([]);
+    expect(r.skipped).toEqual([`${LEGACY_KB_DIR}/INDEX.md`]);
+    expect(await readFile(path.join(dir, KB_DIR, 'INDEX.md'), 'utf8')).toContain('Generated');
+  });
+
+  it('does not re-import on a second pass', async () => {
+    await write(`${KB_DIR}/ARCHITECTURE.md`, '# Fresh\n');
+    await write(`${LEGACY_KB_DIR}/ARCHITECTURE.md`, '# Stale\n');
+    const first = await migrateLegacyKnowledge(dir);
+    expect(first.pendingMerge).toHaveLength(1);
+
+    // The legacy tree is gone, so a re-run finds nothing to do at all.
+    const second = await migrateLegacyKnowledge(dir);
+    expect(second).toEqual({ moved: [], pendingMerge: [], skipped: [] });
   });
 
   it('is a no-op and idempotent on a repo with no legacy tree', async () => {
     await write(`${KB_DIR}/ARCHITECTURE.md`, '# Only canonical\n');
-    expect(await migrateLegacyKnowledge(dir)).toEqual({ moved: [], skipped: [] });
-    expect(await migrateLegacyKnowledge(dir)).toEqual({ moved: [], skipped: [] });
+    expect(await migrateLegacyKnowledge(dir)).toEqual({ moved: [], pendingMerge: [], skipped: [] });
+    expect(await migrateLegacyKnowledge(dir)).toEqual({ moved: [], pendingMerge: [], skipped: [] });
   });
 });
 

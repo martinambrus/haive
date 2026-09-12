@@ -240,6 +240,13 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
           '  Prefer KEEP unless a file is genuinely stale; either way it lands at its canonical',
           '  slot. Emit `entries` ONLY for topics that no existing file covers (genuine gaps).',
           '',
+          "A file under `legacy/` is this project's OWN earlier knowledge on a topic that a",
+          'newer page already covers — it was accumulated over many past tasks, so treat it as',
+          'evidence, not as clutter. MERGE it: emit ONE `updates` entry for the NEWER page whose',
+          '`sections` fold in everything the legacy file still gets right, and do NOT emit a',
+          'placement that would publish the legacy copy as a page of its own. Say nothing about',
+          'the merge in the body — the result should read as one page.',
+          '',
           ...existingKb.map((f) => `- ${f.relPath} — ${f.title}`),
           '',
         ]
@@ -1345,15 +1352,19 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // Without this the scan returns nothing, the prompt offers no existing files, and a real
     // project's accumulated knowledge is silently regenerated from scratch.
     const migrated = await migrateLegacyKnowledge(ctx.repoPath, ctx.logger);
-    if (migrated.moved.length > 0) {
+    if (migrated.moved.length + migrated.pendingMerge.length > 0) {
       await ctx.emitProgress(
-        `Migrated ${migrated.moved.length} knowledge file(s) from .claude/ into ${KB_DIR}.`,
+        `Migrated ${migrated.moved.length + migrated.pendingMerge.length} knowledge file(s) from .claude/ into ${KB_DIR}` +
+          (migrated.pendingMerge.length > 0
+            ? ` (${migrated.pendingMerge.length} under legacy/ to merge into the page that displaced it)`
+            : '') +
+          '.',
       );
     }
     if (migrated.skipped.length > 0) {
       ctx.logger.warn(
         { skipped: migrated.skipped.slice(0, 10), count: migrated.skipped.length },
-        'kb: left legacy knowledge files in place because the canonical slot was taken',
+        'kb: left some legacy knowledge files in place',
       );
     }
 
