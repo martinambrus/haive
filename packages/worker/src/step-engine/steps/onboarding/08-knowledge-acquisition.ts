@@ -87,6 +87,10 @@ interface KnowledgeApply {
   llmAvailable: boolean;
   /** Count of entries promoted to the global KB as drafts (not written to disk). */
   globalPromoted: number;
+  /** Existing-file paths the agent asked to re-place or improve that the KB scan does not
+   *  know, so nothing was applied for them. Present only when non-empty: a step output is
+   *  what a later reader has, and a silent skip is indistinguishable from nothing to do. */
+  unknownPaths?: string[];
 }
 
 type KbCategory = 'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
@@ -1611,9 +1615,19 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // 1a. Updates (auto-applied): write the improved content to the canonical
     //     slot, replacing the stale file. Preserve-correct-content is enforced by
     //     the prompt; git tracks the rewrite as the review/rollback.
+    // Paths the agent named that the KB scan does not know. Collected rather than merely
+    // skipped: MEASURED on a real run, 40 placements and 1 update — every item it reported —
+    // named files under a legacy `.claude/knowledge_base/` tree that `scanExistingKb` does not
+    // read, so all 41 were dropped by these two `continue`s while the step reported success and
+    // wrote its 28 new entries. One of them carried an 8,750-byte ARCHITECTURE body. Absence of
+    // a write is indistinguishable from "nothing to do" unless it is stated.
+    const unknownPaths: string[] = [];
     for (const u of updates) {
       const src = existingByPath.get(u.path);
-      if (!src) continue;
+      if (!src) {
+        unknownPaths.push(u.path);
+        continue;
+      }
       const dest = routePlacement(u) ?? src.relPath;
       if (takenDest.has(dest)) continue;
       takenDest.add(dest);
@@ -1642,7 +1656,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     //     re-route a now-global file to the cross-repo KB and delete it locally.
     for (const p of placements) {
       const src = existingByPath.get(p.path);
-      if (!src || handledSrc.has(src.relPath)) continue;
+      if (!src) {
+        unknownPaths.push(p.path);
+        continue;
+      }
+      if (handledSrc.has(src.relPath)) continue;
       if (isGlobalRoutedPlacement(p) && rerouteSet.has(p.path)) {
         // Re-route candidate: a reusable house-standard file the user kept ticked.
         // Same deterministic backstop as the entry path — promote only when it is
@@ -1873,6 +1891,13 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // retry re-runs the whole mining pass anyway.
     if (bodyFailures.length === 0) await discardKbDrafts(ctx.repoPath, ctx.logger);
 
+    if (unknownPaths.length > 0) {
+      ctx.logger.warn(
+        { count: unknownPaths.length, sample: unknownPaths.slice(0, 5), kbDir: KB_DIR },
+        'kb: reported existing-file paths are not in the knowledge base; those were not applied',
+      );
+    }
+
     ctx.logger.info(
       {
         written: written.length,
@@ -1880,9 +1905,16 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         llmAvailable,
         topicCount: entries.length,
         draftsKept: bodyFailures.length > 0,
+        unknownPaths: unknownPaths.length,
       },
       'knowledge base written',
     );
-    return { written, topicCount: entries.length, llmAvailable, globalPromoted };
+    return {
+      written,
+      topicCount: entries.length,
+      llmAvailable,
+      globalPromoted,
+      ...(unknownPaths.length > 0 ? { unknownPaths } : {}),
+    };
   },
 };
