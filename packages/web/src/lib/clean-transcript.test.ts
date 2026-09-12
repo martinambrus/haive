@@ -54,6 +54,30 @@ describe('appendModelText', () => {
   });
 });
 
+describe('appendUserTurn', () => {
+  // The race that produced a real double-render: the worker publishes the steer frame the
+  // moment the text hits stdin, which often beats the POST's own response, so the frame has
+  // already added the turn by the time the sender appends it optimistically.
+  it('is a no-op when a turn with that id is already present', () => {
+    const segs = applySteerFrame([], { id: 'a', text: 'from the frame' });
+    expect(appendUserTurn(segs, { id: 'a', text: 'from the frame', status: 'sent' })).toBe(segs);
+  });
+
+  it('does not resurrect a turn the frame has already had consumed', () => {
+    const segs: TranscriptSegment[] = [user('a', 'x', 'consumed')];
+    const next = appendUserTurn(segs, { id: 'a', text: 'x', status: 'sent' });
+    expect(next).toBe(segs);
+    expect((next[0] as { status: string }).status).toBe('consumed');
+  });
+
+  // A POST that threw published no frame, so there is nothing to collide with.
+  it('still appends a rejected turn', () => {
+    const segs = appendUserTurn([], { id: 'b', text: 'x', status: 'error', error: 'too late' });
+    expect(segs).toHaveLength(1);
+    expect(segs[0]).toMatchObject({ status: 'error', error: 'too late' });
+  });
+});
+
 describe('applySteerFrame', () => {
   // The sender appends optimistically AND the API replays the stream from id 0 on every
   // connect, so a plain append would render each steer twice for whoever sent it.

@@ -49,11 +49,25 @@ export function appendModelText(
 }
 
 /** Append the turn the sender just submitted, optimistically — before any frame confirms it,
- *  so pressing Enter puts your words in the transcript immediately. */
+ *  so pressing Enter puts your words in the transcript immediately.
+ *
+ *  Idempotent on a non-empty id, because the optimistic append LOSES A RACE often enough to
+ *  matter: the POST resolves only after a round trip, while the worker publishes the `steer`
+ *  frame the moment the text reaches the CLI's stdin, so the frame frequently arrives first
+ *  and `applySteerFrame` has already added the turn. MEASURED in the browser against a live
+ *  plan-chat run — one steer rendered as two identical `You ✓` turns while the persisted
+ *  transcript held exactly one. Guarding only the frame side leaves the race open from the
+ *  other direction.
+ *
+ *  The failure path is unaffected: a POST that threw published no frame, so there is no id to
+ *  collide with and the `error` turn appends normally. */
 export function appendUserTurn(
   segments: readonly TranscriptSegment[],
   turn: { id: string; text: string; status: SteerStatus; error?: string },
 ): TranscriptSegment[] {
+  if (turn.id && segments.some((s) => s.kind === 'user' && s.id === turn.id)) {
+    return segments as TranscriptSegment[];
+  }
   return [...segments, { kind: 'user', ...turn }];
 }
 
