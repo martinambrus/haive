@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   discardKbDrafts,
   KB_DRAFT_DIR,
+  readKbBodyFile,
+  readKbBodyText,
   KbBodyPathError,
   parseSectionsFromMarkdown,
   prepareAgentWritableDir,
@@ -160,6 +162,76 @@ describe('resolveBodies', () => {
 // The step's own validators must accept an entry whose body is staged, and must keep
 // accepting one that carries it inline — a model ignoring the new contract, or a payload
 // replayed from before it existed, has to behave exactly as it did.
+// The sandboxed agent OWNS the draft dir, and the worker reading it runs as root — so a
+// symlink dropped in there reads a file the agent could never open itself and publishes it as
+// trusted KB output. A lexical containment check cannot see through one.
+describe('staged bodies never escape the draft dir', () => {
+  let dir: string;
+  let secret: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'haive-kbescape-'));
+    await mkdir(path.join(dir, KB_DRAFT_DIR), { recursive: true });
+    secret = path.join(dir, 'outside-secret.md');
+    await writeFile(secret, '## Leaked\n\nWORKER_READABLE_EXTERNAL_SECRET\n');
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a symlink that points outside, in both readers', async () => {
+    await symlink(secret, path.join(dir, KB_DRAFT_DIR, 'sneak.md'));
+    const declared = `${KB_DRAFT_DIR}/sneak.md`;
+    await expect(readKbBodyFile(dir, declared)).rejects.toThrow(KbBodyPathError);
+    await expect(readKbBodyText(dir, declared)).rejects.toThrow(/resolves outside/);
+  });
+
+  it('refuses a body reached through a symlinked SUBDIRECTORY', async () => {
+    const outsideDir = path.join(dir, 'elsewhere');
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(path.join(outsideDir, 'x.md'), '## H\n\nbody\n');
+    await symlink(outsideDir, path.join(dir, KB_DRAFT_DIR, 'sub'));
+    await expect(readKbBodyText(dir, `${KB_DRAFT_DIR}/sub/x.md`)).rejects.toThrow(
+      /resolves outside/,
+    );
+  });
+
+  it('still reads an ordinary staged file', async () => {
+    await writeFile(path.join(dir, KB_DRAFT_DIR, 'ok.md'), '## H\n\nAGENT_DRAFT_CONTENT\n');
+    await expect(readKbBodyText(dir, `${KB_DRAFT_DIR}/ok.md`)).resolves.toContain(
+      'AGENT_DRAFT_CONTENT',
+    );
+  });
+});
+
+// Body paths are deterministic (`<id>.md`), so a retry that declares one and then fails to
+// write it would read the PREVIOUS attempt's file and publish it as this attempt's output.
+describe('prepareAgentWritableDir isolates attempts', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'haive-kbretry-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('empties a staging dir left by a previous attempt', async () => {
+    await mkdir(path.join(dir, KB_DRAFT_DIR), { recursive: true });
+    await writeFile(path.join(dir, KB_DRAFT_DIR, 'arch.md'), '## H\n\nPRIOR_ATTEMPT_CONTENT\n');
+    await prepareAgentWritableDir(dir, KB_DRAFT_DIR);
+    await expect(stat(path.join(dir, KB_DRAFT_DIR, 'arch.md'))).rejects.toThrow();
+    await expect(readKbBodyText(dir, `${KB_DRAFT_DIR}/arch.md`)).rejects.toThrow(
+      /declared but not written/,
+    );
+  });
+
+  it('leaves the rest of .haive alone while clearing', async () => {
+    await mkdir(path.join(dir, '.haive'), { recursive: true });
+    await writeFile(path.join(dir, '.haive', 'install.json'), '{"keep":true}');
+    await prepareAgentWritableDir(dir, KB_DRAFT_DIR);
+    expect(await readFile(path.join(dir, '.haive', 'install.json'), 'utf8')).toContain('keep');
+  });
+});
+
 describe('discardKbDrafts', () => {
   let dir: string;
   beforeEach(async () => {

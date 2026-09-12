@@ -1,4 +1,4 @@
-import { chown, mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { chown, lstat, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 /** Where a KB miner stages an entry's body before the step files it. Inside the
@@ -64,6 +64,37 @@ export function resolveKbBodyPath(repoPath: string, declared: string): string {
   return abs;
 }
 
+/** Resolve a declared body path to a file that is REALLY inside the draft dir.
+ *
+ *  `resolveKbBodyPath` is lexical, and lexical is not enough: the sandboxed agent owns this
+ *  directory and can drop a symlink in it. The worker runs as ROOT, so following one reads a
+ *  file the agent could never open itself and publishes it as trusted KB output — VERIFIED by
+ *  a reviewer's reproduction, which returned the contents of an external mode-0600 file
+ *  through these readers.
+ *
+ *  `realpath` collapses every link in the chain — the final component AND any intermediate
+ *  directory — and the result is re-tested against the REAL draft root, so a link is refused
+ *  wherever it sits. The regular-file check then rejects a fifo or device, which would hang or
+ *  misread rather than escape. TOCTOU is not a live concern here: the CLI has exited by the
+ *  time apply reads these, and nothing else writes the directory. */
+async function resolveStagedFile(repoPath: string, declared: string): Promise<string> {
+  const lexical = resolveKbBodyPath(repoPath, declared);
+  let real: string;
+  let root: string;
+  try {
+    real = await realpath(lexical);
+    root = await realpath(path.resolve(repoPath, KB_DRAFT_DIR));
+  } catch {
+    throw new KbBodyPathError(`bodyPath declared but not written: ${declared}`);
+  }
+  if (real !== root && !real.startsWith(root + path.sep)) {
+    throw new KbBodyPathError(`bodyPath resolves outside ${KB_DRAFT_DIR}: ${declared}`);
+  }
+  const st = await lstat(real);
+  if (!st.isFile()) throw new KbBodyPathError(`bodyPath is not a regular file: ${declared}`);
+  return real;
+}
+
 /** Read one staged body and return its sections.
  *
  *  A declared-but-missing file THROWS instead of yielding an empty entry: the index said
@@ -71,7 +102,7 @@ export function resolveKbBodyPath(repoPath: string, declared: string): string {
  *  than failing the entry — an empty ARCHITECTURE.md reads as "this project has no
  *  architecture" to every later reader, human and agent. */
 export async function readKbBodyFile(repoPath: string, declared: string): Promise<KbSection[]> {
-  const abs = resolveKbBodyPath(repoPath, declared);
+  const abs = await resolveStagedFile(repoPath, declared);
   let text: string;
   try {
     text = await readFile(abs, 'utf8');
@@ -95,7 +126,7 @@ export async function readKbBodyFile(repoPath: string, declared: string): Promis
  *  Empty is a failure for the same reason a missing file is: the index said the agent
  *  wrote it, and an approved-but-blank KB section is worse than one that never arrived. */
 export async function readKbBodyText(repoPath: string, declared: string): Promise<string> {
-  const abs = resolveKbBodyPath(repoPath, declared);
+  const abs = await resolveStagedFile(repoPath, declared);
   let text: string;
   try {
     text = await readFile(abs, 'utf8');
@@ -167,6 +198,14 @@ export async function prepareAgentWritableDir(
   logger?: { warn: (obj: unknown, msg?: string) => void },
 ): Promise<void> {
   const abs = path.resolve(repoPath, relDir);
+  // EMPTY it first. Body paths are deterministic (`<id>.md`), so a retry that declares a path
+  // and then fails to write it would otherwise read the PREVIOUS attempt's file and publish it
+  // as this attempt's trusted output — VERIFIED by a reviewer's reproduction, where a retry
+  // that wrote nothing published the prior attempt's body. Clearing here rather than only
+  // after a successful apply is what makes every attempt start from nothing; it also discards
+  // drafts a failed run left for diagnosis, which is the right trade — by the time anyone
+  // retries, they have looked.
+  await rm(abs, { recursive: true, force: true });
   await mkdir(abs, { recursive: true });
   try {
     const owner = await stat(repoPath);
