@@ -14,12 +14,7 @@ import { RetryableParseError } from '../../step-definition.js';
 import type { AgentColor, AgentSpec } from './_agent-templates.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { extractFencedJson } from '../_fenced-json.js';
-import {
-  countFilesMatching,
-  listFilesMatching,
-  pathExists,
-  resolveConfirmedProject,
-} from './_helpers.js';
+import { listFilesMatching, pathExists, resolveConfirmedProject } from './_helpers.js';
 import {
   FILE_COUNT_THRESHOLD,
   buildTechInventory,
@@ -34,6 +29,16 @@ export interface AgentCandidate {
   label: string;
   hint: string;
   count: number;
+  /** A few of the paths the scan actually matched, shown with the count.
+   *
+   *  A bare count is unfalsifiable, and a model asked to justify a decision will invent
+   *  what it cannot see. MEASURED on a live run: `Test writer (77 files)` was declined with
+   *  "the 77 scanner matches are Drupal core SimpleTest .test files under modules/" — the
+   *  count was in fact 75 of the project's OWN Playwright specs under `test-playwright/`
+   *  plus 2 contrib files, and the scanner's regex cannot match a bare `.test` file at all.
+   *  Naming the paths makes that claim impossible to make. Absent for candidates that carry
+   *  no file pattern, which is a different thing from matching nothing. */
+  sampleFiles?: string[];
   recommended: boolean;
   /** 'scan' for deterministic file-pattern matches, 'llm' for AI-suggested,
    *  'bundle' for items pulled in from a custom user bundle. */
@@ -345,12 +350,20 @@ const FRAMEWORK_AGENTS: Record<string, FrameworkAgent[]> = {
 /* Scanning                                                            */
 /* ------------------------------------------------------------------ */
 
-async function scanPattern(repo: string, pattern: Pattern): Promise<number> {
+/** How many matched paths to keep per candidate — enough to characterise WHERE the matches
+ *  live, which is the question a reviewer actually asks of a count. */
+const SCAN_SAMPLE_SIZE = 4;
+
+async function scanPattern(
+  repo: string,
+  pattern: Pattern,
+): Promise<{ count: number; sample: string[] }> {
   if (pattern.requireDir) {
     const dir = path.join(repo, pattern.requireDir);
-    if (!(await pathExists(dir))) return 0;
+    if (!(await pathExists(dir))) return { count: 0, sample: [] };
   }
-  return countFilesMatching(repo, pattern.predicate, 5);
+  const matches = await listFilesMatching(repo, pattern.predicate, 5);
+  return { count: matches.length, sample: matches.slice(0, SCAN_SAMPLE_SIZE) };
 }
 
 export async function discoverAgentCandidates(
@@ -372,9 +385,12 @@ export async function discoverAgentCandidates(
   const scanResults = await mapWithConcurrency(
     uniquePatterns,
     await resolveParallelCap(),
-    async (p) => ({ id: p.id, count: await scanPattern(repo, p) }),
+    async (p) => ({ id: p.id, ...(await scanPattern(repo, p)) }),
   );
   const countById = new Map(scanResults.map((r) => [r.id, r.count]));
+  // Absent for an id with no pattern, which the prompt renders differently from zero
+  // matches: "nothing was looked for" and "nothing was found" are different facts.
+  const sampleById = new Map(scanResults.map((r) => [r.id, r.sample]));
 
   // Build candidate list: baselines first, then framework-specific
   const candidates: AgentCandidate[] = [];
@@ -387,6 +403,7 @@ export async function discoverAgentCandidates(
       label: def.label,
       hint: def.hint,
       count,
+      ...(sampleById.has(def.id) ? { sampleFiles: sampleById.get(def.id) } : {}),
       recommended: true, // baselines always recommended
     });
     usedIds.add(def.id);
@@ -400,6 +417,7 @@ export async function discoverAgentCandidates(
       label: fa.label,
       hint: fa.hint,
       count,
+      ...(sampleById.has(fa.id) ? { sampleFiles: sampleById.get(fa.id) } : {}),
       recommended: count >= THRESHOLD || true, // framework agents always recommended
     });
     usedIds.add(fa.id);
@@ -584,14 +602,37 @@ function renderBundleAgentBodies(candidates: readonly AgentCandidate[]): string[
   return lines.filter((l) => l !== '');
 }
 
+/** One candidate row, with the EVIDENCE behind its count.
+ *
+ *  A bare `(77 matching files)` is unfalsifiable, and a model asked to justify a decision
+ *  will describe what it cannot see. MEASURED on a live run, `Test writer (77 files)` was
+ *  declined with "the 77 scanner matches are Drupal core SimpleTest .test files under
+ *  modules/" — in fact 75 were the project's OWN Playwright specs under `test-playwright/`,
+ *  and the scanner's regex requires `.test.<ext>` so it cannot match a bare `.test` file at
+ *  all. The conclusion may still have been right; the stated reason was invented, and a
+ *  sample of the paths is what makes that impossible.
+ *
+ *  A candidate with NO pattern says so, rather than rendering `0 matching files`. "Nothing
+ *  was looked for" and "nothing was found" license opposite conclusions — `api-route-dev`
+ *  only matches `app/api/`, `src/routes/`, `routes/`, `src/api/` and `pages/api/`, so on a
+ *  Drupal 7 repo it scores 0 for a surface that exists and lives in `hook_menu()`. */
+function renderCandidateRow(c: AgentCandidate): string {
+  const head = `- ${c.id}: ${c.label} — ${c.hint}`;
+  if (c.sampleFiles === undefined) {
+    return `${head} (no file-pattern scan for this agent — judge it from the file tree, and do not read the absence of a count as evidence either way)`;
+  }
+  if (c.count === 0) return `${head} (0 matching files — the scan ran and found none)`;
+  const shown = c.sampleFiles.join(', ');
+  const more = c.count > c.sampleFiles.length ? `, +${c.count - c.sampleFiles.length} more` : '';
+  return `${head} (${c.count} matching files, e.g. ${shown}${more})`;
+}
+
 export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
   const detected = args.detected as AgentDiscoveryDetect;
   const fileTree = detected.__fileTree ?? '(no file tree)';
   const inventory = detected.__techInventory ?? { items: [], scannedManifests: [] };
 
-  const predefinedList = detected.candidates
-    .map((c) => `- ${c.id}: ${c.label} — ${c.hint} (${c.count} matching files)`)
-    .join('\n');
+  const predefinedList = detected.candidates.map((c) => renderCandidateRow(c)).join('\n');
 
   const baselineIds = new Set(detected.candidates.map((c) => c.id));
   const inventoryNotInBaseline = inventory.items.filter(
@@ -654,6 +695,7 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Instructions',
     '1. Review the file tree, key config files, and the technology inventory above.',
     '2. For each predefined agent, decide if it is relevant to this project (true/false). For every one you set to FALSE, add an entry to `declined` saying why — it stays on the form as an unticked box, and without a reason the user is left guessing. Judge a bundle-sourced agent by its BODY, not its name: a bundle the user imported may still describe work this repository does not do.',
+    'A reason must rest on something a reader can check: a path, a symbol, a config key, a line you opened. Where a row shows example matching files, those files are what its count is made of — do not describe them as something else. If you did not open anything and are reasoning from the stack alone, say so in the reason ("inferred from the framework, not verified") rather than asserting a fact about files you have not read. A confident wrong reason is worse than an admitted inference, because the user cannot tell them apart on the form.',
     '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Every Tier 1 row must appear in EXACTLY ONE of `custom` or `skipped`. Put a row in `skipped` ONLY when you are not emitting it — `skipped` is the rejection list, not a place to note what you did, and an entry saying "not skipped, emitted below" contradicts itself. A row you leave out of BOTH is read as an oversight and re-added for you, so a deliberate omission survives only if it is in `skipped`.',
     '4. You MAY suggest additional technical agents not in the inventory if the file tree or config files show another framework/library/tool with non-trivial usage that the inventory missed.',
     '5. Do NOT propose agents for business domain concepts (entities, workflows, validation rules, UI flows specific to this app). Those become skills.',

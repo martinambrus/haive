@@ -32,6 +32,83 @@ const prompt = (inventory: { name: string; category: string; fileCount: number }
     formValues: {},
   } as unknown as LlmBuildArgs);
 
+const promptFor = (candidates: unknown[]): string =>
+  buildAgentDiscoveryPrompt({
+    detected: {
+      candidates,
+      __fileTree: 'sites/all/modules/activit/activit.module',
+      __techInventory: { items: [], scannedManifests: [] },
+    },
+  } as unknown as LlmBuildArgs);
+
+// A bare count is unfalsifiable, and a model asked to justify a decision describes what it
+// cannot see. MEASURED on a live run: `Test writer (77 files)` was declined as "Drupal core
+// SimpleTest .test files under modules/" when 75 of the 77 were the project's OWN Playwright
+// specs — and the scanner's regex cannot match a bare `.test` file at all.
+describe('candidate rows carry checkable evidence', () => {
+  it('names example matched files beside the count', () => {
+    const out = promptFor([
+      {
+        id: 'test-writer',
+        label: 'Test writer',
+        hint: 'writes tests',
+        count: 77,
+        recommended: true,
+        sampleFiles: [
+          'test-playwright/tests/functionality-validation/a.spec.ts',
+          'test-playwright/tests/data-validation/b.spec.ts',
+        ],
+      },
+    ]);
+    expect(out).toContain(
+      '77 matching files, e.g. test-playwright/tests/functionality-validation/a.spec.ts',
+    );
+    expect(out).toContain('+75 more');
+  });
+
+  // "Nothing was looked for" and "nothing was found" license opposite conclusions.
+  it('distinguishes an unscanned agent from one that matched nothing', () => {
+    const unscanned = promptFor([
+      {
+        id: 'api-route-dev',
+        label: 'API route developer',
+        hint: 'routes',
+        count: 0,
+        recommended: true,
+      },
+    ]);
+    expect(unscanned).toContain('no file-pattern scan for this agent');
+    expect(unscanned).not.toContain('0 matching files');
+
+    const scannedEmpty = promptFor([
+      {
+        id: 'api-route-dev',
+        label: 'API route developer',
+        hint: 'routes',
+        count: 0,
+        recommended: true,
+        sampleFiles: [],
+      },
+    ]);
+    expect(scannedEmpty).toContain('the scan ran and found none');
+  });
+
+  it('requires a reason to rest on something checkable, or admit it is inferred', () => {
+    const out = promptFor([
+      {
+        id: 'code-reviewer',
+        label: 'Code reviewer',
+        hint: 'reviews',
+        count: 1,
+        recommended: true,
+        sampleFiles: ['a.ts'],
+      },
+    ]);
+    expect(out).toContain('a path, a symbol, a config key, a line you opened');
+    expect(out).toContain('inferred from the framework, not verified');
+  });
+});
+
 describe('agent-discovery prompt rules', () => {
   it('says `skipped` is only for rows NOT emitted', () => {
     const p = prompt();
