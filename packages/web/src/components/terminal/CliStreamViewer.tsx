@@ -6,14 +6,26 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
-import { restoreSteers } from '@/lib/steer-history';
-import { api, apiWebSocketUrl, type TaskEvent } from '@/lib/api-client';
+import { restoreSteers, type RestoredSteer } from '@/lib/steer-history';
+import { api, apiWebSocketUrl, type StoredCleanTranscript, type TaskEvent } from '@/lib/api-client';
+import {
+  appendModelText,
+  appendUserTurn,
+  applySteerFrame,
+  buildReplayTranscript,
+  hasModelText,
+  markPendingUnconsumed,
+  markSteerConsumed,
+  type SteerStatus,
+  type TranscriptSegment,
+} from '@/lib/clean-transcript';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
 import { copyTerminalSelection } from '@/lib/terminal-copy';
 import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
 import { describeRetry, describeStall, isStalled, type CliRetryInfo } from '@/lib/stream-health';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 type TerminalTab = 'clean' | 'raw';
@@ -41,6 +53,15 @@ interface CliStreamViewerProps {
   /** Persisted model prose for the Clean tab on replay (cli_invocations.raw_output).
    *  Ignored for live runs, which accumulate prose from `text` stream frames. */
   staticCleanOutput?: string;
+  /** Persisted ordered transcript for the Clean tab on replay
+   *  (cli_invocations.clean_transcript): the same prose split into turns, with each mid-run
+   *  steer at the position it was injected. Null/absent on every invocation that ran before
+   *  the column existed, which falls back to `staticCleanOutput` plus the steers restored from
+   *  task events. Ignored for live runs, which build the list from stream frames. */
+  staticCleanTranscript?: StoredCleanTranscript | null;
+  /** Size of this invocation's dispatched prompt, for the collapsed "initial prompt" turn's
+   *  label. The prompt itself is fetched only if someone expands it. */
+  promptChars?: number;
   /** Whether this invocation produces parsed model prose. False for
    *  subagent_sequential (its rawOutput is a JSON trace, not prose) — those
    *  panels render raw-only with no tab bar. Defaults to true. */
@@ -86,23 +107,17 @@ const RAW_AUTOSWITCH_IDLE_MS = 30_000;
 // stop pinning to the latest output until they scroll back to the bottom.
 const CLEAN_STICK_THRESHOLD_PX = 24;
 
-// A steer's lifecycle in the viewer. `sent` = accepted by the API (queued to the
-// CLI's stdin); `consumed` = drained by the model at a tool-call boundary (the
-// worker's steer_consumed frame); `unconsumed` = the run ended before it drained;
-// `error` = the API rejected it (e.g. the turn already finished).
-//
-// `historical` = restored from `steering.nudge` task events after a remount. The list
-// lived only in component state, so closing the terminal threw it away even though the
-// steers were durable. Only the SEND is recorded, never the outcome, so a restored entry
-// claims no status rather than reporting a `sent` that may long since have been consumed
-// — the same rule the step banners follow about copy that outlives its state.
-type SteerStatus = 'sent' | 'consumed' | 'unconsumed' | 'error' | 'historical';
-interface SteerEntry {
-  id: string;
-  text: string;
-  status: SteerStatus;
-  error?: string;
-}
+// A steer's status note. The glyph beside a turn carries the state and its tooltip carries
+// the reason, but a tooltip is not discoverable — so every ambiguous state also says what it
+// is in words. Deliberately NOT `consumed`: a green tick above the prose that answers it needs
+// no caption, and captioning the happy path would put a status line on every turn.
+const STEER_STATUS_NOTE: Record<SteerStatus, string> = {
+  sent: 'queued — applies at the next tool call',
+  consumed: '',
+  unconsumed: 'the run ended before this was applied',
+  error: 'not delivered',
+  historical: 'outcome not recorded',
+};
 
 export function CliStreamViewer({
   invocationId,
@@ -114,6 +129,8 @@ export function CliStreamViewer({
   staticOutput,
   staticExitCode,
   staticCleanOutput,
+  staticCleanTranscript,
+  promptChars,
   cleanSupported = true,
   cleanOnly = false,
   startedAt,
@@ -140,31 +157,24 @@ export function CliStreamViewer({
   // invocation is steerable. The text is delivered to the running CLI's stdin
   // and applied at its next tool-call boundary.
   const [steerable, setSteerable] = useState(false);
-  const [steerText, setSteerText] = useState('');
-  const [steering, setSteering] = useState(false);
-  // Sent steers for this invocation (live-session only — a page reload resets it).
-  // Rows flip to `consumed` on the worker's steer_consumed frame; any still-`sent`
-  // rows flip to `unconsumed` when the run exits.
-  const [steers, setSteers] = useState<SteerEntry[]>([]);
-  const [steerListOpen, setSteerListOpen] = useState(false);
+  const [restoredSteers, setRestoredSteers] = useState<RestoredSteer[]>([]);
 
-  // Restore what THIS invocation has already been steered with. Runs once per mount and only
-  // SEEDS: a live `sent` or `steer_consumed` frame arriving later appends as usual, and
-  // an id already present is not duplicated, so a reopened terminal during a live run
-  // shows history then keeps tracking.
+  // Restore what THIS invocation was steered with — for a LEGACY replay only.
+  //
+  // A live run needs nothing: the worker publishes a `steer` frame the moment it writes to
+  // stdin and the API replays the stream from id 0, so a terminal reopened mid-run gets every
+  // steer back IN POSITION, which is strictly better than the flat list this ever produced.
+  // A replay whose row carries a transcript already has its user turns. So this is the one
+  // case left — a run that finished before the transcript column existed — and gating it here
+  // also drops an events fetch from every live terminal mount, eight of them on a fan-out step.
   useEffect(() => {
-    if (!stepRowId) return;
+    if (!stepRowId || !isReplay || staticCleanTranscript != null) return;
     let cancelled = false;
     void api
       .get<{ events: TaskEvent[] }>(`/tasks/${taskId}/events?type=steering.nudge`)
       .then((data) => {
         if (cancelled) return;
-        const restored: SteerEntry[] = restoreSteers(data.events, stepRowId, invocationId);
-        if (restored.length === 0) return;
-        setSteers((prev) => {
-          const seen = new Set(prev.map((p) => p.id));
-          return [...restored.filter((r) => !seen.has(r.id)), ...prev];
-        });
+        setRestoredSteers(restoreSteers(data.events, stepRowId, invocationId));
       })
       .catch(() => {
         // History is a convenience; a terminal that cannot fetch it still works.
@@ -172,16 +182,17 @@ export function CliStreamViewer({
     return () => {
       cancelled = true;
     };
-  }, [taskId, stepRowId, invocationId]);
-  const steerListRef = useRef<HTMLDivElement | null>(null);
+  }, [taskId, stepRowId, invocationId, isReplay, staticCleanTranscript]);
   const onExitRef = useRef(onExit);
 
   // Tabbed view: Clean (parsed model prose) is the default; Raw is the original
-  // xterm byte stream. cleanText accumulates live `text` frames; on replay the
-  // Clean tab renders staticCleanOutput instead. When cleanSupported is false we
+  // xterm byte stream. The transcript accumulates live `text` and `steer` frames; on replay
+  // it is rebuilt from the persisted transcript (or staticCleanOutput). When cleanSupported is false we
   // render raw-only (no tabs) — unchanged from the pre-tabs behavior.
   const [tab, setTab] = useState<TerminalTab>('clean');
-  const [cleanText, setCleanText] = useState('');
+  // The live transcript: model prose interleaved with the user's own turns, in the order they
+  // happened. On replay this is rebuilt from the persisted column instead (see `transcript`).
+  const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   // True once the user clicks either tab on this terminal. Disables all auto-switching
   // for the rest of this terminal's life — a manual choice always wins. Resets per
   // terminal because each invocation mounts a fresh CliStreamViewer (keyed by id).
@@ -212,18 +223,6 @@ export function CliStreamViewer({
     onExitRef.current = onExit;
   }, [onExit]);
 
-  // Close the steer-list popover on an outside click.
-  useEffect(() => {
-    if (!steerListOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (steerListRef.current && !steerListRef.current.contains(e.target as Node)) {
-        setSteerListOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [steerListOpen]);
-
   const cancelActiveCli = async () => {
     if (cancelling) return;
     setCancelling(true);
@@ -237,23 +236,29 @@ export function CliStreamViewer({
     }
   };
 
-  const sendSteer = async () => {
-    const text = steerText.trim();
-    if (!text || steering) return;
+  /** Send one steer and put it in the transcript. Returns whether the composer should clear.
+   *
+   *  The turn is appended optimistically rather than waiting for the server's `steer` frame,
+   *  so pressing Enter puts your words on screen at once; `applySteerFrame` then reconciles
+   *  the frame against it by id instead of appending a second copy. */
+  const sendSteer = async (text: string): Promise<boolean> => {
     const id = crypto.randomUUID();
-    setSteering(true);
+    // Your own turn always lands on screen, even if you had scrolled up to read — and this
+    // re-engages following for the model output that answers it, which is what pressing Enter
+    // in a terminal means. Re-armed on the failure path too: a rejection nobody scrolls to is
+    // a rejection nobody reads.
+    cleanStickRef.current = true;
     try {
       await api.post(`/tasks/${taskId}/steer-active-cli`, { text, invocationId, steerId: id });
-      setSteerText('');
-      setSteers((prev) => [...prev, { id, text, status: 'sent' }]);
+      setSegments((prev) => appendUserTurn(prev, { id, text, status: 'sent' }));
+      return true;
     } catch (err) {
       const msg = (err as Error).message ?? 'Steer failed';
       const friendly = /409|not steerable|no active/i.test(msg)
         ? 'Too late — the run already finished its turn'
         : msg;
-      setSteers((prev) => [...prev, { id, text, status: 'error', error: friendly }]);
-    } finally {
-      setSteering(false);
+      setSegments((prev) => appendUserTurn(prev, { id, text, status: 'error', error: friendly }));
+      return false;
     }
   };
 
@@ -434,15 +439,7 @@ export function CliStreamViewer({
             if (parsed.stream === 'text') {
               if (parsed.data.length > 0) {
                 const chunk = parsed.data;
-                // Each `text` frame is one complete assistant turn / agent_message.
-                // Separate consecutive responses with a blank line so they don't
-                // visually run together — and so Markdown renders them as distinct
-                // blocks rather than one continuous paragraph.
-                setCleanText((prev) => {
-                  if (!prev) return chunk;
-                  const sep = prev.endsWith('\n\n') ? '' : prev.endsWith('\n') ? '\n' : '\n\n';
-                  return prev + sep + chunk;
-                });
+                setSegments((prev) => appendModelText(prev, chunk));
               }
             } else {
               term.write(stripDel(parsed.data));
@@ -450,6 +447,24 @@ export function CliStreamViewer({
             }
           }
           break;
+        case 'steer': {
+          // The user's own turn, echoed back by the worker at the moment it reached the CLI's
+          // stdin. Rendered in BOTH surfaces: as a turn in the transcript, and as a line in
+          // the byte stream, so neither tab shows the model answering a question that appears
+          // nowhere. Deliberately not `setHasOutput` — that gates the "Waiting for CLI
+          // output…" overlay, which is a statement about the CLI, and a terminal showing only
+          // what the user typed is still waiting.
+          const steerText = typeof parsed.text === 'string' ? parsed.text : '';
+          if (steerText.length > 0) {
+            const steerId = typeof parsed.id === 'string' ? parsed.id : '';
+            setSegments((prev) => applySteerFrame(prev, { id: steerId, text: steerText }));
+            // Written from the FRAME, never from the local optimistic copy: xterm has no
+            // dedupe and the API replays the stream from id 0 to every viewer, so a
+            // locally-written line would double up on reconnect.
+            writeSteerLine(term, steerText);
+          }
+          break;
+        }
         case 'exit':
           setState('closed');
           setHasOutput(true);
@@ -457,12 +472,8 @@ export function CliStreamViewer({
           setRetry(null);
           setStall(null);
           // The run ended — any steer that never reached a tool-call boundary was
-          // never applied. Flip pending rows so they don't hang as "queued".
-          setSteers((prev) =>
-            prev.some((s) => s.status === 'sent')
-              ? prev.map((s) => (s.status === 'sent' ? { ...s, status: 'unconsumed' } : s))
-              : prev,
-          );
+          // never applied. Flip pending turns so they don't hang as "queued".
+          setSegments(markPendingUnconsumed);
           if (typeof parsed.code === 'number') {
             term.writeln(`\r\n\x1b[36m[CLI exited with code ${parsed.code}]\x1b[0m`);
             onExitRef.current?.(parsed.code);
@@ -471,13 +482,7 @@ export function CliStreamViewer({
         case 'steer_consumed': {
           // The model drained this steer at a tool-call boundary — tick its row.
           const consumedId = typeof parsed.id === 'string' ? parsed.id : null;
-          if (consumedId) {
-            setSteers((prev) =>
-              prev.map((s) =>
-                s.id === consumedId && s.status === 'sent' ? { ...s, status: 'consumed' } : s,
-              ),
-            );
-          }
+          if (consumedId) setSegments((prev) => markSteerConsumed(prev, consumedId));
           break;
         }
         case 'error':
@@ -599,12 +604,28 @@ export function CliStreamViewer({
     return () => clearInterval(id);
   }, [isReplay, state, startedAt]);
 
-  // CR-only sequences confuse HTML pre-wrap; JSON.parse already turned \n/\t into
-  // real characters, so stripping bare \r is all the escaping the prose needs.
-  const cleanContent = useMemo(
-    () => (isReplay ? (staticCleanOutput ?? '') : cleanText).replace(/\r/g, ''),
-    [isReplay, staticCleanOutput, cleanText],
+  // What the Clean tab renders. Live, that is the accumulated stream; on replay it is the
+  // persisted transcript, falling back to the plain prose plus whatever `steering.nudge`
+  // recorded for a row written before that column existed.
+  //
+  // Every dependency is a prop or state written only by a frame or a fetch, and none of the
+  // mutators rebuilds the array when nothing changed, so the memoized subtree below re-renders
+  // only when a turn actually moves.
+  const transcript = useMemo(
+    () =>
+      isReplay
+        ? buildReplayTranscript({
+            transcript: staticCleanTranscript,
+            cleanOutput: staticCleanOutput ?? '',
+            restored: restoredSteers,
+          })
+        : segments,
+    [isReplay, staticCleanTranscript, staticCleanOutput, restoredSteers, segments],
   );
+  // "The Clean tab is empty" has to mean "no MODEL prose": the Raw auto-switch below exists
+  // for a run whose model has said nothing parseable, and a transcript holding only the user's
+  // own turn is still exactly that run.
+  const modelTextSeen = useMemo(() => hasModelText(transcript), [transcript]);
 
   // Keep the Clean panel pinned to the latest output as it streams — but only
   // while the user is at (or near) the bottom. Once they scroll up to read we
@@ -614,7 +635,7 @@ export function CliStreamViewer({
   useEffect(() => {
     const el = cleanScrollRef.current;
     if (el && cleanStickRef.current) el.scrollTop = el.scrollHeight;
-  }, [cleanContent, tab]);
+  }, [transcript, tab]);
 
   // Re-arm the stick-to-bottom gate when the user is within the threshold of the
   // bottom, disarm it otherwise. Programmatic scrolls from the effect above land
@@ -635,7 +656,7 @@ export function CliStreamViewer({
   //  Never armed in cleanOnly mode: there the Raw panel is not rendered at all, so the
   //  switch would blank the column instead of revealing the bytes it exists to reveal.
   useEffect(() => {
-    const cleanIsEmpty = cleanText.trim().length === 0;
+    const cleanIsEmpty = !modelTextSeen;
     if (
       isReplay ||
       cleanOnly ||
@@ -649,7 +670,7 @@ export function CliStreamViewer({
     }
     const id = setTimeout(() => setTab('raw'), RAW_AUTOSWITCH_IDLE_MS);
     return () => clearTimeout(id);
-  }, [isReplay, cleanOnly, cleanSupported, state, hasOutput, cleanText, userPickedTab]);
+  }, [isReplay, cleanOnly, cleanSupported, state, hasOutput, modelTextSeen, userPickedTab]);
 
   // Auto-return to Clean once prose lands, if we auto-switched to Raw and the user
   // hasn't taken manual control. Default tab is 'clean' and the only non-user path to
@@ -657,8 +678,8 @@ export function CliStreamViewer({
   // "we imposed Raw" — safe to flip back without a separate flag.
   useEffect(() => {
     if (isReplay || userPickedTab || cleanOnly) return;
-    if (tab === 'raw' && cleanText.trim().length > 0) setTab('clean');
-  }, [cleanText, tab, isReplay, userPickedTab, cleanOnly]);
+    if (tab === 'raw' && modelTextSeen) setTab('clean');
+  }, [modelTextSeen, tab, isReplay, userPickedTab, cleanOnly]);
 
   const heightClass = height ?? (fill ? '' : 'h-[400px]');
   const showTabs = cleanSupported && !cleanOnly;
@@ -671,9 +692,6 @@ export function CliStreamViewer({
   // showing an empty box.
   const cleanOnlyUnsupported = cleanOnly && !cleanSupported;
 
-  // Compact inline status driven by the most recent steer: shows the error or the
-  // "queued" hint, and clears the moment that steer is consumed. The full per-steer
-  // history lives behind the list popover.
   // One badge for both health signals, retry first: an api_retry event is EVIDENCE of what went
   // wrong, while a stall is only the absence of output — so when the CLI has told us, say that.
   const health = retry
@@ -681,14 +699,6 @@ export function CliStreamViewer({
     : stall
       ? { kind: 'stall' as const, ...describeStall(stall.since, stall.now) }
       : null;
-
-  const latestSteer = steers.length > 0 ? steers[steers.length - 1]! : null;
-  const steerInline =
-    latestSteer?.status === 'error'
-      ? { text: latestSteer.error ?? 'Steer failed', tone: 'error' as const }
-      : latestSteer?.status === 'sent'
-        ? { text: 'Steer queued — applies at the next tool call', tone: 'pending' as const }
-        : null;
 
   return (
     <div className={`flex flex-col gap-2 ${fill ? 'h-full min-h-0' : ''}`}>
@@ -706,11 +716,6 @@ export function CliStreamViewer({
           )}
           {errorMsg && <span className="text-red-400">{errorMsg}</span>}
           {cancelError && <span className="text-red-400">cancel: {cancelError}</span>}
-          {steerInline && (
-            <span className={steerInline.tone === 'error' ? 'text-red-400' : 'text-indigo-300'}>
-              {steerInline.text}
-            </span>
-          )}
           {cliPendingChars !== null && (
             <button
               type="button"
@@ -723,51 +728,6 @@ export function CliStreamViewer({
           )}
         </div>
         <div className="flex items-center gap-3 text-xs text-neutral-400">
-          {!isReplay && steerable && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void sendSteer();
-              }}
-              className="flex items-center gap-1"
-            >
-              <input
-                value={steerText}
-                onChange={(e) => setSteerText(e.target.value)}
-                placeholder="Steer the agent…"
-                disabled={steering || state !== 'connected'}
-                className="w-48 rounded border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-200 placeholder:text-neutral-600 disabled:opacity-50"
-              />
-              <button
-                type="submit"
-                disabled={steering || state !== 'connected' || steerText.trim().length === 0}
-                className="rounded border border-indigo-600 px-2 py-0.5 text-indigo-300 hover:bg-indigo-950 disabled:opacity-50"
-              >
-                {steering ? 'Sending…' : 'Steer'}
-              </button>
-            </form>
-          )}
-          {/* Deliberately NOT behind `!isReplay`, unlike everything else in this row: a
-              finished invocation renders as a replay, which is exactly when someone
-              reopens a terminal to read what it was steered with. Behind the guard the
-              history restored above had no render site and only ever showed during the
-              live run — the one state that never needed restoring. */}
-          {steers.length > 0 && (
-            <div className="relative" ref={steerListRef}>
-              <button
-                type="button"
-                onClick={() => setSteerListOpen((v) => !v)}
-                className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
-                title="Sent steers"
-                aria-label={`Sent steers (${steers.length})`}
-                aria-expanded={steerListOpen}
-              >
-                <SteerIcon />
-                <span className="tabular-nums">{steers.length}</span>
-              </button>
-              {steerListOpen && <SteerList steers={steers} />}
-            </div>
-          )}
           {!isReplay && (
             <>
               <span>Read-only — use Cancel to stop the running CLI</span>
@@ -838,7 +798,12 @@ export function CliStreamViewer({
             onScroll={handleCleanScroll}
             className="h-full w-full overflow-auto rounded border border-neutral-800 bg-[#0a0a0a]"
           >
-            {cleanContent.length === 0 ? (
+            <InitialPromptTurn
+              taskId={taskId}
+              invocationId={invocationId}
+              promptChars={promptChars}
+            />
+            {transcript.length === 0 ? (
               <div className="p-3 text-xs text-neutral-500">
                 {isReplay
                   ? 'No model text for this run.'
@@ -849,7 +814,7 @@ export function CliStreamViewer({
                       : 'No text generated by the model yet.'}
               </div>
             ) : (
-              <CleanProse content={cleanContent} />
+              <CleanTranscript segments={transcript} />
             )}
           </div>
         )}
@@ -860,8 +825,80 @@ export function CliStreamViewer({
           </div>
         )}
       </div>
+      {/* The CLI prompt: below the output, full width, so what you type reads as the next turn
+          in the transcript above it. Deliberately a sibling of the output box rather than a
+          member of the header row — that makes it tab-independent for free, and keeps it in
+          the cleanOnly split column, whose header is hidden. */}
+      {!isReplay && steerable && (
+        <SteerComposer disabled={state !== 'connected'} onSend={sendSteer} />
+      )}
     </div>
   );
+}
+
+/** The Send box. Owns its own draft state so a keystroke re-renders THIS form and nothing
+ *  else: the transcript above holds every rendered markdown body in the panel, and re-parsing
+ *  them per letter is the exact lag MarkdownView's memo was added against. */
+function SteerComposer({
+  disabled,
+  onSend,
+}: {
+  disabled: boolean;
+  onSend: (text: string) => Promise<boolean>;
+}) {
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+  const submit = async () => {
+    const trimmed = text.trim();
+    if (!trimmed || sending) return;
+    setSending(true);
+    const ok = await onSend(trimmed);
+    setSending(false);
+    if (ok) setText('');
+  };
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+      className="flex shrink-0 items-center gap-2"
+    >
+      <span aria-hidden className="select-none font-mono text-xs text-indigo-400">
+        ›
+      </span>
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="Send a message to the agent…"
+        disabled={sending || disabled}
+        className="min-w-0 flex-1 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 placeholder:text-neutral-600 disabled:opacity-50"
+      />
+      <button
+        type="submit"
+        disabled={sending || disabled || text.trim().length === 0}
+        className="rounded border border-indigo-600 px-2 py-1 text-xs text-indigo-300 hover:bg-indigo-950 disabled:opacity-50"
+      >
+        {sending ? 'Sending…' : 'Send'}
+      </button>
+    </form>
+  );
+}
+
+/** The Raw-tab rendering of one steer.
+ *
+ *  Same annotation family as this file's own `[CLI exited with code N]` and
+ *  `[stream closed: …]` writes — bracketed tag, SGR colour, explicit reset — rather than the
+ *  dim `#` the command header uses, because a steer is a turn in the run and not metadata
+ *  about how it was launched.
+ *
+ *  MIRRORS `formatSteerLine` in the worker, which writes the identical line into the persisted
+ *  transcript so a replayed Raw tab shows what the live one did. Web cannot import the worker;
+ *  the worker side pins the string in its own test. */
+function writeSteerLine(term: XTerm, text: string): void {
+  term.writeln(`\r\n\x1b[94m[you] ${stripDel(text).replaceAll('\n', '\n      ')}\x1b[0m`);
+  // A steer is a deliberate human action — show it even if the reader had scrolled up.
+  term.scrollToBottom();
 }
 
 type CleanSegment = { kind: 'normal' | 'think'; text: string; open: boolean };
@@ -896,8 +933,145 @@ function splitThink(content: string): CleanSegment[] {
   return segs;
 }
 
-// Renders Clean-tab prose, folding <think> reasoning into collapsed disclosures.
-// The outer scroll container owns padding/scroll; this just lays out the segments.
+// The Clean tab as a conversation: model turns, the user's own turns, and — on a replay of a
+// run that predates the persisted transcript — one grouped block of the steers it was given.
+//
+// Index keys are safe HERE and only here: the list is append-only with a mutated TAIL
+// (appendModelText extends the last model segment), never spliced or reordered, so no index
+// ever changes meaning.
+const CleanTranscript = memo(function CleanTranscript({
+  segments,
+}: {
+  segments: readonly TranscriptSegment[];
+}) {
+  return (
+    <div className="p-3">
+      {segments.map((seg, idx) => {
+        if (seg.kind === 'model') return <CleanProse key={idx} content={seg.text} />;
+        if (seg.kind === 'history') return <HistoricalSteers key={idx} steers={seg.steers} />;
+        return <UserTurn key={idx} text={seg.text} status={seg.status} error={seg.error} />;
+      })}
+    </div>
+  );
+});
+
+// One user turn. The speaker label follows the plan chat's turns; the body carries the
+// `.haive-md blockquote` treatment — left border, italic, dimmer — through InlineMarkdown,
+// because size and colour have to sit on a WRAPPER: `.haive-md p` sets `color` explicitly, so
+// a colour class on the markdown element itself loses to it.
+//
+// The text is rendered, never rewritten: prefixing it with `> ` to get a real blockquote would
+// edit what the user wrote, and a steer containing its own `>`, a fence or a list would come
+// back as something they did not type.
+const UserTurn = memo(function UserTurn({
+  text,
+  status,
+  error,
+}: {
+  text: string;
+  status: SteerStatus;
+  error?: string;
+}) {
+  const note = STEER_STATUS_NOTE[status];
+  return (
+    <div className="my-3 border-l-[3px] border-indigo-500/60 pl-3">
+      <p className="mb-0.5 flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-indigo-300">
+        <span>You</span>
+        <SteerStatusIcon status={status} />
+        {note && <span className="normal-case text-neutral-500">{note}</span>}
+      </p>
+      <InlineMarkdown body={text} className="text-sm italic text-neutral-400" />
+      {error && <p className="mt-1 text-[11px] text-red-400">{error}</p>}
+    </div>
+  );
+});
+
+// Steers restored from `steering.nudge` events, for a run that finished before the transcript
+// was persisted. Grouped rather than interleaved, and the heading says why: those events
+// record that a steer was SENT and never where in the output it landed. Fabricating a position
+// would read as fact.
+function HistoricalSteers({ steers }: { steers: readonly RestoredSteer[] }) {
+  return (
+    <div className="mb-3 border-l-[3px] border-neutral-700 pl-3">
+      <p className="mb-1 text-[11px] uppercase tracking-wide text-indigo-300">
+        You — steers sent during this run
+        <span className="ml-1 normal-case text-neutral-500">
+          (position in the output was not recorded)
+        </span>
+      </p>
+      {steers.map((s) => (
+        <InlineMarkdown key={s.id} body={s.text} className="mb-1 text-sm italic text-neutral-400" />
+      ))}
+    </div>
+  );
+}
+
+// The step prompt as the transcript's first user turn, so the prose below it reads as the
+// answer to something. Collapsed because step prompts are large — MEASURED across every row on
+// this install the median is ~95 KB and the largest 1.19 MB — and the body is FETCHED only on
+// first expand, so a panel nobody opens costs nothing and eight fan-out panels do not pull
+// eight prompts at mount. Same disclosure shape as ThinkBlock below.
+function InitialPromptTurn({
+  taskId,
+  invocationId,
+  promptChars,
+}: {
+  taskId: string;
+  invocationId: string;
+  promptChars?: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [prompt, setPrompt] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open || prompt !== null) return;
+    let cancelled = false;
+    void api
+      .get<{ prompt: string }>(`/tasks/${taskId}/cli-invocations/${invocationId}/prompt`)
+      .then((d) => {
+        if (!cancelled) setPrompt(d.prompt);
+      })
+      .catch((err) => {
+        if (!cancelled) setError((err as Error).message ?? 'Failed to load the prompt');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, prompt, taskId, invocationId]);
+  return (
+    <details
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+      className="mx-3 mt-3 rounded border border-neutral-800 bg-neutral-900/40"
+    >
+      <summary className="cursor-pointer select-none px-3 py-1.5 text-[11px] uppercase tracking-wide text-indigo-300 hover:text-indigo-200">
+        You — initial prompt
+        {typeof promptChars === 'number' && promptChars > 0 && (
+          <span className="ml-1 normal-case text-neutral-500">({formatChars(promptChars)})</span>
+        )}
+      </summary>
+      <div className="border-l-[3px] border-indigo-500/60 px-3 pb-2.5 pt-1">
+        {error ? (
+          <p className="text-[11px] text-red-400">{error}</p>
+        ) : prompt === null ? (
+          <p className="text-xs text-neutral-500">Loading the prompt…</p>
+        ) : (
+          <InlineMarkdown body={prompt} className="text-sm italic text-neutral-400" />
+        )}
+      </div>
+    </details>
+  );
+}
+
+/** Prompt size for the collapsed summary. Characters, not bytes — it is what the column
+ *  measures and what a reader is deciding whether to open. */
+function formatChars(n: number): string {
+  if (n < 1024) return `${n} chars`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Renders one model turn, folding <think> reasoning into collapsed disclosures.
+// The transcript container owns padding/scroll; this just lays out the segments.
 const CleanProse = memo(function CleanProse({ content }: { content: string }) {
   // splitThink scans the whole accumulated body; memoize on content so a steer-box
   // keystroke (re-renders the parent CliStreamViewer but does not change content)
@@ -906,7 +1080,7 @@ const CleanProse = memo(function CleanProse({ content }: { content: string }) {
   // MarkdownView (itself memoized on body) re-parses; finalized segments bail.
   const segments = useMemo(() => splitThink(content), [content]);
   return (
-    <div className="p-3">
+    <div>
       {segments.map((seg, idx) =>
         seg.kind === 'think' ? (
           <ThinkBlock key={idx} text={seg.text} streaming={seg.open} />
@@ -1044,37 +1218,21 @@ function DisconnectIcon() {
   );
 }
 
-function SteerIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-    </svg>
-  );
-}
-
-// One-glyph status indicator for a steer-list row. Unicode symbols (not emoji).
+// One-glyph status indicator for a user turn. Unicode symbols (not emoji). Each carries its
+// own tooltip — that tooltip is the legend, which is why the glyph set survived the move off
+// the popover it was written for.
 function SteerStatusIcon({ status }: { status: SteerStatus }) {
   switch (status) {
     case 'consumed':
       return (
-        <span className="mt-0.5 text-green-400" title="Applied at a tool-call boundary">
+        <span className="text-green-400" title="Applied at a tool-call boundary">
           ✓
         </span>
       );
     case 'sent':
       return (
         <span
-          className="mt-0.5 animate-pulse text-amber-400"
+          className="animate-pulse text-amber-400"
           title="Queued — applies at the next tool call"
         >
           •
@@ -1082,14 +1240,14 @@ function SteerStatusIcon({ status }: { status: SteerStatus }) {
       );
     case 'unconsumed':
       return (
-        <span className="mt-0.5 text-neutral-500" title="The run ended before this was applied">
+        <span className="text-neutral-500" title="The run ended before this was applied">
           —
         </span>
       );
     case 'historical':
       return (
         <span
-          className="mt-0.5 text-neutral-500"
+          className="text-neutral-500"
           title="Sent earlier in this step — the outcome is not recorded"
         >
           ↺
@@ -1097,33 +1255,9 @@ function SteerStatusIcon({ status }: { status: SteerStatus }) {
       );
     case 'error':
       return (
-        <span
-          className="mt-0.5 text-red-400"
-          title="Rejected — the run had already finished its turn"
-        >
+        <span className="text-red-400" title="Rejected — the run had already finished its turn">
           ✗
         </span>
       );
   }
-}
-
-// Popover listing the steers sent this session, newest last, each with its status
-// glyph. Rendered inside the toggle's relative wrapper so an inside click (handled
-// by the parent's click-outside effect) keeps it open.
-function SteerList({ steers }: { steers: SteerEntry[] }) {
-  return (
-    <div className="absolute right-0 top-full z-20 mt-1 max-h-64 w-72 overflow-auto rounded border border-neutral-700 bg-neutral-900 p-2 shadow-lg">
-      <div className="mb-1 px-1 text-[10px] uppercase tracking-wider text-neutral-500">Steers</div>
-      <ul className="flex flex-col gap-1">
-        {steers.map((s) => (
-          <li key={s.id} className="flex items-start gap-2 px-1 py-0.5 text-xs">
-            <SteerStatusIcon status={s.status} />
-            <span className="min-w-0 flex-1 break-words text-neutral-200" title={s.error ?? s.text}>
-              {s.text}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
 }

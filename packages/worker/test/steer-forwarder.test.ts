@@ -52,6 +52,58 @@ describe('createSteerForwarder', () => {
     expect(onWritten).toHaveBeenCalledWith({ id: 'steer-1', text: 'focus on perf' });
   });
 
+  it('carries the system marker through to onWritten, still writing it to stdin', () => {
+    const sub = fakeSubscriber();
+    const w = fakeWritable();
+    const onWritten = vi.fn();
+    const f = createSteerForwarder({ subscriber: sub as never, onWritten });
+    f.captureWritable(w as never);
+    // The soft-timeout wind-down. It must still REACH the CLI — it is the only thing that
+    // asks a run to bank its findings before the SIGKILL — but the echo downstream keeps it
+    // out of the transcript, where it would read as something the user typed.
+    sub.emitMessage(JSON.stringify({ id: '', system: true, text: 'TIME BUDGET NEARLY SPENT.' }));
+    expect(w.write).toHaveBeenCalledTimes(1);
+    expect(onWritten).toHaveBeenCalledWith({
+      id: '',
+      system: true,
+      text: 'TIME BUDGET NEARLY SPENT.',
+    });
+  });
+
+  it('never infers system from an empty id - a bare-string steer is human', () => {
+    const sub = fakeSubscriber();
+    const w = fakeWritable();
+    const onWritten = vi.fn();
+    const f = createSteerForwarder({ subscriber: sub as never, onWritten });
+    f.captureWritable(w as never);
+    sub.emitMessage('legacy steer');
+    expect(onWritten).toHaveBeenCalledWith({ id: '', text: 'legacy steer' });
+  });
+
+  describe('steerFlag', () => {
+    const write = (steerFlag?: boolean) => {
+      const sub = fakeSubscriber();
+      const w = fakeWritable();
+      const f = createSteerForwarder({ subscriber: sub as never, steerFlag });
+      f.captureWritable(w as never);
+      sub.emitMessage(JSON.stringify({ id: 'a', text: 'focus on perf' }));
+      return w.write.mock.calls[0]![0] as string;
+    };
+
+    it('adds amp queue marker to a MID-RUN steer when set', () => {
+      expect(JSON.parse(write(true).trim()).steer).toBe(true);
+    });
+
+    // Unset is the claude family, whose binary has no such field: the line must be exactly
+    // what it has always been.
+    it('emits the byte-identical legacy line when unset', () => {
+      expect(write()).toBe(
+        '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"focus on perf"}]}}\n',
+      );
+      expect(write(false)).toBe(write());
+    });
+  });
+
   it('falls back to a bare-string payload with an empty id (rolling-restart safety)', () => {
     const sub = fakeSubscriber();
     const w = fakeWritable();

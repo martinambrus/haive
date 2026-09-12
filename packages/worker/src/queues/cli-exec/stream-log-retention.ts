@@ -191,7 +191,10 @@ export class CliStreamLogReaper {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const rows = await this.db
       .update(schema.cliInvocations)
-      .set({ streamLog: null })
+      // clean_transcript goes in the SAME statement on the SAME window: the prose it holds
+      // is a subset of what stream_log carries, so a separate retention window would be a
+      // promise the adjacent column does not keep.
+      .set({ streamLog: null, cleanTranscript: null })
       .where(expiredStreamLogFilter(this.db, cutoff))
       .returning({ id: schema.cliInvocations.id });
 

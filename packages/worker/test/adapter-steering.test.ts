@@ -6,6 +6,10 @@ import { MuseAdapter } from '../src/cli-adapters/muse.js';
 import { CodexAdapter } from '../src/cli-adapters/codex.js';
 import { GeminiAdapter } from '../src/cli-adapters/gemini.js';
 import { GrokAdapter } from '../src/cli-adapters/grok.js';
+import { AmpAdapter } from '../src/cli-adapters/amp.js';
+import { AntigravityAdapter } from '../src/cli-adapters/antigravity.js';
+import { OpenRouterAdapter } from '../src/cli-adapters/openrouter.js';
+import { steeringUserMessageLine } from '../src/cli-adapters/steering.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
 const provider = (over: Partial<CliProviderRecord> = {}): CliProviderRecord =>
@@ -21,16 +25,81 @@ const provider = (over: Partial<CliProviderRecord> = {}): CliProviderRecord =>
   }) as unknown as CliProviderRecord;
 
 describe('supportsSteering capability', () => {
-  it('is true for Claude-family adapters (claude binary), false for the rest', () => {
+  // EVERY adapter is asserted here, including the false ones. amp and antigravity were absent
+  // from this table when amp shipped steering, which is how the capability set went stale for
+  // three months without a test noticing.
+  it('is true for the claude binary and for amp, false for the rest', () => {
     expect(new ClaudeCodeAdapter().supportsSteering).toBe(true);
     expect(new ZaiAdapter().supportsSteering).toBe(true);
     expect(new OllamaAdapter().supportsSteering).toBe(true);
     expect(new MuseAdapter().supportsSteering).toBe(true);
+    expect(new OpenRouterAdapter().supportsSteering).toBe(true);
+    // amp reads NDJSON user-messages from stdin under --stream-json-input and honours a
+    // top-level `steer: true` as "apply at the next interruption point while the agent is
+    // busy". Verified against the shipped binary's own --help.
+    expect(new AmpAdapter().supportsSteering).toBe(true);
+    // codex exec is fire-and-forget; turn/steer exists only in its app-server JSON-RPC
+    // protocol, which is a different transport entirely.
     expect(new CodexAdapter().supportsSteering).toBe(false);
     expect(new GeminiAdapter().supportsSteering).toBe(false);
     // grok is agentic and Claude-shaped on the wire, but its headless streams are
     // read-only — bidirectional flows need its ACP interface (`grok agent`), not stdin.
     expect(new GrokAdapter().supportsSteering).toBe(false);
+    // antigravity already speaks --input-format stream-json, but its docs say to wait for the
+    // `result` event before writing the next message: that is a queued follow-up TURN, not a
+    // mid-turn steer.
+    expect(new AntigravityAdapter().supportsSteering).toBe(false);
+  });
+});
+
+describe('steeringUserMessageLine', () => {
+  // The claude binary has no `steer` field. The flag is opt-in precisely so the line every
+  // claude-family adapter emits is byte-identical to what shipped before amp needed one.
+  it('omits the steer marker by default', () => {
+    expect(steeringUserMessageLine('hello')).toBe(
+      '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}\n',
+    );
+    expect(steeringUserMessageLine('hello', {})).toBe(steeringUserMessageLine('hello'));
+    expect(steeringUserMessageLine('hello', { steer: false })).toBe(
+      steeringUserMessageLine('hello'),
+    );
+  });
+
+  it('adds amp"s top-level steer marker when asked', () => {
+    const parsed = JSON.parse(steeringUserMessageLine('hello', { steer: true }).trim());
+    expect(parsed.steer).toBe(true);
+    expect(parsed.message.content[0].text).toBe('hello');
+  });
+});
+
+describe('amp buildCliInvocation', () => {
+  it('one-shot (default): prompt on -x, no input stream, not steerable', () => {
+    const spec = new AmpAdapter().buildCliInvocation(provider(), 'hello world', {});
+    expect(spec.args).toContain('hello world');
+    expect(spec.args).not.toContain('--stream-json-input');
+    expect(spec.steerable).toBeUndefined();
+    expect(spec.stdinInitial).toBeUndefined();
+    expect(spec.steerFlag).toBeUndefined();
+  });
+
+  it('steering: bare -x plus --stream-json-input, prompt off argv, NDJSON stdinInitial', () => {
+    const spec = new AmpAdapter().buildCliInvocation(provider(), 'hello world', {
+      steeringMode: true,
+    });
+    // amp"s --help: --stream-json-input "Requires both --execute and --stream-json".
+    expect(spec.args).toContain('-x');
+    expect(spec.args).toContain('--stream-json');
+    expect(spec.args).toContain('--stream-json-input');
+    // `-x` carries no value: the message arrives on stdin.
+    expect(spec.args[spec.args.indexOf('-x') + 1]).toBe('--stream-json');
+    expect(spec.args).not.toContain('hello world');
+    expect(spec.steerable).toBe(true);
+    expect(spec.steerFlag).toBe(true);
+    expect(spec.stdinPrompt).toBeUndefined(); // mutually exclusive with stdinInitial
+    const parsed = JSON.parse(spec.stdinInitial!.trim());
+    expect(parsed.message.content[0].text).toBe('hello world');
+    // The INITIAL message is never flagged: there is no turn in progress to interrupt.
+    expect(parsed.steer).toBeUndefined();
   });
 });
 
@@ -119,6 +188,9 @@ describe('claude-code buildCliInvocation', () => {
     expect(parsed.type).toBe('user');
     expect(parsed.message.role).toBe('user');
     expect(parsed.message.content[0].text).toBe('hello world');
+    // amp's marker must never reach the claude binary, which has no such field.
+    expect(parsed.steer).toBeUndefined();
+    expect(spec.steerFlag).toBeUndefined();
   });
 
   it('steering NDJSON is injection-safe for quotes/newlines (JSON.stringify, not concat)', () => {

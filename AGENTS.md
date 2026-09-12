@@ -211,7 +211,7 @@ install it emits ZERO custom agents, so the path is dead and the large output is
 
 ## CLI adapter system
 
-`packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`, `muse`, `grok`, `openrouter`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; only the Claude-family adapters (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) override it to true.
+`packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`, `muse`, `grok`, `openrouter`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; the Claude-family adapters (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) override it to true, and so does `amp` — see Steering below.
 
 Four adapters are the same trick: the stock `claude` binary pointed at a non-Anthropic Anthropic-wire endpoint via `ANTHROPIC_BASE_URL` — `zai` (api.z.ai), `ollama` (in-stack daemon or ollama.com), `muse` (api.meta.ai), `openrouter` (openrouter.ai/api). All four piggyback the `claude-code` install, so they build no new sandbox image. Their per-endpoint quirks are MEASURED against the live API and recorded in the adapter, not taken from vendor docs — `muse` exists as its own adapter purely because its effort scale rejects `max`, and `openrouter` records the opposite finding (its effort enum is validated globally at the gateway, so every level is safe on every model). Re-probe before "correcting" any of those comments.
 
@@ -220,6 +220,83 @@ Four adapters are the same trick: the stock `claude` binary pointed at a non-Ant
 `openrouter` traffic goes through the `openrouter-compat-proxy` sidecar (`docker/openrouter-compat-proxy/`), not straight to openrouter.ai. The claude binary appends a trailing `role:"system"` message (the Agent tool's agent-type listing) on top of the top-level `system` field; OpenRouter passes Anthropic models through natively, but every other vendor needs an Anthropic→OpenAI translation in which that message keeps its position, and vLLM-style backends answer `400 "System message must be at the beginning."` (measured on `qwen/qwen3.8-27b` across all three of its upstreams; `--disallowedTools Agent` does not stop the binary emitting it). The proxy hoists it into `system`. Unconditional rather than toggled — the rewrite is a no-op when no such message is present and was verified not to change already-working models — so unlike ollama's thinking proxy there is no per-provider switch. `resolveOpenRouterBaseUrl` is the single place that endpoint is chosen, shared by the adapter and the Test-connection probe; a provider that sets `ANTHROPIC_BASE_URL` by hand bypasses the proxy and the probe then says so.
 
 `openrouter` fronts 400+ models, so the provider form picks from a cached catalog rather than a free-text slug: the worker's `REFRESH_VERSIONS` job also refreshes `openrouter_model_cache` (`cli-versions/openrouter-models.ts`), the API serves it at `GET /cli-providers/openrouter/models`, and the picker refuses models whose `supported_parameters` lacks `tools` because Claude Code cannot run a step without native tool use. The cache is never a gate: an empty or errored catalog degrades to a free-text model field.
+
+### Steering
+
+Mid-run steering is a user message written to a RUNNING CLI's stdin, applied at its next
+tool-call boundary. `supportsSteering` is read in exactly ONE place (`dispatcher.ts`, ANDed
+with the step's `steeringRequested`) and reaches the browser only as the per-invocation
+`cli_invocations.steerable` column — no capability travels to web, which is why there is
+nothing to keep in sync in `@haive/shared`.
+
+**The capability set goes stale silently, so re-probe it.** It was set in June 2026 and by
+September amp had shipped steering without anything noticing — `adapter-steering.test.ts`
+asserted seven adapters and amp was not one of them. It now asserts ALL ten, false ones
+included. Verdicts as of 2026-09-12, each against the vendor's current docs and, where
+installed, the binary's own `--help`:
+
+- **claude family** (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) — `--input-format
+stream-json`, stdin held open, one NDJSON user-message per steer.
+- **amp** — `--stream-json-input` ("Read JSON Lines user messages from stdin. Requires both
+  --execute and --stream-json", quoted from the shipped image's own `--help`) plus a
+  top-level `"steer": true`, which means "apply at the next interruption point while the
+  agent is busy". `-x, --execute [message]` takes an OPTIONAL value, so bare `-x` with the
+  message on stdin is the shape the adapter already used for an oversized prompt.
+  MEASURED against 0.0.1789200043-gdb3b35, because two things had to hold before the flag
+  could be set. Its stream DOES emit the `user` + `tool_result` event `onBoundary` keys on
+  (`system, user, assistant, user, assistant, result` for a one-tool run) — without it
+  `steer_consumed` would never publish and every amp steer would sit at "queued" until exit
+  relabelled it "the run ended before this was applied", telling the user their steer was
+  ignored when it was not. And a `steer: true` line written 6s INTO a run was received and
+  applied: the agent abandoned its original task and answered the steer verbatim, then
+  exited 0 once stdin closed — which is what makes the forwarder's `onResult` latch plus its
+  750 ms grace the right shutdown for it. amp also echoes each stdin message back as a
+  text-only `user` event, which is harmless in both directions: `onBoundary` ignores a user
+  event carrying no `tool_result`, and `onText` reads assistant blocks only.
+- **codex** — NO. `codex exec` is fire-and-forget; `turn/steer` exists only in `codex
+app-server`, a JSON-RPC 2.0 stdio protocol. Adopting it is a second transport (request
+  correlation, thread lifecycle, its own event stream replacing `codex-jsonl`, approvals),
+  not a flag.
+- **grok** — NO. Headless `-p` streams are read-only and the REPL needs a TTY (piped stdin
+  dies ENXIO, already recorded in `grok.ts`). Only ACP (`grok agent stdio`) is bidirectional.
+- **antigravity** — NO, and it is the closest miss. It already passes `--input-format
+stream-json` and writes an NDJSON prompt on stdin, but as `stdinPrompt`, which CLOSES; its
+  docs say to wait for the `result` event before writing again. That is a queued follow-up
+  TURN, not a mid-turn steer, and there is no `steer:true` equivalent to queue one.
+- **gemini** — NO. Stdin is never opened at all; mid-run injection is an open upstream
+  feature request.
+
+**The steer is echoed by US, because the binary never echoes it.** `steer-echo.ts` fans one
+written steer to three places from the forwarder's `onWritten`: a `steer` stream frame
+(live), the Clean transcript (persisted), and the stream-log buffer (the persisted Raw tab).
+Three details are load-bearing:
+
+- The frame is its OWN top-level type, not a value on `output`'s `stream` union. The viewer
+  routes any non-`text` output straight into xterm, so an output-shaped frame would be
+  echoed raw by any client that has not shipped the inline rendering — and `output` is in
+  the viewer's stall-clock frame set, so a steer published there would restamp "the CLI is
+  talking" on exactly the frozen run someone is steering.
+- The Raw line goes into the buffer ONLY, never a second publish. The viewer draws the live
+  line from the steer frame itself; publishing both draws it twice.
+- The soft-timeout wind-down rides the same channel and is marked `system` AT ITS SOURCE, so
+  it still reaches the CLI but is not rendered as something a person typed. Marked rather
+  than inferred from an empty id, because an empty id already means "legacy bare-string
+  steer", which IS human — the same distinction that makes `publishCliSteerConsumed` drop an
+  empty id while `publishCliSteer` keeps one.
+
+**Both sides of the optimistic append have to be idempotent.** The sender adds its own turn
+when the POST resolves, but the worker publishes the frame the moment the text reaches
+stdin, so the frame routinely arrives FIRST. Guarding only `applySteerFrame` left the race
+open from the other direction — MEASURED in the browser against a live plan-chat run, one
+steer rendered as two identical `You ✓` turns while the persisted transcript held exactly
+one. `appendUserTurn` is idempotent on a non-empty id for that reason.
+
+`cli_invocations.clean_transcript` is the durable half (migration 0156): ordered segments,
+model prose interleaved with the user turns at the positions they were injected. It is a
+SECOND column rather than part of `raw_output` because that column is also the step parsers'
+input, so a human sentence there is handed to a JSON parser as the agent's answer. NULL
+means "not recorded" — every pre-existing row, and any run with no model prose, where
+`raw_output` is the only copy of the answer and a transcript would hide it.
 
 `model_identity` (`queues/cli-exec/model-identity.ts`) records which model ANSWERED, not which one was configured. Two DISTINCT channels, not two names for one value: the claude-family stream-json `system`/`init` event carries what the binary ASKED for, each `assistant` event's `message.model` carries what the endpoint SERVED, and they disagree — api.z.ai answers a `glm-5.3[1m]` request as `glm-5.3`, and recorded streams show the same provider served `glm-5.2` on 2026-07-24 and `glm-5.3` on 2026-08-18, i.e. an endpoint can swap models with no config change here. Coverage is MEASURED per provider: `claude-code`/`zai`/`ollama`/`muse`/`grok`/`openrouter` report both channels; `gemini` names its models only as the keys of `stats.models`; `antigravity` names one only in its `--log-file` and only as a human LABEL (`Gemini 3.7 Flash (High)`), parsed from ONE constant marked volatile that returns null on a reword; `codex` and `amp` report NOTHING. codex's `exec --json` carries no model on any typed event (verified against a complete 3.4 MB SUCCESSFUL run — `model_provider` strings found in such a stream come from old `~/.codex/sessions` rollout files an agent happened to read, not from live events), and amp emits `agent_mode` instead because it abstracts the model away. Those two are permanently `match: 'unknown'`, which is why `unknown` never fails a run.
 

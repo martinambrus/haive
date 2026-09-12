@@ -14,6 +14,15 @@ const DEFAULT_STEER_CLOSE_GRACE_MS = 750;
 export interface ForwardedSteer {
   id: string;
   text: string;
+  /** Machine-generated (the soft-timeout wind-down), not a human turn. Written to stdin
+   *  exactly like any other steer and still tracked for consumption, but excluded from the
+   *  transcript, the `steer` frame and the Raw line — the same stance exec-core takes when
+   *  it keeps the wind-down out of the `steering.nudge` events the mining digest reads as a
+   *  human-friction signal.
+   *
+   *  Marked at the source rather than inferred from an empty `id`, because an empty id
+   *  already means "legacy bare-string steer", which IS human. */
+  system?: boolean;
 }
 
 export interface SteerForwarder {
@@ -37,6 +46,9 @@ export interface SteerForwarder {
 export function createSteerForwarder(opts: {
   subscriber: Redis;
   graceMs?: number;
+  /** Render each line with amp's `steer: true` queue marker. Unset for the claude family,
+   *  whose binary has no such field. */
+  steerFlag?: boolean;
   /** Fired after a steer is successfully written to the CLI's stdin. Lets the
    *  caller track which steers were delivered so a later tool-call boundary can
    *  be reported as their consumption point. */
@@ -56,7 +68,7 @@ export function createSteerForwarder(opts: {
     const steer = parseSteerMessage(raw);
     if (!steer) return;
     try {
-      writable.write(steeringUserMessageLine(steer.text));
+      writable.write(steeringUserMessageLine(steer.text, { steer: opts.steerFlag }));
       opts.onWritten?.(steer);
     } catch (err) {
       log.warn({ err }, 'steer stdin write failed');
@@ -101,9 +113,16 @@ export function createSteerForwarder(opts: {
  *  api/worker restart. Returns null only for an empty payload. */
 function parseSteerMessage(raw: string): ForwardedSteer | null {
   try {
-    const obj = JSON.parse(raw) as { id?: unknown; text?: unknown };
+    const obj = JSON.parse(raw) as { id?: unknown; text?: unknown; system?: unknown };
     if (obj && typeof obj === 'object' && typeof obj.text === 'string') {
-      return { id: typeof obj.id === 'string' ? obj.id : '', text: obj.text };
+      const steer: ForwardedSteer = {
+        id: typeof obj.id === 'string' ? obj.id : '',
+        text: obj.text,
+      };
+      // Only the JSON branch can be system: a bare-string payload is a legacy steer from the
+      // api's own route, which only a person reaches.
+      if (obj.system === true) steer.system = true;
+      return steer;
     }
   } catch {
     // not JSON — fall through to the bare-string path

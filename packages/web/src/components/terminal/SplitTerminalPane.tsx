@@ -123,6 +123,11 @@ export function SplitTerminalPane({ taskId, stepRowId, side, onMove }: SplitTerm
           key={invocation.id}
           invocationId={invocation.id}
           taskId={taskId}
+          // Forwarded so a reopened panel can restore what this run was steered with, and so
+          // the Send box below the column posts against the right step. The prop was always
+          // passed to this pane; it just never reached the viewer.
+          stepRowId={stepRowId}
+          promptChars={invocation.promptChars}
           fill
           cleanOnly
           cleanSupported={cleanSupported}
@@ -133,11 +138,14 @@ export function SplitTerminalPane({ taskId, stepRowId, side, onMove }: SplitTerm
           key={invocation.id}
           invocationId={invocation.id}
           taskId={taskId}
+          stepRowId={stepRowId}
+          promptChars={invocation.promptChars}
           fill
           cleanOnly
           cleanSupported={cleanSupported}
           staticOutput={replay.streamLog}
           staticCleanOutput={replay.cleanOutput}
+          staticCleanTranscript={replay.cleanTranscript ?? null}
           staticExitCode={replay.exitCode}
         />
       ) : (
