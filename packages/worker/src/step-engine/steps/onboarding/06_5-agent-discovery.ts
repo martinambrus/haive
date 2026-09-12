@@ -525,6 +525,65 @@ const MANDATORY_CATEGORIES: ReadonlySet<string> = new Set([
   'api',
 ]);
 
+/** Per-agent and total budgets for the imported bodies below.
+ *
+ *  Bounded because a bundle can hold many agents and a single imported body is a whole
+ *  markdown document — MEASURED, one Drupal reviewer agent's body is 5.8k chars on its own.
+ *  Both caps state their elision in the prompt rather than trimming silently, the same rule
+ *  the fan-out summary budget follows. */
+const BUNDLE_BODY_CHARS = 1_500;
+const BUNDLE_BODY_TOTAL_CHARS = 6_000;
+
+/** The bodies of bundle-sourced agents, so "judge it by its BODY" is answerable.
+ *
+ *  The instruction to judge an imported agent by its body rather than its name predates
+ *  anything supplying one: candidates rendered as `id: label — hint`, and `AgentCandidate.
+ *  body` — populated for exactly these — was never written into the prompt. MEASURED on a
+ *  live run, the model was handed `drupal-reviewer: These MUST pass before committing —
+ *  Expert Drupal code reviewer…` and declined it, saying no agent body was supplied and a
+ *  commit-gate description alone could not establish Drupal 7 compatibility. It was right;
+ *  the three other CLIs accepted the same agent on the same non-evidence. */
+function renderBundleAgentBodies(candidates: readonly AgentCandidate[]): string[] {
+  const bundled = candidates.filter((c) => c.source === 'bundle' && c.body);
+  if (bundled.length === 0) return [];
+  const lines: string[] = [
+    '## Imported agent bodies (from your custom bundles)',
+    '',
+    'These are the FULL definitions behind the bundle-sourced rows above — judge them on this,',
+    'not on their name or one-line description. A bundle the user imported may still describe',
+    'work this repository does not do; say so in `declined` with the reason if it does.',
+    '',
+  ];
+  let spent = 0;
+  let omitted = 0;
+  for (const c of bundled) {
+    if (spent >= BUNDLE_BODY_TOTAL_CHARS) {
+      omitted++;
+      continue;
+    }
+    const mission = (c.body?.coreMission ?? '').trim();
+    const slice =
+      mission.length > BUNDLE_BODY_CHARS ? mission.slice(0, BUNDLE_BODY_CHARS) : mission;
+    spent += slice.length;
+    lines.push(
+      `### ${c.id}`,
+      c.body?.description ? `Description: ${c.body.description}` : '',
+      slice.length > 0 ? slice : '(this bundle item carries no body text)',
+      mission.length > slice.length
+        ? `[body truncated at ${BUNDLE_BODY_CHARS} of ${mission.length} chars — judge on what is shown]`
+        : '',
+      '',
+    );
+  }
+  if (omitted > 0) {
+    lines.push(
+      `[${omitted} further imported ${omitted === 1 ? 'body' : 'bodies'} omitted for length — treat those rows as unverified and say so if you decline them]`,
+      '',
+    );
+  }
+  return lines.filter((l) => l !== '');
+}
+
 export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
   const detected = args.detected as AgentDiscoveryDetect;
   const fileTree = detected.__fileTree ?? '(no file tree)';
@@ -560,7 +619,9 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Agents vs skills — IMPORTANT',
     'AGENTS = technical / framework expertise (how to write a Drupal hook, how to use TCPDF, how to query PostgreSQL with CTEs, how to call LWJGL OpenGL bindings).',
     'SKILLS = business / domain knowledge (what an "inspection" is, the order-fulfilment state machine, which fields belong to which form).',
-    'You are picking AGENTS only. Do NOT propose agents whose value would come from understanding business entities, workflows, or domain rules — those become skills in a later step.',
+    'That split governs the agents YOU PROPOSE: do not invent a custom agent whose value would come from understanding business entities, workflows, or domain rules — those become skills in a later step.',
+    'It does NOT govern the predefined list below. Those are curated roles that already earned their place, and several work ON business-facing material by design — a requirements writer produces prose for stakeholders, an adversary attacks business-logic flaws. Judge each on whether THIS project has that work to do, never on whether the role sounds technical enough. Some are dispatched BY NAME by a later workflow step, so declining one removes a tuned definition that step would otherwise use and falls back to a generic persona.',
+    'Judge each predefined agent on its own. Declining one is not a reason to decline another that touches the same subject.',
     '',
     ...noSubagentInstructionLines(),
     '## Project info',
@@ -578,6 +639,7 @@ export function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Predefined agents (from deterministic scan)',
     predefinedList,
     '',
+    ...renderBundleAgentBodies(detected.candidates),
     `## Secondary technology inventory (deterministic dep scan + import grep, threshold ${FILE_COUNT_THRESHOLD}+ files for non-framework categories)`,
     inventoryTable,
     '',
