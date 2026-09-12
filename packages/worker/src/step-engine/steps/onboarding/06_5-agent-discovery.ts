@@ -732,7 +732,14 @@ function parseSkipped(raw: unknown): SkippedInventoryRow[] {
 }
 
 export function parseLlmAgentOutputWithDiagnostic(raw: string): {
-  result: { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null;
+  // `skipped`/`declined` are the rejection channels parseAgentBody already returns; naming
+  // them here is what lets a typed caller read them at all.
+  result: {
+    predefined: Record<string, boolean>;
+    custom: LlmAgentSuggestion[];
+    skipped: SkippedInventoryRow[];
+    declined: SkippedInventoryRow[];
+  } | null;
   diagnostic: AgentParseDiagnostic | null;
 } {
   // Custom agent bodies include an `outputFormat` field that is itself a
