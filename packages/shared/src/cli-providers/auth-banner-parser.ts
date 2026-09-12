@@ -24,6 +24,13 @@ export function ansiToSpaces(str: string): string {
     .replace(/ {2,}/g, ' ');
 }
 
+/** amp's paste-back login page. amp prints this URL only on versions before
+ *  0.0.1789200043; newer ones print an auth.ampcode.com device URL instead.
+ *  A login session picks its flow by testing the URL the CLI actually printed
+ *  against this prefix, because the version behind a provider is a user pin and
+ *  both shapes stay reachable. */
+export const AMP_PASTE_LOGIN_URL_PREFIX = 'https://ampcode.com/auth/cli-login';
+
 export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
   'claude-code': [
     'https://claude.com/cai/oauth/authorize',
@@ -37,7 +44,14 @@ export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
     'https://chatgpt.com/',
   ],
   gemini: ['https://accounts.google.com/o/oauth2/'],
-  amp: ['https://ampcode.com/auth/cli-login'],
+  // MEASURED against real `amp login` runs on both shapes: 0.0.1789200043-gdb3b35
+  // retired the paste-back cli-login page for an OAuth DEVICE flow and prints
+  // `https://auth.ampcode.com/device?user_code=XXXX-XXXX`, while 0.0.1786896116
+  // still prints the cli-login page. The CLI VERSION is a per-provider pin, so
+  // both are live and both prefixes have to stay. The bare host sits between
+  // them so a device-path change still resolves to a usable URL. Which flow a
+  // session is in is read off the URL — see AMP_PASTE_LOGIN_URL_PREFIX.
+  amp: ['https://auth.ampcode.com/device', 'https://auth.ampcode.com/', AMP_PASTE_LOGIN_URL_PREFIX],
   // Antigravity (agy) prints the same Google OAuth endpoint as gemini.
   antigravity: ['https://accounts.google.com/o/oauth2/'],
   // MEASURED from a real `grok login --device-auth`, not from xAI's docs, which
@@ -47,10 +61,18 @@ export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
   grok: ['https://accounts.x.ai/oauth2/device', 'https://accounts.x.ai/'],
 };
 
+/** Providers whose login is ALWAYS a paste-back: the CLI prints a URL and then
+ *  reads a token or code from stdin. Membership gates `canDetect`, so a provider
+ *  listed here is only inspected for success after a token is submitted.
+ *
+ *  amp is deliberately absent even though an older pinned version still pastes
+ *  back: its flow is per-VERSION, and this set is per-PROVIDER. A login session
+ *  resolves amp from the URL it printed (AMP_PASTE_LOGIN_URL_PREFIX) and that
+ *  answer overrides this set, so the default here only has to be right for the
+ *  current CLI. */
 export const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
   'gemini',
-  'amp',
   'antigravity',
 ]);
 

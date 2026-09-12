@@ -31,10 +31,13 @@ type Phase =
   | 'saved'
   | 'error';
 
+// Mirrors the set of the same name in @haive/shared, which web must not import.
+// Only the DEFAULT until the auth-url frame arrives: amp ships both login
+// shapes and the CLI version is a user pin, so the server resolves that session
+// from the URL the CLI printed and sends the answer as `tokenPaste`.
 const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
   'gemini',
-  'amp',
   'antigravity',
 ]);
 
@@ -108,6 +111,9 @@ export function CliAuthBannerModal({
   const [verifyOnly, setVerifyOnly] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [urlAttempt, setUrlAttempt] = useState(1);
+  /** The flow the server resolved for this session, null until the auth-url
+   *  frame. Overrides TOKEN_PASTE_PROVIDERS, which cannot see the CLI version. */
+  const [tokenPasteFlow, setTokenPasteFlow] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -120,6 +126,7 @@ export function CliAuthBannerModal({
     setQueueWait(null);
     setVerifyOnly(false);
     setVerifying(false);
+    setTokenPasteFlow(null);
 
     const ws = new WebSocket(apiWebSocketUrl(`/cli-login-banner/${providerId}`));
     wsRef.current = ws;
@@ -155,12 +162,17 @@ export function CliAuthBannerModal({
           else if (msg.phase === 'awaiting-approval') setPhase('awaiting-approval');
           else if (msg.phase === 'submitting') setPhase('submitting');
           break;
-        case 'auth-url':
+        case 'auth-url': {
           if (typeof msg.url === 'string') setAuthUrl(safeAuthUrl(msg.url));
           if (typeof msg.deviceCode === 'string') setDeviceCode(msg.deviceCode);
-          if (!TOKEN_PASTE_PROVIDERS.has(providerName)) setPhase('awaiting-approval');
-          else setPhase('awaiting-token');
+          const paste =
+            typeof msg.tokenPaste === 'boolean'
+              ? msg.tokenPaste
+              : TOKEN_PASTE_PROVIDERS.has(providerName);
+          setTokenPasteFlow(paste);
+          setPhase(paste ? 'awaiting-token' : 'awaiting-approval');
           break;
+        }
         case 'output':
           // antigravity debug terminal: write raw agy TUI output to the xterm.
           if (typeof msg.data === 'string') termRef.current?.write(msg.data);
@@ -417,18 +429,15 @@ export function CliAuthBannerModal({
 
   if (!open) return null;
 
-  const isTokenPaste = TOKEN_PASTE_PROVIDERS.has(providerName);
+  const isTokenPaste = tokenPasteFlow ?? TOKEN_PASTE_PROVIDERS.has(providerName);
   // Debug-only: render agy's live TUI in an xterm. The hidden field flow works
   // without it now that the server sizes the PTY itself; flip to true to debug.
   const showTerminal = providerName === 'antigravity' && ANTIGRAVITY_DEBUG_TERMINAL;
-  const pasteItemLabel =
-    providerName === 'gemini' || providerName === 'amp' || providerName === 'antigravity'
-      ? 'code'
-      : 'token';
-  const pasteInputPlaceholder =
-    providerName === 'gemini' || providerName === 'amp' || providerName === 'antigravity'
-      ? 'Paste code here'
-      : 'Paste token here';
+  // amp reaches this only on an older pinned CLI, where what it reads is a code.
+  const pastesCode =
+    providerName === 'gemini' || providerName === 'antigravity' || providerName === 'amp';
+  const pasteItemLabel = pastesCode ? 'code' : 'token';
+  const pasteInputPlaceholder = pastesCode ? 'Paste code here' : 'Paste token here';
 
   return (
     <div
@@ -598,7 +607,15 @@ export function CliAuthBannerModal({
               </li>
               {deviceCode && (
                 <li>
-                  Enter this device code:{' '}
+                  {/* A device URL that already carries the code opens a page with the
+                      code filled in and nothing but approve/deny on it — amp and grok
+                      both do this — so telling the user to enter it is wrong. Keyed on
+                      the code being IN the URL rather than on the provider, and the
+                      fallback is "enter": being told to type a code that is already
+                      there is a smaller failure than not being told to type one. */}
+                  {authUrl?.includes(deviceCode)
+                    ? 'Check the page shows this code:'
+                    : 'Enter this device code:'}{' '}
                   <code className="rounded bg-neutral-900 px-2 py-0.5 font-mono text-base font-bold text-indigo-50">
                     {deviceCode}
                   </code>

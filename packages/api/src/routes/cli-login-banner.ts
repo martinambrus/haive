@@ -6,6 +6,7 @@ import Docker from 'dockerode';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  AMP_PASTE_LOGIN_URL_PREFIX,
   AUTH_URL_PREFIXES,
   CLI_EXEC_JOB_NAMES,
   TOKEN_PASTE_PROVIDERS,
@@ -130,9 +131,17 @@ const TERMINAL_LOGIN_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProvid
 //     https://accounts.x.ai/oauth2/device?user_code=XXXX-XXXX, then "Signed in as ..."
 //     (both verified against the shipped binary; the code matches the shared
 //     DEVICE_CODE_PATTERN and the success line matches detectAuthResult).
+//   - amp:   `amp login` -> https://auth.ampcode.com/device?user_code=XXXX-XXXX.
+//     amp moved here from the paste-back flow in 0.0.1789200043 and is the one
+//     device-code provider that also runs a creds poller, because the credential
+//     write is a signal that holds whatever amp prints.
+//     Membership is only amp's DEFAULT — the CLI version is a user pin, so an
+//     older amp still prints the paste-back page and `session.ampPasteFlow`
+//     (read off the URL) puts that session back on the paste path.
 const DEVICE_CODE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'codex',
   'grok',
+  'amp',
 ]);
 
 interface BannerSession {
@@ -164,6 +173,10 @@ interface BannerSession {
   // Content signature (md5) of agy's OAuth token file captured on the poller's
   // first read, so a pre-existing token isn't mistaken for a fresh sign-in.
   credsBaseline: string | null;
+  /** amp only: this session's CLI printed the paste-back login URL, so it reads
+   *  a code on stdin rather than polling for a browser approval. Resolved from
+   *  the URL because amp ships both shapes and the version is a provider pin. */
+  ampPasteFlow: boolean;
   urlDebugged: boolean;
   firstChunkLogged: boolean;
   menuAdvanceTimer: NodeJS.Timeout | null;
@@ -382,6 +395,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     cleanedUp: false,
     credsPoller: null,
     credsBaseline: null,
+    ampPasteFlow: false,
     urlDebugged: false,
     firstChunkLogged: false,
     menuAdvanceTimer: null,
@@ -507,11 +521,6 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
         // writes on success (either legacy oauth_creds.json or the current
         // encrypted gemini-credentials.json).
         startGeminiCredsPoller(session);
-      } else if (session.providerName === 'amp') {
-        // Amp reads the paste-back code from stdin and, on success, writes
-        // the API key into $HOME/.config/amp/settings.json. Poll for that
-        // file — the REPL's post-paste stdout is unreliable.
-        startAmpCredsPoller(session);
       } else if (session.providerName === 'antigravity') {
         // agy reads the pasted authorization code on stdin and writes its OAuth
         // token to ~/.gemini/antigravity-cli/antigravity-oauth-token on success.
@@ -529,6 +538,13 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   ws.on('error', () => {
     void cleanupSession(session);
   });
+}
+
+/** Whether this session's CLI reads a token or code back on stdin. Per-provider
+ *  for everything but amp, which ships both shapes: there the answer comes from
+ *  the URL the CLI printed and only holds once `authUrlSent`. */
+function usesTokenPaste(session: BannerSession): boolean {
+  return TOKEN_PASTE_PROVIDERS.has(session.providerName) || session.ampPasteFlow;
 }
 
 function onStreamData(session: BannerSession, chunk: Buffer): void {
@@ -623,18 +639,33 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     }
     if (url) {
       session.authUrlSent = true;
-      const deviceCode = DEVICE_CODE_PROVIDERS.has(session.providerName)
-        ? extractDeviceCode(session.rawBuffer)
-        : undefined;
-      log.info({ providerId: session.providerId, url: url.slice(0, 120) }, 'auth url extracted');
-      wsSend(session.ws, { type: 'auth-url', url, deviceCode });
+      if (session.providerName === 'amp') {
+        session.ampPasteFlow = url.startsWith(AMP_PASTE_LOGIN_URL_PREFIX);
+        // Start in BOTH flows, and start here rather than after a paste: the
+        // paste-back flow writes its credential within ~200ms of the paste,
+        // faster than the poll cadence, so a baseline taken afterwards would
+        // already contain that credential and could never change.
+        startAmpCredsPoller(session);
+      }
+      const tokenPaste = usesTokenPaste(session);
+      const deviceCode =
+        DEVICE_CODE_PROVIDERS.has(session.providerName) && !tokenPaste
+          ? extractDeviceCode(session.rawBuffer)
+          : undefined;
+      log.info(
+        { providerId: session.providerId, url: url.slice(0, 120), tokenPaste },
+        'auth url extracted',
+      );
+      // tokenPaste travels with the URL because the client's own provider set is
+      // only a default: for amp it learns the real flow here.
+      wsSend(session.ws, { type: 'auth-url', url, deviceCode, tokenPaste });
     }
   }
 
   const canDetect =
     session.authUrlSent &&
     !session.authSuccessSent &&
-    (session.tokenSubmitted || !TOKEN_PASTE_PROVIDERS.has(session.providerName));
+    (session.tokenSubmitted || !usesTokenPaste(session));
   if (!canDetect) return;
 
   if (session.providerName === 'claude-code') {
@@ -675,12 +706,12 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
   // REPL / agy TUI) is unreliable, so we deliberately skip detectAuthResult here.
   if (session.providerName === 'gemini' || session.providerName === 'antigravity') return;
 
-  // Amp prints "Login successful!" to stdout and exits within ~200ms of the
-  // paste. That's faster than our 500ms creds-file poll cadence, so if we
-  // relied on the poller alone the stream-end would fire first and the UI
-  // would flip to a blank error state. Let detectAuthResult catch the
-  // stdout signal; the creds poller below is kept as a belt-and-suspenders
-  // fallback and is idempotent against authSuccessSent.
+  // What reaches here is codex, grok and amp. The first two announce the grant
+  // on stdout ("Signed in as ..."), which detectAuthResult matches. amp's
+  // success comes from its creds poller instead; this pass is still run for it
+  // because it costs nothing and turns an explicit failure — an expired device
+  // code — into an error rather than a nine-minute wait. Both paths are
+  // idempotent against authSuccessSent.
 
   const signal = detectAuthResult(session.cleanBuffer);
   if (signal?.kind === 'success') {
@@ -705,13 +736,29 @@ const GEMINI_CREDS_CHECK = [
     '|| test -s "$HOME/.gemini/tokens.json"',
 ];
 
-const AMP_POLL_INTERVAL_MS = 500;
-const AMP_POLL_MAX_TRIES = 20;
-// amp stores the login-derived apiKey in the file-based secretStorage at
-// $XDG_DATA_HOME/amp/secrets.json (defaults to $HOME/.local/share/amp/secrets.json).
-// settings.json under ~/.config/amp is for MCP/CLI prefs and is NOT populated
-// by `amp login` — checking it waited 10s then always timed out.
-const AMP_CREDS_CHECK = ['sh', '-c', 'test -s "$HOME/.local/share/amp/secrets.json"'];
+const AMP_POLL_INTERVAL_MS = 1000;
+// The poller starts with the URL, so its window has to cover a person reading
+// the page and approving (device flow) or pasting a code (the older one) — not
+// the ~10s the post-paste poller used to need. 540 x 1000ms = 9 min, inside the
+// 10-min SESSION_TIMEOUT_MS backstop. In the device flow amp closes the window
+// first: MEASURED twice, `amp login` exits 1 after ~303s with "Login failed: The
+// login code expired", which detectAuthResult reports as an error.
+const AMP_POLL_MAX_TRIES = 540;
+// Content signature (md5) over every file in amp's two auth dirs — the same pair
+// the provider mounts as authConfigPaths. A whole-dir signature rather than one
+// filename because the device flow's credential path is not documented and the
+// paste-back flow's $HOME/.local/share/amp/secrets.json cannot be assumed to
+// survive it; MEASURED on amp 0.0.1789200043, those dirs hold device-id.json
+// alone and do not change across 45s of device polling, so any change during a
+// session is the login writing its credential. Baselined on the first read and
+// fired only on a CHANGE, so a credential already on the persistent auth volume
+// is never read as a fresh sign-in.
+const AMP_CREDS_SIGNATURE = [
+  'sh',
+  '-c',
+  'find "$HOME/.local/share/amp" "$HOME/.config/amp" -type f 2>/dev/null | sort | ' +
+    'xargs -r md5sum | md5sum | cut -d" " -f1',
+];
 
 const ANTIGRAVITY_POLL_INTERVAL_MS = 1000;
 // Interactive login: the user reads the URL and completes the whole OAuth (incl.
@@ -785,10 +832,13 @@ function startGeminiCredsPoller(session: BannerSession): void {
   log.info({ providerId: session.providerId }, 'gemini creds poller started');
 }
 
-/** Polls the login container for amp's settings.json after the user pastes
- *  the code. Fires auth-success + runProbeAndSave when the file appears;
- *  errors out after AMP_POLL_MAX_TRIES × interval. Idempotent.
- */
+/** Polls the login container for a change in amp's auth dirs. amp writes its
+ *  credential the moment the login lands — on the browser approval in the device
+ *  flow, on the pasted code in the older one — which is a signal that does not
+ *  depend on amp's wording. MEASURED on a real device sign-in, amp's own stdout
+ *  tripped detectAuthResult first and this never fired; it is the backstop, and
+ *  the one that carries the paste flow where stdout was already unreliable.
+ *  Errors out after AMP_POLL_MAX_TRIES x interval. Idempotent. */
 function startAmpCredsPoller(session: BannerSession): void {
   if (session.cleanedUp) return;
   if (session.credsPoller) return;
@@ -800,19 +850,32 @@ function startAmpCredsPoller(session: BannerSession): void {
       clearInterval(poller);
       return;
     }
-    void execInContainer(session.docker, session.dockerContainerId, AMP_CREDS_CHECK)
+    void execInContainer(session.docker, session.dockerContainerId, AMP_CREDS_SIGNATURE)
       .then((result) => {
         if (session.cleanedUp || session.authSuccessSent) {
           clearInterval(poller);
           session.credsPoller = null;
           return;
         }
-        if (result.exitCode === 0) {
+        const signature = result.stdout.trim();
+        if (!signature) {
+          // The pipeline always prints a hash, empty dirs included, so an empty
+          // read is the exec failing rather than an absent credential.
+          log.warn({ providerId: session.providerId, tries }, 'amp creds signature unreadable');
+        } else if (session.credsBaseline === null) {
+          // First read establishes the baseline. A credential already present at
+          // session start (an authenticated provider on the persistent auth
+          // volume, or an expired one still on disk) must NOT be read as a fresh
+          // sign-in, or the modal fires success before the user has approved
+          // anything and the probe then runs against the same dead credential.
+          session.credsBaseline = signature;
+          log.info({ providerId: session.providerId }, 'amp creds baseline captured');
+        } else if (signature !== session.credsBaseline) {
           clearInterval(poller);
           session.credsPoller = null;
           session.authSuccessSent = true;
           session.probePending = true;
-          log.info({ providerId: session.providerId }, 'amp settings file detected');
+          log.info({ providerId: session.providerId }, 'amp creds written (new sign-in)');
           wsSend(session.ws, { type: 'auth-success' });
           void runProbeAndSave(session);
           return;
@@ -822,12 +885,13 @@ function startAmpCredsPoller(session: BannerSession): void {
           session.credsPoller = null;
           log.warn(
             { providerId: session.providerId, tries },
-            'amp settings file not found before poll timeout',
+            'amp credential not written before poll timeout',
           );
           wsSend(session.ws, {
             type: 'error',
-            message:
-              'Amp did not write credentials after the code paste. The code may be wrong or expired — retry the login.',
+            message: session.ampPasteFlow
+              ? 'Amp wrote no credentials after the code paste. The code may be wrong or expired — retry the login.'
+              : 'Amp wrote no credentials before the approval window closed. The device code may have expired — retry the login.',
           });
         }
       })

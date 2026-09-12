@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  AMP_PASTE_LOGIN_URL_PREFIX,
   AUTH_URL_PREFIXES,
   TOKEN_PASTE_PROVIDERS,
   detectAuthResult,
@@ -71,6 +72,78 @@ describe('TOKEN_PASTE_PROVIDERS', () => {
     // success AFTER a token is submitted. grok never submits one, so listing it
     // would stall the modal forever on a login that had already succeeded.
     expect(TOKEN_PASTE_PROVIDERS.has('grok')).toBe(false);
+  });
+
+  it('excludes amp — it became a device-code flow in 0.0.1789200043', () => {
+    expect(TOKEN_PASTE_PROVIDERS.has('amp')).toBe(false);
+  });
+});
+
+// VERBATIM output of a real `amp login` (amp 0.0.1789200043-gdb3b35), ANSI and
+// CRLF included, because that is what reaches the parser off the container's
+// PTY — the URL arrives wrapped in colour codes and the extractor has to strip
+// them. Kept exact rather than paraphrased: the host is auth.ampcode.com, NOT
+// the ampcode.com/auth/cli-login page the paste-back flow used.
+const AMP_DEVICE_BANNER =
+  'To log in, visit:\r\n' +
+  '\r\n' +
+  '\x1b[34m\x1b[1mhttps://auth.ampcode.com/device?user_code=WMSD-BBRS\x1b[22m\x1b[39m\r\n' +
+  '\r\n' +
+  'and confirm that the code shown matches: \x1b[1mWMSD-BBRS\x1b[22m\r\n' +
+  '\r\n' +
+  'Waiting for confirmation in the browser...\r\n';
+
+// Output of `amp login` on 0.0.1786896116-gd65cd9 (2026-08-16), the paste-back
+// shape a provider pinned to an older CLI version still gets. Kept beside the
+// device banner because both are live: the version is a user pin. Verbatim
+// apart from the authToken, which is a real login nonce and is replaced here by
+// a synthetic string of the same shape — the parser keys on the URL PREFIX, so
+// only the token's length and alphabet matter to this fixture.
+const AMP_PASTE_TOKEN = 'a'.repeat(64);
+const AMP_PASTE_BANNER =
+  'If your browser does not open automatically, visit:\r\n' +
+  '\r\n' +
+  `\x1b[34m\x1b[1m${AMP_PASTE_LOGIN_URL_PREFIX}?authToken=${AMP_PASTE_TOKEN}\x1b[22m\x1b[39m\r\n` +
+  '\r\n';
+
+describe('amp device-code login parsing', () => {
+  it('declares the measured auth.ampcode.com device prefix first', () => {
+    expect(AUTH_URL_PREFIXES.amp?.[0]).toBe('https://auth.ampcode.com/device');
+  });
+
+  it('keeps the paste-back prefix so an older amp still signs in', () => {
+    expect(AUTH_URL_PREFIXES.amp).toContain('https://ampcode.com/auth/cli-login');
+  });
+
+  it('extracts the authorization URL from the real banner', () => {
+    const url = extractWrappedUrl(AMP_DEVICE_BANNER, AUTH_URL_PREFIXES.amp ?? []);
+    expect(url).toBe('https://auth.ampcode.com/device?user_code=WMSD-BBRS');
+  });
+
+  it('still extracts the URL an older pinned amp prints', () => {
+    expect(extractWrappedUrl(AMP_PASTE_BANNER, AUTH_URL_PREFIXES.amp ?? [])).toBe(
+      `${AMP_PASTE_LOGIN_URL_PREFIX}?authToken=${AMP_PASTE_TOKEN}`,
+    );
+  });
+
+  it('separates the two flows by the URL, which is what the session keys on', () => {
+    // The CLI version is a provider pin, so both shapes stay reachable and the
+    // URL is the only per-session evidence of which one is running.
+    const paste = extractWrappedUrl(AMP_PASTE_BANNER, AUTH_URL_PREFIXES.amp ?? []) ?? '';
+    const device = extractWrappedUrl(AMP_DEVICE_BANNER, AUTH_URL_PREFIXES.amp ?? []) ?? '';
+    expect(paste.startsWith(AMP_PASTE_LOGIN_URL_PREFIX)).toBe(true);
+    expect(device.startsWith(AMP_PASTE_LOGIN_URL_PREFIX)).toBe(false);
+  });
+
+  it('extracts the short user code with the shared pattern', () => {
+    expect(extractDeviceCode(AMP_DEVICE_BANNER)).toBe('WMSD-BBRS');
+  });
+
+  it('does not report success while still waiting for approval', () => {
+    // The banner sits in the buffer for the whole approval wait, and amp is no
+    // longer gated behind a token submit, so a false positive here would flip
+    // the modal to success before the user had approved anything.
+    expect(detectAuthResult(AMP_DEVICE_BANNER)).toBeNull();
   });
 });
 
