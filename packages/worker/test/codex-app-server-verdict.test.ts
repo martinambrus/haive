@@ -87,6 +87,15 @@ describe('codexAppServerFallbackWarning', () => {
       /^codex app-server failed at spawn: no detail\. /,
     );
   });
+
+  it('keeps one full stop after a stderr detail that already ends its sentence', () => {
+    const text = codexAppServerFallbackWarning(
+      { stage: 'spawn', detail: "For more information, try '--help'.\n" },
+      '0.154.0',
+    );
+    expect(text).toContain("try '--help'. This task continues on codex exec");
+    expect(text).not.toContain('..');
+  });
 });
 
 /** Enough of drizzle's builder for the one update and the one insert the recorder issues. */

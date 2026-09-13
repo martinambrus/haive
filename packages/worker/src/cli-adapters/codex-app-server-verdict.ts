@@ -191,8 +191,10 @@ export function codexAppServerFallbackWarning(
   binaryVersion: string | null,
 ): string {
   const version = binaryVersion ? ` on codex ${binaryVersion}` : '';
+  // The detail is often a binary's own stderr, which already ends its sentence.
+  const detail = failure.detail?.trim().replace(/\.+$/, '') || 'no detail';
   return (
-    `codex app-server failed at ${failure.stage}${version}: ${failure.detail ?? 'no detail'}. ` +
+    `codex app-server failed at ${failure.stage}${version}: ${detail}. ` +
     'This task continues on codex exec, without mid-run steering. If this keeps happening after a ' +
     "codex update, Haive's app-server support needs updating — Admin > Execution lists every " +
     'recorded failure.'
