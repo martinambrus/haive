@@ -15,6 +15,7 @@ import {
 import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
+import { isAwaitingFormInput } from '@/lib/submit-state';
 
 const POLL_MS = 2000;
 
@@ -54,11 +55,22 @@ export function PlanMergePanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  // Refs, not poll dependencies: the page passes both inline and the poll calls them when it
+  // settles, so depending on them would re-poll a parked merge on every page render.
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
+  const onSettledRef = useRef(onSettled);
+  onSettledRef.current = onSettled;
+  // Bumped after an answer: a settled poll has stopped and the task id is unchanged.
+  const [pollRestart, setPollRestart] = useState(0);
+  // Discard only queues the cancel, so the step still reads as parked until it lands.
+  const [discardedTaskId, setDiscardedTaskId] = useState<string | null>(null);
 
   // Poll the task only while it is working, and stop the moment it parks or reaches
   // a terminal status — the same self-terminating shape the plan chat uses, so an
   // idle conversation costs nothing.
   const taskId = merge?.taskId ?? null;
+  const discarding = taskId !== null && discardedTaskId === taskId;
   useEffect(() => {
     if (!taskId) {
       setLiveStep(null);
@@ -73,11 +85,12 @@ export function PlanMergePanel({
         const step = res.steps.find((s) => s.stepId === PLAN_MERGE_STEP_ID) ?? null;
         setLiveStep(step);
         const settled =
-          step?.status === 'waiting_form' ||
+          (!discarding && isAwaitingFormInput(step)) ||
           ['completed', 'cancelled', 'failed'].includes(res.task.status);
         if (settled) {
-          onChanged();
-          if (['completed', 'cancelled', 'failed'].includes(res.task.status)) onSettled();
+          onChangedRef.current();
+          if (['completed', 'cancelled', 'failed'].includes(res.task.status))
+            onSettledRef.current();
           return;
         }
       } catch {
@@ -90,13 +103,13 @@ export function PlanMergePanel({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [taskId, onChanged, onSettled]);
+  }, [taskId, pollRestart, discarding]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' });
   }, [merge?.messages.length]);
 
-  const parked = liveStep?.status === 'waiting_form';
+  const parked = !discarding && isAwaitingFormInput(liveStep);
   const working = merge !== null && !parked;
 
   async function answer(decision: 'confirm' | 'revise'): Promise<void> {
@@ -109,7 +122,8 @@ export function PlanMergePanel({
         ...(decision === 'revise' ? { message: draft.trim() } : {}),
       });
       setDraft('');
-      setLiveStep(null); // resume polling: the step is running again
+      setLiveStep(null);
+      setPollRestart((n) => n + 1); // resume polling: the step is running again
       onChanged();
     } catch (e) {
       setError((e as ApiError).message ?? 'Could not send that');
@@ -125,6 +139,7 @@ export function PlanMergePanel({
     setError(null);
     try {
       await discardPlanMerge(repositoryId);
+      setDiscardedTaskId(taskId);
       onSettled();
     } catch (e) {
       setError((e as ApiError).message ?? 'Could not discard the merge');

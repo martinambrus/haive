@@ -13,3 +13,11 @@ export function shouldClearSubmitting(
   const step = steps.find((s) => s.stepId === submitting);
   return !step || step.status !== 'waiting_form';
 }
+
+/** A step parked on its form for an answer. Status alone is not enough: the submit route clears
+ *  `waitingStartedAt` and leaves the row `waiting_form` until the worker picks the job up. */
+export function isAwaitingFormInput(
+  step: Pick<TaskStep, 'status' | 'waitingStartedAt'> | null | undefined,
+): boolean {
+  return step?.status === 'waiting_form' && step.waitingStartedAt !== null;
+}
