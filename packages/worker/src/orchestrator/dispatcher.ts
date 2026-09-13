@@ -324,7 +324,15 @@ function buildCliSidePlan(
     const mcpBounded = withMcpSurface(
       ddevBounded,
       adapter.supportsMcp ? (req.mcpSurface ?? null) : null,
-      { noBuiltInTools: req.invokeOpts?.disableTools === true },
+      // ANDed with the adapter, like `supportsMcp` above and for the same reason: codex,
+      // gemini, amp and antigravity ignore `disableTools` outright, so claiming "no search, no
+      // file reading, no shell" to one of them tells an agent that still has all three — and
+      // amp and antigravity keep their blanket permission flags besides — that it cannot touch
+      // a worktree it can.
+      {
+        noBuiltInTools:
+          req.invokeOpts?.disableTools === true && adapter.supportsDisableTools === true,
+      },
     );
     // Whether the app can actually be reached, and how. Same reason as the boundaries above:
     // handing an agent a URL without saying what can dial it asserts a capability the sandbox

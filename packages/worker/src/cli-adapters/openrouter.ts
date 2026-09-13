@@ -80,6 +80,7 @@ export class OpenRouterAdapter extends BaseCliAdapter {
   override readonly effortScale = OPENROUTER_EFFORT_SCALE;
   override readonly defaultEgressDomains = ['openrouter.ai'];
   override readonly supportsSteering = true;
+  override readonly supportsDisableTools = true;
 
   buildCliInvocation(
     provider: CliProviderRecord,

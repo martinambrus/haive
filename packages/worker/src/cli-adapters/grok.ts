@@ -38,6 +38,7 @@ export class GrokAdapter extends BaseCliAdapter {
   readonly supportsMcp = true;
   readonly supportsPlugins = true;
   override readonly supportsLsp = true;
+  override readonly supportsDisableTools = true;
   // Kept in sync with the catalog entry, which uses this as a CAPABILITY flag
   // rather than a mere default: 'subscription' is what allows a provider row to
   // be saved in either mode (api_key stays legal because apiKeyEnvName is set).

@@ -100,6 +100,7 @@ export class OllamaAdapter extends BaseCliAdapter {
   // network (not egress); an external remote host is added per provider.
   override readonly defaultEgressDomains = ['ollama.com', '*.ollama.com'];
   override readonly supportsSteering = true;
+  override readonly supportsDisableTools = true;
 
   buildCliInvocation(
     provider: CliProviderRecord,

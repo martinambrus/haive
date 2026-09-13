@@ -71,6 +71,7 @@ export class MuseAdapter extends BaseCliAdapter {
   override readonly effortScale = MUSE_EFFORT_SCALE;
   override readonly defaultEgressDomains = ['api.meta.ai'];
   override readonly supportsSteering = true;
+  override readonly supportsDisableTools = true;
 
   buildCliInvocation(
     provider: CliProviderRecord,
