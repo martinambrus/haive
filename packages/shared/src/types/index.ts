@@ -121,9 +121,11 @@ export interface CliTokenUsage {
  *    - claude-code / zai / ollama / muse / grok / openrouter: both channels.
  *    - gemini: `stats.models` keys (served only).
  *    - antigravity: a human LABEL scraped from its own --log-file, never an id.
- *    - codex / amp: report NO model at all, so `served` stays null and `match`
- *      is 'unknown'. amp reports `agent_mode` instead; codex's `exec --json`
- *      carries no model on any typed event (verified against a full 3.4 MB run). */
+ *    - codex: `exec --json` carries no model on any typed event (verified against a
+ *      full 3.4 MB run). Its app-server names the requested model in `thread/start`
+ *      and a served one only when it reroutes (`model/rerouted`), so `served` is
+ *      usually null and `match` 'unknown'.
+ *    - amp: reports `agent_mode` instead of a model, so `served` stays null. */
 export interface ModelIdentity {
   /** What we asked for: the CLI's own init event, else the provider config. */
   requested: string | null;
@@ -135,10 +137,17 @@ export interface ModelIdentity {
    *  only — grok reports `grok-4.6-build` here while serving `grok-4.6`, so this
    *  is NOT an identity source. */
   billed: string[];
-  /** Provenance of this record, so a reader can weigh it. The first three mean a
-   *  CLI named the answering model; 'provider-config' means it did not, and only
-   *  `requested` is known (codex, amp). Null when no channel said anything. */
-  source: 'stream-json' | 'gemini-stats' | 'antigravity-log' | 'provider-config' | null;
+  /** Provenance of this record, so a reader can weigh it. Every value but
+   *  'provider-config' means a CLI named the answering model; 'provider-config' means it
+   *  did not, and only `requested` is known (amp, and codex unless it rerouted). Null when
+   *  no channel said anything. */
+  source:
+    | 'stream-json'
+    | 'gemini-stats'
+    | 'antigravity-log'
+    | 'codex-app-server'
+    | 'provider-config'
+    | null;
   /** 'unknown' whenever `served` is null — those providers can never trip the
    *  strict-mode failure, because we have no evidence either way. */
   match: 'exact' | 'differs' | 'unknown';

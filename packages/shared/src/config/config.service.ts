@@ -184,15 +184,24 @@ export const CONFIG_KEYS = {
   // toggle — there is no per-repo flag.
   STEERING_ENABLED: 'config:steering:enabled',
 
+  // Whether codex may be steered through its [experimental] `codex app-server` protocol (default
+  // ON). A steerable codex run moves onto it only after a zero-token protocol probe has verified
+  // that provider's binary in that task, and a run that finds the transport broken sends the rest
+  // of its task back to `codex exec` — so this switch is for what the probe cannot see, such as an
+  // upstream protocol change that breaks runs subtly. 'false' sends every newly dispatched codex
+  // run through `codex exec` without a redeploy. Read at each dispatch, within the ~30s config
+  // cache; a run already queued keeps the transport it was built with.
+  CODEX_APP_SERVER_ENABLED: 'config:steering:codexAppServerEnabled',
+
   // Soft timeout for steerable CLI invocations (default ON). The hard timeout is a
   // zero-grace SIGKILL, so a reviewer killed at its budget loses every finding it
   // made. At CLI_SOFT_TIMEOUT_PERCENT of the budget the worker publishes a wind-down
   // to the invocation's steer channel (CLI_SOFT_TIMEOUT_WIND_DOWN): stop investigating,
   // emit the verified findings now. Set 'false' to go back to the bare hard kill.
   //
-  // Steer-delivered, so it reaches ONLY invocations that are actually steerable —
-  // Claude-family adapters, and only while STEERING_ENABLED is on. Non-steerable
-  // adapters (codex, gemini, amp, antigravity) are unaffected either way.
+  // Steer-delivered, so it reaches ONLY invocations that are actually steerable — the
+  // claude family, amp, and codex once its app-server is verified for the task — and only
+  // while STEERING_ENABLED is on. gemini and antigravity are unaffected either way.
   CLI_SOFT_TIMEOUT_ENABLED: 'config:cli:softTimeoutEnabled',
   // Percent of the invocation's timeout budget at which the wind-down fires (default
   // 80). An integer, not a fraction, because configService.getNumber parses with
@@ -646,6 +655,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.TEST_BROWSER_PROVISION_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
+  [CONFIG_KEYS.CODEX_APP_SERVER_ENABLED]: 'true',
   [CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED]: 'true',
   [CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT]: '80',
   [CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES]: String(DEFAULT_CLI_TIMEOUT_BASE_MINUTES),
