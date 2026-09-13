@@ -79,10 +79,12 @@ interface StreamFrameOut {
     | 'steer'
     | 'steer_consumed'
     | 'retry'
-    | 'retry_resolved';
+    | 'retry_resolved'
+    | 'steerable';
   invocationId?: string;
-  /** On the `connected` frame: whether this invocation accepts mid-run steering
-   *  (drives the web steer box). */
+  /** On the `connected` frame, and on a `steerable` frame when it changes part-way (a codex
+   *  app-server run that fell back to `codex exec`): whether this invocation accepts mid-run
+   *  steering (drives the web steer box). */
   steerable?: boolean;
   /** On the `connected` frame: how long this stream has ALREADY been silent, so the viewer's
    *  stall clock continues an existing silence instead of restarting it at connect. */
@@ -200,6 +202,7 @@ async function runStreamSession(
           frame.type === 'output' ||
           frame.type === 'steer' ||
           frame.type === 'steer_consumed' ||
+          frame.type === 'steerable' ||
           frame.type === 'retry' ||
           frame.type === 'retry_resolved'
         ) {
@@ -279,6 +282,9 @@ function fieldsToFrame(fields: string[]): StreamFrameOut | null {
   if (stream === 'steer_consumed') {
     const id = map.get('id');
     if (typeof id === 'string') return { type: 'steer_consumed', id };
+  }
+  if (stream === 'steerable') {
+    return { type: 'steerable', steerable: map.get('value') === 'true' };
   }
   if (stream === 'retry') {
     // Redis stream fields are strings; a field the CLI's event did not carry is simply absent.

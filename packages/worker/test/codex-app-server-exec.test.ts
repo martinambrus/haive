@@ -135,6 +135,31 @@ const completed = (status: string, error: unknown = null) => ({
   params: { threadId: 'thread-1', turn: { id: 'turn-1', status, error } },
 });
 
+/** executeCliSpec with nothing set past the spec and budget but the steering-ended callback. */
+const runWithSteeringCallback = (onSteeringUnavailable: () => Promise<void>) =>
+  executeCliSpec(
+    appServerSpec(),
+    defaultDeps,
+    60_000,
+    {},
+    null,
+    null,
+    null,
+    undefined,
+    null,
+    [],
+    [],
+    [],
+    undefined,
+    null,
+    null,
+    [],
+    undefined,
+    false,
+    null,
+    onSteeringUnavailable,
+  );
+
 beforeEach(() => {
   runInSandbox.mockReset();
 });
@@ -152,8 +177,10 @@ describe('executeCliSpec on codex app-server', () => {
         exit(0);
       }),
     );
-    const outcome = await executeCliSpec(appServerSpec(), defaultDeps, 60_000);
+    const onSteeringUnavailable = vi.fn(async () => {});
+    const outcome = await runWithSteeringCallback(onSteeringUnavailable);
     expect(runInSandbox).toHaveBeenCalledTimes(1);
+    expect(onSteeringUnavailable).not.toHaveBeenCalled();
     expect(outcome.rawOutput).toBe('DONE');
     expect(outcome.errorMessage).toBeNull();
     expect(outcome.tokenUsage).toEqual({
@@ -172,8 +199,11 @@ describe('executeCliSpec on codex app-server', () => {
         appServer((_msg, _emit, exit) => exit(2, "error: unexpected argument '--json' found\n")),
       )
       .mockImplementationOnce(execRun('ANSWER FROM EXEC'));
-    const outcome = await executeCliSpec(appServerSpec(), defaultDeps, 60_000);
+    const onSteeringUnavailable = vi.fn(async () => {});
+    const outcome = await runWithSteeringCallback(onSteeringUnavailable);
     expect(runInSandbox).toHaveBeenCalledTimes(2);
+    // The exec half cannot take a steer, so the row is told before it starts.
+    expect(onSteeringUnavailable).toHaveBeenCalledTimes(1);
     const execSpec = runInSandbox.mock.calls[1]![0] as RunSpec;
     expect(execSpec.args[0]).toBe('exec');
     expect(execSpec.args).not.toContain('do the work');

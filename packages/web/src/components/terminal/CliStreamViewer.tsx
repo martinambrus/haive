@@ -412,6 +412,11 @@ export function CliStreamViewer({
           // froze twenty minutes ago answers now instead of after another full threshold.
           lastFrameAtRef.current = Date.now() - elapsedMs(parsed.idleMs);
           break;
+        case 'steerable':
+          // The run stopped taking steers part-way — a codex app-server run that fell back to
+          // `codex exec`. Read exactly like the flag on `connected`.
+          setSteerable(parsed.steerable === true);
+          break;
         case 'retry': {
           // The CLI hit a transient API failure and is retrying. Fields come straight from its
           // own api_retry event; coerce defensively so a reshaped event degrades the wording

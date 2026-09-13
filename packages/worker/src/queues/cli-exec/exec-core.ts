@@ -46,6 +46,7 @@ import {
   publishCliRetryResolved,
   publishCliSteerConsumed,
   wrapStreamCallback,
+  publishCliSteerable,
 } from '../cli-stream-publisher.js';
 import { log, type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createStreamJsonCollector, type StreamRetryInfo } from './stream.js';
@@ -490,6 +491,7 @@ export async function executeByKind(
         makeUsageSnapshotPersister(db, payload.invocationId),
         payload.softTimeout === true,
         appReach,
+        payload.invocationId ? makeSteerableClearer(db, payload.invocationId) : undefined,
       );
     }
     case 'subagent_sequential':
@@ -520,6 +522,18 @@ export async function executeByKind(
   }
 }
 
+/** The row stops claiming `steerable` once its run can no longer take a steer — a codex app-server
+ *  run that fell back to `codex exec`. The api refuses a steer for such a row, and a viewer that
+ *  reconnects is told the same by its `connected` frame. */
+function makeSteerableClearer(db: Database, invocationId: string): () => Promise<void> {
+  return async () => {
+    await db
+      .update(schema.cliInvocations)
+      .set({ steerable: false })
+      .where(eq(schema.cliInvocations.id, invocationId));
+  };
+}
+
 export async function executeCliSpec(
   spec: CliCommandSpec,
   deps: CliExecDeps,
@@ -543,6 +557,10 @@ export async function executeCliSpec(
    *  callers that never had a runtime in view (the `--version` auth probe, the test
    *  fixtures) keep compiling unchanged. */
   appReach: AppReach | null = null,
+  /** Called when a steerable run stops being steerable part-way — a codex app-server run that fell
+   *  back to `codex exec` in this invocation — so the caller can stop the row claiming it. Trailing
+   *  and optional for the same reason as `appReach`. */
+  onSteeringUnavailable?: () => Promise<void>,
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
@@ -870,6 +888,17 @@ export async function executeCliSpec(
         'codex app-server could not accept the turn; re-running the invocation on codex exec',
       );
       if (invocationId) await publishCliChunk(invocationId, 'stdout', notice);
+      // What follows is `codex exec`, which cannot take a steer. Say so before it starts: the api
+      // then refuses one, and an open terminal drops its steer box instead of accepting text that
+      // nothing will read.
+      if (mergedSpec.steerable === true) {
+        try {
+          await onSteeringUnavailable?.();
+        } catch (err) {
+          log.warn({ err, invocationId }, 'could not mark the invocation unsteerable');
+        }
+        await publishCliSteerable(invocationId, false);
+      }
       const remainingMs =
         timeoutMs === undefined
           ? undefined

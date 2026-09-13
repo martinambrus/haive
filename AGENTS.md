@@ -298,7 +298,9 @@ no `app-server` subcommand, 0.78.0 has an app-server with `turn/start` and `turn
 - **An in-invocation fallback when the app-server cannot accept the turn** (spawn, initialize,
   thread/start, turn/start, or no accepted turn within 5 min): no work was done, so exec-core
   re-runs the SAME invocation from `codexExecFallbackSpec` (the adapter's exec argv, prompt over
-  stdin) and returns that. A binary that exits before answering `initialize` is `spawn` here
+  stdin) and returns that. Before that exec half starts the row stops claiming `steerable` and a
+  `steerable` stream frame drops an open terminal's steer box, so no steer is accepted that nothing
+  will read. A binary that exits before answering `initialize` is `spawn` here
   exactly as in the probe, with its stderr tail as the detail — MEASURED, that tail was clap's
   `unexpected argument '--json' found`, the one line naming what changed, where the session alone
   could only say the process had exited. A failure after the turn was accepted — a server->client
