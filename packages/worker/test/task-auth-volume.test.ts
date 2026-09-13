@@ -184,6 +184,54 @@ describe('ensureTaskAuthVolumes', () => {
     expect(runner.runCalls.some((c) => c.cmd[0] === 'bash')).toBe(true);
   });
 
+  it('forgets the applied preparations whose files the recreate just deleted', async () => {
+    // The volume holding this task's rtk seed and MCP config is gone, but their applied
+    // identities are in-process. Without dropping them every writer skips on its next call and
+    // the fresh volume keeps no tooling at all — for codex that is the whole config.toml MCP
+    // surface, so the agents after a re-login run without the tools they were promised.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskinv_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    // Seed an applied identity, then make the volume look refreshed.
+    await seedRtkInTaskVolume('task-inv', 'codex', runner);
+    const seedsBefore = runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length;
+    expect(seedsBefore).toBe(1);
+
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-inv', runner);
+    expect(runner.createCalls).toContain(taskVol);
+
+    // The same seed must now RUN again rather than skip on its recorded identity.
+    await seedRtkInTaskVolume('task-inv', 'codex', runner);
+    expect(runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length).toBe(seedsBefore + 1);
+    clearTaskAuthPreparationState('task-inv');
+  });
+
+  it("leaves other providers' preparations alone when one volume is recreated", async () => {
+    const taskVol = 'haive_cli_auth_task_taskiso_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: ['haive_cli_auth_abc_codex_0', taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    await seedRtkInTaskVolume('task-iso', 'grok', runner);
+    const before = runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length;
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-iso', runner);
+    // grok's volume was not touched, so its seed must still skip.
+    await seedRtkInTaskVolume('task-iso', 'grok', runner);
+    expect(runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length).toBe(before);
+    clearTaskAuthPreparationState('task-iso');
+  });
+
   it('compares against the source only while the source still exists', async () => {
     // A user volume that is GONE must never be compared against: it would fingerprint as
     // empty, read as "moved on", and the recreate would populate an EMPTY task volume —

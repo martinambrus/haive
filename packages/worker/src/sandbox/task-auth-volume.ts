@@ -220,13 +220,29 @@ async function applyAuthPreparationOnce(
   );
 }
 
-/** Forget every applied-preparation slot for one task. Called from the task-end funnel that
- *  destroys the volumes themselves — the slots describe volumes that no longer exist. */
-export function clearTaskAuthPreparationState(taskId: string): void {
-  const prefix = `${taskId}|`;
+/** Forget applied-preparation slots whose volume no longer holds what they recorded.
+ *
+ *  Called from two places, and the difference matters. The task-end funnel passes no provider:
+ *  every volume for the task is being destroyed, so the in-flight LOCKS go too. A volume
+ *  RECREATE passes the provider, and then only the applied identities are dropped — a sibling
+ *  may be queued on that scope's lock, and removing the lock mid-flight would let its
+ *  preparation run concurrently with the next one, which is the whole thing the lock exists to
+ *  stop.
+ *
+ *  Scopes are `taskId|provider|phase` for exactly this reason: a per-provider prefix is then
+ *  an exact match rather than a substring search over four differently-shaped keys.
+ *
+ *  Without the recreate call, refreshed credentials cost a task its tooling: the copy helper
+ *  replaces the volume, the rtk seed and every MCP write still read their prior identity from
+ *  this map and SKIP, and the agent that follows runs against a volume where those files no
+ *  longer exist. The identities are dropped rather than re-applied here because each writer
+ *  already re-applies itself on the next invocation that needs it. */
+export function clearTaskAuthPreparationState(taskId: string, providerName?: string): void {
+  const prefix = providerName ? `${taskId}|${providerName}|` : `${taskId}|`;
   for (const scope of appliedAuthPreparations.keys()) {
     if (scope.startsWith(prefix)) appliedAuthPreparations.delete(scope);
   }
+  if (providerName) return;
   for (const scope of authPreparationLocks.keys()) {
     if (scope.startsWith(prefix)) authPreparationLocks.delete(scope);
   }
@@ -351,6 +367,12 @@ async function ensureTaskAuthVolumesUnlocked(
         `Failed to create task auth volume ${taskVol}: ${created.stderr || 'unknown error'}`,
       );
     }
+    // The volume this task's rtk seed and MCP config were written into is gone. Their applied
+    // identities are in-process and would otherwise make every writer skip, leaving the fresh
+    // volume without the tooling the next agent expects — for codex that is the whole
+    // `config.toml` MCP surface. Always reached on a recreate, whether it was a half-built
+    // volume or refreshed credentials.
+    clearTaskAuthPreparationState(taskId, ctx.providerName);
 
     const mounts: DockerVolumeMount[] = [{ source: taskVol, target: '/dst', readOnly: false }];
     if (userHasData) {
@@ -563,7 +585,7 @@ export function seedRtkInTaskVolume(
 ): Promise<void> {
   // The seed writes the same thing every time for a given provider, so its identity is the
   // slot itself: applied once per task, not once per invocation.
-  return applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|rtk|${providerName}`, 'seeded', () =>
+  return applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|${providerName}|rtk`, 'seeded', () =>
     seedRtkInTaskVolumeUnlocked(taskId, providerName, runner),
   );
 }
@@ -678,7 +700,7 @@ export function mergeGeminiMcpIntoSettings(
   const clear = opts.clear === true;
   return applyAuthPreparationOnce(
     geminiMcpMergeRuns,
-    `${taskId}|gemini-mcp`,
+    `${taskId}|gemini|mcp`,
     // The MODE is part of the identity: a clear and an empty no-op both carry `{}`, so a key
     // on the content alone would let the recorded no-op skip a later clear.
     contentKey(`${clear ? 'clear' : 'merge'}|${content}`),
@@ -814,7 +836,7 @@ export function mergeCliMcpIntoTaskVolume(
   const surfaceKey = contentKey(JSON.stringify({ image, servers }));
   return applyAuthPreparationOnce(
     cliMcpMergeRuns,
-    `${taskId}|cli-mcp|${providerName}`,
+    `${taskId}|${providerName}|cli-mcp`,
     surfaceKey,
     () => mergeCliMcpIntoTaskVolumeUnlocked(taskId, providerName, image, servers, runner),
   );
@@ -926,7 +948,7 @@ export function writeMcpFileIntoTaskVolume(
 ): Promise<void> {
   return applyAuthPreparationOnce(
     mcpFileWriteRuns,
-    `${taskId}|mcp-file|${providerName}|${containerPath}`,
+    `${taskId}|${providerName}|mcp-file|${containerPath}`,
     contentKey(content),
     () => writeMcpFileIntoTaskVolumeUnlocked(taskId, providerName, containerPath, content, runner),
   );
