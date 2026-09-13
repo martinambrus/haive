@@ -264,7 +264,10 @@ input from stdin...` and waits for EOF before the first turn), and `codex queue 
   JSON-RPC 2.0 over plain piped stdio (`cli-executor/codex-app-server.ts`): `initialize` →
   `thread/start` → `turn/start`, each steer a `turn/steer` carrying `expectedTurnId` and a
   `clientUserMessageId`, and consumption is the turn's `userMessage` item echoing that client id
-  (drained in order when a binary echoes none). How it is verified and abandoned is below.
+  (drained in order when a binary echoes none). MEASURED on a live plan_chat turn: a steer sent
+  during the third of three `sleep 20` calls answered with the live `turnId`, the `userMessage`
+  carrying its client id arrived once that call returned, and the reply answered the steer. How it
+  is verified and abandoned is below.
 - **grok** — NO. Headless `-p` streams are read-only and the REPL needs a TTY (piped stdin
   dies ENXIO, already recorded in `grok.ts`). Only ACP (`grok agent stdio`) is bidirectional.
 - **antigravity** — NO, and it is the closest miss. It already passes `--input-format
@@ -295,16 +298,24 @@ no `app-server` subcommand, 0.78.0 has an app-server with `turn/start` and `turn
 - **An in-invocation fallback when the app-server cannot accept the turn** (spawn, initialize,
   thread/start, turn/start, or no accepted turn within 5 min): no work was done, so exec-core
   re-runs the SAME invocation from `codexExecFallbackSpec` (the adapter's exec argv, prompt over
-  stdin) and returns that. A failure after the turn was accepted — a server->client request under
-  `never`/`dangerFullAccess`, a stream that ended without `turn/completed`, a completed turn with
-  neither usage nor a message — cannot be re-run blindly, since the agent may have edited files,
-  so it fails as `CODEX_APP_SERVER_FAILED_HEADLINE`, a transient the step's existing re-dispatch
-  re-runs. Either way `handleCliExecJob` first records `unsupported`/`runtime` for that provider,
-  so every later dispatch in the task — that re-run included — builds `codex exec`, and the step
-  carries a `warningMessage` naming the stage and codex version. A run that behaved still reports
-  `thread.cliVersion`; one that differs from the verdict's binary (a provider left on "latest"
-  whose image was rebuilt) drops the verdict, so the next dispatch re-probes the new binary.
-  Haive's own kills (timeout, cancel, preemption) never count.
+  stdin) and returns that. A binary that exits before answering `initialize` is `spawn` here
+  exactly as in the probe, with its stderr tail as the detail — MEASURED, that tail was clap's
+  `unexpected argument '--json' found`, the one line naming what changed, where the session alone
+  could only say the process had exited. A failure after the turn was accepted — a server->client
+  request under `never`/`dangerFullAccess`, a stream that ended without `turn/completed`, a
+  completed turn with neither usage nor a message — cannot be re-run blindly, since the agent may
+  have edited files, so it fails as `CODEX_APP_SERVER_FAILED_HEADLINE`, a transient the step's
+  existing re-dispatch re-runs. Either way `handleCliExecJob` first records `unsupported`/`runtime`
+  for that provider, so every later dispatch in the task — that re-run included — builds
+  `codex exec`, and the step carries a `warningMessage` naming the stage and codex version. That
+  banner cannot be the only trace: a self-revising step resets its own row at the end of the turn
+  that set it — MEASURED on plan_chat, the warning was cleared 0.3 s after it was written — so
+  every `unsupported` verdict, probe or run, is also a `codex_app_server.unavailable` task event on
+  the Activity tab. A run that behaved still reports `thread.cliVersion`; one that differs from the
+  verdict's binary (a provider left on "latest" whose image was rebuilt) drops the verdict, so the
+  next dispatch re-probes the new binary. Haive's own kills (timeout, cancel, preemption) never
+  count, and neither does Docker's own exit 125: a container that never started says nothing about
+  codex, which is how the probe already read it.
 - **`CONFIG_KEYS.CODEX_APP_SERVER_ENABLED`** (default on, Admin > CLI execution) for what the probe
   cannot see: off sends every newly dispatched codex run through `codex exec`. The same card lists
   the last 30 days of `unsupported` verdicts with their codex version and stage — the report Haive's
@@ -317,7 +328,10 @@ steer is NOT a downgrade, since a steer racing the turn's end is refused the sam
 ~0.12 s after stdin EOF when no turn ran but ~5.1 s after an interrupted one, with the image's
 entrypoint and without it. And the MCP surface needs no reconciling: both transports read the same
 `~/.codex/config.toml` that `cli-merge` writes (`initialize` reports `codexHome:
-/home/node/.codex`), and `codex exec` runs already expose `codex_apps`.
+/home/node/.codex`), and `codex exec` runs already expose `codex_apps`. Those servers boot
+asynchronously once `thread/start` has answered — MEASURED on live runs, ~0.3 s for `thread/start`
+and ~5 s from container start to `turn/started` — so they never hold up the handshake the 5-min
+deadline guards.
 
 **The steer is echoed by US, because the binary never echoes it.** `steer-echo.ts` fans one
 written steer to three places from the forwarder's `onWritten`: a `steer` stream frame
