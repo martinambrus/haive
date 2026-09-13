@@ -53,6 +53,16 @@ export abstract class BaseCliAdapter {
    *  messages the CLI applies at its next boundary. The claude family and amp take them as
    *  stream-json lines on stdin; codex takes them over its app-server protocol. Default false. */
   readonly supportsSteering: boolean = false;
+  /** Whether this CLI's builder actually HONORS `invokeOpts.disableTools` — i.e. can be told to
+   *  run with no built-in file, search or shell tools. The claude family and grok translate it
+   *  into `--tools ''`; codex, gemini, amp and antigravity ignore the flag entirely, and two of
+   *  them keep blanket permission flags besides.
+   *
+   *  Declared rather than inferred because the DISPATCHER states it in the prompt: the no-tools
+   *  block asserts "no search, no file reading, no shell", and asserting that to an agent which
+   *  still has all three is the same class of defect as advertising an MCP server the mount does
+   *  not wire. Default false, so a new adapter never inherits a claim it cannot keep. */
+  readonly supportsDisableTools: boolean = false;
 
   /** Whether that steering transport can be used for THIS provider in THIS task. The capability
    *  above is static; this is the per-task half. A transport of stdin NDJSON lines is always

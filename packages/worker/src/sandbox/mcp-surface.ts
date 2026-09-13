@@ -40,6 +40,26 @@ export interface McpSurface {
  *  chrome-devtools attaches to the runner's visible browser or self-launches a
  *  headless one — never whether the server is present. Keeping it out means the
  *  dispatcher can resolve the surface without paying for it on every enqueue. */
+/** How much of the MCP surface an invocation gets. `'rag_only'` is the existing
+ *  narrowing; `'none'` is narrower still and gives it no servers at all. */
+export type McpProfile = 'full' | 'rag_only' | 'none';
+
+/** A surface carrying nothing, for a step that declared `toolProfile: 'none'`.
+ *
+ *  Built here rather than inlined at the caller so it cannot drift from `McpSurface`.
+ *  `ragOnly` is FALSE: that flag means "narrowed to rag_search alone", and this is
+ *  narrower still, so `mcpSurfacePrompt` states the absence positively rather than
+ *  promising a tool that is not wired. */
+export function emptyMcpSurface(): McpSurface {
+  return {
+    ragOnly: false,
+    rag: { enabled: false, apiUrl: '', token: '' },
+    chromeDevtools: { enabled: false, version: null },
+    ddevControl: { enabled: false, apiUrl: '', token: '' },
+    userServers: {},
+  };
+}
+
 export async function resolveMcpSurface(
   db: Database,
   taskId: string,
@@ -311,7 +331,10 @@ const BROWSER_TAB_DISCIPLINE = [
  *  else would otherwise send an agent at a tool that was never wired — `ragMode: 'none'`
  *  is a first-class onboarding choice, not a fault. One negative sentence here reaches
  *  every one of those mentions without matching any of their wording. */
-export function mcpSurfacePrompt(surface: McpSurface | null): string {
+export function mcpSurfacePrompt(
+  surface: McpSurface | null,
+  opts: { noBuiltInTools?: boolean } = {},
+): string {
   const lines: string[] = [MCP_SURFACE_MARKER];
   const wired: string[] = [];
 
@@ -344,7 +367,21 @@ export function mcpSurfacePrompt(surface: McpSurface | null): string {
 
   if (wired.length > 0) lines.push('MCP tools wired into this run:', ...wired);
 
-  if (!surface?.rag.enabled) {
+  if (opts.noBuiltInTools) {
+    // The step runs with `--tools ''`, so it has no file, search or shell tool either — the
+    // grep/ripgrep fallback below would send it after something it cannot run. MEASURED on
+    // `01-env-detect`: glm-5.3 followed that advice on two repos, answering with prose and a
+    // `cat wp-includes/version.php` block instead of the required JSON, three attempts each
+    // time, until the retry budget was spent. Other models ignored the instruction and
+    // answered from the prompt, which is what made it look like a model fault.
+    lines.push(
+      '',
+      'NO tools are wired into this run — no search, no file reading, no shell. That is',
+      'deliberate: everything this step needs is already in this prompt. Do not plan or',
+      'describe a command, and do not ask to inspect a file. Answer from the material below,',
+      'and where it does not settle a field, emit null for that field rather than a guess.',
+    );
+  } else if (!surface?.rag.enabled) {
     lines.push(
       '',
       'No `rag_search` (haive-rag) tool is wired into this run: this repository has no RAG index',
@@ -375,7 +412,11 @@ export function mcpSurfacePrompt(surface: McpSurface | null): string {
  * reasoning that a block with no list to give was pure prompt cost — but that is exactly
  * the dispatch whose prompt body still names `rag_search`, so silence there is what let
  * an agent chase a tool it never had. */
-export function withMcpSurface(prompt: string, surface: McpSurface | null): string {
+export function withMcpSurface(
+  prompt: string,
+  surface: McpSurface | null,
+  opts: { noBuiltInTools?: boolean } = {},
+): string {
   if (prompt.includes(MCP_SURFACE_MARKER)) return prompt;
-  return `${mcpSurfacePrompt(surface)}\n\n${prompt}`;
+  return `${mcpSurfacePrompt(surface, opts)}\n\n${prompt}`;
 }

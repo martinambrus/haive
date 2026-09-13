@@ -466,10 +466,6 @@ export const knowledgeQaResolveStep: StepDefinition<
 
     const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
 
-    // The agent stages each proposed section here, so the dir has to exist and be
-    // writable by the sandbox user before the prompt names it.
-    await prepareAgentWritableDir(ctx.repoPath, KB_DRAFT_DIR, ctx.logger);
-
     ctx.logger.info(
       { agentQuestionCount: agentQuestions.length, kbFileCount: kbFiles.length },
       'qa-resolve detect complete',
@@ -485,6 +481,21 @@ export const knowledgeQaResolveStep: StepDefinition<
     requiredCapabilities: ['tool_use'],
     buildPrompt,
     timeoutMs: 60 * 60 * 1000,
+    // Emptied and handed to the sandbox user before EVERY dispatch, not once per detect.
+    // Body paths are deterministic (`<id>.md`), so an attempt that declares a path and then
+    // fails to write it would read whatever an earlier attempt left at that name. Clearing
+    // in detect() closed that for a human RETRY (detect re-runs) but not for a re-dispatch:
+    // an invocation orphaned by a worker restart is superseded and re-dispatched through
+    // `resolveLlmPhase`'s "no invocation exists yet" branch, which never re-runs detect.
+    // MEASURED on task cbf0be06: 14 bodies written by the killed attempt were still on disk
+    // when its replacement started one second later.
+    //
+    // The chown matters as much as the rm: the worker runs as ROOT while the sandboxed CLI
+    // runs as uid 1000 — MEASURED, a plain mkdir left `.haive/kb-draft` root:root 0755 and
+    // the agent could not write a single body into it.
+    prepareWorkspace: async ({ ctx }) => {
+      await prepareAgentWritableDir(ctx.repoPath, KB_DRAFT_DIR, ctx.logger);
+    },
     retry: { maxAttempts: 3, retryOn: (err) => err instanceof QaResolveParseError },
     bypassStub: () => ({ answers: [], unanswered: [] }),
   },

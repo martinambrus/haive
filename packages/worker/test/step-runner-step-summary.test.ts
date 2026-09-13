@@ -224,6 +224,23 @@ describe('per-step summarizer provider choice', () => {
     expect(summary[0]!.cliProviderId).toBe('prov-1');
   });
 
+  it('declares the no-tool profile, so the prompt and the wiring agree', async () => {
+    // The recap compacts agent text and reads nothing. Without the declaration it was
+    // dispatched against the task's FULL surface — the prompt listing rag_search, the browser
+    // and the user's own servers — while cli-exec wired none of them, and the npm pre-warm
+    // (which keys on this same field) spent a cold chrome-devtools fetch ahead of the recap's
+    // own 60s budget. The dispatch carries the identical literal, which is what makes the
+    // advertised surface empty too.
+    const { enqueued } = await runToDone(undefined, [makeProvider()]);
+    const summary = summaries(enqueued)[0]!;
+    expect(summary.toolProfile).toBe('none');
+    // And no built-in file/search/shell tools either: the recap reads nothing that is not
+    // already in its prompt. `--tools ''` is safe precisely because no MCP is wired — the one
+    // failure it ever caused was stripping the `tool_search` that DEFERRED MCP tools need.
+    const args = (summary.spec as { args?: string[] }).args ?? [];
+    expect(args).toContain('--tools');
+  });
+
   it('reads a missing task row as inherit/enabled', async () => {
     // Five other step-runner suites return undefined here and must keep passing.
     const { enqueued } = await runToDone(undefined, [makeProvider()]);

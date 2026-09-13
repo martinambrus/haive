@@ -34,7 +34,12 @@ import {
   withWorktreeGitBoundary,
 } from '../repo/worktree-git-boundary.js';
 import { withDdevGeneratedBoundary } from '../repo/ddev-generated-boundary.js';
-import { resolveMcpSurface, withMcpSurface, type McpSurface } from '../sandbox/mcp-surface.js';
+import {
+  emptyMcpSurface,
+  resolveMcpSurface,
+  withMcpSurface,
+  type McpSurface,
+} from '../sandbox/mcp-surface.js';
 import { resolveAppReach, withAppReach, type AppReach } from '../queues/cli-exec/app-reach.js';
 import {
   resolveModelLimits,
@@ -109,7 +114,7 @@ export interface DispatchRequest {
   worktreeGitBoundary?: boolean;
   /** The step's declared MCP narrowing, passed straight to resolveMcpSurface so the
    *  advertised surface matches the one cli-exec will wire for the same invocation. */
-  toolProfile?: 'rag_only';
+  toolProfile?: 'rag_only' | 'none';
   /** Computed by resolveTaskDispatch. Exposed on the pure resolver only for
    *  deterministic unit tests; null means "advertise nothing". */
   mcpSurface?: McpSurface | null;
@@ -147,7 +152,9 @@ export async function resolveTaskDispatch(
     await Promise.all([
       hasReadyLspBridge(db, taskId),
       resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
-      resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
+      req.toolProfile === 'none'
+        ? emptyMcpSurface()
+        : resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
       resolveGlobalKbDigest(db, taskId),
       resolveAppReach(db, taskId),
       resolveCodexAppServerVerdicts(db, taskId),
@@ -317,6 +324,15 @@ function buildCliSidePlan(
     const mcpBounded = withMcpSurface(
       ddevBounded,
       adapter.supportsMcp ? (req.mcpSurface ?? null) : null,
+      // ANDed with the adapter, like `supportsMcp` above and for the same reason: codex,
+      // gemini, amp and antigravity ignore `disableTools` outright, so claiming "no search, no
+      // file reading, no shell" to one of them tells an agent that still has all three — and
+      // amp and antigravity keep their blanket permission flags besides — that it cannot touch
+      // a worktree it can.
+      {
+        noBuiltInTools:
+          req.invokeOpts?.disableTools === true && adapter.supportsDisableTools === true,
+      },
     );
     // Whether the app can actually be reached, and how. Same reason as the boundaries above:
     // handing an agent a URL without saying what can dial it asserts a capability the sandbox

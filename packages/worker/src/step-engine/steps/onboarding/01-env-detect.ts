@@ -539,9 +539,31 @@ async function detectStack(
     language = 'ruby';
   }
 
-  if (await pathExists(path.join(repoPath, 'wp-config.php'))) {
-    framework = 'wordpress';
-    language = 'php';
+  // Keyed on a file WordPress SHIPS, not on one the site writes. `wp-config.php` holds the
+  // DB credentials and salts and is gitignored by essentially every WordPress project, so
+  // it is absent exactly when the deterministic path has to carry the detection. MEASURED
+  // on two live sites: one commits it and one does not, and the one that does not was
+  // classified `general` — losing the framework's whole exclude list and custom-path
+  // handling — after the LLM pass failed. `06a-db-migrate` already settled on this marker
+  // for the same reason; see its note on markers having to be TRACKED files.
+  //
+  // `wp-config.php` is kept as a FALLBACK rather than replaced, because the two markers are
+  // absent on different projects: a plain install gitignores the config and tracks core,
+  // while a composer-managed one (bedrock and friends) tracks a root config and DOWNLOADS
+  // core at deploy, so it ships no `wp-includes/` at all. Dropping it outright turned that
+  // second layout into `general` — and `paths` is computed from the framework in the same
+  // pass, so a later LLM correction does not get the exclude list or the extension scan
+  // back. Ordered strong-marker-first: a repo carrying both is WordPress either way.
+  for (const marker of ['wp-includes/version.php', 'wp-config.php']) {
+    for (const root of DOCROOT_CANDIDATES) {
+      const rel = root ? `${root}/${marker}` : marker;
+      if (await pathExists(path.join(repoPath, rel))) {
+        framework = 'wordpress';
+        language = 'php';
+        break;
+      }
+    }
+    if (framework === 'wordpress') break;
   }
 
   // Not every framework has a manifest to be named in. Drupal 7's core ships no
@@ -626,6 +648,274 @@ async function detectStack(
   };
 }
 
+/** Where a project may put its web root. A framework's `customPaths` are written relative
+ *  to the DOCROOT, and composer templates (`web/`) and Acquia (`docroot/`) both nest it, so
+ *  stat-ing the bare convention at the repo root reports "not present" for a layout where it
+ *  is present one level down. Empty string first: the common case is no nesting. */
+const DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html', 'public_html'] as const;
+
+/** The WordPress extension header, read from the first file in the directory that carries
+ *  one — `style.css` for a theme, the main `.php` for a plugin. Not recursive: a header in
+ *  a bundled sub-library is not this extension's. */
+async function wpFileHeader(file: string): Promise<string> {
+  try {
+    const text = (await readFile(file, 'utf8')).slice(0, 4000);
+    return /^\s*\*?\s*(Plugin Name|Theme Name)\s*:/im.test(text) ? text : '';
+  } catch {
+    return ''; // unreadable or binary — carries no header as far as we can tell
+  }
+}
+
+async function wpExtensionHeader(dir: string): Promise<string> {
+  let names: string[];
+  try {
+    names = (await readdir(dir)).sort();
+  } catch {
+    return '';
+  }
+  for (const name of names) {
+    if (!name.endsWith('.php') && !name.endsWith('.css')) continue;
+    const header = await wpFileHeader(path.join(dir, name));
+    if (header) return header;
+  }
+  return '';
+}
+
+/** A second distribution marker, needed because a URI alone is not one.
+ *
+ *  A published extension carries release machinery a one-site plugin has no use for: an i18n
+ *  `Text Domain`, a declared `License`, or the `readme.txt` `Stable tag` wordpress.org
+ *  requires of everything it hosts. A bespoke plugin's header is usually Name/URI/Description/
+ *  Version/Author and nothing else. MEASURED across 71 extensions on two live sites, every one
+ *  of the ~60 that declares a URI also carries at least one of these three, so requiring the
+ *  pair costs NO correct rejection while covering the plugin an agency publishes under its own
+ *  domain — the case a URI on its own gets wrong, and gets wrong in the leaking direction.
+ *
+ *  `Stable tag` on its OWN was tried first and rejected on measurement: a real custom plugin
+ *  ships one (`Stable tag: 1.0.0`), so as a sole marker it excluded exactly the code this
+ *  guard protects. As the second half of an AND it is harmless — that plugin declares no URI. */
+async function hasDistributionMarker(dir: string | null, header: string): Promise<boolean> {
+  if (/^\s*\*?\s*(?:Text Domain|License)\s*:\s*\S+/im.test(header)) return true;
+  // A single-file plugin has no directory of its own, so the header is all there is.
+  if (!dir) return false;
+  for (const name of ['readme.txt', 'README.txt']) {
+    try {
+      const text = await readFile(path.join(dir, name), 'utf8');
+      if (/^\s*Stable tag\s*:\s*\S+/im.test(text)) return true;
+    } catch {
+      /* absent or unreadable — try the other casing */
+    }
+  }
+  return false;
+}
+
+/** Whether a theme or plugin came from a distributor rather than from this project.
+ *
+ *  A declared `Plugin URI`/`Theme URI` is the first marker: somebody publishing an extension
+ *  names where it lives. It is not sufficient on its own — an agency writing for one client
+ *  points the URI at the agency — so a rejection also needs a `hasDistributionMarker`.
+ *
+ *  The one blanket exception is a CHILD THEME, which copies its parent's header wholesale —
+ *  MEASURED, a site's own `kalium-child` carries `Theme URI: laborator.co` from the commercial
+ *  parent, so the URI there says nothing about who wrote it. `Template:` is what makes it a
+ *  child.
+ *
+ *  Used only to REJECT. Anything unmarked is treated as the project's own, which is the
+ *  safe direction: a wrongly-included directory keeps knowledge local, a wrongly-excluded
+ *  one lets repo-private knowledge reach the shared KB. MEASURED across two live sites (71
+ *  extensions): no custom code missed, 5 third-party extensions kept.
+ *
+ *  KNOWN LIMIT, so nobody re-derives it: a bespoke plugin generated from the WordPress plugin
+ *  boilerplate carries a URI, a Text Domain AND a license, and this classifies it distributed.
+ *  No on-disk signal separates "an agency published nothing and wrote this for one client"
+ *  from "a vendor published this", and every candidate was measured against those 71: a
+ *  required `readme.txt` `Stable tag` loses 13 of ~60 correct rejections (every theme and most
+ *  commercial plugins ship none), and requiring the extension slug to appear in the URI loses
+ *  16. Both trade a rare leak for vendor directories reported to the knowledge miner as the
+ *  project's own code on EVERY WordPress repo, which is the failure `d50a18aa` fixed. The
+ *  residual exposure is narrowed, not covered, by 08's second promotion guard
+ *  (`bodyUsesRepoSymbol`), which scans the whole tree rather than these paths and so is
+ *  independent of this verdict — though its 4,000-file cap means a large WordPress repo can
+ *  exhaust it before reaching a bespoke plugin. */
+async function isDistributedHeader(
+  header: string,
+  /** The extension's own directory, or null for a single-file plugin. */
+  dir: string | null,
+  kind: 'themes' | 'plugins',
+): Promise<boolean> {
+  if (!/^\s*\*?\s*(?:Plugin|Theme) URI\s*:\s*https?:\/\/\S+/im.test(header)) return false;
+  if (kind === 'themes' && /^\s*\*?\s*Template\s*:\s*\S+/im.test(header)) return false;
+  return hasDistributionMarker(dir, header);
+}
+
+async function looksDistributed(dir: string, kind: 'themes' | 'plugins'): Promise<boolean> {
+  return isDistributedHeader(await wpExtensionHeader(dir), dir, kind);
+}
+
+/** What one framework-specific scan concluded about a repo's own code.
+ *
+ *  `exhaustive` decides whether the framework's CONVENTION still gets its turn afterwards,
+ *  and the two scans differ on it: a `wp-content` that was read has seen every theme and
+ *  plugin there is, while the Drupal walk only sees extensions sitting DIRECTLY under a
+ *  parent and is blind to the common `modules/custom/<name>` nesting. `null` from a scan is
+ *  the third state — nothing was determined at all. */
+interface CustomPathScan {
+  paths: string[];
+  exhaustive: boolean;
+}
+
+/** WordPress themes and plugins this project WROTE.
+ *
+ *  `wp-content/themes/` is the framework's declared custom path, but unlike Drupal's
+ *  `modules/custom/` it is a MIXED directory — core ships its Twenty* themes into the same
+ *  place. MEASURED, naming the parent told the knowledge miner that three bundled core
+ *  themes were "this repo's OWN custom code".
+ *
+ *  Plugins are scanned too even though `wp-content/plugins/` is an excludePath, because a
+ *  site's own plugin is the case that leaks: the include is one segment deeper, so
+ *  `isRepoOwnPath`'s specificity rule lets it win over the broader exclude. */
+async function detectWordPressCustomPaths(repoPath: string): Promise<CustomPathScan | null> {
+  const found: string[] = [];
+  let scanned = false;
+  for (const root of DOCROOT_CANDIDATES) {
+    const base = root ? `${root}/wp-content` : 'wp-content';
+    for (const kind of ['themes', 'plugins'] as const) {
+      const rel = `${base}/${kind}`;
+      let entries: Dirent[];
+      try {
+        entries = await readdir(path.join(repoPath, rel), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      scanned = true;
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (await looksDistributed(path.join(repoPath, rel, entry.name), kind)) continue;
+          found.push(`${rel}/${entry.name}/`);
+          continue;
+        }
+        // A plugin can be ONE FILE — core ships `hello.php` that way — and a bespoke one is
+        // exactly the shape that leaks, since `wp-content/plugins/` is an excludePath and a
+        // directory-only scan leaves nothing more specific to outrank it. Plugins only: a
+        // theme needs a `style.css` and is therefore always a directory. `index.php`'s
+        // silence-is-golden stub is dropped by the HEADER test rather than by its name, so
+        // any other headerless file goes with it.
+        if (kind !== 'plugins' || !entry.isFile() || !entry.name.endsWith('.php')) continue;
+        const header = await wpFileHeader(path.join(repoPath, rel, entry.name));
+        if (!header) continue;
+        if (await isDistributedHeader(header, null, kind)) continue;
+        found.push(`${rel}/${entry.name}`);
+      }
+    }
+    // Scanning a real wp-content is conclusive even when it yields NOTHING: every extension
+    // came from a distributor. An empty `paths` here is a determination, not a shrug, which
+    // is what `exhaustive` carries — the convention `wp-content/themes/` must NOT be added
+    // back afterwards, or the parent of the core Twenty* themes is reported as custom code.
+    if (scanned) return { paths: found, exhaustive: true };
+  }
+  return null;
+}
+
+/** D8+ keeps core under `core/`, so the root parents hold contrib and custom. */
+const DRUPAL8_EXTENSION_PARENTS = ['modules', 'themes'] as const;
+
+/** Where this Drupal tree can keep extensions. The answer differs by MAJOR, and on D7 it is
+ *  read from disk rather than fixed.
+ *
+ *  D7 separates core from everything else by LOCATION: root `modules/`, `themes/` and
+ *  `profiles/` are core, and contrib and custom live under `sites/`. That is already what
+ *  `FRAMEWORK_PATTERNS.drupal7.excludePaths` declares, and scanning the core roots would
+ *  contradict it — a core tree whose `.info` files carry no drupal.org packaging stamp
+ *  (core tracked from git rather than unpacked from a release tarball) reads as 40
+ *  hand-written extensions, and the deep include paths then outrank the broad core exclude
+ *  in `isRepoOwnPath`. MEASURED on a live tarball-installed D7, all 40 core modules and all
+ *  4 core themes ARE stamped, so that install was never affected; the stamp is a property
+ *  of how core was OBTAINED, not of Drupal, which is why location decides instead.
+ *
+ *  Which `sites/` directory is likewise not fixed: a multisite install puts a site's own
+ *  modules under `sites/<hostname>/modules` and a single-site one uses
+ *  `sites/default/modules`, neither of which a `sites/all` literal covers — and the miss
+ *  fails in the leaking direction, because the broad `modules/` exclude matches that path
+ *  segment anyway, so an extension nobody listed reads as vendor code. One readdir of
+ *  `sites/` covers `all`, `default` and every hostname directory; a site with no `modules/`
+ *  or `themes/` simply fails the caller's readdir and costs nothing. */
+async function drupalExtensionParents(
+  repoPath: string,
+  framework: FrameworkName,
+): Promise<string[]> {
+  if (framework !== 'drupal7') {
+    return DOCROOT_CANDIDATES.flatMap((root) =>
+      DRUPAL8_EXTENSION_PARENTS.map((p) => (root ? `${root}/${p}` : p)),
+    );
+  }
+  const parents: string[] = [];
+  for (const root of DOCROOT_CANDIDATES) {
+    const sitesRel = root ? `${root}/sites` : 'sites';
+    let entries: Dirent[];
+    try {
+      entries = await readdir(path.join(repoPath, sitesRel), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      parents.push(`${sitesRel}/${entry.name}/modules`, `${sitesRel}/${entry.name}/themes`);
+    }
+  }
+  return parents;
+}
+
+/** Directories under those parents that this site WROTE, rather than installed.
+ *
+ *  Drupal keeps contrib and custom side by side under one parent, so no path rule separates
+ *  them — but drupal.org's packaging script stamps `project` and `datestamp` into every
+ *  contrib `.info`/`.info.yml`, and a hand-written extension has neither. MEASURED on a live
+ *  Drupal 7 site: 40 modules carry a `.info`, exactly ONE lacks `project`, and that one is
+ *  the site's own. Without this the convention `sites/all/modules/custom/` was reported for
+ *  a site that has no such directory, which is worse than saying nothing — see the caller.
+ *
+ *  A directory with no info file at all is NOT claimed: that is how `modules/contrib` and
+ *  other grouping dirs look, and guessing there would re-introduce the problem. */
+async function detectDrupalCustomPaths(
+  repoPath: string,
+  framework: FrameworkName,
+): Promise<CustomPathScan> {
+  const found: string[] = [];
+  for (const parent of await drupalExtensionParents(repoPath, framework)) {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(path.join(repoPath, parent), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === 'contrib') continue;
+      const dir = path.join(repoPath, parent, entry.name);
+      let info: string | null = null;
+      try {
+        const names = await readdir(dir);
+        info = names.find((n) => n.endsWith('.info') || n.endsWith('.info.yml')) ?? null;
+      } catch {
+        continue;
+      }
+      if (!info) continue;
+      try {
+        const text = await readFile(path.join(dir, info), 'utf8');
+        if (/^\s*project\s*[:=]/m.test(text)) continue; // packaged by drupal.org => contrib
+      } catch {
+        continue;
+      }
+      found.push(`${parent}/${entry.name}/`);
+    }
+  }
+  // Never exhaustive, and that holds even when this DID find something: the common D8 layout
+  // nests custom modules one level deeper inside `modules/custom/`, where this walk sees a
+  // directory carrying no info file of its own and claims nothing. A repo with both an
+  // unstamped extension directly under `modules/` and a populated `modules/custom/` is one
+  // scan that finds half the answer, so the convention is unioned in rather than skipped.
+  return { paths: found, exhaustive: false };
+}
+
 async function detectPaths(repoPath: string, framework: FrameworkName): Promise<PathsDetection> {
   const testPaths: string[] = [];
   for (const candidate of TEST_DIR_CANDIDATES) {
@@ -642,11 +932,44 @@ async function detectPaths(repoPath: string, framework: FrameworkName): Promise<
   await collectEnvFiles(repoPath, '', 0, envFiles);
 
   const pattern = FRAMEWORK_PATTERNS[framework] ?? FRAMEWORK_PATTERNS.general;
+  // Filtered the same way testPaths is above, and for the same reason: a pattern's
+  // customPaths are the framework's CONVENTION, not a reading of this repo. MEASURED
+  // across nine onboarding runs of one Drupal 7 repo — identical on every CLI, because
+  // this never reaches a model — `sites/all/modules/custom/` was reported while the
+  // repo's own module sits at `sites/all/modules/activit/` beside contrib.
+  //
+  // Reporting it anyway is worse than reporting nothing: `repoOwnRef` (08) treats a
+  // non-empty include as authoritative, so no file matched it, the "does this knowledge
+  // depend on repo-private code" guard never fired, and a repo-specific page reached the
+  // SHARED global KB. An empty list is the honest answer and routes that guard to its
+  // `isLikelyRepoOwnPath` fallback, which works off excludePaths and gets this right.
+  // Real extensions first where we can read them; the convention only fills the gap.
+  // `null` means nothing was determined and the convention still gets its chance; an empty
+  // ARRAY is a determination that this project has no custom code of that kind.
+  const scan: CustomPathScan | null = framework.startsWith('drupal')
+    ? await detectDrupalCustomPaths(repoPath, framework)
+    : framework === 'wordpress'
+      ? await detectWordPressCustomPaths(repoPath)
+      : null;
+  const customPaths: string[] = scan ? [...scan.paths] : [];
+  for (const candidate of scan?.exhaustive ? [] : pattern.customPaths) {
+    for (const root of DOCROOT_CANDIDATES) {
+      const rel = root ? `${root}/${candidate}` : candidate;
+      try {
+        if ((await stat(path.join(repoPath, rel))).isDirectory()) {
+          if (!customPaths.includes(rel)) customPaths.push(rel);
+          break;
+        }
+      } catch {
+        /* try the next docroot; none matching means the convention is not this repo's */
+      }
+    }
+  }
   return {
     testPaths,
     envFiles,
     customCodePaths: {
-      include: pattern.customPaths,
+      include: customPaths,
       exclude: pattern.excludePaths,
     },
   };
@@ -896,6 +1219,7 @@ export const detectCommandsForTest = detectCommands;
 
 /** Test seam for detectStack, same reason. */
 export const detectStackForTest = detectStack;
+export const detectPathsForTest = detectPaths;
 
 async function collectConfigFileContents(repoPath: string): Promise<string> {
   const candidates = [
@@ -1177,6 +1501,8 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
     // Give the model no built-in tools so a high-effort run answers in one shot
     // instead of crawling the repo until the sandbox timeout SIGKILLs it.
     disableTools: true,
+    // With the built-in tools gone there is nothing an MCP server could serve here.
+    toolProfile: 'none',
     buildPrompt: buildEnvDetectPrompt,
     parseOutput: (raw: string, _parsed: unknown) => parseEnrichment(raw),
     retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },

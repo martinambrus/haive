@@ -410,7 +410,7 @@ export interface CliExecJobPayload {
    *  AgentMiningSpec.toolProfile for a fan-out). `'rag_only'` cuts this invocation
    *  to rag_search; unset = the full surface. Honored identically by every kind —
    *  no kind narrows itself. */
-  toolProfile?: 'rag_only';
+  toolProfile?: 'rag_only' | 'none';
   spec: unknown;
   /** The worktree this invocation is isolated to, as a path RELATIVE to the repo root
    *  (e.g. `.haive/worktrees/<dirName>`), or `''` for the repo root itself (a merge that

@@ -49,6 +49,7 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
   override readonly effortScale = CLAUDE_EFFORT_SCALE;
   override readonly defaultEgressDomains = ['api.anthropic.com'];
   override readonly supportsSteering = true;
+  override readonly supportsDisableTools = true;
 
   buildCliInvocation(
     provider: CliProviderRecord,

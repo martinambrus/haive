@@ -58,6 +58,7 @@ export class ZaiAdapter extends BaseCliAdapter {
   // provider via egressDomains.
   override readonly defaultEgressDomains = ['api.z.ai'];
   override readonly supportsSteering = true;
+  override readonly supportsDisableTools = true;
 
   buildCliInvocation(
     provider: CliProviderRecord,

@@ -677,7 +677,18 @@ async function resolveLlmPhase(
   // Optional async setup the invocation depends on (e.g. 08a starting the
   // runner's headed browser so chrome-devtools MCP can connect). Idempotent;
   // a throw here fails the step like any dispatch error.
+  //
+  // Re-check the dispatch race before running it. This is a CHEAP guard, not a correct
+  // one — two advances that reach it before either inserts both pass — so nothing
+  // destructive or exclusive may live in this hook; that work belongs in
+  // `prepareWorkspace`, past the insert. What it does buy is real: the hooks here boot a
+  // DDEV runner, a headed browser desktop and an app login, and 08a's writes its outcome
+  // onto `detected`, so a job that arrives after the winner already parked the step should
+  // do none of it. Only paid for by a step that declares the hook.
   if (llmSpec.prepare) {
+    if (await hasLiveInvocation(db, current.id)) {
+      return { resolved: false, result: { status: 'waiting_cli', row: current } };
+    }
     await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
   }
 
@@ -833,6 +844,27 @@ async function resolveLlmPhase(
   }
   const invRow = inserted[0];
   if (!invRow) throw new Error('failed to insert cli_invocations row');
+  // Setup that must not run unless THIS job won. The insert above IS the reservation — the
+  // live-per-step unique index makes it atomic where a `hasLiveInvocation` read cannot be —
+  // so everything destructive belongs on this side of it. `prepare` cannot: it runs before
+  // the prompt is built because 08a resolves the app login there and `buildPrompt` renders
+  // it, which leaves it a check-before-act two concurrent advances can both pass.
+  //
+  // A throw RELEASES the reservation before propagating. The row is live by
+  // `hasLiveInvocation`'s definition and nothing has been enqueued that would ever end it,
+  // so leaving it would park the step for good; superseded is the same release the orphan
+  // re-dispatch above performs.
+  if (llmSpec.prepareWorkspace) {
+    try {
+      await llmSpec.prepareWorkspace({ ctx, detected, formValues: formValues ?? {} });
+    } catch (err) {
+      await db
+        .update(schema.cliInvocations)
+        .set({ supersededAt: new Date() })
+        .where(eq(schema.cliInvocations.id, invRow.id));
+      throw err;
+    }
+  }
   await params.deps.enqueueCliInvocation({
     invocationId: invRow.id,
     taskId: params.taskId,
@@ -2728,11 +2760,29 @@ async function maybeEnqueueStepSummary(
           params.taskId,
           params.ignoreSavedStepClis ?? false,
         );
+    // This pass reads NOTHING. It compacts agent text that is already in its prompt into three
+    // sentences, so it gets neither MCP servers nor the CLI's own built-in file, search and
+    // shell tools — the same pair `01-env-detect` ships, which is the combination proven safe:
+    // `--tools ''` only ever 400'd where it stripped the `tool_search` that DEFERRED MCP tools
+    // need, and there are no MCP tools here to defer.
+    //
+    // Declared at DISPATCH and not only on the payload, because this is what the prompt
+    // advertises: without it the recap was told rag_search, the browser and the user's own
+    // servers were wired while cli-exec wired none of them. It also skips the npm pre-warm,
+    // which keys on this field and was spending a cold chrome-devtools fetch (MEASURED 111-146s,
+    // against a 240s budget) ahead of the recap's own 60s one. And it is what the fixed preamble
+    // costs that dominates this pass — MEASURED before the per-task setting existed, claude-code
+    // spent 33,945 tokens and 22s writing three sentences.
     const plan = await resolveTaskDispatch(db, params.taskId, {
       providers,
       preferredProviderId,
+      toolProfile: 'none',
       input: { kind: 'prompt', prompt, capabilities: [] },
-      invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
+      invokeOpts: {
+        cwd: params.workspacePath,
+        effortLevel: preferredEffort ?? undefined,
+        disableTools: true,
+      },
     });
     const invocation = plan.invocation;
     if (plan.mode === 'skip' || !invocation || invocation.kind !== 'cli') return;
@@ -2760,6 +2810,7 @@ async function maybeEnqueueStepSummary(
       userId: params.userId,
       cliProviderId: plan.providerId,
       kind: 'cli',
+      toolProfile: 'none',
       spec: invocation.spec,
       timeoutMs: STEP_SUMMARY_TIMEOUT_MS,
       purpose: 'step_summary',

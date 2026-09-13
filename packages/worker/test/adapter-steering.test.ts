@@ -24,6 +24,28 @@ const provider = (over: Partial<CliProviderRecord> = {}): CliProviderRecord =>
     ...over,
   }) as unknown as CliProviderRecord;
 
+describe('supportsDisableTools capability', () => {
+  // EVERY adapter, false ones included, for the same reason the table above exists. This one
+  // is read by the DISPATCHER, which states "no search, no file reading, no shell" in the
+  // prompt when a step asks for it — so a value that drifts from what the builder actually
+  // does tells an agent it cannot touch a worktree it can. The truth is one grep away:
+  // an adapter honours it exactly when its builder reads `opts.disableTools`.
+  it('is true only for the builders that translate it into --tools ""', () => {
+    expect(new ClaudeCodeAdapter().supportsDisableTools).toBe(true);
+    expect(new ZaiAdapter().supportsDisableTools).toBe(true);
+    expect(new OllamaAdapter().supportsDisableTools).toBe(true);
+    expect(new MuseAdapter().supportsDisableTools).toBe(true);
+    expect(new OpenRouterAdapter().supportsDisableTools).toBe(true);
+    expect(new GrokAdapter().supportsDisableTools).toBe(true);
+    // The four that ignore the flag outright. amp and antigravity additionally keep their
+    // blanket permission flags, so the claim would be furthest from true there.
+    expect(new CodexAdapter().supportsDisableTools).toBe(false);
+    expect(new GeminiAdapter().supportsDisableTools).toBe(false);
+    expect(new AmpAdapter().supportsDisableTools).toBe(false);
+    expect(new AntigravityAdapter().supportsDisableTools).toBe(false);
+  });
+});
+
 describe('supportsSteering capability', () => {
   // EVERY adapter is asserted here, including the false ones. amp and antigravity were absent
   // from this table when amp shipped steering, which is how the capability set went stale for

@@ -30,7 +30,7 @@ import {
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
 import { CHROME_MCP_PROXY_JS, CHROME_MCP_PROXY_PATH } from '../../sandbox/chrome-mcp-proxy.js';
 import { DDEV_MCP_SERVER_JS, DDEV_MCP_SERVER_PATH } from '../../sandbox/ddev-mcp-server.js';
-import { resolveMcpSurface } from '../../sandbox/mcp-surface.js';
+import { resolveMcpSurface, type McpProfile } from '../../sandbox/mcp-surface.js';
 import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
 import { appRunnerBrowserCdpUrl } from '../../sandbox/app-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
@@ -169,6 +169,43 @@ async function resolveRunnerBrowserCdpUrl(taskId: string): Promise<string | unde
   return undefined;
 }
 
+/** Take a volume-backed MCP config back down to nothing, for `toolProfile: 'none'`.
+ *
+ *  Wiring nothing is not the same as leaving nothing wired. Only the claude-family `bind`
+ *  delivery is self-clearing, because its file is written per invocation; the other three
+ *  write INTO the per-task auth volume, which is destroyed with the TASK and not with the
+ *  invocation. So an earlier full-surface dispatch leaves its servers on disk and the CLI
+ *  still loads them, while this invocation's prompt states that nothing is wired — and
+ *  `00-model-health` is step index 0, so on gemini/codex/grok/antigravity that earlier
+ *  dispatch is the normal case rather than an edge one.
+ *
+ *  Each mode clears the way its writer allows, and both merges RECONCILE from a marker so a
+ *  server the USER configured is never removed — only what Haive wrote. `cli-merge` takes an
+ *  empty server list; gemini needs `clear` to say "run even though the map is empty";
+ *  antigravity's file holds nothing but MCP servers, so an empty body is the whole clear.
+ *  Best-effort throughout, like the writers themselves. */
+async function clearVolumeBackedMcp(
+  taskId: string,
+  providerName: CliProviderName,
+  sandboxImage: string | null,
+): Promise<void> {
+  const config = buildMcpConfigForCli(providerName, [], SANDBOX_USER_HOME, {}, true);
+  if (!config) return; // amp wires no MCP at all, so there is nothing to clear
+  switch (config.delivery) {
+    case 'bind':
+      return; // per-invocation file; absent IS cleared
+    case 'volume-merge':
+      await mergeGeminiMcpIntoSettings(taskId, {}, undefined, { clear: true });
+      return;
+    case 'cli-merge':
+      await mergeCliMcpIntoTaskVolume(taskId, providerName, sandboxImage, []);
+      return;
+    case 'volume-write':
+      await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content);
+      return;
+  }
+}
+
 export async function resolveMcpExtraFiles(
   db: Database,
   taskId: string,
@@ -179,10 +216,12 @@ export async function resolveMcpExtraFiles(
    *  Callers already resolve it for the invocation itself; pass that value rather than a second
    *  lookup, so the merge and the run can never target different images. */
   sandboxImage: string | null,
-  /** Restrict the MCP surface to the haive-rag server only — no chrome-devtools
-   *  and no user MCP servers. Used for knowledge-mining invocations, which are
-   *  read-only analysis and should reach nothing but rag_search. */
-  ragOnly = false,
+  /** How much surface this invocation gets. `'rag_only'` restricts it to the haive-rag
+   *  server — no chrome-devtools and no user servers — for knowledge-mining invocations,
+   *  which are read-only analysis. `'none'` wires nothing at all, for a step that answers
+   *  from its prompt alone; handled HERE rather than at each caller so the cli path and
+   *  both sub-agent kinds cannot diverge on it again. */
+  profile: McpProfile = 'full',
   /** Whether this invocation targets a linked worktree rather than the repo root. Decides
    *  whether the git MCP server is offered at all — see the `includeGit` note below.
    *
@@ -191,6 +230,11 @@ export async function resolveMcpExtraFiles(
   hasWorktree: boolean,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
+  if (profile === 'none') {
+    await clearVolumeBackedMcp(taskId, providerName, sandboxImage);
+    return empty;
+  }
+  const ragOnly = profile === 'rag_only';
 
   // THE decision — shared with the dispatcher, which renders the same object into the
   // prompt. Materialization below must read it rather than re-deriving any part, or a
