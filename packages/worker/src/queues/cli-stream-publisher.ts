@@ -126,6 +126,36 @@ export async function publishCliSteerConsumed(
   }
 }
 
+/** Publish a `steerable` frame: whether this invocation still takes a steer, when that changes
+ *  part-way — a codex app-server run that fell back to `codex exec`. The viewer reads it exactly
+ *  like the flag on the api's `connected` frame, so an open terminal drops its steer box. */
+export async function publishCliSteerable(
+  invocationId: string | null | undefined,
+  steerable: boolean,
+): Promise<void> {
+  if (!invocationId) return;
+  try {
+    // Same TTL refresh as publishCliChunk: any write keeps the live stream from leaking.
+    await getRedis()
+      .multi()
+      .xadd(
+        streamKey(invocationId),
+        'MAXLEN',
+        '~',
+        STREAM_MAXLEN,
+        '*',
+        'stream',
+        'steerable',
+        'value',
+        steerable ? 'true' : 'false',
+      )
+      .expire(streamKey(invocationId), CLI_STREAM_LIVE_TTL_SECONDS)
+      .exec();
+  } catch (err) {
+    log.warn({ err, invocationId }, 'publishCliSteerable failed');
+  }
+}
+
 /** Publish a `retry` frame: the CLI hit a transient API failure and is backing off. The viewer
  *  shows a breathing indicator beside its tabs, because the run otherwise looks frozen.
  *

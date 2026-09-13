@@ -195,10 +195,14 @@ describe('mergedEnv resolution through buildCliInvocation', () => {
 
 describe('codex arg-based effort injection', () => {
   function findReasoningArg(args: string[]): string | null {
-    const idx = args.indexOf('-c');
-    if (idx === -1) return null;
-    const next = args[idx + 1];
-    return next && next.startsWith('model_reasoning_effort=') ? next : null;
+    // Every `-c` pair, not the first: codex's argv carries more than one override (the multi-agent
+    // switch precedes the effort), and reading only the first let the invalid-level case below pass
+    // whether or not a poisoned arg was emitted.
+    for (let i = 0; i < args.length - 1; i++) {
+      const value = args[i + 1] ?? '';
+      if (args[i] === '-c' && value.startsWith('model_reasoning_effort=')) return value;
+    }
+    return null;
   }
 
   it('injects -c model_reasoning_effort="ultra" by default (scale.max)', () => {

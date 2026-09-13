@@ -4,7 +4,7 @@
 /* cli_invocations.raw_output is the terminal viewer's Clean-tab replay
  * source (StepTerminal -> staticCleanOutput). It must hold the model's
  * prose, never CLI machine protocol (stream-json / codex-jsonl NDJSON,
- * or a structured JSON wrapper). The runtime success paths already store
+ * codex app-server JSON-RPC, or a structured JSON wrapper). The runtime success paths already store
  * extracted prose; this guard covers the FALLBACK paths (no-result,
  * extraction failure) so a killed/timed-out/unparsed run never dumps raw
  * protocol into Clean. The full raw stream is always preserved in
@@ -33,6 +33,17 @@ const CLI_PROTOCOL_EVENT_TYPES = new Set<string>([
   'error',
 ]);
 
+/** A codex app-server JSON-RPC line: a notification or server request (`method`), or a response
+ *  (`id` with `result` or `error`). None of them carries a `type`, so the event-type check cannot
+ *  see them. Held to the same two-line rule as typed events, so a single JSON object that merely
+ *  has an `id` — a model answering in JSON — is still not protocol. */
+function isJsonRpcMessage(o: unknown): boolean {
+  if (typeof o !== 'object' || o === null) return false;
+  const m = o as Record<string, unknown>;
+  if (typeof m.method === 'string') return true;
+  return (typeof m.id === 'number' || typeof m.id === 'string') && ('result' in m || 'error' in m);
+}
+
 /** True when `raw` is a CLI machine-protocol stream (NDJSON of typed events),
  *  not human prose. Recognises the claude init event and the codex init event
  *  outright, otherwise requires the first non-blank line to be a typed event
@@ -55,7 +66,8 @@ export function looksLikeCliProtocol(raw: string): boolean {
     let ok = false;
     try {
       const o = JSON.parse(t) as { type?: unknown };
-      ok = typeof o.type === 'string' && CLI_PROTOCOL_EVENT_TYPES.has(o.type);
+      ok =
+        (typeof o.type === 'string' && CLI_PROTOCOL_EVENT_TYPES.has(o.type)) || isJsonRpcMessage(o);
     } catch {
       ok = false;
     }

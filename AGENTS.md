@@ -211,7 +211,7 @@ install it emits ZERO custom agents, so the path is dead and the large output is
 
 ## CLI adapter system
 
-`packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`, `muse`, `grok`, `openrouter`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; the Claude-family adapters (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) override it to true, and so does `amp` — see Steering below.
+`packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`, `muse`, `grok`, `openrouter`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; the Claude-family adapters (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) override it to true, and so do `amp` and `codex` — codex only through its app-server, and only once that is verified for the task (`steeringTransportReady`) — see Steering below.
 
 Four adapters are the same trick: the stock `claude` binary pointed at a non-Anthropic Anthropic-wire endpoint via `ANTHROPIC_BASE_URL` — `zai` (api.z.ai), `ollama` (in-stack daemon or ollama.com), `muse` (api.meta.ai), `openrouter` (openrouter.ai/api). All four piggyback the `claude-code` install, so they build no new sandbox image. Their per-endpoint quirks are MEASURED against the live API and recorded in the adapter, not taken from vendor docs — `muse` exists as its own adapter purely because its effort scale rejects `max`, and `openrouter` records the opposite finding (its effort enum is validated globally at the gateway, so every level is safe on every model). Re-probe before "correcting" any of those comments.
 
@@ -223,17 +223,18 @@ Four adapters are the same trick: the stock `claude` binary pointed at a non-Ant
 
 ### Steering
 
-Mid-run steering is a user message written to a RUNNING CLI's stdin, applied at its next
-tool-call boundary. `supportsSteering` is read in exactly ONE place (`dispatcher.ts`, ANDed
-with the step's `steeringRequested`) and reaches the browser only as the per-invocation
-`cli_invocations.steerable` column — no capability travels to web, which is why there is
-nothing to keep in sync in `@haive/shared`.
+Mid-run steering is a user message delivered to a RUNNING CLI, applied at its next
+boundary — an NDJSON line on stdin for most CLIs, a `turn/steer` JSON-RPC request for codex.
+`supportsSteering` is read in exactly ONE place (`dispatcher.ts`, ANDed with the step's
+`steeringRequested` and with `steeringTransportReady`, the per-task half only codex overrides)
+and reaches the browser only as the per-invocation `cli_invocations.steerable` column — no
+capability travels to web, which is why there is nothing to keep in sync in `@haive/shared`.
 
 **The capability set goes stale silently, so re-probe it.** It was set in June 2026 and by
 September amp had shipped steering without anything noticing — `adapter-steering.test.ts`
 asserted seven adapters and amp was not one of them. It now asserts ALL ten, false ones
-included. Verdicts as of 2026-09-12, each against the vendor's current docs and, where
-installed, the binary's own `--help`:
+included. Verdicts as of 2026-09-12 (codex revised 2026-09-13), each against the vendor's
+current docs and, where installed, the binary's own `--help`:
 
 - **claude family** (`claude-code`, `zai`, `ollama`, `muse`, `openrouter`) — `--input-format
 stream-json`, stdin held open, one NDJSON user-message per steer.
@@ -253,20 +254,20 @@ stream-json`, stdin held open, one NDJSON user-message per steer.
   750 ms grace the right shutdown for it. amp also echoes each stdin message back as a
   text-only `user` event, which is harmless in both directions: `onBoundary` ignores a user
   event carrying no `tool_result`, and `onText` reads assistant blocks only.
-- **codex** — NO. `codex exec` is fire-and-forget; `turn/steer` exists only in `codex
-app-server`, a JSON-RPC 2.0 stdio protocol. Adopting it is a second transport (request
-  correlation, thread lifecycle, its own event stream replacing `codex-jsonl`, approvals),
-  not a flag. `codex queue --thread <id> --message <text>` looks like the way in and is NOT:
-  MEASURED against 0.154.0 on a live authenticated run, it accepts the message and persists
-  it (`Queued message <id> for thread <id>`, exit 0) while the running `exec` never sees it —
-  a three-command run kept going and answered its original prompt, with zero trace of the
-  queued text, and a later `exec resume` with its own prompt did not deliver it either. The
-  `thread/queue/{add,list,delete,start,changed}` RPCs in the binary belong to the app-server
-  the TUI talks to (hence `--remote <ADDR>`); `exec` subscribes to none of them. Its stdin is
-  likewise one-shot — it prints `Reading additional input from stdin...` and waits for EOF
-  before the first turn. Two prerequisites DO already hold if anyone adopts app-server:
-  `thread.started` is the FIRST stream event and carries the `thread_id`, and the adapter
-  passes no `--ephemeral`, so every run has a rollout to address.
+- **codex** — YES, through `codex app-server`, and only where it was verified; `codex exec`
+  stays the default and the fallback. `exec` is fire-and-forget (it prints `Reading additional
+input from stdin...` and waits for EOF before the first turn), and `codex queue --thread <id>
+--message <text>` is NOT a way in: MEASURED against 0.154.0 on a live authenticated run, it
+  accepts and persists the message (`Queued message <id> for thread <id>`, exit 0) while the
+  running `exec` never sees it, and a later `exec resume` with its own prompt did not deliver it
+  either — the `thread/queue/*` RPCs belong to the app-server the TUI talks to. The app-server is
+  JSON-RPC 2.0 over plain piped stdio (`cli-executor/codex-app-server.ts`): `initialize` →
+  `thread/start` → `turn/start`, each steer a `turn/steer` carrying `expectedTurnId` and a
+  `clientUserMessageId`, and consumption is the turn's `userMessage` item echoing that client id
+  (drained in order when a binary echoes none). MEASURED on a live plan_chat turn: a steer sent
+  during the third of three `sleep 20` calls answered with the live `turnId`, the `userMessage`
+  carrying its client id arrived once that call returned, and the reply answered the steer. How it
+  is verified and abandoned is below.
 - **grok** — NO. Headless `-p` streams are read-only and the REPL needs a TTY (piped stdin
   dies ENXIO, already recorded in `grok.ts`). Only ACP (`grok agent stdio`) is bidirectional.
 - **antigravity** — NO, and it is the closest miss. It already passes `--input-format
@@ -275,6 +276,69 @@ stream-json` and writes an NDJSON prompt on stdin, but as `stdinPrompt`, which C
   TURN, not a mid-turn steer, and there is no `steer:true` equivalent to queue one.
 - **gemini** — NO. Stdin is never opened at all; mid-run injection is an open upstream
   feature request.
+
+**codex steers through an EXPERIMENTAL protocol, so each task verifies it before relying on it
+and falls back to `codex exec` the moment it does not hold.** The app-server is marked
+`[experimental]`, and older binaries lack it or part of it — MEASURED on real images: 0.40.0 has
+no `app-server` subcommand, 0.78.0 has an app-server with `turn/start` and `turn/interrupt` but no
+`turn/steer`, and 0.122.0 and 0.154.0 pass the probe. Three layers:
+
+- **A zero-token probe on a provider's first steerable dispatch in a task**
+  (`cli-adapters/codex-app-server-probe.ts`, called from `resolveTaskDispatch`; in onboarding and
+  workflow tasks that dispatch IS `00-model-health`, whose progress line states the verdict). The
+  provider's own image and argv run with NO credentials and NO network, which is what makes it
+  free: MEASURED on 0.154.0, `turn/start` still answers `inProgress` and the turn stays active for
+  20+ s while codex retries its connection, so `turn/steer` (must answer `result.turnId`),
+  `turn/interrupt` (only accepted after `turn/started`) and `turn/completed` are all exercised with
+  no model call. The verdict lands in `tasks.codex_app_server` per provider (migration 0157) and is
+  current only while the provider's `cli_version` still matches. An inconclusive probe (docker
+  exit 125, a turn that ended before its steer was answered) records nothing and the next
+  dispatch probes again. ASSUMED, not measured: a future codex that refuses turns without a login
+  would read as `unsupported` — which fails toward exec, the safe direction.
+- **An in-invocation fallback when the app-server cannot accept the turn** (spawn, initialize,
+  thread/start, turn/start, or no accepted turn within 5 min): no work was done, so exec-core
+  re-runs the SAME invocation from `codexExecFallbackSpec` (the adapter's exec argv, prompt over
+  stdin) and returns that. Before that exec half starts the row stops claiming `steerable` and a
+  `steerable` stream frame drops an open terminal's steer box, so no steer is accepted that nothing
+  will read. A binary that exits before answering `initialize` is `spawn` here
+  exactly as in the probe, with its stderr tail as the detail — MEASURED, that tail was clap's
+  `unexpected argument '--json' found`, the one line naming what changed, where the session alone
+  could only say the process had exited. A failure after the turn was accepted — a server->client
+  request under `never`/`dangerFullAccess`, a stream that ended without `turn/completed`, a
+  completed turn with neither usage nor a message — cannot be re-run blindly, since the agent may
+  have edited files, so it fails as `CODEX_APP_SERVER_FAILED_HEADLINE`, a transient the step's
+  existing re-dispatch re-runs. Either way `handleCliExecJob` first records `unsupported`/`runtime`
+  for that provider, so every later dispatch in the task — that re-run included — builds
+  `codex exec`, and the step carries a `warningMessage` naming the stage and codex version. That
+  banner cannot be the only trace: a self-revising step resets its own row at the end of the turn
+  that set it — MEASURED on plan_chat, the warning was cleared 0.3 s after it was written — so
+  every `unsupported` verdict, probe or run, is also a `codex_app_server.unavailable` task event on
+  the Activity tab. A run that behaved still reports `thread.cliVersion`; one that differs from the
+  verdict's binary (a provider left on "latest" whose image was rebuilt) drops the verdict, so the
+  next dispatch re-probes the new binary. Haive's own kills (timeout, cancel, preemption) never
+  count, and neither does Docker's own exit 125: a container that never started says nothing about
+  codex, which is how the probe already read it.
+- **`CONFIG_KEYS.CODEX_APP_SERVER_ENABLED`** (default on, Admin > CLI execution) for what the probe
+  cannot see: off sends every newly dispatched codex run through `codex exec`. The same card lists
+  the last 30 days of `unsupported` verdicts with their codex version and stage — the report Haive's
+  protocol support is updated from when a codex release changes the API.
+
+Four measured facts to keep. EVERY app-server error is `-32600` — an unknown method, a malformed
+request, `thread not found` and `no active turn to steer` alike — so nothing may key on an error's
+code or wording, only on success results and structural fields; that is also why a single refused
+steer is NOT a downgrade, since a steer racing the turn's end is refused the same way. codex exits
+~0.12 s after stdin EOF when no turn ran but ~5.1 s after an interrupted one, with the image's
+entrypoint and without it. And the MCP surface needs no reconciling: both transports read the same
+`~/.codex/config.toml` that `cli-merge` writes (`initialize` reports `codexHome:
+/home/node/.codex`), and `codex exec` runs already expose `codex_apps`. Those servers boot
+asynchronously once `thread/start` has answered — MEASURED on live runs, ~0.3 s for `thread/start`
+and ~5 s from container start to `turn/started` — so they never hold up the handshake the 5-min
+deadline guards. Finally, codex's multi-agent feature goes off with
+`-c features.multi_agent_v2=false` and never `--disable multi_agent_v2`, although codex's help calls
+them equivalent: `--disable` refuses a feature name the binary does not know (0.154.0 answers
+`--disable no_such_feature` with "Unknown feature flag", exit 1, and 0.78.0 refused every exec and
+app-server start that way) while `-c` ignores one, and `codex features list` shows both forms
+setting the same flag.
 
 **The steer is echoed by US, because the binary never echoes it.** `steer-echo.ts` fans one
 written steer to three places from the forwarder's `onWritten`: a `steer` stream frame
@@ -308,7 +372,7 @@ input, so a human sentence there is handed to a JSON parser as the agent's answe
 means "not recorded" — every pre-existing row, and any run with no model prose, where
 `raw_output` is the only copy of the answer and a transcript would hide it.
 
-`model_identity` (`queues/cli-exec/model-identity.ts`) records which model ANSWERED, not which one was configured. Two DISTINCT channels, not two names for one value: the claude-family stream-json `system`/`init` event carries what the binary ASKED for, each `assistant` event's `message.model` carries what the endpoint SERVED, and they disagree — api.z.ai answers a `glm-5.3[1m]` request as `glm-5.3`, and recorded streams show the same provider served `glm-5.2` on 2026-07-24 and `glm-5.3` on 2026-08-18, i.e. an endpoint can swap models with no config change here. Coverage is MEASURED per provider: `claude-code`/`zai`/`ollama`/`muse`/`grok`/`openrouter` report both channels; `gemini` names its models only as the keys of `stats.models`; `antigravity` names one only in its `--log-file` and only as a human LABEL (`Gemini 3.7 Flash (High)`), parsed from ONE constant marked volatile that returns null on a reword; `codex` and `amp` report NOTHING. codex's `exec --json` carries no model on any typed event (verified against a complete 3.4 MB SUCCESSFUL run — `model_provider` strings found in such a stream come from old `~/.codex/sessions` rollout files an agent happened to read, not from live events), and amp emits `agent_mode` instead because it abstracts the model away. Those two are permanently `match: 'unknown'`, which is why `unknown` never fails a run.
+`model_identity` (`queues/cli-exec/model-identity.ts`) records which model ANSWERED, not which one was configured. Two DISTINCT channels, not two names for one value: the claude-family stream-json `system`/`init` event carries what the binary ASKED for, each `assistant` event's `message.model` carries what the endpoint SERVED, and they disagree — api.z.ai answers a `glm-5.3[1m]` request as `glm-5.3`, and recorded streams show the same provider served `glm-5.2` on 2026-07-24 and `glm-5.3` on 2026-08-18, i.e. an endpoint can swap models with no config change here. Coverage is MEASURED per provider: `claude-code`/`zai`/`ollama`/`muse`/`grok`/`openrouter` report both channels; `gemini` names its models only as the keys of `stats.models`; `antigravity` names one only in its `--log-file` and only as a human LABEL (`Gemini 3.7 Flash (High)`), parsed from ONE constant marked volatile that returns null on a reword; `amp` and codex's `exec` report NOTHING. codex's `exec --json` carries no model on any typed event (verified against a complete 3.4 MB SUCCESSFUL run — `model_provider` strings found in such a stream come from old `~/.codex/sessions` rollout files an agent happened to read, not from live events), and amp emits `agent_mode` instead because it abstracts the model away. codex exec still records `requested`, read off its own `--model` argument — the adapter passed the short `-m` until 2026-09-13, which the argv reader never matched, and MEASURED, 0 of 624 codex invocations carried any identity. codex's app-server does better on one channel: `thread/start` names the model it resolved, recorded as `requested`, while a served model appears only when it reroutes (`model/rerouted`, source `codex-app-server`). So amp is permanently `match: 'unknown'` and codex nearly always is, which is why `unknown` never fails a run.
 
 Two traps in that data. `result.modelUsage` keys are recorded as `billed` and are NOT an identity source: `grok` serves `grok-4.6` while billing `grok-4.6-build`, and `claude-code` bills a `claude-haiku-*` call for its own session titling. And an `assistant` event with `model:"<synthetic>"` is a message the BINARY authored (an API error), not a model reply — filtered on the angle-bracket convention rather than the literal word, so a future sentinel is excluded too. `requested`/`served` are stored verbatim; only `match` is lenient, and only for one case: an endpoint that DROPS a trailing variant tag while naming the same model (`glm-5.3[1m]` to `glm-5.3`) is `exact`. That keys on the tag's PRESENCE differing, not on tag-stripped equality, so a version swap (`glm-5.2[1m]` to `glm-5.3`) and a different variant (`[1m]` to `[200k]`) both stay `differs`, and ollama's colon marker (`glm-5.2:cloud`) is untouched. A mismatch warns and never blocks — claude-code legitimately resolves an alias to a dated snapshot — unless `CONFIG_KEYS.MODEL_IDENTITY_STRICT` (default false, admin toggle) is on. Capture rides the same parse as token usage, so it costs no extra call, prompt or tokens; the canary (`00-model-health`) then copies the task-default provider's identity onto `tasks.model_identity`, while per-invocation truth stays on `cli_invocations.model_identity` because per-step CLI preferences let one task run several models. Re-measure with `packages/worker/test/model-report-discover.ts` before "correcting" any of this — it runs each adapter's real invocation and feeds the live output through the shipped parser.
 

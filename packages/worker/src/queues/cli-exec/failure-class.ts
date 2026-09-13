@@ -59,7 +59,7 @@ export const CLI_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137
  *  exec-core.ts (stop/cancel/timeout), stream.ts (premature stream end). Stable
  *  internal contracts we own end-to-end, never ephemeral upstream wording. */
 export const TRANSIENT_CLI_FAILURE_RE =
-  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget|preempted for a higher-priority task|MCP server failed to start/i;
+  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget|preempted for a higher-priority task|MCP server failed to start|codex app-server transport failed/i;
 
 /** Stable headline for a run that started without a capability it was configured with.
  *
@@ -108,6 +108,20 @@ export const CLI_TIMEOUT_HEADLINE = 'CLI process exceeded its time budget';
  *  Same "internal contract we own end-to-end" convention as CLI_TIMEOUT_HEADLINE and
  *  OUTPUT_TRUNCATION_HEADLINE — written by exec-core, read only by us. */
 export const CLI_PREEMPTED_HEADLINE = 'CLI run preempted for a higher-priority task';
+
+/** Stable headline for a codex run whose app-server transport broke AFTER its turn was accepted: a
+ *  server->client request under the never/dangerFullAccess pair, a stream that ended without
+ *  completing the turn, or a completed turn whose notifications arrived in no shape Haive reads.
+ *
+ *  Transient, because the work never finished for a reason that is not the model's — and the
+ *  re-run does not repeat it: cli-exec records the task's app-server verdict as `unsupported`
+ *  before the step re-dispatches, so the re-run is built as `codex exec`. A failure BEFORE the turn
+ *  was accepted never reaches this headline; exec-core re-runs that invocation on exec itself,
+ *  since no work was done.
+ *
+ *  Same "internal contract we own end-to-end" convention as CLI_TIMEOUT_HEADLINE — written by
+ *  exec-core, matched only by TRANSIENT_CLI_FAILURE_RE above. */
+export const CODEX_APP_SERVER_FAILED_HEADLINE = 'codex app-server transport failed';
 
 /** True when an ended invocation did not finish under its own power — it was killed,
  *  orphaned by a worker restart, cancelled, or timed out — so its "failure" is an

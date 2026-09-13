@@ -3,6 +3,10 @@ import { schema } from '@haive/database';
 import { configService, CONFIG_KEYS, type ModelIdentity } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../step-definition.js';
 import { extractFencedJson } from './_fenced-json.js';
+import {
+  currentCodexAppServerVerdict,
+  loadCodexAppServerVerdicts,
+} from '../../cli-adapters/codex-app-server-verdict.js';
 
 // Model-health canary (00-model-health). A tiny first step that makes ONE cheap CLI
 // call and verifies the configured model can do the bare minimum every later step
@@ -102,7 +106,10 @@ export function validateCanary(raw: unknown): void {
  *  and swallowed. That also means strict mode cannot fail on a fault: it fires only
  *  on a PROVEN mismatch ('differs'), never on absent evidence ('unknown'), which is
  *  the permanent state for codex and amp. */
-async function recordModelIdentity(ctx: StepContext): Promise<ModelIdentity | null> {
+async function recordModelIdentity(
+  ctx: StepContext,
+  transportNote: string | null,
+): Promise<ModelIdentity | null> {
   let identity: ModelIdentity | null = null;
   try {
     // The canary's own invocation. Ordered newest-first because an llm.retry re-roll
@@ -116,7 +123,10 @@ async function recordModelIdentity(ctx: StepContext): Promise<ModelIdentity | nu
       columns: { modelIdentity: true },
     });
     identity = (invocation?.modelIdentity as ModelIdentity | undefined) ?? null;
-    if (!identity) return null;
+    if (!identity) {
+      if (transportNote) await ctx.emitProgress(transportNote);
+      return null;
+    }
 
     await ctx.db
       .update(schema.tasks)
@@ -124,16 +134,41 @@ async function recordModelIdentity(ctx: StepContext): Promise<ModelIdentity | nu
       .where(eq(schema.tasks.id, ctx.taskId));
 
     const served = identity.served ?? identity.requested ?? 'unknown model';
-    await ctx.emitProgress(
+    const verdictLine =
       identity.match === 'differs'
         ? `Model mismatch: configured ${identity.requested ?? 'unknown'}, but ${served} answered.`
-        : `Healthy — running ${served}.`,
-    );
+        : `Healthy — running ${served}.`;
+    await ctx.emitProgress(transportNote ? `${verdictLine} ${transportNote}` : verdictLine);
   } catch (err) {
     ctx.logger.warn({ err }, 'model identity capture failed; canary result stands');
     return null;
   }
   return identity;
+}
+
+/** When the task's provider is codex, which transport its steerable runs use: the verdict this
+ *  canary's own dispatch just took (dispatcher.resolveTaskDispatch). Display copy only — a read
+ *  fault answers null rather than failing a model that passed. */
+async function codexAppServerNote(ctx: StepContext): Promise<string | null> {
+  if (!ctx.cliProviderId) return null;
+  try {
+    const provider = await ctx.db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, ctx.cliProviderId),
+      columns: { id: true, name: true, cliVersion: true },
+    });
+    if (!provider || provider.name !== 'codex') return null;
+    const verdict = currentCodexAppServerVerdict(
+      await loadCodexAppServerVerdicts(ctx.db, ctx.taskId),
+      provider,
+    );
+    if (!verdict) return null;
+    return verdict.status === 'supported'
+      ? 'codex app-server verified: steering available.'
+      : `codex app-server unavailable (${verdict.stage ?? 'unknown stage'}): using codex exec.`;
+  } catch (err) {
+    ctx.logger.warn({ err }, 'codex app-server verdict read failed; canary result stands');
+    return null;
+  }
 }
 
 /** Build the canary step for a given pipeline (`workflowType`). One definition is
@@ -181,7 +216,7 @@ export function makeModelHealthStep(
 
     async apply(ctx, args): Promise<{ ok: true; modelIdentity: ModelIdentity | null }> {
       validateCanary(args.llmOutput ?? null);
-      const modelIdentity = await recordModelIdentity(ctx);
+      const modelIdentity = await recordModelIdentity(ctx, await codexAppServerNote(ctx));
 
       // Opt-in hard stop. Default off because a mismatch is not inherently wrong —
       // claude-code legitimately resolves an alias to a dated snapshot — so failing

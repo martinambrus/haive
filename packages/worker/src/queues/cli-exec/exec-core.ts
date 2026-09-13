@@ -31,6 +31,14 @@ import {
   type CliSpawner,
   type SpawnOptions,
 } from '../../cli-executor/index.js';
+import {
+  createCodexAppServerSession,
+  DOCKER_RUN_FAILED_EXIT,
+  isPreTurnFailure,
+  spawnFailureDetail,
+  type CodexAppServerSession,
+} from '../../cli-executor/codex-app-server.js';
+import { codexExecFallbackSpec } from '../../cli-adapters/codex.js';
 import { runInSandbox } from '../../sandbox/sandbox-runner.js';
 import {
   publishCliChunk,
@@ -38,6 +46,7 @@ import {
   publishCliRetryResolved,
   publishCliSteerConsumed,
   wrapStreamCallback,
+  publishCliSteerable,
 } from '../cli-stream-publisher.js';
 import { log, type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createStreamJsonCollector, type StreamRetryInfo } from './stream.js';
@@ -78,6 +87,7 @@ import {
   MCP_SERVER_FAILED_HEADLINE,
   CLI_PREEMPTED_HEADLINE,
   CLI_TIMEOUT_HEADLINE,
+  CODEX_APP_SERVER_FAILED_HEADLINE,
   isCliPreemptionFailure,
   isCliTimeoutFailure,
   MODEL_CAPABILITY_HEADLINES,
@@ -89,6 +99,12 @@ import {
 /** Throttle for persisting running token-usage snapshots during a CLI stream.
  *  ~40 writes/min/invocation at most — cheap, safe under the 7-task cap. */
 const RUNNING_USAGE_INTERVAL_MS = 1500;
+
+/** How long a codex app-server gets from spawn to an accepted turn before the run gives up on it
+ *  and re-runs on `codex exec`. A guard against a binary that starts and never answers, not a
+ *  tuning knob: MEASURED on 0.154.0 the zero-token probe reached an accepted turn in ~0.5 s, and a
+ *  real run's handshake also boots the task's MCP servers, hence the generous margin. */
+const CODEX_APP_SERVER_HANDSHAKE_TIMEOUT_MS = 5 * 60 * 1000;
 
 const PROVIDER_LOGIN_HINTS: Record<string, string> = {
   'claude-code': 'claude /login',
@@ -475,6 +491,7 @@ export async function executeByKind(
         makeUsageSnapshotPersister(db, payload.invocationId),
         payload.softTimeout === true,
         appReach,
+        payload.invocationId ? makeSteerableClearer(db, payload.invocationId) : undefined,
       );
     }
     case 'subagent_sequential':
@@ -505,6 +522,18 @@ export async function executeByKind(
   }
 }
 
+/** The row stops claiming `steerable` once its run can no longer take a steer — a codex app-server
+ *  run that fell back to `codex exec`. The api refuses a steer for such a row, and a viewer that
+ *  reconnects is told the same by its `connected` frame. */
+function makeSteerableClearer(db: Database, invocationId: string): () => Promise<void> {
+  return async () => {
+    await db
+      .update(schema.cliInvocations)
+      .set({ steerable: false })
+      .where(eq(schema.cliInvocations.id, invocationId));
+  };
+}
+
 export async function executeCliSpec(
   spec: CliCommandSpec,
   deps: CliExecDeps,
@@ -528,6 +557,10 @@ export async function executeCliSpec(
    *  callers that never had a runtime in view (the `--version` auth probe, the test
    *  fixtures) keep compiling unchanged. */
   appReach: AppReach | null = null,
+  /** Called when a steerable run stops being steerable part-way — a codex app-server run that fell
+   *  back to `codex exec` in this invocation — so the caller can stop the row claiming it. Trailing
+   *  and optional for the same reason as `appReach`. */
+  onSteeringUnavailable?: () => Promise<void>,
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
@@ -610,6 +643,30 @@ export async function executeCliSpec(
     cleanBuf.pushModel(text);
     if (invocationId) void publishCliChunk(invocationId, 'text', text);
   };
+  // codex's app-server speaks JSON-RPC on the CLI's own stdin and stdout, so one session both drives
+  // the turn and parses its output. Built before the steer forwarder, which delivers steers through
+  // it; `steer` is read lazily for the same reason.
+  const appServerTurn = outputFormat === 'codex-app-server' ? mergedSpec.codexAppServer : undefined;
+  const appServer: CodexAppServerSession | null = appServerTurn
+    ? createCodexAppServerSession({
+        prompt: appServerTurn.prompt,
+        model: appServerTurn.model,
+        effort: appServerTurn.effort,
+        onText: onProseText,
+        // The turn is the whole invocation: latch the forwarder, which ends stdin after its grace,
+        // and the app-server exits on EOF.
+        onTurnCompleted: () => steer?.onResult(),
+        onSteerConsumed: (steerId) => {
+          cleanBuf.markConsumed(steerId);
+          if (invocationId) void publishCliSteerConsumed(invocationId, steerId);
+        },
+        onSteerRejected: (steerId, detail) =>
+          log.warn(
+            { invocationId, steerId, detail },
+            'codex app-server refused a steer; it stays unapplied',
+          ),
+      })
+    : null;
   // Mid-run steering: for a steerable invocation, subscribe a dedicated Redis
   // connection to this invocation's steer channel and forward each message to
   // the CLI's stdin. The collector's onResult latches the forwarder closed (end
@@ -632,6 +689,7 @@ export async function executeCliSpec(
     steer = createSteerForwarder({
       subscriber: sub,
       steerFlag: mergedSpec.steerFlag === true,
+      deliver: appServer ? (s) => appServer.steer(s) : undefined,
       // Tracking stays first and unconditional — a system wind-down must still be reported
       // consumed exactly as it is today. The echo is what filters it out of the transcript.
       onWritten: (s) => {
@@ -660,12 +718,13 @@ export async function executeCliSpec(
     steerable && invocationId && softTimeout
       ? await scheduleSoftTimeout(invocationId, timeoutMs)
       : null;
-  // The wind-down travels as a steer, so it only exists for a steerable CLI — today
-  // claude-code, muse, zai, ollama and openrouter. On codex/gemini/amp/antigravity a step that asked
-  // for softTimeout silently gets none: the run is SIGKILLed at its budget with zero grace
-  // and every unbanked finding dies with it. That is exactly how 08c lost three reviewers
-  // in one round on codex while its own comment promised they would be asked to bank first.
-  // Log it, because the step's mitigation is not merely weaker here — it is absent.
+  // The wind-down travels as a steer, so it only exists for a steerable CLI — the claude family,
+  // amp, and codex once its app-server is verified for the task. On gemini, antigravity and a codex
+  // run still on `codex exec`, a step that asked for softTimeout silently gets none: the run is
+  // SIGKILLed at its budget with zero grace and every unbanked finding dies with it. That is exactly
+  // how 08c lost three reviewers in one round on codex while its own comment promised they would be
+  // asked to bank first. Log it, because the step's mitigation is not merely weaker here — it is
+  // absent.
   if (softTimeout && invocationId && !steerable) {
     log.warn(
       { invocationId, timeoutMs },
@@ -715,7 +774,7 @@ export async function executeCliSpec(
   if (onUsageSnapshot) {
     let lastUsageJson = '';
     usageTimer = setInterval(() => {
-      const usage = (jsonlCollector ?? collector).getTokenUsage();
+      const usage = (appServer ?? jsonlCollector ?? collector).getTokenUsage();
       if (!usage) return;
       const json = JSON.stringify(usage);
       if (json === lastUsageJson) return;
@@ -724,23 +783,47 @@ export async function executeCliSpec(
     }, RUNNING_USAGE_INTERVAL_MS);
   }
 
+  // An app-server that never reaches an accepted turn is abandoned, so the invocation re-runs on
+  // `codex exec` instead of waiting out its whole budget. A no-op once the turn is accepted.
+  const handshakeAbort = appServer ? new AbortController() : null;
+  const handshakeTimer = appServer
+    ? setTimeout(() => {
+        if (appServer.isTurnAccepted()) return;
+        appServer.abortHandshake(
+          'handshake_timeout',
+          `no accepted turn within ${Math.round(CODEX_APP_SERVER_HANDSHAKE_TIMEOUT_MS / 60_000)} min`,
+        );
+        handshakeAbort?.abort();
+      }, CODEX_APP_SERVER_HANDSHAKE_TIMEOUT_MS)
+    : null;
+  const spawnStartedAt = Date.now();
+
   let result: CliExecutionResult;
   try {
     result = await spawner(mergedSpec, {
       timeoutMs,
       onStdoutChunk: (chunk: string) => {
         streamBuf.push(chunk);
-        if (jsonlCollector) jsonlCollector.onChunk(chunk);
+        if (appServer) appServer.onChunk(chunk);
+        else if (jsonlCollector) jsonlCollector.onChunk(chunk);
         else collector.onChunk(chunk);
       },
       onStderrChunk: (chunk: string) => {
         streamBuf.push(chunk);
       },
-      onStdinWritable: steer ? steer.captureWritable : undefined,
+      onStdinWritable:
+        appServer || steer
+          ? (writable: NodeJS.WritableStream) => {
+              appServer?.attach(writable);
+              steer?.captureWritable(writable);
+            }
+          : undefined,
+      ...(handshakeAbort ? { signal: handshakeAbort.signal } : {}),
     });
   } finally {
     if (usageTimer) clearInterval(usageTimer);
     if (softTimeoutTimer) clearTimeout(softTimeoutTimer);
+    if (handshakeTimer) clearTimeout(handshakeTimer);
     if (steer) steer.teardown();
   }
   const streamLog = streamBuf.toString();
@@ -770,6 +853,128 @@ export async function executeCliSpec(
   // are entitled to assert. Only a stream we actually parsed can say either way.
   const compactionFrom = (events: CompactionEvent[]): InvocationCompaction | null =>
     events.length > 0 ? { events } : null;
+
+  if (appServer) {
+    appServer.close();
+    // Haive stopped this run itself — its budget, a cancel, a preemption. Those keep today's
+    // handling and say nothing about the transport, so they never become a verdict. The handshake
+    // deadline is the one abort that IS evidence about it.
+    const handshakeTimedOut = handshakeAbort?.signal.aborted === true;
+    const stoppedByHaive =
+      !handshakeTimedOut &&
+      (result.timedOut ||
+        result.exitCode === null ||
+        TERMINATION_EXIT_CODES.has(result.exitCode) ||
+        isCliPreemptionFailure({ errorMessage: result.error ?? null }));
+    // A container Docker never started says nothing about codex either — the probe reads that exit
+    // the same way — so a daemon hiccup cannot cost the task its steering.
+    const containerNeverStarted = result.exitCode === DOCKER_RUN_FAILED_EXIT;
+    const reported =
+      stoppedByHaive || containerNeverStarted ? null : appServer.getTransportFailure();
+    // A binary that exits before answering `initialize` says why only on stderr.
+    const failure =
+      reported?.stage === 'spawn'
+        ? { ...reported, detail: spawnFailureDetail(result.stderr ?? '', result.exitCode) }
+        : reported;
+
+    // No turn was accepted, so the model did no work: re-run this same invocation on `codex exec`
+    // instead of failing it. The failure still rides the outcome, so cli-exec records the verdict
+    // and every later dispatch in the task builds exec from the start.
+    const fallbackSpec = failure && isPreTurnFailure(failure) ? codexExecFallbackSpec(spec) : null;
+    if (failure && fallbackSpec) {
+      const notice = `\r\n\x1b[33m[codex app-server unavailable at ${failure.stage}: ${failure.detail ?? 'no detail'} — re-running on codex exec]\x1b[0m\r\n`;
+      log.warn(
+        { invocationId, stage: failure.stage, detail: failure.detail },
+        'codex app-server could not accept the turn; re-running the invocation on codex exec',
+      );
+      if (invocationId) await publishCliChunk(invocationId, 'stdout', notice);
+      // What follows is `codex exec`, which cannot take a steer. Say so before it starts: the api
+      // then refuses one, and an open terminal drops its steer box instead of accepting text that
+      // nothing will read.
+      if (mergedSpec.steerable === true) {
+        try {
+          await onSteeringUnavailable?.();
+        } catch (err) {
+          log.warn({ err, invocationId }, 'could not mark the invocation unsteerable');
+        }
+        await publishCliSteerable(invocationId, false);
+      }
+      const remainingMs =
+        timeoutMs === undefined
+          ? undefined
+          : Math.max(timeoutMs - (Date.now() - spawnStartedAt), 60_000);
+      const fallback = await executeCliSpec(
+        fallbackSpec,
+        deps,
+        remainingMs,
+        secrets,
+        wrapperContent,
+        sandboxImage,
+        repoMount,
+        sandboxWorkdir,
+        networkPolicy,
+        egressDomains,
+        extraFiles,
+        authMounts,
+        statusCallback,
+        taskId,
+        invocationId,
+        mcpExtraArgs,
+        onUsageSnapshot,
+        false,
+        appReach,
+      );
+      return {
+        ...fallback,
+        streamLog: `${streamLog}${notice}${fallback.streamLog ?? ''}`,
+        codexAppServer: { failure, binaryVersion: appServer.getBinaryVersion() },
+      };
+    }
+
+    const text = appServer.getResult();
+    const turnStatus = appServer.getTurnStatus();
+    const turnError = appServer.getTurnError();
+    const transportMessage = failure
+      ? `${CODEX_APP_SERVER_FAILED_HEADLINE} (${failure.stage}): ${failure.detail ?? 'no detail'}`
+      : null;
+    // The app-server exits 0 whenever its stdin closes, whatever became of the turn, so the exit
+    // code cannot say a turn failed; its status can. The wording matches codex-jsonl's
+    // `codex turn failed: ...`, so provider-fatal classification reads it identically.
+    const turnMessage =
+      turnStatus !== null && turnStatus !== 'completed'
+        ? `codex turn ${turnStatus}${turnError ? `: ${turnError}` : ''}`
+        : null;
+    const codexAppServer = { failure, binaryVersion: appServer.getBinaryVersion() };
+    const modelIdentity = modelIdentityFrom({ codexAppServer: appServer.getModelReport() });
+    if (text !== null && transportMessage === null && turnMessage === null) {
+      return {
+        exitCode: result.exitCode,
+        rawOutput: text,
+        parsedOutput: tryJsonParse(text),
+        errorMessage: formatCliErrorMessage(result.exitCode, result.stderr, text, result.error),
+        tokenUsage: appServer.getTokenUsage(),
+        modelIdentity,
+        ...persisted,
+        codexAppServer,
+      };
+    }
+    return {
+      exitCode: result.exitCode,
+      rawOutput: proseForClean(text ?? '', result.stdout),
+      parsedOutput: null,
+      errorMessage:
+        result.error ??
+        transportMessage ??
+        turnMessage ??
+        formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
+        'codex emitted no agent message',
+      tokenUsage: appServer.getTokenUsage(),
+      modelIdentity,
+      ...persisted,
+      providerErrorScan,
+      codexAppServer,
+    };
+  }
 
   if (jsonlCollector && jsonlCollector.isJsonl()) {
     const jsonlText = jsonlCollector.getResult();
@@ -1120,6 +1325,10 @@ export function formatCliHeader(spec: CliCommandSpec, workdir: string): string {
   if (spec.stdinInitial) {
     const promptText = extractStdinPromptText(spec.stdinInitial);
     if (promptText) header += `\x1b[2m# stdin prompt: ${promptText}\x1b[0m\r\n`;
+  }
+  // codex's app-server takes its prompt in a JSON-RPC request, so the command line omits it too.
+  if (spec.codexAppServer) {
+    header += `\x1b[2m# turn prompt: ${spec.codexAppServer.prompt}\x1b[0m\r\n`;
   }
   return header;
 }

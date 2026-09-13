@@ -217,23 +217,25 @@ describe('adapter outputFormat declarations', () => {
     expect(spec.args[spec.args.length - 1]).toBe('hello');
   });
 
-  it('codex disables its multi-agent feature (no autonomous subagent fan-out)', () => {
+  it('codex turns its multi-agent feature off (no autonomous subagent fan-out)', () => {
     const adapter = cliAdapterRegistry.get('codex');
     const provider = makeProvider({ id: 'p-codex', name: 'codex' });
     const spec = adapter.buildCliInvocation(provider, 'hello', opts);
-    const i = spec.args.indexOf('--disable');
-    expect(i).toBeGreaterThanOrEqual(0);
-    expect(spec.args[i + 1]).toBe('multi_agent_v2');
+    const i = spec.args.indexOf('features.multi_agent_v2=false');
+    expect(i).toBeGreaterThan(0);
+    expect(spec.args[i - 1]).toBe('-c');
+    // `--disable` refuses a feature name the binary does not know; a rename would break every run.
+    expect(spec.args).not.toContain('--disable');
   });
 
-  it('codex passes a configured model through -m, and omits it when unset', () => {
+  it('codex passes a configured model through --model, and omits it when unset', () => {
     const adapter = cliAdapterRegistry.get('codex');
     const withModel = adapter.buildCliInvocation(
       makeProvider({ id: 'p-codex', name: 'codex', model: 'gpt-5.6-sol' }),
       'hello',
       opts,
     );
-    const i = withModel.args.indexOf('-m');
+    const i = withModel.args.indexOf('--model');
     expect(i).toBeGreaterThanOrEqual(0);
     expect(withModel.args[i + 1]).toBe('gpt-5.6-sol');
 
@@ -244,7 +246,7 @@ describe('adapter outputFormat declarations', () => {
       'hello',
       opts,
     );
-    expect(withoutModel.args).not.toContain('-m');
+    expect(withoutModel.args).not.toContain('--model');
   });
 
   it('gemini requests JSON output mode', () => {
