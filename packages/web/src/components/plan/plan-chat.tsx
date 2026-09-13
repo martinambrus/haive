@@ -18,6 +18,7 @@ import {
   type TaskStep,
   type Task,
 } from '@/lib/api-client';
+import { stepCliProviderIds } from '@/lib/step-cli-providers';
 import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
@@ -83,6 +84,9 @@ export function PlanChat({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providers, setProviders] = useState<CliProvider[]>([]);
+  // Read by the poll below, which is not re-created when the list loads.
+  const providersRef = useRef<CliProvider[]>([]);
+  providersRef.current = providers;
   const [providerId, setProviderId] = useState('');
   const [liveStep, setLiveStep] = useState<TaskStep | null>(null);
   const [showHistory, setShowHistory] = useState(false);
@@ -189,9 +193,16 @@ export function PlanChat({
         if (cancelled) return;
         const step = res.steps.find((s) => s.stepId === PLAN_CHAT_STEP_ID) ?? null;
         setLiveStep(step);
-        // A conversation already running has a provider of its own; the picker
-        // must show THAT rather than what a new conversation would start with.
-        if (res.task.cliProviderId) setProviderId(res.task.cliProviderId);
+        // A conversation already running has a provider of its own; the picker must show THAT
+        // rather than what a new conversation would start with — and it is the STEP's CLI, not the
+        // task's. Changing the CLI mid-conversation saves a step preference and leaves the task
+        // column alone, so reading the column put the old CLI back while the new one ran.
+        const [running] = stepCliProviderIds({
+          step,
+          taskCliProviderId: res.task.cliProviderId,
+          enabledProviderIds: new Set(providersRef.current.map((p) => p.id)),
+        });
+        if (running) setProviderId(running);
         const settled =
           step?.status === 'waiting_form' ||
           ['completed', 'cancelled', 'failed'].includes(res.task.status);

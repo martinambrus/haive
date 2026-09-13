@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { db, taskQueue, order } = vi.hoisted(() => {
+const { db, taskQueue, order, inserted } = vi.hoisted(() => {
   const order: string[] = [];
+  const inserted: Record<string, unknown>[] = [];
   const db = {
     insert: () => ({
-      values: () => ({
+      values: (row: Record<string, unknown>) => ({
         returning: async () => {
+          inserted.push(row);
           order.push('insert');
           return [{ id: 'task-1' }];
         },
@@ -17,7 +19,7 @@ const { db, taskQueue, order } = vi.hoisted(() => {
       order.push('enqueue');
     }),
   };
-  return { db, taskQueue, order };
+  return { db, taskQueue, order, inserted };
 });
 
 vi.mock('../src/db.js', () => ({ getDb: () => db }));
@@ -106,5 +108,30 @@ describe('spawnPlanTask seeding', () => {
       }),
     ).rejects.toThrow('message insert failed');
     expect(taskQueue.add).not.toHaveBeenCalled();
+  });
+});
+
+describe('spawnPlanTask CLI choice', () => {
+  const base = {
+    userId: 'u1',
+    repositoryId: 'r1',
+    type: 'plan_chat' as const,
+    title: 'chat',
+    metadata: {},
+    cliProviderId: 'provider-1',
+  };
+
+  beforeEach(() => {
+    inserted.length = 0;
+  });
+
+  it('keeps saved per-step CLIs when the caller named none', async () => {
+    await spawnPlanTask(base);
+    expect(inserted[0]).toMatchObject({ ignoreSavedStepClis: false });
+  });
+
+  it('lets a picked CLI win over a saved per-step preference', async () => {
+    await spawnPlanTask({ ...base, ignoreSavedStepClis: true });
+    expect(inserted[0]).toMatchObject({ cliProviderId: 'provider-1', ignoreSavedStepClis: true });
   });
 });

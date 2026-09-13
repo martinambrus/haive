@@ -1075,6 +1075,7 @@ planRoutes.post('/:id/plan/build', async (c) => {
       ...(body.deferStart ? { planBuildDeferred: true } : {}),
     },
     cliProviderId,
+    ignoreSavedStepClis: Boolean(body.cliProviderId),
     // Uploads cannot ride a seed hook: the api does not know how many files are
     // coming or whether they all arrive. So the row is created unstarted and the
     // client finalizes with the `start` action once every upload succeeds —
@@ -1102,6 +1103,7 @@ planRoutes.post('/:id/plan/sequence', async (c) => {
     title: `Order plan: ${repo.name}`,
     metadata: {},
     cliProviderId,
+    ignoreSavedStepClis: Boolean(body.cliProviderId),
   });
   return c.json({ taskId }, 201);
 });
@@ -1135,6 +1137,7 @@ planRoutes.post('/:id/plan/merge', async (c) => {
     title: `Resolve plan merge: ${repo.name}`,
     metadata: {},
     cliProviderId,
+    ignoreSavedStepClis: Boolean(body.cliProviderId),
   });
   return c.json({ taskId }, 201);
 });
@@ -1210,6 +1213,7 @@ planRoutes.post('/:id/plan/nodes/:nodeId/chat', async (c) => {
     description: body.message,
     metadata: { planNodeId: nodeId },
     cliProviderId,
+    ignoreSavedStepClis: Boolean(body.cliProviderId),
     // The opening turn must be readable before the worker starts: detect()
     // derives the pending question from the transcript, and the step's skipIf
     // treats "no pending question" as nothing to answer. Inserting it after the
@@ -1242,6 +1246,7 @@ planRoutes.post('/:id/plan/nodes/:nodeId/advisory', async (c) => {
     description: body.question,
     metadata: { planNodeId: nodeId },
     cliProviderId,
+    ignoreSavedStepClis: Boolean(body.cliProviderId),
   });
   return c.json({ taskId }, 201);
 });
