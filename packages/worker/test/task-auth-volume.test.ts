@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanupTaskAuthVolumes,
   clearTaskAuthPreparationState,
@@ -264,6 +264,64 @@ describe('ensureTaskAuthVolumes', () => {
     // Reused only once it came back FRESH — never recreated behind a blocked remove.
     expect(runner.createCalls).not.toContain(taskVol);
     clearTaskAuthPreparationState('task-busy');
+  });
+
+  it('degrades to the existing copy when a running sibling will not release the volume', async () => {
+    // A CLI turn holds its mount for the length of its timeout, far past any wait worth doing
+    // inside a job that occupies a queue slot. And a moved source is not proof this task's
+    // credentials are dead: the common cause is ANOTHER task ending, because the teardown
+    // syncs a rotated token back to the user volume and codex rotates single-use. Failing the
+    // invocation would deny the task work and refresh nothing.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskheld_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    runner.volumeRemove = async () => ({ ok: false, stderr: 'volume is in use', stdout: '' });
+
+    // Fake timers rather than a 40s test: the wait runs its full budget here by design, and
+    // the retries after it add more. Driven rather than shortened, so the production
+    // constants stay the ones that ship.
+    vi.useFakeTimers();
+    try {
+      const pending = ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-held', runner);
+      await vi.advanceTimersByTimeAsync(120_000);
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(runner.createCalls).not.toContain(taskVol);
+    clearTaskAuthPreparationState('task-held');
+  });
+
+  it('still fails loudly for a half-built volume it cannot replace', async () => {
+    // No degrading there: `not_ready` means the volume is unusable, so there is nothing to
+    // fall back to.
+    const taskVol = 'haive_cli_auth_task_taskhalf_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: ['haive_cli_auth_abc_codex_0', taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 1, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    runner.volumeRemove = async () => ({ ok: false, stderr: 'volume is in use', stdout: '' });
+
+    vi.useFakeTimers();
+    try {
+      const pending = ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-half', runner);
+      const settled = expect(pending).rejects.toThrow(/Failed to remove stale task auth volume/);
+      await vi.advanceTimersByTimeAsync(120_000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+    clearTaskAuthPreparationState('task-half');
   });
 
   it('compares against the source only while the source still exists', async () => {

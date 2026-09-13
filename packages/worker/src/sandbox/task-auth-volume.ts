@@ -374,6 +374,27 @@ async function ensureTaskAuthVolumesUnlocked(
         removed = await removeVolumeWithRetry(taskVol, runner);
       }
       if (!removed.ok) {
+        // A volume Docker will not let go of is held by a RUNNING sibling, and a CLI turn can
+        // hold it for the length of its timeout — far past any wait worth doing inside a job
+        // that is occupying a queue slot. What to do about it depends on WHICH verdict sent
+        // us here, and the two are not close.
+        //
+        // `source_moved` degrades: carry on with the copy we have. A moved source is not
+        // proof this task's credentials are dead — it is most often ANOTHER task ending,
+        // because `syncRefreshedAuthToUserVolumes` writes a rotated token back to the user
+        // volume at teardown and codex rotates its OAuth token single-use. That fires far
+        // more often than a re-login, and this task's own copy is the token this task has
+        // been using. Failing the invocation would deny the task work AND not refresh
+        // anything; the next dispatch after the sibling exits replaces the volume properly.
+        if (readiness === 'source_moved') {
+          log.warn(
+            { taskVol, userVol, stderr: removed.stderr.slice(-200) },
+            'auth source moved but the volume is held by a running invocation; ' +
+              'continuing on the existing copy and refreshing at the next dispatch',
+          );
+          continue;
+        }
+        // `not_ready` is a half-built volume: unusable, so there is nothing to degrade to.
         throw new Error(
           `Failed to remove stale task auth volume ${taskVol}: ${removed.stderr || 'unknown error'}`,
         );

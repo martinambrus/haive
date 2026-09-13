@@ -2141,10 +2141,19 @@ function SummaryCliCard({
   error: string | null;
   onChange: (patch: { summaryCliProviderId?: string | null; summaryLlmEnabled?: boolean }) => void;
 }) {
-  // Only enabled providers are offered: maybeEnqueueStepSummary honors the choice only while
+  // Only enabled providers are OFFERED: maybeEnqueueStepSummary honors the choice only while
   // the provider is still enabled, and resolveDispatch merely ORDERS a preferred provider
   // first — so a disabled pick would silently run the recap somewhere else.
   const usable = providers.filter((p) => p.enabled);
+  // The stored choice is still shown when its provider has since been disabled, as an option
+  // nobody can select. Filtering it away leaves a controlled select whose value matches no
+  // option, so the browser paints the first one — the card would say "inherit" while the row
+  // still holds the disabled id, and re-enabling that provider would silently resume spending
+  // on it. Naming it is what makes the mismatch fixable.
+  const storedButDisabled =
+    summaryCliProviderId && !usable.some((p) => p.id === summaryCliProviderId)
+      ? (providers.find((p) => p.id === summaryCliProviderId) ?? null)
+      : null;
   return (
     <Card className="flex flex-col gap-3 p-3">
       <div className="flex flex-col gap-1">
@@ -2172,6 +2181,11 @@ function SummaryCliCard({
               through resolvePreferredCli, where a saved per-step preference outranks
               tasks.cli_provider_id, so no single provider name is true for every step. */}
           <option value="">Inherit (each step&apos;s own CLI)</option>
+          {storedButDisabled && (
+            <option value={storedButDisabled.id} disabled>
+              {storedButDisabled.label} — disabled, recaps fall back
+            </option>
+          )}
           {usable.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}
