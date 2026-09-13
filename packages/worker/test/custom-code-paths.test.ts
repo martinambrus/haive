@@ -151,43 +151,55 @@ describe('detectPaths: docroot and composer installer-path variants', () => {
 // `modules/custom/`, it is a MIXED directory — core ships its Twenty* themes into it.
 // MEASURED on a real WordPress site: naming the parent told the knowledge miner that three
 // bundled core themes were the project's own code.
-describe('detectPaths: WordPress themes', () => {
-  const distributed = 'Stable tag: 1.5\nRequires at least: 6.0\n';
-  const mkTheme = async (name: string, readme?: string) => {
-    await mkdir(path.join(repo, 'wp-content/themes', name), { recursive: true });
-    await writeFile(path.join(repo, 'wp-content/themes', name, 'style.css'), '/* x */');
-    if (readme) await writeFile(path.join(repo, 'wp-content/themes', name, 'readme.txt'), readme);
+describe('detectPaths: WordPress extensions', () => {
+  const vendor = (name: string) =>
+    `/*\nTheme Name: ${name}\nTheme URI: https://vendor.example/\n*/`;
+  const child = (name: string) =>
+    `/*\nTheme Name: ${name}\nTheme URI: https://vendor.example/\nTemplate: kalium\n*/`;
+  const bespokeTheme = (name: string) => `/*\nTheme Name: ${name}\nAuthor: In House\n*/`;
+  const put = async (rel: string, body: string) => {
+    await mkdir(path.join(repo, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(repo, rel), body);
   };
 
-  it('drops the bundled themes and keeps a hand-written one', async () => {
-    await mkTheme('twentytwentyfive', distributed);
-    await mkTheme('twentytwentyfour', distributed);
-    await mkTheme('dogacars-child'); // no readme.txt — nobody writes one for a child theme
-    const paths = await detectPathsForTest(repo, 'wordpress');
-    expect(paths.customCodePaths.include).toEqual(['wp-content/themes/dogacars-child/']);
+  it('keeps a child theme even though it inherits the parent vendor URI', async () => {
+    // MEASURED on a live site: `kalium-child` carries `Theme URI: laborator.co` copied from
+    // the commercial parent, so the URI says nothing about who wrote it.
+    await put('wp-content/themes/kalium/style.css', vendor('Kalium'));
+    await put('wp-content/themes/kalium-child/style.css', child('Kalium Child'));
+    const p = await detectPathsForTest(repo, 'wordpress');
+    expect(p.customCodePaths.include).toEqual(['wp-content/themes/kalium-child/']);
   });
 
-  it('reports nothing rather than the parent when every theme is distributed', async () => {
-    // The real site measured: three bundled themes and no custom code at all. Saying
-    // nothing is honest; naming `wp-content/themes/` claims core code as the project's.
-    await mkTheme('twentytwentyfive', distributed);
-    await mkTheme('twentytwentythree', distributed);
-    const paths = await detectPathsForTest(repo, 'wordpress');
-    expect(paths.customCodePaths.include).toEqual([]);
+  it('keeps a bespoke plugin that ships a readme with a Stable tag', async () => {
+    // The case that killed the first rule: a real custom plugin shipped `Stable tag: 1.0.0`,
+    // so a readme-based test would have excluded the very code this guard protects.
+    await put(
+      'wp-content/plugins/acme-login/acme-login.php',
+      '<?php\n/*\nPlugin Name: Acme Login\nAuthor: In House\n*/',
+    );
+    await put('wp-content/plugins/acme-login/readme.txt', 'Stable tag: 1.0.0\n');
+    await put(
+      'wp-content/plugins/contact-form-7/wp-contact-form-7.php',
+      '<?php\n/*\nPlugin Name: CF7\nPlugin URI: https://contactform7.com/\n*/',
+    );
+    const p = await detectPathsForTest(repo, 'wordpress');
+    expect(p.customCodePaths.include).toEqual(['wp-content/plugins/acme-login/']);
   });
 
-  it('beats the wp-content/plugins exclude for a theme nested under a docroot', async () => {
-    await mkdir(path.join(repo, 'web/wp-content/themes/mine'), { recursive: true });
-    await writeFile(path.join(repo, 'web/wp-content/themes/mine/style.css'), '/* x */');
-    const paths = await detectPathsForTest(repo, 'wordpress');
-    expect(paths.customCodePaths.include).toEqual(['web/wp-content/themes/mine/']);
+  it('reports an empty determination rather than naming the mixed parent', async () => {
+    await put('wp-content/themes/twentytwentyfive/style.css', vendor('Twenty Twenty-Five'));
+    const p = await detectPathsForTest(repo, 'wordpress');
+    expect(p.customCodePaths.include).toEqual([]);
+  });
+
+  it('keeps an unmarked extension, because over-including is the safe error', async () => {
+    await put('wp-content/themes/beclinic/style.css', bespokeTheme('BeClinic'));
+    const p = await detectPathsForTest(repo, 'wordpress');
+    expect(p.customCodePaths.include).toEqual(['wp-content/themes/beclinic/']);
   });
 });
 
-// MEASURED on two live WordPress sites: one commits `wp-config.php` and one does not, and
-// the one that does not was classified `general` once its LLM pass failed — losing the
-// framework's exclude list and custom-path handling entirely. `06a-db-migrate` had already
-// settled on the shipped marker for this same reason.
 describe('detectStack: WordPress is found by a file WordPress ships', () => {
   it('detects a site that gitignores wp-config.php', async () => {
     await mkdir(path.join(repo, 'wp-includes'), { recursive: true });

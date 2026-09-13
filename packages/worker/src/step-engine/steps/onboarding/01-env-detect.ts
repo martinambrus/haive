@@ -643,58 +643,87 @@ async function detectStack(
  *  is present one level down. Empty string first: the common case is no nesting. */
 const DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html', 'public_html'] as const;
 
-/** A theme or plugin that came from a distributor rather than from this project.
- *
- *  `readme.txt` carrying a `Stable tag` is what wordpress.org requires of every hosted
- *  item, and vendors outside the directory copy the format. MEASURED on a real WordPress
- *  site: 26 of its 27 installed themes and plugins carry it — every bundled Twenty* theme
- *  and 23 of 24 plugins — while a hand-written child theme has no reason to.
- *
- *  Used to REJECT, never to confirm: that repo had no custom code at all, so this rule has
- *  no verified positive samples. Anything unmarked is therefore treated as the project's
- *  own, which is the safe direction — a wrongly-included directory keeps knowledge local,
- *  while a wrongly-excluded one lets repo-private knowledge reach the shared KB. */
-async function looksDistributed(dir: string): Promise<boolean> {
+/** The WordPress extension header, read from the first file in the directory that carries
+ *  one — `style.css` for a theme, the main `.php` for a plugin. Not recursive: a header in
+ *  a bundled sub-library is not this extension's. */
+async function wpExtensionHeader(dir: string): Promise<string> {
+  let names: string[];
   try {
-    const text = await readFile(path.join(dir, 'readme.txt'), 'utf8');
-    return /^\s*Stable tag:\s*\S+/im.test(text);
+    names = (await readdir(dir)).sort();
   } catch {
-    return false;
+    return '';
   }
+  for (const name of names) {
+    if (!name.endsWith('.php') && !name.endsWith('.css')) continue;
+    try {
+      const text = (await readFile(path.join(dir, name), 'utf8')).slice(0, 4000);
+      if (/^\s*\*?\s*(Plugin Name|Theme Name)\s*:/im.test(text)) return text;
+    } catch {
+      /* unreadable — try the next candidate */
+    }
+  }
+  return '';
 }
 
-/** WordPress themes this project WROTE.
+/** Whether a theme or plugin came from a distributor rather than from this project.
+ *
+ *  A declared `Plugin URI`/`Theme URI` is the marker: somebody publishing an extension
+ *  names where it lives, and a plugin written for one site has nowhere to point. The one
+ *  exception is a CHILD THEME, which copies its parent's header wholesale — MEASURED, a
+ *  site's own `kalium-child` carries `Theme URI: laborator.co` from the commercial parent,
+ *  so the URI there says nothing about who wrote it. `Template:` is what makes it a child.
+ *
+ *  `readme.txt` + `Stable tag` was tried first and REJECTED on measurement: wordpress.org
+ *  requires it of everything it hosts, but nothing stops a bespoke plugin shipping one, and
+ *  a real custom plugin did — `Stable tag: 1.0.0` — which would have excluded exactly the
+ *  code this guard exists to protect.
+ *
+ *  Used only to REJECT. Anything unmarked is treated as the project's own, which is the
+ *  safe direction: a wrongly-included directory keeps knowledge local, a wrongly-excluded
+ *  one lets repo-private knowledge reach the shared KB. MEASURED across two live sites (70
+ *  extensions): no custom code missed, 5 third-party extensions kept. */
+async function looksDistributed(dir: string, kind: 'themes' | 'plugins'): Promise<boolean> {
+  const header = await wpExtensionHeader(dir);
+  if (!/^\s*\*?\s*(?:Plugin|Theme) URI\s*:\s*https?:\/\/\S+/im.test(header)) return false;
+  if (kind === 'themes' && /^\s*\*?\s*Template\s*:\s*\S+/im.test(header)) return false;
+  return true;
+}
+
+/** WordPress themes and plugins this project WROTE.
  *
  *  `wp-content/themes/` is the framework's declared custom path, but unlike Drupal's
- *  `modules/custom/` it is a MIXED directory: WordPress ships its Twenty* themes into the
- *  same place. MEASURED, naming the parent told the knowledge miner that three bundled
- *  core themes were "this repo's OWN custom code".
+ *  `modules/custom/` it is a MIXED directory — core ships its Twenty* themes into the same
+ *  place. MEASURED, naming the parent told the knowledge miner that three bundled core
+ *  themes were "this repo's OWN custom code".
  *
- *  Plugins are deliberately NOT scanned. The same marker leaves a false positive there
- *  (one GitHub-distributed plugin ships no readme), and with no custom plugin anywhere to
- *  measure against, a rule for them would be the same guess this whole change removes. */
+ *  Plugins are scanned too even though `wp-content/plugins/` is an excludePath, because a
+ *  site's own plugin is the case that leaks: the include is one segment deeper, so
+ *  `isRepoOwnPath`'s specificity rule lets it win over the broader exclude. */
 async function detectWordPressCustomPaths(repoPath: string): Promise<string[] | null> {
   const found: string[] = [];
+  let scanned = false;
   for (const root of DOCROOT_CANDIDATES) {
-    const rel = root ? `${root}/wp-content/themes` : 'wp-content/themes';
-    let entries: Dirent[];
-    try {
-      entries = await readdir(path.join(repoPath, rel), { withFileTypes: true });
-    } catch {
-      continue;
+    const base = root ? `${root}/wp-content` : 'wp-content';
+    for (const kind of ['themes', 'plugins'] as const) {
+      const rel = `${base}/${kind}`;
+      let entries: Dirent[];
+      try {
+        entries = await readdir(path.join(repoPath, rel), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      scanned = true;
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (await looksDistributed(path.join(repoPath, rel, entry.name), kind)) continue;
+        found.push(`${rel}/${entry.name}/`);
+      }
     }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (await looksDistributed(path.join(repoPath, rel, entry.name))) continue;
-      found.push(`${rel}/${entry.name}/`);
-    }
-    // Scanned a real themes directory, so the answer is known even when it is EMPTY:
-    // every theme here came from a distributor and the project has none of its own.
-    // Returning [] would be read as "could not tell" and fall back to naming the mixed
-    // parent, which is the claim this exists to stop.
-    return found;
+    // Scanning a real wp-content is conclusive even when it yields NOTHING: every extension
+    // came from a distributor. Returning [] here is a determination, not a shrug.
+    if (scanned) return found;
   }
-  return null; // no themes directory anywhere — nothing was determined
+  return null;
 }
 
 /** Parents Drupal keeps modules and themes under, across docroots and layouts. */
