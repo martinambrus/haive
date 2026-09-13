@@ -609,6 +609,8 @@ export default function TaskDetailPage() {
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [autoContinueBusy, setAutoContinueBusy] = useState(false);
+  const [summaryCliBusy, setSummaryCliBusy] = useState(false);
+  const [summaryCliError, setSummaryCliError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('steps');
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -1381,6 +1383,34 @@ export default function TaskDetailPage() {
     }
   }
 
+  /** Repoint the per-step recap, or switch it off, at any point in the task's life.
+   *
+   *  Optimistic like the auto-continue flip above and reconciled by the same 2s poll. Both
+   *  fields go through one call because the server takes them together; sending only the one
+   *  that changed is what keeps `summaryCliProviderId: null` meaning INHERIT rather than
+   *  colliding with "not sent". */
+  async function changeSummaryCli(patch: {
+    summaryCliProviderId?: string | null;
+    summaryLlmEnabled?: boolean;
+  }) {
+    if (!task || summaryCliBusy) return;
+    const before = {
+      summaryCliProviderId: task.summaryCliProviderId ?? null,
+      summaryLlmEnabled: task.summaryLlmEnabled ?? true,
+    };
+    setSummaryCliBusy(true);
+    setSummaryCliError(null);
+    setTask((t) => (t ? { ...t, ...patch } : t));
+    try {
+      await api.patch(`/tasks/${id}/summary-cli`, patch);
+    } catch (err) {
+      setTask((t) => (t ? { ...t, ...before } : t));
+      setSummaryCliError((err as Error).message ?? 'Failed to change the summary CLI');
+    } finally {
+      setSummaryCliBusy(false);
+    }
+  }
+
   // Takeover only when there is nothing to show. A refresh that fails while the
   // task is on screen is not a load failure: swapping the page for a red box
   // would tear down the step cards and their live terminals over a hiccup that
@@ -1998,17 +2028,27 @@ export default function TaskDetailPage() {
       )}
 
       {tab === 'clis' && (
-        <UpcomingCliPanel
-          steps={upcomingCliSteps}
-          providers={providers}
-          taskCliProviderId={task.cliProviderId ?? null}
-          busyStepId={stepProviderBusy}
-          error={stepProviderError}
-          disabled={task.status === 'cancelled' || task.status === 'completed'}
-          onChangeCli={(stepId, cliProviderId, role, effortLevel) =>
-            changeStepProvider(stepId, cliProviderId, role, 0, effortLevel)
-          }
-        />
+        <div className="flex flex-col gap-3">
+          <SummaryCliCard
+            providers={providers}
+            summaryCliProviderId={task.summaryCliProviderId ?? null}
+            summaryLlmEnabled={task.summaryLlmEnabled ?? true}
+            busy={summaryCliBusy}
+            error={summaryCliError}
+            onChange={changeSummaryCli}
+          />
+          <UpcomingCliPanel
+            steps={upcomingCliSteps}
+            providers={providers}
+            taskCliProviderId={task.cliProviderId ?? null}
+            busyStepId={stepProviderBusy}
+            error={stepProviderError}
+            disabled={task.status === 'cancelled' || task.status === 'completed'}
+            onChangeCli={(stepId, cliProviderId, role, effortLevel) =>
+              changeStepProvider(stepId, cliProviderId, role, 0, effortLevel)
+            }
+          />
+        </div>
       )}
 
       {tab === 'editor' && !editorDisabled && <EditorTab taskId={id} />}
@@ -2070,6 +2110,104 @@ export default function TaskDetailPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/** Which CLI writes the per-step recap — FIRST in this tab and shown at ALL times.
+ *
+ *  It used to be settable only on the New Task form, so a task whose recap provider turned
+ *  out to be wrong had no way back: MEASURED on 2026-09-13 a task's recap ran on amp, amp's
+ *  session expired mid-run, and nothing in the product could repoint it.
+ *
+ *  Rendered OUTSIDE UpcomingCliPanel rather than as its first card, because that panel
+ *  early-returns an empty state once every CLI step has started — which is exactly the late
+ *  part of a run where someone reaches for this control.
+ *
+ *  Not gated on task status either. The column is read only by future recap dispatches, and a
+ *  finished task's step can still be retried, so there is nothing here to protect from a
+ *  cancelled or completed run. */
+function SummaryCliCard({
+  providers,
+  summaryCliProviderId,
+  summaryLlmEnabled,
+  busy,
+  error,
+  onChange,
+}: {
+  providers: CliProvider[];
+  summaryCliProviderId: string | null;
+  summaryLlmEnabled: boolean;
+  busy: boolean;
+  error: string | null;
+  onChange: (patch: { summaryCliProviderId?: string | null; summaryLlmEnabled?: boolean }) => void;
+}) {
+  // Only enabled providers are OFFERED: maybeEnqueueStepSummary honors the choice only while
+  // the provider is still enabled, and resolveDispatch merely ORDERS a preferred provider
+  // first — so a disabled pick would silently run the recap somewhere else.
+  const usable = providers.filter((p) => p.enabled);
+  // The stored choice is still shown when its provider has since been disabled, as an option
+  // nobody can select. Filtering it away leaves a controlled select whose value matches no
+  // option, so the browser paints the first one — the card would say "inherit" while the row
+  // still holds the disabled id, and re-enabling that provider would silently resume spending
+  // on it. Naming it is what makes the mismatch fixable.
+  const storedButDisabled =
+    summaryCliProviderId && !usable.some((p) => p.id === summaryCliProviderId)
+      ? (providers.find((p) => p.id === summaryCliProviderId) ?? null)
+      : null;
+  return (
+    <Card className="flex flex-col gap-3 p-3">
+      <div className="flex flex-col gap-1">
+        <span className="text-sm font-medium text-neutral-200">Step summary CLI</span>
+        <span className="text-xs text-neutral-500">
+          Writes the &ldquo;What the agent did&rdquo; recap on each step. It reads nothing but the
+          step&apos;s own output, so a cheap model is usually the right choice. Changeable at any
+          time; it applies to every recap from the next one on.
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <select
+          id="summary-cli-provider"
+          aria-label="Step summary CLI"
+          value={summaryCliProviderId ?? ''}
+          // Usable while summaries are OFF on purpose. These are two separate requests, so
+          // forcing "switch on, then repoint" dispatches any recap that finalizes in between
+          // through the provider the user is trying to get away from.
+          disabled={busy}
+          onChange={(e) => onChange({ summaryCliProviderId: e.target.value || null })}
+          className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {/* Empty value is a REAL choice — inherit the step's chain — not an unset placeholder.
+              Named generically and NOT after the task's own CLI: an inherited recap resolves
+              through resolvePreferredCli, where a saved per-step preference outranks
+              tasks.cli_provider_id, so no single provider name is true for every step. */}
+          <option value="">Inherit (each step&apos;s own CLI)</option>
+          {storedButDisabled && (
+            <option value={storedButDisabled.id} disabled>
+              {storedButDisabled.label} — disabled, recaps fall back
+            </option>
+          )}
+          {usable.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <label
+          className="flex items-center gap-2 text-sm text-neutral-300"
+          title="Off skips the recap entirely: no prompt, no CLI call, no ledger entry. The step's own findings are still shown when it reports them."
+        >
+          <input
+            type="checkbox"
+            checked={summaryLlmEnabled}
+            disabled={busy}
+            onChange={(e) => onChange({ summaryLlmEnabled: e.target.checked })}
+            className="h-3.5 w-3.5 rounded border-neutral-700 bg-neutral-950"
+          />
+          Write step summaries
+        </label>
+      </div>
+      {error && <span className="text-[11px] text-red-400">{error}</span>}
+    </Card>
   );
 }
 

@@ -82,6 +82,76 @@ const log = logger.child({ module: 'task-auth-volume' });
 
 const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const READY_MARKER = '.haive-ready';
+/** Fingerprint of the USER volume this task's copy was taken from, written into the task
+ *  volume at populate time and re-checked on every reuse. Absent on a volume populated before
+ *  this existed, which is read as "fresh" — no backfill, same stance as every other marker. */
+const SOURCE_MARKER = '.haive-source';
+/** Recorded in {@link SOURCE_MARKER} when the volume was populated with NO source at all —
+ *  an api-key provider row, or a CLI the user had not logged into yet.
+ *
+ *  It has to be written, and it has to be distinguishable from an ABSENT marker. Absent means
+ *  "populated before this existed" and is read as fresh, so that a deploy invalidates nothing
+ *  in flight. Without the sentinel an empty volume is indistinguishable from that, and stays
+ *  "fresh" forever — so a task that later gains credentials (the user logs in, or the row is
+ *  switched to a subscription) would keep mounting the empty snapshot and keep failing. Four
+ *  characters, where a real fingerprint is 32 hex, so the two can never collide. */
+const NO_SOURCE_SENTINEL = 'none';
+
+/** What the readiness probe concluded. `source_moved` is separated from `not_ready` because
+ *  the two are repaired the same way but mean different things, and only one of them is a
+ *  fault: a half-built volume versus credentials that have since been refreshed. */
+type VolumeReadiness = 'ready' | 'not_ready' | 'source_moved';
+
+/** Exit code from the readiness probe for a volume that IS ready but whose source has moved
+ *  on. Distinct from 1 (not ready) because the log lines differ and the distinction is the
+ *  whole point: one is a half-built volume, the other is stale credentials. */
+const VOLUME_SOURCE_MOVED_EXIT = 2;
+
+/** Emit a stable fingerprint of a mounted directory's contents.
+ *
+ *  Hashes path + CONTENT. The obvious cheaper form — name, size and mtime via `stat -c '%n %s
+ *  %Y'` — is what this had, and `%Y` is whole SECONDS: a credential rewritten in the same
+ *  second at the same length is the normal shape of a fixed-size token replacement, and it
+ *  fingerprinted identically, so the refresh this exists for would not fire. Subsecond `%y`
+ *  would close that particular hole; content closes the question. These are a handful of small
+ *  JSON files, the hash never leaves the helper container, and `cp -a` copies bytes, so the
+ *  two sides still agree by construction.
+ *
+ *  `md5sum` prints `<hash>  <path>`, which is why one pass yields both halves. Both sides mount
+ *  the source at the SAME target, so the paths line up; `LC_ALL=C` because a locale-dependent
+ *  sort order would make the fingerprint host-dependent. */
+/** The credential file this provider REFRESHES IN PLACE on the volume at `idx`, or null when
+ *  there is none to single out. `CLI_CREDENTIAL_FILES` is already the registry of exactly
+ *  that, and reusing it is the point: its own header warns that a blanket read of the volume
+ *  sweeps in per-task mutations, which is the same mistake in the other direction. */
+function credentialRelPath(providerName: CliProviderName, idx: number): string | null {
+  const file = CLI_CREDENTIAL_FILES[providerName];
+  return file && file.authPathIdx === idx ? file.relPath : null;
+}
+
+/** Sentinel for a credential file that is not there. Stable, and distinct from any hash, so a
+ *  credential APPEARING later reads as a change and the snapshot is rebuilt. */
+const CREDENTIAL_ABSENT = 'absent';
+
+function sourceFingerprintSh(dir: string, relPath: string | null): string {
+  // Narrowed to the credential wherever the registry names one. A whole-directory hash calls
+  // any write a credential change, and these volumes are written by things that are not:
+  // opening a Terminal runs `codex mcp add` against the USER volume, rewriting
+  // `~/.codex/config.toml`. That reported `source_moved`, and the recopy that followed would
+  // replace a task's OWN rotated credential with the user volume's older one — turning a
+  // working task into an authentication failure, which is the exact opposite of the point.
+  if (relPath) {
+    const f = `${dir}/${relPath}`;
+    return `[ -f '${f}' ] && md5sum '${f}' | cut -c1-32 || echo '${CREDENTIAL_ABSENT}'`;
+  }
+  return (
+    `find ${dir} -type f ! -name '${READY_MARKER}' ! -name '${SOURCE_MARKER}' ` +
+    // `-exec ... +` and not `... \;`: this is a TS template literal, where a single-backslash
+    // escape does not survive, and a BARE `;` would read to the shell as a command separator
+    // that silently truncates the pipeline. `+` needs no escape at all.
+    `-exec md5sum {} + 2>/dev/null | LC_ALL=C sort | md5sum | cut -c1-32`
+  );
+}
 const HELPER_TIMEOUT_MS = 60_000;
 const VOLUME_READY_POLL_MS = 1_500;
 // A concurrent sibling agent's populate helper finishes well within this; bounded so a
@@ -190,13 +260,29 @@ async function applyAuthPreparationOnce(
   );
 }
 
-/** Forget every applied-preparation slot for one task. Called from the task-end funnel that
- *  destroys the volumes themselves — the slots describe volumes that no longer exist. */
-export function clearTaskAuthPreparationState(taskId: string): void {
-  const prefix = `${taskId}|`;
+/** Forget applied-preparation slots whose volume no longer holds what they recorded.
+ *
+ *  Called from two places, and the difference matters. The task-end funnel passes no provider:
+ *  every volume for the task is being destroyed, so the in-flight LOCKS go too. A volume
+ *  RECREATE passes the provider, and then only the applied identities are dropped — a sibling
+ *  may be queued on that scope's lock, and removing the lock mid-flight would let its
+ *  preparation run concurrently with the next one, which is the whole thing the lock exists to
+ *  stop.
+ *
+ *  Scopes are `taskId|provider|phase` for exactly this reason: a per-provider prefix is then
+ *  an exact match rather than a substring search over four differently-shaped keys.
+ *
+ *  Without the recreate call, refreshed credentials cost a task its tooling: the copy helper
+ *  replaces the volume, the rtk seed and every MCP write still read their prior identity from
+ *  this map and SKIP, and the agent that follows runs against a volume where those files no
+ *  longer exist. The identities are dropped rather than re-applied here because each writer
+ *  already re-applies itself on the next invocation that needs it. */
+export function clearTaskAuthPreparationState(taskId: string, providerName?: string): void {
+  const prefix = providerName ? `${taskId}|${providerName}|` : `${taskId}|`;
   for (const scope of appliedAuthPreparations.keys()) {
     if (scope.startsWith(prefix)) appliedAuthPreparations.delete(scope);
   }
+  if (providerName) return;
   for (const scope of authPreparationLocks.keys()) {
     if (scope.startsWith(prefix)) authPreparationLocks.delete(scope);
   }
@@ -279,12 +365,29 @@ async function ensureTaskAuthVolumesUnlocked(
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
     const userVol = userVolumeForCtx(ctx, idx);
     const taskVol = cliAuthTaskVolumeName(taskId, ctx.providerName, idx);
+    // Resolved BEFORE the probe, because a source that no longer exists must not be compared
+    // against: it would fingerprint as empty, read as "moved on", and the recreate below would
+    // then populate an EMPTY volume — destroying the only credentials the task still had.
+    const userHasData = await runner.volumeExists(userVol);
+    const credRelPath = credentialRelPath(ctx.providerName, idx);
 
     if (await runner.volumeExists(taskVol)) {
-      if (await isTaskVolumeReady(taskVol, runner)) {
+      const readiness = await isTaskVolumeReady(
+        taskVol,
+        runner,
+        userHasData ? userVol : null,
+        credRelPath,
+      );
+      if (readiness === 'ready') {
         continue;
       }
-      log.warn({ taskVol }, 'task auth volume exists but not ready, recreating');
+      if (readiness === 'source_moved') {
+        // Not a fault: the user re-authenticated after this task started. Recreated through
+        // exactly the same path a half-built volume takes, so there is one repair, not two.
+        log.info({ taskVol, userVol }, 'task auth credentials were refreshed, recopying');
+      } else {
+        log.warn({ taskVol }, 'task auth volume exists but not ready, recreating');
+      }
       let removed = await runner.volumeRemove(taskVol);
       if (!removed.ok && /in use/i.test(removed.stderr)) {
         // In use → a CONCURRENT sibling agent (08c fans out 2 agents that share this
@@ -292,12 +395,43 @@ async function ensureTaskAuthVolumesUnlocked(
         // which is what produced the EXIT -1. Wait for it to make the volume ready and
         // reuse it; only if it stays unready do we retry the remove (the sibling's
         // helper has exited by then) and recreate.
-        if (await waitForTaskVolumeReady(taskVol, runner)) {
+        // Keep demanding freshness when that is what sent us here: a stale volume already has
+        // its ready marker, so a readiness-only wait would succeed immediately and hand this
+        // invocation the very credentials the user just replaced.
+        if (
+          await waitForTaskVolumeReady(
+            taskVol,
+            runner,
+            readiness === 'source_moved' && userHasData ? userVol : null,
+            credRelPath,
+          )
+        ) {
           continue;
         }
         removed = await removeVolumeWithRetry(taskVol, runner);
       }
       if (!removed.ok) {
+        // A volume Docker will not let go of is held by a RUNNING sibling, and a CLI turn can
+        // hold it for the length of its timeout — far past any wait worth doing inside a job
+        // that is occupying a queue slot. What to do about it depends on WHICH verdict sent
+        // us here, and the two are not close.
+        //
+        // `source_moved` degrades: carry on with the copy we have. A moved source is not
+        // proof this task's credentials are dead — it is most often ANOTHER task ending,
+        // because `syncRefreshedAuthToUserVolumes` writes a rotated token back to the user
+        // volume at teardown and codex rotates its OAuth token single-use. That fires far
+        // more often than a re-login, and this task's own copy is the token this task has
+        // been using. Failing the invocation would deny the task work AND not refresh
+        // anything; the next dispatch after the sibling exits replaces the volume properly.
+        if (readiness === 'source_moved') {
+          log.warn(
+            { taskVol, userVol, stderr: removed.stderr.slice(-200) },
+            'auth source moved but the volume is held by a running invocation; ' +
+              'continuing on the existing copy and refreshing at the next dispatch',
+          );
+          continue;
+        }
+        // `not_ready` is a half-built volume: unusable, so there is nothing to degrade to.
         throw new Error(
           `Failed to remove stale task auth volume ${taskVol}: ${removed.stderr || 'unknown error'}`,
         );
@@ -310,8 +444,13 @@ async function ensureTaskAuthVolumesUnlocked(
         `Failed to create task auth volume ${taskVol}: ${created.stderr || 'unknown error'}`,
       );
     }
+    // The volume this task's rtk seed and MCP config were written into is gone. Their applied
+    // identities are in-process and would otherwise make every writer skip, leaving the fresh
+    // volume without the tooling the next agent expects — for codex that is the whole
+    // `config.toml` MCP surface. Always reached on a recreate, whether it was a half-built
+    // volume or refreshed credentials.
+    clearTaskAuthPreparationState(taskId, ctx.providerName);
 
-    const userHasData = await runner.volumeExists(userVol);
     const mounts: DockerVolumeMount[] = [{ source: taskVol, target: '/dst', readOnly: false }];
     if (userHasData) {
       mounts.push({ source: userVol, target: '/src', readOnly: true });
@@ -320,9 +459,33 @@ async function ensureTaskAuthVolumesUnlocked(
     // Docker creates the named-volume mountpoint owned by root. The CLI sandbox
     // runs as node (uid 1000), so we must chown the volume root (and any copied
     // contents) to 1000:1000 before the CLI can write into the mount.
+    // The fingerprint is recorded LAST and from the source, so a copy that died half way
+    // leaves no record and the next probe reads the volume as not ready rather than as fresh.
+    // One rule, decided INSIDE the helper where the mount actually happens: an EMPTY source is
+    // no source. Both ways of arriving there want the same thing, and neither wants a failure.
+    //
+    // A declared auth path can be legitimately empty — gemini declares `~/.config/gemini` and
+    // `~/.gemini`, keeps its credential in the second, and the login flow creates volumes for
+    // both — so refusing on an empty mount would leave that volume unready on every retry and
+    // break the provider outright. And a volume that VANISHED mid-run (handleSignOutJob runs
+    // in the same worker, and a `-v` mount recreates a missing name) lands in exactly the same
+    // state. Recording the sentinel is what makes both self-healing: it can never equal a
+    // fingerprint, so the copy is redone the moment a credential is there to copy.
+    const emptyCopy =
+      `chown 1000:1000 /dst; printf '%s' ${NO_SOURCE_SENTINEL} > /dst/${SOURCE_MARKER}; ` +
+      `touch /dst/${READY_MARKER}`;
     const copyScript = userHasData
-      ? `cp -a /src/. /dst/ 2>/dev/null || true; chown -R 1000:1000 /dst; touch /dst/${READY_MARKER}`
-      : `chown 1000:1000 /dst; touch /dst/${READY_MARKER}`;
+      ? `if [ -z "$(ls -A /src 2>/dev/null)" ]; then ${emptyCopy}; else ` +
+        // Fingerprint BEFORE the copy. Hashing afterwards records what the source is NOW
+        // against bytes that may already be older — a concurrent harvest or re-login landing
+        // between the two would make every later probe see marker == source and accept the
+        // stale copy forever. Taken first, the same race records a fingerprint that no longer
+        // matches, so the next probe retries: one wasted recopy instead of a permanent miss.
+        `fp=$(${sourceFingerprintSh('/src', credRelPath)}); ` +
+        `cp -a /src/. /dst/ 2>/dev/null || true; ` +
+        `printf '%s' "$fp" > /dst/${SOURCE_MARKER}; ` +
+        `chown -R 1000:1000 /dst; touch /dst/${READY_MARKER}; fi`
+      : emptyCopy;
 
     const result = await runner.run({
       image: HELPER_IMAGE,
@@ -350,11 +513,25 @@ async function ensureTaskAuthVolumesUnlocked(
 /** Poll until the volume is ready or the wait elapses. A concurrent sibling agent
  *  (08c fan-out shares this per-task volume) may be mid-setup; wait for it rather than
  *  racing a remove against its mounted populate helper. */
-async function waitForTaskVolumeReady(taskVol: string, runner: DockerRunner): Promise<boolean> {
+async function waitForTaskVolumeReady(
+  taskVol: string,
+  runner: DockerRunner,
+  /** The source to keep demanding, or null to wait on readiness alone.
+   *
+   *  Which one is right depends on WHY the remove was attempted, and getting it wrong is how
+   *  a refreshed credential gets thrown away. Waiting on readiness is correct for a half-built
+   *  volume: a sibling is mid-populate from the same source, so its finished volume is exactly
+   *  what this caller wanted. It is WRONG for a stale one — that volume already carries a
+   *  `.haive-ready` marker, so the wait returns true on its first poll and the caller reuses
+   *  the expired credentials the refresh was supposed to replace. Passing the source keeps the
+   *  freshness requirement, and still lets a sibling that recreates the volume satisfy it. */
+  userVol: string | null,
+  credRelPath: string | null,
+): Promise<boolean> {
   const deadline = Date.now() + VOLUME_READY_MAX_WAIT_MS;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, VOLUME_READY_POLL_MS));
-    if (await isTaskVolumeReady(taskVol, runner)) return true;
+    if ((await isTaskVolumeReady(taskVol, runner, userVol, credRelPath)) === 'ready') return true;
   }
   return false;
 }
@@ -377,20 +554,75 @@ async function removeVolumeWithRetry(
   return last;
 }
 
-async function isTaskVolumeReady(taskVol: string, runner: DockerRunner): Promise<boolean> {
+async function isTaskVolumeReady(
+  taskVol: string,
+  runner: DockerRunner,
+  /** The volume this copy was taken from, when it still exists. Passing it turns the probe
+   *  into a freshness check as well; passing null keeps the old readiness-only behaviour.
+   *
+   *  NULL when the user volume is GONE, and that case must not recreate: a missing source
+   *  would fingerprint as empty, read as "moved on", and the recreate would then populate an
+   *  EMPTY task volume — deleting the only credentials the task still had. */
+  userVol: string | null,
+  /** Which file to compare, from {@link credentialRelPath}; null hashes the whole directory. */
+  credRelPath: string | null,
+): Promise<VolumeReadiness> {
   // Verify both the readiness marker AND that the volume root is owned by the
   // sandbox user (1000). Early versions of ensureTaskAuthVolumes left the mount
   // root owned by root, which the CLI cannot write to. Treating those as stale
   // forces a recreate on first use.
+  //
+  // Then, when a source is given, compare the fingerprint recorded at populate time against
+  // the source's current one. The per-task volume is otherwise a SNAPSHOT for the life of the
+  // task, so a `cli login` performed after the task started reached new tasks only — MEASURED
+  // on 2026-09-13, six live tasks each held a different expired amp token while the user
+  // volume had a valid one, and every step-summary invocation failed `Session expired and
+  // could not be refreshed` with no way back short of deleting a volume by hand.
+  const checks = [
+    `test -f /x/${READY_MARKER} || exit 1`,
+    `[ "$(stat -c %u /x)" = "1000" ] || exit 1`,
+  ];
+  if (userVol) {
+    checks.push(
+      // A volume populated with no source carries NO_SOURCE_SENTINEL here, which can never
+      // equal a fingerprint — so the comparison below recreates it the moment a source appears,
+      // with no branch of its own.
+      `rec=$(cat /x/${SOURCE_MARKER} 2>/dev/null || echo '')`,
+      // No record: populated before this existed. Read as fresh rather than recreated, so a
+      // deploy does not invalidate every task in flight.
+      `if [ -n "$rec" ]; then`,
+      // An EMPTY source is never evidence that credentials moved on, and the guard has to be
+      // HERE rather than in the caller's existence check: mounting a named volume CREATES it
+      // when it is missing, so a sign-out landing between that check and this run materialises
+      // an empty `/src` that would fingerprint as "moved" — and the recreate would then replace
+      // the task's only credential snapshot with nothing. Reading it as unchanged keeps the
+      // snapshot, which is the same direction the caller's null-source case already takes.
+      `  if [ -n "$(ls -A /src 2>/dev/null)" ]; then`,
+      `    cur=$(${sourceFingerprintSh('/src', credRelPath)})`,
+      // Only a source that HAS the credential can say the credentials moved on. Present ->
+      // absent is not a refresh: grok is documented to give up and DELETE auth.json, and
+      // replacing a task's still-usable snapshot with a source that has no credential at all
+      // destroys the one copy that still works. Absent -> present is still a refresh, because
+      // `rec` is then the sentinel and cannot equal a hash — one condition, both directions.
+      `    if [ "$cur" != '${CREDENTIAL_ABSENT}' ]; then`,
+      `      [ "$rec" = "$cur" ] || exit ${VOLUME_SOURCE_MOVED_EXIT}`,
+      '    fi',
+      '  fi',
+      'fi',
+    );
+  }
+  const mounts: DockerVolumeMount[] = [{ source: taskVol, target: '/x', readOnly: true }];
+  if (userVol) mounts.push({ source: userVol, target: '/src', readOnly: true });
   const result = await runner.run({
     image: HELPER_IMAGE,
-    cmd: ['sh', '-c', `test -f /x/${READY_MARKER} && [ "$(stat -c %u /x)" = "1000" ]`],
-    mounts: [{ source: taskVol, target: '/x', readOnly: true }],
+    cmd: ['sh', '-c', checks.join('\n')],
+    mounts,
     entrypoint: '',
     user: 'root',
     timeoutMs: 15_000,
   });
-  return result.exitCode === 0;
+  if (result.exitCode === 0) return 'ready';
+  return result.exitCode === VOLUME_SOURCE_MOVED_EXIT ? 'source_moved' : 'not_ready';
 }
 
 /** True when at least one of the provider's per-path user auth volumes exists.
@@ -481,7 +713,7 @@ export function seedRtkInTaskVolume(
 ): Promise<void> {
   // The seed writes the same thing every time for a given provider, so its identity is the
   // slot itself: applied once per task, not once per invocation.
-  return applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|rtk|${providerName}`, 'seeded', () =>
+  return applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|${providerName}|rtk`, 'seeded', () =>
     seedRtkInTaskVolumeUnlocked(taskId, providerName, runner),
   );
 }
@@ -596,7 +828,7 @@ export function mergeGeminiMcpIntoSettings(
   const clear = opts.clear === true;
   return applyAuthPreparationOnce(
     geminiMcpMergeRuns,
-    `${taskId}|gemini-mcp`,
+    `${taskId}|gemini|mcp`,
     // The MODE is part of the identity: a clear and an empty no-op both carry `{}`, so a key
     // on the content alone would let the recorded no-op skip a later clear.
     contentKey(`${clear ? 'clear' : 'merge'}|${content}`),
@@ -732,7 +964,7 @@ export function mergeCliMcpIntoTaskVolume(
   const surfaceKey = contentKey(JSON.stringify({ image, servers }));
   return applyAuthPreparationOnce(
     cliMcpMergeRuns,
-    `${taskId}|cli-mcp|${providerName}`,
+    `${taskId}|${providerName}|cli-mcp`,
     surfaceKey,
     () => mergeCliMcpIntoTaskVolumeUnlocked(taskId, providerName, image, servers, runner),
   );
@@ -844,7 +1076,7 @@ export function writeMcpFileIntoTaskVolume(
 ): Promise<void> {
   return applyAuthPreparationOnce(
     mcpFileWriteRuns,
-    `${taskId}|mcp-file|${providerName}|${containerPath}`,
+    `${taskId}|${providerName}|mcp-file|${containerPath}`,
     contentKey(content),
     () => writeMcpFileIntoTaskVolumeUnlocked(taskId, providerName, containerPath, content, runner),
   );

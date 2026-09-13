@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanupTaskAuthVolumes,
   clearTaskAuthPreparationState,
@@ -149,14 +149,309 @@ describe('ensureTaskAuthVolumes', () => {
     ).toBe(true);
   });
 
+  it('records the source fingerprint so a later reuse can tell the credentials moved', async () => {
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [userVol] });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-fp-1', runner);
+    const copy = runner.runCalls.find((c) => c.cmd[0] === 'bash')!.cmd[2]!;
+    expect(copy).toContain('> /dst/.haive-source');
+    // Recorded from the SOURCE and written LAST, so a copy that dies half way leaves no
+    // record and the next probe reads the volume as not ready rather than as fresh.
+    expect(copy.indexOf('> /dst/.haive-source')).toBeLessThan(
+      copy.indexOf('touch /dst/.haive-ready'),
+    );
+    // Scoped to the CREDENTIAL the provider refreshes in place, not the whole volume: a
+    // Terminal running `codex mcp add` rewrites `config.toml` in the USER volume, and a
+    // whole-directory hash called that a credential change.
+    expect(copy).toContain("md5sum '/src/auth.json'");
+    expect(copy).not.toContain('find /src -type f');
+    // And taken BEFORE the copy, so a concurrent rewrite makes the next probe retry rather
+    // than recording a fingerprint that matches bytes which were never copied.
+    expect(copy.indexOf('fp=$(')).toBeLessThan(copy.indexOf('cp -a /src/. /dst/'));
+  });
+
+  it('recopies when the user re-authenticated after the task started', async () => {
+    // The per-task volume is otherwise a SNAPSHOT for the life of the task. MEASURED on
+    // 2026-09-13: six live tasks each held a different expired amp token while the user volume
+    // had a valid one, and every step-summary invocation failed `Session expired` with no way
+    // back short of deleting a volume by hand.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskstale_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-stale', runner);
+    expect(runner.removeCalls).toContain(taskVol);
+    expect(runner.createCalls).toContain(taskVol);
+    expect(runner.runCalls.some((c) => c.cmd[0] === 'bash')).toBe(true);
+  });
+
+  it('forgets the applied preparations whose files the recreate just deleted', async () => {
+    // The volume holding this task's rtk seed and MCP config is gone, but their applied
+    // identities are in-process. Without dropping them every writer skips on its next call and
+    // the fresh volume keeps no tooling at all — for codex that is the whole config.toml MCP
+    // surface, so the agents after a re-login run without the tools they were promised.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskinv_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    // Seed an applied identity, then make the volume look refreshed.
+    await seedRtkInTaskVolume('task-inv', 'codex', runner);
+    const seedsBefore = runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length;
+    expect(seedsBefore).toBe(1);
+
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-inv', runner);
+    expect(runner.createCalls).toContain(taskVol);
+
+    // The same seed must now RUN again rather than skip on its recorded identity.
+    await seedRtkInTaskVolume('task-inv', 'codex', runner);
+    expect(runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length).toBe(seedsBefore + 1);
+    clearTaskAuthPreparationState('task-inv');
+  });
+
+  it("leaves other providers' preparations alone when one volume is recreated", async () => {
+    const taskVol = 'haive_cli_auth_task_taskiso_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: ['haive_cli_auth_abc_codex_0', taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    await seedRtkInTaskVolume('task-iso', 'grok', runner);
+    const before = runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length;
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-iso', runner);
+    // grok's volume was not touched, so its seed must still skip.
+    await seedRtkInTaskVolume('task-iso', 'grok', runner);
+    expect(runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length).toBe(before);
+    clearTaskAuthPreparationState('task-iso');
+  });
+
+  it('does not settle for a ready-but-stale volume when the remove is blocked', async () => {
+    // The in-use recovery was written for a HALF-BUILT volume: a sibling is mid-populate from
+    // the same source, so waiting for its ready marker is exactly right. A STALE volume
+    // already carries that marker, so the same wait returns true on its first poll and hands
+    // this invocation the credentials the user just replaced. The wait has to keep demanding
+    // freshness when freshness is what sent it there.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskbusy_codex_0';
+    let probes = 0;
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) => {
+        if (o.cmd[2]?.includes('/x/.haive-ready')) {
+          probes += 1;
+          // Still stale while the sibling holds it; fresh once it has been replaced.
+          const code = probes > 2 ? 0 : 2;
+          return { exitCode: code, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+        }
+        return { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+      },
+    });
+    runner.volumeRemove = async () => ({ ok: false, stderr: 'volume is in use', stdout: '' });
+
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-busy', runner);
+    // It waited rather than reusing on the first poll, and every wait probe carried the source.
+    expect(probes).toBeGreaterThan(1);
+    const waits = runner.runCalls.filter((c) => c.cmd[2]?.includes('/x/.haive-ready'));
+    expect(waits.every((c) => c.mounts?.some((m) => m.target === '/src'))).toBe(true);
+    // Reused only once it came back FRESH — never recreated behind a blocked remove.
+    expect(runner.createCalls).not.toContain(taskVol);
+    clearTaskAuthPreparationState('task-busy');
+  });
+
+  it('degrades to the existing copy when a running sibling will not release the volume', async () => {
+    // A CLI turn holds its mount for the length of its timeout, far past any wait worth doing
+    // inside a job that occupies a queue slot. And a moved source is not proof this task's
+    // credentials are dead: the common cause is ANOTHER task ending, because the teardown
+    // syncs a rotated token back to the user volume and codex rotates single-use. Failing the
+    // invocation would deny the task work and refresh nothing.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskheld_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    runner.volumeRemove = async () => ({ ok: false, stderr: 'volume is in use', stdout: '' });
+
+    // Fake timers rather than a 40s test: the wait runs its full budget here by design, and
+    // the retries after it add more. Driven rather than shortened, so the production
+    // constants stay the ones that ship.
+    vi.useFakeTimers();
+    try {
+      const pending = ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-held', runner);
+      await vi.advanceTimersByTimeAsync(120_000);
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(runner.createCalls).not.toContain(taskVol);
+    clearTaskAuthPreparationState('task-held');
+  });
+
+  it('still fails loudly for a half-built volume it cannot replace', async () => {
+    // No degrading there: `not_ready` means the volume is unusable, so there is nothing to
+    // fall back to.
+    const taskVol = 'haive_cli_auth_task_taskhalf_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: ['haive_cli_auth_abc_codex_0', taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 1, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    runner.volumeRemove = async () => ({ ok: false, stderr: 'volume is in use', stdout: '' });
+
+    vi.useFakeTimers();
+    try {
+      const pending = ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-half', runner);
+      const settled = expect(pending).rejects.toThrow(/Failed to remove stale task auth volume/);
+      await vi.advanceTimersByTimeAsync(120_000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+    clearTaskAuthPreparationState('task-half');
+  });
+
+  it('compares against the source only while the source still exists', async () => {
+    // A user volume that is GONE must never be compared against: it would fingerprint as
+    // empty, read as "moved on", and the recreate would populate an EMPTY task volume —
+    // destroying the only credentials the task still had.
+    const taskVol = 'haive_cli_auth_task_tasknosrc_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [taskVol], readyVolumes: [taskVol] });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-nosrc', runner);
+    const probe = runner.runCalls.find((c) => c.cmd[2]?.includes('/x/.haive-ready'))!;
+    expect(probe.mounts?.some((m) => m.target === '/src')).toBe(false);
+    expect(probe.cmd[2]).not.toContain('.haive-source');
+    // Reused, not wiped.
+    expect(runner.removeCalls).not.toContain(taskVol);
+    expect(runner.createCalls).not.toContain(taskVol);
+  });
+
+  it('mounts the source into the probe when it does exist', async () => {
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_tasksrc_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+    });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-src', runner);
+    const probe = runner.runCalls.find((c) => c.cmd[2]?.includes('/x/.haive-ready'))!;
+    expect(probe.mounts?.some((m) => m.source === userVol && m.target === '/src')).toBe(true);
+    // A volume populated before this existed carries no record and is read as FRESH, so a
+    // deploy does not invalidate every task in flight.
+    expect(probe.cmd[2]).toContain('if [ -n "$rec" ]; then');
+    // An EMPTY source never counts as "moved on". Mounting a named volume CREATES it when it
+    // is missing, so a sign-out landing between the caller's existence check and this run
+    // materialises an empty /src — and without the guard the recreate would replace the task's
+    // only credential snapshot with nothing.
+    expect(probe.cmd[2]).toContain('if [ -n "$(ls -A /src 2>/dev/null)" ]; then');
+    // Content, not `stat -c %Y`. MEASURED: rewriting a 10-byte token with another 10-byte
+    // token inside one second leaves size and whole-second mtime identical, so the stat form
+    // fingerprinted UNCHANGED and the refresh this exists for would never have fired.
+    expect(probe.cmd[2]).toContain("md5sum '/src/auth.json'");
+    expect(probe.cmd[2]).not.toContain("stat -c '%n %s %Y'");
+    // Narrowed to the credential, so a config write in the user volume is not a refresh.
+    expect(probe.cmd[2]).not.toContain('find /src -type f');
+  });
+
+  it('treats an empty source as no source, whichever way it got there', async () => {
+    // Two arrivals, one rule. A declared auth path can be legitimately empty — gemini declares
+    // `~/.config/gemini` and `~/.gemini` and keeps its credential in the second, while the
+    // login flow creates volumes for both — so failing on an empty mount would leave that
+    // volume unready on EVERY retry and break the provider outright. A volume that vanished
+    // mid-run lands in the same state. The sentinel is what makes both self-healing: it can
+    // never equal a fingerprint, so the copy is redone the moment a credential exists.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [userVol] });
+    await expect(
+      ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-emptysrc', runner),
+    ).resolves.toBeUndefined();
+    const copy = runner.runCalls.find((c) => c.cmd[0] === 'bash')!.cmd[2]!;
+    expect(copy).toContain('if [ -z "$(ls -A /src 2>/dev/null)" ]; then');
+    // The empty branch records the sentinel and still marks the volume ready.
+    expect(copy).toContain("printf '%s' none > /dst/.haive-source");
+    expect(copy).toContain('touch /dst/.haive-ready');
+    clearTaskAuthPreparationState('task-emptysrc');
+  });
+
+  it('does not discard a usable snapshot when the tracked credential is deleted', async () => {
+    // grok is documented to give up and DELETE auth.json. Present -> absent must not read as a
+    // refresh: replacing the task's still-usable snapshot with a source that has no credential
+    // at all destroys the only copy that still works. Absent -> present stays a refresh,
+    // because the record is then the sentinel and cannot equal a hash.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskdel_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+    });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-del', runner);
+    const probe = runner.runCalls.find((c) => c.cmd[2]?.includes('/x/.haive-ready'))!.cmd[2]!;
+    expect(probe).toContain(`if [ "$cur" != 'absent' ]; then`);
+    // Guarding the comparison, not replacing it: a source that still has the credential is
+    // compared exactly as before, and a mismatch is still the source-moved exit.
+    expect(probe).toContain('exit 2');
+    clearTaskAuthPreparationState('task-del');
+  });
+
   it('creates empty task volume when user volume absent (no copy)', async () => {
     const runner = makeRunner();
     await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-222', runner);
     const taskVol = 'haive_cli_auth_task_task222_codex_0';
     expect(runner.createCalls).toEqual([taskVol]);
     const copyCall = runner.runCalls.find((c) => c.cmd[0] === 'bash');
-    expect(copyCall?.cmd[2]).toBe('chown 1000:1000 /dst; touch /dst/.haive-ready');
+    expect(copyCall?.cmd[2]).toBe(
+      "chown 1000:1000 /dst; printf '%s' none > /dst/.haive-source; touch /dst/.haive-ready",
+    );
     expect(copyCall?.mounts?.some((m) => m.target === '/src')).toBe(false);
+  });
+
+  it('recopies once a source appears for a volume that was populated without one', async () => {
+    // An api-key row, or a CLI the user had not logged into yet, populates an EMPTY volume. The
+    // sentinel is what stops that being mistaken for a pre-feature volume: absent means
+    // "populated before this existed" and is read as fresh forever, so without it the task
+    // would keep mounting the empty snapshot after the user finally logged in.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_tasklate_codex_0';
+    const probeScripts: string[] = [];
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) => {
+        if (o.cmd[2]?.includes('/x/.haive-ready')) {
+          probeScripts.push(o.cmd[2]);
+          // What the real probe does with the sentinel: 'none' never equals a fingerprint.
+          return { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+        }
+        return { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+      },
+    });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-late', runner);
+    expect(runner.createCalls).toContain(taskVol);
+    // And the copy now carries the real source.
+    const copy = runner.runCalls.find((c) => c.cmd[0] === 'bash')!;
+    expect(copy.mounts?.some((m) => m.source === userVol && m.target === '/src')).toBe(true);
+    expect(copy.cmd[2]).toContain('> /dst/.haive-source');
+    clearTaskAuthPreparationState('task-late');
   });
 
   it('coalesces concurrent sibling setup into one volume copy', async () => {

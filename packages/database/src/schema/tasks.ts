@@ -425,6 +425,17 @@ export const tasks = pgTable(
         }
       >
     >(),
+    /** When the summary-CLI choice on this row was last STATED, by the create form or by a
+     *  later edit on the task's CLIs tab. `/tasks/last-cli` orders remembered choices by this,
+     *  falling back to created_at where it is null — which is every row written before this
+     *  column existed, so no backfill is needed and they answer exactly as they did.
+     *
+     *  It exists because created_at is the wrong clock for an EDIT: repointing an older task's
+     *  recap marked that row as a recorded choice, while any newer recorded task still won the
+     *  ordering, so the New Task form restored a stale value instead of what the user had just
+     *  picked. Declared last so drizzle-kit push and the migration agree on column order.
+     *  Migration 0158. */
+    summaryCliChoiceAt: timestamp('summary_cli_choice_at'),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),

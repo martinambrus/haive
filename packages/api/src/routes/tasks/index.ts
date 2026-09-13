@@ -33,6 +33,7 @@ import {
   PROVIDER_SENSITIVE_STEP_IDS,
   renameTaskRequestSchema,
   setCliProviderRequestSchema,
+  setSummaryCliRequestSchema,
   STEER_IN_CHANNEL_PREFIX,
   taskActionRequestSchema,
   taskVoteRequestSchema,
@@ -615,6 +616,10 @@ taskRoutes.post('/', async (c) => {
       cliProviderId: body.cliProviderId ?? null,
       summaryCliProviderId: body.summaryCliProviderId ?? null,
       summaryLlmEnabled: body.summaryLlmEnabled ?? true,
+      summaryCliChoiceAt:
+        body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined
+          ? new Date()
+          : null,
       // Presence, not value: naming the field states a choice, and an explicit null
       // ("none" / "inherit") is exactly the choice the FK column cannot express. The
       // New Task form always names all three; every other task spawner names none.
@@ -753,7 +758,14 @@ taskRoutes.get('/last-cli', async (c) => {
           eq(schema.tasks.summaryLlmEnabled, false),
         ),
       ),
-      orderBy: [desc(schema.tasks.summaryCliChoiceRecorded), desc(schema.tasks.createdAt)],
+      // Ordered by when the choice was STATED, not when the task was created, so repointing
+      // an older task's recap becomes this repo's latest choice. `coalesce` is what makes it
+      // deploy without a backfill: every row written before the column answers on created_at
+      // exactly as it did.
+      orderBy: [
+        desc(schema.tasks.summaryCliChoiceRecorded),
+        desc(sql`coalesce(${schema.tasks.summaryCliChoiceAt}, ${schema.tasks.createdAt})`),
+      ],
       columns: { summaryCliProviderId: true, summaryLlmEnabled: true },
     }),
   ]);
@@ -1371,6 +1383,70 @@ taskRoutes.get('/:id/cli-invocations/:invocationId/prompt', async (c) => {
   // Blanked rather than nulled by the prompt retention sweep, which is why '' is a normal
   // answer here and not a missing row.
   return c.json({ id: inv.id, prompt: inv.prompt });
+});
+
+/** Repoint the per-step recap, or switch it off, on a task that is already running.
+ *
+ *  Until this existed the summary CLI could be chosen ONLY on the New Task form, so a task
+ *  whose recap provider turned out to be wrong — expired credentials, a bad recap, spend the
+ *  user wanted to stop — had no way back. MEASURED on 2026-09-13: a task's recap ran on amp,
+ *  amp's session expired mid-run, and nothing in the product could repoint it.
+ *
+ *  Deliberately NOT gated on task status, unlike the sibling route above. That one refuses on
+ *  a completed or cancelled task because changing the run's CLI invalidates cached detect
+ *  output and disturbs work in flight; this one writes a single column that only future recap
+ *  dispatches read, and a finished task's step can still be retried.
+ */
+taskRoutes.patch('/:id/summary-cli', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const body = setSummaryCliRequestSchema.parse(await c.req.json());
+  const db = getDb();
+
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+
+  if (body.summaryCliProviderId) {
+    const provider = await db.query.cliProviders.findFirst({
+      where: and(
+        eq(schema.cliProviders.id, body.summaryCliProviderId),
+        eq(schema.cliProviders.userId, userId),
+      ),
+    });
+    if (!provider) throw new HttpError(404, 'CLI provider not found');
+    // Rejected rather than stored: maybeEnqueueStepSummary honors the choice only while the
+    // provider is still enabled, and resolveDispatch merely ORDERS a preferred provider first
+    // — so a disabled id does not fail, it silently hands the recap to whichever provider
+    // comes first. Refusing here is what keeps the stored value and the run in agreement.
+    if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
+  }
+
+  const patch: Partial<typeof schema.tasks.$inferInsert> = { updatedAt: new Date() };
+  if (body.summaryCliProviderId !== undefined)
+    patch.summaryCliProviderId = body.summaryCliProviderId;
+  if (body.summaryLlmEnabled !== undefined) patch.summaryLlmEnabled = body.summaryLlmEnabled;
+  // The CHOICE bit follows EITHER field, exactly as the create path sets it. A NULL provider
+  // cannot say whether the user picked "inherit" or never picked, and neither can an ON
+  // switch — so recording only the provider left a checkbox-only edit unrecorded, and
+  // /tasks/last-cli then preferred an older New Task choice over this explicit one.
+  patch.summaryCliChoiceRecorded = true;
+  // WHEN it was stated. created_at is the wrong clock for an edit: this row may be older than
+  // another recorded task, and ordering on creation would restore that one's stale value
+  // instead of what was just picked here.
+  patch.summaryCliChoiceAt = new Date();
+
+  await db.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));
+
+  await appendTaskEvent(db, id, null, 'task.summary_cli_changed', {
+    summaryCliProviderId: patch.summaryCliProviderId ?? null,
+    summaryLlmEnabled: patch.summaryLlmEnabled ?? null,
+    by: userId,
+  });
+
+  return c.json({ ok: true });
 });
 
 taskRoutes.patch('/:id/cli-provider', async (c) => {
