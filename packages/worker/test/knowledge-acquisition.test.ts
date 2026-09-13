@@ -602,3 +602,35 @@ describe('knowledgeAcquisitionStep preForm retry gate', () => {
     expect(gate(raw)).toBe(false);
   });
 });
+
+// MEASURED on 2026-09-13: all three claude-code runs of 08 reported `unknownPaths:
+// ["INDEX.md"]` — the agent sees the generated index on disk while `scanExistingKb` omits it
+// BECAUSE it is generated, so it asked to update a file that can never be updated. Dropped
+// safely every time, but the request was wasted on every run; codex never made it.
+describe('buildKnowledgePrompt — the existing-file list is closed', () => {
+  const withExisting = (files: { relPath: string; title: string }[]) =>
+    knowledgeAcquisitionStep.llm!.buildPrompt({
+      detected: {
+        framework: 'nodejs',
+        language: 'typescript',
+        packages: [],
+        customCode: { include: [], exclude: [] },
+        __existingKb: files,
+      },
+      formValues: {},
+    });
+
+  it('says the list is complete and that INDEX.md is generated', () => {
+    const prompt = withExisting([{ relPath: 'ARCHITECTURE.md', title: 'Architecture' }]);
+    expect(prompt).toContain('That list is COMPLETE');
+    expect(prompt).toContain('`INDEX.md` is REGENERATED');
+    // The rule has to sit with the list it constrains, not in a distant section.
+    expect(prompt.indexOf('ARCHITECTURE.md')).toBeLessThan(prompt.indexOf('That list is COMPLETE'));
+  });
+
+  it('says nothing about it when the repo has no existing knowledge base', () => {
+    // No list, no rule about the list: a first onboarding must not be told to reason about
+    // files it does not have.
+    expect(withExisting([])).not.toContain('That list is COMPLETE');
+  });
+});

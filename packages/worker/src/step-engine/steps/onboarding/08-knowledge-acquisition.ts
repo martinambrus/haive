@@ -268,6 +268,14 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
           '',
           ...existingKb.map((f) => `- ${f.relPath} — ${f.title}`),
           '',
+          // MEASURED: three of three claude-code runs asked to update `INDEX.md`, which the
+          // scan omits BECAUSE it is generated. Each request was reported as an unknown path
+          // and dropped — safe, but the agent spent an entry on it every run. Codex never did.
+          'That list is COMPLETE. A `placements` or `updates` entry naming a path that is not',
+          'on it applies nothing: the path is reported back as unknown and dropped. In',
+          'particular `INDEX.md` is REGENERATED from whatever you emit, so it is never a file',
+          'to keep or improve — it is missing from the list for that reason, not by oversight.',
+          '',
         ]
       : [];
 
