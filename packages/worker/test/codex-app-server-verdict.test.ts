@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { schema, type Database } from '@haive/database';
 import {
+  CODEX_APP_SERVER_UNAVAILABLE_EVENT,
   codexAppServerFallbackWarning,
   codexAppServerVerdict,
   currentCodexAppServerVerdict,
   isCodexAppServerSupported,
+  recordCodexAppServerVerdict,
   type CodexAppServerVerdicts,
 } from '../src/cli-adapters/codex-app-server-verdict.js';
 
@@ -83,5 +86,83 @@ describe('codexAppServerFallbackWarning', () => {
     expect(codexAppServerFallbackWarning({ stage: 'spawn', detail: null }, null)).toMatch(
       /^codex app-server failed at spawn: no detail\. /,
     );
+  });
+});
+
+/** Enough of drizzle's builder for the one update and the one insert the recorder issues. */
+function fakeDb(opts: { failInsert?: boolean } = {}) {
+  const calls = { updates: 0, events: [] as Record<string, any>[] };
+  const db = {
+    update: () => ({
+      set: () => ({
+        where: async () => {
+          calls.updates += 1;
+        },
+      }),
+    }),
+    insert: (table: unknown) => ({
+      values: async (values: Record<string, any>) => {
+        if (opts.failInsert) throw new Error('insert refused');
+        calls.events.push({ table, ...values });
+      },
+    }),
+  } as unknown as Database;
+  return { db, calls };
+}
+
+describe('recordCodexAppServerVerdict', () => {
+  const unsupported = codexAppServerVerdict(
+    { cliVersion: '0.154.0' },
+    {
+      status: 'unsupported',
+      binaryVersion: null,
+      stage: 'spawn',
+      detail: "error: unexpected argument '--json' found",
+      source: 'runtime',
+    },
+  );
+
+  it('keeps a task event beside an unsupported verdict, naming the codex version', async () => {
+    const { db, calls } = fakeDb();
+    await recordCodexAppServerVerdict(db, 'task-1', 'prov-1', unsupported);
+    expect(calls.updates).toBe(1);
+    expect(calls.events).toHaveLength(1);
+    const event = calls.events[0]!;
+    expect(event.table).toBe(schema.taskEvents);
+    expect(event).toMatchObject({
+      taskId: 'task-1',
+      eventType: CODEX_APP_SERVER_UNAVAILABLE_EVENT,
+      payload: { providerId: 'prov-1', stage: 'spawn', codexVersion: '0.154.0', source: 'runtime' },
+    });
+    expect(event.payload.message).toMatch(/^codex app-server failed at spawn on codex 0\.154\.0: /);
+  });
+
+  it('writes no event for a supported verdict', async () => {
+    const { db, calls } = fakeDb();
+    await recordCodexAppServerVerdict(
+      db,
+      'task-1',
+      'prov-1',
+      codexAppServerVerdict(
+        { cliVersion: '0.154.0' },
+        {
+          status: 'supported',
+          binaryVersion: '0.154.0',
+          stage: null,
+          detail: null,
+          source: 'probe',
+        },
+      ),
+    );
+    expect(calls.updates).toBe(1);
+    expect(calls.events).toHaveLength(0);
+  });
+
+  it('keeps the recorded verdict when the event cannot be written', async () => {
+    const { db, calls } = fakeDb({ failInsert: true });
+    await expect(
+      recordCodexAppServerVerdict(db, 'task-1', 'prov-1', unsupported),
+    ).resolves.toBeUndefined();
+    expect(calls.updates).toBe(1);
   });
 });

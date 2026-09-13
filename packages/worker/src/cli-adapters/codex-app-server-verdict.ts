@@ -1,10 +1,16 @@
 import { eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { logger } from '@haive/shared';
 import type {
   CodexAppServerFailure,
   CodexAppServerStage,
 } from '../cli-executor/codex-app-server.js';
 import type { CliProviderRecord } from './types.js';
+
+const log = logger.child({ module: 'codex-app-server-verdict' });
+
+/** The task event written beside every `unsupported` verdict — see recordCodexAppServerVerdict. */
+export const CODEX_APP_SERVER_UNAVAILABLE_EVENT = 'codex_app_server.unavailable';
 
 /** Whether codex's experimental app-server transport works for one provider in one task.
  *
@@ -81,7 +87,12 @@ export async function loadCodexAppServerVerdicts(
 }
 
 /** Record one provider's verdict. One statement that merges into the stored object, so two
- *  providers recorded at once cannot overwrite each other's entry. */
+ *  providers recorded at once cannot overwrite each other's entry.
+ *
+ *  An `unsupported` verdict is also written as a task event, which the Activity tab keeps for the
+ *  life of the task. The step warning cannot carry it alone: a self-revising step resets its own
+ *  row at the end of the turn that set it — MEASURED on a plan_chat turn, the warning was cleared
+ *  0.3 s after it was written. Best-effort, so a recorded verdict is never lost to a failed event. */
 export async function recordCodexAppServerVerdict(
   db: Database,
   taskId: string,
@@ -94,6 +105,27 @@ export async function recordCodexAppServerVerdict(
       codexAppServer: sql`coalesce(${schema.tasks.codexAppServer}, '{}'::jsonb) || jsonb_build_object(${providerId}::text, ${JSON.stringify(verdict)}::jsonb)`,
     })
     .where(eq(schema.tasks.id, taskId));
+  if (verdict.status !== 'unsupported' || verdict.stage === null) return;
+  const codexVersion = verdict.binaryVersion ?? verdict.providerCliVersion;
+  try {
+    await db.insert(schema.taskEvents).values({
+      taskId,
+      eventType: CODEX_APP_SERVER_UNAVAILABLE_EVENT,
+      payload: {
+        message: codexAppServerFallbackWarning(
+          { stage: verdict.stage, detail: verdict.detail },
+          codexVersion,
+        ),
+        providerId,
+        stage: verdict.stage,
+        detail: verdict.detail,
+        codexVersion,
+        source: verdict.source,
+      },
+    });
+  } catch (err) {
+    log.warn({ err, taskId, providerId }, 'failed to record the codex app-server event');
+  }
 }
 
 /** A run found the transport broken: the rest of the task uses `codex exec` for this provider.
