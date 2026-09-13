@@ -657,6 +657,15 @@ const DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html', 'public_html
 /** The WordPress extension header, read from the first file in the directory that carries
  *  one — `style.css` for a theme, the main `.php` for a plugin. Not recursive: a header in
  *  a bundled sub-library is not this extension's. */
+async function wpFileHeader(file: string): Promise<string> {
+  try {
+    const text = (await readFile(file, 'utf8')).slice(0, 4000);
+    return /^\s*\*?\s*(Plugin Name|Theme Name)\s*:/im.test(text) ? text : '';
+  } catch {
+    return ''; // unreadable or binary — carries no header as far as we can tell
+  }
+}
+
 async function wpExtensionHeader(dir: string): Promise<string> {
   let names: string[];
   try {
@@ -666,12 +675,8 @@ async function wpExtensionHeader(dir: string): Promise<string> {
   }
   for (const name of names) {
     if (!name.endsWith('.php') && !name.endsWith('.css')) continue;
-    try {
-      const text = (await readFile(path.join(dir, name), 'utf8')).slice(0, 4000);
-      if (/^\s*\*?\s*(Plugin Name|Theme Name)\s*:/im.test(text)) return text;
-    } catch {
-      /* unreadable — try the next candidate */
-    }
+    const header = await wpFileHeader(path.join(dir, name));
+    if (header) return header;
   }
   return '';
 }
@@ -689,8 +694,10 @@ async function wpExtensionHeader(dir: string): Promise<string> {
  *  `Stable tag` on its OWN was tried first and rejected on measurement: a real custom plugin
  *  ships one (`Stable tag: 1.0.0`), so as a sole marker it excluded exactly the code this
  *  guard protects. As the second half of an AND it is harmless — that plugin declares no URI. */
-async function hasDistributionMarker(dir: string, header: string): Promise<boolean> {
+async function hasDistributionMarker(dir: string | null, header: string): Promise<boolean> {
   if (/^\s*\*?\s*(?:Text Domain|License)\s*:\s*\S+/im.test(header)) return true;
+  // A single-file plugin has no directory of its own, so the header is all there is.
+  if (!dir) return false;
   for (const name of ['readme.txt', 'README.txt']) {
     try {
       const text = await readFile(path.join(dir, name), 'utf8');
@@ -730,11 +737,19 @@ async function hasDistributionMarker(dir: string, header: string): Promise<boole
  *  (`bodyUsesRepoSymbol`), which scans the whole tree rather than these paths and so is
  *  independent of this verdict — though its 4,000-file cap means a large WordPress repo can
  *  exhaust it before reaching a bespoke plugin. */
-async function looksDistributed(dir: string, kind: 'themes' | 'plugins'): Promise<boolean> {
-  const header = await wpExtensionHeader(dir);
+async function isDistributedHeader(
+  header: string,
+  /** The extension's own directory, or null for a single-file plugin. */
+  dir: string | null,
+  kind: 'themes' | 'plugins',
+): Promise<boolean> {
   if (!/^\s*\*?\s*(?:Plugin|Theme) URI\s*:\s*https?:\/\/\S+/im.test(header)) return false;
   if (kind === 'themes' && /^\s*\*?\s*Template\s*:\s*\S+/im.test(header)) return false;
   return hasDistributionMarker(dir, header);
+}
+
+async function looksDistributed(dir: string, kind: 'themes' | 'plugins'): Promise<boolean> {
+  return isDistributedHeader(await wpExtensionHeader(dir), dir, kind);
 }
 
 /** What one framework-specific scan concluded about a repo's own code.
@@ -774,9 +789,22 @@ async function detectWordPressCustomPaths(repoPath: string): Promise<CustomPathS
       }
       scanned = true;
       for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (await looksDistributed(path.join(repoPath, rel, entry.name), kind)) continue;
-        found.push(`${rel}/${entry.name}/`);
+        if (entry.isDirectory()) {
+          if (await looksDistributed(path.join(repoPath, rel, entry.name), kind)) continue;
+          found.push(`${rel}/${entry.name}/`);
+          continue;
+        }
+        // A plugin can be ONE FILE — core ships `hello.php` that way — and a bespoke one is
+        // exactly the shape that leaks, since `wp-content/plugins/` is an excludePath and a
+        // directory-only scan leaves nothing more specific to outrank it. Plugins only: a
+        // theme needs a `style.css` and is therefore always a directory. `index.php`'s
+        // silence-is-golden stub is dropped by the HEADER test rather than by its name, so
+        // any other headerless file goes with it.
+        if (kind !== 'plugins' || !entry.isFile() || !entry.name.endsWith('.php')) continue;
+        const header = await wpFileHeader(path.join(repoPath, rel, entry.name));
+        if (!header) continue;
+        if (await isDistributedHeader(header, null, kind)) continue;
+        found.push(`${rel}/${entry.name}`);
       }
     }
     // Scanning a real wp-content is conclusive even when it yields NOTHING: every extension
@@ -788,7 +816,11 @@ async function detectWordPressCustomPaths(repoPath: string): Promise<CustomPathS
   return null;
 }
 
-/** Parents Drupal keeps modules and themes under, and they differ by MAJOR.
+/** D8+ keeps core under `core/`, so the root parents hold contrib and custom. */
+const DRUPAL8_EXTENSION_PARENTS = ['modules', 'themes'] as const;
+
+/** Where this Drupal tree can keep extensions. The answer differs by MAJOR, and on D7 it is
+ *  read from disk rather than fixed.
  *
  *  D7 separates core from everything else by LOCATION: root `modules/`, `themes/` and
  *  `profiles/` are core, and contrib and custom live under `sites/`. That is already what
@@ -800,19 +832,37 @@ async function detectWordPressCustomPaths(repoPath: string): Promise<CustomPathS
  *  4 core themes ARE stamped, so that install was never affected; the stamp is a property
  *  of how core was OBTAINED, not of Drupal, which is why location decides instead.
  *
- *  D8+ has the opposite layout — core lives under `core/` and the root parents hold
- *  contrib and custom — so there they are exactly the right place to look. */
-const DRUPAL_EXTENSION_PARENTS_BY_MAJOR = {
-  drupal7: ['sites/all/modules', 'sites/all/themes'],
-  drupal: ['modules', 'themes'],
-} as const;
-
-function drupalExtensionParents(framework: FrameworkName): string[] {
-  const bases =
-    framework === 'drupal7'
-      ? DRUPAL_EXTENSION_PARENTS_BY_MAJOR.drupal7
-      : DRUPAL_EXTENSION_PARENTS_BY_MAJOR.drupal;
-  return DOCROOT_CANDIDATES.flatMap((root) => bases.map((p) => (root ? `${root}/${p}` : p)));
+ *  Which `sites/` directory is likewise not fixed: a multisite install puts a site's own
+ *  modules under `sites/<hostname>/modules` and a single-site one uses
+ *  `sites/default/modules`, neither of which a `sites/all` literal covers — and the miss
+ *  fails in the leaking direction, because the broad `modules/` exclude matches that path
+ *  segment anyway, so an extension nobody listed reads as vendor code. One readdir of
+ *  `sites/` covers `all`, `default` and every hostname directory; a site with no `modules/`
+ *  or `themes/` simply fails the caller's readdir and costs nothing. */
+async function drupalExtensionParents(
+  repoPath: string,
+  framework: FrameworkName,
+): Promise<string[]> {
+  if (framework !== 'drupal7') {
+    return DOCROOT_CANDIDATES.flatMap((root) =>
+      DRUPAL8_EXTENSION_PARENTS.map((p) => (root ? `${root}/${p}` : p)),
+    );
+  }
+  const parents: string[] = [];
+  for (const root of DOCROOT_CANDIDATES) {
+    const sitesRel = root ? `${root}/sites` : 'sites';
+    let entries: Dirent[];
+    try {
+      entries = await readdir(path.join(repoPath, sitesRel), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      parents.push(`${sitesRel}/${entry.name}/modules`, `${sitesRel}/${entry.name}/themes`);
+    }
+  }
+  return parents;
 }
 
 /** Directories under those parents that this site WROTE, rather than installed.
@@ -831,7 +881,7 @@ async function detectDrupalCustomPaths(
   framework: FrameworkName,
 ): Promise<CustomPathScan> {
   const found: string[] = [];
-  for (const parent of drupalExtensionParents(framework)) {
+  for (const parent of await drupalExtensionParents(repoPath, framework)) {
     let entries: Dirent[];
     try {
       entries = await readdir(path.join(repoPath, parent), { withFileTypes: true });

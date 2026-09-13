@@ -112,6 +112,28 @@ describe('detectPaths: a Drupal site that ignores the custom/ convention', () =>
     expect(paths.customCodePaths.include).toEqual(['sites/all/modules/activit/']);
   });
 
+  it('scans every sites/ directory, not just sites/all', async () => {
+    // A multisite install keeps a site's own modules under `sites/<hostname>/modules` and a
+    // single-site one under `sites/default/modules`. Missing them fails in the LEAKING
+    // direction: the broad `modules/` exclude matches that segment anyway, so an extension
+    // nobody listed reads as vendor code and its knowledge can reach the shared KB.
+    const mk = async (rel: string, info: string) => {
+      await mkdir(path.join(repo, rel), { recursive: true });
+      await writeFile(path.join(repo, rel, `${path.basename(rel)}.info`), info);
+    };
+    await mk('sites/default/modules/site_private', 'name = Site Private\n');
+    await mk('sites/example.com/themes/client_theme', 'name = Client Theme\n');
+    await mk('sites/all/modules/webform', 'name = Webform\nproject = "webform"\n');
+    await mk('sites/all/modules/shared_helper', 'name = Shared Helper\n');
+
+    const paths = await detectPathsForTest(repo, 'drupal7');
+    expect(paths.customCodePaths.include.sort()).toEqual([
+      'sites/all/modules/shared_helper/',
+      'sites/default/modules/site_private/',
+      'sites/example.com/themes/client_theme/',
+    ]);
+  });
+
   it('and that include then beats the bare modules/ exclude', async () => {
     // The whole point: `modules/` matches anywhere, so before the specificity rule the
     // site's own module could never be repo-own.
@@ -233,6 +255,24 @@ describe('detectPaths: WordPress extensions', () => {
     );
     const p = await detectPathsForTest(repo, 'wordpress');
     expect(p.customCodePaths.include).toEqual(['wp-content/plugins/client-portal/']);
+  });
+
+  it('finds a plugin that is a single file, and skips the silence-is-golden stub', async () => {
+    // Core itself ships `hello.php` that way. A directory-only scan leaves a bespoke
+    // single-file plugin with nothing more specific than the `wp-content/plugins/` exclude,
+    // so `repoOwnRef` rejects every citation to it.
+    await put(
+      'wp-content/plugins/client-hooks.php',
+      '<?php\n/*\nPlugin Name: Client Hooks\nAuthor: In House\n*/',
+    );
+    await put('wp-content/plugins/index.php', '<?php\n// Silence is golden.');
+    await put(
+      'wp-content/plugins/hello.php',
+      '<?php\n/*\nPlugin Name: Hello Dolly\nPlugin URI: http://wordpress.org/plugins/hello-dolly/\nLicense: GPLv2 or later\n*/',
+    );
+    const p = await detectPathsForTest(repo, 'wordpress');
+    // No trailing slash: it is a file, and `pathHasPrefix` matches whole segments either way.
+    expect(p.customCodePaths.include).toEqual(['wp-content/plugins/client-hooks.php']);
   });
 
   it('reports an empty determination rather than naming the mixed parent', async () => {
