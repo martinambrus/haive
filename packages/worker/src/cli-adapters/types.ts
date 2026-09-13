@@ -1,4 +1,5 @@
 import { schema } from '@haive/database';
+import type { CodexAppServerVerdicts } from './codex-app-server-verdict.js';
 
 export type CliProviderRecord = typeof schema.cliProviders.$inferSelect;
 export type CliProviderName = CliProviderRecord['name'];
@@ -38,11 +39,11 @@ export interface InvokeOpts {
    *  provider.effortLevel, then to the adapter's effortScale.max. Adapters
    *  with effortScale=null ignore this option. */
   effortLevel?: string;
-  /** When true, a steering-capable (Claude-family) adapter builds an interactive
-   *  stream-json INPUT invocation (prompt on stdin, mid-run steering) instead of
-   *  the one-shot `-p "<prompt>"` form. Set by the dispatcher only when steering
-   *  is enabled (global + per-repo) AND the adapter supportsSteering. Other
-   *  adapters ignore it. */
+  /** When true, a steering-capable adapter builds its steerable form instead of the one-shot
+   *  one: for the claude family and amp an interactive stream-json INPUT invocation (prompt on
+   *  stdin), for codex a `codex app-server` JSON-RPC invocation. Set by the dispatcher only when
+   *  steering is enabled AND the adapter supportsSteering AND its steering transport is ready for
+   *  the provider (steeringTransportReady). Other adapters ignore it. */
   steeringMode?: boolean;
   /** Claude-family only: tool names passed to `--disallowedTools` (a deny-list;
    *  deny beats allow and is honored even under --dangerously-skip-permissions).
@@ -56,6 +57,13 @@ export interface InvokeOpts {
    *  (e.g. 01-env-detect), where a high-effort model would otherwise burn the
    *  timeout exploring the repo. codex/gemini adapters ignore it. */
   disableTools?: boolean;
+}
+
+/** Per-task facts a steering transport can depend on — see
+ *  BaseCliAdapter.steeringTransportReady. */
+export interface SteeringTransportContext {
+  /** The task's codex app-server verdicts, or null when the admin switch is off. */
+  codexAppServer: CodexAppServerVerdicts | null;
 }
 
 export interface EffortScale {
@@ -77,7 +85,12 @@ export type CliRulesFileMode = 'native' | 'import' | 'copy';
 /** How exec-core / the sequential sub-agent runner should interpret the CLI's
  *  stdout. Undefined = legacy heuristic (claude NDJSON collector probe). */
 export type CliOutputFormat =
-  'plain' | 'claude-stream-json' | 'codex-jsonl' | 'antigravity-stream-json' | 'gemini-json';
+  | 'plain'
+  | 'claude-stream-json'
+  | 'codex-jsonl'
+  | 'codex-app-server'
+  | 'antigravity-stream-json'
+  | 'gemini-json';
 
 export interface CliCommandSpec {
   command: string;
@@ -85,9 +98,10 @@ export interface CliCommandSpec {
   env: Record<string, string>;
   cwd?: string;
   outputFormat?: CliOutputFormat;
-  /** Steerable invocation: the spawner opens an interactive stdin pipe and
-   *  writes `stdinInitial`, and exec-core wires a Redis steer channel into it.
-   *  Set by Claude-family adapters in steering mode. */
+  /** Steerable invocation: the spawner opens an interactive stdin pipe and exec-core wires a
+   *  Redis steer channel into it. The claude family and amp write `stdinInitial` and take each
+   *  steer as an NDJSON line; codex's app-server speaks JSON-RPC on the same pipe instead. Set by
+   *  adapters in steering mode. */
   steerable?: boolean;
   /** Written to the CLI's stdin immediately after start (the prompt as an NDJSON
    *  user-message). Only present when steerable. */
@@ -115,6 +129,17 @@ export interface CliCommandSpec {
    *  the sole classifiable signal. Set by the antigravity adapter alongside its
    *  `--log-file` arg; no other adapter uses it. */
   captureFile?: { containerDir: string; fileName: string };
+  /** codex only, set together with `outputFormat: 'codex-app-server'`. The app-server takes its
+   *  turn over JSON-RPC rather than argv or stdin, so the turn's inputs travel here. `execArgs` is
+   *  the `codex exec` argv for the same run, minus the prompt, kept so an invocation whose
+   *  app-server could not even accept the turn can re-run on exec without calling the adapter
+   *  again — see codexExecFallbackSpec. */
+  codexAppServer?: {
+    prompt: string;
+    model: string | null;
+    effort: string | null;
+    execArgs: string[];
+  };
 }
 
 export interface SubAgent {

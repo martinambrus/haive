@@ -13,6 +13,7 @@ import type {
   PluginInstallCommand,
   PluginInstallOpts,
   ProbeResult,
+  SteeringTransportContext,
   SubAgentInvocation,
   SubAgentSpec,
 } from './types.js';
@@ -48,11 +49,20 @@ export abstract class BaseCliAdapter {
    *  network policy `none`/`allowlist`. Empty = adapter declares none (the
    *  user must add them per provider). */
   readonly defaultEgressDomains: readonly string[] = [];
-  /** Whether this CLI supports mid-run steering: an interactive stream-json
-   *  stdin session into which the user can inject messages the CLI applies at
-   *  the next tool-call boundary. Only Claude-family CLIs (the `claude` binary
-   *  in stream-json input mode) support it; default false. */
+  /** Whether this CLI supports mid-run steering: a live session into which the user can inject
+   *  messages the CLI applies at its next boundary. The claude family and amp take them as
+   *  stream-json lines on stdin; codex takes them over its app-server protocol. Default false. */
   readonly supportsSteering: boolean = false;
+
+  /** Whether that steering transport can be used for THIS provider in THIS task. The capability
+   *  above is static; this is the per-task half. A transport of stdin NDJSON lines is always
+   *  spoken, so the default is true. codex overrides it: its transport is the experimental
+   *  app-server, which a task relies on only once it was verified for that provider's binary
+   *  (cli-adapters/codex-app-server-verdict.ts). Read in one place, the dispatcher, ANDed with
+   *  supportsSteering and the step's steering request. */
+  steeringTransportReady(_provider: CliProviderRecord, _ctx: SteeringTransportContext): boolean {
+    return true;
+  }
 
   async isAvailable(provider: CliProviderRecord): Promise<boolean> {
     const result = await this.probeExecutable(provider);
