@@ -632,6 +632,60 @@ async function detectStack(
  *  is present one level down. Empty string first: the common case is no nesting. */
 const DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html', 'public_html'] as const;
 
+/** A theme or plugin that came from a distributor rather than from this project.
+ *
+ *  `readme.txt` carrying a `Stable tag` is what wordpress.org requires of every hosted
+ *  item, and vendors outside the directory copy the format. MEASURED on a real WordPress
+ *  site: 26 of its 27 installed themes and plugins carry it — every bundled Twenty* theme
+ *  and 23 of 24 plugins — while a hand-written child theme has no reason to.
+ *
+ *  Used to REJECT, never to confirm: that repo had no custom code at all, so this rule has
+ *  no verified positive samples. Anything unmarked is therefore treated as the project's
+ *  own, which is the safe direction — a wrongly-included directory keeps knowledge local,
+ *  while a wrongly-excluded one lets repo-private knowledge reach the shared KB. */
+async function looksDistributed(dir: string): Promise<boolean> {
+  try {
+    const text = await readFile(path.join(dir, 'readme.txt'), 'utf8');
+    return /^\s*Stable tag:\s*\S+/im.test(text);
+  } catch {
+    return false;
+  }
+}
+
+/** WordPress themes this project WROTE.
+ *
+ *  `wp-content/themes/` is the framework's declared custom path, but unlike Drupal's
+ *  `modules/custom/` it is a MIXED directory: WordPress ships its Twenty* themes into the
+ *  same place. MEASURED, naming the parent told the knowledge miner that three bundled
+ *  core themes were "this repo's OWN custom code".
+ *
+ *  Plugins are deliberately NOT scanned. The same marker leaves a false positive there
+ *  (one GitHub-distributed plugin ships no readme), and with no custom plugin anywhere to
+ *  measure against, a rule for them would be the same guess this whole change removes. */
+async function detectWordPressCustomPaths(repoPath: string): Promise<string[] | null> {
+  const found: string[] = [];
+  for (const root of DOCROOT_CANDIDATES) {
+    const rel = root ? `${root}/wp-content/themes` : 'wp-content/themes';
+    let entries: Dirent[];
+    try {
+      entries = await readdir(path.join(repoPath, rel), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (await looksDistributed(path.join(repoPath, rel, entry.name))) continue;
+      found.push(`${rel}/${entry.name}/`);
+    }
+    // Scanned a real themes directory, so the answer is known even when it is EMPTY:
+    // every theme here came from a distributor and the project has none of its own.
+    // Returning [] would be read as "could not tell" and fall back to naming the mixed
+    // parent, which is the claim this exists to stop.
+    return found;
+  }
+  return null; // no themes directory anywhere — nothing was determined
+}
+
 /** Parents Drupal keeps modules and themes under, across docroots and layouts. */
 const DRUPAL_EXTENSION_PARENTS = DOCROOT_CANDIDATES.flatMap((root) =>
   ['modules', 'themes', 'sites/all/modules', 'sites/all/themes'].map((p) =>
@@ -650,7 +704,7 @@ const DRUPAL_EXTENSION_PARENTS = DOCROOT_CANDIDATES.flatMap((root) =>
  *
  *  A directory with no info file at all is NOT claimed: that is how `modules/contrib` and
  *  other grouping dirs look, and guessing there would re-introduce the problem. */
-async function detectDrupalCustomPaths(repoPath: string): Promise<string[]> {
+async function detectDrupalCustomPaths(repoPath: string): Promise<string[] | null> {
   const found: string[] = [];
   for (const parent of DRUPAL_EXTENSION_PARENTS) {
     let entries: Dirent[];
@@ -679,7 +733,10 @@ async function detectDrupalCustomPaths(repoPath: string): Promise<string[]> {
       found.push(`${parent}/${entry.name}/`);
     }
   }
-  return found;
+  // Finding none is NOT a determination here, unlike the WordPress scan: the common D8
+  // layout nests every custom module one level deeper inside `modules/custom/`, where this
+  // walk sees a directory with no info file of its own. The convention still gets its turn.
+  return found.length > 0 ? found : null;
 }
 
 async function detectPaths(repoPath: string, framework: FrameworkName): Promise<PathsDetection> {
@@ -710,10 +767,15 @@ async function detectPaths(repoPath: string, framework: FrameworkName): Promise<
   // SHARED global KB. An empty list is the honest answer and routes that guard to its
   // `isLikelyRepoOwnPath` fallback, which works off excludePaths and gets this right.
   // Real extensions first where we can read them; the convention only fills the gap.
-  const customPaths: string[] = framework.startsWith('drupal')
+  // `null` means nothing was determined and the convention still gets its chance; an empty
+  // ARRAY is a determination that this project has no custom code of that kind.
+  const detected: string[] | null = framework.startsWith('drupal')
     ? await detectDrupalCustomPaths(repoPath)
-    : [];
-  for (const candidate of customPaths.length > 0 ? [] : pattern.customPaths) {
+    : framework === 'wordpress'
+      ? await detectWordPressCustomPaths(repoPath)
+      : null;
+  const customPaths: string[] = detected ?? [];
+  for (const candidate of detected === null ? pattern.customPaths : []) {
     for (const root of DOCROOT_CANDIDATES) {
       const rel = root ? `${root}/${candidate}` : candidate;
       try {

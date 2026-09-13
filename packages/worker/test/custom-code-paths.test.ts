@@ -143,3 +143,40 @@ describe('detectPaths: docroot and composer installer-path variants', () => {
     expect(p.customCodePaths.include).toEqual(['modules/mymod/']);
   });
 });
+
+// `wp-content/themes/` is WordPress's declared custom path but, unlike Drupal's
+// `modules/custom/`, it is a MIXED directory — core ships its Twenty* themes into it.
+// MEASURED on a real WordPress site: naming the parent told the knowledge miner that three
+// bundled core themes were the project's own code.
+describe('detectPaths: WordPress themes', () => {
+  const distributed = 'Stable tag: 1.5\nRequires at least: 6.0\n';
+  const mkTheme = async (name: string, readme?: string) => {
+    await mkdir(path.join(repo, 'wp-content/themes', name), { recursive: true });
+    await writeFile(path.join(repo, 'wp-content/themes', name, 'style.css'), '/* x */');
+    if (readme) await writeFile(path.join(repo, 'wp-content/themes', name, 'readme.txt'), readme);
+  };
+
+  it('drops the bundled themes and keeps a hand-written one', async () => {
+    await mkTheme('twentytwentyfive', distributed);
+    await mkTheme('twentytwentyfour', distributed);
+    await mkTheme('dogacars-child'); // no readme.txt — nobody writes one for a child theme
+    const paths = await detectPathsForTest(repo, 'wordpress');
+    expect(paths.customCodePaths.include).toEqual(['wp-content/themes/dogacars-child/']);
+  });
+
+  it('reports nothing rather than the parent when every theme is distributed', async () => {
+    // The real site measured: three bundled themes and no custom code at all. Saying
+    // nothing is honest; naming `wp-content/themes/` claims core code as the project's.
+    await mkTheme('twentytwentyfive', distributed);
+    await mkTheme('twentytwentythree', distributed);
+    const paths = await detectPathsForTest(repo, 'wordpress');
+    expect(paths.customCodePaths.include).toEqual([]);
+  });
+
+  it('beats the wp-content/plugins exclude for a theme nested under a docroot', async () => {
+    await mkdir(path.join(repo, 'web/wp-content/themes/mine'), { recursive: true });
+    await writeFile(path.join(repo, 'web/wp-content/themes/mine/style.css'), '/* x */');
+    const paths = await detectPathsForTest(repo, 'wordpress');
+    expect(paths.customCodePaths.include).toEqual(['web/wp-content/themes/mine/']);
+  });
+});
