@@ -14,6 +14,11 @@ export async function spawnPlanTask(args: {
   description?: string;
   metadata: Record<string, unknown>;
   cliProviderId: string | null;
+  /** True when the caller named the CLI — a plan page picker. A saved per-step preference would
+   *  otherwise run instead of the pick: MEASURED, a plan chat whose picker named codex ran on
+   *  Claude, through an explicit `01-plan-chat` preference saved days earlier. A CLI changed on the
+   *  running task still wins, through the touched-marker rule the New Task form's switch uses. */
+  ignoreSavedStepClis?: boolean;
   /** Runs after the task row exists and BEFORE the job is enqueued. Anything a
    *  step's detect() must already see belongs here: once the job is on the
    *  queue the worker can pick it up immediately, and it does. */
@@ -35,6 +40,7 @@ export async function spawnPlanTask(args: {
       description: args.description ?? null,
       repositoryId: args.repositoryId,
       cliProviderId: args.cliProviderId,
+      ignoreSavedStepClis: args.ignoreSavedStepClis ?? false,
       metadata: args.metadata,
       autoContinue: true,
       status: 'created',
