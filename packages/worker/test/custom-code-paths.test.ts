@@ -94,6 +94,24 @@ describe('detectPaths: a Drupal site that ignores the custom/ convention', () =>
     ]);
   });
 
+  it('never scans the D7 core roots, stamped or not', async () => {
+    // Root `modules/` and `themes/` are CORE on Drupal 7 — which is what that framework's
+    // excludePaths already declare — so they are not extension locations to scan. Core
+    // unpacked from a release tarball carries drupal.org's `project` stamp (MEASURED on a
+    // live site: all 40 core modules and all 4 core themes), but core tracked from git
+    // carries none, and scanning there would then report 40 hand-written extensions.
+    const mk = async (rel: string, info: string) => {
+      await mkdir(path.join(repo, rel), { recursive: true });
+      await writeFile(path.join(repo, rel, `${path.basename(rel)}.info`), info);
+    };
+    await mk('modules/node', 'name = Node\npackage = Core\n');
+    await mk('themes/bartik', 'name = Bartik\n');
+    await mk('sites/all/modules/activit', 'name = Activit\n');
+
+    const paths = await detectPathsForTest(repo, 'drupal7');
+    expect(paths.customCodePaths.include).toEqual(['sites/all/modules/activit/']);
+  });
+
   it('and that include then beats the bare modules/ exclude', async () => {
     // The whole point: `modules/` matches anywhere, so before the specificity rule the
     // site's own module could never be repo-own.
@@ -245,6 +263,17 @@ describe('detectStack: WordPress is found by a file WordPress ships', () => {
     await writeFile(path.join(repo, 'web/wp-includes/version.php'), '<?php');
     const stack = await detectStackForTest(repo, { runtimeVersions: {} } as never);
     expect(stack.framework).toBe('wordpress');
+  });
+
+  it('still detects a composer-managed site that downloads core at deploy', async () => {
+    // The mirror of the case above: bedrock and friends track a root `wp-config.php` and
+    // pull core in with composer, so no `wp-includes/` is ever committed. The two markers
+    // are absent on different projects, so the config file stays as a fallback.
+    await writeFile(path.join(repo, 'wp-config.php'), '<?php');
+    await writeFile(path.join(repo, 'composer.json'), '{"require":{"roots/wordpress":"*"}}');
+    const stack = await detectStackForTest(repo, { runtimeVersions: {} } as never);
+    expect(stack.framework).toBe('wordpress');
+    expect(stack.language).toBe('php');
   });
 
   it('does not call an arbitrary PHP project WordPress', async () => {

@@ -493,7 +493,7 @@ export const knowledgeQaResolveStep: StepDefinition<
     // The chown matters as much as the rm: the worker runs as ROOT while the sandboxed CLI
     // runs as uid 1000 — MEASURED, a plain mkdir left `.haive/kb-draft` root:root 0755 and
     // the agent could not write a single body into it.
-    prepare: async ({ ctx }) => {
+    prepareWorkspace: async ({ ctx }) => {
       await prepareAgentWritableDir(ctx.repoPath, KB_DRAFT_DIR, ctx.logger);
     },
     retry: { maxAttempts: 3, retryOn: (err) => err instanceof QaResolveParseError },

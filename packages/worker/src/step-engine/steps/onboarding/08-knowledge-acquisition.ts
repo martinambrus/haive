@@ -1466,7 +1466,12 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // The chown matters as much as the rm: the worker runs as ROOT while the sandboxed CLI
     // runs as uid 1000 — MEASURED, a plain mkdir left `.haive/kb-draft` root:root 0755 and
     // the agent could not write a single body into it.
-    prepare: async ({ ctx }) => {
+    //
+    // `prepareWorkspace` and not `prepare`, because the rm is DESTRUCTIVE and the directory
+    // is shared: `prepare` runs before the prompt is built and therefore before any
+    // reservation exists, so two concurrent advances can both reach it and the loser would
+    // clear the winner's bodies. This hook runs only once the invocation insert has won.
+    prepareWorkspace: async ({ ctx }) => {
       await prepareAgentWritableDir(ctx.repoPath, KB_DRAFT_DIR, ctx.logger);
     },
     timeoutMs: 90 * 60 * 1000, // 90 minutes — large repos need extensive tool_use scanning

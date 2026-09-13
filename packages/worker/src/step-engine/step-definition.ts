@@ -107,6 +107,15 @@ export interface LlmInvocationSpec {
    *  MCP can connect to it. Idempotent; awaited each dispatch (incl. loop
    *  passes). Skipped under HAIVE_TEST_BYPASS_LLM. */
   prepare?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void>;
+  /** Like `prepare`, but run only once THIS job has WON the dispatch — after the
+   *  cli_invocations insert the live-per-step unique index backs, before the job is
+   *  enqueued. Use for anything DESTRUCTIVE or exclusive: `08`/`09_2` empty the shared
+   *  `.haive/kb-draft/` here, and a job that loses the insert must never have touched it.
+   *  `prepare` cannot carry that work — it runs before the prompt is built (08a resolves
+   *  the app login there and buildPrompt renders it), so it is a check-before-act and two
+   *  concurrent advances can both pass its guard. A throw releases the reservation and
+   *  then fails the step. */
+  prepareWorkspace?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void>;
   /** Retry the LLM phase when apply() throws — for steps whose output is a strict
    *  JSON contract a flaky model intermittently misses (emits prose, an empty turn,
    *  or unparseable JSON). On an apply throw the runner re-enqueues a FRESH cli

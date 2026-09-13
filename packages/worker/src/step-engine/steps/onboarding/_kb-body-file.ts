@@ -108,13 +108,13 @@ async function resolveStagedFile(
   // A body older than the run that declared it is not that run's work. Body paths are
   // deterministic, so an attempt that declares a path and fails to write it would otherwise
   // publish whatever an EARLIER attempt left at the same name. `prepareAgentWritableDir` now
-  // empties the directory from `llm.prepare`, which the runner awaits before EVERY dispatch,
-  // so a re-dispatch that skips detect starts from nothing too — MEASURED on cbf0be06, where
-  // it did not: 14 bodies from an attempt killed by a worker restart were still on disk when
-  // its replacement began, and only the agent happening to rewrite every path it declared
-  // kept stale content out of the knowledge base. This check is the backstop for that, kept
-  // because a future dispatch path that forgets the hook must fail loudly rather than
-  // silently publish a body no agent wrote in this run.
+  // empties the directory from `llm.prepareWorkspace`, which the runner awaits on every
+  // dispatch it WINS, so a re-dispatch that skips detect starts from nothing too — MEASURED
+  // on cbf0be06, where it did not: 14 bodies from an attempt killed by a worker restart were
+  // still on disk when its replacement began, and only the agent happening to rewrite every
+  // path it declared kept stale content out of the knowledge base. This check is the backstop
+  // for that, kept because a future dispatch path that forgets the hook must fail loudly
+  // rather than silently publish a body no agent wrote in this run.
   if (notBefore && st.mtimeMs < notBefore.getTime() - STALE_BODY_GRACE_MS) {
     throw new KbBodyPathError(
       `bodyPath predates this run — left by an earlier attempt: ${declared}`,

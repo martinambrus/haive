@@ -678,16 +678,13 @@ async function resolveLlmPhase(
   // runner's headed browser so chrome-devtools MCP can connect). Idempotent;
   // a throw here fails the step like any dispatch error.
   //
-  // Re-check the dispatch race BEFORE running it. The hook is destructive for the
-  // staged-body steps — `prepareAgentWritableDir` EMPTIES `.haive/kb-draft/` — and the
-  // losing job of a concurrent advance would otherwise delete the bodies the winner's agent
-  // is writing. It cannot move to after the insert instead: 08a's hook resolves the app
-  // login and writes it onto `detected`, which `buildPrompt` (below) renders, so an agent
-  // dispatched before it ran would be told the browser's login state was never attempted.
-  // The same guard runs again immediately before the insert, where it also covers the
-  // window this one leaves open; here it is what stops a job that arrives after the winner
-  // already parked the step from doing any of this work at all. Only paid for by a step
-  // that declares the hook.
+  // Re-check the dispatch race before running it. This is a CHEAP guard, not a correct
+  // one — two advances that reach it before either inserts both pass — so nothing
+  // destructive or exclusive may live in this hook; that work belongs in
+  // `prepareWorkspace`, past the insert. What it does buy is real: the hooks here boot a
+  // DDEV runner, a headed browser desktop and an app login, and 08a's writes its outcome
+  // onto `detected`, so a job that arrives after the winner already parked the step should
+  // do none of it. Only paid for by a step that declares the hook.
   if (llmSpec.prepare) {
     if (await hasLiveInvocation(db, current.id)) {
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
@@ -847,6 +844,27 @@ async function resolveLlmPhase(
   }
   const invRow = inserted[0];
   if (!invRow) throw new Error('failed to insert cli_invocations row');
+  // Setup that must not run unless THIS job won. The insert above IS the reservation — the
+  // live-per-step unique index makes it atomic where a `hasLiveInvocation` read cannot be —
+  // so everything destructive belongs on this side of it. `prepare` cannot: it runs before
+  // the prompt is built because 08a resolves the app login there and `buildPrompt` renders
+  // it, which leaves it a check-before-act two concurrent advances can both pass.
+  //
+  // A throw RELEASES the reservation before propagating. The row is live by
+  // `hasLiveInvocation`'s definition and nothing has been enqueued that would ever end it,
+  // so leaving it would park the step for good; superseded is the same release the orphan
+  // re-dispatch above performs.
+  if (llmSpec.prepareWorkspace) {
+    try {
+      await llmSpec.prepareWorkspace({ ctx, detected, formValues: formValues ?? {} });
+    } catch (err) {
+      await db
+        .update(schema.cliInvocations)
+        .set({ supersededAt: new Date() })
+        .where(eq(schema.cliInvocations.id, invRow.id));
+      throw err;
+    }
+  }
   await params.deps.enqueueCliInvocation({
     invocationId: invRow.id,
     taskId: params.taskId,

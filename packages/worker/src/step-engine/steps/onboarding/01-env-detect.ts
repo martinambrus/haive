@@ -546,13 +546,24 @@ async function detectStack(
   // classified `general` — losing the framework's whole exclude list and custom-path
   // handling — after the LLM pass failed. `06a-db-migrate` already settled on this marker
   // for the same reason; see its note on markers having to be TRACKED files.
-  for (const root of DOCROOT_CANDIDATES) {
-    const rel = root ? `${root}/wp-includes/version.php` : 'wp-includes/version.php';
-    if (await pathExists(path.join(repoPath, rel))) {
-      framework = 'wordpress';
-      language = 'php';
-      break;
+  //
+  // `wp-config.php` is kept as a FALLBACK rather than replaced, because the two markers are
+  // absent on different projects: a plain install gitignores the config and tracks core,
+  // while a composer-managed one (bedrock and friends) tracks a root config and DOWNLOADS
+  // core at deploy, so it ships no `wp-includes/` at all. Dropping it outright turned that
+  // second layout into `general` — and `paths` is computed from the framework in the same
+  // pass, so a later LLM correction does not get the exclude list or the extension scan
+  // back. Ordered strong-marker-first: a repo carrying both is WordPress either way.
+  for (const marker of ['wp-includes/version.php', 'wp-config.php']) {
+    for (const root of DOCROOT_CANDIDATES) {
+      const rel = root ? `${root}/${marker}` : marker;
+      if (await pathExists(path.join(repoPath, rel))) {
+        framework = 'wordpress';
+        language = 'php';
+        break;
+      }
     }
+    if (framework === 'wordpress') break;
   }
 
   // Not every framework has a manifest to be named in. Drupal 7's core ships no
@@ -764,12 +775,32 @@ async function detectWordPressCustomPaths(repoPath: string): Promise<CustomPathS
   return null;
 }
 
-/** Parents Drupal keeps modules and themes under, across docroots and layouts. */
-const DRUPAL_EXTENSION_PARENTS = DOCROOT_CANDIDATES.flatMap((root) =>
-  ['modules', 'themes', 'sites/all/modules', 'sites/all/themes'].map((p) =>
-    root ? `${root}/${p}` : p,
-  ),
-);
+/** Parents Drupal keeps modules and themes under, and they differ by MAJOR.
+ *
+ *  D7 separates core from everything else by LOCATION: root `modules/`, `themes/` and
+ *  `profiles/` are core, and contrib and custom live under `sites/`. That is already what
+ *  `FRAMEWORK_PATTERNS.drupal7.excludePaths` declares, and scanning the core roots would
+ *  contradict it — a core tree whose `.info` files carry no drupal.org packaging stamp
+ *  (core tracked from git rather than unpacked from a release tarball) reads as 40
+ *  hand-written extensions, and the deep include paths then outrank the broad core exclude
+ *  in `isRepoOwnPath`. MEASURED on a live tarball-installed D7, all 40 core modules and all
+ *  4 core themes ARE stamped, so that install was never affected; the stamp is a property
+ *  of how core was OBTAINED, not of Drupal, which is why location decides instead.
+ *
+ *  D8+ has the opposite layout — core lives under `core/` and the root parents hold
+ *  contrib and custom — so there they are exactly the right place to look. */
+const DRUPAL_EXTENSION_PARENTS_BY_MAJOR = {
+  drupal7: ['sites/all/modules', 'sites/all/themes'],
+  drupal: ['modules', 'themes'],
+} as const;
+
+function drupalExtensionParents(framework: FrameworkName): string[] {
+  const bases =
+    framework === 'drupal7'
+      ? DRUPAL_EXTENSION_PARENTS_BY_MAJOR.drupal7
+      : DRUPAL_EXTENSION_PARENTS_BY_MAJOR.drupal;
+  return DOCROOT_CANDIDATES.flatMap((root) => bases.map((p) => (root ? `${root}/${p}` : p)));
+}
 
 /** Directories under those parents that this site WROTE, rather than installed.
  *
@@ -782,9 +813,12 @@ const DRUPAL_EXTENSION_PARENTS = DOCROOT_CANDIDATES.flatMap((root) =>
  *
  *  A directory with no info file at all is NOT claimed: that is how `modules/contrib` and
  *  other grouping dirs look, and guessing there would re-introduce the problem. */
-async function detectDrupalCustomPaths(repoPath: string): Promise<CustomPathScan> {
+async function detectDrupalCustomPaths(
+  repoPath: string,
+  framework: FrameworkName,
+): Promise<CustomPathScan> {
   const found: string[] = [];
-  for (const parent of DRUPAL_EXTENSION_PARENTS) {
+  for (const parent of drupalExtensionParents(framework)) {
     let entries: Dirent[];
     try {
       entries = await readdir(path.join(repoPath, parent), { withFileTypes: true });
@@ -850,7 +884,7 @@ async function detectPaths(repoPath: string, framework: FrameworkName): Promise<
   // `null` means nothing was determined and the convention still gets its chance; an empty
   // ARRAY is a determination that this project has no custom code of that kind.
   const scan: CustomPathScan | null = framework.startsWith('drupal')
-    ? await detectDrupalCustomPaths(repoPath)
+    ? await detectDrupalCustomPaths(repoPath, framework)
     : framework === 'wordpress'
       ? await detectWordPressCustomPaths(repoPath)
       : null;

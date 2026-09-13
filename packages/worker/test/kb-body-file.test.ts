@@ -418,9 +418,14 @@ describe('08 form tolerates a staged body', () => {
 
 // The clear used to live in detect(), which a human retry re-runs but a re-dispatch does
 // not: `resolveLlmPhase` reaches its "no invocation exists yet" branch after an orphaned
-// invocation is superseded, and that branch awaits `llm.prepare` without re-running detect.
-// MEASURED on task cbf0be06 — 14 bodies from the killed attempt were still on disk when its
+// invocation is superseded, and that branch dispatches without re-running detect. MEASURED
+// on task cbf0be06 — 14 bodies from the killed attempt were still on disk when its
 // replacement started one second later.
+//
+// It hangs off `prepareWorkspace` and NOT `prepare`, because the rm is destructive against a
+// shared directory: `prepare` runs before the prompt is built, so no reservation exists yet
+// and two concurrent advances can both pass its guard, while `prepareWorkspace` runs only
+// after this job's cli_invocations insert has won.
 describe('the draft dir is emptied per DISPATCH, not per detect', () => {
   let repo: string;
   beforeEach(async () => {
@@ -434,15 +439,21 @@ describe('the draft dir is emptied per DISPATCH, not per detect', () => {
     ['08-knowledge-acquisition', knowledgeAcquisitionStep],
     ['09_2-qa-resolve', knowledgeQaResolveStep],
   ] as const) {
-    it(`${name} clears an earlier attempt's bodies from llm.prepare`, async () => {
+    it(`${name} clears an earlier attempt's bodies from llm.prepareWorkspace`, async () => {
       const dir = path.join(repo, KB_DRAFT_DIR);
       await mkdir(dir, { recursive: true });
       await writeFile(path.join(dir, 'architecture.md'), '## Stale\n\nfrom a killed run\n');
 
-      expect(step.llm?.prepare, 'the hook the runner awaits before every dispatch').toBeTypeOf(
-        'function',
+      // On the winner-only hook, never the pre-prompt one — a destructive clear from
+      // `prepare` is reachable by a job that goes on to lose the dispatch race.
+      expect(step.llm?.prepare, 'destructive work must not sit on the pre-prompt hook').toBe(
+        undefined,
       );
-      await step.llm!.prepare!({
+      expect(
+        step.llm?.prepareWorkspace,
+        'the hook the runner awaits once the invocation insert has won',
+      ).toBeTypeOf('function');
+      await step.llm!.prepareWorkspace!({
         ctx: { repoPath: repo, logger: { warn: () => {} } },
         detected: {},
         formValues: {},
