@@ -181,16 +181,44 @@ export abstract class BaseCliAdapter {
     // wrapping quotes) get healed at spawn time without forcing the user
     // to re-save the CLI provider. Idempotent on already-normalized input.
     const stored = normalizeCliArgsArray(provider.cliArgs ?? []);
-    // Drop stored tokens that already appear in the adapter's `base` list
-    // — solves duplicate boolean flags like `--dangerously-skip-permissions`
-    // when the user (or the seeded provider config) added the same flag the
-    // adapter hardcodes. Paired flags (e.g. `--model glm-4.7`) survive because
-    // their value tokens differ; the CLI's own last-flag-wins semantics handle
-    // any leftover conflicts.
-    const baseSet = new Set(base);
-    const dedupedStored = stored.filter((tok) => !baseSet.has(tok));
-    return [...dedupedStored, ...base];
+    // Base goes last, so the CLI's last-flag-wins settles any flag both lists set.
+    return [...dropArgsAlreadyInBase(stored, base), ...base];
   }
+}
+
+const FLAG_TOKEN = /^--?[A-Za-z]/;
+
+/** Stored args minus what `base` already passes, judged by how base uses each flag: one it passes
+ *  alone goes as a duplicate boolean, one it passes with a value only as that exact pair. Never a
+ *  lone token — dropping a flag while keeping its value strands the value as a positional. */
+export function dropArgsAlreadyInBase(stored: string[], base: string[]): string[] {
+  const booleans = new Set<string>();
+  const valued = new Set<string>();
+  const pairs = new Set<string>();
+  for (let i = 0; i < base.length; i++) {
+    const tok = base[i]!;
+    if (!FLAG_TOKEN.test(tok)) continue;
+    const next = base[i + 1];
+    if (next === undefined || FLAG_TOKEN.test(next)) {
+      booleans.add(tok);
+    } else {
+      valued.add(tok);
+      pairs.add(JSON.stringify([tok, next]));
+    }
+  }
+  const kept: string[] = [];
+  for (let i = 0; i < stored.length; i++) {
+    const tok = stored[i]!;
+    if (booleans.has(tok)) continue;
+    const next = stored[i + 1];
+    if (valued.has(tok) && next !== undefined && !FLAG_TOKEN.test(next)) {
+      if (!pairs.has(JSON.stringify([tok, next]))) kept.push(tok, next);
+      i++;
+      continue;
+    }
+    kept.push(tok);
+  }
+  return kept;
 }
 
 export async function probeVersion(
