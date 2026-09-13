@@ -324,6 +324,7 @@ function buildCliSidePlan(
     const mcpBounded = withMcpSurface(
       ddevBounded,
       adapter.supportsMcp ? (req.mcpSurface ?? null) : null,
+      { noBuiltInTools: req.invokeOpts?.disableTools === true },
     );
     // Whether the app can actually be reached, and how. Same reason as the boundaries above:
     // handing an agent a URL without saying what can dial it asserts a capability the sandbox
