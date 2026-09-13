@@ -316,8 +316,13 @@ export function buildMcpConfigForCli(
   servers: McpServerSpec[],
   targetHome = '/home/claude',
   userServers: UserMcpServers = {},
+  /** Return the provider's config SHAPE even with nothing to wire. A `toolProfile: 'none'`
+   *  invocation needs the `path` and `delivery` of a config it is about to CLEAR, and the
+   *  volume-backed deliveries cannot be cleared without them. Callers wiring a real surface
+   *  leave this off, so `null` still means "this provider gets no MCP config". */
+  allowEmpty = false,
 ): McpConfigFile | null {
-  if (servers.length === 0 && Object.keys(userServers).length === 0) return null;
+  if (servers.length === 0 && Object.keys(userServers).length === 0 && !allowEmpty) return null;
 
   switch (cliProvider) {
     case 'claude-code':

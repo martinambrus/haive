@@ -169,6 +169,42 @@ async function resolveRunnerBrowserCdpUrl(taskId: string): Promise<string | unde
   return undefined;
 }
 
+/** Take a volume-backed MCP config back down to nothing, for `toolProfile: 'none'`.
+ *
+ *  Wiring nothing is not the same as leaving nothing wired. Only the claude-family `bind`
+ *  delivery is self-clearing, because its file is written per invocation; the other three
+ *  write INTO the per-task auth volume, which is destroyed with the TASK and not with the
+ *  invocation. So an earlier full-surface dispatch leaves its servers on disk and the CLI
+ *  still loads them, while this invocation's prompt states that nothing is wired — and
+ *  `00-model-health` is step index 0, so on gemini/codex/grok/antigravity that earlier
+ *  dispatch is the normal case rather than an edge one.
+ *
+ *  Each mode clears the way its writer allows: `cli-merge` already RECONCILES from its marker,
+ *  so an empty server list removes everything it added; gemini's merge is additive and needs
+ *  its `replace` mode; antigravity's file holds nothing but MCP servers, so an empty body is
+ *  the whole clear. Best-effort throughout, like the writers themselves. */
+async function clearVolumeBackedMcp(
+  taskId: string,
+  providerName: CliProviderName,
+  sandboxImage: string | null,
+): Promise<void> {
+  const config = buildMcpConfigForCli(providerName, [], SANDBOX_USER_HOME, {}, true);
+  if (!config) return; // amp wires no MCP at all, so there is nothing to clear
+  switch (config.delivery) {
+    case 'bind':
+      return; // per-invocation file; absent IS cleared
+    case 'volume-merge':
+      await mergeGeminiMcpIntoSettings(taskId, {}, undefined, { replace: true });
+      return;
+    case 'cli-merge':
+      await mergeCliMcpIntoTaskVolume(taskId, providerName, sandboxImage, []);
+      return;
+    case 'volume-write':
+      await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content);
+      return;
+  }
+}
+
 export async function resolveMcpExtraFiles(
   db: Database,
   taskId: string,
@@ -193,7 +229,10 @@ export async function resolveMcpExtraFiles(
   hasWorktree: boolean,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
-  if (profile === 'none') return empty;
+  if (profile === 'none') {
+    await clearVolumeBackedMcp(taskId, providerName, sandboxImage);
+    return empty;
+  }
   const ragOnly = profile === 'rag_only';
 
   // THE decision — shared with the dispatcher, which renders the same object into the

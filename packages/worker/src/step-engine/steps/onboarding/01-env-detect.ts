@@ -716,7 +716,20 @@ async function hasDistributionMarker(dir: string, header: string): Promise<boole
  *  Used only to REJECT. Anything unmarked is treated as the project's own, which is the
  *  safe direction: a wrongly-included directory keeps knowledge local, a wrongly-excluded
  *  one lets repo-private knowledge reach the shared KB. MEASURED across two live sites (71
- *  extensions): no custom code missed, 5 third-party extensions kept. */
+ *  extensions): no custom code missed, 5 third-party extensions kept.
+ *
+ *  KNOWN LIMIT, so nobody re-derives it: a bespoke plugin generated from the WordPress plugin
+ *  boilerplate carries a URI, a Text Domain AND a license, and this classifies it distributed.
+ *  No on-disk signal separates "an agency published nothing and wrote this for one client"
+ *  from "a vendor published this", and every candidate was measured against those 71: a
+ *  required `readme.txt` `Stable tag` loses 13 of ~60 correct rejections (every theme and most
+ *  commercial plugins ship none), and requiring the extension slug to appear in the URI loses
+ *  16. Both trade a rare leak for vendor directories reported to the knowledge miner as the
+ *  project's own code on EVERY WordPress repo, which is the failure `d50a18aa` fixed. The
+ *  residual exposure is narrowed, not covered, by 08's second promotion guard
+ *  (`bodyUsesRepoSymbol`), which scans the whole tree rather than these paths and so is
+ *  independent of this verdict — though its 4,000-file cap means a large WordPress repo can
+ *  exhaust it before reaching a bespoke plugin. */
 async function looksDistributed(dir: string, kind: 'themes' | 'plugins'): Promise<boolean> {
   const header = await wpExtensionHeader(dir);
   if (!/^\s*\*?\s*(?:Plugin|Theme) URI\s*:\s*https?:\/\/\S+/im.test(header)) return false;

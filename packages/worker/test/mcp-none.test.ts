@@ -1,7 +1,19 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { emptyMcpSurface } from '../src/sandbox/mcp-surface.js';
 import { resolveMcpExtraFiles } from '../src/queues/cli-exec/resolvers.js';
 import { envDetectStep } from '../src/step-engine/steps/onboarding/01-env-detect.js';
+import {
+  mergeCliMcpIntoTaskVolume,
+  mergeGeminiMcpIntoSettings,
+  writeMcpFileIntoTaskVolume,
+} from '../src/sandbox/task-auth-volume.js';
+
+vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/task-auth-volume.js')>()),
+  mergeGeminiMcpIntoSettings: vi.fn(async () => {}),
+  mergeCliMcpIntoTaskVolume: vi.fn(async () => {}),
+  writeMcpFileIntoTaskVolume: vi.fn(async () => {}),
+}));
 
 // MEASURED 2026-09-13 on muse (api.meta.ai): `01-env-detect` runs with `disableTools`, so
 // `--tools ''` strips the built-in `tool_search`, while the MCP surface it was handed
@@ -39,5 +51,65 @@ describe('toolProfile: none', () => {
   it('is declared by the step that disables built-in tools', () => {
     expect(envDetectStep.llm?.disableTools).toBe(true);
     expect(envDetectStep.llm?.toolProfile).toBe('none');
+  });
+});
+
+// Wiring nothing is not the same as leaving nothing wired. Only the claude-family `bind`
+// delivery is self-clearing, because its file is written per invocation; gemini, codex, grok
+// and antigravity write INTO the per-task auth volume, which dies with the TASK. So an earlier
+// full-surface dispatch in the same task — and `00-model-health` is index 0, so that is the
+// normal case — leaves its servers on disk for a `none` invocation whose prompt says none are
+// wired.
+describe('toolProfile: none clears a volume-backed surface', () => {
+  const clear = (provider: string) =>
+    resolveMcpExtraFiles(
+      null as never,
+      'task-1',
+      provider as never,
+      '/haive/workdir',
+      'img:tag',
+      'none',
+      false,
+    );
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it('touches no volume for a bind-delivery provider', async () => {
+    await clear('claude-code');
+    expect(mergeGeminiMcpIntoSettings).not.toHaveBeenCalled();
+    expect(mergeCliMcpIntoTaskVolume).not.toHaveBeenCalled();
+    expect(writeMcpFileIntoTaskVolume).not.toHaveBeenCalled();
+  });
+
+  it('replaces rather than merges for gemini, whose merge is additive', async () => {
+    await clear('gemini');
+    expect(mergeGeminiMcpIntoSettings).toHaveBeenCalledWith('task-1', {}, undefined, {
+      replace: true,
+    });
+  });
+
+  for (const provider of ['codex', 'grok']) {
+    it(`reconciles ${provider} to an empty server set`, async () => {
+      await clear(provider);
+      expect(mergeCliMcpIntoTaskVolume).toHaveBeenCalledWith('task-1', provider, 'img:tag', []);
+    });
+  }
+
+  it('writes an empty config file for antigravity', async () => {
+    await clear('antigravity');
+    expect(writeMcpFileIntoTaskVolume).toHaveBeenCalledTimes(1);
+    const [taskId, provider, filePath, content] = vi.mocked(writeMcpFileIntoTaskVolume).mock
+      .calls[0]!;
+    expect(taskId).toBe('task-1');
+    expect(provider).toBe('antigravity');
+    expect(filePath).toContain('mcp_config.json');
+    expect(JSON.parse(content as string)).toEqual({ mcpServers: {} });
+  });
+
+  it('does nothing for a provider that wires no MCP at all', async () => {
+    await clear('amp');
+    expect(mergeGeminiMcpIntoSettings).not.toHaveBeenCalled();
+    expect(mergeCliMcpIntoTaskVolume).not.toHaveBeenCalled();
+    expect(writeMcpFileIntoTaskVolume).not.toHaveBeenCalled();
   });
 });

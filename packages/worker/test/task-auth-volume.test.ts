@@ -661,6 +661,25 @@ describe('mergeGeminiMcpIntoSettings', () => {
     );
     expect(runner.runCalls).toHaveLength(2);
   });
+
+  it('replace mode runs on an EMPTY set and assigns instead of spreading', async () => {
+    // The clear a `toolProfile: 'none'` invocation needs. An additive merge can add a surface
+    // but never take one away, and the volume outlives the invocation.
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await mergeGeminiMcpIntoSettings('taskgem-0000', {}, runner, { replace: true });
+    expect(runner.runCalls).toHaveLength(1);
+    const script = runner.runCalls[0]!.cmd[2]!;
+    expect(script).toContain('cur.mcpServers = servers;');
+    expect(script).not.toContain('...(cur.mcpServers || {})');
+  });
+
+  it('an additive no-op does not record an identity that skips a later clear', async () => {
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await mergeGeminiMcpIntoSettings('taskgem-0000', {}, runner); // no-op, writes nothing
+    expect(runner.runCalls).toHaveLength(0);
+    await mergeGeminiMcpIntoSettings('taskgem-0000', {}, runner, { replace: true });
+    expect(runner.runCalls).toHaveLength(1);
+  });
 });
 
 describe('writeMcpFileIntoTaskVolume', () => {

@@ -543,20 +543,30 @@ async function seedRtkInTaskVolumeUnlocked(
  *  on-volume preserves the auth fields and any other keys (rtk hooks,
  *  folderTrust, etc) that earlier seed steps wrote.
  *
- *  No-op when servers is empty. Best-effort: failures are logged and the
- *  spawn proceeds — the user sees the MCP-related error from the CLI rather
- *  than a hard worker failure. */
+ *  No-op when servers is empty, UNLESS `replace` is set: the merge is additive, so it can add
+ *  a surface but never take one away, and a `toolProfile: 'none'` invocation needs exactly the
+ *  latter — the volume outlives the invocation, so an earlier full-surface dispatch in the same
+ *  task leaves its servers on disk. `replace` assigns `mcpServers` outright instead of spreading
+ *  onto it, and is what the clear passes. The sibling `mergeCliMcpIntoTaskVolume` needs no such
+ *  flag because it already RECONCILES from its marker.
+ *
+ *  Best-effort: failures are logged and the spawn proceeds — the user sees the MCP-related
+ *  error from the CLI rather than a hard worker failure. */
 export function mergeGeminiMcpIntoSettings(
   taskId: string,
   mcpServers: Record<string, unknown>,
   runner: DockerRunner = defaultDockerRunner,
+  opts: { replace?: boolean } = {},
 ): Promise<void> {
   const content = JSON.stringify(mcpServers);
+  const replace = opts.replace === true;
   return applyAuthPreparationOnce(
     geminiMcpMergeRuns,
     `${taskId}|gemini-mcp`,
-    contentKey(content),
-    () => mergeGeminiMcpIntoSettingsUnlocked(taskId, mcpServers, content, runner),
+    // The MODE is part of the identity: a clear and an additive no-op both carry `{}`, so a
+    // key on the content alone would let the recorded no-op skip a later clear.
+    contentKey(`${replace ? 'replace' : 'merge'}|${content}`),
+    () => mergeGeminiMcpIntoSettingsUnlocked(taskId, mcpServers, content, replace, runner),
   );
 }
 
@@ -564,9 +574,10 @@ async function mergeGeminiMcpIntoSettingsUnlocked(
   taskId: string,
   mcpServers: Record<string, unknown>,
   mcpJson: string,
+  replace: boolean,
   runner: DockerRunner,
 ): Promise<boolean> {
-  if (Object.keys(mcpServers).length === 0) return true;
+  if (Object.keys(mcpServers).length === 0 && !replace) return true;
   const meta = getCliProviderMetadata('gemini');
   // Index 1 is `~/.gemini` per shared catalog; skip if absent for some
   // reason (would mean the catalog drifted).
@@ -596,7 +607,7 @@ if (fs.existsSync(path)) {
 }
 const incoming = ${JSON.stringify(mcpJson)};
 const servers = JSON.parse(incoming);
-cur.mcpServers = { ...(cur.mcpServers || {}), ...servers };
+cur.mcpServers = ${replace ? 'servers' : '{ ...(cur.mcpServers || {}), ...servers }'};
 fs.writeFileSync(path, JSON.stringify(cur, null, 2));
 '
 chown 1000:1000 /vol/settings.json
@@ -618,7 +629,7 @@ chown 1000:1000 /vol/settings.json
     return false;
   }
   log.info(
-    { taskId, count: Object.keys(mcpServers).length },
+    { taskId, count: Object.keys(mcpServers).length, replace },
     'merged mcpServers into gemini settings.json',
   );
   return true;
