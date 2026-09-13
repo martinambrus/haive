@@ -232,6 +232,40 @@ describe('ensureTaskAuthVolumes', () => {
     clearTaskAuthPreparationState('task-iso');
   });
 
+  it('does not settle for a ready-but-stale volume when the remove is blocked', async () => {
+    // The in-use recovery was written for a HALF-BUILT volume: a sibling is mid-populate from
+    // the same source, so waiting for its ready marker is exactly right. A STALE volume
+    // already carries that marker, so the same wait returns true on its first poll and hands
+    // this invocation the credentials the user just replaced. The wait has to keep demanding
+    // freshness when freshness is what sent it there.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskbusy_codex_0';
+    let probes = 0;
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) => {
+        if (o.cmd[2]?.includes('/x/.haive-ready')) {
+          probes += 1;
+          // Still stale while the sibling holds it; fresh once it has been replaced.
+          const code = probes > 2 ? 0 : 2;
+          return { exitCode: code, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+        }
+        return { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+      },
+    });
+    runner.volumeRemove = async () => ({ ok: false, stderr: 'volume is in use', stdout: '' });
+
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-busy', runner);
+    // It waited rather than reusing on the first poll, and every wait probe carried the source.
+    expect(probes).toBeGreaterThan(1);
+    const waits = runner.runCalls.filter((c) => c.cmd[2]?.includes('/x/.haive-ready'));
+    expect(waits.every((c) => c.mounts?.some((m) => m.target === '/src'))).toBe(true);
+    // Reused only once it came back FRESH — never recreated behind a blocked remove.
+    expect(runner.createCalls).not.toContain(taskVol);
+    clearTaskAuthPreparationState('task-busy');
+  });
+
   it('compares against the source only while the source still exists', async () => {
     // A user volume that is GONE must never be compared against: it would fingerprint as
     // empty, read as "moved on", and the recreate would populate an EMPTY task volume —

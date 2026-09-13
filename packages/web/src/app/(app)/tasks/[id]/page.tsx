@@ -2033,7 +2033,6 @@ export default function TaskDetailPage() {
             providers={providers}
             summaryCliProviderId={task.summaryCliProviderId ?? null}
             summaryLlmEnabled={task.summaryLlmEnabled ?? true}
-            taskCliProviderId={task.cliProviderId ?? null}
             busy={summaryCliBusy}
             error={summaryCliError}
             onChange={changeSummaryCli}
@@ -2131,7 +2130,6 @@ function SummaryCliCard({
   providers,
   summaryCliProviderId,
   summaryLlmEnabled,
-  taskCliProviderId,
   busy,
   error,
   onChange,
@@ -2139,7 +2137,6 @@ function SummaryCliCard({
   providers: CliProvider[];
   summaryCliProviderId: string | null;
   summaryLlmEnabled: boolean;
-  taskCliProviderId: string | null;
   busy: boolean;
   error: string | null;
   onChange: (patch: { summaryCliProviderId?: string | null; summaryLlmEnabled?: boolean }) => void;
@@ -2148,8 +2145,6 @@ function SummaryCliCard({
   // the provider is still enabled, and resolveDispatch merely ORDERS a preferred provider
   // first — so a disabled pick would silently run the recap somewhere else.
   const usable = providers.filter((p) => p.enabled);
-  const inheritLabel =
-    providers.find((p) => p.id === taskCliProviderId)?.label ?? "the step's own CLI";
   return (
     <Card className="flex flex-col gap-3 p-3">
       <div className="flex flex-col gap-1">
@@ -2169,8 +2164,11 @@ function SummaryCliCard({
           onChange={(e) => onChange({ summaryCliProviderId: e.target.value || null })}
           className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {/* Empty value is a REAL choice — inherit the step's chain — not an unset placeholder. */}
-          <option value="">Inherit ({inheritLabel})</option>
+          {/* Empty value is a REAL choice — inherit the step's chain — not an unset placeholder.
+              Named generically and NOT after the task's own CLI: an inherited recap resolves
+              through resolvePreferredCli, where a saved per-step preference outranks
+              tasks.cli_provider_id, so no single provider name is true for every step. */}
+          <option value="">Inherit (each step&apos;s own CLI)</option>
           {usable.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}

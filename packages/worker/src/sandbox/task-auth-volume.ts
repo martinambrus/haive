@@ -349,7 +349,16 @@ async function ensureTaskAuthVolumesUnlocked(
         // which is what produced the EXIT -1. Wait for it to make the volume ready and
         // reuse it; only if it stays unready do we retry the remove (the sibling's
         // helper has exited by then) and recreate.
-        if (await waitForTaskVolumeReady(taskVol, runner)) {
+        // Keep demanding freshness when that is what sent us here: a stale volume already has
+        // its ready marker, so a readiness-only wait would succeed immediately and hand this
+        // invocation the very credentials the user just replaced.
+        if (
+          await waitForTaskVolumeReady(
+            taskVol,
+            runner,
+            readiness === 'source_moved' && userHasData ? userVol : null,
+          )
+        ) {
           continue;
         }
         removed = await removeVolumeWithRetry(taskVol, runner);
@@ -416,14 +425,24 @@ async function ensureTaskAuthVolumesUnlocked(
 /** Poll until the volume is ready or the wait elapses. A concurrent sibling agent
  *  (08c fan-out shares this per-task volume) may be mid-setup; wait for it rather than
  *  racing a remove against its mounted populate helper. */
-async function waitForTaskVolumeReady(taskVol: string, runner: DockerRunner): Promise<boolean> {
+async function waitForTaskVolumeReady(
+  taskVol: string,
+  runner: DockerRunner,
+  /** The source to keep demanding, or null to wait on readiness alone.
+   *
+   *  Which one is right depends on WHY the remove was attempted, and getting it wrong is how
+   *  a refreshed credential gets thrown away. Waiting on readiness is correct for a half-built
+   *  volume: a sibling is mid-populate from the same source, so its finished volume is exactly
+   *  what this caller wanted. It is WRONG for a stale one — that volume already carries a
+   *  `.haive-ready` marker, so the wait returns true on its first poll and the caller reuses
+   *  the expired credentials the refresh was supposed to replace. Passing the source keeps the
+   *  freshness requirement, and still lets a sibling that recreates the volume satisfy it. */
+  userVol: string | null,
+): Promise<boolean> {
   const deadline = Date.now() + VOLUME_READY_MAX_WAIT_MS;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, VOLUME_READY_POLL_MS));
-    // Readiness ONLY (no source argument): this waits on a CONCURRENT sibling's populate, and
-    // that sibling copies from the same source, so a freshness verdict here could only bounce
-    // the two of them against each other.
-    if ((await isTaskVolumeReady(taskVol, runner, null)) === 'ready') return true;
+    if ((await isTaskVolumeReady(taskVol, runner, userVol)) === 'ready') return true;
   }
   return false;
 }
