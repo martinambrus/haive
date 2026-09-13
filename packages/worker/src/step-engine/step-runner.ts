@@ -2760,11 +2760,29 @@ async function maybeEnqueueStepSummary(
           params.taskId,
           params.ignoreSavedStepClis ?? false,
         );
+    // This pass reads NOTHING. It compacts agent text that is already in its prompt into three
+    // sentences, so it gets neither MCP servers nor the CLI's own built-in file, search and
+    // shell tools — the same pair `01-env-detect` ships, which is the combination proven safe:
+    // `--tools ''` only ever 400'd where it stripped the `tool_search` that DEFERRED MCP tools
+    // need, and there are no MCP tools here to defer.
+    //
+    // Declared at DISPATCH and not only on the payload, because this is what the prompt
+    // advertises: without it the recap was told rag_search, the browser and the user's own
+    // servers were wired while cli-exec wired none of them. It also skips the npm pre-warm,
+    // which keys on this field and was spending a cold chrome-devtools fetch (MEASURED 111-146s,
+    // against a 240s budget) ahead of the recap's own 60s one. And it is what the fixed preamble
+    // costs that dominates this pass — MEASURED before the per-task setting existed, claude-code
+    // spent 33,945 tokens and 22s writing three sentences.
     const plan = await resolveTaskDispatch(db, params.taskId, {
       providers,
       preferredProviderId,
+      toolProfile: 'none',
       input: { kind: 'prompt', prompt, capabilities: [] },
-      invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
+      invokeOpts: {
+        cwd: params.workspacePath,
+        effortLevel: preferredEffort ?? undefined,
+        disableTools: true,
+      },
     });
     const invocation = plan.invocation;
     if (plan.mode === 'skip' || !invocation || invocation.kind !== 'cli') return;
@@ -2792,6 +2810,7 @@ async function maybeEnqueueStepSummary(
       userId: params.userId,
       cliProviderId: plan.providerId,
       kind: 'cli',
+      toolProfile: 'none',
       spec: invocation.spec,
       timeoutMs: STEP_SUMMARY_TIMEOUT_MS,
       purpose: 'step_summary',

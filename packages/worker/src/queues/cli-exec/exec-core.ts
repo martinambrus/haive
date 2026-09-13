@@ -420,13 +420,13 @@ export async function executeByKind(
       // and an --add-host pointing at a dead address is worse than none. Same split, and the
       // same reason, as the chrome-devtools browser-url probe.
       const appReach = payload.taskId ? await resolveAppReach(db, payload.taskId) : null;
-      // The step-summary pass reads NO tools — it compacts agent text into three sentences —
-      // and every volume-backed provider delivers MCP by writing into the per-task auth volume,
-      // which is shared with whatever step is running by then (the recap is unlinked from the
-      // step machine, so the task has already moved on). Resolving a surface for it would write
-      // a full one into the file the next step is about to read, and that next step may be the
-      // one that declares `toolProfile: 'none'`. Skipping costs the recap nothing and is also
-      // one less helper container and one less MCP boot per summarised step.
+      // The step-summary pass declares `toolProfile: 'none'`, which is what its PROMPT was
+      // built against, and that alone would skip the wiring and the pre-warm below. It is
+      // excluded by PURPOSE as well because it must not take the `'none'` branch's other half:
+      // that branch CLEARS a volume-backed config, and this invocation is unlinked from the
+      // step machine, so by the time it runs the task has moved on and the file it would clear
+      // belongs to the step now running. Skipping costs the recap nothing and saves a helper
+      // container and an MCP boot per summarised step.
       const mcp =
         providerRow && payload.purpose !== 'step_summary'
           ? await resolveMcpExtraFiles(
