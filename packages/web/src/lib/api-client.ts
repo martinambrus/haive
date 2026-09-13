@@ -7,6 +7,8 @@ import type { TaskToneFilter } from './task-tone';
 // A real runtime import, unlike the type-only ones above. `api-origin` has no imports of its own,
 // so it introduces no cycle — the same reasoning that lets `format-cost` be imported for its type.
 import { resolveApiOrigin, type RuntimeApiConfig } from './api-origin';
+// Runtime too, and for the same reason: `route-access` has no imports of its own.
+import { decideSessionEnd } from './route-access';
 
 declare global {
   interface Window {
@@ -43,6 +45,10 @@ export interface ApiError extends Error {
 }
 
 let refreshing: Promise<boolean> | null = null;
+// Set once this page has confirmed its session is over, so no later 401 asks the api again.
+let sessionEnded = false;
+
+const SESSION_RELOAD_STAMP_KEY = 'haive:session-reload-at';
 
 async function tryRefresh(): Promise<boolean> {
   try {
@@ -51,10 +57,47 @@ async function tryRefresh(): Promise<boolean> {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
     });
-    return res.ok;
+    if (res.ok) return true;
+    if (res.status !== 401) return false;
+    // Refused, but another tab may have just rotated the shared refresh cookie, and then the jar
+    // already holds a working pair. Only a refused access cookie as well means the session is over.
+    const me = await fetch(`${API_BASE}/auth/me`, { credentials: 'include' });
+    if (me.ok) return true;
+    if (me.status === 401) endSession();
+    return false;
   } catch {
     return false;
   }
+}
+
+function readReloadStamp(): number | null {
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_RELOAD_STAMP_KEY);
+    return raw === null ? null : Number(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Stop refreshing and hand the verdict to `(app)/layout.tsx`, which sends a dead session to the
+ *  login page and renders a live one again. */
+function endSession(): void {
+  if (typeof window === 'undefined') return;
+  const action = decideSessionEnd({
+    path: window.location.pathname,
+    lastReloadAt: readReloadStamp(),
+    now: Date.now(),
+  });
+  if (action === 'none') return;
+  sessionEnded = true;
+  if (action !== 'reload') return;
+  try {
+    window.sessionStorage.setItem(SESSION_RELOAD_STAMP_KEY, String(Date.now()));
+  } catch {
+    // Without the stamp a second reload could not be refused, so hold instead of risking a loop.
+    return;
+  }
+  window.location.reload();
 }
 
 /**
@@ -64,6 +107,7 @@ async function tryRefresh(): Promise<boolean> {
  * promise guarantees the 401-retry path and the keepalive timer never collide.
  */
 export function refreshSession(): Promise<boolean> {
+  if (sessionEnded) return Promise.resolve(false);
   if (!refreshing) {
     refreshing = tryRefresh().finally(() => {
       refreshing = null;

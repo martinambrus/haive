@@ -3,9 +3,12 @@ import {
   decideAdminAccess,
   decideForcedPasswordChange,
   decideRouteAccess,
+  decideSessionEnd,
   PASSWORD_CHANGE_PATH,
+  SESSION_RELOAD_COOLDOWN_MS,
   type ForcedPasswordRequest,
   type RouteRequest,
+  type SessionEndRequest,
 } from './route-access';
 
 function req(over: Partial<RouteRequest> = {}): RouteRequest {
@@ -160,5 +163,32 @@ describe('the admin console gate', () => {
   // Fails OPEN, same as its neighbour: a path we cannot identify might be the destination.
   it('continues when the path is unknown', () => {
     expect(decideAdminAccess({ path: null, role: 'user' })).toEqual({ action: 'continue' });
+  });
+});
+
+describe('a page whose session the api has refused', () => {
+  const at = (over: Partial<SessionEndRequest> = {}): SessionEndRequest => ({
+    path: '/repos',
+    lastReloadAt: null,
+    now: 1_000_000,
+    ...over,
+  });
+
+  it('reloads an app page, so the layout decides on the server', () => {
+    expect(decideSessionEnd(at())).toBe('reload');
+  });
+
+  it('leaves a public page alone', () => {
+    expect(decideSessionEnd(at({ path: '/login' }))).toBe('none');
+  });
+
+  it('holds instead of reloading again inside the cooldown', () => {
+    expect(decideSessionEnd(at({ lastReloadAt: 1_000_000 - 5_000 }))).toBe('hold');
+  });
+
+  it('reloads again once the cooldown has passed', () => {
+    expect(decideSessionEnd(at({ lastReloadAt: 1_000_000 - SESSION_RELOAD_COOLDOWN_MS }))).toBe(
+      'reload',
+    );
   });
 });

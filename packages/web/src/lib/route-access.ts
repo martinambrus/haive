@@ -54,6 +54,29 @@ export function decideRouteAccess(req: RouteRequest): RouteDecision {
   return { action: 'continue' };
 }
 
+/** How long a dead-session reload refuses the next one, so a page the server keeps rendering while
+ *  the api refuses it cannot reload in a loop. */
+export const SESSION_RELOAD_COOLDOWN_MS = 30_000;
+
+export interface SessionEndRequest {
+  path: string;
+  /** When this tab last reloaded for a dead session, if it has. */
+  lastReloadAt: number | null;
+  now: number;
+}
+
+/** `reload` hands the verdict to the layout's server-side check, `hold` stops asking without
+ *  reloading again, `none` leaves a public page alone — no session is expected there. */
+export type SessionEndAction = 'none' | 'reload' | 'hold';
+
+export function decideSessionEnd(req: SessionEndRequest): SessionEndAction {
+  if (PUBLIC_PATHS.has(req.path)) return 'none';
+  if (req.lastReloadAt !== null && req.now - req.lastReloadAt < SESSION_RELOAD_COOLDOWN_MS) {
+    return 'hold';
+  }
+  return 'reload';
+}
+
 /** Everything under the admin console. */
 export const ADMIN_PATH = '/admin';
 
