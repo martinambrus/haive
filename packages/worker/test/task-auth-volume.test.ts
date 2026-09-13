@@ -149,6 +149,71 @@ describe('ensureTaskAuthVolumes', () => {
     ).toBe(true);
   });
 
+  it('records the source fingerprint so a later reuse can tell the credentials moved', async () => {
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [userVol] });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-fp-1', runner);
+    const copy = runner.runCalls.find((c) => c.cmd[0] === 'bash')!.cmd[2]!;
+    expect(copy).toContain('> /dst/.haive-source');
+    // Recorded from the SOURCE and written LAST, so a copy that dies half way leaves no
+    // record and the next probe reads the volume as not ready rather than as fresh.
+    expect(copy.indexOf('> /dst/.haive-source')).toBeLessThan(
+      copy.indexOf('touch /dst/.haive-ready'),
+    );
+    expect(copy).toContain('find /src -type f');
+  });
+
+  it('recopies when the user re-authenticated after the task started', async () => {
+    // The per-task volume is otherwise a SNAPSHOT for the life of the task. MEASURED on
+    // 2026-09-13: six live tasks each held a different expired amp token while the user volume
+    // had a valid one, and every step-summary invocation failed `Session expired` with no way
+    // back short of deleting a volume by hand.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskstale_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) =>
+        o.cmd[2]?.includes('/x/.haive-ready')
+          ? { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-stale', runner);
+    expect(runner.removeCalls).toContain(taskVol);
+    expect(runner.createCalls).toContain(taskVol);
+    expect(runner.runCalls.some((c) => c.cmd[0] === 'bash')).toBe(true);
+  });
+
+  it('compares against the source only while the source still exists', async () => {
+    // A user volume that is GONE must never be compared against: it would fingerprint as
+    // empty, read as "moved on", and the recreate would populate an EMPTY task volume —
+    // destroying the only credentials the task still had.
+    const taskVol = 'haive_cli_auth_task_tasknosrc_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [taskVol], readyVolumes: [taskVol] });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-nosrc', runner);
+    const probe = runner.runCalls.find((c) => c.cmd[2]?.includes('/x/.haive-ready'))!;
+    expect(probe.mounts?.some((m) => m.target === '/src')).toBe(false);
+    expect(probe.cmd[2]).not.toContain('.haive-source');
+    // Reused, not wiped.
+    expect(runner.removeCalls).not.toContain(taskVol);
+    expect(runner.createCalls).not.toContain(taskVol);
+  });
+
+  it('mounts the source into the probe when it does exist', async () => {
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_tasksrc_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+    });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-src', runner);
+    const probe = runner.runCalls.find((c) => c.cmd[2]?.includes('/x/.haive-ready'))!;
+    expect(probe.mounts?.some((m) => m.source === userVol && m.target === '/src')).toBe(true);
+    // A volume populated before this existed carries no record and is read as FRESH, so a
+    // deploy does not invalidate every task in flight.
+    expect(probe.cmd[2]).toContain('if [ -n "$rec" ]; then');
+  });
+
   it('creates empty task volume when user volume absent (no copy)', async () => {
     const runner = makeRunner();
     await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-222', runner);

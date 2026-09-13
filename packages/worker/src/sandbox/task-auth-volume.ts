@@ -82,6 +82,36 @@ const log = logger.child({ module: 'task-auth-volume' });
 
 const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const READY_MARKER = '.haive-ready';
+/** Fingerprint of the USER volume this task's copy was taken from, written into the task
+ *  volume at populate time and re-checked on every reuse. Absent on a volume populated before
+ *  this existed, which is read as "fresh" — no backfill, same stance as every other marker. */
+const SOURCE_MARKER = '.haive-source';
+/** What the readiness probe concluded. `source_moved` is separated from `not_ready` because
+ *  the two are repaired the same way but mean different things, and only one of them is a
+ *  fault: a half-built volume versus credentials that have since been refreshed. */
+type VolumeReadiness = 'ready' | 'not_ready' | 'source_moved';
+
+/** Exit code from the readiness probe for a volume that IS ready but whose source has moved
+ *  on. Distinct from 1 (not ready) because the log lines differ and the distinction is the
+ *  whole point: one is a half-built volume, the other is stale credentials. */
+const VOLUME_SOURCE_MOVED_EXIT = 2;
+
+/** Emit a stable fingerprint of a mounted directory's contents.
+ *
+ *  name + size + mtime rather than a content hash: the copy is `cp -a`, which preserves all
+ *  three (VERIFIED on a live install — a task's copy carried its source's mtime to the
+ *  nanosecond), so the two sides agree without either reading a byte of a credential. Both
+ *  sides mount the source at the SAME target, so `%n` is stable too. `LC_ALL=C` because a
+ *  locale-dependent sort order would make the fingerprint host-dependent. */
+function sourceFingerprintSh(dir: string): string {
+  return (
+    `find ${dir} -type f ! -name '${READY_MARKER}' ! -name '${SOURCE_MARKER}' ` +
+    // `-exec ... +` and not `... \;`: this is a TS template literal, where a single-backslash
+    // escape does not survive, and a BARE `;` would read to the shell as a command separator
+    // that silently truncates the pipeline. `+` needs no escape at all.
+    `-exec stat -c '%n %s %Y' {} + 2>/dev/null | LC_ALL=C sort | md5sum | cut -c1-32`
+  );
+}
 const HELPER_TIMEOUT_MS = 60_000;
 const VOLUME_READY_POLL_MS = 1_500;
 // A concurrent sibling agent's populate helper finishes well within this; bounded so a
@@ -279,12 +309,23 @@ async function ensureTaskAuthVolumesUnlocked(
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
     const userVol = userVolumeForCtx(ctx, idx);
     const taskVol = cliAuthTaskVolumeName(taskId, ctx.providerName, idx);
+    // Resolved BEFORE the probe, because a source that no longer exists must not be compared
+    // against: it would fingerprint as empty, read as "moved on", and the recreate below would
+    // then populate an EMPTY volume — destroying the only credentials the task still had.
+    const userHasData = await runner.volumeExists(userVol);
 
     if (await runner.volumeExists(taskVol)) {
-      if (await isTaskVolumeReady(taskVol, runner)) {
+      const readiness = await isTaskVolumeReady(taskVol, runner, userHasData ? userVol : null);
+      if (readiness === 'ready') {
         continue;
       }
-      log.warn({ taskVol }, 'task auth volume exists but not ready, recreating');
+      if (readiness === 'source_moved') {
+        // Not a fault: the user re-authenticated after this task started. Recreated through
+        // exactly the same path a half-built volume takes, so there is one repair, not two.
+        log.info({ taskVol, userVol }, 'task auth credentials were refreshed, recopying');
+      } else {
+        log.warn({ taskVol }, 'task auth volume exists but not ready, recreating');
+      }
       let removed = await runner.volumeRemove(taskVol);
       if (!removed.ok && /in use/i.test(removed.stderr)) {
         // In use → a CONCURRENT sibling agent (08c fans out 2 agents that share this
@@ -311,7 +352,6 @@ async function ensureTaskAuthVolumesUnlocked(
       );
     }
 
-    const userHasData = await runner.volumeExists(userVol);
     const mounts: DockerVolumeMount[] = [{ source: taskVol, target: '/dst', readOnly: false }];
     if (userHasData) {
       mounts.push({ source: userVol, target: '/src', readOnly: true });
@@ -320,8 +360,12 @@ async function ensureTaskAuthVolumesUnlocked(
     // Docker creates the named-volume mountpoint owned by root. The CLI sandbox
     // runs as node (uid 1000), so we must chown the volume root (and any copied
     // contents) to 1000:1000 before the CLI can write into the mount.
+    // The fingerprint is recorded LAST and from the source, so a copy that died half way
+    // leaves no record and the next probe reads the volume as not ready rather than as fresh.
     const copyScript = userHasData
-      ? `cp -a /src/. /dst/ 2>/dev/null || true; chown -R 1000:1000 /dst; touch /dst/${READY_MARKER}`
+      ? `cp -a /src/. /dst/ 2>/dev/null || true; ` +
+        `${sourceFingerprintSh('/src')} > /dst/${SOURCE_MARKER}; ` +
+        `chown -R 1000:1000 /dst; touch /dst/${READY_MARKER}`
       : `chown 1000:1000 /dst; touch /dst/${READY_MARKER}`;
 
     const result = await runner.run({
@@ -354,7 +398,10 @@ async function waitForTaskVolumeReady(taskVol: string, runner: DockerRunner): Pr
   const deadline = Date.now() + VOLUME_READY_MAX_WAIT_MS;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, VOLUME_READY_POLL_MS));
-    if (await isTaskVolumeReady(taskVol, runner)) return true;
+    // Readiness ONLY (no source argument): this waits on a CONCURRENT sibling's populate, and
+    // that sibling copies from the same source, so a freshness verdict here could only bounce
+    // the two of them against each other.
+    if ((await isTaskVolumeReady(taskVol, runner, null)) === 'ready') return true;
   }
   return false;
 }
@@ -377,20 +424,55 @@ async function removeVolumeWithRetry(
   return last;
 }
 
-async function isTaskVolumeReady(taskVol: string, runner: DockerRunner): Promise<boolean> {
+async function isTaskVolumeReady(
+  taskVol: string,
+  runner: DockerRunner,
+  /** The volume this copy was taken from, when it still exists. Passing it turns the probe
+   *  into a freshness check as well; passing null keeps the old readiness-only behaviour.
+   *
+   *  NULL when the user volume is GONE, and that case must not recreate: a missing source
+   *  would fingerprint as empty, read as "moved on", and the recreate would then populate an
+   *  EMPTY task volume — deleting the only credentials the task still had. */
+  userVol: string | null,
+): Promise<VolumeReadiness> {
   // Verify both the readiness marker AND that the volume root is owned by the
   // sandbox user (1000). Early versions of ensureTaskAuthVolumes left the mount
   // root owned by root, which the CLI cannot write to. Treating those as stale
   // forces a recreate on first use.
+  //
+  // Then, when a source is given, compare the fingerprint recorded at populate time against
+  // the source's current one. The per-task volume is otherwise a SNAPSHOT for the life of the
+  // task, so a `cli login` performed after the task started reached new tasks only — MEASURED
+  // on 2026-09-13, six live tasks each held a different expired amp token while the user
+  // volume had a valid one, and every step-summary invocation failed `Session expired and
+  // could not be refreshed` with no way back short of deleting a volume by hand.
+  const checks = [
+    `test -f /x/${READY_MARKER} || exit 1`,
+    `[ "$(stat -c %u /x)" = "1000" ] || exit 1`,
+  ];
+  if (userVol) {
+    checks.push(
+      `rec=$(cat /x/${SOURCE_MARKER} 2>/dev/null || echo '')`,
+      // No record: populated before this existed. Read as fresh rather than recreated, so a
+      // deploy does not invalidate every task in flight.
+      `if [ -n "$rec" ]; then`,
+      `  cur=$(${sourceFingerprintSh('/src')})`,
+      `  [ "$rec" = "$cur" ] || exit ${VOLUME_SOURCE_MOVED_EXIT}`,
+      'fi',
+    );
+  }
+  const mounts: DockerVolumeMount[] = [{ source: taskVol, target: '/x', readOnly: true }];
+  if (userVol) mounts.push({ source: userVol, target: '/src', readOnly: true });
   const result = await runner.run({
     image: HELPER_IMAGE,
-    cmd: ['sh', '-c', `test -f /x/${READY_MARKER} && [ "$(stat -c %u /x)" = "1000" ]`],
-    mounts: [{ source: taskVol, target: '/x', readOnly: true }],
+    cmd: ['sh', '-c', checks.join('\n')],
+    mounts,
     entrypoint: '',
     user: 'root',
     timeoutMs: 15_000,
   });
-  return result.exitCode === 0;
+  if (result.exitCode === 0) return 'ready';
+  return result.exitCode === VOLUME_SOURCE_MOVED_EXIT ? 'source_moved' : 'not_ready';
 }
 
 /** True when at least one of the provider's per-path user auth volumes exists.
