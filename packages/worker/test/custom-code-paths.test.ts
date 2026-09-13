@@ -137,6 +137,17 @@ describe('detectPaths: docroot and composer installer-path variants', () => {
     expect(p.customCodePaths.include).toEqual(['web/modules/custom/']);
   });
 
+  it('keeps the convention alongside an extension the stamp scan found', async () => {
+    // The stamp scan sees only extensions sitting DIRECTLY under a parent, so a repo that has
+    // both an unstamped module beside contrib AND a populated `modules/custom/` is one it can
+    // only half answer. Treating its non-empty result as the whole answer dropped
+    // `modules/custom/` entirely, leaving the repo's own code outside every include.
+    await mk('modules/legacy_bridge/legacy_bridge.info.yml', info());
+    await mk('modules/custom/mine/mine.info.yml', info());
+    const p = await detectPathsForTest(repo, 'drupal');
+    expect(p.customCodePaths.include).toEqual(['modules/legacy_bridge/', 'modules/custom/']);
+  });
+
   it('falls to the packaging-stamp scan when composer drops custom beside contrib', async () => {
     // installer-paths `modules/{$name}`: no `custom/` dir to lean on, so the `.info.yml`
     // stamps are the only thing separating the site's own module from contrib.
@@ -153,9 +164,9 @@ describe('detectPaths: docroot and composer installer-path variants', () => {
 // bundled core themes were the project's own code.
 describe('detectPaths: WordPress extensions', () => {
   const vendor = (name: string) =>
-    `/*\nTheme Name: ${name}\nTheme URI: https://vendor.example/\n*/`;
+    `/*\nTheme Name: ${name}\nTheme URI: https://vendor.example/\nLicense: GPLv2 or later\n*/`;
   const child = (name: string) =>
-    `/*\nTheme Name: ${name}\nTheme URI: https://vendor.example/\nTemplate: kalium\n*/`;
+    `/*\nTheme Name: ${name}\nTheme URI: https://vendor.example/\nLicense: GPLv2 or later\nTemplate: kalium\n*/`;
   const bespokeTheme = (name: string) => `/*\nTheme Name: ${name}\nAuthor: In House\n*/`;
   const put = async (rel: string, body: string) => {
     await mkdir(path.join(repo, path.dirname(rel)), { recursive: true });
@@ -181,10 +192,29 @@ describe('detectPaths: WordPress extensions', () => {
     await put('wp-content/plugins/acme-login/readme.txt', 'Stable tag: 1.0.0\n');
     await put(
       'wp-content/plugins/contact-form-7/wp-contact-form-7.php',
-      '<?php\n/*\nPlugin Name: CF7\nPlugin URI: https://contactform7.com/\n*/',
+      '<?php\n/*\nPlugin Name: CF7\nPlugin URI: https://contactform7.com/\nText Domain: contact-form-7\n*/',
     );
     const p = await detectPathsForTest(repo, 'wordpress');
     expect(p.customCodePaths.include).toEqual(['wp-content/plugins/acme-login/']);
+  });
+
+  it('keeps an agency plugin that points its Plugin URI at the agency', async () => {
+    // A URI alone does not make an extension third-party: an agency writing for one client
+    // names its own site. What a PUBLISHED extension also carries is release machinery — an
+    // i18n text domain, a declared license, or the readme `Stable tag` wordpress.org requires
+    // — and a one-site plugin has no use for any of it. MEASURED across 71 extensions on two
+    // live sites, every one of the ~60 declaring a URI carries at least one, so demanding the
+    // pair costs no correct rejection.
+    await put(
+      'wp-content/plugins/client-portal/client-portal.php',
+      '<?php\n/*\nPlugin Name: Client Portal\nPlugin URI: https://agency.example/\nVersion: 1.0\nAuthor: Agency\n*/',
+    );
+    await put(
+      'wp-content/plugins/wordfence/wordfence.php',
+      '<?php\n/*\nPlugin Name: Wordfence\nPlugin URI: https://www.wordfence.com/\nLicense: GPLv3\n*/',
+    );
+    const p = await detectPathsForTest(repo, 'wordpress');
+    expect(p.customCodePaths.include).toEqual(['wp-content/plugins/client-portal/']);
   });
 
   it('reports an empty determination rather than naming the mixed parent', async () => {

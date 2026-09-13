@@ -665,28 +665,64 @@ async function wpExtensionHeader(dir: string): Promise<string> {
   return '';
 }
 
+/** A second distribution marker, needed because a URI alone is not one.
+ *
+ *  A published extension carries release machinery a one-site plugin has no use for: an i18n
+ *  `Text Domain`, a declared `License`, or the `readme.txt` `Stable tag` wordpress.org
+ *  requires of everything it hosts. A bespoke plugin's header is usually Name/URI/Description/
+ *  Version/Author and nothing else. MEASURED across 71 extensions on two live sites, every one
+ *  of the ~60 that declares a URI also carries at least one of these three, so requiring the
+ *  pair costs NO correct rejection while covering the plugin an agency publishes under its own
+ *  domain — the case a URI on its own gets wrong, and gets wrong in the leaking direction.
+ *
+ *  `Stable tag` on its OWN was tried first and rejected on measurement: a real custom plugin
+ *  ships one (`Stable tag: 1.0.0`), so as a sole marker it excluded exactly the code this
+ *  guard protects. As the second half of an AND it is harmless — that plugin declares no URI. */
+async function hasDistributionMarker(dir: string, header: string): Promise<boolean> {
+  if (/^\s*\*?\s*(?:Text Domain|License)\s*:\s*\S+/im.test(header)) return true;
+  for (const name of ['readme.txt', 'README.txt']) {
+    try {
+      const text = await readFile(path.join(dir, name), 'utf8');
+      if (/^\s*Stable tag\s*:\s*\S+/im.test(text)) return true;
+    } catch {
+      /* absent or unreadable — try the other casing */
+    }
+  }
+  return false;
+}
+
 /** Whether a theme or plugin came from a distributor rather than from this project.
  *
- *  A declared `Plugin URI`/`Theme URI` is the marker: somebody publishing an extension
- *  names where it lives, and a plugin written for one site has nowhere to point. The one
- *  exception is a CHILD THEME, which copies its parent's header wholesale — MEASURED, a
- *  site's own `kalium-child` carries `Theme URI: laborator.co` from the commercial parent,
- *  so the URI there says nothing about who wrote it. `Template:` is what makes it a child.
+ *  A declared `Plugin URI`/`Theme URI` is the first marker: somebody publishing an extension
+ *  names where it lives. It is not sufficient on its own — an agency writing for one client
+ *  points the URI at the agency — so a rejection also needs a `hasDistributionMarker`.
  *
- *  `readme.txt` + `Stable tag` was tried first and REJECTED on measurement: wordpress.org
- *  requires it of everything it hosts, but nothing stops a bespoke plugin shipping one, and
- *  a real custom plugin did — `Stable tag: 1.0.0` — which would have excluded exactly the
- *  code this guard exists to protect.
+ *  The one blanket exception is a CHILD THEME, which copies its parent's header wholesale —
+ *  MEASURED, a site's own `kalium-child` carries `Theme URI: laborator.co` from the commercial
+ *  parent, so the URI there says nothing about who wrote it. `Template:` is what makes it a
+ *  child.
  *
  *  Used only to REJECT. Anything unmarked is treated as the project's own, which is the
  *  safe direction: a wrongly-included directory keeps knowledge local, a wrongly-excluded
- *  one lets repo-private knowledge reach the shared KB. MEASURED across two live sites (70
+ *  one lets repo-private knowledge reach the shared KB. MEASURED across two live sites (71
  *  extensions): no custom code missed, 5 third-party extensions kept. */
 async function looksDistributed(dir: string, kind: 'themes' | 'plugins'): Promise<boolean> {
   const header = await wpExtensionHeader(dir);
   if (!/^\s*\*?\s*(?:Plugin|Theme) URI\s*:\s*https?:\/\/\S+/im.test(header)) return false;
   if (kind === 'themes' && /^\s*\*?\s*Template\s*:\s*\S+/im.test(header)) return false;
-  return true;
+  return hasDistributionMarker(dir, header);
+}
+
+/** What one framework-specific scan concluded about a repo's own code.
+ *
+ *  `exhaustive` decides whether the framework's CONVENTION still gets its turn afterwards,
+ *  and the two scans differ on it: a `wp-content` that was read has seen every theme and
+ *  plugin there is, while the Drupal walk only sees extensions sitting DIRECTLY under a
+ *  parent and is blind to the common `modules/custom/<name>` nesting. `null` from a scan is
+ *  the third state — nothing was determined at all. */
+interface CustomPathScan {
+  paths: string[];
+  exhaustive: boolean;
 }
 
 /** WordPress themes and plugins this project WROTE.
@@ -699,7 +735,7 @@ async function looksDistributed(dir: string, kind: 'themes' | 'plugins'): Promis
  *  Plugins are scanned too even though `wp-content/plugins/` is an excludePath, because a
  *  site's own plugin is the case that leaks: the include is one segment deeper, so
  *  `isRepoOwnPath`'s specificity rule lets it win over the broader exclude. */
-async function detectWordPressCustomPaths(repoPath: string): Promise<string[] | null> {
+async function detectWordPressCustomPaths(repoPath: string): Promise<CustomPathScan | null> {
   const found: string[] = [];
   let scanned = false;
   for (const root of DOCROOT_CANDIDATES) {
@@ -720,8 +756,10 @@ async function detectWordPressCustomPaths(repoPath: string): Promise<string[] | 
       }
     }
     // Scanning a real wp-content is conclusive even when it yields NOTHING: every extension
-    // came from a distributor. Returning [] here is a determination, not a shrug.
-    if (scanned) return found;
+    // came from a distributor. An empty `paths` here is a determination, not a shrug, which
+    // is what `exhaustive` carries — the convention `wp-content/themes/` must NOT be added
+    // back afterwards, or the parent of the core Twenty* themes is reported as custom code.
+    if (scanned) return { paths: found, exhaustive: true };
   }
   return null;
 }
@@ -744,7 +782,7 @@ const DRUPAL_EXTENSION_PARENTS = DOCROOT_CANDIDATES.flatMap((root) =>
  *
  *  A directory with no info file at all is NOT claimed: that is how `modules/contrib` and
  *  other grouping dirs look, and guessing there would re-introduce the problem. */
-async function detectDrupalCustomPaths(repoPath: string): Promise<string[] | null> {
+async function detectDrupalCustomPaths(repoPath: string): Promise<CustomPathScan> {
   const found: string[] = [];
   for (const parent of DRUPAL_EXTENSION_PARENTS) {
     let entries: Dirent[];
@@ -773,10 +811,12 @@ async function detectDrupalCustomPaths(repoPath: string): Promise<string[] | nul
       found.push(`${parent}/${entry.name}/`);
     }
   }
-  // Finding none is NOT a determination here, unlike the WordPress scan: the common D8
-  // layout nests every custom module one level deeper inside `modules/custom/`, where this
-  // walk sees a directory with no info file of its own. The convention still gets its turn.
-  return found.length > 0 ? found : null;
+  // Never exhaustive, and that holds even when this DID find something: the common D8 layout
+  // nests custom modules one level deeper inside `modules/custom/`, where this walk sees a
+  // directory carrying no info file of its own and claims nothing. A repo with both an
+  // unstamped extension directly under `modules/` and a populated `modules/custom/` is one
+  // scan that finds half the answer, so the convention is unioned in rather than skipped.
+  return { paths: found, exhaustive: false };
 }
 
 async function detectPaths(repoPath: string, framework: FrameworkName): Promise<PathsDetection> {
@@ -809,18 +849,18 @@ async function detectPaths(repoPath: string, framework: FrameworkName): Promise<
   // Real extensions first where we can read them; the convention only fills the gap.
   // `null` means nothing was determined and the convention still gets its chance; an empty
   // ARRAY is a determination that this project has no custom code of that kind.
-  const detected: string[] | null = framework.startsWith('drupal')
+  const scan: CustomPathScan | null = framework.startsWith('drupal')
     ? await detectDrupalCustomPaths(repoPath)
     : framework === 'wordpress'
       ? await detectWordPressCustomPaths(repoPath)
       : null;
-  const customPaths: string[] = detected ?? [];
-  for (const candidate of detected === null ? pattern.customPaths : []) {
+  const customPaths: string[] = scan ? [...scan.paths] : [];
+  for (const candidate of scan?.exhaustive ? [] : pattern.customPaths) {
     for (const root of DOCROOT_CANDIDATES) {
       const rel = root ? `${root}/${candidate}` : candidate;
       try {
         if ((await stat(path.join(repoPath, rel))).isDirectory()) {
-          customPaths.push(rel);
+          if (!customPaths.includes(rel)) customPaths.push(rel);
           break;
         }
       } catch {
