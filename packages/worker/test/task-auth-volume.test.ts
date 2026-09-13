@@ -352,6 +352,16 @@ describe('ensureTaskAuthVolumes', () => {
     // A volume populated before this existed carries no record and is read as FRESH, so a
     // deploy does not invalidate every task in flight.
     expect(probe.cmd[2]).toContain('if [ -n "$rec" ]; then');
+    // An EMPTY source never counts as "moved on". Mounting a named volume CREATES it when it
+    // is missing, so a sign-out landing between the caller's existence check and this run
+    // materialises an empty /src — and without the guard the recreate would replace the task's
+    // only credential snapshot with nothing.
+    expect(probe.cmd[2]).toContain('if [ -n "$(ls -A /src 2>/dev/null)" ]; then');
+    // Content, not `stat -c %Y`. MEASURED: rewriting a 10-byte token with another 10-byte
+    // token inside one second leaves size and whole-second mtime identical, so the stat form
+    // fingerprinted UNCHANGED and the refresh this exists for would never have fired.
+    expect(probe.cmd[2]).toContain('-exec md5sum {} +');
+    expect(probe.cmd[2]).not.toContain("stat -c '%n %s %Y'");
   });
 
   it('creates empty task volume when user volume absent (no copy)', async () => {

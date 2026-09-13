@@ -108,18 +108,24 @@ const VOLUME_SOURCE_MOVED_EXIT = 2;
 
 /** Emit a stable fingerprint of a mounted directory's contents.
  *
- *  name + size + mtime rather than a content hash: the copy is `cp -a`, which preserves all
- *  three (VERIFIED on a live install — a task's copy carried its source's mtime to the
- *  nanosecond), so the two sides agree without either reading a byte of a credential. Both
- *  sides mount the source at the SAME target, so `%n` is stable too. `LC_ALL=C` because a
- *  locale-dependent sort order would make the fingerprint host-dependent. */
+ *  Hashes path + CONTENT. The obvious cheaper form — name, size and mtime via `stat -c '%n %s
+ *  %Y'` — is what this had, and `%Y` is whole SECONDS: a credential rewritten in the same
+ *  second at the same length is the normal shape of a fixed-size token replacement, and it
+ *  fingerprinted identically, so the refresh this exists for would not fire. Subsecond `%y`
+ *  would close that particular hole; content closes the question. These are a handful of small
+ *  JSON files, the hash never leaves the helper container, and `cp -a` copies bytes, so the
+ *  two sides still agree by construction.
+ *
+ *  `md5sum` prints `<hash>  <path>`, which is why one pass yields both halves. Both sides mount
+ *  the source at the SAME target, so the paths line up; `LC_ALL=C` because a locale-dependent
+ *  sort order would make the fingerprint host-dependent. */
 function sourceFingerprintSh(dir: string): string {
   return (
     `find ${dir} -type f ! -name '${READY_MARKER}' ! -name '${SOURCE_MARKER}' ` +
     // `-exec ... +` and not `... \;`: this is a TS template literal, where a single-backslash
     // escape does not survive, and a BARE `;` would read to the shell as a command separator
     // that silently truncates the pipeline. `+` needs no escape at all.
-    `-exec stat -c '%n %s %Y' {} + 2>/dev/null | LC_ALL=C sort | md5sum | cut -c1-32`
+    `-exec md5sum {} + 2>/dev/null | LC_ALL=C sort | md5sum | cut -c1-32`
   );
 }
 const HELPER_TIMEOUT_MS = 60_000;
@@ -532,8 +538,16 @@ async function isTaskVolumeReady(
       // No record: populated before this existed. Read as fresh rather than recreated, so a
       // deploy does not invalidate every task in flight.
       `if [ -n "$rec" ]; then`,
-      `  cur=$(${sourceFingerprintSh('/src')})`,
-      `  [ "$rec" = "$cur" ] || exit ${VOLUME_SOURCE_MOVED_EXIT}`,
+      // An EMPTY source is never evidence that credentials moved on, and the guard has to be
+      // HERE rather than in the caller's existence check: mounting a named volume CREATES it
+      // when it is missing, so a sign-out landing between that check and this run materialises
+      // an empty `/src` that would fingerprint as "moved" — and the recreate would then replace
+      // the task's only credential snapshot with nothing. Reading it as unchanged keeps the
+      // snapshot, which is the same direction the caller's null-source case already takes.
+      `  if [ -n "$(ls -A /src 2>/dev/null)" ]; then`,
+      `    cur=$(${sourceFingerprintSh('/src')})`,
+      `    [ "$rec" = "$cur" ] || exit ${VOLUME_SOURCE_MOVED_EXIT}`,
+      '  fi',
       'fi',
     );
   }
