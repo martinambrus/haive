@@ -740,6 +740,13 @@ export interface Task {
    *  points at another linked bug fix. */
   parentTaskId?: string | null;
   cliProviderId: string | null;
+  /** Which CLI writes the per-step recap. NULL means INHERIT the step's own chain, which is
+   *  a real choice and not "unset" — see `summaryCliChoiceRecorded` server-side. Optional so
+   *  an older api renders as inherit. */
+  summaryCliProviderId?: string | null;
+  /** False skips the recap pass entirely: no prompt, no CLI, no ledger entry. Optional, and
+   *  absent reads as ON, which is the behaviour before the column existed. */
+  summaryLlmEnabled?: boolean;
   /** Every CLI provider the task's CURRENT step will actually spend, resolved server-side:
    *  an explicit per-step (or per-seat) preference wins, `cliProviderId` is only the
    *  fallback. The usage strip meters THESE — keying on the task column alone showed no

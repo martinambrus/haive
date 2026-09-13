@@ -322,6 +322,23 @@ export const setCliProviderRequestSchema = z.object({
 
 export type SetCliProviderRequest = z.infer<typeof setCliProviderRequestSchema>;
 
+/** Change which CLI writes the per-step recap, at any point in a task's life.
+ *
+ *  Both fields are optional and at least one is required, so a caller can repoint the
+ *  provider without touching the on/off switch and vice versa. `summaryCliProviderId: null`
+ *  is a real value meaning INHERIT the step's chain — distinct from omitting the field,
+ *  which leaves the current setting alone. */
+export const setSummaryCliRequestSchema = z
+  .object({
+    summaryCliProviderId: z.string().uuid().nullable().optional(),
+    summaryLlmEnabled: z.boolean().optional(),
+  })
+  .refine((d) => d.summaryCliProviderId !== undefined || d.summaryLlmEnabled !== undefined, {
+    message: 'summaryCliProviderId or summaryLlmEnabled is required',
+  });
+
+export type SetSummaryCliRequest = z.infer<typeof setSummaryCliRequestSchema>;
+
 export const renameTaskRequestSchema = z
   .object({
     title: z.string().trim().min(1).max(512).optional(),
