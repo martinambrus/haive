@@ -539,9 +539,20 @@ async function detectStack(
     language = 'ruby';
   }
 
-  if (await pathExists(path.join(repoPath, 'wp-config.php'))) {
-    framework = 'wordpress';
-    language = 'php';
+  // Keyed on a file WordPress SHIPS, not on one the site writes. `wp-config.php` holds the
+  // DB credentials and salts and is gitignored by essentially every WordPress project, so
+  // it is absent exactly when the deterministic path has to carry the detection. MEASURED
+  // on two live sites: one commits it and one does not, and the one that does not was
+  // classified `general` — losing the framework's whole exclude list and custom-path
+  // handling — after the LLM pass failed. `06a-db-migrate` already settled on this marker
+  // for the same reason; see its note on markers having to be TRACKED files.
+  for (const root of DOCROOT_CANDIDATES) {
+    const rel = root ? `${root}/wp-includes/version.php` : 'wp-includes/version.php';
+    if (await pathExists(path.join(repoPath, rel))) {
+      framework = 'wordpress';
+      language = 'php';
+      break;
+    }
   }
 
   // Not every framework has a manifest to be named in. Drupal 7's core ships no

@@ -2,7 +2,10 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { detectPathsForTest } from '../src/step-engine/steps/onboarding/01-env-detect.js';
+import {
+  detectPathsForTest,
+  detectStackForTest,
+} from '../src/step-engine/steps/onboarding/01-env-detect.js';
 import { repoOwnRef } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 
 // MEASURED across nine onboarding runs of one Drupal 7 repo — identical on claude-code,
@@ -178,5 +181,33 @@ describe('detectPaths: WordPress themes', () => {
     await writeFile(path.join(repo, 'web/wp-content/themes/mine/style.css'), '/* x */');
     const paths = await detectPathsForTest(repo, 'wordpress');
     expect(paths.customCodePaths.include).toEqual(['web/wp-content/themes/mine/']);
+  });
+});
+
+// MEASURED on two live WordPress sites: one commits `wp-config.php` and one does not, and
+// the one that does not was classified `general` once its LLM pass failed — losing the
+// framework's exclude list and custom-path handling entirely. `06a-db-migrate` had already
+// settled on the shipped marker for this same reason.
+describe('detectStack: WordPress is found by a file WordPress ships', () => {
+  it('detects a site that gitignores wp-config.php', async () => {
+    await mkdir(path.join(repo, 'wp-includes'), { recursive: true });
+    await writeFile(path.join(repo, 'wp-includes/version.php'), "<?php $wp_version = '6.8';");
+    await writeFile(path.join(repo, 'wp-config-sample.php'), '<?php');
+    const stack = await detectStackForTest(repo, { runtimeVersions: {} } as never);
+    expect(stack.framework).toBe('wordpress');
+    expect(stack.language).toBe('php');
+  });
+
+  it('detects it behind a docroot', async () => {
+    await mkdir(path.join(repo, 'web/wp-includes'), { recursive: true });
+    await writeFile(path.join(repo, 'web/wp-includes/version.php'), '<?php');
+    const stack = await detectStackForTest(repo, { runtimeVersions: {} } as never);
+    expect(stack.framework).toBe('wordpress');
+  });
+
+  it('does not call an arbitrary PHP project WordPress', async () => {
+    await writeFile(path.join(repo, 'index.php'), '<?php');
+    const stack = await detectStackForTest(repo, { runtimeVersions: {} } as never);
+    expect(stack.framework).not.toBe('wordpress');
   });
 });
