@@ -102,8 +102,10 @@ export class CodexAdapter extends BaseCliAdapter {
     // Same contract as the effort override: emit nothing when the provider has
     // no model set, so the CLI keeps whatever its own config selects. Until this
     // existed the stored model could not reach the run at all, which made the
-    // field look configurable while doing nothing.
-    const modelArgs = provider.model ? ['-m', provider.model] : [];
+    // field look configurable while doing nothing. The long form is the one
+    // requestedFromSpec reads: while this passed `-m`, not one codex exec run
+    // recorded the model it asked for (MEASURED, 0 of 624 on the dev install).
+    const modelArgs = provider.model ? ['--model', provider.model] : [];
     // Haive runs every CLI inside an isolated per-task Docker container, so
     // Codex's own bwrap/Landlock sandbox is both redundant and unable to
     // start: nested unprivileged user namespaces are blocked, so it fails

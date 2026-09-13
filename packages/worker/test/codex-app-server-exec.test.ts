@@ -180,6 +180,8 @@ describe('executeCliSpec on codex app-server', () => {
     expect(execSpec.stdinPrompt).toBe('do the work');
     expect(outcome.rawOutput).toBe('ANSWER FROM EXEC');
     expect(outcome.errorMessage).toBeNull();
+    // exec names no model on any event, so the one it asked for is read off its --model argv.
+    expect(outcome.modelIdentity?.requested).toBe('gpt-5.6-sol');
     expect(outcome.codexAppServer?.failure).toEqual({
       stage: 'spawn',
       detail: "error: unexpected argument '--json' found",

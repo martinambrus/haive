@@ -128,7 +128,7 @@ describe('codex steering transport', () => {
       'multi_agent_v2',
       '-c',
       'model_reasoning_effort="high"',
-      '-m',
+      '--model',
       'gpt-5.6-sol',
       '--skip-git-repo-check',
       'hello world',

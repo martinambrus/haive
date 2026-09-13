@@ -226,14 +226,14 @@ describe('adapter outputFormat declarations', () => {
     expect(spec.args[i + 1]).toBe('multi_agent_v2');
   });
 
-  it('codex passes a configured model through -m, and omits it when unset', () => {
+  it('codex passes a configured model through --model, and omits it when unset', () => {
     const adapter = cliAdapterRegistry.get('codex');
     const withModel = adapter.buildCliInvocation(
       makeProvider({ id: 'p-codex', name: 'codex', model: 'gpt-5.6-sol' }),
       'hello',
       opts,
     );
-    const i = withModel.args.indexOf('-m');
+    const i = withModel.args.indexOf('--model');
     expect(i).toBeGreaterThanOrEqual(0);
     expect(withModel.args[i + 1]).toBe('gpt-5.6-sol');
 
@@ -244,7 +244,7 @@ describe('adapter outputFormat declarations', () => {
       'hello',
       opts,
     );
-    expect(withoutModel.args).not.toContain('-m');
+    expect(withoutModel.args).not.toContain('--model');
   });
 
   it('gemini requests JSON output mode', () => {

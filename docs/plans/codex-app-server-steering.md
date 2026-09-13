@@ -81,7 +81,7 @@ nothing keys on an error's code or wording, only on success results and structur
 | today (`codex exec`) | app-server |
 |---|---|
 | `--dangerously-bypass-approvals-and-sandbox` | `approvalPolicy:"never"` + `sandboxPolicy:{type:"dangerFullAccess"}` |
-| `-m <model>` | `model` |
+| `--model <model>` | `model` |
 | `-c model_reasoning_effort=<e>` | `effort` |
 | `-C <dir>` | `cwd` (and `thread/start.cwd`) |
 | `--output-schema <file>` | `outputSchema` |

@@ -18,7 +18,8 @@ import type { CliCommandSpec } from '../../cli-adapters/types.js';
  *   gemini                                            stats.models keys
  *   antigravity                                       its --log-file, a LABEL
  *   codex app-server                                  thread/start model; model/rerouted target
- *   codex exec, amp                                   NOTHING (see below)
+ *   codex exec                                        NOTHING; its --model argv names `requested`
+ *   amp                                               NOTHING (see below)
  *
  * codex's `exec --json` carries no model on any typed event — verified against a
  * complete 3.4 MB successful run, not just a failed one. amp's init event reports
