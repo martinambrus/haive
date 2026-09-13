@@ -626,15 +626,18 @@ async function detectStack(
   };
 }
 
-/** Parents Drupal keeps modules and themes under, newest layout first. */
-const DRUPAL_EXTENSION_PARENTS = [
-  'web/modules',
-  'web/themes',
-  'modules',
-  'themes',
-  'sites/all/modules',
-  'sites/all/themes',
-] as const;
+/** Where a project may put its web root. A framework's `customPaths` are written relative
+ *  to the DOCROOT, and composer templates (`web/`) and Acquia (`docroot/`) both nest it, so
+ *  stat-ing the bare convention at the repo root reports "not present" for a layout where it
+ *  is present one level down. Empty string first: the common case is no nesting. */
+const DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html', 'public_html'] as const;
+
+/** Parents Drupal keeps modules and themes under, across docroots and layouts. */
+const DRUPAL_EXTENSION_PARENTS = DOCROOT_CANDIDATES.flatMap((root) =>
+  ['modules', 'themes', 'sites/all/modules', 'sites/all/themes'].map((p) =>
+    root ? `${root}/${p}` : p,
+  ),
+);
 
 /** Directories under those parents that this site WROTE, rather than installed.
  *
@@ -711,10 +714,16 @@ async function detectPaths(repoPath: string, framework: FrameworkName): Promise<
     ? await detectDrupalCustomPaths(repoPath)
     : [];
   for (const candidate of customPaths.length > 0 ? [] : pattern.customPaths) {
-    try {
-      if ((await stat(path.join(repoPath, candidate))).isDirectory()) customPaths.push(candidate);
-    } catch {
-      /* the convention does not apply to this repo */
+    for (const root of DOCROOT_CANDIDATES) {
+      const rel = root ? `${root}/${candidate}` : candidate;
+      try {
+        if ((await stat(path.join(repoPath, rel))).isDirectory()) {
+          customPaths.push(rel);
+          break;
+        }
+      } catch {
+        /* try the next docroot; none matching means the convention is not this repo's */
+      }
     }
   }
   return {

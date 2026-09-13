@@ -110,3 +110,36 @@ describe('detectPaths: a Drupal site that ignores the custom/ convention', () =>
     expect(ref).toBe('sites/all/modules/activit/activit.module');
   });
 });
+
+// A framework's customPaths are written relative to the DOCROOT. Composer templates nest it
+// under `web/` and Acquia under `docroot/`, so stat-ing the bare convention at the repo root
+// reports "not present" for a layout where it is present one level down.
+describe('detectPaths: docroot and composer installer-path variants', () => {
+  const info = (extra = '') => `name: X\ntype: module\n${extra}`;
+  const mk = async (rel: string, body: string) => {
+    await mkdir(path.join(repo, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(repo, rel), body);
+  };
+
+  it('finds the convention at the repo root when there is no docroot', async () => {
+    await mk('modules/custom/mine/mine.info.yml', info());
+    await mk('modules/contrib/token/token.info.yml', info("project: 'token'\n"));
+    const p = await detectPathsForTest(repo, 'drupal');
+    expect(p.customCodePaths.include).toEqual(['modules/custom/']);
+  });
+
+  it('finds the same convention nested under a web/ docroot', async () => {
+    await mk('web/modules/custom/mine/mine.info.yml', info());
+    const p = await detectPathsForTest(repo, 'drupal');
+    expect(p.customCodePaths.include).toEqual(['web/modules/custom/']);
+  });
+
+  it('falls to the packaging-stamp scan when composer drops custom beside contrib', async () => {
+    // installer-paths `modules/{$name}`: no `custom/` dir to lean on, so the `.info.yml`
+    // stamps are the only thing separating the site's own module from contrib.
+    await mk('modules/mymod/mymod.info.yml', info());
+    await mk('modules/token/token.info.yml', info("project: 'token'\n"));
+    const p = await detectPathsForTest(repo, 'drupal');
+    expect(p.customCodePaths.include).toEqual(['modules/mymod/']);
+  });
+});
