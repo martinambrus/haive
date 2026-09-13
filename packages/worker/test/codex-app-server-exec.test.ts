@@ -38,10 +38,10 @@ const provider = {
 const appServerSpec = () =>
   new CodexAdapter().buildCliInvocation(provider, 'do the work', { steeringMode: true });
 
-const sandboxResult = (exitCode: number | null, stdout: string) => ({
+const sandboxResult = (exitCode: number | null, stdout: string, stderr = '') => ({
   exitCode,
   stdout,
-  stderr: '',
+  stderr,
   durationMs: 1,
   timedOut: false,
   resolvedCommand: 'codex',
@@ -50,7 +50,11 @@ const sandboxResult = (exitCode: number | null, stdout: string) => ({
 
 /** A scripted app-server. Output is delivered asynchronously, as a real pipe does. */
 function appServer(
-  respond: (msg: Message, emit: (m: Message) => void, exit: (code: number | null) => void) => void,
+  respond: (
+    msg: Message,
+    emit: (m: Message) => void,
+    exit: (code: number | null, stderr?: string) => void,
+  ) => void,
 ) {
   return (spec: RunSpec) =>
     new Promise((resolve) => {
@@ -62,11 +66,11 @@ function appServer(
           stdout += line;
           spec.onStdoutChunk?.(line);
         });
-      const exit = (code: number | null) =>
+      const exit = (code: number | null, stderr = '') =>
         setImmediate(() => {
           if (done) return;
           done = true;
-          resolve(sandboxResult(code, stdout));
+          resolve(sandboxResult(code, stdout, stderr));
         });
       const stdin = {
         writable: true,
@@ -164,7 +168,9 @@ describe('executeCliSpec on codex app-server', () => {
 
   it('re-runs the same invocation on codex exec when the app-server never accepts the turn', async () => {
     runInSandbox
-      .mockImplementationOnce(appServer((_msg, _emit, exit) => exit(2)))
+      .mockImplementationOnce(
+        appServer((_msg, _emit, exit) => exit(2, "error: unexpected argument '--json' found\n")),
+      )
       .mockImplementationOnce(execRun('ANSWER FROM EXEC'));
     const outcome = await executeCliSpec(appServerSpec(), defaultDeps, 60_000);
     expect(runInSandbox).toHaveBeenCalledTimes(2);
@@ -174,8 +180,11 @@ describe('executeCliSpec on codex app-server', () => {
     expect(execSpec.stdinPrompt).toBe('do the work');
     expect(outcome.rawOutput).toBe('ANSWER FROM EXEC');
     expect(outcome.errorMessage).toBeNull();
-    expect(outcome.codexAppServer?.failure?.stage).toBe('initialize');
-    expect(outcome.streamLog).toContain('codex app-server unavailable at initialize');
+    expect(outcome.codexAppServer?.failure).toEqual({
+      stage: 'spawn',
+      detail: "error: unexpected argument '--json' found",
+    });
+    expect(outcome.streamLog).toContain('codex app-server unavailable at spawn');
   });
 
   it('fails a run whose accepted turn never completed, as a transient the step re-runs', async () => {
@@ -194,6 +203,18 @@ describe('executeCliSpec on codex app-server', () => {
     const outcome = await executeCliSpec(appServerSpec(), defaultDeps, 60_000);
     expect(runInSandbox).toHaveBeenCalledTimes(1);
     expect(outcome.codexAppServer?.failure).toBeNull();
+  });
+
+  it('records no verdict and re-runs nothing when Docker never started the container', async () => {
+    runInSandbox.mockImplementationOnce(() =>
+      Promise.resolve(
+        sandboxResult(125, '', 'docker: Error response from daemon: No such image\n'),
+      ),
+    );
+    const outcome = await executeCliSpec(appServerSpec(), defaultDeps, 60_000);
+    expect(runInSandbox).toHaveBeenCalledTimes(1);
+    expect(outcome.codexAppServer?.failure).toBeNull();
+    expect(outcome.errorMessage).toMatch(/125|No such image/);
   });
 
   it('reports a failed turn in exec wording, with no transport failure', async () => {

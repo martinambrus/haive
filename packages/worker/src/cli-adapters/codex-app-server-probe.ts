@@ -6,11 +6,14 @@ import { runInSandbox } from '../sandbox/sandbox-runner.js';
 import {
   CODEX_APP_SERVER_THREAD_POLICY,
   CODEX_APP_SERVER_TURN_POLICY,
+  DOCKER_RUN_FAILED_EXIT,
   codexAppServerInitializeParams,
   createJsonRpcLineClient,
   isRecord,
   readThreadStart,
   readTurnId,
+  spawnFailureDetail,
+  stderrTailDetail,
   type CodexAppServerStage,
 } from '../cli-executor/codex-app-server.js';
 import type { BaseCliAdapter } from './base-adapter.js';
@@ -51,10 +54,6 @@ const PROBE_TIMEOUT_MS = 30_000;
 const PROBE_EXIT_GRACE_MS = 15_000;
 const PROBE_PROMPT = 'Haive app-server probe. This turn is interrupted before it runs.';
 const PROBE_STEER_CLIENT_ID = 'app-server-probe-steer';
-/** `docker run`'s own exit code when the CONTAINER could not be created or started (daemon
- *  error, missing image) — a statement about Docker, not about codex. */
-const DOCKER_RUN_FAILED_EXIT = 125;
-const DETAIL_MAX_CHARS = 300;
 
 export type CodexAppServerProbeOutcome =
   | { kind: 'supported'; binaryVersion: string | null }
@@ -82,12 +81,6 @@ export type ProbeSpawn = (io: {
   signal: AbortSignal;
   timeoutMs: number;
 }) => Promise<ProbeProcessResult>;
-
-/** The tail of a process's stderr as display copy: codex logs with ANSI colour. */
-function tailDetail(text: string): string {
-  const clean = text.replace(/\u001b\[[0-9;]*m/g, '').trim();
-  return clean.length > DETAIL_MAX_CHARS ? `…${clean.slice(-DETAIL_MAX_CHARS)}` : clean;
-}
 
 export async function runCodexAppServerProbe(
   spawn: ProbeSpawn,
@@ -243,7 +236,7 @@ export async function runCodexAppServerProbe(
         kind: 'inconclusive',
         detail:
           processResult.error ??
-          (tailDetail(processResult.stderr) || 'docker could not start the probe container'),
+          (stderrTailDetail(processResult.stderr) || 'docker could not start the probe container'),
       };
     } else if (state.stage === 'spawn' || state.stage === 'initialize') {
       // The binary exited without answering `initialize`. A codex that has no app-server
@@ -251,9 +244,7 @@ export async function runCodexAppServerProbe(
       state.outcome = {
         kind: 'unsupported',
         stage: 'spawn',
-        detail:
-          tailDetail(processResult.stderr) ||
-          `exited with code ${processResult.exitCode ?? 'unknown'}`,
+        detail: spawnFailureDetail(processResult.stderr, processResult.exitCode),
         binaryVersion: null,
       };
     }

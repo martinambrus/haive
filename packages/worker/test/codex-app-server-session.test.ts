@@ -376,14 +376,26 @@ describe('createCodexAppServerSession transport failures', () => {
     expect(isPreTurnFailure(failure)).toBe(true);
   });
 
-  it('settles the pending request as a pre-turn failure when the process exits first', () => {
+  it('reports spawn, as the probe does, when the process exits before answering initialize', () => {
     const session = createCodexAppServerSession({ prompt: 'p', model: null, effort: null });
     const { w } = fakeStdin();
     session.attach(w as never);
     session.close();
     const failure = session.getTransportFailure();
-    expect(failure?.stage).toBe('initialize');
+    expect(failure).toEqual({
+      stage: 'spawn',
+      detail: 'the app-server exited before answering initialize',
+    });
     expect(isPreTurnFailure(failure)).toBe(true);
+  });
+
+  it('keeps the stage it reached when the process exits after answering initialize', () => {
+    const session = createCodexAppServerSession({ prompt: 'p', model: null, effort: null });
+    const { w } = fakeStdin();
+    session.attach(w as never);
+    session.onChunk(reply(1, {}));
+    session.close();
+    expect(session.getTransportFailure()?.stage).toBe('thread_start');
   });
 
   it('reports spawn when stdin was never handed over', () => {

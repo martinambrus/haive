@@ -57,6 +57,26 @@ export function isPreTurnFailure(failure: CodexAppServerFailure | null): boolean
   return failure !== null && PRE_TURN_STAGES.has(failure.stage);
 }
 
+/** `docker run`'s own exit code when the CONTAINER could not be created or started (daemon error,
+ *  missing image) — a statement about Docker, not about codex, so neither the probe nor a run turns
+ *  it into a verdict. */
+export const DOCKER_RUN_FAILED_EXIT = 125;
+
+const DETAIL_MAX_CHARS = 300;
+
+/** The tail of a process's stderr as display copy: codex logs with ANSI colour. */
+export function stderrTailDetail(text: string): string {
+  const clean = text.replace(/\u001b\[[0-9;]*m/g, '').trim();
+  return clean.length > DETAIL_MAX_CHARS ? `…${clean.slice(-DETAIL_MAX_CHARS)}` : clean;
+}
+
+/** Why a binary exited without answering `initialize`, which only its stderr can say: a codex with
+ *  no app-server subcommand, or one that rejects a flag, prints its usage error there. One wording
+ *  for the probe and for a run, so the admin list reads one failure the same way from either. */
+export function spawnFailureDetail(stderr: string, exitCode: number | null): string {
+  return stderrTailDetail(stderr) || `exited with code ${exitCode ?? 'unknown'}`;
+}
+
 export type JsonRpcOutcome = { ok: true; result: unknown } | { ok: false; detail: string };
 
 export interface JsonRpcLineClient {
@@ -309,6 +329,7 @@ export function createCodexAppServerSession(
   let turnStatus: string | null = null;
   let turnError: string | null = null;
   let handshakeFailure: CodexAppServerFailure | null = null;
+  let initializeAnswered = false;
   let serverRequestFailure: CodexAppServerFailure | null = null;
   let interruptWhenStarted = false;
   let requestedModel: string | null = null;
@@ -453,6 +474,7 @@ export function createCodexAppServerSession(
 
   const beginHandshake = (): void => {
     client.request('initialize', codexAppServerInitializeParams(), (init) => {
+      initializeAnswered = true;
       if (!init.ok) return failHandshake('initialize', init.detail);
       client.notify('initialized', {});
       client.request(
@@ -518,6 +540,11 @@ export function createCodexAppServerSession(
       failHandshake(stage, detail);
     },
     close(): void {
+      // A process that ended before answering `initialize` never ran an app-server that could take
+      // one. The probe records that as `spawn`, so a run does too.
+      if (client.isAttached() && !initializeAnswered) {
+        failHandshake('spawn', 'the app-server exited before answering initialize');
+      }
       client.close('the app-server exited');
     },
     isTurnAccepted(): boolean {

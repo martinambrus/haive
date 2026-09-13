@@ -33,7 +33,9 @@ import {
 } from '../../cli-executor/index.js';
 import {
   createCodexAppServerSession,
+  DOCKER_RUN_FAILED_EXIT,
   isPreTurnFailure,
+  spawnFailureDetail,
   type CodexAppServerSession,
 } from '../../cli-executor/codex-app-server.js';
 import { codexExecFallbackSpec } from '../../cli-adapters/codex.js';
@@ -846,7 +848,16 @@ export async function executeCliSpec(
         result.exitCode === null ||
         TERMINATION_EXIT_CODES.has(result.exitCode) ||
         isCliPreemptionFailure({ errorMessage: result.error ?? null }));
-    const failure = stoppedByHaive ? null : appServer.getTransportFailure();
+    // A container Docker never started says nothing about codex either — the probe reads that exit
+    // the same way — so a daemon hiccup cannot cost the task its steering.
+    const containerNeverStarted = result.exitCode === DOCKER_RUN_FAILED_EXIT;
+    const reported =
+      stoppedByHaive || containerNeverStarted ? null : appServer.getTransportFailure();
+    // A binary that exits before answering `initialize` says why only on stderr.
+    const failure =
+      reported?.stage === 'spawn'
+        ? { ...reported, detail: spawnFailureDetail(result.stderr ?? '', result.exitCode) }
+        : reported;
 
     // No turn was accepted, so the model did no work: re-run this same invocation on `codex exec`
     // instead of failing it. The failure still rides the outcome, so cli-exec records the verdict
