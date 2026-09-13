@@ -7,7 +7,6 @@ import {
   mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
   RTK_HELPER_INIT_FAILED_EXIT,
-  AUTH_COPY_SOURCE_VANISHED_EXIT,
   RTK_HELPER_MISSING_BINARY_EXIT,
   seedRtkInTaskVolume,
   userAuthVolumeExists,
@@ -374,37 +373,44 @@ describe('ensureTaskAuthVolumes', () => {
     expect(probe.cmd[2]).not.toContain('find /src -type f');
   });
 
-  it('refuses to mark a volume ready when the source vanished mid-copy', async () => {
-    // `handleSignOutJob` removes user auth volumes from the same worker, and a `-v` mount
-    // RECREATES a missing one — so without this the helper copies nothing over a task volume
-    // that has ALREADY been removed and then marks the empty result ready, leaving the task
-    // running for good against credentials that are not there. Checked inside the helper
-    // because the mount is what recreates the volume: re-testing from the worker first could
-    // only narrow the window.
+  it('treats an empty source as no source, whichever way it got there', async () => {
+    // Two arrivals, one rule. A declared auth path can be legitimately empty — gemini declares
+    // `~/.config/gemini` and `~/.gemini` and keeps its credential in the second, while the
+    // login flow creates volumes for both — so failing on an empty mount would leave that
+    // volume unready on EVERY retry and break the provider outright. A volume that vanished
+    // mid-run lands in the same state. The sentinel is what makes both self-healing: it can
+    // never equal a fingerprint, so the copy is redone the moment a credential exists.
     const userVol = 'haive_cli_auth_abc_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [userVol] });
+    await expect(
+      ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-emptysrc', runner),
+    ).resolves.toBeUndefined();
+    const copy = runner.runCalls.find((c) => c.cmd[0] === 'bash')!.cmd[2]!;
+    expect(copy).toContain('if [ -z "$(ls -A /src 2>/dev/null)" ]; then');
+    // The empty branch records the sentinel and still marks the volume ready.
+    expect(copy).toContain("printf '%s' none > /dst/.haive-source");
+    expect(copy).toContain('touch /dst/.haive-ready');
+    clearTaskAuthPreparationState('task-emptysrc');
+  });
+
+  it('does not discard a usable snapshot when the tracked credential is deleted', async () => {
+    // grok is documented to give up and DELETE auth.json. Present -> absent must not read as a
+    // refresh: replacing the task's still-usable snapshot with a source that has no credential
+    // at all destroys the only copy that still works. Absent -> present stays a refresh,
+    // because the record is then the sentinel and cannot equal a hash.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_taskdel_codex_0';
     const runner = makeRunner({
-      preExistingVolumes: [userVol],
-      runHandler: (o) =>
-        o.cmd[0] === 'bash'
-          ? {
-              exitCode: AUTH_COPY_SOURCE_VANISHED_EXIT,
-              stdout: '',
-              stderr: 'haive: auth source vanished before the copy',
-              durationMs: 1,
-              timedOut: false,
-            }
-          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
     });
-    await expect(ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-gone', runner)).rejects.toThrow(
-      /vanished before the copy/,
-    );
-    const copy = runner.runCalls.find((c) => c.cmd[0] === 'bash')!;
-    // The guard runs BEFORE anything is written, and the ready marker is on the far side of it.
-    expect(copy.cmd[2]).toContain(`exit ${AUTH_COPY_SOURCE_VANISHED_EXIT}`);
-    expect(copy.cmd[2]!.indexOf('ls -A /src')).toBeLessThan(
-      copy.cmd[2]!.indexOf('touch /dst/.haive-ready'),
-    );
-    clearTaskAuthPreparationState('task-gone');
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-del', runner);
+    const probe = runner.runCalls.find((c) => c.cmd[2]?.includes('/x/.haive-ready'))!.cmd[2]!;
+    expect(probe).toContain(`if [ "$cur" != 'absent' ]; then`);
+    // Guarding the comparison, not replacing it: a source that still has the credential is
+    // compared exactly as before, and a mismatch is still the source-moved exit.
+    expect(probe).toContain('exit 2');
+    clearTaskAuthPreparationState('task-del');
   });
 
   it('creates empty task volume when user volume absent (no copy)', async () => {

@@ -96,15 +96,7 @@ const SOURCE_MARKER = '.haive-source';
  *  switched to a subscription) would keep mounting the empty snapshot and keep failing. Four
  *  characters, where a real fingerprint is 32 hex, so the two can never collide. */
 const NO_SOURCE_SENTINEL = 'none';
-/** Distinct exit from the copy helper when a source was EXPECTED and `/src` turned out empty.
- *
- *  `handleSignOutJob` removes user auth volumes from the same worker, so one can vanish after
- *  the freshness probe and before this helper starts — and a `-v` mount RECREATES the missing
- *  volume, so the helper would otherwise copy nothing over a task volume that has already been
- *  removed and then mark the empty result ready. Refusing leaves `.haive-ready` unwritten, so
- *  the volume reads as not-ready and the next attempt rebuilds it properly instead of the task
- *  running for good against credentials that are not there. Exported for the test. */
-export const AUTH_COPY_SOURCE_VANISHED_EXIT = 3;
+
 /** What the readiness probe concluded. `source_moved` is separated from `not_ready` because
  *  the two are repaired the same way but mean different things, and only one of them is a
  *  fault: a half-built volume versus credentials that have since been refreshed. */
@@ -469,13 +461,21 @@ async function ensureTaskAuthVolumesUnlocked(
     // contents) to 1000:1000 before the CLI can write into the mount.
     // The fingerprint is recorded LAST and from the source, so a copy that died half way
     // leaves no record and the next probe reads the volume as not ready rather than as fresh.
+    // One rule, decided INSIDE the helper where the mount actually happens: an EMPTY source is
+    // no source. Both ways of arriving there want the same thing, and neither wants a failure.
+    //
+    // A declared auth path can be legitimately empty — gemini declares `~/.config/gemini` and
+    // `~/.gemini`, keeps its credential in the second, and the login flow creates volumes for
+    // both — so refusing on an empty mount would leave that volume unready on every retry and
+    // break the provider outright. And a volume that VANISHED mid-run (handleSignOutJob runs
+    // in the same worker, and a `-v` mount recreates a missing name) lands in exactly the same
+    // state. Recording the sentinel is what makes both self-healing: it can never equal a
+    // fingerprint, so the copy is redone the moment a credential is there to copy.
+    const emptyCopy =
+      `chown 1000:1000 /dst; printf '%s' ${NO_SOURCE_SENTINEL} > /dst/${SOURCE_MARKER}; ` +
+      `touch /dst/${READY_MARKER}`;
     const copyScript = userHasData
-      ? // Checked INSIDE the helper, where the mount actually happens: re-testing existence
-        // from the worker first could only narrow the window, because the mount itself is what
-        // recreates a vanished volume. The ready marker is never written on this path.
-        `if [ -z "$(ls -A /src 2>/dev/null)" ]; then ` +
-        `echo 'haive: auth source vanished before the copy' >&2; ` +
-        `exit ${AUTH_COPY_SOURCE_VANISHED_EXIT}; fi; ` +
+      ? `if [ -z "$(ls -A /src 2>/dev/null)" ]; then ${emptyCopy}; else ` +
         // Fingerprint BEFORE the copy. Hashing afterwards records what the source is NOW
         // against bytes that may already be older — a concurrent harvest or re-login landing
         // between the two would make every later probe see marker == source and accept the
@@ -484,9 +484,8 @@ async function ensureTaskAuthVolumesUnlocked(
         `fp=$(${sourceFingerprintSh('/src', credRelPath)}); ` +
         `cp -a /src/. /dst/ 2>/dev/null || true; ` +
         `printf '%s' "$fp" > /dst/${SOURCE_MARKER}; ` +
-        `chown -R 1000:1000 /dst; touch /dst/${READY_MARKER}`
-      : `chown 1000:1000 /dst; printf '%s' ${NO_SOURCE_SENTINEL} > /dst/${SOURCE_MARKER}; ` +
-        `touch /dst/${READY_MARKER}`;
+        `chown -R 1000:1000 /dst; touch /dst/${READY_MARKER}; fi`
+      : emptyCopy;
 
     const result = await runner.run({
       image: HELPER_IMAGE,
@@ -498,18 +497,12 @@ async function ensureTaskAuthVolumesUnlocked(
     });
 
     if (result.exitCode !== 0) {
-      const vanished = result.exitCode === AUTH_COPY_SOURCE_VANISHED_EXIT;
       log.warn(
         { taskVol, userVol, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
-        vanished
-          ? 'auth source vanished mid-copy (signed out?); leaving the task volume unready so ' +
-              'the next attempt rebuilds it'
-          : 'task auth volume copy helper exited non-zero',
+        'task auth volume copy helper exited non-zero',
       );
       throw new Error(
-        vanished
-          ? `Task auth source ${userVol} vanished before the copy into ${taskVol}`
-          : `Task auth volume copy failed for ${taskVol} (exit ${result.exitCode ?? 'unknown'})`,
+        `Task auth volume copy failed for ${taskVol} (exit ${result.exitCode ?? 'unknown'})`,
       );
     }
 
@@ -606,7 +599,14 @@ async function isTaskVolumeReady(
       // snapshot, which is the same direction the caller's null-source case already takes.
       `  if [ -n "$(ls -A /src 2>/dev/null)" ]; then`,
       `    cur=$(${sourceFingerprintSh('/src', credRelPath)})`,
-      `    [ "$rec" = "$cur" ] || exit ${VOLUME_SOURCE_MOVED_EXIT}`,
+      // Only a source that HAS the credential can say the credentials moved on. Present ->
+      // absent is not a refresh: grok is documented to give up and DELETE auth.json, and
+      // replacing a task's still-usable snapshot with a source that has no credential at all
+      // destroys the one copy that still works. Absent -> present is still a refresh, because
+      // `rec` is then the sentinel and cannot equal a hash — one condition, both directions.
+      `    if [ "$cur" != '${CREDENTIAL_ABSENT}' ]; then`,
+      `      [ "$rec" = "$cur" ] || exit ${VOLUME_SOURCE_MOVED_EXIT}`,
+      '    fi',
       '  fi',
       'fi',
     );
