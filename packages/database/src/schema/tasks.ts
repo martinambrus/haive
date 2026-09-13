@@ -172,7 +172,13 @@ export const tasks = pgTable(
       requested: string | null;
       served: string | null;
       billed: string[];
-      source: 'stream-json' | 'gemini-stats' | 'antigravity-log' | 'provider-config' | null;
+      source:
+        | 'stream-json'
+        | 'gemini-stats'
+        | 'antigravity-log'
+        | 'codex-app-server'
+        | 'provider-config'
+        | null;
       match: 'exact' | 'differs' | 'unknown';
     }>(),
     /** Durable record of the final workflow commit and the repo-relative paths it
@@ -395,6 +401,30 @@ export const tasks = pgTable(
     completedAt: timestamp('completed_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    /** Per-provider verdict on codex's experimental app-server transport for THIS task, keyed
+     *  by cli_providers.id. Written by the zero-token protocol probe on a provider's first
+     *  steerable dispatch and downgraded by a run that finds the transport broken; every later
+     *  dispatch moves a codex run onto app-server only while its entry is `supported` and still
+     *  current (`providerCliVersion` equals the provider's cli_version). On the task row because
+     *  a verdict must survive step resets, the same reason as modelIdentity. NULL = never
+     *  probed, which runs `codex exec`. Declared last so drizzle-kit push and the migration agree
+     *  on column order. Keep in sync with `CodexAppServerVerdict` in the worker's
+     *  cli-adapters/codex-app-server-verdict.ts — this package cannot import the worker.
+     *  Migration 0157. */
+    codexAppServer: jsonb('codex_app_server').$type<
+      Record<
+        string,
+        {
+          status: 'supported' | 'unsupported';
+          providerCliVersion: string | null;
+          binaryVersion: string | null;
+          stage: string | null;
+          detail: string | null;
+          source: 'probe' | 'runtime';
+          at: string;
+        }
+      >
+    >(),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),
@@ -858,7 +888,13 @@ export const cliInvocations = pgTable(
       requested: string | null;
       served: string | null;
       billed: string[];
-      source: 'stream-json' | 'gemini-stats' | 'antigravity-log' | 'provider-config' | null;
+      source:
+        | 'stream-json'
+        | 'gemini-stats'
+        | 'antigravity-log'
+        | 'codex-app-server'
+        | 'provider-config'
+        | null;
       match: 'exact' | 'differs' | 'unknown';
     }>(),
     /** The reasoning-effort level that actually reached the CLI, and where it came from.

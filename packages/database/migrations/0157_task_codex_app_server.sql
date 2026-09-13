@@ -1,0 +1,31 @@
+-- tasks.codex_app_server — whether codex's experimental app-server transport works for THIS task.
+--
+-- codex is steerable only through `codex app-server` (JSON-RPC over stdio, marked
+-- [experimental]); `codex exec` cannot take a message mid-run. Haive keeps exec as the default
+-- and moves a codex run onto app-server only after a zero-token protocol probe has proved that
+-- the provider's own binary answers every request Haive sends. That verdict has to outlive the
+-- dispatch that took it: every later step reads it instead of probing again, and a run that
+-- finds the transport broken writes `unsupported` so no later step tries it again. So it lives
+-- on the task row, which survives a Retry cascade, and not in a step's output, which
+-- _step-reset nulls — the same reasoning as model_identity.
+--
+-- One entry PER PROVIDER, keyed by cli_providers.id: per-step CLI preferences let one task run
+-- several codex providers, each its own image and binary, each probed on its first steerable
+-- dispatch. An entry records the provider's cli_version at probe time, so a version change
+-- re-probes instead of trusting a verdict about a different binary.
+--
+-- MEASURED on codex-cli 0.154.0 before this shipped: every protocol error is JSON-RPC -32600 —
+-- an unknown method, a malformed request and "no active turn to steer" alike — so the probe
+-- keys only on success responses and structural fields, never on an error code or its wording.
+--
+-- NULL means "never probed": every row written before this column existed, and every task that
+-- never dispatched a steerable codex run. Those run `codex exec`, which is what they did before,
+-- so there is no backfill.
+--
+-- Additive and idempotent, no FK, no index, nothing joins on it. Rollback: turn the admin switch
+-- off (no deploy — every new codex run is then `codex exec`), or revert the code, which leaves
+-- the column unwritten and unread; then optionally
+--   ALTER TABLE "tasks" DROP COLUMN IF EXISTS "codex_app_server";
+-- That statement stands alone.
+
+ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "codex_app_server" jsonb;
