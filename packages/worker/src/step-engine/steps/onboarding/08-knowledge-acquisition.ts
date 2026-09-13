@@ -1360,17 +1360,6 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     );
 
     const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
-    // Created here, not left to the agent's tool: if that tool does not create parents,
-    // every body write fails and the step silently produces nothing.
-    //
-    // And chowned to whatever owns the repo, because the worker runs as ROOT while the
-    // sandboxed CLI runs as uid 1000 — MEASURED, a plain mkdir left `.haive/kb-draft`
-    // root:root 0755 and the agent could not write a single body into it. `.haive/` has
-    // been root-owned since it was introduced and that was harmless while only Haive
-    // wrote there; this is the first thing to ask the AGENT for a file in it. Matching
-    // the repo root rather than hardcoding 1000 keeps it right wherever the uid differs.
-    await prepareAgentWritableDir(ctx.repoPath, KB_DRAFT_DIR, ctx.logger);
-
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
     const fileTree = await collectShortFileTree(ctx.repoPath, scopeExclude);
 
@@ -1435,6 +1424,21 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     requiredCapabilities: ['tool_use'],
     preForm: true,
     buildPrompt: buildKnowledgePrompt,
+    // Emptied and handed to the sandbox user before EVERY dispatch, not once per detect.
+    // Body paths are deterministic (`<id>.md`), so an attempt that declares a path and then
+    // fails to write it would read whatever an earlier attempt left at that name. Clearing
+    // in detect() closed that for a human RETRY (detect re-runs) but not for a re-dispatch:
+    // an invocation orphaned by a worker restart is superseded and re-dispatched through
+    // `resolveLlmPhase`'s "no invocation exists yet" branch, which never re-runs detect.
+    // MEASURED on task cbf0be06: 14 bodies written by the killed attempt were still on disk
+    // when its replacement started one second later.
+    //
+    // The chown matters as much as the rm: the worker runs as ROOT while the sandboxed CLI
+    // runs as uid 1000 — MEASURED, a plain mkdir left `.haive/kb-draft` root:root 0755 and
+    // the agent could not write a single body into it.
+    prepare: async ({ ctx }) => {
+      await prepareAgentWritableDir(ctx.repoPath, KB_DRAFT_DIR, ctx.logger);
+    },
     timeoutMs: 90 * 60 * 1000, // 90 minutes — large repos need extensive tool_use scanning
     retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
     // Form-aware: re-roll before the manual-topics form when the LLM produced output

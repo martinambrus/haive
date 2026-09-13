@@ -14,9 +14,11 @@ import {
   resolveKbBodyPath,
 } from '../src/step-engine/steps/onboarding/_kb-body-file.js';
 import {
+  knowledgeAcquisitionStep,
   parseKbEntries,
   parseKbUpdates,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
+import { knowledgeQaResolveStep } from '../src/step-engine/steps/onboarding/09_2-qa-resolve.js';
 
 // An entire knowledge base in one fenced JSON block hits the model's single-message
 // ceiling. MEASURED on a live repo: 4,083s and 378,008 output tokens to produce 135,433
@@ -411,5 +413,56 @@ describe('08 form tolerates a staged body', () => {
 
   it('falls back to zero rather than throwing', () => {
     expect(optionDetail({ id: 'arch' })).toBe(0);
+  });
+});
+
+// The clear used to live in detect(), which a human retry re-runs but a re-dispatch does
+// not: `resolveLlmPhase` reaches its "no invocation exists yet" branch after an orphaned
+// invocation is superseded, and that branch awaits `llm.prepare` without re-running detect.
+// MEASURED on task cbf0be06 — 14 bodies from the killed attempt were still on disk when its
+// replacement started one second later.
+describe('the draft dir is emptied per DISPATCH, not per detect', () => {
+  let repo: string;
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'haive-dispatch-'));
+  });
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true }).catch(() => {});
+  });
+
+  for (const [name, step] of [
+    ['08-knowledge-acquisition', knowledgeAcquisitionStep],
+    ['09_2-qa-resolve', knowledgeQaResolveStep],
+  ] as const) {
+    it(`${name} clears an earlier attempt's bodies from llm.prepare`, async () => {
+      const dir = path.join(repo, KB_DRAFT_DIR);
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, 'architecture.md'), '## Stale\n\nfrom a killed run\n');
+
+      expect(step.llm?.prepare, 'the hook the runner awaits before every dispatch').toBeTypeOf(
+        'function',
+      );
+      await step.llm!.prepare!({
+        ctx: { repoPath: repo, logger: { warn: () => {} } },
+        detected: {},
+        formValues: {},
+      } as never);
+
+      await expect(stat(path.join(dir, 'architecture.md'))).rejects.toThrow();
+      // The directory itself must survive, or the agent has nowhere to write.
+      expect((await stat(dir)).isDirectory()).toBe(true);
+    });
+  }
+
+  it('detect() no longer creates it, so nothing depends on that side effect', async () => {
+    const src08 = await readFile(
+      new URL('../src/step-engine/steps/onboarding/08-knowledge-acquisition.ts', import.meta.url),
+      'utf8',
+    );
+    const detectBody = src08.slice(
+      src08.indexOf('async detect('),
+      src08.indexOf('  llm: {', src08.indexOf('async detect(')),
+    );
+    expect(detectBody).not.toContain('prepareAgentWritableDir');
   });
 });
