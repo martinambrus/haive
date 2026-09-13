@@ -831,6 +831,12 @@ function pathSegments(p: string): string[] {
 /** Whether `prefix`'s segments appear as a contiguous run anywhere in `pathSegs`,
  *  so a prefix holds across a `web/` docroot and through nested dependency dirs
  *  (e.g. `modules/custom` matches `web/modules/custom/foo/foo.module`). */
+/** How many segments of `prefix` matched, or 0 for no match. Specificity, so a rule about
+ *  `sites/all/modules/activit/` can outrank one about `modules/`. */
+function prefixMatchDepth(pathSegs: string[], prefix: string): number {
+  return pathHasPrefix(pathSegs, prefix) ? pathSegments(prefix).length : 0;
+}
+
 function pathHasPrefix(pathSegs: string[], prefix: string): boolean {
   const pre = pathSegments(prefix);
   if (pre.length === 0) return false;
@@ -855,10 +861,16 @@ export function isRepoOwnPath(
   exclude: readonly string[],
 ): boolean {
   const pathSegs = pathSegments(rel);
-  return (
-    include.some((p) => pathHasPrefix(pathSegs, p)) &&
-    !exclude.some((p) => pathHasPrefix(pathSegs, p))
-  );
+  // The MORE SPECIFIC rule wins, with exclude keeping the tie. A prefix matches anywhere in
+  // the path — deliberately, so `modules/custom/` covers a `web/` docroot without every
+  // prefix being restated — and that is exactly what made a bare exclude swallow a nested
+  // include: MEASURED on a live Drupal 7 site, `modules/` (core, at the repo root) matched
+  // `sites/all/modules/activit/activit.module`, so the site's OWN module could never be
+  // repo-own and the global-KB guard built on this was dead. Equal depth still lets exclude
+  // win, which is what keeps `src/` from claiming `node_modules/pkg/src/index.js`.
+  const inc = Math.max(0, ...include.map((p) => prefixMatchDepth(pathSegs, p)));
+  const exc = Math.max(0, ...exclude.map((p) => prefixMatchDepth(pathSegs, p)));
+  return inc > 0 && inc > exc;
 }
 
 /** Common shared files whose presence does NOT make an article repo-specific. */
@@ -921,20 +933,30 @@ export function hasInstalledVersionAnchor(
 /** First cited or sourced path that points at THIS repo's own custom code and
  *  exists on disk. Non-null → the knowledge depends on repo-private code, so it is
  *  not a portable house standard. No custom-code prefixes known → never fires. */
-async function repoOwnRef(
+export async function repoOwnRef(
   sectionsText: string,
   sourceFiles: string[] | undefined,
   detect: KnowledgeDetect,
   repoPath: string,
 ): Promise<string | null> {
   const { include, exclude } = detect.customCode;
+  // A STORED include is a convention that may not describe this repo, and a payload
+  // written before detection filtered them still carries one. An include prefix that
+  // exists nowhere on disk is indistinguishable from no include at all — so treat it that
+  // way rather than letting it veto every path and silently disable this guard.
+  const usableInclude: string[] = [];
+  for (const prefix of include) {
+    if (await pathExists(path.join(repoPath, prefix))) usableInclude.push(prefix);
+  }
   const candidates = [
     ...extractCitedPaths(sectionsText),
     ...(sourceFiles ?? []).map((s) => s.replace(/^\.\//, '').replace(/:\d+(?:-\d+)?$/, '')),
   ];
   for (const rel of candidates) {
     const repoOwn =
-      include.length > 0 ? isRepoOwnPath(rel, include, exclude) : isLikelyRepoOwnPath(rel, exclude);
+      usableInclude.length > 0
+        ? isRepoOwnPath(rel, usableInclude, exclude)
+        : isLikelyRepoOwnPath(rel, exclude);
     if (repoOwn && (await pathExists(path.join(repoPath, rel)))) return rel;
   }
   return null;

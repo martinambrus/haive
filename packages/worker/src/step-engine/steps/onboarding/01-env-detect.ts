@@ -626,6 +626,59 @@ async function detectStack(
   };
 }
 
+/** Parents Drupal keeps modules and themes under, newest layout first. */
+const DRUPAL_EXTENSION_PARENTS = [
+  'web/modules',
+  'web/themes',
+  'modules',
+  'themes',
+  'sites/all/modules',
+  'sites/all/themes',
+] as const;
+
+/** Directories under those parents that this site WROTE, rather than installed.
+ *
+ *  Drupal keeps contrib and custom side by side under one parent, so no path rule separates
+ *  them — but drupal.org's packaging script stamps `project` and `datestamp` into every
+ *  contrib `.info`/`.info.yml`, and a hand-written extension has neither. MEASURED on a live
+ *  Drupal 7 site: 40 modules carry a `.info`, exactly ONE lacks `project`, and that one is
+ *  the site's own. Without this the convention `sites/all/modules/custom/` was reported for
+ *  a site that has no such directory, which is worse than saying nothing — see the caller.
+ *
+ *  A directory with no info file at all is NOT claimed: that is how `modules/contrib` and
+ *  other grouping dirs look, and guessing there would re-introduce the problem. */
+async function detectDrupalCustomPaths(repoPath: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const parent of DRUPAL_EXTENSION_PARENTS) {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(path.join(repoPath, parent), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === 'contrib') continue;
+      const dir = path.join(repoPath, parent, entry.name);
+      let info: string | null = null;
+      try {
+        const names = await readdir(dir);
+        info = names.find((n) => n.endsWith('.info') || n.endsWith('.info.yml')) ?? null;
+      } catch {
+        continue;
+      }
+      if (!info) continue;
+      try {
+        const text = await readFile(path.join(dir, info), 'utf8');
+        if (/^\s*project\s*[:=]/m.test(text)) continue; // packaged by drupal.org => contrib
+      } catch {
+        continue;
+      }
+      found.push(`${parent}/${entry.name}/`);
+    }
+  }
+  return found;
+}
+
 async function detectPaths(repoPath: string, framework: FrameworkName): Promise<PathsDetection> {
   const testPaths: string[] = [];
   for (const candidate of TEST_DIR_CANDIDATES) {
@@ -642,11 +695,33 @@ async function detectPaths(repoPath: string, framework: FrameworkName): Promise<
   await collectEnvFiles(repoPath, '', 0, envFiles);
 
   const pattern = FRAMEWORK_PATTERNS[framework] ?? FRAMEWORK_PATTERNS.general;
+  // Filtered the same way testPaths is above, and for the same reason: a pattern's
+  // customPaths are the framework's CONVENTION, not a reading of this repo. MEASURED
+  // across nine onboarding runs of one Drupal 7 repo — identical on every CLI, because
+  // this never reaches a model — `sites/all/modules/custom/` was reported while the
+  // repo's own module sits at `sites/all/modules/activit/` beside contrib.
+  //
+  // Reporting it anyway is worse than reporting nothing: `repoOwnRef` (08) treats a
+  // non-empty include as authoritative, so no file matched it, the "does this knowledge
+  // depend on repo-private code" guard never fired, and a repo-specific page reached the
+  // SHARED global KB. An empty list is the honest answer and routes that guard to its
+  // `isLikelyRepoOwnPath` fallback, which works off excludePaths and gets this right.
+  // Real extensions first where we can read them; the convention only fills the gap.
+  const customPaths: string[] = framework.startsWith('drupal')
+    ? await detectDrupalCustomPaths(repoPath)
+    : [];
+  for (const candidate of customPaths.length > 0 ? [] : pattern.customPaths) {
+    try {
+      if ((await stat(path.join(repoPath, candidate))).isDirectory()) customPaths.push(candidate);
+    } catch {
+      /* the convention does not apply to this repo */
+    }
+  }
   return {
     testPaths,
     envFiles,
     customCodePaths: {
-      include: pattern.customPaths,
+      include: customPaths,
       exclude: pattern.excludePaths,
     },
   };
@@ -896,6 +971,7 @@ export const detectCommandsForTest = detectCommands;
 
 /** Test seam for detectStack, same reason. */
 export const detectStackForTest = detectStack;
+export const detectPathsForTest = detectPaths;
 
 async function collectConfigFileContents(repoPath: string): Promise<string> {
   const candidates = [
