@@ -7,6 +7,7 @@ import {
   mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
   RTK_HELPER_INIT_FAILED_EXIT,
+  AUTH_COPY_SOURCE_VANISHED_EXIT,
   RTK_HELPER_MISSING_BINARY_EXIT,
   seedRtkInTaskVolume,
   userAuthVolumeExists,
@@ -362,6 +363,39 @@ describe('ensureTaskAuthVolumes', () => {
     // fingerprinted UNCHANGED and the refresh this exists for would never have fired.
     expect(probe.cmd[2]).toContain('-exec md5sum {} +');
     expect(probe.cmd[2]).not.toContain("stat -c '%n %s %Y'");
+  });
+
+  it('refuses to mark a volume ready when the source vanished mid-copy', async () => {
+    // `handleSignOutJob` removes user auth volumes from the same worker, and a `-v` mount
+    // RECREATES a missing one — so without this the helper copies nothing over a task volume
+    // that has ALREADY been removed and then marks the empty result ready, leaving the task
+    // running for good against credentials that are not there. Checked inside the helper
+    // because the mount is what recreates the volume: re-testing from the worker first could
+    // only narrow the window.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const runner = makeRunner({
+      preExistingVolumes: [userVol],
+      runHandler: (o) =>
+        o.cmd[0] === 'bash'
+          ? {
+              exitCode: AUTH_COPY_SOURCE_VANISHED_EXIT,
+              stdout: '',
+              stderr: 'haive: auth source vanished before the copy',
+              durationMs: 1,
+              timedOut: false,
+            }
+          : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
+    });
+    await expect(ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-gone', runner)).rejects.toThrow(
+      /vanished before the copy/,
+    );
+    const copy = runner.runCalls.find((c) => c.cmd[0] === 'bash')!;
+    // The guard runs BEFORE anything is written, and the ready marker is on the far side of it.
+    expect(copy.cmd[2]).toContain(`exit ${AUTH_COPY_SOURCE_VANISHED_EXIT}`);
+    expect(copy.cmd[2]!.indexOf('ls -A /src')).toBeLessThan(
+      copy.cmd[2]!.indexOf('touch /dst/.haive-ready'),
+    );
+    clearTaskAuthPreparationState('task-gone');
   });
 
   it('creates empty task volume when user volume absent (no copy)', async () => {
