@@ -22,6 +22,7 @@ import { stepCliProviderIds } from '@/lib/step-cli-providers';
 import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
+import { isAwaitingFormInput } from '@/lib/submit-state';
 import { groupPlanConversations, liveConversation, type PlanChatGroup } from './plan-chat-groups';
 import { firstUnreadMessageId, opCount, startedLabel, stamp, taskProposal } from './plan-chat-turn';
 
@@ -104,6 +105,12 @@ export function PlanChat({
   // its own result — a PUT/refetch loop that hammered the API.
   const onReadRef = useRef(onRead);
   onReadRef.current = onRead;
+  // Same for the poll below, which calls this when it settles: depending on it would
+  // re-poll a parked conversation on every page render.
+  const onPatchedRef = useRef(onPatched);
+  onPatchedRef.current = onPatched;
+  // Bumped when this panel sends a turn: a settled poll has stopped and the task id is unchanged.
+  const [pollRestart, setPollRestart] = useState(0);
   // The (node, turn-count) pair this transcript was last marked read at, so a
   // re-render cannot re-send the same read.
   const markedRef = useRef<string | null>(null);
@@ -174,7 +181,7 @@ export function PlanChat({
   const liveTaskId = live?.taskId ?? null;
   // Parked means the step is holding the form open for the next turn — the one
   // state in which this panel can send anything to an existing conversation.
-  const parked = liveStep?.status === 'waiting_form';
+  const parked = isAwaitingFormInput(liveStep);
   const working = liveTaskId !== null && !parked;
 
   // Poll only while the live task is actually doing something. The step landing
@@ -204,11 +211,11 @@ export function PlanChat({
         });
         if (running) setProviderId(running);
         const settled =
-          step?.status === 'waiting_form' ||
+          isAwaitingFormInput(step) ||
           ['completed', 'cancelled', 'failed'].includes(res.task.status);
         if (settled) {
           await reloadMessages();
-          if (!cancelled) onPatched();
+          if (!cancelled) onPatchedRef.current();
           return;
         }
       } catch {
@@ -224,7 +231,7 @@ export function PlanChat({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [liveTaskId, reloadMessages, onPatched]);
+  }, [liveTaskId, reloadMessages, pollRestart]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' });
@@ -284,6 +291,7 @@ export function PlanChat({
         });
       }
       setDraft('');
+      setPollRestart((n) => n + 1);
       await reloadMessages();
       onPatched();
     } catch (err) {
@@ -308,6 +316,7 @@ export function PlanChat({
     setError(null);
     try {
       await endPlanChat(liveTaskId);
+      setPollRestart((n) => n + 1);
       await reloadMessages();
       onPatched();
     } catch (err) {
