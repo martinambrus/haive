@@ -161,7 +161,14 @@ describe('ensureTaskAuthVolumes', () => {
     expect(copy.indexOf('> /dst/.haive-source')).toBeLessThan(
       copy.indexOf('touch /dst/.haive-ready'),
     );
-    expect(copy).toContain('find /src -type f');
+    // Scoped to the CREDENTIAL the provider refreshes in place, not the whole volume: a
+    // Terminal running `codex mcp add` rewrites `config.toml` in the USER volume, and a
+    // whole-directory hash called that a credential change.
+    expect(copy).toContain("md5sum '/src/auth.json'");
+    expect(copy).not.toContain('find /src -type f');
+    // And taken BEFORE the copy, so a concurrent rewrite makes the next probe retry rather
+    // than recording a fingerprint that matches bytes which were never copied.
+    expect(copy.indexOf('fp=$(')).toBeLessThan(copy.indexOf('cp -a /src/. /dst/'));
   });
 
   it('recopies when the user re-authenticated after the task started', async () => {
@@ -361,8 +368,10 @@ describe('ensureTaskAuthVolumes', () => {
     // Content, not `stat -c %Y`. MEASURED: rewriting a 10-byte token with another 10-byte
     // token inside one second leaves size and whole-second mtime identical, so the stat form
     // fingerprinted UNCHANGED and the refresh this exists for would never have fired.
-    expect(probe.cmd[2]).toContain('-exec md5sum {} +');
+    expect(probe.cmd[2]).toContain("md5sum '/src/auth.json'");
     expect(probe.cmd[2]).not.toContain("stat -c '%n %s %Y'");
+    // Narrowed to the credential, so a config write in the user volume is not a refresh.
+    expect(probe.cmd[2]).not.toContain('find /src -type f');
   });
 
   it('refuses to mark a volume ready when the source vanished mid-copy', async () => {

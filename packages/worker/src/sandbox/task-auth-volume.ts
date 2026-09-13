@@ -128,7 +128,30 @@ const VOLUME_SOURCE_MOVED_EXIT = 2;
  *  `md5sum` prints `<hash>  <path>`, which is why one pass yields both halves. Both sides mount
  *  the source at the SAME target, so the paths line up; `LC_ALL=C` because a locale-dependent
  *  sort order would make the fingerprint host-dependent. */
-function sourceFingerprintSh(dir: string): string {
+/** The credential file this provider REFRESHES IN PLACE on the volume at `idx`, or null when
+ *  there is none to single out. `CLI_CREDENTIAL_FILES` is already the registry of exactly
+ *  that, and reusing it is the point: its own header warns that a blanket read of the volume
+ *  sweeps in per-task mutations, which is the same mistake in the other direction. */
+function credentialRelPath(providerName: CliProviderName, idx: number): string | null {
+  const file = CLI_CREDENTIAL_FILES[providerName];
+  return file && file.authPathIdx === idx ? file.relPath : null;
+}
+
+/** Sentinel for a credential file that is not there. Stable, and distinct from any hash, so a
+ *  credential APPEARING later reads as a change and the snapshot is rebuilt. */
+const CREDENTIAL_ABSENT = 'absent';
+
+function sourceFingerprintSh(dir: string, relPath: string | null): string {
+  // Narrowed to the credential wherever the registry names one. A whole-directory hash calls
+  // any write a credential change, and these volumes are written by things that are not:
+  // opening a Terminal runs `codex mcp add` against the USER volume, rewriting
+  // `~/.codex/config.toml`. That reported `source_moved`, and the recopy that followed would
+  // replace a task's OWN rotated credential with the user volume's older one — turning a
+  // working task into an authentication failure, which is the exact opposite of the point.
+  if (relPath) {
+    const f = `${dir}/${relPath}`;
+    return `[ -f '${f}' ] && md5sum '${f}' | cut -c1-32 || echo '${CREDENTIAL_ABSENT}'`;
+  }
   return (
     `find ${dir} -type f ! -name '${READY_MARKER}' ! -name '${SOURCE_MARKER}' ` +
     // `-exec ... +` and not `... \;`: this is a TS template literal, where a single-backslash
@@ -354,9 +377,15 @@ async function ensureTaskAuthVolumesUnlocked(
     // against: it would fingerprint as empty, read as "moved on", and the recreate below would
     // then populate an EMPTY volume — destroying the only credentials the task still had.
     const userHasData = await runner.volumeExists(userVol);
+    const credRelPath = credentialRelPath(ctx.providerName, idx);
 
     if (await runner.volumeExists(taskVol)) {
-      const readiness = await isTaskVolumeReady(taskVol, runner, userHasData ? userVol : null);
+      const readiness = await isTaskVolumeReady(
+        taskVol,
+        runner,
+        userHasData ? userVol : null,
+        credRelPath,
+      );
       if (readiness === 'ready') {
         continue;
       }
@@ -382,6 +411,7 @@ async function ensureTaskAuthVolumesUnlocked(
             taskVol,
             runner,
             readiness === 'source_moved' && userHasData ? userVol : null,
+            credRelPath,
           )
         ) {
           continue;
@@ -446,8 +476,14 @@ async function ensureTaskAuthVolumesUnlocked(
         `if [ -z "$(ls -A /src 2>/dev/null)" ]; then ` +
         `echo 'haive: auth source vanished before the copy' >&2; ` +
         `exit ${AUTH_COPY_SOURCE_VANISHED_EXIT}; fi; ` +
+        // Fingerprint BEFORE the copy. Hashing afterwards records what the source is NOW
+        // against bytes that may already be older — a concurrent harvest or re-login landing
+        // between the two would make every later probe see marker == source and accept the
+        // stale copy forever. Taken first, the same race records a fingerprint that no longer
+        // matches, so the next probe retries: one wasted recopy instead of a permanent miss.
+        `fp=$(${sourceFingerprintSh('/src', credRelPath)}); ` +
         `cp -a /src/. /dst/ 2>/dev/null || true; ` +
-        `${sourceFingerprintSh('/src')} > /dst/${SOURCE_MARKER}; ` +
+        `printf '%s' "$fp" > /dst/${SOURCE_MARKER}; ` +
         `chown -R 1000:1000 /dst; touch /dst/${READY_MARKER}`
       : `chown 1000:1000 /dst; printf '%s' ${NO_SOURCE_SENTINEL} > /dst/${SOURCE_MARKER}; ` +
         `touch /dst/${READY_MARKER}`;
@@ -497,11 +533,12 @@ async function waitForTaskVolumeReady(
    *  the expired credentials the refresh was supposed to replace. Passing the source keeps the
    *  freshness requirement, and still lets a sibling that recreates the volume satisfy it. */
   userVol: string | null,
+  credRelPath: string | null,
 ): Promise<boolean> {
   const deadline = Date.now() + VOLUME_READY_MAX_WAIT_MS;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, VOLUME_READY_POLL_MS));
-    if ((await isTaskVolumeReady(taskVol, runner, userVol)) === 'ready') return true;
+    if ((await isTaskVolumeReady(taskVol, runner, userVol, credRelPath)) === 'ready') return true;
   }
   return false;
 }
@@ -534,6 +571,8 @@ async function isTaskVolumeReady(
    *  would fingerprint as empty, read as "moved on", and the recreate would then populate an
    *  EMPTY task volume — deleting the only credentials the task still had. */
   userVol: string | null,
+  /** Which file to compare, from {@link credentialRelPath}; null hashes the whole directory. */
+  credRelPath: string | null,
 ): Promise<VolumeReadiness> {
   // Verify both the readiness marker AND that the volume root is owned by the
   // sandbox user (1000). Early versions of ensureTaskAuthVolumes left the mount
@@ -566,7 +605,7 @@ async function isTaskVolumeReady(
       // the task's only credential snapshot with nothing. Reading it as unchanged keeps the
       // snapshot, which is the same direction the caller's null-source case already takes.
       `  if [ -n "$(ls -A /src 2>/dev/null)" ]; then`,
-      `    cur=$(${sourceFingerprintSh('/src')})`,
+      `    cur=$(${sourceFingerprintSh('/src', credRelPath)})`,
       `    [ "$rec" = "$cur" ] || exit ${VOLUME_SOURCE_MOVED_EXIT}`,
       '  fi',
       'fi',
