@@ -1177,6 +1177,8 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
     // Give the model no built-in tools so a high-effort run answers in one shot
     // instead of crawling the repo until the sandbox timeout SIGKILLs it.
     disableTools: true,
+    // With the built-in tools gone there is nothing an MCP server could serve here.
+    toolProfile: 'none',
     buildPrompt: buildEnvDetectPrompt,
     parseOutput: (raw: string, _parsed: unknown) => parseEnrichment(raw),
     retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },

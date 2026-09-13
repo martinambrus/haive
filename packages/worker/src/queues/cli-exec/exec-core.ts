@@ -432,7 +432,7 @@ export async function executeByKind(
             // machinery is shared by knowledge mining, the review personas and the
             // adversarial-QA agents, and forcing rag-only on all three gave 08d a live
             // app URL it had no browser to reach.
-            payload.toolProfile === 'rag_only',
+            payload.toolProfile ?? 'full',
             hasWorktree,
           )
         : { files: [], extraArgs: [] };
@@ -450,7 +450,8 @@ export async function executeByKind(
       // /haive/workdir/--version"). Probing it that way would purge a good tree on every
       // warm. `/tmp` is used because it always exists and is readable; the server prints
       // its banner, reads EOF on the absent stdin and exits 0 in ~1s.
-      if (providerRow && sandboxImage) {
+      // Nothing to pre-warm when no server is wired.
+      if (providerRow && sandboxImage && payload.toolProfile !== 'none') {
         const surface = await resolveMcpSurface(
           db,
           payload.taskId,

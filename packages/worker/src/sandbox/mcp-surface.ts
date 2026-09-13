@@ -40,6 +40,26 @@ export interface McpSurface {
  *  chrome-devtools attaches to the runner's visible browser or self-launches a
  *  headless one — never whether the server is present. Keeping it out means the
  *  dispatcher can resolve the surface without paying for it on every enqueue. */
+/** How much of the MCP surface an invocation gets. `'rag_only'` is the existing
+ *  narrowing; `'none'` is narrower still and gives it no servers at all. */
+export type McpProfile = 'full' | 'rag_only' | 'none';
+
+/** A surface carrying nothing, for a step that declared `toolProfile: 'none'`.
+ *
+ *  Built here rather than inlined at the caller so it cannot drift from `McpSurface`.
+ *  `ragOnly` is FALSE: that flag means "narrowed to rag_search alone", and this is
+ *  narrower still, so `mcpSurfacePrompt` states the absence positively rather than
+ *  promising a tool that is not wired. */
+export function emptyMcpSurface(): McpSurface {
+  return {
+    ragOnly: false,
+    rag: { enabled: false, apiUrl: '', token: '' },
+    chromeDevtools: { enabled: false, version: null },
+    ddevControl: { enabled: false, apiUrl: '', token: '' },
+    userServers: {},
+  };
+}
+
 export async function resolveMcpSurface(
   db: Database,
   taskId: string,

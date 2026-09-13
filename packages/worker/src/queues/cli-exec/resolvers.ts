@@ -30,7 +30,7 @@ import {
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
 import { CHROME_MCP_PROXY_JS, CHROME_MCP_PROXY_PATH } from '../../sandbox/chrome-mcp-proxy.js';
 import { DDEV_MCP_SERVER_JS, DDEV_MCP_SERVER_PATH } from '../../sandbox/ddev-mcp-server.js';
-import { resolveMcpSurface } from '../../sandbox/mcp-surface.js';
+import { resolveMcpSurface, type McpProfile } from '../../sandbox/mcp-surface.js';
 import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
 import { appRunnerBrowserCdpUrl } from '../../sandbox/app-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
@@ -179,10 +179,12 @@ export async function resolveMcpExtraFiles(
    *  Callers already resolve it for the invocation itself; pass that value rather than a second
    *  lookup, so the merge and the run can never target different images. */
   sandboxImage: string | null,
-  /** Restrict the MCP surface to the haive-rag server only — no chrome-devtools
-   *  and no user MCP servers. Used for knowledge-mining invocations, which are
-   *  read-only analysis and should reach nothing but rag_search. */
-  ragOnly = false,
+  /** How much surface this invocation gets. `'rag_only'` restricts it to the haive-rag
+   *  server — no chrome-devtools and no user servers — for knowledge-mining invocations,
+   *  which are read-only analysis. `'none'` wires nothing at all, for a step that answers
+   *  from its prompt alone; handled HERE rather than at each caller so the cli path and
+   *  both sub-agent kinds cannot diverge on it again. */
+  profile: McpProfile = 'full',
   /** Whether this invocation targets a linked worktree rather than the repo root. Decides
    *  whether the git MCP server is offered at all — see the `includeGit` note below.
    *
@@ -191,6 +193,8 @@ export async function resolveMcpExtraFiles(
   hasWorktree: boolean,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
+  if (profile === 'none') return empty;
+  const ragOnly = profile === 'rag_only';
 
   // THE decision — shared with the dispatcher, which renders the same object into the
   // prompt. Materialization below must read it rather than re-deriving any part, or a

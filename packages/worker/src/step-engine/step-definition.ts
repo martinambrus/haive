@@ -86,8 +86,17 @@ export interface LlmInvocationSpec {
    *  on a step where a user-provided tool could plausibly help.
    *
    *  Unlike `disableTools` (which removes the CLI's own built-in file tools) this
-   *  only touches MCP; the step can still read the repo. */
-  toolProfile?: 'rag_only';
+   *  only touches MCP; the step can still read the repo.
+   *
+   *  `'none'` wires NO servers. For a step that ALSO sets `disableTools` — its whole
+   *  input is in the prompt — a surface is tool definitions the model pays for and
+   *  cannot use: `01-env-detect` is step index 1 while `10-rag-populate` is index 14,
+   *  so its `rag_search` had no index to search. On api.meta.ai that pair was fatal
+   *  rather than merely wasteful — MEASURED, with `ENABLE_TOOL_SEARCH` set the binary
+   *  defers the MCP tools while `--tools ''` removes the built-in `tool_search` that
+   *  resolves them, and the endpoint answers
+   *  `400 Deferred tools require tools.tool_search`. */
+  toolProfile?: 'rag_only' | 'none';
   /** Test-only synthetic LLM output used when HAIVE_TEST_BYPASS_LLM=1.
    *  Steps whose apply() throws on null llmOutput must define this so smoke
    *  tests can exercise the full pipeline without a real CLI provider. */
@@ -191,7 +200,7 @@ export interface AgentMiningSpec {
    *  machinery. 08d-adversarial-qa is handed a live app URL for runtime attacks and
    *  could not reach it; 08c-code-review wanted the narrow surface and got it by
    *  accident rather than by saying so. */
-  toolProfile?: 'rag_only';
+  toolProfile?: 'rag_only' | 'none';
   /** Sandbox timeout per agent invocation. Defaults to step-runner default. */
   timeoutMs?: number;
   /** Opt in to the soft timeout: shortly before the hard SIGKILL, steer the agent to

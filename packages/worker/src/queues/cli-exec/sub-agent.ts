@@ -67,7 +67,7 @@ export async function executeSubAgentNative(
     // Honor the step's declared narrowing here too. Both sub-agent kinds used to
     // ignore it and always take the full surface, so `toolProfile` meant one thing
     // on the cli path and another on this one.
-    payload.toolProfile === 'rag_only',
+    payload.toolProfile ?? 'full',
     hasWorktree,
   );
   // Resolved here as well: the sub-agent kinds do NOT share exec-core's per-invocation
@@ -139,7 +139,7 @@ export async function executeSubAgentSequential(
     // Honor the step's declared narrowing here too. Both sub-agent kinds used to
     // ignore it and always take the full surface, so `toolProfile` meant one thing
     // on the cli path and another on this one.
-    payload.toolProfile === 'rag_only',
+    payload.toolProfile ?? 'full',
     hasWorktree,
   );
   const appReach = payload.taskId ? await resolveAppReach(db, payload.taskId) : null;
