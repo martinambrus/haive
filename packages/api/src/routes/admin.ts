@@ -691,6 +691,63 @@ adminRoutes.put('/config/steering', async (c) => {
   return c.json({ enabled });
 });
 
+const codexAppServerSchema = z.object({ enabled: z.boolean() });
+
+/** How far back, and how many, `unsupported` codex app-server verdicts the card lists. */
+const CODEX_APP_SERVER_FAILURE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const CODEX_APP_SERVER_FAILURE_LIMIT = 20;
+
+// A type alias, not an interface: `db.execute<T>` constrains T to `Record<string, unknown>`.
+type CodexAppServerFailureRow = {
+  taskId: string;
+  taskTitle: string;
+  providerId: string;
+  providerLabel: string | null;
+  stage: string | null;
+  detail: string | null;
+  source: string | null;
+  binaryVersion: string | null;
+  providerCliVersion: string | null;
+  at: string;
+};
+
+// Codex steering through its [experimental] app-server protocol. The worker reads the switch at
+// each dispatch (within the ~30s config cache). The GET also lists the recent `unsupported`
+// verdicts across tasks — from the per-task probe and from runs that fell back — with the codex
+// version each was taken on: that list is the report Haive's own protocol support is updated from
+// when a codex release changes the API.
+adminRoutes.get('/config/codex-app-server', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.CODEX_APP_SERVER_ENABLED, true);
+  const since = new Date(Date.now() - CODEX_APP_SERVER_FAILURE_WINDOW_MS).toISOString();
+  const rows = await getDb().execute<CodexAppServerFailureRow>(sql`
+    SELECT t.id AS "taskId",
+           t.title AS "taskTitle",
+           v.key AS "providerId",
+           p.label AS "providerLabel",
+           v.value->>'stage' AS "stage",
+           v.value->>'detail' AS "detail",
+           v.value->>'source' AS "source",
+           v.value->>'binaryVersion' AS "binaryVersion",
+           v.value->>'providerCliVersion' AS "providerCliVersion",
+           v.value->>'at' AS "at"
+      FROM ${schema.tasks} t
+      CROSS JOIN LATERAL jsonb_each(t.codex_app_server) v
+      LEFT JOIN ${schema.cliProviders} p ON p.id::text = v.key
+     WHERE t.codex_app_server IS NOT NULL
+       AND v.value->>'status' = 'unsupported'
+       AND v.value->>'at' >= ${since}
+     ORDER BY v.value->>'at' DESC
+     LIMIT ${CODEX_APP_SERVER_FAILURE_LIMIT}`);
+  return c.json({ enabled, recentFailures: rows as unknown as CodexAppServerFailureRow[] });
+});
+
+adminRoutes.put('/config/codex-app-server', async (c) => {
+  const { enabled } = codexAppServerSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.CODEX_APP_SERVER_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'codex app-server steering switch updated');
+  return c.json({ enabled });
+});
+
 const prWorkflowSchema = z.object({ enabled: z.boolean() });
 
 // Global master switch for the create-PR close-out workflow. Gates step 12's create_pr

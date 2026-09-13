@@ -115,6 +115,21 @@ function runtimeLimitsFormOf(s: RuntimeLimitsSettings): RuntimeLimitsForm {
  *  shared barrel — the same reason the stats page re-declares its own row shapes. */
 type RegistrationMode = 'open' | 'invite' | 'closed';
 
+/** One recorded `unsupported` codex app-server verdict, as GET /admin/config/codex-app-server lists
+ *  it. `source` says whether the pre-run check or a run that fell back recorded it. */
+type CodexAppServerFailure = {
+  taskId: string;
+  taskTitle: string;
+  providerId: string;
+  providerLabel: string | null;
+  stage: string | null;
+  detail: string | null;
+  source: string | null;
+  binaryVersion: string | null;
+  providerCliVersion: string | null;
+  at: string;
+};
+
 /** The settings are one page of ~30 independent switches, so they are grouped rather than
  *  stacked. The global pause switch is deliberately outside this: it renders above the bar on
  *  every tab. */
@@ -163,6 +178,9 @@ function AdminPageInner() {
   const [savingConcurrency, setSavingConcurrency] = useState(false);
   const [steeringEnabled, setSteeringEnabled] = useState<boolean | null>(null);
   const [savingSteering, setSavingSteering] = useState(false);
+  const [codexAppServerEnabled, setCodexAppServerEnabled] = useState<boolean | null>(null);
+  const [codexAppServerFailures, setCodexAppServerFailures] = useState<CodexAppServerFailure[]>([]);
+  const [savingCodexAppServer, setSavingCodexAppServer] = useState(false);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState<boolean | null>(null);
   const [savingPrWorkflow, setSavingPrWorkflow] = useState(false);
   const [ragEmbedding, setRagEmbedding] = useState<RagEmbeddingSettings | null>(null);
@@ -268,6 +286,7 @@ function AdminPageInner() {
         healthData,
         concurrencyData,
         steeringData,
+        codexAppServerData,
         softTimeoutData,
         timeoutLadderData,
         ideData,
@@ -302,6 +321,9 @@ function AdminPageInner() {
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
         api.get<{ enabled: boolean }>('/admin/config/steering'),
+        api.get<{ enabled: boolean; recentFailures: CodexAppServerFailure[] }>(
+          '/admin/config/codex-app-server',
+        ),
         api.get<{ enabled: boolean; percent: number }>('/admin/config/cli-soft-timeout'),
         api.get<{ baseMinutes: number; ladder: string; rungs: number[] }>(
           '/admin/config/cli-timeout-ladder',
@@ -341,6 +363,8 @@ function AdminPageInner() {
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setSteeringEnabled(steeringData.enabled);
+      setCodexAppServerEnabled(codexAppServerData.enabled);
+      setCodexAppServerFailures(codexAppServerData.recentFailures);
       setPrWorkflowEnabled(prWorkflowData.enabled);
       setSoftTimeoutEnabled(softTimeoutData.enabled);
       setSoftTimeoutPercentInput(String(softTimeoutData.percent));
@@ -617,6 +641,21 @@ function AdminPageInner() {
       setError((err as Error).message ?? 'Failed to update steering');
     } finally {
       setSavingSteering(false);
+    }
+  }
+
+  async function setCodexAppServer(next: boolean) {
+    setSavingCodexAppServer(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/codex-app-server', {
+        enabled: next,
+      });
+      setCodexAppServerEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update codex app-server steering');
+    } finally {
+      setSavingCodexAppServer(false);
     }
   }
 
@@ -1569,9 +1608,10 @@ function AdminPageInner() {
           <CardHeader>
             <CardTitle>Mid-run steering</CardTitle>
             <CardDescription>
-              Lets users inject a message into a running Claude-family CLI step (applied at the next
-              tool-call boundary) and mines those nudges into the knowledge base. Global kill-switch
-              across every repo. Takes effect within ~30s; persists across restarts.
+              Lets users inject a message into a running CLI step — the claude family, amp, and
+              codex through its app-server (below) — applied at the CLI&apos;s next boundary, and
+              mines those nudges into the knowledge base. Global kill-switch across every repo.
+              Takes effect within ~30s; persists across restarts.
             </CardDescription>
           </CardHeader>
           <label className="flex items-center gap-2 text-sm text-neutral-200">
@@ -1585,6 +1625,79 @@ function AdminPageInner() {
             {steeringEnabled ? 'Enabled' : 'Disabled'}
             {savingSteering && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
+        </Card>
+      )}
+
+      {tab === 'execution' && codexAppServerEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Codex steering (app-server)</CardTitle>
+            <CardDescription>
+              Steers codex through its experimental <code>codex app-server</code> protocol, because{' '}
+              <code>codex exec</code> cannot take a message mid-run. A task moves a codex provider
+              onto it only after a zero-token check has verified that provider in that task, and a
+              run that finds it broken sends the rest of its task back to <code>codex exec</code>.
+              Turn this off to run every new codex call on <code>codex exec</code>, without
+              steering, if a codex release breaks it in a way the check cannot see. Needs mid-run
+              steering enabled. Takes effect within ~30s; a run already queued keeps its transport.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={codexAppServerEnabled}
+              disabled={savingCodexAppServer}
+              onChange={(e) => void setCodexAppServer(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {codexAppServerEnabled ? 'Enabled' : 'Disabled'}
+            {savingCodexAppServer && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+          <div className="mt-4 space-y-2">
+            <div className="text-xs font-medium text-neutral-400">
+              Recorded failures, last 30 days
+            </div>
+            {codexAppServerFailures.length === 0 ? (
+              <p className="text-xs text-neutral-500">
+                None. A failure here after a codex update usually means Haive has to follow a
+                protocol change.
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {codexAppServerFailures.map((f) => (
+                  <li
+                    key={`${f.taskId}:${f.providerId}`}
+                    className="rounded border border-neutral-800 p-2 text-xs text-neutral-300"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge>
+                        codex {f.binaryVersion ?? f.providerCliVersion ?? 'version unknown'}
+                      </Badge>
+                      <span>
+                        failed at <code>{f.stage ?? 'unknown stage'}</code>
+                      </span>
+                      <span className="text-neutral-500">
+                        {f.source === 'runtime' ? 'during a run' : 'in the pre-run check'}
+                      </span>
+                      <span className="text-neutral-500">{new Date(f.at).toLocaleString()}</span>
+                    </div>
+                    {f.detail && (
+                      <div className="mt-1 break-words text-neutral-400">{f.detail}</div>
+                    )}
+                    <div className="mt-1 text-neutral-500">
+                      {f.providerLabel ?? f.providerId} ·{' '}
+                      <Link
+                        href={`/tasks/${f.taskId}`}
+                        className="underline hover:text-neutral-300"
+                      >
+                        {f.taskTitle}
+                      </Link>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </Card>
       )}
 
@@ -1682,9 +1795,10 @@ function AdminPageInner() {
               A CLI that hits its timeout is SIGKILLed with no grace, so a reviewer that runs its
               full budget loses everything it found. At the percentage below, the worker steers the
               CLI to stop investigating and emit only the findings it has already verified.
-              Delivered as a steering message, so it reaches Claude-family CLIs only, and only while
-              mid-run steering is enabled above. Read at invocation start; a change applies to the
-              next invocation, not a running one.
+              Delivered as a steering message, so it reaches only steerable runs — Claude-family
+              CLIs, amp, and codex once its app-server is verified — and only while mid-run steering
+              is enabled above. Read at invocation start; a change applies to the next invocation,
+              not a running one.
             </CardDescription>
           </CardHeader>
           <label className="flex items-center gap-2 text-sm text-neutral-200">
