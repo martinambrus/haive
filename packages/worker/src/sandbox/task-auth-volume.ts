@@ -86,6 +86,16 @@ const READY_MARKER = '.haive-ready';
  *  volume at populate time and re-checked on every reuse. Absent on a volume populated before
  *  this existed, which is read as "fresh" — no backfill, same stance as every other marker. */
 const SOURCE_MARKER = '.haive-source';
+/** Recorded in {@link SOURCE_MARKER} when the volume was populated with NO source at all —
+ *  an api-key provider row, or a CLI the user had not logged into yet.
+ *
+ *  It has to be written, and it has to be distinguishable from an ABSENT marker. Absent means
+ *  "populated before this existed" and is read as fresh, so that a deploy invalidates nothing
+ *  in flight. Without the sentinel an empty volume is indistinguishable from that, and stays
+ *  "fresh" forever — so a task that later gains credentials (the user logs in, or the row is
+ *  switched to a subscription) would keep mounting the empty snapshot and keep failing. Four
+ *  characters, where a real fingerprint is 32 hex, so the two can never collide. */
+const NO_SOURCE_SENTINEL = 'none';
 /** What the readiness probe concluded. `source_moved` is separated from `not_ready` because
  *  the two are repaired the same way but mean different things, and only one of them is a
  *  fault: a half-built volume versus credentials that have since been refreshed. */
@@ -397,7 +407,8 @@ async function ensureTaskAuthVolumesUnlocked(
       ? `cp -a /src/. /dst/ 2>/dev/null || true; ` +
         `${sourceFingerprintSh('/src')} > /dst/${SOURCE_MARKER}; ` +
         `chown -R 1000:1000 /dst; touch /dst/${READY_MARKER}`
-      : `chown 1000:1000 /dst; touch /dst/${READY_MARKER}`;
+      : `chown 1000:1000 /dst; printf '%s' ${NO_SOURCE_SENTINEL} > /dst/${SOURCE_MARKER}; ` +
+        `touch /dst/${READY_MARKER}`;
 
     const result = await runner.run({
       image: HELPER_IMAGE,
@@ -493,6 +504,9 @@ async function isTaskVolumeReady(
   ];
   if (userVol) {
     checks.push(
+      // A volume populated with no source carries NO_SOURCE_SENTINEL here, which can never
+      // equal a fingerprint — so the comparison below recreates it the moment a source appears,
+      // with no branch of its own.
       `rec=$(cat /x/${SOURCE_MARKER} 2>/dev/null || echo '')`,
       // No record: populated before this existed. Read as fresh rather than recreated, so a
       // deploy does not invalidate every task in flight.

@@ -302,8 +302,39 @@ describe('ensureTaskAuthVolumes', () => {
     const taskVol = 'haive_cli_auth_task_task222_codex_0';
     expect(runner.createCalls).toEqual([taskVol]);
     const copyCall = runner.runCalls.find((c) => c.cmd[0] === 'bash');
-    expect(copyCall?.cmd[2]).toBe('chown 1000:1000 /dst; touch /dst/.haive-ready');
+    expect(copyCall?.cmd[2]).toBe(
+      "chown 1000:1000 /dst; printf '%s' none > /dst/.haive-source; touch /dst/.haive-ready",
+    );
     expect(copyCall?.mounts?.some((m) => m.target === '/src')).toBe(false);
+  });
+
+  it('recopies once a source appears for a volume that was populated without one', async () => {
+    // An api-key row, or a CLI the user had not logged into yet, populates an EMPTY volume. The
+    // sentinel is what stops that being mistaken for a pre-feature volume: absent means
+    // "populated before this existed" and is read as fresh forever, so without it the task
+    // would keep mounting the empty snapshot after the user finally logged in.
+    const userVol = 'haive_cli_auth_abc_codex_0';
+    const taskVol = 'haive_cli_auth_task_tasklate_codex_0';
+    const probeScripts: string[] = [];
+    const runner = makeRunner({
+      preExistingVolumes: [userVol, taskVol],
+      readyVolumes: [taskVol],
+      runHandler: (o) => {
+        if (o.cmd[2]?.includes('/x/.haive-ready')) {
+          probeScripts.push(o.cmd[2]);
+          // What the real probe does with the sentinel: 'none' never equals a fingerprint.
+          return { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+        }
+        return { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+      },
+    });
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-late', runner);
+    expect(runner.createCalls).toContain(taskVol);
+    // And the copy now carries the real source.
+    const copy = runner.runCalls.find((c) => c.cmd[0] === 'bash')!;
+    expect(copy.mounts?.some((m) => m.source === userVol && m.target === '/src')).toBe(true);
+    expect(copy.cmd[2]).toContain('> /dst/.haive-source');
+    clearTaskAuthPreparationState('task-late');
   });
 
   it('coalesces concurrent sibling setup into one volume copy', async () => {

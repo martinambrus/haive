@@ -616,6 +616,10 @@ taskRoutes.post('/', async (c) => {
       cliProviderId: body.cliProviderId ?? null,
       summaryCliProviderId: body.summaryCliProviderId ?? null,
       summaryLlmEnabled: body.summaryLlmEnabled ?? true,
+      summaryCliChoiceAt:
+        body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined
+          ? new Date()
+          : null,
       // Presence, not value: naming the field states a choice, and an explicit null
       // ("none" / "inherit") is exactly the choice the FK column cannot express. The
       // New Task form always names all three; every other task spawner names none.
@@ -754,7 +758,14 @@ taskRoutes.get('/last-cli', async (c) => {
           eq(schema.tasks.summaryLlmEnabled, false),
         ),
       ),
-      orderBy: [desc(schema.tasks.summaryCliChoiceRecorded), desc(schema.tasks.createdAt)],
+      // Ordered by when the choice was STATED, not when the task was created, so repointing
+      // an older task's recap becomes this repo's latest choice. `coalesce` is what makes it
+      // deploy without a backfill: every row written before the column answers on created_at
+      // exactly as it did.
+      orderBy: [
+        desc(schema.tasks.summaryCliChoiceRecorded),
+        desc(sql`coalesce(${schema.tasks.summaryCliChoiceAt}, ${schema.tasks.createdAt})`),
+      ],
       columns: { summaryCliProviderId: true, summaryLlmEnabled: true },
     }),
   ]);
@@ -1414,13 +1425,18 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
   }
 
   const patch: Partial<typeof schema.tasks.$inferInsert> = { updatedAt: new Date() };
-  if (body.summaryCliProviderId !== undefined) {
+  if (body.summaryCliProviderId !== undefined)
     patch.summaryCliProviderId = body.summaryCliProviderId;
-    // The CHOICE bit, not the column: a NULL provider cannot say whether the user picked
-    // "inherit" or never picked at all, which is what GET /tasks/last-cli reads back.
-    patch.summaryCliChoiceRecorded = true;
-  }
   if (body.summaryLlmEnabled !== undefined) patch.summaryLlmEnabled = body.summaryLlmEnabled;
+  // The CHOICE bit follows EITHER field, exactly as the create path sets it. A NULL provider
+  // cannot say whether the user picked "inherit" or never picked, and neither can an ON
+  // switch — so recording only the provider left a checkbox-only edit unrecorded, and
+  // /tasks/last-cli then preferred an older New Task choice over this explicit one.
+  patch.summaryCliChoiceRecorded = true;
+  // WHEN it was stated. created_at is the wrong clock for an edit: this row may be older than
+  // another recorded task, and ordering on creation would restore that one's stale value
+  // instead of what was just picked here.
+  patch.summaryCliChoiceAt = new Date();
 
   await db.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));
 

@@ -2160,7 +2160,10 @@ function SummaryCliCard({
           id="summary-cli-provider"
           aria-label="Step summary CLI"
           value={summaryCliProviderId ?? ''}
-          disabled={busy || !summaryLlmEnabled}
+          // Usable while summaries are OFF on purpose. These are two separate requests, so
+          // forcing "switch on, then repoint" dispatches any recap that finalizes in between
+          // through the provider the user is trying to get away from.
+          disabled={busy}
           onChange={(e) => onChange({ summaryCliProviderId: e.target.value || null })}
           className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 disabled:cursor-not-allowed disabled:opacity-40"
         >
