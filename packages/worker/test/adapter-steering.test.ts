@@ -97,7 +97,7 @@ describe('codex steering transport', () => {
     const adapter = new CodexAdapter();
     const spec = adapter.buildCliInvocation(codexProvider, 'hello world', { steeringMode: true });
     expect(spec.command).toBe('codex');
-    expect(spec.args).toEqual(['app-server', '--disable', 'multi_agent_v2']);
+    expect(spec.args).toEqual(['app-server', '-c', 'features.multi_agent_v2=false']);
     expect(spec.outputFormat).toBe('codex-app-server');
     expect(spec.steerable).toBe(true);
     // The prompt travels in turn/start, never on argv or stdin.
@@ -118,14 +118,14 @@ describe('codex steering transport', () => {
     expect(fallback.steerable).toBeUndefined();
   });
 
-  it('keeps the one-shot codex exec argv exactly as it was', () => {
+  it('builds the one-shot codex exec argv', () => {
     const spec = new CodexAdapter().buildCliInvocation(codexProvider, 'hello world', {});
     expect(spec.args).toEqual([
       'exec',
       '--json',
       '--dangerously-bypass-approvals-and-sandbox',
-      '--disable',
-      'multi_agent_v2',
+      '-c',
+      'features.multi_agent_v2=false',
       '-c',
       'model_reasoning_effort="high"',
       '--model',

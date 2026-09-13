@@ -21,10 +21,24 @@ const CODEX_EFFORT_SCALE: EffortScale = {
   max: 'ultra',
 };
 
-/** `codex app-server` takes the same feature switch as `codex exec` (see execBaseArgs) — verified
- *  in its own --help on 0.154.0. Approvals, sandbox, model, effort and the prompt are NOT flags
- *  here: they travel in the JSON-RPC requests (cli-executor/codex-app-server.ts). */
-const CODEX_APP_SERVER_ARGS: readonly string[] = ['app-server', '--disable', 'multi_agent_v2'];
+/** Codex's own multi-agent/subagent system stays off: Haive owns fan-out, retries and synthesis
+ *  (supportsSubagents=false — the sub-agent emulator emits a sequential script instead), so a run
+ *  spawning its own agents only duplicates work and burns tokens.
+ *
+ *  A config override, NOT `--disable multi_agent_v2`, although codex's help calls the two
+ *  equivalent. MEASURED: `--disable` validates the feature name and `-c` does not — 0.154.0
+ *  answers `--disable no_such_feature` with "Error: Unknown feature flag" and exit 1, and 0.78.0,
+ *  which predates `multi_agent_v2`, refused every exec and app-server start that way. The
+ *  override is accepted for a name the binary does not know, so a renamed or retired feature
+ *  cannot break every codex run. It is the same switch: `codex features list` on 0.154.0 reports
+ *  `multi_agent_v2` false under `=false` and true under `=true`; it defaults to false there, and
+ *  this pins it. */
+const CODEX_MULTI_AGENT_OFF: readonly string[] = ['-c', 'features.multi_agent_v2=false'];
+
+/** `codex app-server` takes the same override as `codex exec` (see execBaseArgs). Approvals,
+ *  sandbox, model, effort and the prompt are NOT flags here: they travel in the JSON-RPC requests
+ *  (cli-executor/codex-app-server.ts). */
+const CODEX_APP_SERVER_ARGS: readonly string[] = ['app-server', ...CODEX_MULTI_AGENT_OFF];
 
 export class CodexAdapter extends BaseCliAdapter {
   readonly providerName = 'codex' as const;
@@ -119,15 +133,7 @@ export class CodexAdapter extends BaseCliAdapter {
       'exec',
       '--json',
       '--dangerously-bypass-approvals-and-sandbox',
-      // Disable Codex's own multi-agent/subagent system (features.multi_agent_v2,
-      // whose MultiAgentMode can proactively spawn Collab subagents). Haive never
-      // uses Codex's native subagents (supportsSubagents=false — the sub-agent
-      // emulator emits a sequential script instead), so a mining agent spawning
-      // its own agents only duplicates work and burns tokens. `--disable <feature>`
-      // == `-c features.<name>=false`; unknown features are ignored (no
-      // --strict-config), so this fails safe if the feature is renamed upstream.
-      '--disable',
-      'multi_agent_v2',
+      ...CODEX_MULTI_AGENT_OFF,
       ...reasoningArgs,
       ...modelArgs,
       '--skip-git-repo-check',

@@ -217,13 +217,15 @@ describe('adapter outputFormat declarations', () => {
     expect(spec.args[spec.args.length - 1]).toBe('hello');
   });
 
-  it('codex disables its multi-agent feature (no autonomous subagent fan-out)', () => {
+  it('codex turns its multi-agent feature off (no autonomous subagent fan-out)', () => {
     const adapter = cliAdapterRegistry.get('codex');
     const provider = makeProvider({ id: 'p-codex', name: 'codex' });
     const spec = adapter.buildCliInvocation(provider, 'hello', opts);
-    const i = spec.args.indexOf('--disable');
-    expect(i).toBeGreaterThanOrEqual(0);
-    expect(spec.args[i + 1]).toBe('multi_agent_v2');
+    const i = spec.args.indexOf('features.multi_agent_v2=false');
+    expect(i).toBeGreaterThan(0);
+    expect(spec.args[i - 1]).toBe('-c');
+    // `--disable` refuses a feature name the binary does not know; a rename would break every run.
+    expect(spec.args).not.toContain('--disable');
   });
 
   it('codex passes a configured model through --model, and omits it when unset', () => {

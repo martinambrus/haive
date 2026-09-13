@@ -180,8 +180,10 @@ refused with the same `-32600` as everything else.
   turn/start → turn/steer → turn/interrupt → turn/completed, unauthenticated and with no network,
   because an unauthenticated turn stays active for 20+ s while codex retries its connection.
   MEASURED on real binaries: 0.40.0 is unsupported at `spawn` (no `app-server` subcommand), 0.78.0
-  at `spawn` (it rejects `--disable multi_agent_v2`, and at `steer` without that flag), and
-  0.122.0 and 0.154.0 are supported.
+  at `steer` (an app-server with no `turn/steer`), and 0.122.0 and 0.154.0 are supported. 0.78.0
+  used to stop at `spawn`, and so did every `codex exec` on it: the adapter passed
+  `--disable multi_agent_v2`, which a binary that does not know the feature refuses, where
+  `-c features.multi_agent_v2=false` is ignored.
 - A server→client request under `never` + `dangerFullAccess` is answered with an error,
   interrupts the turn and is a `server_request` transport failure, so an approval landing in a
   non-interactive run fails the run rather than hanging a task.

@@ -179,8 +179,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     displayName: 'OpenAI Codex',
     description: "OpenAI's Codex CLI. Sub-agents are emulated as a sequential script.",
     defaultExecutable: 'codex',
-    // Codex HAS a native multi-agent mode, but the adapter disables it
-    // (`--disable multi_agent_v2`) because Haive owns fan-out, retries and
+    // Codex HAS a native multi-agent mode, but the adapter turns it off
+    // (`-c features.multi_agent_v2=false`) because Haive owns fan-out, retries and
     // synthesis — a run spawning its own agents duplicates that work. This must
     // stay false: the dispatcher reads the adapter, the UI reads this catalog,
     // and advertising a capability we turn off is how they drift.

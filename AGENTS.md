@@ -321,7 +321,7 @@ no `app-server` subcommand, 0.78.0 has an app-server with `turn/start` and `turn
   the last 30 days of `unsupported` verdicts with their codex version and stage — the report Haive's
   protocol support is updated from when a codex release changes the API.
 
-Three measured facts to keep. EVERY app-server error is `-32600` — an unknown method, a malformed
+Four measured facts to keep. EVERY app-server error is `-32600` — an unknown method, a malformed
 request, `thread not found` and `no active turn to steer` alike — so nothing may key on an error's
 code or wording, only on success results and structural fields; that is also why a single refused
 steer is NOT a downgrade, since a steer racing the turn's end is refused the same way. codex exits
@@ -331,7 +331,12 @@ entrypoint and without it. And the MCP surface needs no reconciling: both transp
 /home/node/.codex`), and `codex exec` runs already expose `codex_apps`. Those servers boot
 asynchronously once `thread/start` has answered — MEASURED on live runs, ~0.3 s for `thread/start`
 and ~5 s from container start to `turn/started` — so they never hold up the handshake the 5-min
-deadline guards.
+deadline guards. Finally, codex's multi-agent feature goes off with
+`-c features.multi_agent_v2=false` and never `--disable multi_agent_v2`, although codex's help calls
+them equivalent: `--disable` refuses a feature name the binary does not know (0.154.0 answers
+`--disable no_such_feature` with "Unknown feature flag", exit 1, and 0.78.0 refused every exec and
+app-server start that way) while `-c` ignores one, and `codex features list` shows both forms
+setting the same flag.
 
 **The steer is echoed by US, because the binary never echoes it.** `steer-echo.ts` fans one
 written steer to three places from the forwarder's `onWritten`: a `steer` stream frame
