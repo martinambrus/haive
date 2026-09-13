@@ -3,7 +3,7 @@ import { ClaudeCodeAdapter } from '../src/cli-adapters/claude-code.js';
 import { ZaiAdapter } from '../src/cli-adapters/zai.js';
 import { OllamaAdapter } from '../src/cli-adapters/ollama.js';
 import { MuseAdapter } from '../src/cli-adapters/muse.js';
-import { CodexAdapter } from '../src/cli-adapters/codex.js';
+import { CodexAdapter, codexExecFallbackSpec } from '../src/cli-adapters/codex.js';
 import { GeminiAdapter } from '../src/cli-adapters/gemini.js';
 import { GrokAdapter } from '../src/cli-adapters/grok.js';
 import { AmpAdapter } from '../src/cli-adapters/amp.js';
@@ -28,7 +28,7 @@ describe('supportsSteering capability', () => {
   // EVERY adapter is asserted here, including the false ones. amp and antigravity were absent
   // from this table when amp shipped steering, which is how the capability set went stale for
   // three months without a test noticing.
-  it('is true for the claude binary and for amp, false for the rest', () => {
+  it('is true for the claude binary, amp and codex, false for the rest', () => {
     expect(new ClaudeCodeAdapter().supportsSteering).toBe(true);
     expect(new ZaiAdapter().supportsSteering).toBe(true);
     expect(new OllamaAdapter().supportsSteering).toBe(true);
@@ -38,9 +38,9 @@ describe('supportsSteering capability', () => {
     // top-level `steer: true` as "apply at the next interruption point while the agent is
     // busy". Verified against the shipped binary's own --help.
     expect(new AmpAdapter().supportsSteering).toBe(true);
-    // codex exec is fire-and-forget; turn/steer exists only in its app-server JSON-RPC
-    // protocol, which is a different transport entirely.
-    expect(new CodexAdapter().supportsSteering).toBe(false);
+    // codex exec is fire-and-forget; turn/steer exists only in its app-server JSON-RPC protocol.
+    // codex is steerable through that transport, which steeringTransportReady gates per task.
+    expect(new CodexAdapter().supportsSteering).toBe(true);
     expect(new GeminiAdapter().supportsSteering).toBe(false);
     // grok is agentic and Claude-shaped on the wire, but its headless streams are
     // read-only — bidirectional flows need its ACP interface (`grok agent`), not stdin.
@@ -49,6 +49,94 @@ describe('supportsSteering capability', () => {
     // `result` event before writing the next message: that is a queued follow-up TURN, not a
     // mid-turn steer.
     expect(new AntigravityAdapter().supportsSteering).toBe(false);
+  });
+});
+
+describe('codex steering transport', () => {
+  const verdicts = (status: 'supported' | 'unsupported', providerCliVersion: string | null) => ({
+    'prov-codex': {
+      status,
+      providerCliVersion,
+      binaryVersion: '0.154.0',
+      stage: null,
+      detail: null,
+      source: 'probe' as const,
+      at: '2026-09-13T00:00:00.000Z',
+    },
+  });
+  const codexProvider = provider({
+    id: 'prov-codex',
+    name: 'codex',
+    cliVersion: '0.154.0',
+    model: 'gpt-5.6-sol',
+    effortLevel: 'high',
+  });
+
+  it('is ready only with a current, supported verdict for that provider', () => {
+    const adapter = new CodexAdapter();
+    const ready = (codexAppServer: ReturnType<typeof verdicts> | Record<string, never> | null) =>
+      adapter.steeringTransportReady(codexProvider, { codexAppServer });
+    expect(ready(null)).toBe(false);
+    expect(ready({})).toBe(false);
+    expect(ready(verdicts('supported', '0.154.0'))).toBe(true);
+    expect(ready(verdicts('unsupported', '0.154.0'))).toBe(false);
+    // A verdict about another version of the binary is not a verdict about this one.
+    expect(ready(verdicts('supported', '0.153.4'))).toBe(false);
+  });
+
+  it('leaves every stdin-NDJSON adapter always ready', () => {
+    expect(
+      new ClaudeCodeAdapter().steeringTransportReady(provider(), { codexAppServer: null }),
+    ).toBe(true);
+    expect(new AmpAdapter().steeringTransportReady(provider(), { codexAppServer: null })).toBe(
+      true,
+    );
+  });
+
+  it('builds an app-server spec in steering mode, whose exec fallback is the one-shot argv', () => {
+    const adapter = new CodexAdapter();
+    const spec = adapter.buildCliInvocation(codexProvider, 'hello world', { steeringMode: true });
+    expect(spec.command).toBe('codex');
+    expect(spec.args).toEqual(['app-server', '--disable', 'multi_agent_v2']);
+    expect(spec.outputFormat).toBe('codex-app-server');
+    expect(spec.steerable).toBe(true);
+    // The prompt travels in turn/start, never on argv or stdin.
+    expect(spec.args).not.toContain('hello world');
+    expect(spec.stdinInitial).toBeUndefined();
+    expect(spec.stdinPrompt).toBeUndefined();
+    expect(spec.codexAppServer).toMatchObject({
+      prompt: 'hello world',
+      model: 'gpt-5.6-sol',
+      effort: 'high',
+    });
+    const oneShot = adapter.buildCliInvocation(codexProvider, 'hello world', {});
+    expect([...spec.codexAppServer!.execArgs, 'hello world']).toEqual(oneShot.args);
+    const fallback = codexExecFallbackSpec(spec)!;
+    expect(fallback.args).toEqual(spec.codexAppServer!.execArgs);
+    expect(fallback.outputFormat).toBe('codex-jsonl');
+    expect(fallback.stdinPrompt).toBe('hello world');
+    expect(fallback.steerable).toBeUndefined();
+  });
+
+  it('keeps the one-shot codex exec argv exactly as it was', () => {
+    const spec = new CodexAdapter().buildCliInvocation(codexProvider, 'hello world', {});
+    expect(spec.args).toEqual([
+      'exec',
+      '--json',
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--disable',
+      'multi_agent_v2',
+      '-c',
+      'model_reasoning_effort="high"',
+      '-m',
+      'gpt-5.6-sol',
+      '--skip-git-repo-check',
+      'hello world',
+    ]);
+    expect(spec.outputFormat).toBe('codex-jsonl');
+    expect(spec.steerable).toBeUndefined();
+    expect(spec.codexAppServer).toBeUndefined();
+    expect(codexExecFallbackSpec(spec)).toBeNull();
   });
 });
 

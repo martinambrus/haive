@@ -218,3 +218,34 @@ describe('buildModelIdentity', () => {
     expect(id).toMatchObject({ requested: 'qwen/qwen3.8-27b', served: null, match: 'unknown' });
   });
 });
+
+describe('buildModelIdentity with a codex app-server report', () => {
+  // exec --json names no model; the app-server names the one thread/start resolved.
+  it('records the thread/start model as requested and nothing as served', () => {
+    expect(
+      buildModelIdentity({
+        codexAppServer: { requested: 'gpt-5.6-sol', served: null, billed: [] },
+      }),
+    ).toEqual({
+      requested: 'gpt-5.6-sol',
+      served: null,
+      billed: [],
+      source: 'provider-config',
+      match: 'unknown',
+    });
+  });
+
+  it('records a model/rerouted target as a served model that differs', () => {
+    expect(
+      buildModelIdentity({
+        codexAppServer: { requested: 'gpt-5.6-sol', served: 'gpt-5.6-mini', billed: [] },
+      }),
+    ).toEqual({
+      requested: 'gpt-5.6-sol',
+      served: 'gpt-5.6-mini',
+      billed: [],
+      source: 'codex-app-server',
+      match: 'differs',
+    });
+  });
+});

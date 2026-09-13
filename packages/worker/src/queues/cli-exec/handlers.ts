@@ -77,6 +77,11 @@ import {
 } from './resolvers.js';
 import { markProvidersReady, probeCliPath, removeOrphanedPreviousImage } from './images.js';
 import { resolveInvocationCost } from './invocation-cost.js';
+import {
+  codexAppServerFallbackWarning,
+  forgetCodexAppServerVerdictForOtherBinary,
+  recordCodexAppServerRuntimeFailure,
+} from '../../cli-adapters/codex-app-server-verdict.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
 import {
   cleanupTaskAuthVolumes,
@@ -174,6 +179,64 @@ export async function handleCliExecJob(
 
     const providerName = await resolveProviderNameForPayload(db, payload);
     const finalErrorMessage = interpretCliFailure(result, providerName);
+
+    // A codex run that found its app-server transport broken sends the rest of this task back to
+    // `codex exec` for that provider, so no later dispatch builds app-server again — including the
+    // re-dispatch its own transient headline is about to trigger — and tells the person watching,
+    // on the step. A run that behaved still reports which codex it ran, and a verdict taken on a
+    // different binary is dropped so the next dispatch re-probes. Best-effort throughout: the
+    // bookkeeping must never fail the invocation that observed it.
+    const codexAppServerFailure = result.codexAppServer?.failure ?? null;
+    const codexBinaryVersion = result.codexAppServer?.binaryVersion ?? null;
+    if (payload.cliProviderId && (codexAppServerFailure || codexBinaryVersion)) {
+      try {
+        if (codexAppServerFailure) {
+          await recordCodexAppServerRuntimeFailure(
+            db,
+            payload.taskId,
+            payload.cliProviderId,
+            codexAppServerFailure,
+            codexBinaryVersion,
+          );
+          if (payload.taskStepId) {
+            await db
+              .update(schema.taskSteps)
+              .set({
+                warningMessage: codexAppServerFallbackWarning(
+                  codexAppServerFailure,
+                  codexBinaryVersion,
+                ),
+                updatedAt: new Date(),
+              })
+              .where(eq(schema.taskSteps.id, payload.taskStepId));
+          }
+          log.warn(
+            {
+              invocationId: row.id,
+              providerId: payload.cliProviderId,
+              failure: codexAppServerFailure,
+              codexBinaryVersion,
+            },
+            'codex app-server transport failed; the task continues on codex exec',
+          );
+        } else if (codexBinaryVersion) {
+          const dropped = await forgetCodexAppServerVerdictForOtherBinary(
+            db,
+            payload.taskId,
+            payload.cliProviderId,
+            codexBinaryVersion,
+          );
+          if (dropped) {
+            log.info(
+              { invocationId: row.id, providerId: payload.cliProviderId, codexBinaryVersion },
+              'codex binary changed under a stored app-server verdict; the next dispatch re-probes',
+            );
+          }
+        }
+      } catch (err) {
+        log.warn({ err, invocationId: row.id }, 'failed to record the codex app-server outcome');
+      }
+    }
 
     await publishCliExit(payload.invocationId, result.exitCode);
 

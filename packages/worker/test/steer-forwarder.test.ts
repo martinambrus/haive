@@ -80,6 +80,23 @@ describe('createSteerForwarder', () => {
     expect(onWritten).toHaveBeenCalledWith({ id: '', text: 'legacy steer' });
   });
 
+  it('hands each steer to deliver instead of writing an NDJSON line, keeping onWritten', () => {
+    const sub = fakeSubscriber();
+    const w = fakeWritable();
+    const deliver = vi.fn();
+    const onWritten = vi.fn();
+    const f = createSteerForwarder({ subscriber: sub as never, deliver, onWritten });
+    f.captureWritable(w as never);
+    sub.emitMessage(JSON.stringify({ id: 'steer-1', text: 'focus on perf' }));
+    expect(deliver).toHaveBeenCalledWith({ id: 'steer-1', text: 'focus on perf' });
+    expect(w.write).not.toHaveBeenCalled();
+    expect(onWritten).toHaveBeenCalledWith({ id: 'steer-1', text: 'focus on perf' });
+    // The result latch still drops a late steer before it reaches deliver.
+    f.onResult();
+    sub.emitMessage(JSON.stringify({ id: 'steer-2', text: 'too late' }));
+    expect(deliver).toHaveBeenCalledTimes(1);
+  });
+
   describe('steerFlag', () => {
     const write = (steerFlag?: boolean) => {
       const sub = fakeSubscriber();

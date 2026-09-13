@@ -17,7 +17,8 @@ import type { CliCommandSpec } from '../../cli-adapters/types.js';
  *   claude-code, zai, ollama, muse, grok, openrouter  stream-json, both channels
  *   gemini                                            stats.models keys
  *   antigravity                                       its --log-file, a LABEL
- *   codex, amp                                        NOTHING (see below)
+ *   codex app-server                                  thread/start model; model/rerouted target
+ *   codex exec, amp                                   NOTHING (see below)
  *
  * codex's `exec --json` carries no model on any typed event — verified against a
  * complete 3.4 MB successful run, not just a failed one. amp's init event reports
@@ -161,6 +162,9 @@ export interface StreamModelReport {
 export interface ModelIdentityInput {
   /** claude-family stream-json report (createStreamJsonCollector.getModelIdentity). */
   stream?: StreamModelReport | null;
+  /** codex app-server report (createCodexAppServerSession.getModelReport): requested is the model
+   *  `thread/start` resolved, served only the target of a `model/rerouted` notification. */
+  codexAppServer?: StreamModelReport | null;
   /** gemini `stats.models` keys, in document order. */
   geminiModels?: string[] | null;
   /** antigravity's captured --log-file. */
@@ -173,7 +177,8 @@ export interface ModelIdentityInput {
  *  anything at all (nothing to store, and a row of nulls would imply we looked and
  *  found nothing rather than that this path reports nothing). */
 export function buildModelIdentity(input: ModelIdentityInput): ModelIdentity | null {
-  const requested = input.stream?.requested ?? input.specRequested ?? null;
+  const requested =
+    input.stream?.requested ?? input.codexAppServer?.requested ?? input.specRequested ?? null;
 
   let served: string | null = null;
   let source: ModelIdentity['source'] = null;
@@ -185,6 +190,11 @@ export function buildModelIdentity(input: ModelIdentityInput): ModelIdentity | n
       served = input.stream.served;
       source = 'stream-json';
     }
+  }
+
+  if (!served && input.codexAppServer?.served) {
+    served = input.codexAppServer.served;
+    source = 'codex-app-server';
   }
 
   if (!served && input.geminiModels && input.geminiModels.length > 0) {

@@ -18,6 +18,7 @@ import type {
 } from '@haive/shared';
 import { QUEUE_NAMES } from '@haive/shared';
 import { defaultCliSpawner, type CliSpawner } from '../../cli-executor/index.js';
+import type { CodexAppServerFailure } from '../../cli-executor/codex-app-server.js';
 import { getBullRedis } from '../../redis.js';
 
 export const log: ReturnType<typeof logger.child> = logger.child({ module: 'cli-exec-queue' });
@@ -101,6 +102,12 @@ export interface ExecutionOutcome {
    *  (via classifyAntigravityDiagnostic). Kept SEPARATE from providerErrorScan so the
    *  model's answer text never enters the fatal scan. */
   providerDiagnosticLog?: string;
+  /** codex app-server only: what this run learned about the transport. A `failure` means the
+   *  app-server misbehaved in a way that is not the model's doing, and cli-exec records the task's
+   *  verdict for this provider as `unsupported`, so no later dispatch builds app-server again.
+   *  Null when it behaved, and when Haive stopped the run itself (timeout, cancel, preemption).
+   *  `binaryVersion` is the codex version the app-server reported, null when it never said. */
+  codexAppServer?: { failure: CodexAppServerFailure | null; binaryVersion: string | null };
 }
 
 /**

@@ -12,7 +12,23 @@ const CODEX_JSONL =
   '{"type":"turn.started"}\n' +
   '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n';
 
+// The head of a real codex app-server stream (0.154.0): a response, then notifications. JSON-RPC
+// lines carry no `type`, which is why they need their own recognition.
+const CODEX_APP_SERVER =
+  '{"id":1,"result":{"userAgent":"haive/0.154.0","codexHome":"/home/node/.codex"}}\n' +
+  '{"method":"configWarning","params":{"summary":"bubblewrap"}}\n' +
+  '{"method":"item/completed","params":{"item":{"type":"agentMessage","text":"done"}}}\n';
+
 describe('looksLikeCliProtocol', () => {
+  it('detects a codex app-server JSON-RPC stream', () => {
+    expect(looksLikeCliProtocol(CODEX_APP_SERVER)).toBe(true);
+    expect(proseForClean('', CODEX_APP_SERVER)).toBe('');
+  });
+
+  it('does NOT treat a single JSON object with an id and a result as protocol', () => {
+    expect(looksLikeCliProtocol('{"id":1,"result":"ok"}')).toBe(false);
+  });
+
   it('detects the claude-stream-json init event', () => {
     expect(looksLikeCliProtocol(CLAUDE_INIT_NDJSON)).toBe(true);
   });

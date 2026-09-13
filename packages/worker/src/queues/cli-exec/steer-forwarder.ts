@@ -49,6 +49,10 @@ export function createSteerForwarder(opts: {
   /** Render each line with amp's `steer: true` queue marker. Unset for the claude family,
    *  whose binary has no such field. */
   steerFlag?: boolean;
+  /** Deliver a steer some other way than an NDJSON line on stdin — codex's app-server takes one as
+   *  a `turn/steer` request on the same pipe. The result latch, the stdin guard, onWritten and
+   *  teardown are unchanged; only the write is replaced. Unset for every stdin-NDJSON CLI. */
+  deliver?: (steer: ForwardedSteer) => void;
   /** Fired after a steer is successfully written to the CLI's stdin. Lets the
    *  caller track which steers were delivered so a later tool-call boundary can
    *  be reported as their consumption point. */
@@ -68,7 +72,8 @@ export function createSteerForwarder(opts: {
     const steer = parseSteerMessage(raw);
     if (!steer) return;
     try {
-      writable.write(steeringUserMessageLine(steer.text, { steer: opts.steerFlag }));
+      if (opts.deliver) opts.deliver(steer);
+      else writable.write(steeringUserMessageLine(steer.text, { steer: opts.steerFlag }));
       opts.onWritten?.(steer);
     } catch (err) {
       log.warn({ err }, 'steer stdin write failed');

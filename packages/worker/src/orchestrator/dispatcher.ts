@@ -1,6 +1,17 @@
 import type { Database } from '@haive/database';
-import { getCliProviderMetadata, type StepCapability } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  getCliProviderMetadata,
+  type StepCapability,
+} from '@haive/shared';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
+import { ensureCodexAppServerVerdict } from '../cli-adapters/codex-app-server-probe.js';
+import {
+  currentCodexAppServerVerdict,
+  loadCodexAppServerVerdicts,
+  type CodexAppServerVerdicts,
+} from '../cli-adapters/codex-app-server-verdict.js';
 import { CliAdapterRegistry, cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type {
   CliCommandSpec,
@@ -116,6 +127,12 @@ export interface DispatchRequest {
    *  better, and not seeing it still works, so refusing a blind provider outright
    *  would be wrong. */
   preferVision?: boolean;
+  /** The task's codex app-server verdicts, or null when the admin switch is off — the per-task
+   *  half of codex's steering capability (steeringTransportReady). Computed by
+   *  resolveTaskDispatch, which also takes the verdict on a provider's first steerable dispatch;
+   *  exposed on the pure resolver only for deterministic unit tests. Absent means none recorded,
+   *  which builds `codex exec`. */
+  codexAppServer?: CodexAppServerVerdicts | null;
   registry?: CliAdapterRegistry;
 }
 
@@ -126,15 +143,16 @@ export async function resolveTaskDispatch(
   taskId: string,
   req: DispatchRequest,
 ): Promise<DispatchPlan> {
-  const [lspConfigured, worktreeGitBoundary, mcpSurface, globalKbDigest, appReach] =
+  const [lspConfigured, worktreeGitBoundary, mcpSurface, globalKbDigest, appReach, codexAppServer] =
     await Promise.all([
       hasReadyLspBridge(db, taskId),
       resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
       resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
       resolveGlobalKbDigest(db, taskId),
       resolveAppReach(db, taskId),
+      resolveCodexAppServerVerdicts(db, taskId),
     ]);
-  return resolveDispatch({
+  const resolved: DispatchRequest = {
     ...req,
     lspConfigured,
     // Production callers cannot accidentally claim a boundary the mount will
@@ -143,7 +161,48 @@ export async function resolveTaskDispatch(
     mcpSurface,
     globalKbDigest,
     appReach,
-  });
+    codexAppServer,
+  };
+  const plan = resolveDispatch(resolved);
+  // A provider's first steerable codex dispatch in a task is where its app-server transport is
+  // checked — for onboarding and workflow tasks that is the model-health canary. The plan is
+  // resolved first so the provider ordering decides WHICH provider is probed, instead of a second
+  // copy of that ordering here. A probe that reaches no verdict leaves this dispatch on
+  // `codex exec`, and the next steerable dispatch tries again.
+  const { provider, adapter } = plan;
+  if (
+    codexAppServer !== null &&
+    req.steeringRequested === true &&
+    req.input.kind === 'prompt' &&
+    provider !== null &&
+    adapter !== null &&
+    provider.name === 'codex' &&
+    currentCodexAppServerVerdict(codexAppServer, provider) === null
+  ) {
+    const verdict = await ensureCodexAppServerVerdict(db, taskId, provider, adapter);
+    if (verdict) {
+      return resolveDispatch({
+        ...resolved,
+        codexAppServer: { ...codexAppServer, [provider.id]: verdict },
+      });
+    }
+  }
+  return plan;
+}
+
+/** The task's codex app-server verdicts, or null when the admin switch is off or unreadable. Null
+ *  keeps every codex run on `codex exec`, which is also what a config fault must do. */
+async function resolveCodexAppServerVerdicts(
+  db: Database,
+  taskId: string,
+): Promise<CodexAppServerVerdicts | null> {
+  let enabled: boolean;
+  try {
+    enabled = await configService.getBoolean(CONFIG_KEYS.CODEX_APP_SERVER_ENABLED, true);
+  } catch {
+    enabled = false;
+  }
+  return enabled ? loadCodexAppServerVerdicts(db, taskId) : null;
 }
 
 export function resolveDispatch(req: DispatchRequest): DispatchPlan {
@@ -297,10 +356,13 @@ function buildCliSidePlan(
     if (needsSubagents && !adapter.supportsSubagents) {
       return null;
     }
-    // Steering applies only to this single watched cli step (kind 'prompt') AND
-    // only when the resolved adapter supports it. Subagent/agent_mining paths
-    // never set steeringRequested.
-    const steeringMode = (req.steeringRequested ?? false) && adapter.supportsSteering;
+    // Steering applies only to a kind:'prompt' dispatch that asked for it, on an adapter that
+    // supports it AND whose steering transport is ready for this provider in this task — for codex
+    // that is its app-server, verified per task. Sub-agent paths never set steeringRequested.
+    const steeringMode =
+      (req.steeringRequested ?? false) &&
+      adapter.supportsSteering &&
+      adapter.steeringTransportReady(provider, { codexAppServer: req.codexAppServer ?? null });
     const effectivePrompt = adaptPrompt(req.input.prompt);
     const spec = adapter.buildCliInvocation(provider, effectivePrompt, {
       ...invokeOpts,

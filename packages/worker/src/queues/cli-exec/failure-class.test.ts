@@ -7,6 +7,7 @@ import {
   classifyProviderFatal,
   CLI_PREEMPTED_HEADLINE,
   CLI_TIMEOUT_HEADLINE,
+  CODEX_APP_SERVER_FAILED_HEADLINE,
   cliTimeoutBudgetMinutes,
   fatalClassFromMessage,
   isCliPreemptionFailure,
@@ -285,6 +286,15 @@ describe('isTransientCliFailure', () => {
     expect(isTransientCliFailure({ errorMessage: 'the run was cancelled or timed out' })).toBe(
       true,
     );
+  });
+
+  it('transient for a codex app-server transport failure, whose re-run is built as codex exec', () => {
+    expect(
+      isTransientCliFailure({
+        exitCode: 0,
+        errorMessage: `${CODEX_APP_SERVER_FAILED_HEADLINE} (stream): the app-server ended without completing the turn`,
+      }),
+    ).toBe(true);
   });
 
   it('NOT transient for a clean success (exit 0, no error)', () => {
