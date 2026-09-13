@@ -420,22 +420,30 @@ export async function executeByKind(
       // and an --add-host pointing at a dead address is worse than none. Same split, and the
       // same reason, as the chrome-devtools browser-url probe.
       const appReach = payload.taskId ? await resolveAppReach(db, payload.taskId) : null;
-      const mcp = providerRow
-        ? await resolveMcpExtraFiles(
-            db,
-            payload.taskId,
-            providerRow.name as CliProviderName,
-            sandboxWorkdir,
-            sandboxImage,
-            // Narrowed only when the STEP said so (report-only steps that cannot act on
-            // a browser or a container). Never inferred from `kind`: the fan-out
-            // machinery is shared by knowledge mining, the review personas and the
-            // adversarial-QA agents, and forcing rag-only on all three gave 08d a live
-            // app URL it had no browser to reach.
-            payload.toolProfile ?? 'full',
-            hasWorktree,
-          )
-        : { files: [], extraArgs: [] };
+      // The step-summary pass reads NO tools — it compacts agent text into three sentences —
+      // and every volume-backed provider delivers MCP by writing into the per-task auth volume,
+      // which is shared with whatever step is running by then (the recap is unlinked from the
+      // step machine, so the task has already moved on). Resolving a surface for it would write
+      // a full one into the file the next step is about to read, and that next step may be the
+      // one that declares `toolProfile: 'none'`. Skipping costs the recap nothing and is also
+      // one less helper container and one less MCP boot per summarised step.
+      const mcp =
+        providerRow && payload.purpose !== 'step_summary'
+          ? await resolveMcpExtraFiles(
+              db,
+              payload.taskId,
+              providerRow.name as CliProviderName,
+              sandboxWorkdir,
+              sandboxImage,
+              // Narrowed only when the STEP said so (report-only steps that cannot act on
+              // a browser or a container). Never inferred from `kind`: the fan-out
+              // machinery is shared by knowledge mining, the review personas and the
+              // adversarial-QA agents, and forcing rag-only on all three gave 08d a live
+              // app URL it had no browser to reach.
+              payload.toolProfile ?? 'full',
+              hasWorktree,
+            )
+          : { files: [], extraArgs: [] };
       // Pre-warm the shared npm cache for the MCP servers that are fetched from npm.
       // chrome-devtools-mcp's cold fetch (MEASURED 111-146s) outran the agent's ~50s
       // wait for its tools, so 08a silently fell back to static analysis while still

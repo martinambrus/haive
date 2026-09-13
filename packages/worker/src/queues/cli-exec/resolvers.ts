@@ -179,10 +179,11 @@ async function resolveRunnerBrowserCdpUrl(taskId: string): Promise<string | unde
  *  `00-model-health` is step index 0, so on gemini/codex/grok/antigravity that earlier
  *  dispatch is the normal case rather than an edge one.
  *
- *  Each mode clears the way its writer allows: `cli-merge` already RECONCILES from its marker,
- *  so an empty server list removes everything it added; gemini's merge is additive and needs
- *  its `replace` mode; antigravity's file holds nothing but MCP servers, so an empty body is
- *  the whole clear. Best-effort throughout, like the writers themselves. */
+ *  Each mode clears the way its writer allows, and both merges RECONCILE from a marker so a
+ *  server the USER configured is never removed — only what Haive wrote. `cli-merge` takes an
+ *  empty server list; gemini needs `clear` to say "run even though the map is empty";
+ *  antigravity's file holds nothing but MCP servers, so an empty body is the whole clear.
+ *  Best-effort throughout, like the writers themselves. */
 async function clearVolumeBackedMcp(
   taskId: string,
   providerName: CliProviderName,
@@ -194,7 +195,7 @@ async function clearVolumeBackedMcp(
     case 'bind':
       return; // per-invocation file; absent IS cleared
     case 'volume-merge':
-      await mergeGeminiMcpIntoSettings(taskId, {}, undefined, { replace: true });
+      await mergeGeminiMcpIntoSettings(taskId, {}, undefined, { clear: true });
       return;
     case 'cli-merge':
       await mergeCliMcpIntoTaskVolume(taskId, providerName, sandboxImage, []);

@@ -662,23 +662,79 @@ describe('mergeGeminiMcpIntoSettings', () => {
     expect(runner.runCalls).toHaveLength(2);
   });
 
-  it('replace mode runs on an EMPTY set and assigns instead of spreading', async () => {
-    // The clear a `toolProfile: 'none'` invocation needs. An additive merge can add a surface
-    // but never take one away, and the volume outlives the invocation.
+  it('reconciles from a marker, so only what Haive wrote is ever removed', async () => {
+    // The user's own gemini settings are copied into the task volume, `mcpServers` included.
+    // An unmarked entry must survive every merge and every clear.
     const runner = makeRunner({ preExistingVolumes: [taskVol] });
-    await mergeGeminiMcpIntoSettings('taskgem-0000', {}, runner, { replace: true });
-    expect(runner.runCalls).toHaveLength(1);
+    await mergeGeminiMcpIntoSettings('taskgem-0000', servers, runner);
     const script = runner.runCalls[0]!.cmd[2]!;
-    expect(script).toContain('cur.mcpServers = servers;');
-    expect(script).not.toContain('...(cur.mcpServers || {})');
+    expect(script).toContain('.haive-mcp-managed');
+    expect(script).toContain('for (const name of prev) delete merged[name];');
+    expect(script).toContain('Object.assign(merged, servers);');
+    // The marker is rewritten with THIS set, so the next reconcile knows what to undo.
+    expect(script).toContain('fs.writeFileSync(marker,');
+
+    // The emitted program must PARSE. This is a TS template literal, so a `\n` written with one
+    // backslash becomes a real newline in the program and breaks the string literal it sits in
+    // — and the helper is best-effort, so the syntax error would be logged and swallowed while
+    // gemini silently lost its MCP servers. `new Function` compiles without running.
+    const program = script.split("node -e '")[1]!.split("\n'")[0]!;
+    expect(() => new Function(program)).not.toThrow();
   });
 
-  it('an additive no-op does not record an identity that skips a later clear', async () => {
+  it('clear mode runs on an EMPTY set, which the no-op guard would otherwise skip', async () => {
+    // The clear a `toolProfile: 'none'` invocation needs: an additive merge can add a surface
+    // but never take one away, and the volume outlives the invocation.
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await mergeGeminiMcpIntoSettings('taskgem-0000', {}, runner, { clear: true });
+    expect(runner.runCalls).toHaveLength(1);
+    expect(runner.runCalls[0]!.cmd[2]!).toContain('for (const name of prev) delete merged[name];');
+  });
+
+  it('an empty no-op does not record an identity that skips a later clear', async () => {
     const runner = makeRunner({ preExistingVolumes: [taskVol] });
     await mergeGeminiMcpIntoSettings('taskgem-0000', {}, runner); // no-op, writes nothing
     expect(runner.runCalls).toHaveLength(0);
-    await mergeGeminiMcpIntoSettings('taskgem-0000', {}, runner, { replace: true });
+    await mergeGeminiMcpIntoSettings('taskgem-0000', {}, runner, { clear: true });
     expect(runner.runCalls).toHaveLength(1);
+  });
+});
+
+// Coalescing keys on scope + IDENTITY, which dedupes a fan-out's identical siblings but left two
+// DIFFERENT surfaces running their helper containers against one file at the same time. That
+// cost only a wrong surface until `toolProfile: 'none'` started CLEARING the file.
+describe('preparations against one file are serialised', () => {
+  it('does not start a second surface while the first is still writing', async () => {
+    clearTaskAuthPreparationState('taskgem-lock');
+    const events: string[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let n = 0;
+    const runner = {
+      volumeExists: async () => true,
+      run: async (): Promise<DockerRunResult> => {
+        const id = (n += 1);
+        events.push(`start${id}`);
+        if (id === 1) await gate;
+        events.push(`end${id}`);
+        return { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+      },
+    } as unknown as DockerRunner;
+
+    const first = mergeGeminiMcpIntoSettings(
+      'taskgem-lock',
+      { 'haive-rag': { command: 'node' } },
+      runner,
+    );
+    const second = mergeGeminiMcpIntoSettings('taskgem-lock', {}, runner, { clear: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual(['start1']); // the clear is queued, not racing
+    release();
+    await Promise.all([first, second]);
+    expect(events).toEqual(['start1', 'end1', 'start2', 'end2']);
+    clearTaskAuthPreparationState('taskgem-lock');
   });
 });
 

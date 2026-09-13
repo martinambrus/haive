@@ -81,10 +81,10 @@ describe('toolProfile: none clears a volume-backed surface', () => {
     expect(writeMcpFileIntoTaskVolume).not.toHaveBeenCalled();
   });
 
-  it('replaces rather than merges for gemini, whose merge is additive', async () => {
+  it('tells gemini to run on an empty map, since its no-op guard would skip it', async () => {
     await clear('gemini');
     expect(mergeGeminiMcpIntoSettings).toHaveBeenCalledWith('task-1', {}, undefined, {
-      replace: true,
+      clear: true,
     });
   });
 

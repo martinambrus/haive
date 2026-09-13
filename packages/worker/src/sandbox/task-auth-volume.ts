@@ -107,6 +107,30 @@ const cliMcpMergeRuns = new Map<string, Promise<void>>();
 const geminiMcpMergeRuns = new Map<string, Promise<void>>();
 const mcpFileWriteRuns = new Map<string, Promise<void>>();
 
+/**
+ * Tail of the in-flight chain for one preparation SCOPE, i.e. one file in one task's volume.
+ *
+ * The coalescing below keys on scope + IDENTITY, which dedupes a fan-out's identical siblings
+ * but leaves two DIFFERENT surfaces free to run their helper containers against the same file
+ * at the same time. That used to cost only a wrong surface; with `toolProfile: 'none'` clearing
+ * a volume it costs interleaved writes to a file another invocation is about to read. Ordering
+ * them is not the same as choosing the order — the later WRITE still wins, which is why the
+ * step-summary pass is kept out of MCP resolution entirely rather than raced with.
+ */
+const authPreparationLocks = new Map<string, Promise<void>>();
+
+/** Run `fn` after every preparation already queued for `scope`, whatever their outcomes. */
+function withScopeLock(scope: string, fn: () => Promise<void>): Promise<void> {
+  const prev = authPreparationLocks.get(scope) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  const tail = run.catch(() => {});
+  authPreparationLocks.set(scope, tail);
+  void tail.finally(() => {
+    if (authPreparationLocks.get(scope) === tail) authPreparationLocks.delete(scope);
+  });
+  return run;
+}
+
 function coalesceAuthPreparation(
   runs: Map<string, Promise<void>>,
   key: string,
@@ -155,10 +179,15 @@ async function applyAuthPreparationOnce(
   work: () => Promise<boolean>,
 ): Promise<void> {
   if (appliedAuthPreparations.get(scope) === key) return;
-  await coalesceAuthPreparation(runs, `${scope}|${key}`, async () => {
-    if (await work()) appliedAuthPreparations.set(scope, key);
-    else appliedAuthPreparations.delete(scope);
-  });
+  await coalesceAuthPreparation(runs, `${scope}|${key}`, () =>
+    withScopeLock(scope, async () => {
+      // Re-checked INSIDE the lock: an identical preparation may have been applied while
+      // this one waited, which is the whole point of queueing behind it.
+      if (appliedAuthPreparations.get(scope) === key) return;
+      if (await work()) appliedAuthPreparations.set(scope, key);
+      else appliedAuthPreparations.delete(scope);
+    }),
+  );
 }
 
 /** Forget every applied-preparation slot for one task. Called from the task-end funnel that
@@ -167,6 +196,9 @@ export function clearTaskAuthPreparationState(taskId: string): void {
   const prefix = `${taskId}|`;
   for (const scope of appliedAuthPreparations.keys()) {
     if (scope.startsWith(prefix)) appliedAuthPreparations.delete(scope);
+  }
+  for (const scope of authPreparationLocks.keys()) {
+    if (scope.startsWith(prefix)) authPreparationLocks.delete(scope);
   }
 }
 
@@ -543,12 +575,14 @@ async function seedRtkInTaskVolumeUnlocked(
  *  on-volume preserves the auth fields and any other keys (rtk hooks,
  *  folderTrust, etc) that earlier seed steps wrote.
  *
- *  No-op when servers is empty, UNLESS `replace` is set: the merge is additive, so it can add
- *  a surface but never take one away, and a `toolProfile: 'none'` invocation needs exactly the
- *  latter — the volume outlives the invocation, so an earlier full-surface dispatch in the same
- *  task leaves its servers on disk. `replace` assigns `mcpServers` outright instead of spreading
- *  onto it, and is what the clear passes. The sibling `mergeCliMcpIntoTaskVolume` needs no such
- *  flag because it already RECONCILES from its marker.
+ *  RECONCILES from a marker, exactly like {@link mergeCliMcpIntoTaskVolume}: the names Haive
+ *  wrote last time are removed and the current set added, so a surface that shrinks actually
+ *  shrinks and — the reason it matters — a `toolProfile: 'none'` invocation can take it to
+ *  nothing. A purely additive merge could add a surface but never take one away, while the
+ *  volume outlives the invocation. The marker is what keeps the user's OWN `mcpServers`, copied
+ *  in with the rest of their gemini settings, out of it: unmarked entries are never touched.
+ *
+ *  `clear` only says "run even though the map is empty"; the reconcile is the same either way.
  *
  *  Best-effort: failures are logged and the spawn proceeds — the user sees the MCP-related
  *  error from the CLI rather than a hard worker failure. */
@@ -556,17 +590,17 @@ export function mergeGeminiMcpIntoSettings(
   taskId: string,
   mcpServers: Record<string, unknown>,
   runner: DockerRunner = defaultDockerRunner,
-  opts: { replace?: boolean } = {},
+  opts: { clear?: boolean } = {},
 ): Promise<void> {
   const content = JSON.stringify(mcpServers);
-  const replace = opts.replace === true;
+  const clear = opts.clear === true;
   return applyAuthPreparationOnce(
     geminiMcpMergeRuns,
     `${taskId}|gemini-mcp`,
-    // The MODE is part of the identity: a clear and an additive no-op both carry `{}`, so a
-    // key on the content alone would let the recorded no-op skip a later clear.
-    contentKey(`${replace ? 'replace' : 'merge'}|${content}`),
-    () => mergeGeminiMcpIntoSettingsUnlocked(taskId, mcpServers, content, replace, runner),
+    // The MODE is part of the identity: a clear and an empty no-op both carry `{}`, so a key
+    // on the content alone would let the recorded no-op skip a later clear.
+    contentKey(`${clear ? 'clear' : 'merge'}|${content}`),
+    () => mergeGeminiMcpIntoSettingsUnlocked(taskId, mcpServers, content, clear, runner),
   );
 }
 
@@ -574,10 +608,10 @@ async function mergeGeminiMcpIntoSettingsUnlocked(
   taskId: string,
   mcpServers: Record<string, unknown>,
   mcpJson: string,
-  replace: boolean,
+  clear: boolean,
   runner: DockerRunner,
 ): Promise<boolean> {
-  if (Object.keys(mcpServers).length === 0 && !replace) return true;
+  if (Object.keys(mcpServers).length === 0 && !clear) return true;
   const meta = getCliProviderMetadata('gemini');
   // Index 1 is `~/.gemini` per shared catalog; skip if absent for some
   // reason (would mean the catalog drifted).
@@ -607,10 +641,23 @@ if (fs.existsSync(path)) {
 }
 const incoming = ${JSON.stringify(mcpJson)};
 const servers = JSON.parse(incoming);
-cur.mcpServers = ${replace ? 'servers' : '{ ...(cur.mcpServers || {}), ...servers }'};
+// Newline escapes below are written with a DOUBLED backslash: this program is built from a
+// TS template literal, where a single backslash escape becomes a real newline and breaks the
+// string literal it sits in. The helper then exits non-zero and the best-effort merge
+// swallows it, so gemini loses its MCP servers silently.
+const marker = "/vol/${MCP_MANAGED_MARKER}";
+let prev = [];
+if (fs.existsSync(marker)) {
+  try { prev = fs.readFileSync(marker, "utf8").split("\\n").filter(Boolean); } catch (err) {}
+}
+const merged = { ...(cur.mcpServers || {}) };
+for (const name of prev) delete merged[name];
+Object.assign(merged, servers);
+cur.mcpServers = merged;
 fs.writeFileSync(path, JSON.stringify(cur, null, 2));
+fs.writeFileSync(marker, Object.keys(servers).join("\\n"));
 '
-chown 1000:1000 /vol/settings.json
+chown 1000:1000 /vol/settings.json /vol/${MCP_MANAGED_MARKER}
 `;
 
   const result = await runner.run({
@@ -629,7 +676,7 @@ chown 1000:1000 /vol/settings.json
     return false;
   }
   log.info(
-    { taskId, count: Object.keys(mcpServers).length, replace },
+    { taskId, count: Object.keys(mcpServers).length, clear },
     'merged mcpServers into gemini settings.json',
   );
   return true;
