@@ -41,7 +41,9 @@ import {
 } from '../src/step-engine/steps/kb-author/_citation-scrub.js';
 import {
   bodyUsesRepoSymbol,
+  collectRepoBasenames,
   collectRepoSymbols,
+  isDistinctiveSymbol,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 
 const repoPath = process.env.KB_SCRUB_REPO;
@@ -62,6 +64,7 @@ async function main(): Promise<void> {
   await secretsService.initialize(db);
 
   const symbols = await collectRepoSymbols(repoPath, null).catch(() => new Set<string>());
+  const repoBasenames = await collectRepoBasenames(repoPath).catch(() => new Set<string>());
   const rows = await withGlobalKb(db, async ({ db: kb }) =>
     kb
       .select({ id: globalKbEntries.id, title: globalKbEntries.title, body: globalKbEntries.body })
@@ -80,6 +83,11 @@ async function main(): Promise<void> {
       repoPath,
       repoSymbols: symbols,
       findSymbol: bodyUsesRepoSymbol,
+      // MUST mirror 01-enrich's call exactly. An option this harness omits is a rule it does not
+      // exercise, and it would then score a clean 0 while measuring nothing — the one way this
+      // harness can lie about a change it exists to gate.
+      repoBasenames,
+      isDistinctiveStem: isDistinctiveSymbol,
     });
     blocks += count;
     chars += body.length;

@@ -258,6 +258,13 @@ export async function scrubCitations(
     /** First repo-defined symbol the text leans on, or null. Injected so this module does not
      *  depend on the knowledge step; `bodyUsesRepoSymbol` is the production implementation. */
     findSymbol?: (text: string, symbols: ReadonlySet<string>) => string | null;
+    /** Lowercased basenames of the anchor repo's own files, from `collectRepoBasenames`. Lets a
+     *  bare filename be recognised wherever it lives, not only at the repo root. Absent restores
+     *  the root-only behaviour exactly. */
+    repoBasenames?: ReadonlySet<string>;
+    /** Whether a bare filename's STEM is specific enough to be this repo's. Injected for the same
+     *  reason as `findSymbol`; `isDistinctiveSymbol` is the production implementation. */
+    isDistinctiveStem?: (stem: string) => boolean;
   },
 ): Promise<ScrubResult> {
   const blocks = splitIntoBlocks(body);
@@ -297,13 +304,28 @@ export async function scrubCitations(
           break;
         }
       }
-      // Bare filenames are checked at the repo ROOT only. That is where the config and manifest
-      // files a model reaches for actually live, and it costs one stat per candidate instead of
-      // a second walk of the tree with its own cap to get wrong.
+      // Bare filenames resolve at the repo ROOT for ANY name — that is where the config and
+      // manifests a model reaches for live — and anywhere in the tree for a DISTINCTIVE one.
+      //
+      // The split is the whole point. Matching every basename against the whole tree would delete
+      // a block for saying `config.php` or `utils.ts`, names that belong to no repository in
+      // particular and appear in invented examples constantly; the scrub's two errors are not
+      // equal, and a false hit silently removes somebody's prose. A stem carrying a hump or an
+      // underscore is specific to a codebase, which is the SAME test `isDistinctiveSymbol` applies
+      // to symbols and for the same reason. `InvoiceProcessor.ts` under `src/` is caught;
+      // `index.php` under `web/` is not.
       if (!reason) {
         for (const name of bareFilenameCandidates(block)) {
           const target = resolveInsideRepo(opts.repoPath, name);
           if (target && (await pathExists(target))) {
+            reason = name;
+            break;
+          }
+          const stem = name.replace(/\.[^.]+$/, '');
+          if (
+            opts.repoBasenames?.has(name.toLowerCase()) &&
+            opts.isDistinctiveStem?.(stem) === true
+          ) {
             reason = name;
             break;
           }

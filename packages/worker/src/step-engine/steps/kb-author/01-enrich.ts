@@ -16,7 +16,12 @@ import {
   SUPERSEDE_CANDIDATE_LIMIT,
 } from '../_global-kb-similarity.js';
 import { globalKbTopicKey } from '../_global-kb-promote.js';
-import { bodyUsesRepoSymbol, collectRepoSymbols } from '../onboarding/08-knowledge-acquisition.js';
+import {
+  bodyUsesRepoSymbol,
+  collectRepoBasenames,
+  collectRepoSymbols,
+  isDistinctiveSymbol,
+} from '../onboarding/08-knowledge-acquisition.js';
 import { scrubCitations, type ScrubbedBlock } from './_citation-scrub.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
@@ -450,10 +455,15 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     const repoSymbols = detected.hasRepo
       ? await collectRepoSymbols(ctx.repoPath, null).catch(() => new Set<string>())
       : new Set<string>();
+    const repoBasenames = detected.hasRepo
+      ? await collectRepoBasenames(ctx.repoPath).catch(() => new Set<string>())
+      : new Set<string>();
     const scrub = await scrubCitations(body, {
       repoPath: detected.hasRepo ? ctx.repoPath : null,
       repoSymbols,
       findSymbol: bodyUsesRepoSymbol,
+      repoBasenames,
+      isDistinctiveStem: isDistinctiveSymbol,
     });
     if (scrub.removed.length > 0) {
       ctx.logger.warn(
