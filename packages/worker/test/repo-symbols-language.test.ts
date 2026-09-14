@@ -165,6 +165,38 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('buildInvoiceRow')).toBe(true);
   });
 
+  it('collects PascalCase names carrying a single-letter prefix', async () => {
+    // `[a-z][A-Z]` alone misses this whole class shape — `CProduct` has no lowercase-then-
+    // uppercase pair anywhere — so the repo that motivated the scrub had its own class names
+    // dropped from the symbol set and a block copied out of one could not be recognised.
+    // Same two-hump rule `identifiers.ts` already uses, and it must still reject capitalised
+    // prose and all-caps words, or the scrub starts deleting invented examples.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-pascal-'));
+    await writeFile(
+      path.join(dir, 'classes.php'),
+      [
+        '<?php',
+        'class CProduct { public function get() {} }',
+        'class CPDF { public function get() {} }',
+        'class Postgres { public function get() {} }',
+        'class Excel { public function get() {} }',
+        'class PDF { public function get() {} }',
+        'class CNotificationEmail { public function get() {} }',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, 'php');
+    expect(symbols.has('CProduct')).toBe(true);
+    // Already collected through its `nE` hump, and must stay collected.
+    expect(symbols.has('CNotificationEmail')).toBe(true);
+    // Capitalised prose and all-caps names identify no repository: admitting them would let a
+    // body that merely says "Postgres" or "PDF" lose the block around it.
+    expect(symbols.has('Postgres')).toBe(false);
+    expect(symbols.has('Excel')).toBe(false);
+    expect(symbols.has('PDF')).toBe(false);
+    expect(symbols.has('CPDF')).toBe(false);
+  });
+
   it('collects a TypeScript method that declares a return type', async () => {
     // The annotation sits between `)` and `{`, and requiring the brace immediately after the
     // parens skipped every typed method — which in a TS repo is most of them.

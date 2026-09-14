@@ -1041,10 +1041,16 @@ const LANGUAGE_BUILTIN_NAMES = new Set([
  *
  *  Multi-word is the structural form of "specific to this codebase": a name built from two or
  *  more words was chosen for a domain, while a single verb is vocabulary every project shares.
- *  It mirrors what `identifiers.ts` already treats as an identifier worth indexing. */
+ *  It mirrors what `identifiers.ts` already treats as an identifier worth indexing — including
+ *  its SECOND hump, which is not optional here either: `[a-z][A-Z]` alone misses PascalCase with
+ *  a single-letter prefix, so a repo declaring `CProduct` had that name dropped from the symbol
+ *  set and a block copied out of that class could not be recognised. The second clause wants an
+ *  uppercase-then-lowercase pair NOT at the start, which admits `CProduct` while still rejecting
+ *  capitalised prose (`Postgres`, `Excel`) and all-caps words (`PDF`). Keep the two rules
+ *  identical: this decides what a citation IS, and `identifiers.ts` decides what is searchable. */
 function isDistinctiveSymbol(name: string | undefined): name is string {
   if (!name || LANGUAGE_BUILTIN_NAMES.has(name)) return false;
-  return /[a-z][A-Z]|_/.test(name);
+  return /[a-z][A-Z]|_/.test(name) || /.[A-Z][a-z]/.test(name);
 }
 
 /** Words that pass the method shape (`name(...) {`) but name no symbol. Length alone does not
