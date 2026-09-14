@@ -63,9 +63,14 @@ type — inherits it without anyone maintaining a list of special steps.
    exactly. Inside it, the body replaces the pointer, read from that provider's OWN
    `projectAgentsDir` (`.claude/agents` for the claude family, `.grok/agents` for grok) — the file
    the pointer names today. Outside it (codex, amp, gemini, antigravity, or a capable provider
-   whose bridge is not ready) nothing about the prompt changes. The reader is `loadAgentPersonas`
-   (`steps/workflow/_agent-loader.ts`, called only by 03), which already parses frontmatter and
-   returns `body`; it gains a directory argument defaulting to `.claude/agents`. Codex inlining
+   whose bridge is not ready) nothing about the prompt changes. The body is read by FILENAME,
+   `<projectAgentsDir>/<id>.md` — the exact file today's pointer names — and never looked up by the
+   frontmatter `name` that `loadAgentPersonas` keys on (`steps/workflow/_agent-loader.ts:36-37`).
+   The two can differ, and a lookup by `name` would silently drop the customisation that outranks
+   the inline persona. The reader `stat`s that one file and reads it only within the size budget
+   (dispatch side, item 3), so no directory is scanned and no unrelated agent file is ever read. It
+   reuses the loader's frontmatter parser (`parseAgentFile`, exported) and leaves
+   `loadAgentPersonas` and its only caller, 03, untouched. Codex inlining
    (its `.codex/agents/*.toml` is rendered without LSP, and no package has a TOML parser) is a
    follow-up.
 2. **Under isolation the rewrite never emits a pointer.** The file it would name is hidden, so the
@@ -170,8 +175,8 @@ so only a customised definition triggers it.
    does async work for the SELECTED provider (the codex app-server probe) and re-resolves.
    Persona bodies take the same shape: once `plan` exists, if `agentIsolationApplies(resolved)`,
    `plan.adapter` passes the gate (`supportsLsp`, `lspConfigured`, a catalog `projectAgentsDir`
-   with `agentFileFormat: 'markdown'`) and the prompt has marker ids, read that ONE directory in
-   the invocation's tree. The persona bodies and the codex app-server verdict are both gathered
+   with `agentFileFormat: 'markdown'`) and the prompt has marker ids, read `<id>.md` for each
+   marker id from that ONE directory in the invocation's tree (by filename, per Decision 1). The persona bodies and the codex app-server verdict are both gathered
    BEFORE re-resolving, and `resolveDispatch` runs a second time only when either is new, carrying
    both (`{ ...resolved, agentBodies, codexAppServer }`). Two early returns would each skip the
    other the moment Phase 3.1 resolves template personas on codex, losing either the persona or the
@@ -179,11 +184,13 @@ so only a customised definition triggers it.
    neither input changes which provider `tryBuildPlan` accepts, and when nothing is found the first
    plan's fallback text is already right. That is PR 1's gate
    for built-in markers, whose inline protocol always follows them; Phase 3.1 widens it for
-   template markers, which have none (Companion, item 2). A body larger than
-   `MAX_PERSONA_BODY_BYTES` (64 KiB, a guard rail above the largest definition measured, 24,694
-   bytes) is never pasted and never truncated, since a cut persona reads as a complete one: a
-   built-in marker falls back to its inline protocol and records an `agent_persona.oversized` task
-   event naming the file and its size, and a template marker fails the dispatch with that reason.
+   template markers, which have none (Companion, item 2). Pasted bodies share
+   one budget per prompt, `MAX_PERSONA_BODY_BYTES` (64 KiB in total, a guard rail above the largest
+   definition measured, 24,694 bytes), counted in marker order from each file's `stat` size before
+   it is read. A body that would exceed what is left is never read, never pasted and never
+   truncated, since a cut persona reads as a complete one: a built-in marker falls back to its
+   inline protocol and records an `agent_persona.oversized` task event naming the file and its
+   size, and a template marker fails the dispatch with that reason.
 4. **The tree is the one cli-exec will mount.** `ctx.repoPath` is always the repository root,
    while cli-exec mounts the invocation's worktree. The subpath rule inside
    `resolveInvocationRepoMount` (`queues/cli-exec/resolvers.ts`: a local-path repo binds its root
@@ -303,8 +310,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 
 - **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies` with its
   scope-marker check, the switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
-  (`agentGuidanceIds`, the positive arm), `step-engine/steps/workflow/_agent-loader.ts` (directory
-  argument), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
+  (`agentGuidanceIds`, the positive arm), `step-engine/steps/workflow/_agent-loader.ts` (export
+  `parseAgentFile`; a filename-keyed single-file reader that `stat`s before reading), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
   `step-engine/step-runner.ts` (`resolveLlmPhase` passes `agentPool`; the retry_ai `toolProfile`
   fix is its own commit).
 - **Spec:** `cli-adapters/types.ts` (`CliCommandSpec.maskAgentDefinitions`). No `CliExecJobPayload`
@@ -364,7 +371,7 @@ scratch.
    `agentDirectoryScopeMarker` (`.claude/agents/x.md`, `./.claude/agents/x.md` and
    `/haive/workdir/.claude/agents/x.md` mark; `docs/.claude/agents/x.md` and
    `.claude/agents-old/x.md` do not), marker ids, the persona path
-   (found / missing / oversized / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, and `07_7-secret-sweep` declaring `'*'`.
@@ -409,22 +416,23 @@ stores only `stepIds: string[]` and needs nothing.
    pasted for EVERY provider and whether or not the invocation is isolated: a template that
    declares `file_write`, `subagents` or `agentPool: '*'`, or hands its agent an agent path, still
    has no embedded protocol, so the widened resolver runs for these markers outside
-   `agentIsolationApplies`. The body is read from the selected provider's own agent directory when
-   that one is markdown and defines the id, and otherwise from the first markdown agent directory in
-   catalog order that does — the same directories the dangling-reference check below searches, so
+   `agentIsolationApplies`. The body is read by filename (`<id>.md`, as PR 1 reads it) from the
+   selected provider's own agent directory when that one is markdown and holds it, and otherwise
+   from the first markdown agent directory in catalog order that does — the same directories the dangling-reference check below searches, so
    a persona defined only in `.gemini/agents` passes task-create and still resolves for a claude
    dispatch, and codex (TOML) and amp (no agent directory) get it without the TOML reader PR 1
    defers. A marker whose body cannot be found at dispatch fails the dispatch with the
    dangling-reference reason below instead of running without its persona, since the tree can
-   change between task-create and dispatch; one whose body exceeds `MAX_PERSONA_BODY_BYTES` fails
-   the same way, naming the file and its size. The factory is also a handed-path renderer: a read-only
+   change between task-create and dispatch; one whose body would exceed the prompt's remaining
+   `MAX_PERSONA_BODY_BYTES` budget fails the same way, naming the file and its size — the budget is
+   per prompt, so many tokens cannot add up past it. The factory is also a handed-path renderer: a read-only
    template that interpolates an agent file (`Review {{path}}` with `path = .claude/agents/foo.md`)
    would hand its agent a masked file, so `buildPrompt` runs `agentDirectoryScopeMarker` over the
    template's static text and every interpolated value, split into path tokens, BEFORE tokens
    become persona markers (whose own pointer names `.claude/agents/<id>.md`), and appends the scope
    marker when one lies inside an agent directory.
-3. **Dangling references.** Extended to personas: a token naming a persona the target repository
-   does not define in a markdown agent directory is refused at task-create with a named reason
+3. **Dangling references.** Extended to personas: a token naming a persona with no `<id>.md` in any
+   markdown agent directory of the target repository is refused at task-create with a named reason
    ("step `<slug>` needs agent `drupal7-developer`, which this repository does not define") — the
    same not-silently-truncated rule the section applies to missing steps. A definition that exists
    only as `.codex/agents/<id>.toml` counts as absent until a TOML reader exists. Built-in steps are
