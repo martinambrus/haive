@@ -233,6 +233,16 @@ export interface RagFacetFilter {
 /** The dimensions the facet filter constrains. Exported so a consumer that
  *  filters the same facet shape outside SQL (the global KB prompt digest) cannot
  *  drift from what retrieval actually scopes on. */
+/** The dimensions that RESTRICT retrieval: a project with no value for one of these is
+ *  excluded from entries that constrain it, which is the conservative direction.
+ *
+ *  `tags` is deliberately NOT here, though an entry may carry it (`FACET_DIMENSIONS`). A tag is
+ *  a topical label on the ARTICLE — "performance", "caching" — and a PROJECT has no counterpart:
+ *  `extractProjectFacets` builds its set from the detected stack and leaves `tags` empty for
+ *  everyone. So a constrained `tags` could never be satisfied, only fail. MEASURED against the
+ *  live store: an article facetted `{framework:['drupal'], language:['php'], tags:[...]}` passed
+ *  both stack clauses and was rejected by the tags clause alone, i.e. invisible to every
+ *  project. Put it back only when projects actually carry tags. */
 export const FACET_FILTER_DIMENSIONS = [
   'framework',
   'frameworkMajor',
@@ -242,7 +252,6 @@ export const FACET_FILTER_DIMENSIONS = [
   'database',
   'dbMajor',
   'packages',
-  'tags',
 ] as const;
 
 interface RawRow {

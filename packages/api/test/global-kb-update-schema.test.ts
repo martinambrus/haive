@@ -74,3 +74,13 @@ describe('global KB enrichSchema', () => {
     expect(enrichSchema.safeParse({ title: 't', seedText: 's' }).success).toBe(false);
   });
 });
+
+// The entry schema is derived from FACET_DIMENSIONS (what an entry may CARRY), not from
+// FACET_FILTER_DIMENSIONS (what RESTRICTS retrieval). The two lists differ by `tags`, so
+// deriving from the filter list would start answering 400 for a facet the editor offers.
+describe('facets schema vs the filter list', () => {
+  it('accepts tags, which an entry may carry but which never filters', () => {
+    const parsed = updateSchema.parse({ facets: { tags: ['performance'], framework: ['drupal'] } });
+    expect(parsed.facets).toEqual({ tags: ['performance'], framework: ['drupal'] });
+  });
+});

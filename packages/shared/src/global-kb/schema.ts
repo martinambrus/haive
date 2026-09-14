@@ -29,6 +29,27 @@ export interface GlobalKbFacets {
   tags?: string[];
 }
 
+/** Every dimension an ENTRY may carry, in the order the UI shows them.
+ *
+ *  Deliberately NOT the same list as `FACET_FILTER_DIMENSIONS`, which is what RESTRICTS
+ *  retrieval. `tags` is the one dimension with no project-side source — `extractProjectFacets`
+ *  derives a project's facets from its detected stack and never sets tags — so filtering on it
+ *  can only ever exclude. MEASURED on a real entry: an article scoped
+ *  `{framework:['drupal'], language:['php'], tags:[...10 topical labels]}` passed the framework
+ *  and language clauses and was rejected by the tags clause alone, making it unreachable from
+ *  every project. Keep the two lists apart unless projects gain real tags. */
+export const FACET_DIMENSIONS = [
+  'framework',
+  'frameworkMajor',
+  'language',
+  'phpMajor',
+  'nodeMajor',
+  'database',
+  'dbMajor',
+  'packages',
+  'tags',
+] as const satisfies readonly (keyof GlobalKbFacets)[];
+
 export type GlobalKbCategory =
   'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
 

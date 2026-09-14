@@ -18,15 +18,11 @@ import {
   resolveGlobalKbSettings,
   withGlobalKb,
   type GlobalKbCategory,
+  FACET_DIMENSIONS,
   type GlobalKbFacets,
   type GlobalKbStatus,
 } from '@haive/shared/global-kb';
-import {
-  FACET_FILTER_DIMENSIONS,
-  ollamaEmbed,
-  probeOllama,
-  releaseEmbedModelIfUnused,
-} from '@haive/shared/rag';
+import { ollamaEmbed, probeOllama, releaseEmbedModelIfUnused } from '@haive/shared/rag';
 import { getDb } from '../db.js';
 import { getGlobalKbSyncQueue, getTaskQueue } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -54,10 +50,8 @@ const CATEGORIES = [
  *  right; a typo'd dimension stored here would simply never match anything. */
 const facetsSchema = z
   .object(
-    Object.fromEntries(
-      FACET_FILTER_DIMENSIONS.map((dim) => [dim, z.array(z.string()).optional()]),
-    ) as {
-      [K in (typeof FACET_FILTER_DIMENSIONS)[number]]: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    Object.fromEntries(FACET_DIMENSIONS.map((dim) => [dim, z.array(z.string()).optional()])) as {
+      [K in (typeof FACET_DIMENSIONS)[number]]: z.ZodOptional<z.ZodArray<z.ZodString>>;
     },
   )
   .strict();
