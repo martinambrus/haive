@@ -188,6 +188,37 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('loadInvoiceBatch')).toBe(true);
   });
 
+  it('collects accessors, generic methods and arrow class properties', async () => {
+    // Five of seven common JS/TS declaration forms were invisible. `get`/`set` are keyword
+    // extensions; the generic and the arrow property are narrow shape extensions, each
+    // anchored on something unambiguous (`<...>(` and `=>`).
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-forms-'));
+    await writeFile(
+      path.join(dir, 'view.ts'),
+      [
+        'class InvoiceView {',
+        '  get invoiceTotal(): number {',
+        '    return 1;',
+        '  }',
+        '  loadInvoiceRows<T>(id: string): T[] {',
+        '    return [];',
+        '  }',
+        '  handleUserClick = (e: Event) => {',
+        '    return e;',
+        '  };',
+        '  timeoutValue = 30;',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, 'typescript');
+    expect(symbols.has('invoiceTotal')).toBe(true);
+    expect(symbols.has('loadInvoiceRows')).toBe(true);
+    expect(symbols.has('handleUserClick')).toBe(true);
+    // A plain value property is not a callable and must not be collected.
+    expect(symbols.has('timeoutValue')).toBe(false);
+  });
+
   it('does not mistake control flow for a symbol', async () => {
     // These clear the length floor and match the method SHAPE, so only the name list excludes
     // them. Collecting one would make the scrub delete any article block that used the word.

@@ -1146,7 +1146,14 @@ export async function collectRepoSymbols(
       // most of them. Stops at `{` so an inline object return type is missed rather than
       // over-matched: a miss costs a symbol, over-matching costs somebody's article.
       const methodRe =
-        /^[ \t]+(?:(?:public|private|protected|static|readonly|async|\*)\s+)*([A-Za-z_]\w{4,})\s*\([^)]*\)\s*(?::\s*[^;{]+)?\s*\{/gm;
+        /^[ \t]+(?:(?:public|private|protected|static|readonly|async|get|set|\*)\s+)*([A-Za-z_]\w{4,})\s*(?:<[^<>()]*>)?\s*\([^)]*\)\s*(?::\s*[^;{]+)?\s*\{/gm;
+      // A class PROPERTY holding an arrow function — the common React/TS idiom. Anchored on the
+      // `=>`, so it declares a callable and cannot match `timeoutValue = 30` or an object
+      // literal. Deliberately NOT covered, with reasons: `#private` methods cannot be called
+      // from outside the class, so an article cannot meaningfully cite one, and an `abstract
+      // name(): T;` signature is re-declared with a body by whichever class implements it.
+      const classPropFnRe =
+        /^[ \t]+(?:(?:public|private|protected|static|readonly)\s+)*([A-Za-z_]\w{4,})\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_]\w*)\s*=>/gm;
       for (let m = defRe.exec(body); m; m = defRe.exec(body)) {
         if (isDistinctiveSymbol(m[1])) symbols.add(m[1]!);
       }
@@ -1157,6 +1164,9 @@ export async function collectRepoSymbols(
         if (m[1] && !NON_SYMBOL_KEYWORDS.has(m[1]) && isDistinctiveSymbol(m[1])) {
           symbols.add(m[1]);
         }
+      }
+      for (let m = classPropFnRe.exec(body); m; m = classPropFnRe.exec(body)) {
+        if (isDistinctiveSymbol(m[1])) symbols.add(m[1]!);
       }
       if (symbols.size > REPO_SYMBOL_CAP) break;
     }
