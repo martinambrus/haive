@@ -276,15 +276,25 @@ nothing has to ride in the prompt, and a future step inherits the rule with noth
    it checks the descriptor it opened, Decision 1), but a race can leave a stub. A directory deleted
    or renamed between the check and container start — a window holding `resolveAppReach`,
    `resolveMcpExtraFiles` with its pre-warm and `executeCliSpec`'s own setup — is a missing mount
-   target again, so Docker creates it, and any parent that went with it, empty and root-owned in the
-   repository, where it outlives the container and refuses every uid-1000 writer. So the builder
+   target again. On a volume repository Docker creates it, and any parent that went with it, empty and
+   root-owned, where it outlives the container and refuses every uid-1000 writer. A local-path
+   repository is mounted read-only (`resolveInvocationRepoMount`), so there the container fails to
+   start instead (runc's `mkdir` of the missing destination returns `EROFS`) and the invocation fails
+   loudly, leaving nothing behind. So the builder
    records the `dev`/`ino` of each masked directory and each ancestor below the root from the
    `lstat`s it already makes, and once the run returns, whether or not it succeeded, `executeByKind`
    removes, deepest first, every recorded path that is now an empty, root-owned directory with a
    different identity. `rmdir` cannot remove content; a directory the terminal or IDE recreated is
    owned by uid 1000 and stays, and one that anything filled is not empty and stays. A worker that
    dies mid-run leaves its stub behind, empty and invisible to git, and later builds mask it as the
-   real directory it now is; uid-1000 writes into that one path fail until it is removed.
+   real directory it now is; uid-1000 writes into that one path fail until it is removed. The
+   opposite race is accepted, not closed: a candidate absent at the check and created before the CLI
+   reads it stays unmasked for that run, which is today's behaviour and item 6's fail-open result,
+   with nothing left behind. Revalidating just before container creation only narrows that window,
+   since every CLI reads its agent directories inside the container once it exists, and masking
+   absent candidates is worse than the race: it would create directories for CLIs a repository does
+   not use on every isolated run, and on a read-only local-path mount no such mountpoint can be
+   created, so an isolated invocation on almost any local-path repository would fail to start.
 3. **A read-only tmpfs mount.** `DockerVolumeMount` (`sandbox/docker-runner.ts`) has only volume
    and bind forms. It gains `tmpfs?: true`, rendered as
    `--mount type=tmpfs,destination=<target>[,readonly]` by a branch placed BEFORE the
