@@ -465,39 +465,57 @@ stores only `stepIds: string[]` and needs nothing.
    must match the marker grammar `AGENT_GUIDANCE_PATTERN` parses (`[a-z0-9-]+`): the composer refuses
    any other id at save, task-create refuses it with a named reason, and `agentDefinitionGuidance`
    asserts the grammar beside its existing path assertion, so no caller can emit a marker the rewrite
-   would leave unparsed. The body is
+   would leave unparsed. Save and task-create run in the api, which cannot import the worker's
+   private pattern, so the id grammar is one `@haive/shared` constant that the api's checks and
+   `AGENT_GUIDANCE_PATTERN` are both built from. The body is
    pasted for EVERY provider and whether or not the invocation is isolated: a template that
    declares `file_write`, `subagents` or `agentPool: '*'`, or names an agent directory or file in its prompt, still
    has no embedded protocol, so the widened resolver runs for these markers outside
    `agentIsolationApplies`. The body is read by filename (`<id>.md`, as PR 1 reads it) from the
    selected provider's own agent directory when that one is markdown and holds it, and otherwise
    from the first markdown agent directory in catalog order that does — the same directories the dangling-reference check below searches, so
-   a persona defined only in `.gemini/agents` passes task-create and still resolves for a claude
+   a persona defined only in `.gemini/agents` raises no start-time warning and still resolves for a claude
    dispatch, and codex (TOML) and amp (no agent directory) get it without the TOML reader PR 1
    defers. A marker whose body cannot be found at dispatch fails the dispatch with the
-   dangling-reference reason below instead of running without its persona, since the tree can
-   change between task-create and dispatch; one whose body would exceed the prompt's remaining
+   dangling-reference reason below instead of running without its persona, since the start-time check below reads a
+   different tree and the tree can change before dispatch; one whose body would exceed the prompt's remaining
    `MAX_PERSONA_BODY_BYTES` budget fails the same way, naming the file and its size — the budget is
    per prompt, so many tokens cannot add up past it. Template text needs nothing of its own: the prompt
    path scan (dispatch side, "Handed paths") sees interpolated values and static text like any other
    prompt text, and excludes the persona markers that tokens become.
-3. **Dangling references.** Extended to personas: a token naming a persona with no `<id>.md` in any
-   markdown agent directory of the target repository (a symlink, an out-of-tree path, an unparseable
-   file, an empty body or a file the secret mask covers counts as absent, since PR 1's reader treats
-   all five as missing) is refused at task-create with a named reason
-   ("step `<slug>` needs agent `drupal7-developer`, which this repository does not define") — the
-   same not-silently-truncated rule the section applies to missing steps. A definition that exists
-   only as `.codex/agents/<id>.toml` counts as absent until a TOML reader exists. Built-in steps are
-   never refused this way, since their personas always have an inline fallback.
+3. **Dangling references.** Extended to personas, with one difference from missing steps: whether a
+   persona resolves depends on the tree the invocation will mount, and task-create cannot know that
+   tree, since `01-worktree-setup` picks its base only when it runs (a synced base, its form's
+   `baseBranch`, the current branch or `main`) and a worktree holds tracked files only. So
+   task-create REFUSES only what no tree can fix, an id outside the marker grammar (item 2).
+   Everything else is checked twice by PR 1's reader. When the worker starts the task
+   (`handleStartTask`, beside its `task.running` event, which a task-level retry runs again), it reads
+   the repository as checked out and records one `agent_persona.unresolved` task event, naming the
+   step and the agent, for each persona the reader cannot use there: no `<id>.md` in any markdown
+   agent directory, a symlink, an out-of-tree path, an unparseable file, an empty body, a file the
+   secret mask covers, or a body past the per-prompt `MAX_PERSONA_BODY_BYTES` budget in marker order.
+   That warning reaches the Activity tab the way `codex_app_server.unavailable` does, and it runs in
+   the worker because the reader and the secret-mask policy are worker code the api must not import;
+   sharing the reader is also what keeps the warning and the dispatch from disagreeing about anything
+   but the tree. Dispatch is the authoritative check and fails loudly with the same reason ("step
+   `<slug>` needs agent `drupal7-developer`, which this repository does not define"). Refusing before
+   dispatch would block a persona that exists only on the base the task actually branches from,
+   which is the stance `AGENTS.md` records for onboarding and `computePlanReady`: a rule strict
+   enough to choose must not refuse. A definition that exists only as `.codex/agents/<id>.toml`
+   counts as absent until a TOML reader exists. Built-in steps never warn or fail this way, since
+   their personas always have an inline fallback.
 4. **Creator mode.** The generated candidate entry may use tokens and `agentPool`; the generating
    turn is handed the persona catalog Haive's onboarding templates install (id + description).
    Authoring is global, so no single repository's own agents apply; a repository-specific persona
-   typed by hand is caught at task-create by the dangling-reference rule, and the admin reviews the
-   pick in the composer like any other field.
+   typed by hand is warned about when a task starts and checked authoritatively at dispatch by the
+   dangling-reference rule, and the admin reviews the pick in the composer like any other field.
 5. **Net-new infrastructure, Critical files, Verification.** Item 6 (`synthesizeStepDefinition`)
-   and the Phase 3 critical-files line name the field and the token; Phase 3 verification gains a
-   prompt-template step using `{{agent:peer-reviewer}}` whose captured request contains that
-   persona's body and no other repository agent.
+   and the Phase 3 and Shared critical-files lines name the field, the token, the start-time check in
+   `handleStartTask` and the shared id grammar constant. Phase 3 verification gains a prompt-template
+   step using `{{agent:peer-reviewer}}` whose captured request contains that persona's body and no
+   other repository agent, a persona the checked-out repository lacks that warns at start and fails
+   its dispatch, and one defined only on the base `01-worktree-setup` branches from that warns at
+   start and still runs.
 6. **Header blockquote.** Records the dependency: Phase 3.1's agent handling needs this plan's
    rule, which ships first and independently.
 
