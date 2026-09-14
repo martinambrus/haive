@@ -163,7 +163,9 @@ export function buildEnrichPrompt(detected: KbAuthorDetect): string {
       ? [
           '## The scope the author set (AUTHORITATIVE — do not narrow or widen it)',
           ...scope,
-          'These dimensions are already decided. Fill in only the ones missing below.',
+          'These dimensions are already decided. Fill in only the ones missing below — and where',
+          'the author named a technology without pinning its version, the rule covers EVERY',
+          'version of it, so leave that version dimension out rather than inferring one.',
           '',
         ]
       : []),
