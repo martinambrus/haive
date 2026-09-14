@@ -1259,7 +1259,16 @@ export default function GlobalKbPage() {
                           Go to task
                         </Button>
                       )}
-                      {(e.status === 'draft' || e.status === 'archived') && (
+                      {/* Drafts only. Reactivating an ARCHIVED entry is a considered recovery,
+                          not a list operation: it cannot retire whatever replaced it (the API
+                          archives the predecessor named by the row being activated, and a
+                          successor points the other way), so done from here it silently leaves
+                          two entries live for one rule. Worse from a filtered list — filtering to
+                          `archived` HIDES the successor, so the conflict is not even visible. The
+                          detail view is where the warning and the diff are, and where the scope
+                          editor's own copy already sends the reviewer. Activating a draft carries
+                          no such hazard: superseding its predecessor is the designed outcome. */}
+                      {e.status === 'draft' && (
                         <Button
                           size="sm"
                           disabled={busy}
@@ -1268,7 +1277,7 @@ export default function GlobalKbPage() {
                             void activate(e);
                           }}
                         >
-                          {e.status === 'archived' ? 'Reactivate' : 'Activate'}
+                          Activate
                         </Button>
                       )}
                       {!inProgress && (
