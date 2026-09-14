@@ -1,5 +1,8 @@
+import { Queue } from 'bullmq';
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { GLOBAL_KB_JOB_NAMES, QUEUE_NAMES } from '@haive/shared';
+import { getBullRedis } from '../../../redis.js';
 import {
   FACET_DIMENSIONS,
   normalizeFacets,
@@ -620,9 +623,42 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
       );
     }
 
-    // No embed here any more. Drafts hold no vectors (the sync job deletes chunks for anything
-    // not `active`), so embedding on write was only ever reachable on the auto-activate path
-    // this commit removes; activation re-embeds through the API's enqueueSync.
+    // No embed here any more — but the vectors still have to be RECONCILED, and asserting the
+    // invariant is not the same as enforcing it.
+    //
+    // "Drafts hold no vectors" is true of a NEW entry, which was never embedded. It is false of a
+    // RETRIED one: a step that completed under the old auto-activate behaviour left its entry
+    // `active` WITH chunks, and re-running it rewrites the body and demotes the row to `draft`
+    // while those chunks stay. Retrieval does not save us there — `ragHybridSearch` filters on
+    // namespace and facets only, and the body expansion joins the chunk to its entry with no
+    // status predicate at all, so it would serve the NEW, explicitly unreviewed text globally.
+    // That is the review gate this whole step exists to create, bypassed by a retry.
+    //
+    // The sync job already holds the rule ("Only `active` entries are retrievable; anything else
+    // holds no vectors") and deletes chunks for anything not active, so one enqueue restores it.
+    // ENQUEUED rather than called inline: this must eventually happen, and a queued job retries
+    // where a direct call would lose the reconciliation to one transient failure. A no-op for a
+    // new entry, which has no chunks to delete.
+    try {
+      const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
+      try {
+        await queue.add(
+          GLOBAL_KB_JOB_NAMES.SYNC_ENTRY,
+          { entryId: skeletonId, namespace: detected.namespace, reason: 'upsert' },
+          { removeOnComplete: true, removeOnFail: 20 },
+        );
+      } finally {
+        await queue.close().catch(() => {});
+      }
+    } catch (err) {
+      // Loud, not fatal: the article is written and the entry IS a draft, so failing the step
+      // would discard finished work. What survives a failure here is stale chunks on a demoted
+      // entry, which is exactly what this line exists to prevent — so it is an error, not a warn.
+      ctx.logger.error(
+        { err, entryId: skeletonId },
+        'kb enrich: could not enqueue vector reconciliation; a retried entry may keep stale chunks',
+      );
+    }
     ctx.logger.info(
       { entryId: skeletonId, mode: confirmedUpdate ? 'update' : 'new', enriched: !!parsed?.body },
       'kb enrichment complete → draft (awaiting review)',
