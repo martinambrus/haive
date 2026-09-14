@@ -1339,8 +1339,14 @@ export function bodyUsesRepoSymbol(text: string, symbols: ReadonlySet<string>): 
   // `[ \t]*` rather than `\s*` on that arm, deliberately: a newline between a name and a brace is
   // a markdown heading followed by an unrelated block far more often than it is a literal, and
   // over-matching here deletes somebody's article.
+  // The call arm allows a trailing `!` or `?`. Ruby and Elixir spell a mutating or predicate
+  // method that way (`process_invoice!`, `valid_invoice?`), and the DECLARATION scanner captures
+  // only the base word — `[A-Za-z_]\w{4,}` stops at the punctuation — so the symbol set holds
+  // `process_invoice` while an article copies `process_invoice!(invoice)`. Requiring `(`
+  // immediately after the base word missed every one of them, in the two languages where the
+  // form is idiomatic rather than rare.
   const re =
-    /\b([A-Za-z_]\w{4,})\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::|\b([A-Za-z_]\w{4,})[ \t]*\{/g;
+    /\b([A-Za-z_]\w{4,})[!?]?\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::|\b([A-Za-z_]\w{4,})[ \t]*\{/g;
   for (let m = re.exec(text); m; m = re.exec(text)) {
     const name = m[1] ?? m[2] ?? m[3] ?? m[4];
     if (name && symbols.has(name)) return name;

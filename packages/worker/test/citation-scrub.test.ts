@@ -261,6 +261,16 @@ describe('bodyUsesRepoSymbol type literals', () => {
   it('ignores a name this repo does not define', () => {
     expect(bodyUsesRepoSymbol('OtherThing{x: 1}', symbols)).toBeNull();
   });
+
+  it('matches a Ruby/Elixir bang or predicate call', () => {
+    // The declaration scanner captures the BASE word — its pattern stops at the punctuation —
+    // so the set holds `process_invoice` while the article writes `process_invoice!(...)`.
+    // Requiring `(` straight after the base word missed the idiomatic form in both languages.
+    expect(bodyUsesRepoSymbol('process_invoice!(invoice)', symbols)).toBe('process_invoice');
+    expect(bodyUsesRepoSymbol('if process_invoice?(invoice) do', symbols)).toBe('process_invoice');
+    // Still not a match without a call: a bare mention is not a citation of the code.
+    expect(bodyUsesRepoSymbol('the process_invoice! helper', symbols)).toBeNull();
+  });
 });
 
 // The bare-filename rule resolved at the repo ROOT only, so `InvoiceProcessor.ts` living under
