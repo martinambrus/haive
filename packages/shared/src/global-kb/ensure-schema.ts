@@ -230,6 +230,15 @@ export async function ensureGlobalKbSchema(
   // selected; and a padded ` drupal ` matched neither the predicate (`lower(v)` equals it) nor
   // `?|`, which does not trim. The predicate is now "the stored value differs from its canonical
   // form", which subsumes case, padding and aliases and needs no clause per rule.
+  //
+  // It must also catch the values the aggregation DROPS rather than rewrites. An empty or
+  // whitespace-only token canonicalises TO ITSELF, so `canon <> v` is false for it while the
+  // rewrite would still discard it — and a legacy `{"framework": [""]}` (the old API took a bare
+  // `z.string()`) therefore kept a NON-EMPTY array that overlaps nothing, with
+  // `jsonb_array_length` = 1 so `buildFacetClause`'s "= 0 applies to all" arm does not fire
+  // either. Unreachable from every project. A null element is folded in for the same reason —
+  // dropped, not rewritten — though that one is benign for retrieval on its own (MEASURED: `?|`
+  // and `jsonb_array_length` both handle it).
   const canon = canonicalFacetValueSql('kv.key', 'v');
   for (const table of [ENTRIES_TABLE, VECTORS_TABLE]) {
     await conn.pg.unsafe(`
@@ -250,7 +259,8 @@ export async function ensureGlobalKbSchema(
         SELECT 1 FROM jsonb_each(t.facets) AS kv
         WHERE jsonb_typeof(kv.value) <> 'array'
            OR EXISTS (
-             SELECT 1 FROM jsonb_array_elements_text(kv.value) AS v WHERE ${canon} <> v
+             SELECT 1 FROM jsonb_array_elements_text(kv.value) AS v
+             WHERE v IS NULL OR btrim(v) = '' OR ${canon} <> v
            )
       )
     `);
