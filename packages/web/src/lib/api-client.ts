@@ -1116,6 +1116,28 @@ export interface RagQueryEntry {
   createdAt: string;
 }
 
+/** The facet dimensions, in the order they are shown, with the label each gets.
+ *
+ *  One list, beside the type it describes: a form and an editor that disagree about the
+ *  dimensions would let a user set a scope the other cannot show. The api validates the same
+ *  set with `.strict()`, so anything missing here is a dimension the UI can neither send nor
+ *  edit — which is how `database`/`dbMajor` went unnoticed. */
+export const GLOBAL_KB_FACET_DIMENSIONS: ReadonlyArray<{
+  key: keyof GlobalKbFacets;
+  label: string;
+  placeholder: string;
+}> = [
+  { key: 'framework', label: 'Framework', placeholder: 'drupal, laravel' },
+  { key: 'frameworkMajor', label: 'Framework major', placeholder: '11' },
+  { key: 'language', label: 'Language', placeholder: 'php' },
+  { key: 'phpMajor', label: 'PHP major', placeholder: '8' },
+  { key: 'nodeMajor', label: 'Node major', placeholder: '22' },
+  { key: 'database', label: 'Database', placeholder: 'postgres, mariadb' },
+  { key: 'dbMajor', label: 'Database major', placeholder: '17' },
+  { key: 'packages', label: 'Packages', placeholder: 'drupal/paragraphs@8' },
+  { key: 'tags', label: 'Tags', placeholder: 'performance' },
+];
+
 /** Mirrors `GlobalKbFacets` in @haive/shared/global-kb, which web must not import. Keep every
  *  dimension: the api validates the same shape with `.strict()`, so a field missing here is one
  *  the UI can neither send nor edit. */

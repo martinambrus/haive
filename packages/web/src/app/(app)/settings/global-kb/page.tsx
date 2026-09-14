@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { diffLines } from 'diff';
 import {
   api,
+  GLOBAL_KB_FACET_DIMENSIONS,
   releaseGlobalKbEmbedModel,
   type ApiError,
   type CliProvider,
@@ -32,6 +33,57 @@ function parseList(s: string): string[] {
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+/** Comma-separated text per dimension — the `parseList` shape already used for egress domains,
+ *  rather than a tag component web does not have. An EMPTY dimension is dropped, not stored as
+ *  `[]`: naming a dimension restricts the entry to it, so "no opinion" has to be absence. */
+function facetsFromFields(fields: Record<string, string>): GlobalKbFacets {
+  const out: GlobalKbFacets = {};
+  for (const { key } of GLOBAL_KB_FACET_DIMENSIONS) {
+    const values = parseList(fields[key] ?? '');
+    if (values.length > 0) out[key] = values;
+  }
+  return out;
+}
+
+function fieldsFromFacets(f: GlobalKbFacets): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { key } of GLOBAL_KB_FACET_DIMENSIONS) out[key] = (f[key] ?? []).join(', ');
+  return out;
+}
+
+/** The one scope editor, used by the enrich form and by the entry detail modal. Two surfaces
+ *  that disagreed about the dimensions would let a scope be set that the other cannot show. */
+function FacetFields({
+  idPrefix,
+  fields,
+  onChange,
+  disabled,
+}: {
+  idPrefix: string;
+  fields: Record<string, string>;
+  onChange: (key: string, value: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {GLOBAL_KB_FACET_DIMENSIONS.map((dim) => (
+        <div key={dim.key} className="flex flex-col gap-1">
+          <Label htmlFor={`${idPrefix}-${dim.key}`} className="text-[11px] text-neutral-500">
+            {dim.label}
+          </Label>
+          <Input
+            id={`${idPrefix}-${dim.key}`}
+            value={fields[dim.key] ?? ''}
+            placeholder={dim.placeholder}
+            disabled={disabled}
+            onChange={(e) => onChange(dim.key, e.target.value)}
+          />
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function facetsSummary(f: GlobalKbFacets): string {
@@ -174,6 +226,14 @@ export default function GlobalKbPage() {
     egressMode: 'none' as 'none' | 'allowlist' | 'full',
     egressDomains: '',
   });
+  // Scope the author is sure of. Blank means "let the model decide", which is what an omitted
+  // dimension already means to retrieval.
+  const [enrichFacets, setEnrichFacets] = useState<Record<string, string>>({});
+  // Scope editor for an entry that already exists. Null = not editing; the entry's own facets
+  // are loaded into it on open so a correction starts from what is stored.
+  const [scopeEdit, setScopeEdit] = useState<Record<string, string> | null>(null);
+  const [scopeBusy, setScopeBusy] = useState(false);
+  const [scopeError, setScopeError] = useState<string | null>(null);
   const [enrichBusy, setEnrichBusy] = useState(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
   // Arriving from the onboarding step-04 link (?repo=&cli=) pre-fills the repo +
@@ -513,6 +573,29 @@ export default function GlobalKbPage() {
     }
   }
 
+  /** Re-scope an entry that is already stored.
+   *
+   *  The only way to correct a facet short of deleting the article and writing it again — which
+   *  is how the first of these ended up stuck at `frameworkMajor: ["7"]`. PATCH replaces the
+   *  facets wholesale (it does not merge), which is exactly what an editor showing every
+   *  dimension needs. */
+  async function saveScope(e: GlobalKbEntry) {
+    if (!scopeEdit) return;
+    setScopeBusy(true);
+    setScopeError(null);
+    try {
+      const facets = facetsFromFields(scopeEdit);
+      await api.patch(`/global-kb/entries/${e.id}`, { facets });
+      setSelected((cur) => (cur && cur.id === e.id ? { ...cur, facets } : cur));
+      setEntries((rows) => rows?.map((r) => (r.id === e.id ? { ...r, facets } : r)) ?? rows);
+      setScopeEdit(null);
+    } catch (err) {
+      setScopeError((err as ApiError).message ?? 'Failed to save the scope');
+    } finally {
+      setScopeBusy(false);
+    }
+  }
+
   async function remove(e: GlobalKbEntry) {
     // Only a kb_author ENRICH entry (source='user' with its own task) should cascade
     // a cancel — that task exists solely to produce this row, so deleting the row
@@ -588,8 +671,11 @@ export default function GlobalKbPage() {
       setEnrichError('Write something for the AI to work from.');
       return;
     }
-    if (!enrich.repoId || !enrich.cliProviderId) {
-      setEnrichError('Pick a repository and a CLI.');
+    // No repository required: a rule that applies to every project should be writable without
+    // opening one, and anchoring to a codebase is what scoped the first of these to that
+    // codebase's own version.
+    if (!enrich.cliProviderId) {
+      setEnrichError('Pick a CLI to write it with.');
       return;
     }
     setEnrichBusy(true);
@@ -598,8 +684,9 @@ export default function GlobalKbPage() {
       await api.post('/global-kb/enrich', {
         title: enrich.title,
         seedText: enrich.notes,
-        repositoryId: enrich.repoId,
+        ...(enrich.repoId ? { repositoryId: enrich.repoId } : {}),
         cliProviderId: enrich.cliProviderId,
+        facets: facetsFromFields(enrichFacets),
         egress: {
           mode: enrich.egressMode,
           ...(enrich.egressMode === 'allowlist'
@@ -608,6 +695,7 @@ export default function GlobalKbPage() {
         },
       });
       setEnrich({ ...enrich, title: '', notes: '' });
+      setEnrichFacets({});
       await load();
     } catch (err) {
       setEnrichError((err as ApiError).message ?? 'Enrichment failed to start');
@@ -858,10 +946,10 @@ export default function GlobalKbPage() {
           <CardTitle>Add a house rule</CardTitle>
           <CardDescription>
             Set a title you'll recognize, then write the rule — generic or detailed; name modules,
-            paste URLs. Pick a repository so the AI can read its stack and extract the right
-            framework + major versions. It keeps your title, derives the category and facets, and
-            files the entry automatically — as a new one, or an update of a matching rule already in
-            the KB.
+            paste URLs. A repository is optional: it is somewhere the AI can SEE the rule obeyed or
+            broken, never the subject of the article. It keeps your title, derives the category, and
+            fills whatever scope you leave blank — filing the result as a draft for you to review,
+            either as a new rule or an update of one already in the KB.
           </CardDescription>
         </CardHeader>
         <div className="flex flex-col gap-3">
@@ -916,27 +1004,51 @@ export default function GlobalKbPage() {
                 }
                 className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
-                <option value="none">repo only (no web)</option>
+                <option value="none">
+                  {enrich.repoId ? 'repo only (no web)' : 'no web access'}
+                </option>
                 <option value="allowlist">specific domains</option>
                 <option value="full">full internet</option>
               </select>
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="enrich-repo">Repository</Label>
+              <Label htmlFor="enrich-repo">Repository (optional)</Label>
               <select
                 id="enrich-repo"
                 value={enrich.repoId}
                 onChange={(e) => setEnrich({ ...enrich, repoId: e.target.value })}
                 className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
-                <option value="">Select…</option>
+                {/* Default. A house standard applies to every project, so writing one should not
+                    require opening any — and anchoring is what scoped the first of these to the
+                    one codebase it was written against. */}
+                <option value="">none — write a generic rule</option>
                 {repos.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.name}
                   </option>
                 ))}
               </select>
+              <span className="text-[11px] text-neutral-500">
+                Somewhere the AI can SEE the rule obeyed or broken. It never cites the code it reads
+                — the article has to work for projects that share none of its files.
+              </span>
             </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>Applies to (optional)</Label>
+            <span className="text-[11px] text-neutral-500">
+              Leave a box empty and the rule applies to ALL values of it — that is what makes an
+              article reachable from the projects that need it. Name a version only when the rule is
+              genuinely specific to that version. Comma-separated; the AI fills what you leave
+              blank.
+            </span>
+            <FacetFields
+              idPrefix="enrich-facet"
+              fields={enrichFacets}
+              disabled={enrichBusy}
+              onChange={(key, value) => setEnrichFacets((f) => ({ ...f, [key]: value }))}
+            />
           </div>
           {enrich.egressMode === 'allowlist' && (
             <div className="flex flex-col gap-1.5">
@@ -956,8 +1068,8 @@ export default function GlobalKbPage() {
             </Button>
           </div>
           <p className="text-xs text-neutral-500">
-            A background task reads the repo and files the entry (active when done). It appears
-            below; refresh to see updates.
+            A background task writes the article and files it as a draft. It appears below; refresh
+            to see updates.
           </p>
         </div>
       </Card>
@@ -1013,9 +1125,9 @@ export default function GlobalKbPage() {
           )}
         </div>
         <p className="text-xs text-neutral-500">
-          AI-added rules activate automatically. <span className="text-neutral-300">Activate</span>{' '}
-          publishes a pending auto-promoted draft into retrieval;{' '}
-          <span className="text-neutral-300">Delete</span> permanently removes a rule.
+          AI-written rules land as drafts. <span className="text-neutral-300">Activate</span>{' '}
+          publishes one into retrieval; <span className="text-neutral-300">Delete</span> permanently
+          removes a rule.
         </p>
         {sourceTaskId && (
           <div className="flex items-center gap-2 rounded-md border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-200">
@@ -1172,7 +1284,7 @@ export default function GlobalKbPage() {
                     )}
                     {inProgress && (
                       <span className="text-xs text-neutral-500">
-                        Reading the repo in the background — activates automatically when done.
+                        Writing the article in the background — lands as a draft to review.
                       </span>
                     )}
                     {failed && (
@@ -1247,7 +1359,47 @@ export default function GlobalKbPage() {
                   </a>
                 )}
               </div>
-              <p className="mt-2 text-xs text-neutral-400">{facetsSummary(selected.facets)}</p>
+              {scopeEdit ? (
+                <div className="mt-2 flex flex-col gap-2 rounded border border-neutral-800 p-2">
+                  <span className="text-[11px] text-neutral-500">
+                    Empty = applies to all values of that dimension. Comma-separated.
+                  </span>
+                  <FacetFields
+                    idPrefix="scope-edit"
+                    fields={scopeEdit}
+                    disabled={scopeBusy}
+                    onChange={(key, value) => setScopeEdit((f) => ({ ...(f ?? {}), [key]: value }))}
+                  />
+                  {scopeError && <FormError message={scopeError} />}
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" disabled={scopeBusy} onClick={() => void saveScope(selected)}>
+                      {scopeBusy ? 'Saving…' : 'Save scope'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={scopeBusy}
+                      onClick={() => setScopeEdit(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 flex items-center gap-2 text-xs text-neutral-400">
+                  {facetsSummary(selected.facets)}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScopeError(null);
+                      setScopeEdit(fieldsFromFacets(selected.facets));
+                    }}
+                    className="text-indigo-400 hover:text-indigo-300"
+                  >
+                    Edit scope
+                  </button>
+                </p>
+              )}
               {supersededEntry ? (
                 <>
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">

@@ -96,7 +96,7 @@ async function enqueueSync(
   );
 }
 
-const enrichSchema = z.object({
+export const enrichSchema = z.object({
   // User-set title — used verbatim for the entry and the task title (so the user
   // recognizes their own articles). Max matches the canonical title length (300).
   title: z.string().min(1).max(300),
@@ -104,8 +104,16 @@ const enrichSchema = z.object({
   // task derives the category and version facets itself by reading the chosen repo.
   seedText: z.string().min(1),
   namespace: z.string().min(1).max(120).optional(),
-  repositoryId: z.string().uuid(),
+  /** OPTIONAL: a repository to read while writing the rule. It is where the model can SEE the
+   *  pattern in practice, never the subject of the article — a house standard that applies to
+   *  every project must be writable without opening one. */
+  repositoryId: z.string().uuid().optional(),
   cliProviderId: z.string().uuid(),
+  /** Scope the author is sure of, e.g. `{ framework: ['drupal'] }` for a rule that holds across
+   *  Drupal majors. Authoritative: the worker merges these over whatever the model returns,
+   *  because asking the prompt was already tried and produced a Drupal-8+ rule scoped to
+   *  `frameworkMajor: ['7']`. Dimensions left out stay the model's to fill. */
+  facets: facetsSchema.optional(),
   // Per-article egress for the enrichment run (plan §5.3): none = repo + the
   // CLI's own model only; allowlist = + the listed domains; full = open internet.
   egress: z
@@ -310,14 +318,17 @@ globalKbRoutes.post('/enrich', async (c) => {
   const userId = c.get('userId');
   const db = getDb();
 
-  const repo = await db.query.repositories.findFirst({
-    where: and(
-      eq(schema.repositories.id, data.repositoryId),
-      eq(schema.repositories.userId, userId),
-    ),
-    columns: { id: true },
-  });
-  if (!repo) throw new HttpError(404, 'Repository not found');
+  // Only when one was named — a repo-less enrich is a first-class mode, not a missing field.
+  if (data.repositoryId) {
+    const repo = await db.query.repositories.findFirst({
+      where: and(
+        eq(schema.repositories.id, data.repositoryId),
+        eq(schema.repositories.userId, userId),
+      ),
+      columns: { id: true },
+    });
+    if (!repo) throw new HttpError(404, 'Repository not found');
+  }
   const provider = await db.query.cliProviders.findFirst({
     where: and(
       eq(schema.cliProviders.id, data.cliProviderId),
@@ -338,7 +349,10 @@ globalKbRoutes.post('/enrich', async (c) => {
         seedText: data.seedText,
         body: data.seedText,
         category: 'general',
-        facets: {},
+        // The author's stated scope, carried on the skeleton so the enrich step can read it
+        // back as authoritative. `{}` when they stated nothing, which leaves every dimension
+        // to the model exactly as before.
+        facets: (data.facets ?? {}) as GlobalKbFacets,
         status: 'skeleton',
         source: 'user',
         embedStatus: 'pending',
@@ -354,7 +368,7 @@ globalKbRoutes.post('/enrich', async (c) => {
       type: 'kb_author',
       title: `Enrich: ${data.title}`.slice(0, 512),
       description: data.seedText,
-      repositoryId: data.repositoryId,
+      repositoryId: data.repositoryId ?? null,
       cliProviderId: data.cliProviderId,
       metadata: {
         globalKbEntryId: entry.id,
