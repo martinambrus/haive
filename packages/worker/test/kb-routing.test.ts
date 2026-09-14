@@ -311,6 +311,19 @@ describe('cross-repo dedup key', () => {
     ).toBe('best_practice:drupal:11');
   });
 
+  it('keys on the CANONICAL facet value, because that is what the entry stores', () => {
+    // The promote insert normalises the facets, so a key built from the raw values describes a
+    // scoping the row does not have. `norm` lowercases, which hides a case difference but not a
+    // VOCABULARY one — keyed `postgresql` and stored `postgres`, the exact topic-key lookup
+    // missed the earlier entry and wrote a duplicate draft instead of superseding it.
+    expect(globalKbTopicKey('quick_reference', { database: ['postgresql'], dbMajor: ['17'] })).toBe(
+      globalKbTopicKey('quick_reference', { database: ['postgres'], dbMajor: ['17'] }),
+    );
+    expect(globalKbTopicKey('quick_reference', { database: ['PostgreSQL'], dbMajor: ['17'] })).toBe(
+      'quick_reference:postgres:17',
+    );
+  });
+
   it('is STABLE across the drifting free-form tech that broke dedup', () => {
     // The original bug: same article, identical facets, but tech "php" vs "php5"
     // produced different topic_keys. The facets drive the key now, so both match.

@@ -466,9 +466,17 @@ export async function promoteToGlobalKbDraft(
  *  neither yields a tech — such a promotion is never deduped (always inserted). */
 export function globalKbTopicKey(
   category: string,
-  facets: GlobalKbFacets,
+  rawFacets: GlobalKbFacets,
   fallbackTech?: string | null,
 ): string | null {
+  // Derived from the CANONICAL facets, because the entry is STORED canonical: the insert below
+  // normalises, so a key built from the raw values describes a scoping the row does not have.
+  // `norm` lowercases, which hides a case difference but not a VOCABULARY one — a promotion
+  // carrying `database: ["postgresql"]` keyed on `postgresql` and stored `postgres`, so the
+  // exact topic-key lookup missed the earlier entry and wrote a duplicate draft instead of
+  // superseding it. Both call sites pass this same object as the promotion's `facets`, so
+  // normalising here makes the key and the row agree by construction.
+  const facets = normalizeFacets(rawFacets);
   const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
   const first = (a?: string[]): string | null => (a && a.length > 0 ? (a[0] ?? null) : null);
 
