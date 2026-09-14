@@ -242,6 +242,32 @@ export default function GlobalKbPage() {
     setScopeEdit(null);
     setScopeError(null);
   }, [selected?.id]);
+  // The LIVE entry that replaced this one, asked of the SERVER rather than read out of
+  // `entries`. That list is filtered and paginated, so a reviewer who filtered to `archived`
+  // never has the active successor in hand — and a warning derived from a view is one that
+  // silently disappears exactly when the view narrows, which is the case it exists for.
+  const [activeSuccessor, setActiveSuccessor] = useState<{ id: string; title: string } | null>(
+    null,
+  );
+  useEffect(() => {
+    setActiveSuccessor(null);
+    if (!selected || selected.status !== 'archived') return;
+    let cancelled = false;
+    void api
+      .get<{ activeSuccessor: { id: string; title: string } | null }>(
+        `/global-kb/entries/${selected.id}`,
+      )
+      .then((res) => {
+        if (!cancelled) setActiveSuccessor(res.activeSuccessor ?? null);
+      })
+      // Fail QUIET, not loud: the warning is advisory, and a failed lookup must not block the
+      // reviewer from opening an entry. It errs toward not warning, which is why the detail
+      // view is also the only place reactivation can happen at all.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id, selected?.status]);
   const [enrichBusy, setEnrichBusy] = useState(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
   // Arriving from the onboarding step-04 link (?repo=&cli=) pre-fills the repo +
@@ -1480,15 +1506,12 @@ export default function GlobalKbPage() {
                   reviewer's back — both are choices this form should not make for them, which is
                   the same rule the scope-edit warning above follows. Two active entries is noise
                   a reviewer can see and undo; silently retiring the live one is not. */}
-              {selected.status === 'archived' &&
-                entries?.some(
-                  (e) => e.supersedesEntryId === selected.id && e.status === 'active',
-                ) && (
-                  <p className="mt-3 text-center text-[11px] text-amber-400">
-                    An active entry still replaces this one. Reactivating leaves both live for the
-                    same scope — re-scope or archive that entry if only one should apply.
-                  </p>
-                )}
+              {selected.status === 'archived' && activeSuccessor && (
+                <p className="mt-3 text-center text-[11px] text-amber-400">
+                  An active entry still replaces this one. Reactivating leaves both live for the
+                  same scope — re-scope or archive that entry if only one should apply.
+                </p>
+              )}
               <div className="mt-4 flex items-center justify-center gap-3">
                 {/* Activation is blocked while a scope edit is OPEN as well as while one is in
                     flight. They are separate PATCHes, and activating first archives the

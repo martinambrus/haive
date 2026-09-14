@@ -481,11 +481,35 @@ globalKbRoutes.get('/entries', async (c) => {
 
 globalKbRoutes.get('/entries/:id', async (c) => {
   const id = c.req.param('id');
-  const entry = await withGlobalKb(getDb(), async ({ db }) =>
-    db.query.globalKbEntries.findFirst({ where: eq(globalKbEntries.id, id) }),
-  );
-  if (!entry) throw new HttpError(404, 'global KB entry not found');
-  return c.json({ entry });
+  const found = await withGlobalKb(getDb(), async ({ db }) => {
+    const entry = await db.query.globalKbEntries.findFirst({
+      where: eq(globalKbEntries.id, id),
+    });
+    if (!entry) return null;
+    // The LIVE entry that replaced this one, if any. Answered here because the only other way
+    // to know is to scan the entries list — and that list is filtered and paginated, so a
+    // reviewer looking at archived entries never has the active successor in hand. A warning
+    // derived from a VIEW is a warning that silently disappears when the view narrows.
+    //
+    // Only for an archived row: an active entry cannot meaningfully be "replaced", and the
+    // query is not worth running for every detail open.
+    const [activeSuccessor] =
+      entry.status === 'archived'
+        ? await db
+            .select({ id: globalKbEntries.id, title: globalKbEntries.title })
+            .from(globalKbEntries)
+            .where(
+              and(
+                eq(globalKbEntries.supersedesEntryId, entry.id),
+                eq(globalKbEntries.status, 'active'),
+              ),
+            )
+            .limit(1)
+        : [];
+    return { entry, activeSuccessor: activeSuccessor ?? null };
+  });
+  if (!found) throw new HttpError(404, 'global KB entry not found');
+  return c.json(found);
 });
 
 globalKbRoutes.post('/entries', async (c) => {
