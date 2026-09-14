@@ -168,7 +168,13 @@ step that reuses these helpers inherits it.
    the invocation's tree and, when any body is found, `return resolveDispatch({ ...resolved,
    agentBodies })`. The provider cannot change on that second pass, because bodies never affect
    `tryBuildPlan`; codex never passes the gate, so this never stacks with the codex re-resolve;
-   and when nothing is found the first plan's fallback text is already right.
+   and when nothing is found the first plan's fallback text is already right. That is PR 1's gate
+   for built-in markers, whose inline protocol always follows them; Phase 3.1 widens it for
+   template markers, which have none (Companion, item 2). A body larger than
+   `MAX_PERSONA_BODY_BYTES` (64 KiB, a guard rail above the largest definition measured, 24,694
+   bytes) is never pasted and never truncated, since a cut persona reads as a complete one: a
+   built-in marker falls back to its inline protocol and records an `agent_persona.oversized` task
+   event naming the file and its size, and a template marker fails the dispatch with that reason.
 4. **The tree is the one cli-exec will mount.** `ctx.repoPath` is always the repository root,
    while cli-exec mounts the invocation's worktree. The subpath rule inside
    `resolveInvocationRepoMount` (`queues/cli-exec/resolvers.ts`: a local-path repo binds its root
@@ -347,7 +353,7 @@ scratch.
    every provider with `supportsSubagents` reads a markdown `projectAgentsDir`,
    `agentDirectoryScopeMarker` (`.claude/agents/x.md` marks; `docs/.claude/agents/x.md` and
    `.claude/agents-old/x.md` do not), marker ids, the persona path
-   (found / missing / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / oversized / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, and `07_7-secret-sweep` declaring `'*'`.
@@ -399,7 +405,8 @@ stores only `stepIds: string[]` and needs nothing.
    dispatch, and codex (TOML) and amp (no agent directory) get it without the TOML reader PR 1
    defers. A marker whose body cannot be found at dispatch fails the dispatch with the
    dangling-reference reason below instead of running without its persona, since the tree can
-   change between task-create and dispatch. The factory is also a handed-path renderer: a read-only
+   change between task-create and dispatch; one whose body exceeds `MAX_PERSONA_BODY_BYTES` fails
+   the same way, naming the file and its size. The factory is also a handed-path renderer: a read-only
    template that interpolates an agent file (`Review {{path}}` with `path = .claude/agents/foo.md`)
    would hand its agent a masked file, so `buildPrompt` runs `agentDirectoryScopeMarker` over the
    template's static text and every interpolated value, split into path tokens, BEFORE tokens
