@@ -598,9 +598,12 @@ export default function GlobalKbPage() {
       const res = await api.patch<{ entry: GlobalKbEntry }>(`/global-kb/entries/${e.id}`, {
         facets: facetsFromFields(scopeEdit),
       });
-      const facets = res.entry.facets;
-      setSelected((cur) => (cur && cur.id === e.id ? { ...cur, facets } : cur));
-      setEntries((rows) => rows?.map((r) => (r.id === e.id ? { ...r, facets } : r)) ?? rows);
+      // The WHOLE returned entry, not just its facets: a scope edit can also clear
+      // `supersedesEntryId` server-side, and copying one field leaves the modal showing an
+      // "Updates existing" diff against a predecessor that activation will no longer archive.
+      const saved = res.entry;
+      setSelected((cur) => (cur && cur.id === e.id ? saved : cur));
+      setEntries((rows) => rows?.map((r) => (r.id === e.id ? saved : r)) ?? rows);
       setScopeEdit(null);
     } catch (err) {
       setScopeError((err as ApiError).message ?? 'Failed to save the scope');

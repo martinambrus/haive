@@ -652,10 +652,18 @@ async function cleanupTaskContainers(
   // below because it is NOT a worktree — no step owns it, nothing else sweeps it, and it sits
   // on the shared repos volume where a leak would accumulate one directory per task. Defers to
   // the last step summary when one is still in flight; see cleanupTaskScratchWorkspace.
-  try {
-    await cleanupTaskScratchWorkspace(db, taskId);
-  } catch (err) {
-    logger.warn({ err, taskId, reason }, 'cleanup-scratch-workspace failed');
+  //
+  // NOT on `failed`, the same rule the ddev runners above follow and the one the Editor and
+  // Terminal tabs are gated on: a failed task keeps its workspace so those recovery surfaces
+  // can still open it, and only a definitive end reaps it. For a repo-less task the scratch
+  // directory IS that workspace, so removing it here would leave `resolveTaskRepoMount`
+  // pointing at a subpath that no longer exists.
+  if (reason !== 'failed') {
+    try {
+      await cleanupTaskScratchWorkspace(db, taskId);
+    } catch (err) {
+      logger.warn({ err, taskId, reason }, 'cleanup-scratch-workspace failed');
+    }
   }
 
   // Remove the feature worktree. On cancel: always (a task cancelled before its
