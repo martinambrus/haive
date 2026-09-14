@@ -192,5 +192,35 @@ export async function ensureGlobalKbSchema(
     `);
   }
 
+  // Facet values are stored LOWERCASE, because retrieval compares them two ways and only one
+  // can be lenient: `facetsMatchProject` lowercases in JS while `buildFacetClause` uses jsonb
+  // `?|`, which is exact. Every write path normalises now, and the PROJECT side is normalised
+  // too — which is precisely what makes this backfill necessary rather than optional. An
+  // upgraded install can still hold `Drupal` or `github.com/Azure/foo@1` written by the old
+  // paths, and normalising only the live sides would leave those rows advertised by the digest
+  // and unreachable through rag_search: worse than before the change, because before it both
+  // sides were un-normalised and matched.
+  //
+  // Rides ensureGlobalKbSchema in the shape `backfillIdentifierTsv` established: no
+  // applied-record, converges structurally, and re-running writes nothing because the predicate
+  // only selects rows that still hold a non-lowercase VALUE. Both tables, since the search
+  // reads the chunk's own copy of the facets rather than the entry's.
+  for (const table of ['global_kb_entries', VECTORS_TABLE]) {
+    await conn.pg.unsafe(`
+      UPDATE ${table} AS t
+      SET facets = COALESCE((
+        SELECT jsonb_object_agg(kv.key, (
+          SELECT jsonb_agg(DISTINCT lower(v)) FROM jsonb_array_elements_text(kv.value) AS v
+        ))
+        FROM jsonb_each(t.facets) AS kv
+      ), '{}'::jsonb)
+      WHERE EXISTS (
+        SELECT 1 FROM jsonb_each(t.facets) AS kv,
+             LATERAL jsonb_array_elements_text(kv.value) AS v
+        WHERE v <> lower(v)
+      )
+    `);
+  }
+
   return { usedPgvector };
 }

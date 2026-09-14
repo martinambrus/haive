@@ -417,23 +417,32 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
   await cleanupTaskContainers(db, taskId, 'completed');
   await maybeUnloadTaskEmbedModel(db, taskId);
   await unloadTaskOllamaCliModels(db, taskId);
-  // Hooked to COMPLETION specifically: cancel and fail write through their own
-  // functions, so an abandoned task can never green a plan node.
-  await completePlanNodesForTask(db, taskId);
-  // Same hook, same reason: only a run that FINISHED may say the repository is onboarded.
-  // The four on-disk markers appear at step 07 of 27 and cannot tell a finished run from a
-  // cancelled or a live one.
-  await stampRepositoryOnboarded(db, taskId);
-  // The code-link staleness pass ALSO runs here, not only in 11c-rag-reindex.
-  // 11c lives in PLAN_TASKLIST_EXTRA rather than SPINE, so a quick_bugfix task
-  // never reaches it, and it is user-skippable on the paths that do — either way
-  // a task would finish having changed the very files a plan link points at
-  // while the link still claimed to be current. Idempotent (it only touches rows
-  // that are not already stale), so the earlier mid-run call stays for its flush.
-  await markPlanCodeLinksStale(db, taskId);
-  // LAST: every fallible hook above has succeeded, so `completed` is now the task's real
-  // outcome. Reaping earlier meant a hook that threw left a `failed` task whose Editor and
-  // Terminal pointed at a deleted workspace.
+  // BOOKKEEPING, and it cannot un-complete the task. The status is already stamped, and a
+  // throw here used to reach the queue's catch and call markTaskFailed — turning a finished
+  // run into a failed one on a plan-node write, and (because `failed` keeps its recovery
+  // surfaces) stranding them on a workspace the reap had already taken. `stampRepositoryOnboarded`
+  // was the only one of the three that already swallowed its own errors; the guarantee now
+  // covers all of them, stated here rather than left to each function's internals.
+  try {
+    // Hooked to COMPLETION specifically: cancel and fail write through their own
+    // functions, so an abandoned task can never green a plan node.
+    await completePlanNodesForTask(db, taskId);
+    // Same hook, same reason: only a run that FINISHED may say the repository is onboarded.
+    // The four on-disk markers appear at step 07 of 27 and cannot tell a finished run from a
+    // cancelled or a live one.
+    await stampRepositoryOnboarded(db, taskId);
+    // The code-link staleness pass ALSO runs here, not only in 11c-rag-reindex.
+    // 11c lives in PLAN_TASKLIST_EXTRA rather than SPINE, so a quick_bugfix task
+    // never reaches it, and it is user-skippable on the paths that do — either way
+    // a task would finish having changed the very files a plan link points at
+    // while the link still claimed to be current. Idempotent (it only touches rows
+    // that are not already stale), so the earlier mid-run call stays for its flush.
+    await markPlanCodeLinksStale(db, taskId);
+  } catch (err) {
+    logger.warn({ err, taskId }, 'task completion bookkeeping failed; task stays completed');
+  }
+  // LAST, and now safe from either side: `completed` can no longer become `failed`, so the
+  // summary-triggered reap that observes this status is reading a settled outcome too.
   try {
     await cleanupTaskScratchWorkspace(db, taskId);
   } catch (err) {
