@@ -26,6 +26,7 @@ import {
   buildDefaultMcpServers,
   buildMcpConfigForCli,
   resolveStdioMcpServers,
+  emittedDefaultServerNames,
   serversToJsonObject,
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
@@ -283,6 +284,15 @@ export async function resolveMcpExtraFiles(
     ? await resolveRunnerBrowserCdpUrl(taskId)
     : undefined;
 
+  // Which defaults this invocation gets. The rule itself is `emittedDefaultServerNames`, so the
+  // surface prompt can answer the same question; the reasoning for each gate stays below.
+  const emittedDefaults = emittedDefaultServerNames({
+    hasRepo,
+    hasWorktree,
+    ragOnly,
+    registriesReachable: networkPolicyReachesPackageRegistries(networkPolicy),
+  });
+
   const servers = buildDefaultMcpServers({
     repoPath: sandboxWorkdir,
     // No git server on a worktree, where git cannot work for two independent reasons.
@@ -320,15 +330,14 @@ export async function resolveMcpExtraFiles(
     // this alone would point `mcp-server-git` at the empty scratch workspace and reproduce
     // exactly the `"git":"failed"` / `is not a valid Git repository` entry the gate above
     // exists to prevent.
-    includeGit:
-      hasRepo && !hasWorktree && !ragOnly && networkPolicyReachesPackageRegistries(networkPolicy),
+    includeGit: emittedDefaults.has('git'),
     // `filesystem` survives a rag-only run because grounding on disk is still the job. A
     // REPO-LESS run is the one case where that argument runs out: its workspace is an empty
     // scratch directory, so the server would announce eleven tools over nothing. Declaring it
     // is not free either — the CLI reports a server that failed to start, and exec-core then
     // refuses to trust the whole run (MEASURED: three kb_author invocations returned a correct
     // article and were discarded as `filesystem: failed`).
-    includeFilesystem: hasRepo,
+    includeFilesystem: emittedDefaults.has('filesystem'),
     includeChromeDevtools: surface.chromeDevtools.enabled,
     chromeDevtoolsBrowserUrl,
     chromeDevtoolsMcpVersion: surface.chromeDevtools.version,

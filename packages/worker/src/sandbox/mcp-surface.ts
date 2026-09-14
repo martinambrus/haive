@@ -7,6 +7,7 @@ import {
   configService,
   logger,
 } from '@haive/shared';
+import { emittedDefaultServerNames } from './mcp-config.js';
 import { signRagToken } from '@haive/shared/rag';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 
@@ -257,12 +258,14 @@ export const MCP_SURFACE_MARKER = '<haive_mcp_surface>';
  *  mcp_settings.json ends up running Haive's — listing the name under both headings
  *  would announce a server that is not there.
  *
- *  Keyed on what is ENABLED, not on a fixed reserved list: with Haive's
- *  chrome-devtools off, nothing overwrites the user's entry and it really is theirs.
- *  `filesystem` and `git` are always emitted by buildDefaultMcpServers, so they always
- *  shadow. */
-function reachableUserServerNames(surface: McpSurface): string[] {
-  const shadowed = new Set(['filesystem', 'git']);
+ *  Keyed on what is actually EMITTED, never on a fixed reserved list: with Haive's
+ *  chrome-devtools off, nothing overwrites the user's entry and it really is theirs. The
+ *  defaults come from `emittedDefaultServerNames`, the same rule that builds the server list —
+ *  a second guess here is exactly what made this wrong. It hardcoded `filesystem` and `git` as
+ *  always shadowing, which stopped being true once `git` became conditional on the worktree and
+ *  rag-only gates, so a repo defining its own `git` was told it was unreachable. */
+function reachableUserServerNames(surface: McpSurface, emitted: ReadonlySet<string>): string[] {
+  const shadowed = new Set<string>(emitted);
   if (surface.rag.enabled) shadowed.add('haive-rag');
   if (surface.chromeDevtools.enabled) shadowed.add('chrome-devtools');
   if (surface.ddevControl.enabled) shadowed.add('ddev-control');
@@ -333,7 +336,13 @@ const BROWSER_TAB_DISCIPLINE = [
  *  every one of those mentions without matching any of their wording. */
 export function mcpSurfacePrompt(
   surface: McpSurface | null,
-  opts: { noBuiltInTools?: boolean; noRepo?: boolean } = {},
+  opts: {
+    noBuiltInTools?: boolean;
+    noRepo?: boolean;
+    /** Whether this invocation targets a linked worktree — the gate that decides whether the
+     *  git server is emitted, and so whether a user's own `git` entry survives. */
+    hasWorktree?: boolean;
+  } = {},
 ): string {
   const lines: string[] = [MCP_SURFACE_MARKER];
   const wired: string[] = [];
@@ -360,7 +369,17 @@ export function mcpSurfacePrompt(
       '  and no way to run tests, a linter or a syntax check inside the container from here.',
     );
   }
-  const userNames = surface ? reachableUserServerNames(surface) : [];
+  const userNames = surface
+    ? reachableUserServerNames(
+        surface,
+        // `registriesReachable` deliberately left unset — see emittedDefaultServerNames.
+        emittedDefaultServerNames({
+          hasRepo: opts.noRepo !== true,
+          hasWorktree: opts.hasWorktree === true,
+          ragOnly: surface.ragOnly,
+        }),
+      )
+    : [];
   if (userNames.length > 0) {
     wired.push(`- Project-configured servers: ${userNames.map((n) => `\`${n}\``).join(', ')}.`);
   }
@@ -428,7 +447,13 @@ export function mcpSurfacePrompt(
 export function withMcpSurface(
   prompt: string,
   surface: McpSurface | null,
-  opts: { noBuiltInTools?: boolean; noRepo?: boolean } = {},
+  opts: {
+    noBuiltInTools?: boolean;
+    noRepo?: boolean;
+    /** Whether this invocation targets a linked worktree — the gate that decides whether the
+     *  git server is emitted, and so whether a user's own `git` entry survives. */
+    hasWorktree?: boolean;
+  } = {},
 ): string {
   if (prompt.includes(MCP_SURFACE_MARKER)) return prompt;
   return `${mcpSurfacePrompt(surface, opts)}\n\n${prompt}`;

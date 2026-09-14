@@ -186,6 +186,44 @@ const CHROME_MCP_HEADLESS_LAUNCH_ARGS = [
   '--chrome-arg=--disable-dev-shm-usage',
 ];
 
+/** Which of the default servers an invocation actually gets.
+ *
+ *  ONE rule, read twice. `resolveMcpExtraFiles` turns it into `includeFilesystem` /
+ *  `includeGit` — the measured reasoning for each gate is documented at that call site, not
+ *  here — and `mcpSurfacePrompt` reads it to say which of the user's OWN servers survive the
+ *  name collision, since `serversToJsonObject` lets a Haive server overwrite a user entry of
+ *  the same name.
+ *
+ *  The two used to decide separately, and the prompt's half was a fixed `['filesystem','git']`
+ *  that had not been true since `git` became conditional on the worktree and rag-only gates. A
+ *  repo defining its own `git` in mcp_settings.json was told it was unreachable while nothing
+ *  was shadowing it. */
+export function emittedDefaultServerNames(gates: {
+  hasRepo: boolean;
+  hasWorktree: boolean;
+  ragOnly: boolean;
+  /** `git` runs through uvx, and the sandbox image ships no Python, so it cannot start where
+   *  the sandbox cannot reach PyPI and the GitHub release its interpreter comes from.
+   *
+   *  OPTIONAL because the prompt is built at DISPATCH, before the invocation's egress is
+   *  resolved. Leaving it unset keeps `git` in the shadow set, which under-reports a user's own
+   *  server rather than announcing one that is not theirs — the safe direction, and the only
+   *  case where the two readers still differ. */
+  registriesReachable?: boolean;
+}): Set<string> {
+  const names = new Set<string>();
+  if (gates.hasRepo) names.add('filesystem');
+  if (
+    gates.hasRepo &&
+    !gates.hasWorktree &&
+    !gates.ragOnly &&
+    gates.registriesReachable !== false
+  ) {
+    names.add('git');
+  }
+  return names;
+}
+
 /** Leading `npx` flags for every server we launch from npm.
  *
  *  `--prefer-offline` is what makes `warmNpmPackage` actually count: the warm container runs on

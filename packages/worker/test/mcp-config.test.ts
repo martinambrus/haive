@@ -4,6 +4,7 @@ import { DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import {
   buildDefaultMcpServers,
+  emittedDefaultServerNames,
   buildMcpAddArgv,
   buildMcpConfigForCli,
   resolveStdioMcpServers,
@@ -615,5 +616,39 @@ describe('injectMcpConfig', () => {
     expect(result.written).toBeNull();
     expect(result.skipped).toBe(true);
     expect(result.reason).toContain('exit 1');
+  });
+});
+
+// One rule, read by resolveMcpExtraFiles to build the server list and by mcpSurfacePrompt to
+// say which of the user's OWN servers survive the name collision. They used to guess
+// separately, and the prompt's guess was a fixed ['filesystem','git'].
+describe('emittedDefaultServerNames', () => {
+  const base = { hasRepo: true, hasWorktree: false, ragOnly: false };
+
+  it('wires both for an ordinary repo-root invocation', () => {
+    expect([...emittedDefaultServerNames(base)].sort()).toEqual(['filesystem', 'git']);
+  });
+
+  it('drops git on a worktree, where its gitfile is masked', () => {
+    expect([...emittedDefaultServerNames({ ...base, hasWorktree: true })]).toEqual(['filesystem']);
+  });
+
+  it('drops git on a rag-only run but keeps filesystem for grounding on disk', () => {
+    expect([...emittedDefaultServerNames({ ...base, ragOnly: true })]).toEqual(['filesystem']);
+  });
+
+  it('wires nothing without a repository', () => {
+    expect(emittedDefaultServerNames({ ...base, hasRepo: false }).size).toBe(0);
+  });
+
+  it('drops git when the registries are unreachable, since uvx must download an interpreter', () => {
+    expect([...emittedDefaultServerNames({ ...base, registriesReachable: false })]).toEqual([
+      'filesystem',
+    ]);
+  });
+
+  it('keeps git when the caller cannot know the egress, which under-reports rather than over-reports', () => {
+    // The prompt is built at dispatch, before the invocation's egress is resolved.
+    expect([...emittedDefaultServerNames(base)].sort()).toEqual(['filesystem', 'git']);
   });
 });

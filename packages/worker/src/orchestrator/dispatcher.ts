@@ -348,6 +348,9 @@ function buildCliSidePlan(
         noBuiltInTools:
           req.invokeOpts?.disableTools === true && adapter.supportsDisableTools === true,
         noRepo: req.hasRepo === false,
+        // Same predicate as the boundary above, so the prompt cannot claim a user's own `git`
+        // server is shadowed by one the worktree gate stops us from wiring.
+        hasWorktree: req.worktreeGitBoundary === true,
       },
     );
     // Whether the app can actually be reached, and how. Same reason as the boundaries above:
