@@ -62,17 +62,39 @@ export const FACET_DIMENSIONS = [
  *
  *  Applied wherever an entry's facets are written: the enrich request's author-stated scope,
  *  the scope editor's PATCH, and the model's own answer. */
+/** Spellings that are not the token a PROJECT reports, per dimension.
+ *
+ *  An entry's facets and a project's are compared for OVERLAP, so a dimension whose two sides
+ *  spell one technology differently restricts that entry to nothing. `01-env-detect.ts`
+ *  canonicalises PostgreSQL to `postgres` — both its `DB_NAME_TO_TYPE` table and the container
+ *  scan's `/\b(postgres|postgresql)\b/` yield that token — and `extractProjectFacets` only
+ *  lowercases what the detector produced. So an entry stored as `postgresql` was silently
+ *  unreachable from every PostgreSQL project, which is the failure this normalisation exists to
+ *  prevent, one layer up: `Drupal` vs `drupal` is a CASE mismatch, this is a VOCABULARY one.
+ *
+ *  Deliberately tiny and grounded: only a spelling the detector itself maps away belongs here,
+ *  never a guess at what someone might type. Adding one is a claim about the detector's output
+ *  and has to be read out of that file.
+ */
+const FACET_VALUE_ALIASES: Partial<Record<keyof GlobalKbFacets, Record<string, string>>> = {
+  database: { postgresql: 'postgres' },
+};
+
 export function normalizeFacets(facets: GlobalKbFacets | null | undefined): GlobalKbFacets {
   const out: GlobalKbFacets = {};
   for (const dim of FACET_DIMENSIONS) {
     const values = facets?.[dim];
     if (!Array.isArray(values)) continue;
+    const aliases = FACET_VALUE_ALIASES[dim];
+    // Aliasing happens INSIDE the Set, so two spellings of one technology collapse to one value
+    // rather than being stored as two.
     const cleaned = [
       ...new Set(
         values
           .filter((v): v is string => typeof v === 'string')
           .map((v) => v.trim().toLowerCase())
-          .filter(Boolean),
+          .filter(Boolean)
+          .map((v) => aliases?.[v] ?? v),
       ),
     ];
     if (cleaned.length > 0) out[dim] = cleaned;

@@ -11,8 +11,20 @@ describe('normalizeFacets', () => {
   it('lowercases and trims, so jsonb ?| can match a lowercased project set', () => {
     expect(normalizeFacets({ framework: ['  Drupal '], database: ['PostgreSQL'] })).toEqual({
       framework: ['drupal'],
-      database: ['postgresql'],
+      // `postgres`, not `postgresql`: lowercasing alone leaves a VOCABULARY mismatch, because
+      // `01-env-detect.ts` canonicalises PostgreSQL to `postgres` and a project therefore never
+      // reports the longer spelling. An entry stored as `postgresql` overlaps nothing.
+      database: ['postgres'],
     });
+  });
+
+  it('collapses a vocabulary alias into the token a project actually reports', () => {
+    // Both spellings of one technology must not survive as two values.
+    expect(normalizeFacets({ database: ['PostgreSQL', 'postgres'] })).toEqual({
+      database: ['postgres'],
+    });
+    // Dimensions with no alias table are untouched.
+    expect(normalizeFacets({ framework: ['postgresql'] })).toEqual({ framework: ['postgresql'] });
   });
 
   it('dedupes values that differed only by case or padding', () => {

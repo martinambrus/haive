@@ -199,7 +199,10 @@ export function buildEnrichPrompt(detected: KbAuthorDetect): string {
         ]
       : ['1. Work the rule out from the notes and from what you know of the technology.']),
     '2. Decide the SCOPE: which technologies does this rule actually apply to? Name the base',
-    '   technology (e.g. "drupal", "postgresql", "php"). Add a MAJOR version ONLY when the rule',
+    // "postgres", not "postgresql": the example has to be the token a PROJECT reports, or the
+    // prompt teaches the one spelling `buildFacetClause` can never overlap (`01-env-detect.ts`
+    // canonicalises it). `normalizeFacets` now aliases it too, so this is belt AND braces.
+    '   technology (e.g. "drupal", "postgres", "php"). Add a MAJOR version ONLY when the rule',
     '   is genuinely specific to it — a rule that holds across majors must NOT name one, because',
     '   naming a dimension RESTRICTS the entry to it and an omitted dimension applies to all.',
     ...(detected.hasRepo
