@@ -48,3 +48,43 @@ describe('collectRepoSymbols with an unknown language', () => {
     expect(symbols.has('activit_menu_alter')).toBe(false);
   });
 });
+
+// JS/TS declare most helpers with no keyword at all, so a keyword-anchored scan missed exactly
+// the forms those repos use most — while bodyUsesRepoSymbol recognises their call syntax in an
+// article, letting a copied repo-private helper through the scrub.
+describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
+  it('collects assigned functions and class methods', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-js-'));
+    await writeFile(
+      path.join(dir, 'invoice.ts'),
+      [
+        'const calculateInvoiceTotal = (rows: Row[]) => rows.length;',
+        'export const serializeInvoice = async (x: Row) => x;',
+        'class InvoiceRepo {',
+        '  async loadInvoices(id: string) {',
+        '    return id;',
+        '  }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, 'typescript');
+    expect(symbols.has('calculateInvoiceTotal')).toBe(true);
+    expect(symbols.has('serializeInvoice')).toBe(true);
+    expect(symbols.has('loadInvoices')).toBe(true);
+  });
+
+  it('does not mistake control flow for a symbol', async () => {
+    // These clear the length floor and match the method SHAPE, so only the name list excludes
+    // them. Collecting one would make the scrub delete any article block that used the word.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-kw-'));
+    await writeFile(
+      path.join(dir, 'flow.ts'),
+      ['function run() {', '  while (ready) {', '  }', '  switch (kind) {', '  }', '}'].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, 'typescript');
+    expect(symbols.has('while')).toBe(false);
+    expect(symbols.has('switch')).toBe(false);
+  });
+});

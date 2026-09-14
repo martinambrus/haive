@@ -966,6 +966,19 @@ export async function repoOwnRef(
  * class DEFINED in this repo (e.g. a custom helper like GetPHPVariables). */
 const REPO_SYMBOL_FILE_CAP = 4000;
 const REPO_SYMBOL_CAP = 40000;
+/** Words that pass the method shape (`name(...) {`) but name no symbol. Length alone does not
+ *  exclude them — `while`, `catch` and `switch` all clear the 5-character floor. */
+const NON_SYMBOL_KEYWORDS = new Set([
+  'while',
+  'catch',
+  'switch',
+  'return',
+  'function',
+  'constructor',
+  'elseif',
+  'foreach',
+]);
+
 const SYMBOL_SCAN_EXT: Record<string, string[]> = {
   php: ['.php', '.inc', '.module', '.install', '.theme', '.phtml', '.profile', '.engine'],
   javascript: ['.js', '.jsx', '.mjs', '.cjs'],
@@ -1016,8 +1029,26 @@ export async function collectRepoSymbols(
       // `function` precedes `func` so the longer keyword wins the alternation.
       const defRe =
         /\b(?:function|func|def|class|trait|interface|struct|type)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
+      // JS/TS declare most of their helpers with no keyword at all — `const parseInvoice = () =>`
+      // and class methods `serializeInvoice() {` — so a keyword-anchored scan misses exactly the
+      // forms those repos use most, while `bodyUsesRepoSymbol` happily recognises their call
+      // syntax in an article. Two narrow patterns rather than one loose one: over-collecting here
+      // costs a FALSE citation, which deletes a block of somebody's article.
+      const assignedFnRe =
+        /\b(?:const|let|var)\s+([A-Za-z_]\w{4,})\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_]\w*\s*=>)/g;
+      // A method must sit on its OWN indented line and open a block, which a call statement
+      // (`  doThing();`) never does. Control-flow keywords reach the length floor, so they are
+      // excluded by name rather than by shape.
+      const methodRe =
+        /^[ \t]+(?:(?:public|private|protected|static|readonly|async|\*)\s+)*([A-Za-z_]\w{4,})\s*\([^)]*\)\s*\{/gm;
       for (let m = defRe.exec(body); m; m = defRe.exec(body)) {
         if (m[1]) symbols.add(m[1]);
+      }
+      for (let m = assignedFnRe.exec(body); m; m = assignedFnRe.exec(body)) {
+        if (m[1]) symbols.add(m[1]);
+      }
+      for (let m = methodRe.exec(body); m; m = methodRe.exec(body)) {
+        if (m[1] && !NON_SYMBOL_KEYWORDS.has(m[1])) symbols.add(m[1]);
       }
       if (symbols.size > REPO_SYMBOL_CAP) break;
     }

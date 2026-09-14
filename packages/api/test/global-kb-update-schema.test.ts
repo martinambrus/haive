@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { enrichSchema, updateSchema } from '../src/routes/global-kb.js';
+import { enrichSchema, scopeChanged, updateSchema } from '../src/routes/global-kb.js';
 
 // The facet schema is `.strict()`, so a dimension missing from it is a 400 on a payload every
 // other layer produces and stores happily — and nothing else in the stack catches that. It
@@ -82,5 +82,28 @@ describe('facets schema vs the filter list', () => {
   it('accepts tags, which an entry may carry but which never filters', () => {
     const parsed = updateSchema.parse({ facets: { tags: ['performance'], framework: ['drupal'] } });
     expect(parsed.facets).toEqual({ tags: ['performance'], framework: ['drupal'] });
+  });
+});
+
+// A scope edit invalidates a proposed supersession: the link was decided by comparing THIS
+// draft's article against the entry it would replace, so re-scoping it to another technology
+// and then activating would archive an entry it no longer has anything to do with.
+describe('scopeChanged', () => {
+  it('sees a real scope change', () => {
+    expect(scopeChanged({ framework: ['drupal'] }, { database: ['postgres'] })).toBe(true);
+    expect(scopeChanged({ framework: ['drupal'] }, {})).toBe(true);
+  });
+
+  it('ignores a tags-only edit, which does not scope retrieval', () => {
+    expect(
+      scopeChanged(
+        { framework: ['drupal'], tags: ['performance'] },
+        { framework: ['drupal'], tags: ['performance', 'caching'] },
+      ),
+    ).toBe(false);
+  });
+
+  it('ignores value order', () => {
+    expect(scopeChanged({ packages: ['a', 'b'] }, { packages: ['b', 'a'] })).toBe(false);
   });
 });

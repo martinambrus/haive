@@ -23,7 +23,12 @@ import {
   type GlobalKbFacets,
   type GlobalKbStatus,
 } from '@haive/shared/global-kb';
-import { ollamaEmbed, probeOllama, releaseEmbedModelIfUnused } from '@haive/shared/rag';
+import {
+  FACET_FILTER_DIMENSIONS,
+  ollamaEmbed,
+  probeOllama,
+  releaseEmbedModelIfUnused,
+} from '@haive/shared/rag';
 import { getDb } from '../db.js';
 import { getGlobalKbSyncQueue, getTaskQueue } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -501,6 +506,21 @@ globalKbRoutes.post('/entries', async (c) => {
   return c.json({ entry }, 201);
 });
 
+/** Whether a facet edit changed the entry's SCOPE, ignoring `tags`.
+ *
+ *  `tags` is carried by an entry but does not restrict retrieval (see FACET_FILTER_DIMENSIONS),
+ *  so relabelling one does not make the article a different rule. Every other dimension does. */
+export function scopeChanged(
+  before: GlobalKbFacets | null | undefined,
+  after: GlobalKbFacets | null | undefined,
+): boolean {
+  const key = (f: GlobalKbFacets | null | undefined): string =>
+    JSON.stringify(
+      FACET_FILTER_DIMENSIONS.map((dim) => [dim, [...((f?.[dim] as string[]) ?? [])].sort()]),
+    );
+  return key(before) !== key(after);
+}
+
 globalKbRoutes.patch('/entries/:id', async (c) => {
   const id = c.req.param('id');
   const parsed = updateSchema.safeParse(await c.req.json().catch(() => null));
@@ -518,6 +538,22 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
     // Content/scope/status edits need a re-embed.
     if (data.body !== undefined || data.facets !== undefined || data.status !== undefined) {
       set.embedStatus = 'pending';
+    }
+    // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
+    // draft's article against the entry it would replace; re-scoping it to another technology
+    // makes it a different rule, and activating it would then archive an entry it no longer has
+    // anything to do with. Cleared rather than revalidated — revalidating needs an embedding
+    // pass, and a stale duplicate the reviewer can archive by hand is a far cheaper mistake than
+    // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
+    // (tags do not scope retrieval) leaves a valid link alone.
+    if (data.facets !== undefined) {
+      const existing = await db.query.globalKbEntries.findFirst({
+        where: eq(globalKbEntries.id, id),
+        columns: { facets: true, supersedesEntryId: true },
+      });
+      if (existing?.supersedesEntryId && scopeChanged(existing.facets, set.facets)) {
+        set.supersedesEntryId = null;
+      }
     }
     const [row] = await db
       .update(globalKbEntries)
