@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { FACET_DIMENSIONS } from '@haive/shared/global-kb';
 import { describe, expect, it } from 'vitest';
 import { enrichSchema, scopeChanged, updateSchema } from '../src/routes/global-kb.js';
 
@@ -113,5 +115,28 @@ describe('scopeChanged', () => {
     // supersedesEntryId, leaving the predecessor active after activation.
     expect(scopeChanged({ framework: ['Drupal'] }, { framework: ['drupal'] })).toBe(false);
     expect(scopeChanged({ database: [' PostgreSQL '] }, { database: ['postgresql'] })).toBe(false);
+  });
+});
+
+// The editor's dimension list and the schema's are two hand-maintained lists that must agree,
+// and nothing forced them to. Drift one way is a missing field in the editor; drift the other
+// reproduces the bug this branch opened with — a dimension web can send that `.strict()` rejects
+// with a silent 400. Compared as TEXT because web must not import @haive/shared.
+describe('the editor offers exactly the dimensions the schema accepts', () => {
+  it('matches FACET_DIMENSIONS, in the same set', () => {
+    const webSrc = readFileSync(
+      new URL('../../web/src/lib/api-client.ts', import.meta.url),
+      'utf8',
+    );
+    const block = webSrc.match(/export const GLOBAL_KB_FACET_DIMENSIONS[\s\S]*?\n\];/)?.[0];
+    // An extraction that finds nothing must FAIL, never pass quietly: a reformat that breaks the
+    // match would otherwise turn this guard off while still reporting green.
+    expect(
+      block,
+      'could not locate GLOBAL_KB_FACET_DIMENSIONS in web/src/lib/api-client.ts',
+    ).toBeTruthy();
+    const webKeys = [...block!.matchAll(/key: '([A-Za-z]+)'/g)].map((m) => m[1]);
+    expect(webKeys.length).toBeGreaterThan(0);
+    expect([...webKeys].sort()).toEqual([...FACET_DIMENSIONS].sort());
   });
 });
