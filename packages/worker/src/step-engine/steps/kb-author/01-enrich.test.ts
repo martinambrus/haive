@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildEnrichPrompt,
   cleanFacets,
+  kbAuthorEnrichStep,
   mergeAuthorFacets,
   normCategory,
   parseEnrichment,
@@ -213,5 +214,42 @@ describe('mergeAuthorFacets and version dimensions', () => {
     expect(mergeAuthorFacets({ database: ['postgres'] }, { dbMajor: ['17'] })).toEqual({
       database: ['postgres'],
     });
+  });
+});
+
+// The scrub must not fail OPEN when the violation is total. Restoring the raw text on an
+// empty scrub handed the shared store a draft that was nothing but citations, and its
+// `scrubbed` list would then contradict the body the reviewer was shown.
+describe('an article that scrubs to nothing', () => {
+  const detected = {
+    entryId: '11111111-1111-4111-8111-111111111111',
+    title: 'All citations',
+    seedText: 'seed',
+    authorFacets: {},
+    hasRepo: false,
+    existing: [],
+  } as unknown as Parameters<typeof kbAuthorEnrichStep.apply>[1]['detected'];
+
+  // Every block is a slashed path reference, which counts in either mode, so the scrub empties
+  // the article without needing a repository to resolve against.
+  const llmOutput = JSON.stringify({
+    mode: 'new',
+    category: 'general',
+    facets: {},
+    body: 'See src/Cache/Backend.php:12 for this.\n\nAnd web/modules/custom/acme/acme.module:9 too.',
+  });
+
+  const ctx = { repoPath: '/nonexistent', logger: { warn() {}, info() {} } } as never;
+
+  it('retries rather than publishing it, while attempts remain', async () => {
+    await expect(
+      kbAuthorEnrichStep.apply!(ctx, { detected, llmOutput, isFinalLlmAttempt: false } as never),
+    ).rejects.toThrow(/scrubbed to nothing/i);
+  });
+
+  it('fails on the final attempt instead of restoring the raw text', async () => {
+    await expect(
+      kbAuthorEnrichStep.apply!(ctx, { detected, llmOutput, isFinalLlmAttempt: true } as never),
+    ).rejects.toThrow(/no publishable article/i);
   });
 });

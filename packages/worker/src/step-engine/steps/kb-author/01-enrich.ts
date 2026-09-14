@@ -458,9 +458,28 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         'kb enrich: removed blocks that cited a real codebase',
       );
     }
-    // Keep the unscrubbed text when scrubbing would leave nothing: an empty article is worse
-    // than one the reviewer can see is wrong, and the removals are reported either way.
-    const finalBody = scrub.body.trim().length > 0 ? scrub.body : body;
+    // Scrubbing everything means the answer was a repo audit rather than a house rule — there
+    // is no generic article under the citations. Restoring the raw text here is the one case
+    // that must NOT happen: the guard would fail open exactly when the violation is total,
+    // handing the shared store a draft that is nothing but citations, and its `scrubbed` list
+    // would contradict the body the reviewer is shown.
+    //
+    // Retried first, on the same ladder the unparseable case uses a few lines up: the prompt
+    // already asks for an abstracted rule, so another pass is a real chance rather than a
+    // formality. On the final attempt it fails, the way a declared-but-missing KB body does —
+    // publishing the wrong thing under a canonical name is worse than publishing nothing.
+    if (scrub.body.trim().length === 0) {
+      if (!args.isFinalLlmAttempt) {
+        throw new RetryableParseError(
+          'kb enrichment scrubbed to nothing — every block cited the anchor repo, retrying',
+        );
+      }
+      throw new Error(
+        'kb enrichment produced no publishable article: every block cited the anchor repository ' +
+          `(${scrub.removed.length} removed, e.g. ${scrub.removed[0]?.reason ?? 'n/a'})`,
+      );
+    }
+    const finalBody = scrub.body;
 
     // The model may flag this as an update of an existing rule; only honor a
     // targetId we actually showed it (else treat it as a new entry).
