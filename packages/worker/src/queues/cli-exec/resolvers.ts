@@ -207,6 +207,22 @@ async function clearVolumeBackedMcp(
   }
 }
 
+/** Whether this invocation can reach the package registries its MCP servers are fetched from.
+ *
+ *  `uvx` has no warm cache to fall back on the way `npx` does — the sandbox image ships no
+ *  Python at all, so `mcp-server-git` downloads a managed interpreter (GitHub) as well as the
+ *  package (PyPI) on every run. Under a restricted per-task egress none of that is reachable,
+ *  the server fails to start, and exec-core then discards a run that was otherwise fine —
+ *  MEASURED, an anchored kb_author enrich with `egress: none` failed all three attempts with
+ *  `MCP server failed to start: filesystem, git`.
+ *
+ *  Only a per-task egress override can narrow this: every provider row ships `mode: 'full'`,
+ *  so nothing that works today changes. Declining to declare a server that cannot start is the
+ *  same rule the gates below already follow. */
+export function networkPolicyReachesPackageRegistries(policy: CliNetworkPolicy | null): boolean {
+  return !policy || policy.mode === 'full';
+}
+
 export async function resolveMcpExtraFiles(
   db: Database,
   taskId: string,
@@ -236,6 +252,9 @@ export async function resolveMcpExtraFiles(
    *  Required for the same reason as `hasWorktree` — a default would let a new call site
    *  silently re-advertise a server that cannot work. */
   hasRepo: boolean,
+  /** The invocation's effective egress. Required, like the two flags above: a default would let
+   *  a new call site declare a server the sandbox cannot fetch. */
+  networkPolicy: CliNetworkPolicy | null,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
   if (profile === 'none') {
@@ -301,7 +320,8 @@ export async function resolveMcpExtraFiles(
     // this alone would point `mcp-server-git` at the empty scratch workspace and reproduce
     // exactly the `"git":"failed"` / `is not a valid Git repository` entry the gate above
     // exists to prevent.
-    includeGit: hasRepo && !hasWorktree && !ragOnly,
+    includeGit:
+      hasRepo && !hasWorktree && !ragOnly && networkPolicyReachesPackageRegistries(networkPolicy),
     // `filesystem` survives a rag-only run because grounding on disk is still the job. A
     // REPO-LESS run is the one case where that argument runs out: its workspace is an empty
     // scratch directory, so the server would announce eleven tools over nothing. Declaring it

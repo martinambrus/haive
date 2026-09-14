@@ -186,6 +186,17 @@ const CHROME_MCP_HEADLESS_LAUNCH_ARGS = [
   '--chrome-arg=--disable-dev-shm-usage',
 ];
 
+/** Leading `npx` flags for every server we launch from npm.
+ *
+ *  `--prefer-offline` is what makes `warmNpmPackage` actually count: the warm container runs on
+ *  the default bridge and fills the shared cache, but plain `npx -y` still reaches for the
+ *  registry, so an invocation under a restricted per-task egress could not start the server at
+ *  all — and a declared server that fails to start makes exec-core discard the whole run.
+ *  MEASURED in the sandbox image on `--network none`: `npx -y` never prints a banner, while
+ *  `npx --prefer-offline -y` starts the filesystem server from the warm cache. Preferred rather
+ *  than `--offline` so a cold cache still falls back to the registry instead of hard-failing. */
+const NPX_CACHE_FIRST = ['--prefer-offline', '-y'] as const;
+
 export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): McpServerSpec[] {
   const servers: McpServerSpec[] = [];
   const includeFs = opts.includeFilesystem !== false;
@@ -195,7 +206,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
     servers.push({
       name: 'filesystem',
       command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-filesystem', opts.repoPath],
+      args: [...NPX_CACHE_FIRST, '@modelcontextprotocol/server-filesystem', opts.repoPath],
     });
   }
 
@@ -211,7 +222,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
     servers.push({
       name: 'postgres',
       command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-postgres', opts.databaseUrl],
+      args: [...NPX_CACHE_FIRST, '@modelcontextprotocol/server-postgres', opts.databaseUrl],
     });
   }
 
@@ -233,7 +244,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
     // is what actually contains it.
     const chromeArgs = opts.chromeDevtoolsBrowserUrl
       ? [
-          '-y',
+          ...NPX_CACHE_FIRST,
           cdmSpec,
           `--browser-url=${opts.chromeDevtoolsBrowserUrl}`,
           '--allow-unrestricted-paths',
@@ -241,7 +252,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
           ...CHROME_MCP_REDACT_HEADERS_ARGS,
         ]
       : [
-          '-y',
+          ...NPX_CACHE_FIRST,
           cdmSpec,
           `--executable-path=${SANDBOX_CHROME_PATH}`,
           '--headless=true',

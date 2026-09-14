@@ -150,7 +150,12 @@ describe('buildDefaultMcpServers', () => {
     }).find((s) => s.name === 'chrome-devtools');
     expect(withProxy?.command).toBe('node');
     // npx stays the inner command, so the version pin and every flag survive the wrap.
-    expect(withProxy?.args.slice(0, 3)).toEqual(['/haive/haive-chrome-mcp-proxy.mjs', 'npx', '-y']);
+    expect(withProxy?.args.slice(0, 4)).toEqual([
+      '/haive/haive-chrome-mcp-proxy.mjs',
+      'npx',
+      '--prefer-offline',
+      '-y',
+    ]);
     expect(withProxy?.args).toContain('--redact-network-headers');
     expect(withProxy?.args).toContain('--no-usage-statistics');
 
@@ -162,7 +167,10 @@ describe('buildDefaultMcpServers', () => {
       includeChromeDevtools: true,
     }).find((s) => s.name === 'chrome-devtools');
     expect(noProxy?.command).toBe('npx');
-    expect(noProxy?.args[0]).toBe('-y');
+    // Cache-first, so a sandbox whose egress cannot reach the registry still starts it from
+    // the warm cache. A plain npm flag, naming no sandbox path, so it stays correct in the
+    // user's own mcp_settings.json too.
+    expect(noProxy?.args.slice(0, 2)).toEqual(['--prefer-offline', '-y']);
   });
 
   it("opts the headless launch out of Chrome's sandbox, and only that branch", () => {

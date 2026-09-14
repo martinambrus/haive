@@ -443,6 +443,7 @@ export async function executeByKind(
               payload.toolProfile ?? 'full',
               hasWorktree,
               hasRepo,
+              networkPolicy,
             )
           : { files: [], extraArgs: [] };
       // Pre-warm the shared npm cache for the MCP servers that are fetched from npm.
