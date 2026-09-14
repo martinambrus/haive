@@ -126,6 +126,43 @@ export function canonicalFacetValueSql(keyExpr: string, valueExpr: string): stri
   return whens.length === 0 ? base : `CASE ${whens.join(' ')} ELSE ${base} END`;
 }
 
+/** Majors whose own dimension NAME does not say which technology they version, paired with the
+ *  dimension that does.
+ *
+ *  `buildFacetClause` tests every dimension independently, so a major standing alone constrains
+ *  the version and nothing else — VERIFIED against the jsonb engine, an entry facetted
+ *  `{"frameworkMajor":["11"]}` matches a Laravel 11 project exactly as it matches Drupal 11,
+ *  and only a project on major 10 is excluded. A Drupal 11 rule therefore reaches every other
+ *  framework's v11 while looking correctly scoped in the UI.
+ *
+ *  `phpMajor` and `nodeMajor` are deliberately NOT here: those names identify the technology
+ *  themselves, so `{"phpMajor":["8"]}` is a complete statement about PHP 8 and a project running
+ *  PHP 8 alongside another primary language is a legitimate match. The ambiguity is specific to
+ *  the two generic names. */
+export const FACET_MAJOR_PARENTS = {
+  frameworkMajor: 'framework',
+  dbMajor: 'database',
+} as const satisfies Readonly<Record<string, keyof GlobalKbFacets>>;
+
+/** Majors present WITHOUT the dimension that says what they are a version of. Empty is the
+ *  normal case. The api refuses a write carrying one so the author is told which dimension is
+ *  missing; `normalizeFacets` drops it for every writer that has no author to tell. */
+export function orphanFacetMajors(
+  facets: GlobalKbFacets | null | undefined,
+): Array<{ dimension: keyof GlobalKbFacets; parent: keyof GlobalKbFacets }> {
+  const out: Array<{ dimension: keyof GlobalKbFacets; parent: keyof GlobalKbFacets }> = [];
+  for (const [dim, parent] of Object.entries(FACET_MAJOR_PARENTS) as Array<
+    [keyof GlobalKbFacets, keyof GlobalKbFacets]
+  >) {
+    const has = (d: keyof GlobalKbFacets): boolean => {
+      const v = facets?.[d];
+      return Array.isArray(v) && v.some((x) => typeof x === 'string' && x.trim() !== '');
+    };
+    if (has(dim) && !has(parent)) out.push({ dimension: dim, parent });
+  }
+  return out;
+}
+
 export function normalizeFacets(facets: GlobalKbFacets | null | undefined): GlobalKbFacets {
   const out: GlobalKbFacets = {};
   for (const dim of FACET_DIMENSIONS) {
@@ -143,6 +180,12 @@ export function normalizeFacets(facets: GlobalKbFacets | null | undefined): Glob
     ];
     if (cleaned.length > 0) out[dim] = cleaned;
   }
+  // A major with no parent dimension states a version of nothing, and naming a dimension
+  // RESTRICTS — so the choice is between constraining the wrong thing and stating no opinion.
+  // Absence is what "no opinion" already means here, and it leaves every OTHER dimension in the
+  // set intact, so only a facet set that was nothing BUT an orphan major widens to everything.
+  // Runs last, after every dimension is filled, so field order cannot change the answer.
+  for (const { dimension } of orphanFacetMajors(out)) delete out[dimension];
   return out;
 }
 

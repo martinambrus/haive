@@ -15,6 +15,7 @@ import {
 import {
   globalKbEntries,
   globalKbTopicKey,
+  orphanFacetMajors,
   resolveGlobalKbConnection,
   resolveGlobalKbSettings,
   withGlobalKb,
@@ -316,6 +317,7 @@ globalKbRoutes.post('/enrich', async (c) => {
   const parsed = enrichSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid enrich request', 'invalid_body');
   const data = parsed.data;
+  assertFacetsNameTheirTechnology(data.facets);
   const userId = c.get('userId');
   const db = getDb();
 
@@ -527,6 +529,7 @@ globalKbRoutes.post('/entries', async (c) => {
   const parsed = createSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid global KB entry', 'invalid_body');
   const data = parsed.data;
+  assertFacetsNameTheirTechnology(data.facets);
   const userId = c.get('userId');
 
   const entry = await withGlobalKb(getDb(), async ({ db, settings }) => {
@@ -551,6 +554,27 @@ globalKbRoutes.post('/entries', async (c) => {
   await enqueueSync(entry.id, entry.namespace, 'upsert');
   return c.json({ entry }, 201);
 });
+
+/** Refuse a major-version facet that names no technology.
+ *
+ *  `normalizeFacets` DROPS one, which is the right convergent answer for a writer with nobody
+ *  to ask — but silently discarding what an author typed is the wrong answer when there IS an
+ *  author. They meant a specific technology's major and omitted the technology; both keeping it
+ *  (it then matches that version of everything) and dropping it (the entry widens) are wrong,
+ *  so the only honest move is to say which dimension is missing.
+ *
+ *  Applied to the RAW request facets, before normalisation, or the drop would have already
+ *  happened and there would be nothing left to report. */
+function assertFacetsNameTheirTechnology(facets: unknown): void {
+  const orphans = orphanFacetMajors(facets as GlobalKbFacets | undefined);
+  if (orphans.length === 0) return;
+  const detail = orphans.map((o) => `${o.dimension} needs ${o.parent}`).join('; ');
+  throw new HttpError(
+    400,
+    `a major-version facet must name its technology (${detail}) — a bare major matches that version of every technology`,
+    'facet_major_without_parent',
+  );
+}
 
 /** Whether a facet edit changed the entry's SCOPE, ignoring `tags`.
  *
@@ -621,6 +645,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   const parsed = updateSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid update', 'invalid_body');
   const data = parsed.data;
+  assertFacetsNameTheirTechnology(data.facets);
   if (Object.keys(data).length === 0) throw new HttpError(400, 'no fields to update');
 
   // ONE transaction for read-decide-write-archive. Without it two clients racing the same

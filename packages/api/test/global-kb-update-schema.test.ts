@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { FACET_DIMENSIONS } from '@haive/shared/global-kb';
+import { FACET_DIMENSIONS, FACET_MAJOR_PARENTS } from '@haive/shared/global-kb';
 import { describe, expect, it } from 'vitest';
 import {
   enrichSchema,
@@ -240,6 +240,47 @@ describe('rescopedTopicKey', () => {
     };
     expect(rescopedTopicKey(pg, { facets: { database: ['PostgreSQL'] } })).toBe(
       'best_practice:postgres',
+    );
+  });
+});
+
+// The pairing is spelled twice — `FACET_MAJOR_PARENTS` in shared and a `parent:` field on web's
+// mirrored dimension list — because web must not import @haive/shared. Same reason, and same
+// failure mode, as the dimension-set parity above: drift means the form stops warning about a
+// scope the api still refuses.
+describe('web mirrors the major/parent pairing', () => {
+  it('declares the same parents as FACET_MAJOR_PARENTS', () => {
+    const webSrc = readFileSync(
+      new URL('../../web/src/lib/api-client.ts', import.meta.url),
+      'utf8',
+    );
+    const block = webSrc.match(/export const GLOBAL_KB_FACET_DIMENSIONS[\s\S]*?\n\];/)?.[0];
+    expect(
+      block,
+      'could not locate GLOBAL_KB_FACET_DIMENSIONS in web/src/lib/api-client.ts',
+    ).toBeTruthy();
+    const webPairs = [...block!.matchAll(/key: '([A-Za-z]+)'[^}]*parent: '([A-Za-z]+)'/g)].map(
+      (m) => [m[1], m[2]],
+    );
+    expect(webPairs.length).toBeGreaterThan(0);
+    expect(Object.fromEntries(webPairs)).toEqual({ ...FACET_MAJOR_PARENTS });
+  });
+});
+
+// The relational rule is enforced by the ROUTE (`assertFacetsNameTheirTechnology`), not by zod
+// — `.strict()` only knows the dimension set. So this block asserts the schema still ADMITS the
+// well-formed shapes; the refusal itself is covered by `orphanFacetMajors` in the shared suite
+// and verified end to end against the running api.
+describe('the facet schema admits a major beside its technology', () => {
+  it('still accepts a major beside its parent', () => {
+    expect(
+      updateSchema.safeParse({ facets: { framework: ['drupal'], frameworkMajor: ['11'] } }).success,
+    ).toBe(true);
+  });
+
+  it('accepts phpMajor and nodeMajor standing alone', () => {
+    expect(updateSchema.safeParse({ facets: { phpMajor: ['8'], nodeMajor: ['22'] } }).success).toBe(
+      true,
     );
   });
 });

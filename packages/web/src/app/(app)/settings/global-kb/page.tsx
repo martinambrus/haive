@@ -5,6 +5,7 @@ import { diffLines } from 'diff';
 import {
   api,
   GLOBAL_KB_FACET_DIMENSIONS,
+  facetScopeError,
   releaseGlobalKbEmbedModel,
   type ApiError,
   type CliProvider,
@@ -628,6 +629,13 @@ export default function GlobalKbPage() {
    *  dimension needs. */
   async function saveScope(e: GlobalKbEntry) {
     if (!scopeEdit) return;
+    // Said in the form rather than as a failed request: a bare major names no technology, so
+    // the api refuses it and the reviewer would otherwise see only a 400.
+    const scopeIssue = facetScopeError(facetsFromFields(scopeEdit));
+    if (scopeIssue) {
+      setScopeError(scopeIssue);
+      return;
+    }
     setScopeBusy(true);
     setScopeError(null);
     try {
@@ -731,6 +739,11 @@ export default function GlobalKbPage() {
     // codebase's own version.
     if (!enrich.cliProviderId) {
       setEnrichError('Pick a CLI to write it with.');
+      return;
+    }
+    const enrichScopeIssue = facetScopeError(facetsFromFields(enrichFacets));
+    if (enrichScopeIssue) {
+      setEnrichError(enrichScopeIssue);
       return;
     }
     setEnrichBusy(true);

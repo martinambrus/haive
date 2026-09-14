@@ -1126,17 +1126,37 @@ export const GLOBAL_KB_FACET_DIMENSIONS: ReadonlyArray<{
   key: keyof GlobalKbFacets;
   label: string;
   placeholder: string;
+  /** The dimension that says WHICH technology this major versions. Set only where the field's
+   *  own name does not — `phpMajor`/`nodeMajor` name theirs, `frameworkMajor`/`dbMajor` do not.
+   *  Mirrors `FACET_MAJOR_PARENTS` in @haive/shared/global-kb, which web must not import; the
+   *  api test pins the two together. */
+  parent?: keyof GlobalKbFacets;
 }> = [
   { key: 'framework', label: 'Framework', placeholder: 'drupal, laravel' },
-  { key: 'frameworkMajor', label: 'Framework major', placeholder: '11' },
+  { key: 'frameworkMajor', label: 'Framework major', placeholder: '11', parent: 'framework' },
   { key: 'language', label: 'Language', placeholder: 'php' },
   { key: 'phpMajor', label: 'PHP major', placeholder: '8' },
   { key: 'nodeMajor', label: 'Node major', placeholder: '22' },
   { key: 'database', label: 'Database', placeholder: 'postgres, mariadb' },
-  { key: 'dbMajor', label: 'Database major', placeholder: '17' },
+  { key: 'dbMajor', label: 'Database major', placeholder: '17', parent: 'database' },
   { key: 'packages', label: 'Packages', placeholder: 'drupal/paragraphs@8' },
   { key: 'tags', label: 'Tags', placeholder: 'performance' },
 ];
+
+/** The message for a major that names no technology, or null when the scope is well formed.
+ *  A bare `frameworkMajor: 11` matches v11 of EVERY framework, because each dimension is
+ *  filtered independently — so the api refuses it. Checked here too, to say so in the form
+ *  rather than as a failed request. */
+export function facetScopeError(facets: GlobalKbFacets): string | null {
+  const named = (k: keyof GlobalKbFacets): boolean => (facets[k] ?? []).length > 0;
+  for (const dim of GLOBAL_KB_FACET_DIMENSIONS) {
+    if (dim.parent && named(dim.key) && !named(dim.parent)) {
+      const parent = GLOBAL_KB_FACET_DIMENSIONS.find((d) => d.key === dim.parent);
+      return `"${dim.label}" needs "${parent?.label ?? dim.parent}" — a major on its own applies to that version of every technology.`;
+    }
+  }
+  return null;
+}
 
 /** Mirrors `GlobalKbFacets` in @haive/shared/global-kb, which web must not import. Keep every
  *  dimension: the api validates the same shape with `.strict()`, so a field missing here is one

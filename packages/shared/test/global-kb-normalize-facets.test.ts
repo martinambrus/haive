@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalFacetValueSql, normalizeFacets } from '../src/global-kb/schema.js';
+import {
+  canonicalFacetValueSql,
+  normalizeFacets,
+  orphanFacetMajors,
+} from '../src/global-kb/schema.js';
 import { extractProjectFacets } from '../src/global-kb/facets.js';
 
 // The two filters compare differently and only the write can reconcile them: facetsMatchProject
@@ -89,5 +93,48 @@ describe('canonicalFacetValueSql', () => {
     // The SQL is generated from the same table, so the pairing is asserted rather than assumed.
     expect(normalizeFacets({ database: ['  PostgreSQL '] })).toEqual({ database: ['postgres'] });
     expect(canonicalFacetValueSql('k', 'v')).toContain("'postgres'");
+  });
+});
+
+// `buildFacetClause` tests each dimension independently, so a major standing alone constrains
+// the version and nothing else — VERIFIED against the jsonb engine, `{"frameworkMajor":["11"]}`
+// matches a Laravel 11 project exactly as it matches Drupal 11.
+describe('major-version facets must name their technology', () => {
+  it('drops a framework major with no framework', () => {
+    expect(normalizeFacets({ frameworkMajor: ['11'] })).toEqual({});
+  });
+
+  it('drops a db major with no database', () => {
+    expect(normalizeFacets({ dbMajor: ['17'], tags: ['perf'] })).toEqual({ tags: ['perf'] });
+  });
+
+  it('keeps a major whose parent is named', () => {
+    expect(normalizeFacets({ framework: ['Drupal'], frameworkMajor: ['11'] })).toEqual({
+      framework: ['drupal'],
+      frameworkMajor: ['11'],
+    });
+  });
+
+  // The parent being present but EMPTY is the same as absent — naming a dimension with no
+  // values states no opinion, and `normalizeFacets` drops it before this rule runs.
+  it('drops a major whose parent is empty', () => {
+    expect(normalizeFacets({ framework: ['  '], frameworkMajor: ['11'] })).toEqual({});
+  });
+
+  // These two name their own technology, so they are complete statements on their own. A
+  // project running PHP 8 beside another primary language is a legitimate match.
+  it('leaves phpMajor and nodeMajor alone', () => {
+    expect(normalizeFacets({ phpMajor: ['8'], nodeMajor: ['22'] })).toEqual({
+      phpMajor: ['8'],
+      nodeMajor: ['22'],
+    });
+  });
+
+  it('reports the missing parent by name', () => {
+    expect(orphanFacetMajors({ frameworkMajor: ['11'], dbMajor: ['17'] })).toEqual([
+      { dimension: 'frameworkMajor', parent: 'framework' },
+      { dimension: 'dbMajor', parent: 'database' },
+    ]);
+    expect(orphanFacetMajors({ framework: ['drupal'], frameworkMajor: ['11'] })).toEqual([]);
   });
 });
