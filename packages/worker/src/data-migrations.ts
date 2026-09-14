@@ -137,8 +137,17 @@ async function reconcileUnenqueuedStepSummaries(db: Database): Promise<void> {
     );
   if (pending.length === 0) return;
 
-  // Every state that is not finished. bullmq 6 has no 'paused' in JobState; a finished job has
-  // already written its own outcome to the row, so omitting those two cannot strand anything.
+  // Every state that is not finished. A finished job has already written its own outcome to the
+  // row, so omitting `completed`/`failed` cannot strand anything.
+  //
+  // `paused` is deliberately absent and is NOT a gap. MEASURED against bullmq 6.3.4: `pause()`
+  // only sets `meta.paused = 1` and deletes the marker — the job stays on `wait` (list length 1,
+  // `paused` key absent) and `getJobs(['waiting'])` still returns it while the queue is paused.
+  // The `paused` LIST is a legacy shape older versions wrote, which `pause-7.lua` drains back
+  // into `wait` on resume under a local it names `legacyPausedRemaining`; `JobType` does not
+  // admit it, and bullmq's own all-types default omits it too. Haive never pauses the queue in
+  // any case — GLOBAL_PAUSE is a pickup gate that calls `moveToDelayed`, which is `delayed`.
+  // Re-measure before adding a state rather than taking it from the docs.
   const jobs = await getCliExecQueue().getJobs([
     'waiting',
     'delayed',
