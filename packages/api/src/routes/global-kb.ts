@@ -637,6 +637,24 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         .set(set)
         .where(eq(globalKbEntries.id, id))
         .returning();
+      // Carry the new scope onto this entry's CHUNKS, in the same transaction.
+      //
+      // A chunk holds its OWN copy of the facets and `buildFacetClause` filters on THAT, not on
+      // the entry's — so committing the entry alone leaves every chunk advertising the old
+      // scope, while the body expansion serves the entry's current text. Until the sync ran, a
+      // re-scoped rule was therefore still delivered to its FORMER projects and missing from its
+      // new ones, and indefinitely so if the enqueue or the embed failed.
+      //
+      // An UPDATE rather than a delete: a scope edit changes metadata, not prose, so the vectors
+      // stay valid and the entry keeps working for the whole operation instead of going dark
+      // until a re-embed lands. The enqueue below still runs — it is what re-embeds a BODY change
+      // — but retrieval is correct the moment this commits rather than whenever that job does.
+      if (set.facets !== undefined) {
+        await db.execute(
+          sql`UPDATE ai_rag_embeddings SET facets = ${JSON.stringify(set.facets)}::jsonb
+               WHERE namespace = ${row?.namespace ?? ''} AND entry_id = ${id}`,
+        );
+      }
       // Activation supersession: when a draft that proposes replacing another entry (a
       // merge produced by onboarding) is activated, archive the entry it supersedes so
       // the topic keeps a single live article. Its vectors are dropped below.
