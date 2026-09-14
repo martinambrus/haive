@@ -210,7 +210,7 @@ export async function ensureGlobalKbSchema(
   // at boot rather than one per request. It carries no per-run cap, unlike its model — the work
   // is bounded by the number of LEGACY rows, which is zero after the first successful pass, and
   // a migration that converges over several boots would leave retrieval half-fixed in between.
-  for (const table of ['global_kb_entries', VECTORS_TABLE]) {
+  for (const table of [ENTRIES_TABLE, VECTORS_TABLE]) {
     await conn.pg.unsafe(`
       UPDATE ${table} AS t
       SET facets = COALESCE((
