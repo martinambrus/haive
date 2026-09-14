@@ -1,7 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
+import { ensureTaskScratchWorkspace } from '../../repo/scratch-workspace.js';
 import { resolveInvocationRepoMount } from './resolvers.js';
+
+// Only the filesystem half is stubbed: the subpath and the repo-less predicate stay real, and
+// the resolver MUST create the directory, because docker refuses a volume-subpath that does not
+// exist (MEASURED: `cannot access path ... no such file or directory`).
+vi.mock('../../repo/scratch-workspace.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../repo/scratch-workspace.js')>();
+  return { ...actual, ensureTaskScratchWorkspace: vi.fn(async () => '/scratch/dir') };
+});
 
 function mkDb(
   task: {
@@ -86,6 +95,8 @@ describe('resolveInvocationRepoMount', () => {
       hasWorktree: false,
       hasRepo: false,
     });
+    // And nothing is created for it: a torn state must not be handed a workspace.
+    expect(ensureTaskScratchWorkspace).not.toHaveBeenCalled();
   });
 
   it('mounts an empty scratch workspace for a type allowed to run repo-less', async () => {
@@ -103,5 +114,9 @@ describe('resolveInvocationRepoMount', () => {
       // check on repoMount can no longer answer the second question.
       hasRepo: false,
     });
+    // The mount is only valid if the directory EXISTS by the time it is returned: docker
+    // refuses a volume-subpath that does not, and the human Terminal resolves this before
+    // `resolveTaskContext` ever runs for a task still sitting in `created`.
+    expect(ensureTaskScratchWorkspace).toHaveBeenCalledWith('u1', 't1');
   });
 });

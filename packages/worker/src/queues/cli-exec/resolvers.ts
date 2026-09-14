@@ -1,7 +1,11 @@
 import { stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import { and, eq } from 'drizzle-orm';
-import { taskScratchSubpath, taskTypeAllowsNoRepository } from '../../repo/scratch-workspace.js';
+import {
+  ensureTaskScratchWorkspace,
+  taskScratchSubpath,
+  taskTypeAllowsNoRepository,
+} from '../../repo/scratch-workspace.js';
 import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -432,13 +436,20 @@ export async function resolveTaskRepoMount(
   if (!task.repositoryId) {
     // A task type allowed to run with no repository still gets a working directory — see
     // ensureTaskScratchWorkspace. Anything else keeps the old `null`.
-    return taskTypeAllowsNoRepository(task.type)
-      ? {
-          source: REPO_VOLUME_NAME,
-          target: REPO_MOUNT_TARGET,
-          subpath: taskScratchSubpath(task.userId, taskId),
-        }
-      : null;
+    //
+    // CREATED here, not merely named. Docker REFUSES a volume-subpath that does not exist
+    // (MEASURED: `cannot access path ... no such file or directory`), and this resolver has a
+    // caller that runs before `resolveTaskContext` ever does — the human Terminal, which is
+    // worktree-gated only for `workflow`/`run_app`, so a repo-less kb_author shell can be
+    // opened while the task is still `created`. Ensuring is idempotent, so the task path pays
+    // a mkdir it would have done anyway.
+    if (!taskTypeAllowsNoRepository(task.type)) return null;
+    await ensureTaskScratchWorkspace(task.userId, taskId);
+    return {
+      source: REPO_VOLUME_NAME,
+      target: REPO_MOUNT_TARGET,
+      subpath: taskScratchSubpath(task.userId, taskId),
+    };
   }
 
   const repo = await db.query.repositories.findFirst({
@@ -498,14 +509,18 @@ export async function resolveInvocationRepoMount(
     // `hasRepo` is separate from "there is a mount" precisely because of this branch: a
     // repo-less task DOES get a mount (an empty scratch workspace), so a null check on
     // repoMount can no longer answer "is there a repository here".
+    if (!taskTypeAllowsNoRepository(task.type)) {
+      return { repoMount: null, hasWorktree: false, hasRepo: false };
+    }
+    // Same reason as resolveTaskRepoMount: the directory has to EXIST before docker will
+    // mount the subpath, and ensuring is idempotent.
+    await ensureTaskScratchWorkspace(task.userId, taskId);
     return {
-      repoMount: taskTypeAllowsNoRepository(task.type)
-        ? {
-            source: REPO_VOLUME_NAME,
-            target: REPO_MOUNT_TARGET,
-            subpath: taskScratchSubpath(task.userId, taskId),
-          }
-        : null,
+      repoMount: {
+        source: REPO_VOLUME_NAME,
+        target: REPO_MOUNT_TARGET,
+        subpath: taskScratchSubpath(task.userId, taskId),
+      },
       hasWorktree: false,
       hasRepo: false,
     };

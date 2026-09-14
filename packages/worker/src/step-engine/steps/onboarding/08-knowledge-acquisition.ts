@@ -1140,8 +1140,13 @@ export async function collectRepoSymbols(
       // A method must sit on its OWN indented line and open a block, which a call statement
       // (`  doThing();`) never does. Control-flow keywords reach the length floor, so they are
       // excluded by name rather than by shape.
+      // The `(?::...)` arm is TypeScript's return annotation, which sits between `)` and `{` —
+      // `serializeInvoice(): string {`, `async load(): Promise<T> {`. Requiring the brace
+      // immediately after the parens silently skipped every typed method in a TS repo, which is
+      // most of them. Stops at `{` so an inline object return type is missed rather than
+      // over-matched: a miss costs a symbol, over-matching costs somebody's article.
       const methodRe =
-        /^[ \t]+(?:(?:public|private|protected|static|readonly|async|\*)\s+)*([A-Za-z_]\w{4,})\s*\([^)]*\)\s*\{/gm;
+        /^[ \t]+(?:(?:public|private|protected|static|readonly|async|\*)\s+)*([A-Za-z_]\w{4,})\s*\([^)]*\)\s*(?::\s*[^;{]+)?\s*\{/gm;
       for (let m = defRe.exec(body); m; m = defRe.exec(body)) {
         if (isDistinctiveSymbol(m[1])) symbols.add(m[1]!);
       }

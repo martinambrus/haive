@@ -165,6 +165,29 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('buildInvoiceRow')).toBe(true);
   });
 
+  it('collects a TypeScript method that declares a return type', async () => {
+    // The annotation sits between `)` and `{`, and requiring the brace immediately after the
+    // parens skipped every typed method — which in a TS repo is most of them.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-ts-'));
+    await writeFile(
+      path.join(dir, 'repo.ts'),
+      [
+        'class InvoiceRepo {',
+        '  serializeInvoice(): string {',
+        '    return "";',
+        '  }',
+        '  async loadInvoiceBatch(id: string): Promise<string[]> {',
+        '    return [];',
+        '  }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, 'typescript');
+    expect(symbols.has('serializeInvoice')).toBe(true);
+    expect(symbols.has('loadInvoiceBatch')).toBe(true);
+  });
+
   it('does not mistake control flow for a symbol', async () => {
     // These clear the length floor and match the method SHAPE, so only the name list excludes
     // them. Collecting one would make the scrub delete any article block that used the word.
