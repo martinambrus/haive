@@ -1,5 +1,6 @@
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { execFile } from 'node:child_process';
+import { stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -16,6 +17,7 @@ import {
   logger,
   volumeName,
 } from '@haive/shared';
+import { taskScratchPath, taskScratchSubpath } from '../repo/scratch-workspace.js';
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
 import { defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
@@ -79,9 +81,22 @@ export async function resolveIdeWorkspaceSubpath(
 ): Promise<string | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { repositoryId: true },
+    columns: { repositoryId: true, userId: true },
   });
-  if (!task?.repositoryId) return null;
+  // A repo-less task's workspace is its scratch directory, on this same volume. The Editor tab is
+  // worktree-gated for `workflow`/`run_app` ONLY, so it is enabled on a running or failed
+  // `kb_author` run — returning null here left that tab advertising an editor that could not boot.
+  //
+  // EXISTENCE is the entitlement, the same rule the api's `resolveWorkspaceRoot` uses and for the
+  // same reason: `ensureTaskScratchWorkspace` is the only creator and owns who is allowed one, so
+  // re-deriving that rule in a second place would be a divergence waiting to happen.
+  if (!task?.repositoryId) {
+    if (!task) return null;
+    const exists = await stat(taskScratchPath(task.userId, taskId))
+      .then((st) => st.isDirectory())
+      .catch(() => false);
+    return exists ? taskScratchSubpath(task.userId, taskId) : null;
+  }
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId),
     columns: { storagePath: true, localPath: true },
