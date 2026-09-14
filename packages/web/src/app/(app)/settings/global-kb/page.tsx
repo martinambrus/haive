@@ -249,10 +249,20 @@ export default function GlobalKbPage() {
   const [activeSuccessor, setActiveSuccessor] = useState<{ id: string; title: string } | null>(
     null,
   );
+  // `activeSuccessor === null` alone cannot gate the button, because THREE different states
+  // produce it: the lookup is still in flight, the lookup failed, and there genuinely is no
+  // successor. Reactivation was live throughout the first of those, so a quick reviewer could
+  // reactivate before the warning had any chance to render and leave both entries retrievable
+  // for the same scope. Only the in-flight state blocks; a FAILED lookup re-enables the button
+  // with no warning, which keeps the fail-quiet rule below intact rather than turning an
+  // advisory check into a hard block on a request that may never succeed.
+  const [successorLoading, setSuccessorLoading] = useState(false);
   useEffect(() => {
     setActiveSuccessor(null);
+    setSuccessorLoading(false);
     if (!selected || selected.status !== 'archived') return;
     let cancelled = false;
+    setSuccessorLoading(true);
     void api
       .get<{ activeSuccessor: { id: string; title: string } | null }>(
         `/global-kb/entries/${selected.id}`,
@@ -263,7 +273,10 @@ export default function GlobalKbPage() {
       // Fail QUIET, not loud: the warning is advisory, and a failed lookup must not block the
       // reviewer from opening an entry. It errs toward not warning, which is why the detail
       // view is also the only place reactivation can happen at all.
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setSuccessorLoading(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -1524,8 +1537,14 @@ export default function GlobalKbPage() {
                 {(selected.status === 'draft' || selected.status === 'archived') && (
                   <Button
                     size="sm"
-                    disabled={busy || scopeBusy || scopeEdit !== null}
-                    title={scopeEdit !== null ? 'Save or cancel the scope edit first' : undefined}
+                    disabled={busy || scopeBusy || scopeEdit !== null || successorLoading}
+                    title={
+                      scopeEdit !== null
+                        ? 'Save or cancel the scope edit first'
+                        : successorLoading
+                          ? 'Checking whether an active entry already replaces this one…'
+                          : undefined
+                    }
                     onClick={() => void activate(selected)}
                   >
                     {selected.status === 'archived' ? 'Reactivate' : 'Activate'}
