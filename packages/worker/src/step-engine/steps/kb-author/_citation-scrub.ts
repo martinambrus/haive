@@ -143,6 +143,13 @@ export const ECOSYSTEM_FILENAMES = new Set(
     'mix.lock',
     'package.swift',
     'cmakelists.txt',
+    // Lockfiles pair with their manifest. `cargo.toml` was exempt and `cargo.lock` was not, so
+    // "commit Cargo.lock for applications" — reusable Rust guidance — resolved at the root and
+    // deleted the block, while the npm, Composer, Go and Mix lockfiles beside it were already
+    // safe. Every exempt manifest that HAS a standard lockfile now carries it.
+    'cargo.lock',
+    'gemfile.lock',
+    'poetry.lock',
   ].map((n) => n.toLowerCase()),
 );
 
