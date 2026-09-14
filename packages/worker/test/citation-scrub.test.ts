@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { bodyUsesRepoSymbol } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 import {
   citationCandidates,
   resolveInsideRepo,
@@ -228,5 +229,79 @@ describe('bare repository filenames', () => {
       repoPath: null,
     });
     expect(r.removed).toEqual([]);
+  });
+});
+
+// A repo-defined TYPE is not called, it is constructed — Go/Rust write `InvoiceRow{...}` and
+// Elixir `%InvoiceRow{...}` — so collecting those names bought nothing until the matcher learned
+// the literal form. Kept to `[ \t]*` so a markdown heading above an unrelated block cannot match.
+describe('bodyUsesRepoSymbol type literals', () => {
+  const symbols = new Set(['InvoiceRow', 'process_invoice']);
+
+  it('matches a struct literal', () => {
+    expect(bodyUsesRepoSymbol('row := InvoiceRow{ID: 1}', symbols)).toBe('InvoiceRow');
+    expect(bodyUsesRepoSymbol('let r = InvoiceRow { id: 1 };', symbols)).toBe('InvoiceRow');
+    expect(bodyUsesRepoSymbol('%InvoiceRow{id: 1}', symbols)).toBe('InvoiceRow');
+  });
+
+  it('still matches the forms it always did', () => {
+    expect(bodyUsesRepoSymbol('process_invoice(x)', symbols)).toBe('process_invoice');
+    expect(bodyUsesRepoSymbol('new InvoiceRow', symbols)).toBe('InvoiceRow');
+    expect(bodyUsesRepoSymbol('InvoiceRow::new()', symbols)).toBe('InvoiceRow');
+  });
+
+  it('does not cross a newline to reach a brace', () => {
+    // `## InvoiceRow` followed by an unrelated fenced block is a heading, not a literal.
+    expect(bodyUsesRepoSymbol('## InvoiceRow\n\n{ "a": 1 }', symbols)).toBeNull();
+  });
+
+  it('ignores a name this repo does not define', () => {
+    expect(bodyUsesRepoSymbol('OtherThing{x: 1}', symbols)).toBeNull();
+  });
+});
+
+// The bare-filename rule resolved at the repo ROOT only, so `InvoiceProcessor.ts` living under
+// `src/` slipped through — the slashed-path rule cannot see it either, a bare name having no
+// separator to match on. Widening it to the whole tree is only safe with the distinctiveness
+// gate: matching every basename would delete a block for saying `config.php`.
+describe('scrubCitations bare filenames outside the repo root', () => {
+  const opts = (basenames: string[]) => ({
+    repoPath: '/nonexistent-repo-root',
+    repoBasenames: new Set(basenames),
+    isDistinctiveStem: (stem: string) => /[a-z][A-Z]|_/.test(stem) || /.[A-Z][a-z]/.test(stem),
+  });
+
+  it('removes a DISTINCTIVE filename found anywhere in the tree', async () => {
+    const res = await scrubCitations(
+      'Register the handler in InvoiceProcessor.ts before dispatch.',
+      opts(['invoiceprocessor.ts']),
+    );
+    expect(res.removed).toHaveLength(1);
+    expect(res.removed[0]?.reason).toBe('InvoiceProcessor.ts');
+  });
+
+  it('keeps a GENERIC filename even when the repo has one', async () => {
+    // `config.php` belongs to no repository in particular and turns up in invented examples
+    // constantly. Deleting a block for it is the over-removal this scrub must never commit.
+    const res = await scrubCitations(
+      'Put the constant in config.php and reload.',
+      opts(['config.php']),
+    );
+    expect(res.removed).toHaveLength(0);
+  });
+
+  it('keeps a distinctive filename this repo does not have', async () => {
+    const res = await scrubCitations(
+      'See InvoiceProcessor.ts for the shape.',
+      opts(['other_thing.ts']),
+    );
+    expect(res.removed).toHaveLength(0);
+  });
+
+  it('behaves exactly as before when no basename index is supplied', async () => {
+    const res = await scrubCitations('Register it in InvoiceProcessor.ts first.', {
+      repoPath: '/nonexistent-repo-root',
+    });
+    expect(res.removed).toHaveLength(0);
   });
 });
