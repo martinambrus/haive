@@ -1169,6 +1169,7 @@ export async function collectRepoBasenames(repoPath: string): Promise<Set<string
         return !rel.split('/').some((p) => IGNORE_DIRS.has(p));
       },
       10,
+      (name) => IGNORE_DIRS.has(name),
     );
     for (const rel of files.slice(0, REPO_SYMBOL_FILE_CAP)) {
       const base = rel.split('/').pop();
@@ -1207,6 +1208,10 @@ export async function collectRepoSymbols(
         return exts.some((e) => low.endsWith(e));
       },
       10,
+      // Prune as well as filter: without this the walk descends into every `.venv`, `target` and
+      // `Pods` in the tree and then discards what it found. Anchored enrichment runs this walk
+      // and the basename walk back to back, so the cost was paid twice.
+      (name) => IGNORE_DIRS.has(name),
     );
     for (const rel of files.slice(0, REPO_SYMBOL_FILE_CAP)) {
       let text: string;
