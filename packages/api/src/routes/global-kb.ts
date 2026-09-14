@@ -378,6 +378,11 @@ globalKbRoutes.post('/enrich', async (c) => {
         // indistinguishable from one created repo-less. Written even when null, because the
         // KEY's presence is what separates "recorded" from "predates this".
         anchorRepositoryId: data.repositoryId ?? null,
+        // The author's OWN scope, kept where it cannot be rewritten. `01-enrich`'s apply
+        // overwrites the ENTRY's facets with the merged result, so on a retry the entry reports
+        // the model's inferred scope as though the author had stated it — and forcing those
+        // values back over the new answer makes "retry to correct a wrong scope" impossible.
+        authorFacets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
         ...(data.egress
           ? { egress: { mode: data.egress.mode, domains: data.egress.domains ?? [], ips: [] } }
           : {}),

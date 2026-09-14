@@ -107,15 +107,28 @@ interface Enrichment {
 
 async function loadTaskAnchor(
   ctx: StepContext,
-): Promise<{ entryId: string | null; hasRepo: boolean }> {
+): Promise<{ entryId: string | null; hasRepo: boolean; authorFacets: GlobalKbFacets | null }> {
   const task = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
     columns: { metadata: true, repositoryId: true },
   });
-  const md = task?.metadata as { globalKbEntryId?: string } | null;
+  const md = task?.metadata as { globalKbEntryId?: string; authorFacets?: GlobalKbFacets } | null;
   // ANCHORED vs repo-less is the task's own repositoryId, not `ctx.repoPath`: a repo-less task
   // still has a repoPath — an empty scratch workspace — so the path cannot answer this.
-  return { entryId: md?.globalKbEntryId ?? null, hasRepo: task?.repositoryId != null };
+  // The author's OWN scope, recorded at creation. Read from the task and NOT from the entry,
+  // because apply() overwrites the entry's facets with the MERGED result — so on a retry the
+  // entry reports the model's inferred scope as if the author had stated it, `mergeAuthorFacets`
+  // then forces those values over the new answer, and retrying to correct a wrong inferred scope
+  // is the one thing that cannot work. The task row is immutable here; the entry is not.
+  //
+  // `null` means the task predates the record, where reading the entry is exactly the behaviour
+  // it had. No backfill: for an entry that has already been enriched the author's original values
+  // are gone, and recording the merged ones would assert something false.
+  return {
+    entryId: md?.globalKbEntryId ?? null,
+    hasRepo: task?.repositoryId != null,
+    authorFacets: md?.authorFacets ?? null,
+  };
 }
 
 export function buildEnrichPrompt(detected: KbAuthorDetect): string {
@@ -350,7 +363,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
   },
 
   async detect(ctx): Promise<KbAuthorDetect> {
-    const { entryId, hasRepo } = await loadTaskAnchor(ctx);
+    const { entryId, hasRepo, authorFacets } = await loadTaskAnchor(ctx);
     if (!entryId) throw new Error('kb_author task is missing metadata.globalKbEntryId');
     return withGlobalKb(ctx.db, async ({ db }) => {
       const entry = await db.query.globalKbEntries.findFirst({
@@ -400,8 +413,9 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         hasRepo,
         // Whatever the author stated when creating the entry. The skeleton is inserted with
         // `facets: {}` when they state nothing, so this is empty in that case and the model
-        // decides every dimension.
-        authorFacets: entry.facets ?? {},
+        // decides every dimension. Taken from the TASK, which never changes; the entry's own
+        // column is rewritten by apply() and so reports the model's scope on a retry.
+        authorFacets: authorFacets ?? entry.facets ?? {},
       };
     });
   },
