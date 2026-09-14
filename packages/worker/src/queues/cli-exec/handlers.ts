@@ -419,19 +419,28 @@ async function cleanupAuthAfterTerminalSummary(db: Database, taskId: string): Pr
     // record of what was applied to them goes now rather than inside the removal's success
     // path. Before the check it must NOT run: a live task's preparations are still in place.
     clearTaskAuthPreparationState(taskId);
-    await syncRefreshedAuthToUserVolumes(db, taskId);
-    const result = await cleanupTaskAuthVolumes(taskId);
-    if (result.removed.length > 0) {
-      log.info(
-        { taskId, volumes: result.removed.length },
-        'terminal step summary removed deferred task auth volumes',
-      );
-    }
-    if (result.failed.length > 0) {
-      log.warn(
-        { taskId, volumes: result.failed.map((f) => f.name) },
-        'terminal step summary could not remove every deferred task auth volume',
-      );
+    // The auth work gets its OWN catch so a failure in it cannot skip the scratch reap below.
+    // They are unrelated resources that happen to share a trigger, and credentials are the
+    // half more likely to throw — a rotated token, a volume still held. Sharing one try meant
+    // one bad sync leaked a repo-less task's workspace for good, since this is the LAST thing
+    // that runs for that task.
+    try {
+      await syncRefreshedAuthToUserVolumes(db, taskId);
+      const result = await cleanupTaskAuthVolumes(taskId);
+      if (result.removed.length > 0) {
+        log.info(
+          { taskId, volumes: result.removed.length },
+          'terminal step summary removed deferred task auth volumes',
+        );
+      }
+      if (result.failed.length > 0) {
+        log.warn(
+          { taskId, volumes: result.failed.map((f) => f.name) },
+          'terminal step summary could not remove every deferred task auth volume',
+        );
+      }
+    } catch (err) {
+      log.warn({ err, taskId }, 'terminal step summary auth cleanup failed');
     }
     // Same deferral, different resource: a repo-less task's scratch workspace was left in
     // place by task completion precisely so THIS invocation could mount it.
