@@ -1028,7 +1028,15 @@ export async function collectRepoSymbols(
       // Python declares with `def`, Go with `func` (optionally behind a receiver) and `type`.
       // `function` precedes `func` so the longer keyword wins the alternation.
       const defRe =
-        /\b(?:function|func|def|class|trait|interface|struct|type)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
+        /\b(?:function|func|def|class|trait|interface|struct|type|enum|module)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
+      // `enum` covers PHP 8.1 and TypeScript, `module` covers Ruby — both are unambiguous
+      // declaration keywords, so they cost nothing.
+      //
+      // This scan is an APPROXIMATION and is meant to stay one. The two errors are not equal:
+      // missing a symbol lets a copied identifier reach a draft a human then reviews, while
+      // inventing one deletes a block of somebody's article. So it under-collects on purpose —
+      // extend it with keywords that are unambiguous, and resist widening the SHAPES it accepts.
+      //
       // JS/TS declare most of their helpers with no keyword at all — `const parseInvoice = () =>`
       // and class methods `serializeInvoice() {` — so a keyword-anchored scan misses exactly the
       // forms those repos use most, while `bodyUsesRepoSymbol` happily recognises their call

@@ -74,6 +74,18 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('loadInvoices')).toBe(true);
   });
 
+  it('covers the declaration keywords of every language it claims to scan', async () => {
+    // The extension map claims php/js/ts/python/ruby/go, so the keyword set has to match it:
+    // `enum` is PHP 8.1 and TypeScript, `module` is Ruby. A claimed extension whose keyword is
+    // unknown scans the file and collects nothing, which is how this was wrong twice before.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-kw2-'));
+    await writeFile(path.join(dir, 'status.php'), '<?php enum InvoiceStatus { }', 'utf8');
+    await writeFile(path.join(dir, 'helpers.rb'), 'module InvoiceHelpers\nend', 'utf8');
+    const symbols = await collectRepoSymbols(dir, null);
+    expect(symbols.has('InvoiceStatus')).toBe(true);
+    expect(symbols.has('InvoiceHelpers')).toBe(true);
+  });
+
   it('does not mistake control flow for a symbol', async () => {
     // These clear the length floor and match the method SHAPE, so only the name list excludes
     // them. Collecting one would make the scrub delete any article block that used the word.
