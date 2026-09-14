@@ -106,4 +106,12 @@ describe('scopeChanged', () => {
   it('ignores value order', () => {
     expect(scopeChanged({ packages: ['a', 'b'] }, { packages: ['b', 'a'] })).toBe(false);
   });
+
+  it('normalises BOTH sides, so a legacy-cased entry is not seen as re-scoped', () => {
+    // The stored side can predate normalisation while the incoming side is always normalised.
+    // Compared raw, a no-op save looks like a re-scope and silently drops a valid
+    // supersedesEntryId, leaving the predecessor active after activation.
+    expect(scopeChanged({ framework: ['Drupal'] }, { framework: ['drupal'] })).toBe(false);
+    expect(scopeChanged({ database: [' PostgreSQL '] }, { database: ['postgresql'] })).toBe(false);
+  });
 });

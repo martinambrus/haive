@@ -435,7 +435,12 @@ async function cleanupAuthAfterTerminalSummary(db: Database, taskId: string): Pr
     }
     // Same deferral, different resource: a repo-less task's scratch workspace was left in
     // place by task completion precisely so THIS invocation could mount it.
-    await cleanupTaskScratchWorkspace(db, taskId);
+    //
+    // NOT on a FAILED task, matching the guard on the task-queue side and the keep-alive-on-
+    // 'failed' rule its neighbours follow: a failed task keeps its workspace so the Editor and
+    // Terminal can still open it. This path admits `failed` because the AUTH volumes do go at
+    // that point, so the status has to be re-read for the one resource that does not.
+    if (task.status !== 'failed') await cleanupTaskScratchWorkspace(db, taskId);
   } catch (err) {
     // The summary is best-effort and already finalized. Cleanup trouble must not turn its
     // successful task back into a failed queue job; boot's orphan reaper is the final backstop.

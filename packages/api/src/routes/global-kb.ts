@@ -514,10 +514,17 @@ export function scopeChanged(
   before: GlobalKbFacets | null | undefined,
   after: GlobalKbFacets | null | undefined,
 ): boolean {
-  const key = (f: GlobalKbFacets | null | undefined): string =>
-    JSON.stringify(
-      FACET_FILTER_DIMENSIONS.map((dim) => [dim, [...((f?.[dim] as string[]) ?? [])].sort()]),
+  // BOTH operands are normalised here rather than at the call site. The stored side can predate
+  // normalisation (`{framework:["Drupal"]}`) while the incoming side is always normalised, so
+  // comparing them raw makes a no-op save look like a re-scope and silently drops a valid
+  // `supersedesEntryId` — leaving the predecessor active after activation. Normalising inside
+  // the helper is what stops a future caller reintroducing that asymmetry.
+  const key = (f: GlobalKbFacets | null | undefined): string => {
+    const n = normalizeFacets(f);
+    return JSON.stringify(
+      FACET_FILTER_DIMENSIONS.map((dim) => [dim, [...((n[dim] as string[]) ?? [])].sort()]),
     );
+  };
   return key(before) !== key(after);
 }
 

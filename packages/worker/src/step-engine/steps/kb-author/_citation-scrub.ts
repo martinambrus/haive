@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import { pathExists } from '../onboarding/_helpers.js';
 
 /** What was taken out of an article, and why. Surfaced on the step output so the removal is
@@ -59,7 +60,7 @@ export function lineRefHits(block: string): LineRefHit[] {
  *  would miss the directory citations that are the common case — the SVG entry led with
  *  `sites/all/themes/activit/img/`, which carries no extension and which the existing
  *  `extractCitedPaths` therefore skips. */
-const PATH_LIKE = /(?:^|[\s`("[<])((?:\.\/)?[\w.-]+(?:\/[\w.-]+)+\/?)/g;
+const PATH_LIKE = /(?:^|[\s`("[<])(\/?(?:\.\/)?[\w.-]+(?:\/[\w.-]+)+\/?)/g;
 
 /** Split markdown into blocks, keeping a fenced code block whole.
  *
@@ -106,7 +107,15 @@ export function citationCandidates(block: string): string[] {
   for (const m of block.matchAll(PATH_LIKE)) {
     const raw = m[1];
     if (!raw) continue;
-    const rel = raw.replace(/^\.\//, '').replace(/\/+$/, '');
+    let rel = raw.replace(/^\.\//, '').replace(/\/+$/, '');
+    if (rel.startsWith('/')) {
+      // An ABSOLUTE path is a citation only when it names the sandbox's own working directory,
+      // which IS the anchor repo — an agent that cites what it read often writes the container
+      // path it saw. Anything else absolute (`/etc/passwd`, `/var/log/...`) belongs to no
+      // repository, and `resolveInsideRepo` would reject it anyway.
+      if (!rel.startsWith(`${SANDBOX_WORKDIR}/`)) continue;
+      rel = rel.slice(SANDBOX_WORKDIR.length + 1);
+    }
     // A bare `a/b` with no dot and one slash is as likely to be prose ("and/or") or a fraction
     // as a path; require either an extension or real depth before spending a stat on it.
     if (!rel.includes('.') && rel.split('/').length < 3) continue;

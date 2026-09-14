@@ -169,3 +169,25 @@ describe('path probes stay inside the anchor repo', () => {
     expect(r.removed).toEqual([]);
   });
 });
+
+// An agent that cites what it read often writes the CONTAINER path it saw. The path pattern
+// could not start a capture on `/`, so an absolute sandbox path produced no candidate at all
+// and walked straight through the scrub.
+describe('absolute sandbox paths', () => {
+  it('strips a citation written as the sandbox path', async () => {
+    await mk('src/private-helper.ts');
+    const r = await scrubCitations('Handled in /haive/workdir/src/private-helper.ts today.', {
+      repoPath: repo,
+    });
+    expect(r.removed).toHaveLength(1);
+  });
+
+  it('leaves an absolute path that is not the workdir alone', async () => {
+    // Belongs to no repository, and resolveInsideRepo would reject it anyway — but it must not
+    // even become a candidate, or an article about file permissions loses a block.
+    const r = await scrubCitations('Never expose /etc/ssl/private/server.key in a build.', {
+      repoPath: repo,
+    });
+    expect(r.removed).toEqual([]);
+  });
+});
