@@ -85,10 +85,11 @@ disabled, removed, or failed to load after a rebuild.
   module `deep-analysis`, which is not installed". Never a crash, and never silently dropping the
   missing step, which would run a truncated pipeline the admin never authored and cannot see.
 - The same rule covers a persona a prompt-template step names with `{{agent:<id>}}`, checked at
-  task-create against the TARGET repository because agent definitions live per repository: a
-  missing one refuses the task with a named reason ("step `<slug>` needs agent `drupal7-developer`,
-  which this repository does not define"), never an empty persona. Built-in steps never hit it —
-  their personas always carry an inline fallback.
+  task-create against the TARGET repository because agent definitions live per repository: one the
+  repository does not define in a markdown agent directory refuses the task with a named reason
+  ("step `<slug>` needs agent `drupal7-developer`, which this repository does not define"), never an
+  empty persona. A definition that exists only as `.codex/agents/<id>.toml` counts as absent until a
+  TOML reader exists. Built-in steps never hit it — their personas always carry an inline fallback.
 - Tasks already running are untouched: their run list is materialised, and `buildRunList` is
   forward-walked from the current step. This gates new task creation only.
 
@@ -175,7 +176,7 @@ A definition entry `{ kind:'prompt-template', stepSlug, title, promptTemplate, r
 
 - Factory `synthesizeStepDefinition(entry, defSlug, index)`: `metadata.id = 'custom.<defSlug>.<stepSlug>'`, `workflowType = defSlug`, `requiresCli: true`, capabilities from config, `llm.agentPool` from `entry.agentPool`. `llm.buildPrompt(args)` = safe mustache-style `{{field}}` interpolation of `entry.promptTemplate` against `args.formValues` (already has preAnswers overlaid) + `args.detected` — plain substitution, no eval/Function. `parseOutput` = generic JSON try-parse. `apply` = generic: write raw + parsed to `task_steps.output`; no in-process fs writes (file work goes through the sandboxed MCP tool).
 - Repository agents follow `toasty-percolating-kernighan`'s per-invocation rule with nothing custom here: an entry whose `requiredCapabilities` carry `file_write` keeps seeing the real tree, a read-only one sees no repository agent definitions, and `agentPool: '*'` is the explicit choice for a template that wants the model to pick from the whole catalog.
-- `{{agent:<id>}}` is not a form field. `buildPrompt` renders it as that plan's persona marker with no inline protocol, and Phase 3.1 widens its persona resolver for exactly those markers: the definition body is pasted for every provider with a markdown agent directory, because the LSP gate that plan keeps exists to protect an embedded fallback a template persona does not have. Codex needs the TOML reader that plan defers.
+- `{{agent:<id>}}` is not a form field. `buildPrompt` renders it as that plan's persona marker with no inline protocol, and Phase 3.1 widens its persona resolver for exactly those markers, because the LSP gate that plan keeps exists to protect an embedded fallback a template persona does not have. The body is pasted for EVERY provider, read from the selected provider's own agent directory when that one is markdown and otherwise from the first markdown agent directory in catalog order that defines the id, so codex (TOML) and amp (no agent directory) get the persona without the TOML reader that plan defers. A marker whose body cannot be found at dispatch fails the dispatch with the dangling-reference reason instead of running without its persona — the tree can change between task-create and dispatch.
 - Registration: `registerCustomStepsFromDefinitions(registry, db)` runs at boot after `registerAllSteps`, reading definitions and calling `registry.override(...)` (packages/worker/src/step-engine/registry.ts:19, upserts, tolerates re-runs). `buildRunList` `require()`s ids at execution time, well after boot, so synthetics are present when needed.
 - CLI-dispatch gating caveat: `assertCliDispatchListInSync` (steps/index.ts:94) throws if an `llm` step is absent from the static `CLI_DISPATCH_STEP_IDS`. Custom synthetics register after that snapshot so they fall outside it (confirm ordering at boot). The web per-step CLI picker must treat `custom.*` as CLI-dispatching via the catalog `dispatchesCli` flag rather than the static shared array — the single static-shared-constant that does not stretch to custom steps.
 

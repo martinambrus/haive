@@ -335,15 +335,20 @@ stores only `stepIds: string[]` and needs nothing.
    `requiredCapabilities` already carry `file_write` for a template that writes, which is what
    keeps such a step seeing the real tree.
 2. **`{{agent:<id>}}` tokens.** `buildPrompt` renders a token as PR 1's persona marker with no
-   inline protocol, and Phase 3.1 widens PR 1's resolver for exactly those markers: the body is
-   pasted for every provider with a markdown agent directory, because PR 1's LSP gate exists to
-   protect an embedded fallback a template persona does not have. Codex needs the TOML reader
-   PR 1 defers.
+   inline protocol, and Phase 3.1 widens PR 1's resolver for exactly those markers, because PR 1's
+   LSP gate exists to protect an embedded fallback a template persona does not have. The body is
+   pasted for EVERY provider, read from the selected provider's own agent directory when that one
+   is markdown and otherwise from the first markdown agent directory in catalog order that defines
+   the id — so codex (TOML) and amp (no agent directory) get the same persona without the TOML
+   reader PR 1 defers. A marker whose body cannot be found at dispatch fails the dispatch with the
+   dangling-reference reason below instead of running without its persona, since the tree can
+   change between task-create and dispatch.
 3. **Dangling references.** Extended to personas: a token naming a persona the target repository
-   does not define is refused at task-create with a named reason ("step `<slug>` needs agent
-   `drupal7-developer`, which this repository does not define") — the same not-silently-truncated
-   rule the section applies to missing steps. Built-in steps are never refused this way, since
-   their personas always have an inline fallback.
+   does not define in a markdown agent directory is refused at task-create with a named reason
+   ("step `<slug>` needs agent `drupal7-developer`, which this repository does not define") — the
+   same not-silently-truncated rule the section applies to missing steps. A definition that exists
+   only as `.codex/agents/<id>.toml` counts as absent until a TOML reader exists. Built-in steps are
+   never refused this way, since their personas always have an inline fallback.
 4. **Creator mode.** The generated candidate entry may use tokens and `agentPool`; the generating
    turn is handed the persona catalog Haive's onboarding templates install (id + description).
    Authoring is global, so no single repository's own agents apply; a repository-specific persona
