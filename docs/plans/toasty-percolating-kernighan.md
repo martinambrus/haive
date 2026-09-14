@@ -79,7 +79,9 @@ type — inherits it without anyone maintaining a list of special steps.
    Finally it `fstat`s the handle, accepts only a regular file, and reads at most the remaining size
    budget (dispatch side, item 3) plus one byte from it, so a size that lies (a pseudo-file reports
    0) cannot slip past the budget. That is the regular-files-only rule `ensureArchivesExpanded` already applies with
-   `lstat`, and a refused file is treated as missing. No directory is scanned, and no unrelated or
+   `lstat`, and a refused file is treated as missing — as is one `parseAgentFile` cannot parse (an
+   unclosed frontmatter) or whose body is empty after the frontmatter, since pasting an empty persona
+   is the same silent failure as a missing one. No directory is scanned, and no unrelated or
    out-of-tree file is ever read. It reuses the loader's frontmatter parser (`parseAgentFile`,
    exported) and leaves `loadAgentPersonas` and its only caller, 03, untouched. Codex inlining
    (its `.codex/agents/*.toml` is rendered without LSP, and no package has a TOML parser) is a
@@ -261,7 +263,10 @@ nothing has to ride in the prompt, and a future step inherits the rule with noth
    `authMounts`. That array already carries a non-auth entry (the uploads mount),
    `assertNoAuthVolumeNesting` checks only `kind: 'auth'` entries, and the codex app-server
    fallback's recursive `executeCliSpec` call forwards it, so the `codex exec` re-run is masked
-   too. No new parameter is threaded anywhere.
+   too. No new parameter is threaded anywhere. The same branch drops every secret and
+   `#ddev-generated` file mask whose target lies under a masked agent directory: the read-only tmpfs
+   already hides that subtree, and Docker could not create those files' mountpoints inside it, so
+   keeping them would fail the whole invocation.
 5. **A new module in the `#ddev-generated` mask's shape.** `queues/cli-exec/agent-definition-mask.ts`:
    `resolveAgentDefinitionMasks(db, taskId, repoMount, spec)` returns `[]` unless
    `spec.maskAgentDefinitions`, does the task/repo lookup, derives the worker root, and wraps
@@ -357,7 +362,7 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   switch off),
   `test/step-runner-llm.test.ts` (`agentPool` reaches dispatch, the flag rides
   `enqueued[0].spec`, retry_ai `toolProfile`), NEW `test/agent-definition-mask.test.ts` (fixture
-  tree), a NEW docker-runner argv test (no mount form has one today), NEW
+  tree, including a secret file mask under a masked agent directory), a NEW docker-runner argv test (no mount form has one today), NEW
   `test/agent-listing-capture.ts`.
 
 ## Verification
@@ -380,17 +385,20 @@ scratch.
      request and the listing is still built-ins only;
    - unmasked → the request is byte-identical to today's;
    - a write into a masked directory fails — `readonly` on a tmpfs mount is the one piece of the
-     mount the earlier captures did not exercise.
+     mount the earlier captures did not exercise;
+   - an untracked deny-listed file inside a masked agent directory still lets the container start,
+     because its file mask is dropped rather than stacked under the read-only tmpfs.
 2. **Unit tests** (`pnpm --filter @haive/worker exec vitest run`), modelled on
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
-   real directories only, symlinked ones left unmasked, read-only, fail-open), `agentIsolationApplies` (a named agent directory or file, and `subagents`, included), a catalog assertion that
+   real directories only, symlinked ones left unmasked, read-only, fail-open, secret and ddev file
+   masks under a masked directory dropped), `agentIsolationApplies` (a named agent directory or file, and `subagents`, included), a catalog assertion that
    every provider with `supportsSubagents` reads a markdown `projectAgentsDir`,
    `promptNamesAgentPath` (`.claude/agents/`, `.claude/agents`, `.claude/agents/x.md`,
    `./.claude/agents/x.md` and `/haive/workdir/.claude/agents/x.md` in running text match; `.claude`,
    `docs/.claude/agents/x.md`, `.claude/agents-old/x.md` and the pointer inside a persona marker do
    not; among built-in prompt builders only 06_5 and 09_5 match, so a new match fails the test and
    becomes a conscious decision), marker ids, the persona path
-   (found / missing / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, and `07_7-secret-sweep` declaring `'*'`.
@@ -452,8 +460,8 @@ stores only `stepIds: string[]` and needs nothing.
    path scan (dispatch side, "Handed paths") sees interpolated values and static text like any other
    prompt text, and excludes the persona markers that tokens become.
 3. **Dangling references.** Extended to personas: a token naming a persona with no `<id>.md` in any
-   markdown agent directory of the target repository (a symlink or an out-of-tree path counts as
-   absent, since PR 1's reader refuses both) is refused at task-create with a named reason
+   markdown agent directory of the target repository (a symlink, an out-of-tree path, an unparseable
+   file or an empty body counts as absent, since PR 1's reader treats all four as missing) is refused at task-create with a named reason
    ("step `<slug>` needs agent `drupal7-developer`, which this repository does not define") — the
    same not-silently-truncated rule the section applies to missing steps. A definition that exists
    only as `.codex/agents/<id>.toml` counts as absent until a TOML reader exists. Built-in steps are
