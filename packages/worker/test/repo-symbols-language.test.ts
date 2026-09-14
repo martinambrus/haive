@@ -86,6 +86,35 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('InvoiceHelpers')).toBe(true);
   });
 
+  it('ignores names the LANGUAGE owns, however they were declared', async () => {
+    // A repo that declares `in_array` has written a shim or vendored a helper; it has not
+    // coined a word. MEASURED across four checkouts: `is_string` arrived from a minified
+    // jQuery plugin and `in_array` from a site's own `const in_array = ...`, each deleting a
+    // block from the "PHP 8 Mistakes" article for naming the built-in it is about.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-builtin-'));
+    await writeFile(
+      path.join(dir, 'shim.php'),
+      '<?php\nfunction in_array($n, $h) { return false; }\nfunction activit_row_key($x) { return $x; }',
+      'utf8',
+    );
+    await writeFile(path.join(dir, 'helper.js'), 'const is_string = (a) => true;', 'utf8');
+    const symbols = await collectRepoSymbols(dir, null);
+    expect(symbols.has('in_array')).toBe(false);
+    expect(symbols.has('is_string')).toBe(false);
+    expect(symbols.has('activit_row_key')).toBe(true);
+  });
+
+  it('skips a minified bundle, which is not this project vocabulary', async () => {
+    // Detected by line LENGTH, not by a `.min.js` name a build tool can drop.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-min-'));
+    const long = `function bundled_helper_name(a){return a}${'var padding_value=1;'.repeat(120)}`;
+    await writeFile(path.join(dir, 'vendor-bundle.js'), long, 'utf8');
+    await writeFile(path.join(dir, 'app.js'), 'function activit_real_helper(a){return a}', 'utf8');
+    const symbols = await collectRepoSymbols(dir, 'javascript');
+    expect(symbols.has('bundled_helper_name')).toBe(false);
+    expect(symbols.has('activit_real_helper')).toBe(true);
+  });
+
   it('does not mistake a PHP import for a declaration', async () => {
     // `use function array_key_exists;` imports a BUILT-IN. Collecting it made the language's
     // own library look repo-specific — MEASURED, that deleted 7 of 167 blocks across the real

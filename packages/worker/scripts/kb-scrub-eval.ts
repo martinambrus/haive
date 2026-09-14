@@ -17,6 +17,12 @@
  * genuinely cite its repo. Read the reasons. What must never appear is a removal whose reason
  * is ordinary vocabulary.
  *
+ * Run it against SEVERAL repositories, not one. Their symbol sets differ enormously (10k-22k on
+ * this install) and a false positive usually comes from what one checkout happens to vendor:
+ * MEASURED, a rule set that scored zero on the first repo still deleted a block on two others,
+ * from a minified jQuery plugin declaring `function is_string(arg)` and a site's own
+ * `const in_array = ...`. Four checkouts now score zero across all 11 articles.
+ *
  * Run (inside the worker container):
  *   docker exec haive-worker sh -lc 'cd /app/packages/worker && \
  *     KB_SCRUB_REPO=/var/lib/haive/repos/<userId>/<repoId> pnpm exec tsx scripts/kb-scrub-eval.ts'

@@ -966,6 +966,67 @@ export async function repoOwnRef(
  * class DEFINED in this repo (e.g. a custom helper like GetPHPVariables). */
 const REPO_SYMBOL_FILE_CAP = 4000;
 const REPO_SYMBOL_CAP = 40000;
+/** Longest line in a file, used to spot a minified bundle without trusting its name. */
+function longestLine(text: string): number {
+  let max = 0;
+  let start = 0;
+  for (let i = 0; i <= text.length; i += 1) {
+    if (i === text.length || text[i] === '\n') {
+      if (i - start > max) max = i - start;
+      start = i + 1;
+    }
+  }
+  return max;
+}
+
+/** Names the LANGUAGE owns. A repository that declares one has written a shim or vendored a
+ *  helper; it has not coined a word, so an article mentioning `in_array()` is not citing that
+ *  repository.
+ *
+ *  MEASURED across four real checkouts with the corpus harness: `is_string` reached the symbol
+ *  set from a minified jQuery plugin declaring `function is_string(arg)`, and `in_array` from a
+ *  site's own `const in_array = ...` — both genuine declarations, both deleting a block from the
+ *  "PHP 8 Mistakes" article for naming the built-in it is about.
+ *
+ *  Unlike a list of project filenames, these are specified by the language and do not churn.
+ *  Grow it on evidence from `scripts/kb-scrub-eval.ts`; a name missing here costs a deleted
+ *  block, a name wrongly here costs only a citation reaching a reviewed draft. */
+const LANGUAGE_BUILTIN_NAMES = new Set([
+  // PHP type and array checks, the ones an article about PHP pitfalls names by definition.
+  'is_string',
+  'is_numeric',
+  'is_array',
+  'is_callable',
+  'is_object',
+  'is_bool',
+  'is_null',
+  'in_array',
+  'array_key_exists',
+  'array_merge',
+  'array_filter',
+  'array_map',
+  'array_keys',
+  'array_values',
+  'str_replace',
+  'str_contains',
+  'str_starts_with',
+  'str_ends_with',
+  'json_encode',
+  'json_decode',
+  'array_slice',
+  'array_search',
+  'call_user_func',
+  // JS/TS globals that a bundled library commonly re-declares.
+  'parseInt',
+  'parseFloat',
+  'setTimeout',
+  'setInterval',
+  'clearTimeout',
+  'encodeURIComponent',
+  'decodeURIComponent',
+  'requestAnimationFrame',
+]);
+
 /** Whether a declared name IDENTIFIES this repository, rather than merely existing in it.
  *
  *  A single lowercase word does not. `bodyUsesRepoSymbol` matches any `name(` in an article, so
@@ -982,7 +1043,8 @@ const REPO_SYMBOL_CAP = 40000;
  *  more words was chosen for a domain, while a single verb is vocabulary every project shares.
  *  It mirrors what `identifiers.ts` already treats as an identifier worth indexing. */
 function isDistinctiveSymbol(name: string | undefined): name is string {
-  return !!name && /[a-z][A-Z]|_/.test(name);
+  if (!name || LANGUAGE_BUILTIN_NAMES.has(name)) return false;
+  return /[a-z][A-Z]|_/.test(name);
 }
 
 /** Words that pass the method shape (`name(...) {`) but name no symbol. Length alone does not
@@ -1041,6 +1103,12 @@ export async function collectRepoSymbols(
       } catch {
         continue;
       }
+      // A MINIFIED or generated bundle is not this project's vocabulary — it is a vendored
+      // library flattened onto one line, and parsing it yields hundreds of generic helpers.
+      // Detected by line LENGTH rather than by a `.min.js` name, which is a convention a build
+      // tool can drop. MEASURED: a minified jQuery plugin declaring `function is_string(arg)`
+      // put that name into the symbol set of a real repo.
+      if (text.length > 2000 && longestLine(text) > 1000) continue;
       const body = text.length > 200_000 ? text.slice(0, 200_000) : text;
       // Every keyword the SCANNED extensions can declare with. Adding `.go`/`.py`/`.rb` to the
       // file filter collected nothing from them while this still knew only the PHP/JS set —

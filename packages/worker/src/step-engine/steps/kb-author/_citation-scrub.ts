@@ -242,8 +242,10 @@ export function resolveInsideRepo(repoPath: string, candidate: string): string |
  * real content — and measure that against the WHOLE article corpus, not one sample. One article
  * showed zero removals while the rule set was deleting 7 of 167 blocks across the other ten,
  * because a single sample cannot exercise a rule that fires on ordinary vocabulary. MEASURED
- * against all 11 stored articles (167 blocks, 30,469 chars) anchored to a live repo whose scan
- * yields 10,141 symbols: ZERO blocks removed. That is the check to re-run before adding a
+ * against all 11 stored articles (167 blocks, 30,469 chars) anchored to FOUR live repositories
+ * whose scans yield 10k-21k symbols each: ZERO blocks removed in every one. Use several repos —
+ * a rule set that scored zero on the first still deleted blocks on two others, because what
+ * leaks in is whatever a given checkout happens to vendor. That is the check to re-run before adding a
  * seventh rule — one that cannot be shown harmless on known-good prose is not ready.
  */
 export async function scrubCitations(
