@@ -145,12 +145,18 @@ edits an agent definition, or an outside commit that touches one, would otherwis
 a catch-up agent a file the mask hides — a review of a change it never saw, the failure
 `changedFilesBlock`'s COVERAGE notice exists to prevent. So those renderers append
 `AGENT_DIRECTORY_SCOPE_MARKER` whenever a listed path lies inside an agent directory (a pure
-`agentDirectoryScopeMarker(paths)` beside the agent-directory union, matching repository-relative
-paths on whole segments from the root, the way `isDeniedPath` does), and `agentIsolationApplies`
-treats the marker as `agentPool: '*'`. The marker stays in the prompt, as
+`agentDirectoryScopeMarker(paths, workdir)` beside the agent-directory union). It first strips a
+leading `./` and the sandbox workdir prefix (`SANDBOX_WORKDIR`, `/haive/workdir/`, passed in by its
+worker-side callers because shared cannot import it; agent-reported `filesTouched` can carry either
+spelling), then matches repository-relative paths on whole segments from the root, the way
+`isDeniedPath` does. `agentIsolationApplies` treats the marker as `agentPool: '*'`. The marker stays in the prompt, as
 `WORKTREE_GIT_BOUNDARY_MARKER` does, so a stored prompt that a mining retry re-dispatches keeps the
 decision it was built with. The rule lives at the render sites, not in a list of steps: a future
-step that reuses these helpers inherits it.
+step that reuses these helpers inherits it. Loaded persona bodies count as handed paths too:
+`agentDirectoryScopeMarker` runs over each body read on the persona path (dispatch side, item 3)
+before the re-resolve, so a repository persona that points the model at another definition keeps
+that file reachable. Haive's own agent templates reference no agent file (`_agent-templates.ts`),
+so only a customised definition triggers it.
 
 1. **The declaration.** `LlmInvocationSpec.agentPool?: '*'` (`step-engine/step-definition.ts`,
    beside `toolProfile`). `'*'` is the only value PR 1 needs (see "Steps that read agent files");
@@ -165,10 +171,13 @@ step that reuses these helpers inherits it.
    Persona bodies take the same shape: once `plan` exists, if `agentIsolationApplies(resolved)`,
    `plan.adapter` passes the gate (`supportsLsp`, `lspConfigured`, a catalog `projectAgentsDir`
    with `agentFileFormat: 'markdown'`) and the prompt has marker ids, read that ONE directory in
-   the invocation's tree and, when any body is found, `return resolveDispatch({ ...resolved,
-   agentBodies })`. The provider cannot change on that second pass, because bodies never affect
-   `tryBuildPlan`; codex never passes the gate, so this never stacks with the codex re-resolve;
-   and when nothing is found the first plan's fallback text is already right. That is PR 1's gate
+   the invocation's tree. The persona bodies and the codex app-server verdict are both gathered
+   BEFORE re-resolving, and `resolveDispatch` runs a second time only when either is new, carrying
+   both (`{ ...resolved, agentBodies, codexAppServer }`). Two early returns would each skip the
+   other the moment Phase 3.1 resolves template personas on codex, losing either the persona or the
+   first steerable dispatch's probe. The provider cannot change on that second pass, because
+   neither input changes which provider `tryBuildPlan` accepts, and when nothing is found the first
+   plan's fallback text is already right. That is PR 1's gate
    for built-in markers, whose inline protocol always follows them; Phase 3.1 widens it for
    template markers, which have none (Companion, item 2). A body larger than
    `MAX_PERSONA_BODY_BYTES` (64 KiB, a guard rail above the largest definition measured, 24,694
@@ -318,7 +327,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **Docs:** `AGENTS.md` → Sandbox, a paragraph beside "Secret-file masking" and "Worktree gitfile
   masking": what is hidden, from which invocations, why it fails open, and the measured listing
   costs.
-- **Tests:** `test/dispatcher.test.ts` (isolated twins, grok, a template-less id, and
+- **Tests:** `test/dispatcher.test.ts` (isolated twins, grok, a template-less id, one re-resolve
+  carrying both persona bodies and a codex verdict, and
   `agentIsolationApplies` over `file_write` / `subagents` / the scope marker / `'*'` / sub-agent kind /
   switch off),
   `test/step-runner-llm.test.ts` (`agentPool` reaches dispatch, the flag rides
@@ -351,9 +361,10 @@ scratch.
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
    directories only, read-only, fail-open), `agentIsolationApplies` (the scope marker and `subagents` included), a catalog assertion that
    every provider with `supportsSubagents` reads a markdown `projectAgentsDir`,
-   `agentDirectoryScopeMarker` (`.claude/agents/x.md` marks; `docs/.claude/agents/x.md` and
+   `agentDirectoryScopeMarker` (`.claude/agents/x.md`, `./.claude/agents/x.md` and
+   `/haive/workdir/.claude/agents/x.md` mark; `docs/.claude/agents/x.md` and
    `.claude/agents-old/x.md` do not), marker ids, the persona path
-   (found / missing / oversized / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / oversized / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, and `07_7-secret-sweep` declaring `'*'`.
