@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   citationCandidates,
+  resolveInsideRepo,
   scrubCitations,
   splitIntoBlocks,
 } from '../src/step-engine/steps/kb-author/_citation-scrub.js';
@@ -132,5 +133,34 @@ describe('line references vs host:port', () => {
       repoPath: '/nonexistent-repo-root',
     });
     expect(kept.removed).toEqual([]);
+  });
+});
+
+// A citation is by definition something IN the repository, so a token resolving outside it is
+// not one. Probing it anyway made any article that SHOWS a traversal example a false positive:
+// `../../../../../../etc/passwd` joins to `/etc/passwd`, which exists on the worker.
+describe('path probes stay inside the anchor repo', () => {
+  it('rejects a traversal candidate instead of probing it', () => {
+    expect(
+      resolveInsideRepo('/var/lib/haive/repos/u/r', '../../../../../../etc/passwd'),
+    ).toBeNull();
+  });
+
+  it('rejects a sibling directory that merely shares the prefix', () => {
+    expect(resolveInsideRepo('/repos/app', '../app-backup/secrets.env')).toBeNull();
+  });
+
+  it('accepts an ordinary repo-relative path', () => {
+    expect(resolveInsideRepo('/repos/app', 'src/Cache/Backend.php')).toBe(
+      '/repos/app/src/Cache/Backend.php',
+    );
+  });
+
+  it('keeps a block that only shows a traversal example', async () => {
+    const r = await scrubCitations(
+      'Never accept a user path like ../../../../../../etc/passwd in a download handler.',
+      { repoPath: '/var/lib/haive/repos/u/r' },
+    );
+    expect(r.removed).toEqual([]);
   });
 });

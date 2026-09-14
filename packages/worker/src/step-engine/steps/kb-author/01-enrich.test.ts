@@ -111,8 +111,10 @@ describe('mergeAuthorFacets', () => {
       { framework: ['drupal'], frameworkMajor: ['7'] },
     );
     expect(merged.framework).toEqual(['drupal']);
-    // The model may still fill a dimension the author left open...
-    expect(merged.frameworkMajor).toEqual(['7']);
+    // ...and the model does NOT get to narrow it by version. Leaving the version box blank is
+    // how the form says "every Drupal major", so the model's own `7` is cleared rather than
+    // kept — see the version-dimension block below.
+    expect(merged.frameworkMajor).toBeUndefined();
   });
 
   it('overrides the model on a dimension the author pinned', () => {
@@ -173,5 +175,43 @@ describe('buildEnrichPrompt', () => {
     expect(withScope).toMatch(/AUTHORITATIVE — do not narrow or widen it/);
     expect(withScope).toMatch(/- framework: drupal/);
     expect(buildEnrichPrompt(baseDetect)).not.toMatch(/AUTHORITATIVE/);
+  });
+});
+
+// The form promises a blank version box means "every version". Without clearing the child the
+// model's own guess survived there, so scoping `framework: ['drupal']` against a Drupal 7
+// checkout still produced `frameworkMajor: ['7']` — the regression this step exists to stop.
+describe('mergeAuthorFacets and version dimensions', () => {
+  it("drops the model's major when the author scoped the technology", () => {
+    const merged = mergeAuthorFacets(
+      { framework: ['drupal'] },
+      { framework: ['drupal'], frameworkMajor: ['7'], language: ['php'] },
+    );
+    expect(merged.frameworkMajor).toBeUndefined();
+    expect(merged.framework).toEqual(['drupal']);
+    // An unrelated dimension the author said nothing about is still the model's to fill.
+    expect(merged.language).toEqual(['php']);
+  });
+
+  it('keeps a version the author stated themselves', () => {
+    const merged = mergeAuthorFacets(
+      { framework: ['drupal'], frameworkMajor: ['11'] },
+      { frameworkMajor: ['7'] },
+    );
+    expect(merged.frameworkMajor).toEqual(['11']);
+  });
+
+  it('leaves the model alone when the author scoped nothing', () => {
+    const model = { framework: ['drupal'], frameworkMajor: ['7'] };
+    expect(mergeAuthorFacets({}, model)).toEqual(model);
+  });
+
+  it('covers the language and database parents too', () => {
+    expect(
+      mergeAuthorFacets({ language: ['php'] }, { phpMajor: ['8'], nodeMajor: ['22'] }),
+    ).toEqual({ language: ['php'] });
+    expect(mergeAuthorFacets({ database: ['postgres'] }, { dbMajor: ['17'] })).toEqual({
+      database: ['postgres'],
+    });
   });
 });

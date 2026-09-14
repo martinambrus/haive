@@ -264,14 +264,39 @@ export function parseEnrichment(raw: unknown): Enrichment | null {
  *
  *  Enforced HERE rather than in the prompt because the prompt already asked, politely, and got
  *  `frameworkMajor: ["7"]` on a rule the author wrote for Drupal 8+. */
+/** Version dimensions that a broader dimension already covers.
+ *
+ *  Naming a technology and leaving its version blank is how the form says "every version of it"
+ *  — an omitted dimension is exactly what retrieval reads as "applies to all". Without this the
+ *  model's own guess survived in the subordinate slot, so an author who scoped `framework:
+ *  ['drupal']` against a Drupal 7 checkout still got `frameworkMajor: ['7']` — the precise
+ *  regression this whole step exists to stop, arriving through the field meant to prevent it.
+ *
+ *  Only a dimension the author actually stated clears its children, and an author who wants a
+ *  version-specific rule still gets one by filling the version box themselves. */
+const FACET_VERSION_CHILDREN: Partial<Record<keyof GlobalKbFacets, (keyof GlobalKbFacets)[]>> = {
+  framework: ['frameworkMajor'],
+  language: ['phpMajor', 'nodeMajor'],
+  database: ['dbMajor'],
+};
+
 export function mergeAuthorFacets(
   authorFacets: GlobalKbFacets,
   modelFacets: GlobalKbFacets,
 ): GlobalKbFacets {
   const merged: GlobalKbFacets = { ...modelFacets };
+  const stated = (dim: keyof GlobalKbFacets): boolean => {
+    const v = authorFacets[dim];
+    return Array.isArray(v) && v.length > 0;
+  };
   for (const dim of FACET_DIMS) {
-    const stated = authorFacets[dim];
-    if (Array.isArray(stated) && stated.length > 0) merged[dim] = [...stated];
+    if (stated(dim)) merged[dim] = [...(authorFacets[dim] as string[])];
+  }
+  for (const [parent, children] of Object.entries(FACET_VERSION_CHILDREN)) {
+    if (!stated(parent as keyof GlobalKbFacets)) continue;
+    for (const child of children) {
+      if (!stated(child)) delete merged[child];
+    }
   }
   return merged;
 }

@@ -592,8 +592,13 @@ export default function GlobalKbPage() {
     setScopeBusy(true);
     setScopeError(null);
     try {
-      const facets = facetsFromFields(scopeEdit);
-      await api.patch(`/global-kb/entries/${e.id}`, { facets });
+      // Bind to what the server STORED, never to what was typed: facet values are normalised
+      // on write (trimmed, lowercased, deduped), so echoing the raw fields would show a scope
+      // the entry does not have until the next reload.
+      const res = await api.patch<{ entry: GlobalKbEntry }>(`/global-kb/entries/${e.id}`, {
+        facets: facetsFromFields(scopeEdit),
+      });
+      const facets = res.entry.facets;
       setSelected((cur) => (cur && cur.id === e.id ? { ...cur, facets } : cur));
       setEntries((rows) => rows?.map((r) => (r.id === e.id ? { ...r, facets } : r)) ?? rows);
       setScopeEdit(null);
@@ -1047,9 +1052,10 @@ export default function GlobalKbPage() {
             <Label>Applies to (optional)</Label>
             <span className="text-[11px] text-neutral-500">
               Leave a box empty and the rule applies to ALL values of it — that is what makes an
-              article reachable from the projects that need it. Name a version only when the rule is
-              genuinely specific to that version. Comma-separated; the AI fills what you leave
-              blank.
+              article reachable from the projects that need it. Name a technology and its version
+              stays open: scoping Framework to drupal keeps the rule across every Drupal major, so
+              fill Framework major only when the rule is genuinely specific to one. The AI fills the
+              dimensions you leave untouched and never narrows one you scoped. Comma-separated.
             </span>
             <FacetFields
               idPrefix="enrich-facet"

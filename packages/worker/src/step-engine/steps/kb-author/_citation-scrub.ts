@@ -124,6 +124,21 @@ export function citationCandidates(block: string): string[] {
   return [...out];
 }
 
+/** The absolute path a candidate names inside the anchor repo, or null if it escapes.
+ *
+ *  A citation is by definition something IN the repository, so a token that resolves outside it
+ *  is not one — and probing it anyway turns any article that shows a traversal example into a
+ *  false positive: `../../../../../../etc/passwd` joins to `/etc/passwd`, which exists on the
+ *  worker, so a block warning about path traversal was deleted for naming the attack it warns
+ *  about. Compared against the root plus a separator, so a sibling `<root>-backup` cannot pass
+ *  as a prefix match. */
+export function resolveInsideRepo(repoPath: string, candidate: string): string | null {
+  const root = path.resolve(repoPath);
+  const target = path.resolve(root, candidate);
+  if (target !== root && !target.startsWith(root + path.sep)) return null;
+  return target;
+}
+
 /**
  * Remove blocks that cite a real codebase.
  *
@@ -182,7 +197,8 @@ export async function scrubCitations(
 
     if (!reason && opts.repoPath) {
       for (const candidate of citationCandidates(block)) {
-        if (await pathExists(path.join(opts.repoPath, candidate))) {
+        const target = resolveInsideRepo(opts.repoPath, candidate);
+        if (target && (await pathExists(target))) {
           reason = candidate;
           break;
         }
