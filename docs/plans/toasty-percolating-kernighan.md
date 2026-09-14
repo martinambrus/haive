@@ -140,39 +140,34 @@ type — inherits it without anyone maintaining a list of special steps.
   `supportsSubagents` (`resolveDispatch`: the claude family, grok and antigravity), each of which
   reads a markdown agent directory, and no built-in step declares it, so this changes nothing for
   PR 1's steps;
-- the prompt hands the agent no path inside an agent directory (see "Handed paths" below);
+- the prompt names no file inside an agent directory (see "Handed paths" below);
 - the step did not declare `agentPool: '*'`.
 
 In practice that isolates the 08c reviewers and lenses, the 08d adversaries, 08c2, 03's mining
 roster, 04, 05, 01e, 01f, 03b, 03b2, 11, 11f, the DAG per-issue reviewer, issue advisor and
-replanner, and onboarding's read-only mining (08, 09-qa) — each only while the paths it is handed
-stay outside the agent directories — while 08a, 08b and the DAG coders declare `file_write` and are
+replanner, and onboarding's read-only mining (08, 09-qa) — each only while its prompt names no
+file inside an agent directory — while 08a, 08b and the DAG coders declare `file_write` and are
 not isolated.
 
-**Handed paths.** Several read-only dispatches are handed a list of repository paths to READ: the
-review change set (`changedFilesBlock` in `_impl-changes.ts`, rendered by 08c, 08c2 and 08d among
-others), the external drift 01e and 01f list (`resolveExternalDrift`, which drops only Haive's own
-commits), the task's `changedPaths` that `11f-plan-reconcile` lists, the `filesTouched` list
-`11-phase-8-learning` renders into its prompt, and the `filesModified` change set the DAG per-issue
-reviewer is told to "read each in full" (`reviewerPrompt`, `dag-executor.ts`). Those are every
-read-only prompt that renders a change set, found by searching the renderers of
-`changedFilesBlock`, `changedPaths`, `filesTouched` and `filesModified`. A task that
-edits an agent definition, or an outside commit that touches one, would otherwise hand a reviewer or
-a catch-up agent a file the mask hides — a review of a change it never saw, the failure
-`changedFilesBlock`'s COVERAGE notice exists to prevent. So those renderers append
-`AGENT_DIRECTORY_SCOPE_MARKER` whenever a listed path lies inside an agent directory (a pure
-`agentDirectoryScopeMarker(paths, workdir)` beside the agent-directory union). It first strips a
-leading `./` and the sandbox workdir prefix (`SANDBOX_WORKDIR`, `/haive/workdir/`, passed in by its
-worker-side callers because shared cannot import it; agent-reported `filesTouched` can carry either
-spelling), then matches repository-relative paths on whole segments from the root, the way
-`isDeniedPath` does. `agentIsolationApplies` treats the marker as `agentPool: '*'`. The marker stays in the prompt, as
-`WORKTREE_GIT_BOUNDARY_MARKER` does, so a stored prompt that a mining retry re-dispatches keeps the
-decision it was built with. The rule lives at the render sites, not in a list of steps: a future
-step that reuses these helpers inherits it. Loaded persona bodies count as handed paths too:
-`agentDirectoryScopeMarker` runs over each body read on the persona path (dispatch side, item 3)
-before the re-resolve, so a repository persona that points the model at another definition keeps
-that file reachable. Haive's own agent templates reference no agent file (`_agent-templates.ts`),
-so only a customised definition triggers it.
+**Handed paths.** A prompt that names a file inside an agent directory must be able to open it. The
+file can come from a review change set that includes an edited agent definition, an outside commit
+that touched one, a template value, a persona body that points at another definition, or a user who
+types one into a task description, a form hint or a plan-chat message. Where such a path can enter a
+prompt is open-ended, so the check is made once, over the prompt itself, rather than where lists
+are rendered. `agentIsolationApplies` runs a pure `promptNamesAgentPath(text, workdir)` (beside the
+agent-directory union) over the dispatch prompt with Haive's persona-marker blocks removed, since
+their pointers name `.claude/agents/<id>.md` by construction, and over every persona body the
+re-resolve carries. It splits the text into path tokens, strips a leading `./` and the sandbox
+workdir prefix (`SANDBOX_WORKDIR`, `/haive/workdir/`, passed in by worker-side callers because shared
+cannot import it), and matches a token only when it lies strictly INSIDE an agent directory,
+anchored on whole segments from the root the way `isDeniedPath` is: `.claude/agents/x.md` counts,
+`.claude/agents/` alone does not. That is deliberate. Haive's own prompts name agent DIRECTORIES
+outside persona markers (06_5's prior-setup warning, 09_5's note on where agents live), but no Haive
+prose names a file inside one: searched across `step-engine`, `orchestrator` and `sandbox`, the only
+such literals are the persona pointers the scan excludes. A match counts as `agentPool: '*'` for
+that invocation.
+A stored prompt that a mining retry re-dispatches is scanned again and reaches the same decision, so
+nothing has to ride in the prompt, and a future step inherits the rule with nothing to wire.
 
 1. **The declaration.** `LlmInvocationSpec.agentPool?: '*'` (`step-engine/step-definition.ts`,
    beside `toolProfile`). `'*'` is the only value PR 1 needs (see "Steps that read agent files");
@@ -295,11 +290,10 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **11-final-review, 07_5-verify-files, 07-generate-files, 12-post-onboarding, the onboarding-upgrade
   steps** — host-side reads and writes; no CLI reads the files. A retry_ai fix for a failed 07_5
   declares `file_write`, so it sees the directories it has to repair.
-- **08c, 08c2, 08d, 01e, 01f, 11-phase-8-learning, 11f-plan-reconcile, the DAG per-issue
-  reviewer** — handed lists of repository paths to read (the review change set, the external
-  drift, `changedPaths`, `filesTouched`, `filesModified`). Isolated only while no listed path
-  lies inside an agent directory; a list that names one carries the scope marker, and that
-  invocation sees the real tree (dispatch side, "Handed paths").
+- **Any step whose prompt names a file inside an agent directory** — a change set (08c, 08c2, 08d,
+  the DAG per-issue reviewer), external drift (01e, 01f), `changedPaths` (11f), `filesTouched` (11),
+  a template value or user-typed text alike. That invocation sees the real tree (dispatch side,
+  "Handed paths").
 - **07_7-secret-sweep — declares `agentPool: '*'`.** It sweeps committed secrets across the whole
   tree and writes nothing, and agent definitions are committed files, so hiding them would
   silently shrink a security control's coverage. The cost is known and already handled: Haive's
@@ -326,7 +320,7 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 ## Critical files
 
 - **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies` with its
-  scope-marker check, the switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
+  prompt path scan, the switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
   (`agentGuidanceIds`, the positive arm), `step-engine/steps/workflow/_agent-loader.ts` (export
   `parseAgentFile`; a filename-keyed single-file reader: `O_NOFOLLOW | O_NONBLOCK` open, an
   in-tree check on the opened descriptor's `/proc/self/fd` path, `fstat` regular-file check, capped
@@ -341,13 +335,10 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   calls `invocationRepoSubpath`).
 - **Exec:** `queues/cli-exec/agent-definition-mask.ts` (NEW), `queues/cli-exec/exec-core.ts`
   (append to `authMounts`), `sandbox/docker-runner.ts` (tmpfs branch).
-- **Steps:** `step-engine/steps/onboarding/07_7-secret-sweep.ts` (`agentPool: '*'`), and the
-  handed-path renderers that append the scope marker: `step-engine/steps/workflow/_impl-changes.ts`
-  (`changedFilesBlock`), `01e-external-kb-sync.ts`, `01f-external-plan-sync.ts`,
-  `11-phase-8-learning.ts`, `11f-plan-reconcile.ts`, and `step-engine/dag-executor.ts`
-  (`reviewerPrompt`).
+- **Steps:** `step-engine/steps/onboarding/07_7-secret-sweep.ts` (`agentPool: '*'`). No prompt
+  renderer changes: the prompt path scan covers every step.
 - **Shared:** beside `packages/shared/src/cli-providers/catalog.ts` (the agent-directory union and
-  `agentDirectoryScopeMarker`),
+  `promptNamesAgentPath`),
   `packages/shared/src/config/config.service.ts` (key and default).
 - **API and web:** `packages/api/src/routes/admin.ts`, `packages/web/src/app/(app)/admin/page.tsx`.
 - **Docs:** `AGENTS.md` → Sandbox, a paragraph beside "Secret-file masking" and "Worktree gitfile
@@ -355,7 +346,7 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   follows a repository-controlled link, and the measured listing costs.
 - **Tests:** `test/dispatcher.test.ts` (isolated twins, grok, a template-less id, one re-resolve
   carrying both persona bodies and a codex verdict, and
-  `agentIsolationApplies` over `file_write` / `subagents` / the scope marker / `'*'` / sub-agent kind /
+  `agentIsolationApplies` over `file_write` / `subagents` / a named agent file / `'*'` / sub-agent kind /
   switch off),
   `test/step-runner-llm.test.ts` (`agentPool` reaches dispatch, the flag rides
   `enqueued[0].spec`, retry_ai `toolProfile`), NEW `test/agent-definition-mask.test.ts` (fixture
@@ -385,11 +376,12 @@ scratch.
      mount the earlier captures did not exercise.
 2. **Unit tests** (`pnpm --filter @haive/worker exec vitest run`), modelled on
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
-   real directories only, symlinked ones left unmasked, read-only, fail-open), `agentIsolationApplies` (the scope marker and `subagents` included), a catalog assertion that
+   real directories only, symlinked ones left unmasked, read-only, fail-open), `agentIsolationApplies` (a named agent file and `subagents` included), a catalog assertion that
    every provider with `supportsSubagents` reads a markdown `projectAgentsDir`,
-   `agentDirectoryScopeMarker` (`.claude/agents/x.md`, `./.claude/agents/x.md` and
-   `/haive/workdir/.claude/agents/x.md` mark; `docs/.claude/agents/x.md` and
-   `.claude/agents-old/x.md` do not), marker ids, the persona path
+   `promptNamesAgentPath` (`.claude/agents/x.md`, `./.claude/agents/x.md` and
+   `/haive/workdir/.claude/agents/x.md` in running text match; `.claude/agents/` alone,
+   `docs/.claude/agents/x.md`, `.claude/agents-old/x.md` and the pointer inside a persona marker do
+   not; every built-in prompt builder's output matches nothing), marker ids, the persona path
    (found / missing / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
@@ -433,7 +425,7 @@ stores only `stepIds: string[]` and needs nothing.
    inline protocol, and Phase 3.1 widens PR 1's resolver for exactly those markers, because PR 1's
    LSP gate exists to protect an embedded fallback a template persona does not have. The body is
    pasted for EVERY provider and whether or not the invocation is isolated: a template that
-   declares `file_write`, `subagents` or `agentPool: '*'`, or hands its agent an agent path, still
+   declares `file_write`, `subagents` or `agentPool: '*'`, or names an agent file in its prompt, still
    has no embedded protocol, so the widened resolver runs for these markers outside
    `agentIsolationApplies`. The body is read by filename (`<id>.md`, as PR 1 reads it) from the
    selected provider's own agent directory when that one is markdown and holds it, and otherwise
@@ -444,12 +436,9 @@ stores only `stepIds: string[]` and needs nothing.
    dangling-reference reason below instead of running without its persona, since the tree can
    change between task-create and dispatch; one whose body would exceed the prompt's remaining
    `MAX_PERSONA_BODY_BYTES` budget fails the same way, naming the file and its size — the budget is
-   per prompt, so many tokens cannot add up past it. The factory is also a handed-path renderer: a read-only
-   template that interpolates an agent file (`Review {{path}}` with `path = .claude/agents/foo.md`)
-   would hand its agent a masked file, so `buildPrompt` runs `agentDirectoryScopeMarker` over the
-   template's static text and every interpolated value, split into path tokens, BEFORE tokens
-   become persona markers (whose own pointer names `.claude/agents/<id>.md`), and appends the scope
-   marker when one lies inside an agent directory.
+   per prompt, so many tokens cannot add up past it. Template text needs nothing of its own: the prompt
+   path scan (dispatch side, "Handed paths") sees interpolated values and static text like any other
+   prompt text, and excludes the persona markers that tokens become.
 3. **Dangling references.** Extended to personas: a token naming a persona with no `<id>.md` in any
    markdown agent directory of the target repository (a symlink or an out-of-tree path counts as
    absent, since PR 1's reader refuses both) is refused at task-create with a named reason
