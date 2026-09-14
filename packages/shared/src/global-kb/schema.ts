@@ -80,21 +80,32 @@ const FACET_VALUE_ALIASES: Partial<Record<keyof GlobalKbFacets, Record<string, s
   database: { postgresql: 'postgres' },
 };
 
+/** Trim, lowercase, and fold a known vocabulary alias — the ONE rule BOTH sides of a facet
+ *  comparison have to apply.
+ *
+ *  Exported because `extractProjectFacets` must reach the identical answer: the confirmation
+ *  form's `databaseType` is a free-TEXT field (`02-detection-confirmation.ts`, placeholder
+ *  "postgres, mysql, mariadb..."), so a person can legitimately confirm `postgresql` and the
+ *  project side would then carry a token no canonicalised entry can overlap. Normalising only
+ *  the entry side trades one silent mismatch for another. */
+export function canonicalizeFacetValue(dimension: string, value: string): string {
+  const v = value.trim().toLowerCase();
+  return FACET_VALUE_ALIASES[dimension as keyof GlobalKbFacets]?.[v] ?? v;
+}
+
 export function normalizeFacets(facets: GlobalKbFacets | null | undefined): GlobalKbFacets {
   const out: GlobalKbFacets = {};
   for (const dim of FACET_DIMENSIONS) {
     const values = facets?.[dim];
     if (!Array.isArray(values)) continue;
-    const aliases = FACET_VALUE_ALIASES[dim];
     // Aliasing happens INSIDE the Set, so two spellings of one technology collapse to one value
     // rather than being stored as two.
     const cleaned = [
       ...new Set(
         values
           .filter((v): v is string => typeof v === 'string')
-          .map((v) => v.trim().toLowerCase())
-          .filter(Boolean)
-          .map((v) => aliases?.[v] ?? v),
+          .map((v) => canonicalizeFacetValue(dim, v))
+          .filter(Boolean),
       ),
     ];
     if (cleaned.length > 0) out[dim] = cleaned;
