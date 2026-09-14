@@ -137,6 +137,20 @@ describe('mergeAuthorFacets', () => {
 });
 
 describe('buildEnrichPrompt', () => {
+  // Counts have no detector and deliberately never will: nothing structural separates
+  // "this codebase has 122 icons" from "eight icons per card is ~2.4 KB", and the difference
+  // is the self-reference, not the number. MEASURED — the scrubber removes 0 of 29 blocks from
+  // a real article carrying exactly that arithmetic, and a count rule would have taken it. So
+  // the prompt is the ONLY thing holding this contract, which is why its wording is pinned.
+  it('draws the line between measuring the repo and reasoning with numbers', () => {
+    const p = buildEnrichPrompt(baseDetect);
+    expect(p).toMatch(/count of occurrences/i);
+    // Both sides must be present: the ban alone reads as "use no numbers" and would cost these
+    // articles the arithmetic that makes a rule land.
+    expect(p).toMatch(/bans MEASURING the repository, not using numbers/i);
+    expect(p).toMatch(/illustrative/i);
+  });
+
   it('never asks for facets from the repository', () => {
     const p = buildEnrichPrompt(baseDetect);
     expect(p).not.toMatch(/versions you actually found in the repository/i);
