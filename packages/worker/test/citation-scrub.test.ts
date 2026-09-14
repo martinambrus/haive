@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { bareFilenameCandidates } from '../src/step-engine/steps/kb-author/_citation-scrub.js';
 import { bodyUsesRepoSymbol } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 import { STACK_INDICATORS } from '../src/step-engine/steps/onboarding/01-env-detect.js';
 import { ECOSYSTEM_FILENAMES } from '../src/step-engine/steps/kb-author/_citation-scrub.js';
@@ -334,5 +335,26 @@ describe('ecosystem manifest exemptions', () => {
     const markers = [...new Set(STACK_INDICATORS.map((i) => i.file.toLowerCase()))].sort();
     const missing = markers.filter((m) => !ECOSYSTEM_FILENAMES.has(m));
     expect(missing).toEqual([]);
+  });
+});
+
+// The `{2,8}` extension floor exists to keep prose out — `e.g`, `i.e` and `8.1` all have a
+// one-character or numeric tail — so one-letter source extensions are admitted by ALLOWLIST
+// rather than by relaxing it. The scan reads `.c` and `.h`, so those filenames are as forbidden
+// by the contract as `.ts` is.
+describe('bareFilenameCandidates one-letter extensions', () => {
+  it('admits the C source extensions the scan now reads', () => {
+    expect(bareFilenameCandidates('see invoice-processor.c for the loop')).toContain(
+      'invoice-processor.c',
+    );
+    expect(bareFilenameCandidates('declared in InvoiceRow.h')).toContain('InvoiceRow.h');
+  });
+
+  it('still keeps ordinary prose out', () => {
+    // These are exactly what the floor was written for; relaxing the quantifier would delete
+    // blocks over them.
+    for (const text of ['e.g. use a queue', 'i.e. the second pass', 'upgrade to 8.1 first']) {
+      expect(bareFilenameCandidates(text)).toEqual([]);
+    }
   });
 });

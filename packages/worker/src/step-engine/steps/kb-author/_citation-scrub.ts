@@ -67,8 +67,14 @@ const PATH_LIKE = /(?:^|[\s`("[<])(\/?(?:\.\/)?[\w.-]+(?:\/[\w.-]+)+\/?)/g;
  *  model that has just read the tree reaches for them naturally.
  *
  *  The last segment must be alphabetic and at least two characters, which keeps prose out:
- *  `e.g`, `i.e` and a version like `8.1` all have a one-character or numeric tail. */
-const BARE_FILENAME = /(?:^|[\s`("[<])([\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,8})(?=[\s`)"\].,;:!?<]|$)/g;
+ *  `e.g`, `i.e` and a version like `8.1` all have a one-character or numeric tail.
+ *
+ *  ONE-letter extensions are admitted by ALLOWLIST rather than by relaxing that quantifier, which
+ *  is the whole reason it exists: `{1,8}` would match `e.g` and `i.e` and start deleting blocks
+ *  over ordinary prose. `c` and `h` are named because the symbol scan reads those languages, so
+ *  `invoice-processor.c` is a filename the contract forbids exactly as `.ts` is. */
+const BARE_FILENAME =
+  /(?:^|[\s`("[<])([\w-]+(?:\.[\w-]+)*\.(?:[A-Za-z]{2,8}|[chCH]))(?=[\s`)"\].,;:!?<]|$)/g;
 
 /** Filenames that name an ECOSYSTEM TOOL rather than this repository.
  *
