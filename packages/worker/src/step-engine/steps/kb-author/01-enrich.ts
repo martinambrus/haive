@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   FACET_DIMENSIONS,
+  normalizeFacets,
   globalKbEntries,
   resolveGlobalKbSettings,
   withGlobalKb,
@@ -275,15 +276,11 @@ export function mergeAuthorFacets(
   return merged;
 }
 
+/** Keep only the known dimensions, and store them the way retrieval compares them.
+ *  `normalizeFacets` owns that rule — jsonb `?|` is exact, so a model answering `Drupal` would
+ *  be advertised by the digest and filtered out of rag_search. */
 export function cleanFacets(llm?: GlobalKbFacets): GlobalKbFacets {
-  const out: GlobalKbFacets = {};
-  for (const d of FACET_DIMS) {
-    const v = llm?.[d];
-    if (Array.isArray(v) && v.length) {
-      out[d] = [...new Set(v.filter((x) => typeof x === 'string' && x).map(String))];
-    }
-  }
-  return out;
+  return normalizeFacets(llm);
 }
 
 export function normCategory(c?: string): Category {

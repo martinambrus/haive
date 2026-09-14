@@ -50,6 +50,36 @@ export const FACET_DIMENSIONS = [
   'tags',
 ] as const satisfies readonly (keyof GlobalKbFacets)[];
 
+/** Facet values as they must be STORED: trimmed, lowercased, deduped, empties dropped.
+ *
+ *  The two filters compare differently and only one of them can be made lenient.
+ *  `facetsMatchProject` lowercases both sides in JS, while `buildFacetClause` uses jsonb `?|`,
+ *  which is exact — MEASURED, `'{"framework":["Drupal"]}'::jsonb->'framework' ?| array['drupal']`
+ *  is FALSE. A project's own set is already lowercased by `extractProjectFacets`, so an entry
+ *  stored as `Drupal` would be advertised by the digest and then filtered out of the very
+ *  `rag_search` the digest promises to agree with. Making the SQL lenient instead would mean
+ *  unnesting the array and losing the GIN index, so the normalisation belongs on the WRITE.
+ *
+ *  Applied wherever an entry's facets are written: the enrich request's author-stated scope,
+ *  the scope editor's PATCH, and the model's own answer. */
+export function normalizeFacets(facets: GlobalKbFacets | null | undefined): GlobalKbFacets {
+  const out: GlobalKbFacets = {};
+  for (const dim of FACET_DIMENSIONS) {
+    const values = facets?.[dim];
+    if (!Array.isArray(values)) continue;
+    const cleaned = [
+      ...new Set(
+        values
+          .filter((v): v is string => typeof v === 'string')
+          .map((v) => v.trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    ];
+    if (cleaned.length > 0) out[dim] = cleaned;
+  }
+  return out;
+}
+
 export type GlobalKbCategory =
   'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
 

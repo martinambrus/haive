@@ -19,6 +19,7 @@ import {
   withGlobalKb,
   type GlobalKbCategory,
   FACET_DIMENSIONS,
+  normalizeFacets,
   type GlobalKbFacets,
   type GlobalKbStatus,
 } from '@haive/shared/global-kb';
@@ -346,7 +347,7 @@ globalKbRoutes.post('/enrich', async (c) => {
         // The author's stated scope, carried on the skeleton so the enrich step can read it
         // back as authoritative. `{}` when they stated nothing, which leaves every dimension
         // to the model exactly as before.
-        facets: (data.facets ?? {}) as GlobalKbFacets,
+        facets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
         status: 'skeleton',
         source: 'user',
         embedStatus: 'pending',
@@ -487,7 +488,7 @@ globalKbRoutes.post('/entries', async (c) => {
         seedText: data.seedText ?? null,
         body: data.body,
         category: data.category,
-        facets: (data.facets ?? {}) as GlobalKbFacets,
+        facets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
         status: data.status ?? 'draft',
         source: 'user',
         embedStatus: 'pending',
@@ -512,7 +513,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
     if (data.title !== undefined) set.title = data.title;
     if (data.body !== undefined) set.body = data.body;
     if (data.category !== undefined) set.category = data.category;
-    if (data.facets !== undefined) set.facets = data.facets as GlobalKbFacets;
+    if (data.facets !== undefined) set.facets = normalizeFacets(data.facets as GlobalKbFacets);
     if (data.status !== undefined) set.status = data.status;
     // Content/scope/status edits need a re-embed.
     if (data.body !== undefined || data.facets !== undefined || data.status !== undefined) {
