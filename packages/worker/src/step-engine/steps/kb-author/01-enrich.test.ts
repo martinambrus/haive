@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { parseEnrichment, normCategory, cleanFacets, resolveWriteTarget } from './01-enrich.js';
+import {
+  buildEnrichPrompt,
+  cleanFacets,
+  mergeAuthorFacets,
+  normCategory,
+  parseEnrichment,
+  resolveWriteTarget,
+} from './01-enrich.js';
 
 describe('parseEnrichment', () => {
   it('parses a fenced json block out of CLI text', () => {
@@ -78,5 +85,93 @@ describe('resolveWriteTarget', () => {
 
   it('inserts when there is no parsed output', () => {
     expect(resolveWriteTarget(null, 'skel', ids)).toEqual({ isUpdate: false, targetId: 'skel' });
+  });
+});
+
+// MEASURED on entry b15eebfb: notes describing a Drupal 8+ rule, authored against a Drupal 7
+// repo, produced an audit of that one repo scoped `frameworkMajor: ["7"]` — the exact set of
+// projects the rule does not apply to. The prompt asked for facets "you actually found in the
+// repository" and for "real file paths… not generic advice", and the model obliged.
+const baseDetect = {
+  entryId: 'e1',
+  namespace: 'default',
+  title: 'Never inline SVG',
+  seedText: 'inline SVGs bloat the page cache',
+  existing: [],
+  hasRepo: true,
+  authorFacets: {},
+};
+
+describe('mergeAuthorFacets', () => {
+  it('replaces a dimension the author stated, rather than unioning it', () => {
+    // The failure this exists to stop: author says drupal, model says drupal 7. A union would
+    // keep BOTH, and naming a dimension RESTRICTS the entry to it.
+    const merged = mergeAuthorFacets(
+      { framework: ['drupal'] },
+      { framework: ['drupal'], frameworkMajor: ['7'] },
+    );
+    expect(merged.framework).toEqual(['drupal']);
+    // The model may still fill a dimension the author left open...
+    expect(merged.frameworkMajor).toEqual(['7']);
+  });
+
+  it('overrides the model on a dimension the author pinned', () => {
+    const merged = mergeAuthorFacets({ frameworkMajor: ['8'] }, { frameworkMajor: ['7'] });
+    expect(merged.frameworkMajor).toEqual(['8']);
+  });
+
+  it('leaves the model in charge when the author stated nothing', () => {
+    const merged = mergeAuthorFacets({}, { framework: ['drupal'], language: ['php'] });
+    expect(merged).toEqual({ framework: ['drupal'], language: ['php'] });
+  });
+
+  it('treats an empty dimension as unstated', () => {
+    // `cleanFacets` drops empties, but an author form can post one — it means "no opinion",
+    // not "scope this to nothing".
+    const merged = mergeAuthorFacets({ framework: [] }, { framework: ['drupal'] });
+    expect(merged.framework).toEqual(['drupal']);
+  });
+});
+
+describe('buildEnrichPrompt', () => {
+  it('never asks for facets from the repository', () => {
+    const p = buildEnrichPrompt(baseDetect);
+    expect(p).not.toMatch(/versions you actually found in the repository/i);
+    expect(p).toMatch(/Facets describe the RULE/);
+    // And says what omitting a dimension MEANS, since that is the reachability rule.
+    expect(p).toMatch(/applies to all values/);
+  });
+
+  it('bans citations and asks for both sides of the example', () => {
+    const p = buildEnrichPrompt(baseDetect);
+    expect(p).toMatch(/NEVER cite a file path/);
+    expect(p).toMatch(/## The wrong way/);
+    expect(p).toMatch(/## The right way/);
+    expect(p).toMatch(/ANTI-PATTERN — do not copy/);
+    expect(p).not.toMatch(/Cite real file paths/);
+  });
+
+  it('tells an anchored run the repo is to read, not to quote', () => {
+    const p = buildEnrichPrompt(baseDetect);
+    expect(p).toMatch(/NOT the subject of the article/);
+    expect(p).toMatch(/Do NOT read the scope off the repository/);
+  });
+
+  it('sends a repo-less run after nothing on disk', () => {
+    const p = buildEnrichPrompt({ ...baseDetect, hasRepo: false });
+    expect(p).toMatch(/NO repository is checked out/);
+    // The retrieval block and the anchored task line both assume a checkout.
+    expect(p).not.toMatch(/THIS repository/);
+    expect(p).not.toMatch(/rag_search/);
+  });
+
+  it('states an author-set scope as authoritative, and omits the block otherwise', () => {
+    const withScope = buildEnrichPrompt({
+      ...baseDetect,
+      authorFacets: { framework: ['drupal'] },
+    });
+    expect(withScope).toMatch(/AUTHORITATIVE — do not narrow or widen it/);
+    expect(withScope).toMatch(/- framework: drupal/);
+    expect(buildEnrichPrompt(baseDetect)).not.toMatch(/AUTHORITATIVE/);
   });
 });
