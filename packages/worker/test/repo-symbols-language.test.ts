@@ -513,13 +513,19 @@ describe('symbol scan coverage', () => {
     expect(missing).toEqual([]);
   });
 
-  it('reads every language the HISTOGRAM detector can report', () => {
-    // Two independent sources of a language name, which is what made the first version of this
-    // test insufficient: `pickPrimaryLanguage` never consults the manifest markers — it ranks an
-    // ingest histogram and returns a SERVER_LANGUAGES member lowercased. Keying the coverage
-    // check on one list left C#, Kotlin, Scala, Swift, C and C++ blind.
-    const detected = [...SERVER_LANGUAGES].map((l) => l.toLowerCase()).sort();
-    const missing = detected.filter((lang) => !SYMBOL_SCAN_EXT[lang]);
+  it('reads every language the histogram detector RANKS', () => {
+    // Two independent sources of a language name: `pickPrimaryLanguage` never consults the
+    // manifest markers — it ranks an ingest histogram and prefers a SERVER_LANGUAGES member.
+    // Keying the coverage check on one list left C#, Kotlin, Scala, Swift, C and C++ blind.
+    //
+    // This pins the RANKED set, and deliberately not "every language that function can return".
+    // It can return more: `pool = servers.length > 0 ? servers : entries` falls back to ANY
+    // histogram key, so Dart, Lua or Haskell are valid outputs and no finite list can cover
+    // them. See the note on SYMBOL_SCAN_EXT for why the scan stops here rather than chasing
+    // that set — an earlier version of this test named the stronger property and did not check
+    // it, which is worse than the gap it was hiding.
+    const ranked = [...SERVER_LANGUAGES].map((l) => l.toLowerCase()).sort();
+    const missing = ranked.filter((lang) => !SYMBOL_SCAN_EXT[lang]);
     expect(missing).toEqual([]);
   });
 });

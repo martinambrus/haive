@@ -1104,8 +1104,26 @@ const NON_SYMBOL_KEYWORDS = new Set([
   'foreach',
 ]);
 
-/** Exported so a test can hold it to `STACK_INDICATORS`: a language the DETECTOR recognises but
- *  this cannot read is a repository whose own identifiers are invisible to the citation scrub. */
+/** Exported so a test can hold it to `STACK_INDICATORS` and `SERVER_LANGUAGES`: a language the
+ *  detector RANKS but this cannot read is a repository whose own identifiers are invisible to the
+ *  citation scrub, which is how Rust, Java, Elixir and the C family each went missing.
+ *
+ *  It is NOT language-complete and cannot be. `pickPrimaryLanguage` falls back to any histogram
+ *  key when no server language is present (`pool = servers.length > 0 ? servers : entries`), so
+ *  Dart, Lua, Haskell and anything else an ingest histogram names are valid outputs. Two reasons
+ *  the scan stops at the supported stacks rather than chasing that set:
+ *
+ *  - An unlisted language degrades in the ACCEPTED direction. With no extensions to read, the
+ *    symbol backstop is simply absent — the same state a repo-less run is in — while the path,
+ *    line-reference and bare-filename rules still apply. A miss lets a copied identifier reach a
+ *    draft a human reviews; that is the cheap error this scan is calibrated around.
+ *  - The obvious "fix" is the expensive one. Scanning every extension that is not a known binary
+ *    would pull in dependency trees for ecosystems with no IGNORE_DIRS entry, and collecting a
+ *    third-party symbol as repository-private DELETES somebody's article. Widening coverage that
+ *    way trades the cheap error for the costly one.
+ *
+ *  So a new language belongs here when the product SUPPORTS it — when it appears in
+ *  `STACK_INDICATORS` or `SERVER_LANGUAGES` — and the test enforces exactly that, no more. */
 export const SYMBOL_SCAN_EXT: Record<string, string[]> = {
   php: ['.php', '.inc', '.module', '.install', '.theme', '.phtml', '.profile', '.engine'],
   javascript: ['.js', '.jsx', '.mjs', '.cjs'],
