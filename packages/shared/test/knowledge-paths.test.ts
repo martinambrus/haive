@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TASK_SCRATCH_DIR, taskScratchSubpath } from '../src/task-scratch.js';
 import {
   KB_DIR,
   LEARNINGS_DIR,
@@ -75,5 +76,21 @@ describe('tagManagedKnowledgeNodes', () => {
   it('does not mutate the input tree', () => {
     tagManagedKnowledgeNodes(tree);
     expect(tree[0]!.children![1]!.children![0]!.badge).toBeUndefined();
+  });
+});
+
+// The api roots a repo-less task's Editor at this same directory and cannot import the worker, so
+// the NAME has to be shared. Only the name: who is entitled to a workspace stays in the worker,
+// which is its only creator — the api treats the directory's existence as the entitlement so the
+// two cannot drift as that rule changes (it already changed once, from the task type alone to the
+// type plus the recorded anchor).
+describe('taskScratchSubpath', () => {
+  it('sits under the user directory, where no repository UUID can collide with it', () => {
+    expect(taskScratchSubpath('u1', 't1')).toBe(`u1/${TASK_SCRATCH_DIR}/t1`);
+    expect(taskScratchSubpath('u1', 't1')).toBe('u1/_scratch/t1');
+  });
+
+  it('is per task, so two repo-less tasks never share a working directory', () => {
+    expect(taskScratchSubpath('u1', 't1')).not.toBe(taskScratchSubpath('u1', 't2'));
   });
 });

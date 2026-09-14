@@ -4,6 +4,7 @@ import path from 'node:path';
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
+import { TASK_SCRATCH_DIR, taskScratchSubpath } from '@haive/shared';
 import { SANDBOX_UID, SANDBOX_GID } from '../sandbox/sandbox-identity.js';
 
 const log = logger.child({ module: 'scratch-workspace' });
@@ -13,10 +14,6 @@ const log = logger.child({ module: 'scratch-workspace' });
  *  so it rides the SAME named volume, which is what lets it be mounted into a sandbox with
  *  the existing subpath machinery instead of a second volume. */
 const REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
-
-/** Directory name for scratch workspaces, under the user's own repo directory. Cannot collide
- *  with a sibling: every other entry there is a repository UUID. */
-const SCRATCH_DIR = '_scratch';
 
 /** Task types that may run with no repository.
  *
@@ -72,11 +69,9 @@ export function taskMayRunWithoutRepository(task: { type: string; metadata: unkn
   return taskTypeAllowsNoRepository(task.type) && taskWasCreatedRepoLess(task.metadata);
 }
 
-/** Volume-relative path of a task's scratch workspace — the shape `resolveInvocationRepoMount`
- *  already uses for a repository (`<userId>/<repositoryId>`). */
-export function taskScratchSubpath(userId: string, taskId: string): string {
-  return `${userId}/${SCRATCH_DIR}/${taskId}`;
-}
+// The path SHAPE lives in @haive/shared because the api roots the Editor at the same directory
+// and cannot import the worker. Re-exported so existing importers here are unchanged.
+export { taskScratchSubpath };
 
 /** Absolute path as the WORKER sees it. */
 export function taskScratchPath(userId: string, taskId: string): string {
@@ -201,7 +196,7 @@ export async function sweepOrphanScratchWorkspaces(db: Database): Promise<void> 
   let removed = 0;
   for (const userDir of userDirs) {
     if (!userDir.isDirectory()) continue;
-    const scratchRoot = path.join(REPO_STORAGE_ROOT, userDir.name, SCRATCH_DIR);
+    const scratchRoot = path.join(REPO_STORAGE_ROOT, userDir.name, TASK_SCRATCH_DIR);
     let taskDirs: Dirent[];
     try {
       taskDirs = await readdir(scratchRoot, { withFileTypes: true });
