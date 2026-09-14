@@ -86,8 +86,9 @@ disabled, removed, or failed to load after a rebuild.
   missing step, which would run a truncated pipeline the admin never authored and cannot see.
 - The same rule covers a persona a prompt-template step names with `{{agent:<id>}}`, checked at
   task-create against the TARGET repository because agent definitions live per repository: one with no
-  `<id>.md` in any markdown agent directory of the repository (a symlink, an out-of-tree path, an unparseable file or an
-  empty body counts as absent, since that plan's reader treats all four as missing) refuses the task with a named reason
+  `<id>.md` in any markdown agent directory of the repository (a symlink, an out-of-tree path, an unparseable file, an
+  empty body or a secret-masked file counts as absent, since that plan's reader treats all five as
+  missing) refuses the task with a named reason
   ("step `<slug>` needs agent `drupal7-developer`, which this repository does not define"), never an
   empty persona. A definition that exists only as `.codex/agents/<id>.toml` counts as absent until a
   TOML reader exists. Built-in steps never hit it — their personas always carry an inline fallback.

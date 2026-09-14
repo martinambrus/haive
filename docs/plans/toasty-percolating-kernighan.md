@@ -73,15 +73,24 @@ type — inherits it without anyone maintaining a list of special steps.
    provider. So it opens `<id>.md` with `O_NOFOLLOW | O_NONBLOCK`, so a symlinked final
    component fails the open and a FIFO cannot block the dispatch waiting for a writer. It then
    checks the file it actually opened, not the path it asked for: it reads the descriptor's real
-   path from `/proc/self/fd/<fd>` (the worker runs on Linux) and refuses it unless it lies inside
-   the invocation tree's own realpath. No concurrent swap of `.claude/agents` for a symlink can race
+   path from `/proc/self/fd/<fd>` (the worker runs on Linux) and refuses it unless it is exactly
+   `<invocation tree realpath>/<projectAgentsDir>/<id>.md`: a symlink in any component (`.claude`,
+   `agents` or the file itself) changes the resolved path, so the file counts as absent even when the
+   link points somewhere else inside the tree. No concurrent swap of `.claude/agents` for a symlink can race
    that check, because it describes the open descriptor rather than a later re-walk of the path.
    Finally it `fstat`s the handle, accepts only a regular file, and reads at most the remaining size
    budget (dispatch side, item 3) plus one byte from it, so a size that lies (a pseudo-file reports
    0) cannot slip past the budget. That is the regular-files-only rule `ensureArchivesExpanded` already applies with
    `lstat`, and a refused file is treated as missing — as is one `parseAgentFile` cannot parse (an
    unclosed frontmatter) or whose body is empty after the frontmatter, since pasting an empty persona
-   is the same silent failure as a missing one. No directory is scanned, and no unrelated or
+   is the same silent failure as a missing one. Before any read, the reader also applies the
+   invocation's effective secret-mask policy to that path — the kill switch, `secret_mask_enabled`,
+   the deny globs plus `secret_mask_deny_extend`, minus the carve-outs and `secret_mask_allow`,
+   untracked files only (`queues/cli-exec/secret-mask.ts`) — and a file the sandbox would mask counts
+   as missing: pasting it would hand the provider the very bytes the mask keeps from the agent. When
+   that policy cannot be evaluated nothing is pasted, matching masking's fail-closed rule. The policy
+   is extracted into a dependency-free predicate the reader can call, for the same import-cycle
+   reason `invocationRepoSubpath` moves (dispatch side, item 4). No directory is scanned, and no unrelated or
    out-of-tree file is ever read. It reuses the loader's frontmatter parser (`parseAgentFile`,
    exported) and leaves `loadAgentPersonas` and its only caller, 03, untouched. Codex inlining
    (its `.codex/agents/*.toml` is rendered without LSP, and no package has a TOML parser) is a
@@ -266,7 +275,9 @@ nothing has to ride in the prompt, and a future step inherits the rule with noth
    too. No new parameter is threaded anywhere. The same branch drops every secret and
    `#ddev-generated` file mask whose target lies under a masked agent directory: the read-only tmpfs
    already hides that subtree, and Docker could not create those files' mountpoints inside it, so
-   keeping them would fail the whole invocation.
+   keeping them would fail the whole invocation. Dropping a mount retracts nothing already sent,
+   which is why the dispatch-side reader applies the same secret-mask policy before it reads a
+   persona (Decision 1).
 5. **A new module in the `#ddev-generated` mask's shape.** `queues/cli-exec/agent-definition-mask.ts`:
    `resolveAgentDefinitionMasks(db, taskId, repoMount, spec)` returns `[]` unless
    `spec.maskAgentDefinitions`, does the task/repo lookup, derives the worker root, and wraps
@@ -334,9 +345,10 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies` with its
   prompt path scan, the switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
   (`agentGuidanceIds`, the positive arm), `step-engine/steps/workflow/_agent-loader.ts` (export
-  `parseAgentFile`; a filename-keyed single-file reader: `O_NOFOLLOW | O_NONBLOCK` open, an
-  in-tree check on the opened descriptor's `/proc/self/fd` path, `fstat` regular-file check, capped
-  read), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
+  `parseAgentFile`; a filename-keyed single-file reader: the secret-mask policy check first, then an
+  `O_NOFOLLOW | O_NONBLOCK` open, an exact-path check on the opened descriptor's `/proc/self/fd`
+  path, an `fstat` regular-file check and a capped read), `queues/cli-exec/secret-mask.ts` (its
+  effective policy extracted as a dependency-free single-path predicate), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
   `step-engine/step-runner.ts` (`resolveLlmPhase` passes `agentPool`; the retry_ai `toolProfile`
   fix is its own commit).
 - **Spec:** `cli-adapters/types.ts` (`CliCommandSpec.maskAgentDefinitions`). No `CliExecJobPayload`
@@ -398,7 +410,7 @@ scratch.
    `docs/.claude/agents/x.md`, `.claude/agents-old/x.md` and the pointer inside a persona marker do
    not; among built-in prompt builders only 06_5 and 09_5 match, so a new match fails the test and
    becomes a conscious decision), marker ids, the persona path
-   (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open or linked to another in-tree directory / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, and `07_7-secret-sweep` declaring `'*'`.
@@ -461,7 +473,8 @@ stores only `stepIds: string[]` and needs nothing.
    prompt text, and excludes the persona markers that tokens become.
 3. **Dangling references.** Extended to personas: a token naming a persona with no `<id>.md` in any
    markdown agent directory of the target repository (a symlink, an out-of-tree path, an unparseable
-   file or an empty body counts as absent, since PR 1's reader treats all four as missing) is refused at task-create with a named reason
+   file, an empty body or a file the secret mask covers counts as absent, since PR 1's reader treats
+   all five as missing) is refused at task-create with a named reason
    ("step `<slug>` needs agent `drupal7-developer`, which this repository does not define") — the
    same not-silently-truncated rule the section applies to missing steps. A definition that exists
    only as `.codex/agents/<id>.toml` counts as absent until a TOML reader exists. Built-in steps are
