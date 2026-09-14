@@ -441,8 +441,18 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
   } catch (err) {
     logger.warn({ err, taskId }, 'task completion bookkeeping failed; task stays completed');
   }
-  // LAST, and now safe from either side: `completed` can no longer become `failed`, so the
-  // summary-triggered reap that observes this status is reading a settled outcome too.
+  // PUBLISHED here rather than by each caller. Both of them used to emit this immediately after
+  // calling us, which put a fallible insert AFTER the point where completion looked final: a
+  // throw there reached the queue's catch and called markTaskFailed, so the reap below had
+  // already taken the workspace of a task that ended up `failed` with its recovery surfaces
+  // enabled. One place, ahead of the reap, and unable to un-complete the task.
+  try {
+    await appendEvent(db, taskId, null, 'task.completed', {});
+  } catch (err) {
+    logger.warn({ err, taskId }, 'task.completed event not recorded; task stays completed');
+  }
+  // LAST, and now safe from every side: nothing after this point can turn `completed` into
+  // `failed`, so both this reap and the summary-triggered one read a settled outcome.
   try {
     await cleanupTaskScratchWorkspace(db, taskId);
   } catch (err) {
@@ -1039,7 +1049,6 @@ async function handleResult(
         );
       } else {
         await markTaskCompleted(db, ctx.taskId);
-        await appendEvent(db, ctx.taskId, null, 'task.completed', {});
       }
       return;
     }
@@ -1488,7 +1497,6 @@ async function resolveFixLoopGate(
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
     } else {
       await markTaskCompleted(db, ctx.taskId);
-      await appendEvent(db, ctx.taskId, null, 'task.completed', {});
     }
     return;
   }

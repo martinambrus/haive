@@ -560,10 +560,21 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
       // (tags do not scope retrieval) leaves a valid link alone.
       if (data.facets !== undefined) {
-        const existing = await db.query.globalKbEntries.findFirst({
-          where: eq(globalKbEntries.id, id),
-          columns: { facets: true, supersedesEntryId: true, status: true },
-        });
+        // LOCKED, not merely read inside a transaction. Postgres defaults to READ COMMITTED,
+        // where atomicity is not isolation: an unlocked read can see the draft's old
+        // `supersedesEntryId`, a concurrent activation can commit and archive that predecessor,
+        // and this request then clears the link too late to have prevented anything. The row
+        // lock makes the two PATCHes take turns, which is what the UI's button guard could
+        // never do across tabs or API clients.
+        const [existing] = await db
+          .select({
+            facets: globalKbEntries.facets,
+            supersedesEntryId: globalKbEntries.supersedesEntryId,
+            status: globalKbEntries.status,
+          })
+          .from(globalKbEntries)
+          .where(eq(globalKbEntries.id, id))
+          .for('update');
         // DRAFTS only. The link exists to stop activation archiving the wrong predecessor, and
         // only a draft can still activate — on an entry that is already active the archive has
         // happened and the link is history, so clearing it would erase the record of what this
