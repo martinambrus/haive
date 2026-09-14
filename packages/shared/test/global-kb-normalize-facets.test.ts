@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeFacets } from '../src/global-kb/schema.js';
+import { canonicalFacetValueSql, normalizeFacets } from '../src/global-kb/schema.js';
 import { extractProjectFacets } from '../src/global-kb/facets.js';
 
 // The two filters compare differently and only the write can reconcile them: facetsMatchProject
@@ -71,5 +71,23 @@ describe('extractProjectFacets normalisation', () => {
     const project = extractProjectFacets({ data: { project: { framework: 'Drupal' } } });
     const entry = normalizeFacets({ framework: ['Drupal'] });
     expect(entry.framework).toEqual(project.framework);
+  });
+});
+
+// One definition, two engines — the shape `identifierTsvSql` established. A hand-written SQL
+// copy of this rule is exactly what drifted: the backfill lowercased and did neither the trim
+// nor the alias, so legacy rows were rewritten into tokens no project reports.
+describe('canonicalFacetValueSql', () => {
+  it('trims and lowercases before folding an alias, in that order', () => {
+    const sql = canonicalFacetValueSql('kv.key', 'v');
+    expect(sql).toContain('lower(btrim(v))');
+    expect(sql).toContain("WHEN kv.key = 'database' AND lower(btrim(v)) = 'postgresql'");
+    expect(sql).toContain("THEN 'postgres'");
+  });
+
+  it('agrees with the JS rule on every alias it declares', () => {
+    // The SQL is generated from the same table, so the pairing is asserted rather than assumed.
+    expect(normalizeFacets({ database: ['  PostgreSQL '] })).toEqual({ database: ['postgres'] });
+    expect(canonicalFacetValueSql('k', 'v')).toContain("'postgres'");
   });
 });

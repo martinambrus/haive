@@ -1,5 +1,6 @@
 import { logger } from '../logger/index.js';
 import type { GlobalKbConnection } from './connection.js';
+import { canonicalFacetValueSql } from './schema.js';
 
 const log = logger.child({ module: 'global-kb-schema' });
 
@@ -221,6 +222,15 @@ export async function ensureGlobalKbSchema(
   //
   // The predicate admits a NON-ARRAY value as well as a non-lowercase one, so this pass repairs a
   // row an earlier version of this same migration wrote instead of needing a migration of its own.
+  // The value rule comes from `canonicalFacetValueSql`, which is generated from the same alias
+  // table `normalizeFacets` reads, so this pass applies the WRITE path's rule rather than a
+  // hand-written approximation of it. It had been exactly that approximation — `lower(v)` alone
+  // — which left three classes of legacy row permanently unreachable: `PostgreSQL` was rewritten
+  // to `postgresql`, which no project reports; an already-lowercase `postgresql` was not even
+  // selected; and a padded ` drupal ` matched neither the predicate (`lower(v)` equals it) nor
+  // `?|`, which does not trim. The predicate is now "the stored value differs from its canonical
+  // form", which subsumes case, padding and aliases and needs no clause per rule.
+  const canon = canonicalFacetValueSql('kv.key', 'v');
   for (const table of [ENTRIES_TABLE, VECTORS_TABLE]) {
     await conn.pg.unsafe(`
       UPDATE ${table} AS t
@@ -228,10 +238,11 @@ export async function ensureGlobalKbSchema(
         SELECT jsonb_object_agg(kv.key, a.arr)
         FROM jsonb_each(t.facets) AS kv,
              LATERAL (
-               SELECT jsonb_agg(DISTINCT lower(v)) AS arr
+               SELECT jsonb_agg(DISTINCT ${canon}) AS arr
                FROM jsonb_array_elements_text(
                  CASE WHEN jsonb_typeof(kv.value) = 'array' THEN kv.value ELSE '[]'::jsonb END
                ) AS v
+               WHERE btrim(v) <> ''
              ) AS a
         WHERE a.arr IS NOT NULL
       ), '{}'::jsonb)
@@ -239,7 +250,7 @@ export async function ensureGlobalKbSchema(
         SELECT 1 FROM jsonb_each(t.facets) AS kv
         WHERE jsonb_typeof(kv.value) <> 'array'
            OR EXISTS (
-             SELECT 1 FROM jsonb_array_elements_text(kv.value) AS v WHERE v <> lower(v)
+             SELECT 1 FROM jsonb_array_elements_text(kv.value) AS v WHERE ${canon} <> v
            )
       )
     `);

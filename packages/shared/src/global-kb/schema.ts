@@ -93,6 +93,28 @@ export function canonicalizeFacetValue(dimension: string, value: string): string
   return FACET_VALUE_ALIASES[dimension as keyof GlobalKbFacets]?.[v] ?? v;
 }
 
+/** The SAME value rule as SQL, built from the SAME alias table, so a backfill cannot disagree
+ *  with the write path about what a facet value is.
+ *
+ *  This is the shape `identifierTsvSql` established for the identifier pattern: one definition,
+ *  two engines, rather than a JS rule and a hand-written SQL copy that drift. The copy is what
+ *  drifted here — the backfill lowercased and did neither the trim nor the alias, so a legacy
+ *  `PostgreSQL` was rewritten to `postgresql` and made unreachable, an already-lowercase
+ *  `postgresql` was never even selected, and a padded ` drupal ` matched neither the predicate
+ *  (`lower(v)` equals it) nor `?|` (which does not trim).
+ *
+ *  `keyExpr` names the dimension and `valueExpr` the raw stored text; both are SQL expressions.
+ *  Only code constants are interpolated, never a stored value. */
+export function canonicalFacetValueSql(keyExpr: string, valueExpr: string): string {
+  const base = `lower(btrim(${valueExpr}))`;
+  const whens = Object.entries(FACET_VALUE_ALIASES).flatMap(([dim, table]) =>
+    Object.entries(table ?? {}).map(
+      ([from, to]) => `WHEN ${keyExpr} = '${dim}' AND ${base} = '${from}' THEN '${to}'`,
+    ),
+  );
+  return whens.length === 0 ? base : `CASE ${whens.join(' ')} ELSE ${base} END`;
+}
+
 export function normalizeFacets(facets: GlobalKbFacets | null | undefined): GlobalKbFacets {
   const out: GlobalKbFacets = {};
   for (const dim of FACET_DIMENSIONS) {

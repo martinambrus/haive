@@ -89,6 +89,24 @@ describe('ensureGlobalKbSchema', () => {
     expect(sql).toContain("WHERE jsonb_typeof(kv.value) <> 'array'");
   });
 
+  it("backfills through the write path's rule, not an approximation of it", async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const sql = queries();
+
+    // `lower(v)` alone left three classes of legacy row permanently unreachable: `PostgreSQL`
+    // was rewritten to `postgresql`, which no project reports; an already-lowercase
+    // `postgresql` was never selected; and a padded ` drupal ` matched neither the predicate
+    // (`lower(v)` equals it) nor `?|` (which does not trim). The rule is generated from the same
+    // alias table `normalizeFacets` reads, so the two engines cannot drift.
+    expect(sql).toContain('lower(btrim(v))');
+    expect(sql).toContain("WHEN kv.key = 'database' AND lower(btrim(v)) = 'postgresql'");
+    expect(sql).toContain("WHERE btrim(v) <> ''");
+    // The predicate is "differs from its canonical form", which subsumes case, padding and
+    // aliases — the case-only test must NOT come back.
+    expect(sql).not.toContain('v <> lower(v)');
+  });
+
   it('falls back to jsonb embeddings when pgvector is unavailable', async () => {
     const { conn, queries } = fakeConn({ vectorThrows: true });
     const res = await ensureGlobalKbSchema(conn);
