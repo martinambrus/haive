@@ -272,9 +272,19 @@ nothing has to ride in the prompt, and a future step inherits the rule with noth
    only a real directory whose realpath lies inside that root. A candidate that is, or sits under, a
    repository-controlled symlink is left unmasked (failing open, item 6), because a mount
    destination that traverses such a link is not a path to hand Docker. The builder reads no file
-   content, so a race that swaps a directory after the check can at worst leave it unmasked, which is
-   today's behaviour; the persona reader is the one place a race could leak bytes, and it checks the
-   descriptor it opened (Decision 1).
+   content, so no race can leak bytes through it (the persona reader is the one place one could, and
+   it checks the descriptor it opened, Decision 1), but a race can leave a stub. A directory deleted
+   or renamed between the check and container start — a window holding `resolveAppReach`,
+   `resolveMcpExtraFiles` with its pre-warm and `executeCliSpec`'s own setup — is a missing mount
+   target again, so Docker creates it, and any parent that went with it, empty and root-owned in the
+   repository, where it outlives the container and refuses every uid-1000 writer. So the builder
+   records the `dev`/`ino` of each masked directory and each ancestor below the root from the
+   `lstat`s it already makes, and once the run returns, whether or not it succeeded, `executeByKind`
+   removes, deepest first, every recorded path that is now an empty, root-owned directory with a
+   different identity. `rmdir` cannot remove content; a directory the terminal or IDE recreated is
+   owned by uid 1000 and stays, and one that anything filled is not empty and stays. A worker that
+   dies mid-run leaves its stub behind, empty and invisible to git, and later builds mask it as the
+   real directory it now is; uid-1000 writes into that one path fail until it is removed.
 3. **A read-only tmpfs mount.** `DockerVolumeMount` (`sandbox/docker-runner.ts`) has only volume
    and bind forms. It gains `tmpfs?: true`, rendered as
    `--mount type=tmpfs,destination=<target>[,readonly]` by a branch placed BEFORE the
@@ -286,7 +296,9 @@ nothing has to ride in the prompt, and a future step inherits the rule with noth
    `authMounts`. That array already carries a non-auth entry (the uploads mount),
    `assertNoAuthVolumeNesting` checks only `kind: 'auth'` entries, and the codex app-server
    fallback's recursive `executeCliSpec` call forwards it, so the `codex exec` re-run is masked
-   too. No new parameter is threaded anywhere. The same branch drops every secret and
+   too. No new parameter is threaded anywhere. The same branch wraps that `executeCliSpec` call in a
+   `finally` running item 2's stub cleanup, which therefore also follows the fallback's re-run, and
+   drops every secret and
    `#ddev-generated` file mask whose target lies under a masked agent directory: the read-only tmpfs
    already hides that subtree, and Docker could not create those files' mountpoints inside it, so
    keeping them would fail the whole invocation. Dropping a mount retracts nothing already sent,
@@ -296,11 +308,14 @@ nothing has to ride in the prompt, and a future step inherits the rule with noth
    `resolveAgentDefinitionMasks(db, taskId, repoMount, spec)` returns `[]` unless
    `spec.maskAgentDefinitions`, does the task/repo lookup, derives the worker root, and wraps
    everything in the fail-open try/catch of `resolveDdevGeneratedMasks`; the pure
-   `computeAgentDefinitionMasks(workerRoot, containerWorkdir)` does the filesystem work and is what
-   the fixture-tree tests call. `01b-install-plugins.ts` builds its own mask list for plugin
+   `computeAgentDefinitionMasks(workerRoot, containerWorkdir)` does the filesystem work, returning the
+   mounts with the identities item 2 records, and `removeAgentMaskStubs(records, runtimeUid = 0)` is
+   the cleanup. The fixture-tree tests call both, the second with the test's own uid, since an
+   unprivileged test cannot create a root-owned directory. `01b-install-plugins.ts` builds its own mask list for plugin
    installs, which load no agents — unchanged.
 6. **Fails OPEN, unlike secret masking.** This is a context control, not a confidentiality one: a
-   stat that throws logs a warning and masks nothing, and the persona body was already pasted at
+   stat that throws logs a warning and masks nothing, a stub cleanup that throws logs and leaves the
+   path, and the persona body was already pasted at
    dispatch, so the run is only as noisy as it is today. That is the `#ddev-generated` mask's rule,
    not `SecretMaskError`'s.
 7. **Not covered.** User-level agent directories (`~/.claude/agents` and friends) live inside the
@@ -374,7 +389,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   calls `invocationRepoSubpath`).
 - **Exec:** `queues/cli-exec/agent-definition-mask.ts` (NEW), `queues/cli-exec/exec-core.ts`
   (append to `authMounts`; fail before the CLI starts when a pasted persona path is secret-masked
-  by then), `sandbox/docker-runner.ts` (tmpfs branch).
+  by then; remove a race's mount stubs in a `finally` once the run returns),
+  `sandbox/docker-runner.ts` (tmpfs branch).
 - **Steps:** `step-engine/steps/onboarding/07_7-secret-sweep.ts` (`agentPool: '*'`). No prompt
   renderer changes: the prompt path scan covers every step.
 - **Shared:** beside `packages/shared/src/cli-providers/catalog.ts` (the agent-directory union and
@@ -390,8 +406,9 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   switch off),
   `test/step-runner-llm.test.ts` (`agentPool` reaches dispatch, the flag rides
   `enqueued[0].spec`, retry_ai `toolProfile`), NEW `test/agent-definition-mask.test.ts` (fixture
-  tree, including a secret file mask under a masked agent directory, and a pasted persona path that
-  is secret-masked by exec time), a NEW docker-runner argv test (no mount form has one today), NEW
+  tree, including a secret file mask under a masked agent directory, a pasted persona path that
+  is secret-masked by exec time, and stub cleanup: a masked directory swapped for an empty one after
+  the build is removed, while one that was filled or kept its identity stays), a NEW docker-runner argv test (no mount form has one today), NEW
   `test/agent-listing-capture.ts`.
 
 ## Verification
@@ -416,7 +433,9 @@ scratch.
    - a write into a masked directory fails — `readonly` on a tmpfs mount is the one piece of the
      mount the earlier captures did not exercise;
    - an untracked deny-listed file inside a masked agent directory still lets the container start,
-     because its file mask is dropped rather than stacked under the read-only tmpfs.
+     because its file mask is dropped rather than stacked under the read-only tmpfs;
+   - an agent directory removed after the masks are built and before the container starts comes
+     back root-owned, as exec side item 2 predicts, and is gone again once the run returns.
 2. **Unit tests** (`pnpm --filter @haive/worker exec vitest run`), modelled on
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
    real directories only, symlinked ones left unmasked, read-only, fail-open, secret and ddev file
@@ -574,3 +593,10 @@ bullet: `rippling-wibbling-puffin` Phase 3.1 builds on this plan's per-invocatio
   forges one already has its inner text replaced before PR 1. The path scan skips exactly the span
   the rewrite replaces, so the two stay consistent; tracking marker provenance through prompt
   assembly would be its own change.
+- **The secret and `#ddev-generated` file masks have the same stub race** that exec side item 2
+  closes for agent directories. Both resolve their targets before the container starts
+  (`secret-mask.ts` scans the tree, `ddev-generated-mask.ts` `stat`s each file), so a file deleted
+  in that window comes back as an empty root-owned file that outlives the container, and the app
+  runtime, which mounts the same tree unmasked, then reads it in place of a missing one. The same
+  identity-checked cleanup would cover them with `unlink` in place of `rmdir`; a separate change,
+  since those masks predate this plan.
