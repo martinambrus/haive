@@ -205,6 +205,11 @@ export async function ensureGlobalKbSchema(
   // applied-record, converges structurally, and re-running writes nothing because the predicate
   // only selects rows that still hold a non-lowercase VALUE. Both tables, since the search
   // reads the chunk's own copy of the facets rather than the entry's.
+  //
+  // Cost: `withGlobalKb` ensures the schema ONCE PER PROCESS, not per call, so this is one scan
+  // at boot rather than one per request. It carries no per-run cap, unlike its model — the work
+  // is bounded by the number of LEGACY rows, which is zero after the first successful pass, and
+  // a migration that converges over several boots would leave retrieval half-fixed in between.
   for (const table of ['global_kb_entries', VECTORS_TABLE]) {
     await conn.pg.unsafe(`
       UPDATE ${table} AS t
