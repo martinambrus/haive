@@ -1381,6 +1381,16 @@ export default function GlobalKbPage() {
                   <span className="text-[11px] text-neutral-500">
                     Empty = applies to all values of that dimension. Comma-separated.
                   </span>
+                  {/* Said rather than decided: re-scoping a replacement does not bring its
+                      predecessor back, and resurrecting an article somebody retired is not a
+                      choice this form should make for them. */}
+                  {selected.supersedesEntryId && (
+                    <span className="text-[11px] text-amber-400">
+                      {selected.status === 'draft'
+                        ? 'This draft replaces an earlier entry. Changing the scope here detaches it, so activating will no longer archive that entry.'
+                        : 'This entry replaced an earlier one, which was archived when it was activated. Re-scoping moves this rule but does not bring the archived entry back — reactivate it yourself if the old scope still needs a rule.'}
+                    </span>
+                  )}
                   <FacetFields
                     idPrefix="scope-edit"
                     fields={scopeEdit}

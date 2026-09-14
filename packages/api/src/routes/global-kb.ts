@@ -535,60 +535,75 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   const data = parsed.data;
   if (Object.keys(data).length === 0) throw new HttpError(400, 'no fields to update');
 
-  const result = await withGlobalKb(getDb(), async ({ db }) => {
-    const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
-    if (data.title !== undefined) set.title = data.title;
-    if (data.body !== undefined) set.body = data.body;
-    if (data.category !== undefined) set.category = data.category;
-    if (data.facets !== undefined) set.facets = normalizeFacets(data.facets as GlobalKbFacets);
-    if (data.status !== undefined) set.status = data.status;
-    // Content/scope/status edits need a re-embed.
-    if (data.body !== undefined || data.facets !== undefined || data.status !== undefined) {
-      set.embedStatus = 'pending';
-    }
-    // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
-    // draft's article against the entry it would replace; re-scoping it to another technology
-    // makes it a different rule, and activating it would then archive an entry it no longer has
-    // anything to do with. Cleared rather than revalidated — revalidating needs an embedding
-    // pass, and a stale duplicate the reviewer can archive by hand is a far cheaper mistake than
-    // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
-    // (tags do not scope retrieval) leaves a valid link alone.
-    if (data.facets !== undefined) {
-      const existing = await db.query.globalKbEntries.findFirst({
-        where: eq(globalKbEntries.id, id),
-        columns: { facets: true, supersedesEntryId: true },
-      });
-      if (existing?.supersedesEntryId && scopeChanged(existing.facets, set.facets)) {
-        set.supersedesEntryId = null;
+  // ONE transaction for read-decide-write-archive. Without it two clients racing the same
+  // draft interleave: activation reads `supersedesEntryId` after a concurrent scope edit has
+  // decided to clear it but before the clear lands, and archives a predecessor the reviewer
+  // had just detached. The UI's button guard cannot prevent that — it only serialises one tab,
+  // while a second tab or an API client goes straight at the route.
+  const result = await withGlobalKb(getDb(), async ({ db: conn }) =>
+    conn.transaction(async (db) => {
+      const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
+      if (data.title !== undefined) set.title = data.title;
+      if (data.body !== undefined) set.body = data.body;
+      if (data.category !== undefined) set.category = data.category;
+      if (data.facets !== undefined) set.facets = normalizeFacets(data.facets as GlobalKbFacets);
+      if (data.status !== undefined) set.status = data.status;
+      // Content/scope/status edits need a re-embed.
+      if (data.body !== undefined || data.facets !== undefined || data.status !== undefined) {
+        set.embedStatus = 'pending';
       }
-    }
-    const [row] = await db
-      .update(globalKbEntries)
-      .set(set)
-      .where(eq(globalKbEntries.id, id))
-      .returning();
-    // Activation supersession: when a draft that proposes replacing another entry (a
-    // merge produced by onboarding) is activated, archive the entry it supersedes so
-    // the topic keeps a single live article. Its vectors are dropped below.
-    let supersededId: string | null = null;
-    if (row && set.status === 'active' && row.supersedesEntryId) {
-      const [archived] = await db
+      // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
+      // draft's article against the entry it would replace; re-scoping it to another technology
+      // makes it a different rule, and activating it would then archive an entry it no longer has
+      // anything to do with. Cleared rather than revalidated — revalidating needs an embedding
+      // pass, and a stale duplicate the reviewer can archive by hand is a far cheaper mistake than
+      // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
+      // (tags do not scope retrieval) leaves a valid link alone.
+      if (data.facets !== undefined) {
+        const existing = await db.query.globalKbEntries.findFirst({
+          where: eq(globalKbEntries.id, id),
+          columns: { facets: true, supersedesEntryId: true, status: true },
+        });
+        // DRAFTS only. The link exists to stop activation archiving the wrong predecessor, and
+        // only a draft can still activate — on an entry that is already active the archive has
+        // happened and the link is history, so clearing it would erase the record of what this
+        // article replaced without un-archiving anything.
+        if (
+          existing?.supersedesEntryId &&
+          existing.status === 'draft' &&
+          scopeChanged(existing.facets, set.facets)
+        ) {
+          set.supersedesEntryId = null;
+        }
+      }
+      const [row] = await db
         .update(globalKbEntries)
-        // Record the archive time via supersededAt, but DON'T bump updatedAt: the
-        // list sorts by updatedAt desc, so bumping it would float the just-archived
-        // old article above its replacement. Leaving updatedAt keeps it in place.
-        .set({ status: 'archived', supersededAt: new Date() })
-        .where(
-          and(
-            eq(globalKbEntries.id, row.supersedesEntryId),
-            ne(globalKbEntries.status, 'archived'),
-          ),
-        )
-        .returning({ id: globalKbEntries.id });
-      supersededId = archived?.id ?? null;
-    }
-    return { row, supersededId };
-  });
+        .set(set)
+        .where(eq(globalKbEntries.id, id))
+        .returning();
+      // Activation supersession: when a draft that proposes replacing another entry (a
+      // merge produced by onboarding) is activated, archive the entry it supersedes so
+      // the topic keeps a single live article. Its vectors are dropped below.
+      let supersededId: string | null = null;
+      if (row && set.status === 'active' && row.supersedesEntryId) {
+        const [archived] = await db
+          .update(globalKbEntries)
+          // Record the archive time via supersededAt, but DON'T bump updatedAt: the
+          // list sorts by updatedAt desc, so bumping it would float the just-archived
+          // old article above its replacement. Leaving updatedAt keeps it in place.
+          .set({ status: 'archived', supersededAt: new Date() })
+          .where(
+            and(
+              eq(globalKbEntries.id, row.supersedesEntryId),
+              ne(globalKbEntries.status, 'archived'),
+            ),
+          )
+          .returning({ id: globalKbEntries.id });
+        supersededId = archived?.id ?? null;
+      }
+      return { row, supersededId };
+    }),
+  );
 
   const entry = result.row;
   if (!entry) throw new HttpError(404, 'global KB entry not found');

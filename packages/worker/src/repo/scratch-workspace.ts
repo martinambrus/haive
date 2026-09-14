@@ -89,9 +89,17 @@ export async function removeTaskScratchWorkspace(userId: string, taskId: string)
 export async function cleanupTaskScratchWorkspace(db: Database, taskId: string): Promise<void> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, type: true, repositoryId: true },
+    columns: { userId: true, type: true, repositoryId: true, status: true },
   });
   if (!task || task.repositoryId || !taskTypeAllowsNoRepository(task.type)) return;
+
+  // Only a SETTLED, non-failed task gives up its workspace, and the check lives here so no
+  // caller has to be ordered correctly. `markTaskCompleted` stamps `completed` and then runs
+  // fallible bookkeeping; if one of those throws the task becomes `failed`, whose Editor and
+  // Terminal are deliberately kept alive for recovery — so a reaper that fired on the earlier
+  // status would have deleted the workspace those surfaces need. Guarding centrally also
+  // retires the old `reason !== 'failed'` condition its callers each had to remember.
+  if (task.status !== 'completed' && task.status !== 'cancelled') return;
 
   const pendingSummary = await db.query.cliInvocations.findFirst({
     where: and(

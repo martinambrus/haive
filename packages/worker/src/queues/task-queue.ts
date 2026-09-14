@@ -431,6 +431,14 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
   // while the link still claimed to be current. Idempotent (it only touches rows
   // that are not already stale), so the earlier mid-run call stays for its flush.
   await markPlanCodeLinksStale(db, taskId);
+  // LAST: every fallible hook above has succeeded, so `completed` is now the task's real
+  // outcome. Reaping earlier meant a hook that threw left a `failed` task whose Editor and
+  // Terminal pointed at a deleted workspace.
+  try {
+    await cleanupTaskScratchWorkspace(db, taskId);
+  } catch (err) {
+    logger.warn({ err, taskId }, 'cleanup-scratch-workspace failed');
+  }
 }
 
 async function markTaskFailed(db: Database, taskId: string, message: string): Promise<void> {
@@ -653,18 +661,10 @@ async function cleanupTaskContainers(
   // on the shared repos volume where a leak would accumulate one directory per task. Defers to
   // the last step summary when one is still in flight; see cleanupTaskScratchWorkspace.
   //
-  // NOT on `failed`, the same rule the ddev runners above follow and the one the Editor and
-  // Terminal tabs are gated on: a failed task keeps its workspace so those recovery surfaces
-  // can still open it, and only a definitive end reaps it. For a repo-less task the scratch
-  // directory IS that workspace, so removing it here would leave `resolveTaskRepoMount`
-  // pointing at a subpath that no longer exists.
-  if (reason !== 'failed') {
-    try {
-      await cleanupTaskScratchWorkspace(db, taskId);
-    } catch (err) {
-      logger.warn({ err, taskId, reason }, 'cleanup-scratch-workspace failed');
-    }
-  }
+  // NOT reaped here. `cleanupTaskScratchWorkspace` refuses any task that is not settled, and at
+  // this point a COMPLETING task has its status stamped but still has fallible bookkeeping to
+  // run — a throw there turns it `failed`, whose recovery surfaces need the workspace. The call
+  // lives at the end of markTaskCompleted and on the cancel path instead.
 
   // Remove the feature worktree. On cancel: always (a task cancelled before its
   // worktree-cleanup step would leak the dir into the haive_repos volume). On
@@ -2463,6 +2463,11 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     );
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  try {
+    await cleanupTaskScratchWorkspace(db, payload.taskId);
+  } catch (err) {
+    logger.warn({ err, taskId: payload.taskId }, 'cleanup-scratch-workspace failed');
+  }
   await maybeUnloadTaskEmbedModel(db, payload.taskId);
   await unloadTaskOllamaCliModels(db, payload.taskId);
   // A cancelled kb_author enrich should not leave an orphan global KB entry behind;
