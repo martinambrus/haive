@@ -125,6 +125,22 @@ const ECOSYSTEM_FILENAMES = new Set(
   ].map((n) => n.toLowerCase()),
 );
 
+/** Whether a bare filename's STEM is specific to a codebase, rather than a name any project
+ *  might use.
+ *
+ *  Deliberately NOT `isDistinctiveSymbol`, which this used at first. That rule is about SYMBOLS,
+ *  and a symbol cannot contain a hyphen — while kebab-case is how a large share of real source
+ *  files are named (every file in this directory included). Reusing it therefore missed
+ *  `invoice-processor.ts`, which is the most common shape of exactly what the rule exists to
+ *  catch, while still matching `invoiceProcessor.ts` nobody writes.
+ *
+ *  All three multi-word conventions, then: a camel hump, an underscore, or a hyphen. A stem with
+ *  none of them — `config`, `index`, `utils` — belongs to no repository in particular and is left
+ *  alone unless it resolves at the repo ROOT, where the manifests live. */
+export function isDistinctiveFileStem(stem: string): boolean {
+  return /[a-z][A-Z]|.[A-Z][a-z]|[_-]/.test(stem);
+}
+
 /** Bare filenames in one block that might name a file in the anchor repo. */
 export function bareFilenameCandidates(block: string): string[] {
   const out = new Set<string>();
@@ -262,9 +278,6 @@ export async function scrubCitations(
      *  bare filename be recognised wherever it lives, not only at the repo root. Absent restores
      *  the root-only behaviour exactly. */
     repoBasenames?: ReadonlySet<string>;
-    /** Whether a bare filename's STEM is specific enough to be this repo's. Injected for the same
-     *  reason as `findSymbol`; `isDistinctiveSymbol` is the production implementation. */
-    isDistinctiveStem?: (stem: string) => boolean;
   },
 ): Promise<ScrubResult> {
   const blocks = splitIntoBlocks(body);
@@ -311,9 +324,9 @@ export async function scrubCitations(
       // a block for saying `config.php` or `utils.ts`, names that belong to no repository in
       // particular and appear in invented examples constantly; the scrub's two errors are not
       // equal, and a false hit silently removes somebody's prose. A stem carrying a hump or an
-      // underscore is specific to a codebase, which is the SAME test `isDistinctiveSymbol` applies
-      // to symbols and for the same reason. `InvoiceProcessor.ts` under `src/` is caught;
-      // `index.php` under `web/` is not.
+      // underscore or a hyphen is specific to a codebase — see `isDistinctiveFileStem`, which is
+      // a FILENAME rule rather than the symbol one. `InvoiceProcessor.ts` and
+      // `invoice-processor.ts` under `src/` are caught; `index.php` under `web/` is not.
       if (!reason) {
         for (const name of bareFilenameCandidates(block)) {
           const target = resolveInsideRepo(opts.repoPath, name);
@@ -321,10 +334,9 @@ export async function scrubCitations(
             reason = name;
             break;
           }
-          const stem = name.replace(/\.[^.]+$/, '');
           if (
             opts.repoBasenames?.has(name.toLowerCase()) &&
-            opts.isDistinctiveStem?.(stem) === true
+            isDistinctiveFileStem(name.replace(/\.[^.]+$/, ''))
           ) {
             reason = name;
             break;

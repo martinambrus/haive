@@ -43,7 +43,6 @@ import {
   bodyUsesRepoSymbol,
   collectRepoBasenames,
   collectRepoSymbols,
-  isDistinctiveSymbol,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 
 const repoPath = process.env.KB_SCRUB_REPO;
@@ -87,7 +86,6 @@ async function main(): Promise<void> {
       // exercise, and it would then score a clean 0 while measuring nothing — the one way this
       // harness can lie about a change it exists to gate.
       repoBasenames,
-      isDistinctiveStem: isDistinctiveSymbol,
     });
     blocks += count;
     chars += body.length;

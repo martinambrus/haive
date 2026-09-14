@@ -1058,7 +1058,7 @@ const LANGUAGE_BUILTIN_NAMES = new Set([
  *  uppercase-then-lowercase pair NOT at the start, which admits `CProduct` while still rejecting
  *  capitalised prose (`Postgres`, `Excel`) and all-caps words (`PDF`). Keep the two rules
  *  identical: this decides what a citation IS, and `identifiers.ts` decides what is searchable. */
-export function isDistinctiveSymbol(name: string | undefined): name is string {
+function isDistinctiveSymbol(name: string | undefined): name is string {
   if (!name || LANGUAGE_BUILTIN_NAMES.has(name)) return false;
   return /[a-z][A-Z]|_/.test(name) || /.[A-Z][a-z]/.test(name);
 }

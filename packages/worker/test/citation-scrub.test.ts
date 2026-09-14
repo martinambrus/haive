@@ -268,7 +268,6 @@ describe('scrubCitations bare filenames outside the repo root', () => {
   const opts = (basenames: string[]) => ({
     repoPath: '/nonexistent-repo-root',
     repoBasenames: new Set(basenames),
-    isDistinctiveStem: (stem: string) => /[a-z][A-Z]|_/.test(stem) || /.[A-Z][a-z]/.test(stem),
   });
 
   it('removes a DISTINCTIVE filename found anywhere in the tree', async () => {
@@ -296,6 +295,24 @@ describe('scrubCitations bare filenames outside the repo root', () => {
       opts(['other_thing.ts']),
     );
     expect(res.removed).toHaveLength(0);
+  });
+
+  it('removes a KEBAB-CASE filename, which is how most source files are actually named', async () => {
+    // The first version of this gate reused `isDistinctiveSymbol`, and a SYMBOL cannot contain a
+    // hyphen — so the single most common real filename shape was the one it could not see.
+    const res = await scrubCitations(
+      'Register the handler in invoice-processor.ts before dispatch.',
+      opts(['invoice-processor.ts']),
+    );
+    expect(res.removed).toHaveLength(1);
+    expect(res.removed[0]?.reason).toBe('invoice-processor.ts');
+  });
+
+  it('still keeps a single-word stem however it is written', async () => {
+    for (const name of ['config.php', 'index.php', 'utils.ts']) {
+      const res = await scrubCitations(`Put it in ${name} and reload.`, opts([name.toLowerCase()]));
+      expect(res.removed).toHaveLength(0);
+    }
   });
 
   it('behaves exactly as before when no basename index is supplied', async () => {

@@ -20,7 +20,6 @@ import {
   bodyUsesRepoSymbol,
   collectRepoBasenames,
   collectRepoSymbols,
-  isDistinctiveSymbol,
 } from '../onboarding/08-knowledge-acquisition.js';
 import { scrubCitations, type ScrubbedBlock } from './_citation-scrub.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
@@ -463,7 +462,6 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
       repoSymbols,
       findSymbol: bodyUsesRepoSymbol,
       repoBasenames,
-      isDistinctiveStem: isDistinctiveSymbol,
     });
     if (scrub.removed.length > 0) {
       ctx.logger.warn(
