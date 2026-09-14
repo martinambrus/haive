@@ -1463,6 +1463,23 @@ export default function GlobalKbPage() {
                   <MarkdownView body={selected.body} className="max-h-none overflow-visible" />
                 </div>
               )}
+              {/* Reactivating does NOT retire whatever replaced this entry: the API archives the
+                  predecessor named by the row being activated, and a successor points the other
+                  way. Done before that successor has been re-scoped, both end up active and
+                  retrievable for the same rule.
+                  Said rather than blocked, and rather than archiving the successor behind the
+                  reviewer's back — both are choices this form should not make for them, which is
+                  the same rule the scope-edit warning above follows. Two active entries is noise
+                  a reviewer can see and undo; silently retiring the live one is not. */}
+              {selected.status === 'archived' &&
+                entries?.some(
+                  (e) => e.supersedesEntryId === selected.id && e.status === 'active',
+                ) && (
+                  <p className="mt-3 text-center text-[11px] text-amber-400">
+                    An active entry still replaces this one. Reactivating leaves both live for the
+                    same scope — re-scope or archive that entry if only one should apply.
+                  </p>
+                )}
               <div className="mt-4 flex items-center justify-center gap-3">
                 {/* Activation is blocked while a scope edit is OPEN as well as while one is in
                     flight. They are separate PATCHes, and activating first archives the
