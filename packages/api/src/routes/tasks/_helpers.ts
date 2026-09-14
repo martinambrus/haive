@@ -11,6 +11,7 @@ import {
   SKIPPABLE_STEP_IDS,
   STEP_CLI_ROLES,
   STEP_MINING_SEATS,
+  taskMayRunWithoutRepository,
   taskScratchSubpath,
   type AuthMode,
   type CliProviderName,
@@ -1175,13 +1176,18 @@ export async function resolveWorkspaceRoot(
     // (only `workflow`/`run_app` are worktree-gated), so returning 409 here advertised a recovery
     // surface that could not open on exactly the running and failed tasks that need one.
     //
-    // EXISTENCE is the entitlement, deliberately, rather than re-deriving who may run repo-less.
-    // The worker is the only creator of these directories and owns that rule — which has already
-    // changed once in this branch, from the task TYPE to the type plus the recorded anchor — so a
-    // copy here would be a guaranteed future divergence. A task that has not started yet has no
-    // directory and still answers 409, which is the truth: there is nothing to edit.
+    // Entitlement is the RULE, and existence only confirms the directory is there to open.
+    // Existence alone was wrong: an anchored task whose repository was deleted can already have
+    // an empty scratch directory from before that case was refused, and the boot sweep keeps a
+    // FAILED task's workspace on purpose — so the stale directory would have read as permission
+    // and rooted the Editor in a workspace that was never this task's.
+    //
+    // `taskMayRunWithoutRepository` is the same function the worker applies, moved to
+    // @haive/shared rather than copied, which is what makes "one authority" true here instead of
+    // approximated. A task that has not started has no directory and still answers 409: there is
+    // nothing to edit.
     const scratch = resolve(repoStorageRoot(), taskScratchSubpath(task.userId, task.id));
-    if (await directoryExists(scratch)) root = scratch;
+    if (taskMayRunWithoutRepository(task) && (await directoryExists(scratch))) root = scratch;
   }
   if (!root) {
     throw new HttpError(409, 'Task has no resolvable workspace path');

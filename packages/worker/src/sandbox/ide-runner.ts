@@ -17,7 +17,11 @@ import {
   logger,
   volumeName,
 } from '@haive/shared';
-import { taskScratchPath, taskScratchSubpath } from '../repo/scratch-workspace.js';
+import {
+  taskMayRunWithoutRepository,
+  taskScratchPath,
+  taskScratchSubpath,
+} from '../repo/scratch-workspace.js';
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
 import { defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
@@ -81,17 +85,18 @@ export async function resolveIdeWorkspaceSubpath(
 ): Promise<string | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { repositoryId: true, userId: true },
+    columns: { repositoryId: true, userId: true, type: true, metadata: true },
   });
   // A repo-less task's workspace is its scratch directory, on this same volume. The Editor tab is
   // worktree-gated for `workflow`/`run_app` ONLY, so it is enabled on a running or failed
   // `kb_author` run — returning null here left that tab advertising an editor that could not boot.
   //
-  // EXISTENCE is the entitlement, the same rule the api's `resolveWorkspaceRoot` uses and for the
-  // same reason: `ensureTaskScratchWorkspace` is the only creator and owns who is allowed one, so
-  // re-deriving that rule in a second place would be a divergence waiting to happen.
+  // Entitlement is the RULE; existence only confirms the directory is there to open. Existence
+  // alone was wrong: an anchored task whose repository was deleted can already have an empty
+  // scratch directory from before that case was refused, and a FAILED task's workspace is kept on
+  // purpose — so a stale directory would have read as permission.
   if (!task?.repositoryId) {
-    if (!task) return null;
+    if (!task || !taskMayRunWithoutRepository(task)) return null;
     const exists = await stat(taskScratchPath(task.userId, taskId))
       .then((st) => st.isDirectory())
       .catch(() => false);
