@@ -244,6 +244,19 @@ export class TerminalSessionManager {
         }
       }
       repoMount = await resolveTaskRepoMount(this.db, taskId).catch(() => null);
+      // A task terminal without a workspace is not a terminal, it is a bare `/haive/workdir` in
+      // the image — `ensureShellContainer` treats the mount as optional and would happily open
+      // one. The resolver returns null for exactly three states and none of them wants a shell:
+      // the task is gone, its repository row is gone, or it was ANCHORED to a repository that has
+      // since been deleted. A task deliberately created repo-less is NOT one of them — it
+      // resolves to its scratch mount — so this refuses the torn state while leaving the repo-less
+      // mode working.
+      if (!repoMount) {
+        return {
+          ok: false,
+          error: 'task has no workspace - its repository is no longer available',
+        };
+      }
       mcpServers = await this.buildMcpServers(req.userId, taskId);
       scopeId = taskId;
     }
