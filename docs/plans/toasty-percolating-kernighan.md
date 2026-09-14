@@ -67,10 +67,17 @@ type — inherits it without anyone maintaining a list of special steps.
    `<projectAgentsDir>/<id>.md` — the exact file today's pointer names — and never looked up by the
    frontmatter `name` that `loadAgentPersonas` keys on (`steps/workflow/_agent-loader.ts:36-37`).
    The two can differ, and a lookup by `name` would silently drop the customisation that outranks
-   the inline persona. The reader `stat`s that one file and reads it only within the size budget
-   (dispatch side, item 3), so no directory is scanned and no unrelated agent file is ever read. It
-   reuses the loader's frontmatter parser (`parseAgentFile`, exported) and leaves
-   `loadAgentPersonas` and its only caller, 03, untouched. Codex inlining
+   the inline persona. The reader never follows a repository-controlled link: the worker is
+   privileged, and an untrusted repository can plant `.claude/agents/peer-reviewer.md` as a symlink
+   to `/proc/self/environ` or a host secret, whose bytes would be pasted into a prompt sent to the
+   provider. So it `realpath`s the agent directory and refuses it unless it lies inside the
+   invocation tree's own realpath, opens `<id>.md` with `O_NOFOLLOW`, `fstat`s the open handle and
+   accepts only a regular file, and reads at most the remaining size budget (dispatch side, item 3)
+   plus one byte from that handle, so a size that lies (a pseudo-file reports 0) cannot slip past
+   the budget. That is the regular-files-only rule `ensureArchivesExpanded` already applies with
+   `lstat`, and a refused file is treated as missing. No directory is scanned, and no unrelated or
+   out-of-tree file is ever read. It reuses the loader's frontmatter parser (`parseAgentFile`,
+   exported) and leaves `loadAgentPersonas` and its only caller, 03, untouched. Codex inlining
    (its `.codex/agents/*.toml` is rendered without LSP, and no package has a TOML parser) is a
    follow-up.
 2. **Under isolation the rewrite never emits a pointer.** The file it would name is hidden, so the
@@ -186,9 +193,10 @@ so only a customised definition triggers it.
    for built-in markers, whose inline protocol always follows them; Phase 3.1 widens it for
    template markers, which have none (Companion, item 2). Pasted bodies share
    one budget per prompt, `MAX_PERSONA_BODY_BYTES` (64 KiB in total, a guard rail above the largest
-   definition measured, 24,694 bytes), counted in marker order from each file's `stat` size before
-   it is read. A body that would exceed what is left is never read, never pasted and never
-   truncated, since a cut persona reads as a complete one: a built-in marker falls back to its
+   definition measured, 24,694 bytes), counted in marker order from each opened file's `fstat`
+   size, with the read itself capped at what is left plus one byte (Decision 1). A body that would
+   exceed what is left, by its `fstat` size or by a capped read that returns more than that size
+   claimed, is never pasted and never truncated, since a cut persona reads as a complete one: a built-in marker falls back to its
    inline protocol and records an `agent_persona.oversized` task event naming the file and its
    size, and a template marker fails the dispatch with that reason.
 4. **The tree is the one cli-exec will mount.** `ctx.repoPath` is always the repository root,
@@ -230,9 +238,11 @@ so only a customised definition triggers it.
    (`unmanagedAgentsDir`) stay visible.
 2. **Only directories that exist.** A mount over a missing path makes Docker create the
    mountpoint inside the repo volume, root-owned, and that stub outlives the container
-   (`sandbox/sandbox-runner.ts` records the same hazard for files). So the builder stats each
+   (`sandbox/sandbox-runner.ts` records the same hazard for files). So the builder `lstat`s each
    candidate under the invocation's worker-side root (`resolveInvocationWorkerRoot`) and masks
-   only what is there.
+   only a real directory whose realpath lies inside that root. A candidate that is, or sits under, a
+   repository-controlled symlink is left unmasked (failing open, item 6), because a mount
+   destination that traverses such a link is not a path to hand Docker.
 3. **A read-only tmpfs mount.** `DockerVolumeMount` (`sandbox/docker-runner.ts`) has only volume
    and bind forms. It gains `tmpfs?: true`, rendered as
    `--mount type=tmpfs,destination=<target>[,readonly]` by a branch placed BEFORE the
@@ -311,7 +321,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies` with its
   scope-marker check, the switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
   (`agentGuidanceIds`, the positive arm), `step-engine/steps/workflow/_agent-loader.ts` (export
-  `parseAgentFile`; a filename-keyed single-file reader that `stat`s before reading), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
+  `parseAgentFile`; a filename-keyed single-file reader: in-tree realpath, `O_NOFOLLOW` open,
+  `fstat` regular-file check, capped read), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
   `step-engine/step-runner.ts` (`resolveLlmPhase` passes `agentPool`; the retry_ai `toolProfile`
   fix is its own commit).
 - **Spec:** `cli-adapters/types.ts` (`CliCommandSpec.maskAgentDefinitions`). No `CliExecJobPayload`
@@ -332,8 +343,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   `packages/shared/src/config/config.service.ts` (key and default).
 - **API and web:** `packages/api/src/routes/admin.ts`, `packages/web/src/app/(app)/admin/page.tsx`.
 - **Docs:** `AGENTS.md` → Sandbox, a paragraph beside "Secret-file masking" and "Worktree gitfile
-  masking": what is hidden, from which invocations, why it fails open, and the measured listing
-  costs.
+  masking": what is hidden, from which invocations, why it fails open, why the persona reader never
+  follows a repository-controlled link, and the measured listing costs.
 - **Tests:** `test/dispatcher.test.ts` (isolated twins, grok, a template-less id, one re-resolve
   carrying both persona bodies and a codex verdict, and
   `agentIsolationApplies` over `file_write` / `subagents` / the scope marker / `'*'` / sub-agent kind /
@@ -366,12 +377,12 @@ scratch.
      mount the earlier captures did not exercise.
 2. **Unit tests** (`pnpm --filter @haive/worker exec vitest run`), modelled on
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
-   directories only, read-only, fail-open), `agentIsolationApplies` (the scope marker and `subagents` included), a catalog assertion that
+   real directories only, symlinked ones left unmasked, read-only, fail-open), `agentIsolationApplies` (the scope marker and `subagents` included), a catalog assertion that
    every provider with `supportsSubagents` reads a markdown `projectAgentsDir`,
    `agentDirectoryScopeMarker` (`.claude/agents/x.md`, `./.claude/agents/x.md` and
    `/haive/workdir/.claude/agents/x.md` mark; `docs/.claude/agents/x.md` and
    `.claude/agents-old/x.md` do not), marker ids, the persona path
-   (found / missing / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / a symlinked or out-of-tree `<id>.md` refused / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, and `07_7-secret-sweep` declaring `'*'`.
@@ -432,7 +443,8 @@ stores only `stepIds: string[]` and needs nothing.
    become persona markers (whose own pointer names `.claude/agents/<id>.md`), and appends the scope
    marker when one lies inside an agent directory.
 3. **Dangling references.** Extended to personas: a token naming a persona with no `<id>.md` in any
-   markdown agent directory of the target repository is refused at task-create with a named reason
+   markdown agent directory of the target repository (a symlink or an out-of-tree path counts as
+   absent, since PR 1's reader refuses both) is refused at task-create with a named reason
    ("step `<slug>` needs agent `drupal7-developer`, which this repository does not define") — the
    same not-silently-truncated rule the section applies to missing steps. A definition that exists
    only as `.codex/agents/<id>.toml` counts as absent until a TOML reader exists. Built-in steps are
