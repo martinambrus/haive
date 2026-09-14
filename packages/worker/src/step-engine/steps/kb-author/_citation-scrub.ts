@@ -81,7 +81,7 @@ const BARE_FILENAME = /(?:^|[\s`("[<])([\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,8})(?=[\s
  *  Err toward KEEPING content when extending this: a name that is missing costs a deleted block
  *  of somebody's article, silently, while a name wrongly present costs only a filename surviving
  *  into a draft a human reviews. Additions are cheap; removals are not. */
-const ECOSYSTEM_FILENAMES = new Set(
+export const ECOSYSTEM_FILENAMES = new Set(
   [
     'package.json',
     'package-lock.json',
@@ -122,6 +122,21 @@ const ECOSYSTEM_FILENAMES = new Set(
     'pyproject.toml',
     'setup.py',
     'cargo.toml',
+    // The manifests of the stacks the symbol scan learned to read. Every `STACK_INDICATORS`
+    // marker has to be here or the ROOT lookup resolves it and deletes the block: "configure
+    // this in pom.xml" is reusable advice about Maven, not a citation of somebody's repository,
+    // exactly as `composer.json` and `cargo.toml` already are. Asserted against that list in
+    // `citation-scrub.test.ts`, because the two drifted apart the moment the scan grew a
+    // language.
+    'pom.xml',
+    'build.gradle',
+    'build.gradle.kts',
+    'settings.gradle',
+    'settings.gradle.kts',
+    'mix.exs',
+    'mix.lock',
+    'package.swift',
+    'cmakelists.txt',
   ].map((n) => n.toLowerCase()),
 );
 

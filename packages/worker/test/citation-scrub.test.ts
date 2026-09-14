@@ -3,6 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { bodyUsesRepoSymbol } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
+import { STACK_INDICATORS } from '../src/step-engine/steps/onboarding/01-env-detect.js';
+import { ECOSYSTEM_FILENAMES } from '../src/step-engine/steps/kb-author/_citation-scrub.js';
 import {
   citationCandidates,
   resolveInsideRepo,
@@ -320,5 +322,17 @@ describe('scrubCitations bare filenames outside the repo root', () => {
       repoPath: '/nonexistent-repo-root',
     });
     expect(res.removed).toHaveLength(0);
+  });
+});
+
+// Every stack marker the detector knows must be exempt, or the ROOT lookup resolves it and
+// deletes the block: "configure this in pom.xml" is reusable advice about Maven, not a citation
+// of somebody's repository. The two lists drifted apart the moment the symbol scan grew a
+// language, so the relationship is asserted rather than maintained by hand.
+describe('ecosystem manifest exemptions', () => {
+  it('exempts every manifest the stack detector recognises', () => {
+    const markers = [...new Set(STACK_INDICATORS.map((i) => i.file.toLowerCase()))].sort();
+    const missing = markers.filter((m) => !ECOSYSTEM_FILENAMES.has(m));
+    expect(missing).toEqual([]);
   });
 });
