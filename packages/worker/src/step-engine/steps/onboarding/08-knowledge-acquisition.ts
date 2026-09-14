@@ -1228,6 +1228,27 @@ export async function collectRepoSymbols(
       // name(): T;` signature is re-declared with a body by whichever class implements it.
       const classPropFnRe =
         /^[ \t]+(?:(?:public|private|protected|static|readonly)\s+)*([A-Za-z_]\w{4,})\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_]\w*)\s*=>/gm;
+      // C, C++ and C# declare a callable with a RETURN TYPE and no keyword at all, so neither
+      // `defRe` (wants a keyword) nor `methodRe` (wants the name straight after the modifiers)
+      // can see `int process_invoice_batch(...)` or `public void ProcessInvoice(...)`. Those
+      // three contributed TYPES only — and C has no classes, so a C repository contributed
+      // almost nothing at all, which is not the "under-collect on purpose" this scan intends.
+      //
+      // This IS the shape the scan otherwise refuses to widen, so it is anchored hard, and every
+      // clause below is load-bearing rather than defensive:
+      //   - `^` at column 0, where a C/C++ definition sits and an indented CALL does not;
+      //   - a type token AND a name before the parens, so `if (x) {` and `while (x) {` cannot
+      //     match — they have only one;
+      //   - no `;` inside the parens, which is what excludes `for (a; b; c) {`;
+      //   - a `{` after them, so a prototype (`int foo(void);`) and a bare call are both out.
+      // `isDistinctiveSymbol` still applies, so a single generic word never lands.
+      const cFuncRe =
+        /^[A-Za-z_][\w:<>,*&\s]*?\s+\*?([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?\{/gm;
+      for (let m = cFuncRe.exec(body); m; m = cFuncRe.exec(body)) {
+        if (m[1] && !NON_SYMBOL_KEYWORDS.has(m[1]) && isDistinctiveSymbol(m[1])) {
+          symbols.add(m[1]);
+        }
+      }
       for (let m = defRe.exec(body); m; m = defRe.exec(body)) {
         if (isDistinctiveSymbol(m[1])) symbols.add(m[1]!);
       }

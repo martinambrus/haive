@@ -291,6 +291,46 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('generated_helper')).toBe(false);
   });
 
+  it('collects C-family functions, which declare a RETURN TYPE and no keyword', async () => {
+    // Neither `defRe` (wants a keyword) nor `methodRe` (wants the name straight after the
+    // modifiers) can see these, so C, C++ and C# contributed TYPES only — and C has no classes,
+    // so a C repository contributed almost nothing.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-cfamily-'));
+    await writeFile(
+      path.join(dir, 'invoice.c'),
+      [
+        '#include <stdio.h>',
+        'int process_invoice_batch(struct Batch *b) {',
+        '  return b->id;',
+        '}',
+        'static inline unsigned compute_checksum(const char *s) {',
+        '  return 0;',
+        '}',
+        'int prototype_only_fn(void);',
+        'void run(void) {',
+        '  if (condition_value) {',
+        '    indented_call(argument);',
+        '  }',
+        '  for (int i = 0; i < 3; i++) {}',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, 'Invoice.cs'),
+      ['public class Svc {', '}', 'public void ProcessInvoice(int id) {', '}'].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, null);
+    expect(symbols.has('process_invoice_batch')).toBe(true);
+    expect(symbols.has('compute_checksum')).toBe(true);
+    expect(symbols.has('ProcessInvoice')).toBe(true);
+    // A prototype declares no body, and control flow is not a symbol however it is written.
+    expect(symbols.has('prototype_only_fn')).toBe(false);
+    expect(symbols.has('condition_value')).toBe(false);
+    expect(symbols.has('indented_call')).toBe(false);
+  });
+
   it('skips Rust build output, which is generated rather than project vocabulary', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'symbols-rust-target-'));
     await mkdir(path.join(dir, 'target'), { recursive: true });
