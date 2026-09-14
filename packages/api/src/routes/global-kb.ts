@@ -14,6 +14,7 @@ import {
 } from '@haive/shared';
 import {
   globalKbEntries,
+  globalKbTopicKey,
   resolveGlobalKbConnection,
   resolveGlobalKbSettings,
   withGlobalKb,
@@ -573,6 +574,36 @@ export function scopeChanged(
   return key(before) !== key(after);
 }
 
+/** The promotion key a scope edit leaves behind, or `undefined` to leave the stored one alone.
+ *
+ *  `topic_key` is `category:tech[:major]` derived from the key-driving facets, and
+ *  `promoteToGlobalKbDraft` groups its supersede candidates by EXACT equality on it. Left stale,
+ *  a re-scoped entry is grouped with its FORMER stack's promotions and invisible to its new one
+ *  — the same dedup-off-by-one-spelling defect `recomputeAliasedTopicKeys` closed for legacy
+ *  rows, arriving this time through the scope editor.
+ *
+ *  Only an entry that ALREADY has a key is recomputed. Enrich derives the same value as a lock
+ *  key and deliberately never stores it (`01-enrich.ts`), so writing one here would drag every
+ *  hand-authored entry into a dedup it was built to stay out of.
+ *
+ *  Gated on `scopeChanged` rather than on facets merely being present in the patch, because the
+ *  stored key may have come from a promotion's free-form `tech` (`globalKbTopicKey`'s
+ *  `fallbackTech`, which nothing persists): a tags-only edit would then recompute it to null and
+ *  silently drop a valid key. Tags do not drive the key, and `FACET_FILTER_DIMENSIONS` — what
+ *  `scopeChanged` compares — is exactly the set the derivation reads. A real re-scope that
+ *  leaves no derivable tech still CLEARS the key, which is what `globalKbTopicKey` returning
+ *  null already means: never deduped. */
+export function rescopedTopicKey(
+  existing: { facets: GlobalKbFacets; category: GlobalKbCategory; topicKey: string | null },
+  next: { category?: GlobalKbCategory; facets?: GlobalKbFacets },
+): string | null | undefined {
+  if (!existing.topicKey) return undefined;
+  const categoryChanged = next.category !== undefined && next.category !== existing.category;
+  const facetsChanged = next.facets !== undefined && scopeChanged(existing.facets, next.facets);
+  if (!categoryChanged && !facetsChanged) return undefined;
+  return globalKbTopicKey(next.category ?? existing.category, next.facets ?? existing.facets ?? {});
+}
+
 globalKbRoutes.patch('/entries/:id', async (c) => {
   const id = c.req.param('id');
   const parsed = updateSchema.safeParse(await c.req.json().catch(() => null));
@@ -614,22 +645,37 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       // pass, and a stale duplicate the reviewer can archive by hand is a far cheaper mistake than
       // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
       // (tags do not scope retrieval) leaves a valid link alone.
-      if (data.facets !== undefined) {
+      // The locked read serves TWO decisions — the supersede link below and the topic key
+      // after it — so it runs for a category edit as well as a facet one.
+      let existing:
+        | {
+            facets: GlobalKbFacets;
+            supersedesEntryId: string | null;
+            status: GlobalKbStatus;
+            category: GlobalKbCategory;
+            topicKey: string | null;
+          }
+        | undefined;
+      if (data.facets !== undefined || data.category !== undefined) {
         // LOCKED, not merely read inside a transaction. Postgres defaults to READ COMMITTED,
         // where atomicity is not isolation: an unlocked read can see the draft's old
         // `supersedesEntryId`, a concurrent activation can commit and archive that predecessor,
         // and this request then clears the link too late to have prevented anything. The row
         // lock makes the two PATCHes take turns, which is what the UI's button guard could
         // never do across tabs or API clients.
-        const [existing] = await db
+        [existing] = await db
           .select({
             facets: globalKbEntries.facets,
             supersedesEntryId: globalKbEntries.supersedesEntryId,
             status: globalKbEntries.status,
+            category: globalKbEntries.category,
+            topicKey: globalKbEntries.topicKey,
           })
           .from(globalKbEntries)
           .where(eq(globalKbEntries.id, id))
           .for('update');
+      }
+      if (data.facets !== undefined) {
         // Any status this entry can still be ACTIVATED from — draft or archived. The link exists
         // to stop activation archiving the wrong predecessor, so the rule has to track what can
         // activate, and that set grew: this said DRAFTS only, justified by "only a draft can
@@ -646,6 +692,10 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         ) {
           set.supersedesEntryId = null;
         }
+      }
+      if (existing) {
+        const rekeyed = rescopedTopicKey(existing, { category: set.category, facets: set.facets });
+        if (rekeyed !== undefined) set.topicKey = rekeyed;
       }
       const [row] = await db
         .update(globalKbEntries)

@@ -1,7 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { FACET_DIMENSIONS } from '@haive/shared/global-kb';
 import { describe, expect, it } from 'vitest';
-import { enrichSchema, scopeChanged, updateSchema } from '../src/routes/global-kb.js';
+import {
+  enrichSchema,
+  rescopedTopicKey,
+  scopeChanged,
+  updateSchema,
+} from '../src/routes/global-kb.js';
 
 // The facet schema is `.strict()`, so a dimension missing from it is a 400 on a payload every
 // other layer produces and stores happily — and nothing else in the stack catches that. It
@@ -138,5 +143,70 @@ describe('the editor offers exactly the dimensions the schema accepts', () => {
     const webKeys = [...block!.matchAll(/key: '([A-Za-z]+)'/g)].map((m) => m[1]);
     expect(webKeys.length).toBeGreaterThan(0);
     expect([...webKeys].sort()).toEqual([...FACET_DIMENSIONS].sort());
+  });
+});
+
+// The scope editor changes what an entry APPLIES TO, and `topic_key` is derived from exactly
+// that. Leaving it stale groups a re-scoped entry with its former stack's promotions in
+// `promoteToGlobalKbDraft`'s exact-equality candidate lookup, and hides it from its new one.
+describe('rescopedTopicKey', () => {
+  const promoted = {
+    facets: { framework: ['drupal'], frameworkMajor: ['7'] },
+    category: 'best_practice' as const,
+    topicKey: 'best_practice:drupal:7',
+  };
+
+  it('recomputes when the key-driving facets change', () => {
+    expect(rescopedTopicKey(promoted, { facets: { framework: ['laravel'] } })).toBe(
+      'best_practice:laravel',
+    );
+  });
+
+  it('recomputes when the category changes', () => {
+    expect(rescopedTopicKey(promoted, { category: 'anti_pattern' })).toBe('anti_pattern:drupal:7');
+  });
+
+  // Enrich derives this same value as an advisory-lock key and deliberately never stores it, so
+  // a hand-authored entry has none. Writing one here would opt it into the promote dedup.
+  it('leaves an entry that has no key alone', () => {
+    expect(
+      rescopedTopicKey({ ...promoted, topicKey: null }, { facets: { framework: ['x'] } }),
+    ).toBe(undefined);
+  });
+
+  // `tags` is not in FACET_FILTER_DIMENSIONS and does not drive the key. The stored key may have
+  // come from a promotion's free-form `tech`, which nothing persists — so recomputing on an edit
+  // that changed nothing key-driving would silently null a valid key.
+  it('leaves the key alone on a tags-only edit', () => {
+    const fallbackKeyed = {
+      facets: {},
+      category: 'best_practice' as const,
+      topicKey: 'best_practice:php',
+    };
+    expect(rescopedTopicKey(fallbackKeyed, { facets: { tags: ['caching'] } })).toBe(undefined);
+  });
+
+  it('leaves the key alone when a facet edit is a no-op', () => {
+    expect(
+      rescopedTopicKey(promoted, { facets: { framework: ['drupal'], frameworkMajor: ['7'] } }),
+    ).toBe(undefined);
+  });
+
+  // A real re-scope that leaves no derivable tech CLEARS the key rather than keeping a wrong
+  // one. Null is what `globalKbTopicKey` already means by "never deduped".
+  it('clears the key when the new scope yields no tech', () => {
+    expect(rescopedTopicKey(promoted, { facets: { tags: ['caching'] } })).toBeNull();
+  });
+
+  // The recompute runs through `normalizeFacets`, so the key and the row it describes agree.
+  it('keys on the canonical spelling of an aliased value', () => {
+    const pg = {
+      facets: { database: ['mysql'] },
+      category: 'best_practice' as const,
+      topicKey: 'best_practice:mysql',
+    };
+    expect(rescopedTopicKey(pg, { facets: { database: ['PostgreSQL'] } })).toBe(
+      'best_practice:postgres',
+    );
   });
 });

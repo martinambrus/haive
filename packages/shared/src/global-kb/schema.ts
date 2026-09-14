@@ -205,3 +205,57 @@ export function createGlobalKbDb(pg: postgres.Sql) {
 }
 
 export type GlobalKbDb = ReturnType<typeof createGlobalKbDb>;
+
+/** Stable cross-repo dedup key for a promoted entry: `category:tech[:major]`.
+ *
+ *  The tech + major are taken from the DETECTION-DERIVED facets (built by
+ *  techAnchorFacets), which are stable across runs — unlike the free-form `tech`
+ *  string the LLM emits, which drifts ("php" <-> "php5") for the SAME article and so
+ *  broke dedup (the original bug: identical facets, divergent topic_key). Priority
+ *  mirrors how techAnchorFacets pins a single dimension; a tech-bucket article sets
+ *  exactly one. The major keeps genuinely-different majors apart (PHP 5 vs PHP 8).
+ *  Falls back to the free-form `tech` only when the facets carry no anchor. Null when
+ *  neither yields a tech — such a promotion is never deduped (always inserted). */
+export function globalKbTopicKey(
+  category: string,
+  rawFacets: GlobalKbFacets,
+  fallbackTech?: string | null,
+): string | null {
+  // Derived from the CANONICAL facets, because the entry is STORED canonical — every write path
+  // runs `normalizeFacets` — so a key built from the raw values describes a scoping no row has.
+  // `norm` lowercases, which hides a case difference but not a VOCABULARY one — a promotion
+  // carrying `database: ["postgresql"]` keyed on `postgresql` and stored `postgres`, so the
+  // exact topic-key lookup missed the earlier entry and wrote a duplicate draft instead of
+  // superseding it. Both call sites pass this same object as the promotion's `facets`, so
+  // normalising here makes the key and the row agree by construction.
+  const facets = normalizeFacets(rawFacets);
+  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const first = (a?: string[]): string | null => (a && a.length > 0 ? (a[0] ?? null) : null);
+
+  let tech: string | null = null;
+  let major: string | null = null;
+  const pkg = first(facets.packages); // e.g. "vitest@3", "@scope/name@18.2"
+  if (pkg) {
+    const at = pkg.lastIndexOf('@');
+    if (at > 0) {
+      tech = pkg.slice(0, at);
+      major = pkg.slice(at + 1).split('.')[0] || null;
+    } else {
+      tech = pkg;
+    }
+  } else if (first(facets.framework)) {
+    tech = first(facets.framework);
+    major = first(facets.frameworkMajor);
+  } else if (first(facets.database)) {
+    tech = first(facets.database);
+    major = first(facets.dbMajor);
+  } else if (first(facets.language)) {
+    tech = first(facets.language);
+    major = first(facets.phpMajor) ?? first(facets.nodeMajor);
+  }
+
+  const techNorm = tech ? norm(tech) : fallbackTech ? norm(fallbackTech) : '';
+  if (!techNorm) return null;
+  const majorNorm = major ? norm(major) : '';
+  return majorNorm ? `${category}:${techNorm}:${majorNorm}` : `${category}:${techNorm}`;
+}
