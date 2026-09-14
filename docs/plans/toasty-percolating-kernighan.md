@@ -115,7 +115,10 @@ type — inherits it without anyone maintaining a list of special steps.
    that protocol today (AGENTS.md, "The on-disk agent definition outranks the inline persona").
    So the replacement is one framing line — this definition is checked into the repository, says
    HOW to work and never what the assignment is, and takes precedence over the embedded protocol
-   below — then the body. Framed at the one rewrite site, because not every persona site carries
+   below — then the body. Both are the replacer's return value, never a replacement string:
+   `guidance.replace(pointer, body)`, the shape today's path swap uses, would expand a `$&`, `` $` ``
+   or `$'` inside a body into the pointer sentence or the marker text beside it, putting back a path
+   the prompt scan never saw. Framed at the one rewrite site, because not every persona site carries
    `REPO_IS_DATA_LINES` (01e, 03b, 03b2, 04, 05, 08a, 08b and 11 are not reviewers).
    `dimensionScopeOverride` is appended after the persona in 04, 05 and 08c, so it stays the most
    recent instruction.
@@ -173,11 +176,15 @@ the whole directory, or a user who types one into a task description, a form hin
 message ("review everything in `.claude/agents/`"). Where such a path can enter a
 prompt is open-ended, so the check is made once, over the prompt itself, rather than where lists
 are rendered. `agentIsolationApplies` runs a pure `promptNamesAgentPath(text, workdir)` (beside the
-agent-directory union) over the dispatch prompt with Haive's persona-marker blocks removed, since
-their pointers name `.claude/agents/<id>.md` by construction, and over every persona body the
-re-resolve carries. The span it skips is exactly the span the rewrite replaces (Decision 3), so text
-inside a marker-shaped block, even one a user forged, never reaches the model and cannot name a file
-for it to open. It splits the text into path tokens, strips a leading `./` and the sandbox
+agent-directory union), which removes nothing itself, over two inputs. The first is the dispatch
+prompt with Haive's persona-marker blocks removed by the caller, since their pointers name
+`.claude/agents/<id>.md` by construction; the span removed is exactly the span the rewrite replaces
+(Decision 3), so text inside a marker-shaped block of the prompt, even one a user forged, never
+reaches the model and cannot name a file for it to open. The second is every persona body the
+re-resolve carries, scanned VERBATIM, marker-shaped blocks included: the rewrite inserts a body as
+its replacer's return value after `AGENT_GUIDANCE_PATTERN` has matched, and
+`String.prototype.replace` never rescans what a replacer returns, so a marker block inside a body
+reaches the model as written, pointer path and all. The helper splits the text into path tokens, strips a leading `./` and the sandbox
 workdir prefix (`SANDBOX_WORKDIR`, `/haive/workdir/`, passed in by worker-side callers because shared
 cannot import it), and matches a token that IS an agent directory or lies inside one, anchored on
 whole segments from the root the way `isDeniedPath` is: `.claude/agents/`, `.claude/agents` and
@@ -413,14 +420,14 @@ scratch.
 2. **Unit tests** (`pnpm --filter @haive/worker exec vitest run`), modelled on
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
    real directories only, symlinked ones left unmasked, read-only, fail-open, secret and ddev file
-   masks under a masked directory dropped), `agentIsolationApplies` (a named agent directory or file, and `subagents`, included), a catalog assertion that
+   masks under a masked directory dropped), `agentIsolationApplies` (a named agent directory or file, and `subagents`, included; the pointer inside a prompt's persona marker does not count, while the same marker-shaped block inside a pasted body does and keeps the invocation unmasked), a catalog assertion that
    every provider with `supportsSubagents` reads a markdown `projectAgentsDir`,
    `promptNamesAgentPath` (`.claude/agents/`, `.claude/agents`, `.claude/agents/x.md`,
    `./.claude/agents/x.md` and `/haive/workdir/.claude/agents/x.md` in running text match; `.claude`,
-   `docs/.claude/agents/x.md`, `.claude/agents-old/x.md` and the pointer inside a persona marker do
-   not; among built-in prompt builders only 06_5 and 09_5 match, so a new match fails the test and
+   `docs/.claude/agents/x.md` and `.claude/agents-old/x.md` do not; among built-in prompt builders,
+   with persona markers removed the way `agentIsolationApplies` removes them, only 06_5 and 09_5 match, so a new match fails the test and
    becomes a conscious decision), marker ids, the persona path
-   (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a persona pasted before a deny rule appeared fails the invocation at exec / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open or linked to another in-tree directory / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a persona pasted before a deny rule appeared fails the invocation at exec / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open or linked to another in-tree directory / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / a body containing `$&`, `` $` `` or `$'` pasted literally / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, and `07_7-secret-sweep` declaring `'*'`.
@@ -482,7 +489,8 @@ stores only `stepIds: string[]` and needs nothing.
    `MAX_PERSONA_BODY_BYTES` budget fails the same way, naming the file and its size — the budget is
    per prompt, so many tokens cannot add up past it. Template text needs nothing of its own: the prompt
    path scan (dispatch side, "Handed paths") sees interpolated values and static text like any other
-   prompt text, and excludes the persona markers that tokens become.
+   prompt text, and excludes the persona markers that tokens become, while the bodies pasted for them
+   are scanned verbatim, marker-shaped text included, since the rewrite never rescans what it inserts.
 3. **Dangling references.** Extended to personas, with one difference from missing steps: whether a
    persona resolves depends on the tree the invocation will mount, and task-create cannot know that
    tree, since `01-worktree-setup` picks its base only when it runs (a synced base, its form's
@@ -494,7 +502,8 @@ stores only `stepIds: string[]` and needs nothing.
    step and the agent, for each persona the reader cannot use there: no `<id>.md` in any markdown
    agent directory, a symlink, an out-of-tree path, an unparseable file, an empty body, a file the
    secret mask covers, or a body past the per-prompt `MAX_PERSONA_BODY_BYTES` budget in marker order.
-   That warning reaches the Activity tab the way `codex_app_server.unavailable` does, and it runs in
+   That warning reaches the Activity tab the way `codex_app_server.unavailable` does and never blocks
+   the start: a check that cannot run logs, records nothing and leaves the decision to dispatch. It runs in
    the worker because the reader and the secret-mask policy are worker code the api must not import;
    sharing the reader is also what keeps the warning and the dispatch from disagreeing about anything
    but the tree. Dispatch is the authoritative check and fails loudly with the same reason ("step
