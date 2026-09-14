@@ -90,7 +90,13 @@ type — inherits it without anyone maintaining a list of special steps.
    as missing: pasting it would hand the provider the very bytes the mask keeps from the agent. When
    that policy cannot be evaluated nothing is pasted, matching masking's fail-closed rule. The policy
    is extracted into a dependency-free predicate the reader can call, for the same import-cycle
-   reason `invocationRepoSubpath` moves (dispatch side, item 4). No directory is scanned, and no unrelated or
+   reason `invocationRepoSubpath` moves (dispatch side, item 4). The policy is checked again at exec,
+   because a deny rule or the masking switch can change while the job waits in the queue:
+   `buildCliSidePlan` records the repository-relative paths of the bodies it pasted on the spec
+   (`CliCommandSpec.pastedPersonaPaths`), and `executeByKind`, which already resolves the secret masks
+   before its per-kind switch, fails the invocation before the CLI starts when any pasted path is
+   masked by then. That is the `SecretMaskError` path a failed scan already takes, so the step fails
+   loudly and a retry rebuilds the prompt under the current policy. No directory is scanned, and no unrelated or
    out-of-tree file is ever read. It reuses the loader's frontmatter parser (`parseAgentFile`,
    exported) and leaves `loadAgentPersonas` and its only caller, 03, untouched. Codex inlining
    (its `.codex/agents/*.toml` is rendered without LSP, and no package has a TOML parser) is a
@@ -232,7 +238,8 @@ nothing has to ride in the prompt, and a future step inherits the rule with noth
 5. **The rewrite** (`adaptPromptForCliCapabilities`) gains optional `isolated` and `agentBodies`
    inputs and changes only its positive arm, as fixed in Decisions 1–3.
 6. **One decision, carried on the command spec.** When `agentIsolationApplies`, `buildCliSidePlan`
-   stamps `maskAgentDefinitions: true` onto the `CliCommandSpec` it returns. All nine enqueue
+   stamps `maskAgentDefinitions: true` onto the `CliCommandSpec` it returns, and records
+   `pastedPersonaPaths` for the exec-time secret-mask recheck (Decision 1). All nine enqueue
    sites (four in `step-runner.ts`, four in `dag-executor.ts`, one in `merge-resolver.ts`) forward
    `spec: plan.invocation.spec` untouched and `executeCliSpec` spreads it, so no payload literal
    changes and the prompt and the mounts cannot disagree when the switch flips between dispatch
@@ -351,14 +358,16 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   effective policy extracted as a dependency-free single-path predicate), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
   `step-engine/step-runner.ts` (`resolveLlmPhase` passes `agentPool`; the retry_ai `toolProfile`
   fix is its own commit).
-- **Spec:** `cli-adapters/types.ts` (`CliCommandSpec.maskAgentDefinitions`). No `CliExecJobPayload`
+- **Spec:** `cli-adapters/types.ts` (`CliCommandSpec.maskAgentDefinitions` and
+  `CliCommandSpec.pastedPersonaPaths`). No `CliExecJobPayload`
   change, no enqueue literal change, nothing in `codex.ts`.
 - **Tree resolution:** `repo/worktree-git-boundary.ts` (`invocationRepoSubpath`,
   `resolveInvocationWorkerTree`, and the moved `resolveInvocationWorkerRoot` /
   `WORKER_REPO_STORAGE_ROOT`), `queues/cli-exec/resolvers.ts` (re-exports; `resolveInvocationRepoMount`
   calls `invocationRepoSubpath`).
 - **Exec:** `queues/cli-exec/agent-definition-mask.ts` (NEW), `queues/cli-exec/exec-core.ts`
-  (append to `authMounts`), `sandbox/docker-runner.ts` (tmpfs branch).
+  (append to `authMounts`; fail before the CLI starts when a pasted persona path is secret-masked
+  by then), `sandbox/docker-runner.ts` (tmpfs branch).
 - **Steps:** `step-engine/steps/onboarding/07_7-secret-sweep.ts` (`agentPool: '*'`). No prompt
   renderer changes: the prompt path scan covers every step.
 - **Shared:** beside `packages/shared/src/cli-providers/catalog.ts` (the agent-directory union and
@@ -374,7 +383,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   switch off),
   `test/step-runner-llm.test.ts` (`agentPool` reaches dispatch, the flag rides
   `enqueued[0].spec`, retry_ai `toolProfile`), NEW `test/agent-definition-mask.test.ts` (fixture
-  tree, including a secret file mask under a masked agent directory), a NEW docker-runner argv test (no mount form has one today), NEW
+  tree, including a secret file mask under a masked agent directory, and a pasted persona path that
+  is secret-masked by exec time), a NEW docker-runner argv test (no mount form has one today), NEW
   `test/agent-listing-capture.ts`.
 
 ## Verification
@@ -410,7 +420,7 @@ scratch.
    `docs/.claude/agents/x.md`, `.claude/agents-old/x.md` and the pointer inside a persona marker do
    not; among built-in prompt builders only 06_5 and 09_5 match, so a new match fails the test and
    becomes a conscious decision), marker ids, the persona path
-   (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open or linked to another in-tree directory / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a persona pasted before a deny rule appeared fails the invocation at exec / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open or linked to another in-tree directory / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, and `07_7-secret-sweep` declaring `'*'`.
