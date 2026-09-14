@@ -397,10 +397,25 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
       'utf8',
     );
     await writeFile(path.join(dir, 'own.py'), 'def own_project_fn(x):\n    return x\n', 'utf8');
+    // tox and nox build their own per-environment virtualenvs, reached by a different tool.
+    await mkdir(path.join(dir, '.tox', 'py311', 'lib'), { recursive: true });
+    await mkdir(path.join(dir, '.nox', 'tests', 'lib'), { recursive: true });
+    await writeFile(
+      path.join(dir, '.tox', 'py311', 'lib', 'tox_dep.py'),
+      'def tox_library_fn(x):\n    return x\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, '.nox', 'tests', 'lib', 'nox_dep.py'),
+      'def nox_library_fn(x):\n    return x\n',
+      'utf8',
+    );
     const symbols = await collectRepoSymbols(dir, 'python');
     expect(symbols.has('own_project_fn')).toBe(true);
     expect(symbols.has('library_helper_fn')).toBe(false);
     expect(symbols.has('other_library_fn')).toBe(false);
+    expect(symbols.has('tox_library_fn')).toBe(false);
+    expect(symbols.has('nox_library_fn')).toBe(false);
   });
 
   it('skips Rust build output, which is generated rather than project vocabulary', async () => {

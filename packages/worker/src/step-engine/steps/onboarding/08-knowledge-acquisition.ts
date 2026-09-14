@@ -183,6 +183,11 @@ const IGNORE_DIRS = new Set([
   // same reasoning that keeps `bin` off this list applies to it.
   '.venv',
   'venv',
+  // tox and nox build their own virtualenvs per environment, each with its own site-packages —
+  // the same third-party tree as `.venv`, reached by a different tool. Named explicitly rather
+  // than matched by prefix, because this set is compared by exact path SEGMENT.
+  '.tox',
+  '.nox',
 ]);
 
 async function collectShortFileTree(
