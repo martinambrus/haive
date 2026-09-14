@@ -29,8 +29,6 @@ export interface LineRefHit {
   token: string;
   /** The part before the line number, as a repo-relative path candidate. */
   filePath: string;
-  /** `:12-18`. A port is never a range, so this alone settles it. */
-  hasRange: boolean;
   /** Contains a `/`, so it is a path rather than a bare `host:port`. */
   hasPathSeparator: boolean;
 }
@@ -49,12 +47,7 @@ export function lineRefHits(block: string): LineRefHit[] {
     if (at >= 2 && block[at - 1] === '/' && block[at - 2] === '/') continue;
     const colon = token.lastIndexOf(':');
     const filePath = token.slice(0, colon);
-    out.push({
-      token,
-      filePath,
-      hasRange: token.slice(colon + 1).includes('-'),
-      hasPathSeparator: filePath.includes('/'),
-    });
+    out.push({ token, filePath, hasPathSeparator: filePath.includes('/') });
   }
   return out;
 }
@@ -178,14 +171,19 @@ export async function scrubCitations(
   for (const block of blocks) {
     let reason: string | null = null;
 
-    // A range or a slashed path is a file reference whatever the mode. A BARE `word.word:123`
-    // is the ambiguous case — indistinguishable from `host:port` — so it only counts when the
-    // file actually resolves in the anchor repo. Repo-less it is left alone, on the same
-    // reasoning this module already applies to paths: there is nothing private to leak, and a
-    // hallucinated reference is a quality problem the draft review catches. Deleting a block
-    // that merely named a host would be the worse error, and a silent one.
+    // A SLASHED path is a file reference whatever the mode. A bare `word.word:123` is the
+    // ambiguous case — indistinguishable from `host:port` — so it only counts when the file
+    // actually resolves in the anchor repo.
+    //
+    // A range does NOT settle it either, though it looks like it should: `db.example.com:8000-9000`
+    // is a port range in ordinary networking prose and shares its shape with
+    // `internal_menu_block.tpl.php:83-88`. Treating a range as proof deleted the block a
+    // networking rule was written in. Anchored, the real citation still resolves and is caught;
+    // repo-less it is left alone, on the reasoning this module already applies to paths —
+    // nothing private to leak, and a hallucinated reference is a quality problem the draft
+    // review catches, where deleting real prose is silent and worse.
     for (const hit of lineRefHits(block)) {
-      if (hit.hasRange || hit.hasPathSeparator) {
+      if (hit.hasPathSeparator) {
         reason = hit.token;
         break;
       }

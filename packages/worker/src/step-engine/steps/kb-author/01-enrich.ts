@@ -527,7 +527,11 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
           candidates.length > 0
             ? await confirmSupersedeByEmbedding(
                 { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
-                `${title}\n\n${body}`,
+                // The SCRUBBED article, not the model's raw answer. `finalBody` is what gets
+                // saved and reviewed, and if scrubbing removed repo-specific material that
+                // dominated the original text, superseding on that text archives an existing
+                // entry over content nobody will ever see published.
+                `${title}\n\n${finalBody}`,
                 candidates.map((c) => ({
                   id: c.id,
                   status: c.status,

@@ -34,10 +34,13 @@ describe('splitIntoBlocks', () => {
 });
 
 describe('scrubCitations', () => {
-  it('removes a line reference in either mode, with no repo to check against', async () => {
+  it('removes a bare line reference that RESOLVES in the anchor repo', async () => {
+    // A bare `name.ext:83-88` cannot be told apart from `host:port-port` by shape, so the repo
+    // is what settles it. Anchored, the real citation resolves and the block goes.
+    await mk('internal_menu_block.tpl.php');
     const body =
       '## The rule\n\nAlways X.\n\nSee internal_menu_block.tpl.php:83-88 for the bad case.';
-    const r = await scrubCitations(body, { repoPath: null });
+    const r = await scrubCitations(body, { repoPath: repo });
     expect(r.body).not.toMatch(/83-88/);
     expect(r.body).toMatch(/Always X/);
     expect(r.removed[0]?.reason).toBe('internal_menu_block.tpl.php:83-88');
@@ -103,12 +106,14 @@ describe('citationCandidates', () => {
 // `activit.module:534` and `api.internal:8080` are the same token shape, so the shape alone
 // cannot decide. Stripping on shape deleted whole blocks for naming a host and a port.
 describe('line references vs host:port', () => {
-  it('strips a ranged reference in either mode', async () => {
-    const r = await scrubCitations('Look at internal_menu_block.tpl.php:83-88 for this.', {
+  it('does NOT treat a range as proof — a port range is ordinary prose', async () => {
+    // `db.example.com:8000-9000` and `internal_menu_block.tpl.php:83-88` are the same shape.
+    // Treating a range as settling it deleted the block a networking rule was written in.
+    const r = await scrubCitations('Listen on db.example.com:8000-9000 behind the proxy.', {
       repoPath: null,
     });
-    expect(r.removed).toHaveLength(1);
-    expect(r.body).toBe('');
+    expect(r.removed).toEqual([]);
+    expect(r.body).toMatch(/8000-9000/);
   });
 
   it('strips a slashed path reference in either mode', async () => {

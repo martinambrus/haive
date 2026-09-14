@@ -20,13 +20,22 @@ describe('collectRepoSymbols with an unknown language', () => {
     const dir = await repoWith({
       'activit.module': 'function activit_menu_alter($items) {}',
       'helper.inc': 'function activit_render_icon($name) {}',
-      'main.go': 'func ProcessInvoiceBatch() {}\ntype InvoiceWriter interface {}',
+      'main.go':
+        'func ProcessInvoiceBatch() {}\ntype InvoiceWriter interface {}\nfunc (r *Repo) SaveInvoiceBatch() {}',
+      'calc.py': 'def compute_totals(rows):\n    return rows',
       'lib.rb': 'class InvoiceSerializer\nend',
     });
     const symbols = await collectRepoSymbols(dir, null);
     expect(symbols.has('activit_menu_alter')).toBe(true);
     expect(symbols.has('activit_render_icon')).toBe(true);
     expect(symbols.has('InvoiceSerializer')).toBe(true);
+    // Asserted, not merely present in the fixture: scanning `.go`/`.py` collects nothing
+    // unless the DECLARATION keywords are known too, and this file used to contain
+    // `func ProcessInvoiceBatch()` while asserting only the keywords PHP already had.
+    expect(symbols.has('ProcessInvoiceBatch')).toBe(true);
+    expect(symbols.has('InvoiceWriter')).toBe(true);
+    expect(symbols.has('compute_totals')).toBe(true);
+    expect(symbols.has('SaveInvoiceBatch')).toBe(true);
   });
 
   it('still scans only the named language when one is given', async () => {

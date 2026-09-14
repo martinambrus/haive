@@ -1010,7 +1010,12 @@ export async function collectRepoSymbols(
         continue;
       }
       const body = text.length > 200_000 ? text.slice(0, 200_000) : text;
-      const defRe = /\b(?:function|class|trait|interface)\s+([A-Za-z_]\w{4,})/g;
+      // Every keyword the SCANNED extensions can declare with. Adding `.go`/`.py`/`.rb` to the
+      // file filter collected nothing from them while this still knew only the PHP/JS set —
+      // Python declares with `def`, Go with `func` (optionally behind a receiver) and `type`.
+      // `function` precedes `func` so the longer keyword wins the alternation.
+      const defRe =
+        /\b(?:function|func|def|class|trait|interface|struct|type)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
       for (let m = defRe.exec(body); m; m = defRe.exec(body)) {
         if (m[1]) symbols.add(m[1]);
       }
