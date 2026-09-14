@@ -191,3 +191,42 @@ describe('absolute sandbox paths', () => {
     expect(r.removed).toEqual([]);
   });
 });
+
+// A bare filename has no slash and no line number, so neither pattern saw it — while the
+// authoring contract forbids filenames as well as paths, and an anchored model that has just
+// read the tree reaches for them naturally.
+describe('bare repository filenames', () => {
+  it('strips one that exists at the anchor repo root', async () => {
+    await mk('acme.config.ts');
+    const r = await scrubCitations('The rule lives in acme.config.ts for this project.', {
+      repoPath: repo,
+    });
+    expect(r.removed).toHaveLength(1);
+    expect(r.removed[0]?.reason).toBe('acme.config.ts');
+  });
+
+  it('keeps an ecosystem filename even though it resolves', async () => {
+    // `composer.json` sits at the root of the anchor repo AND shares its shape with the case
+    // above, so only the exemption separates them. "Declare it in composer.json" is exactly the
+    // generic advice a house rule is supposed to contain.
+    await mk('composer.json');
+    const r = await scrubCitations('Declare the dependency in composer.json as usual.', {
+      repoPath: repo,
+    });
+    expect(r.removed).toEqual([]);
+  });
+
+  it('keeps an invented filename that resolves nowhere', async () => {
+    const r = await scrubCitations('Something like acme.invented.ts would hold it.', {
+      repoPath: repo,
+    });
+    expect(r.removed).toEqual([]);
+  });
+
+  it('keeps bare filenames on a repo-less run, which has nothing to check against', async () => {
+    const r = await scrubCitations('The rule lives in acme.config.ts for this project.', {
+      repoPath: null,
+    });
+    expect(r.removed).toEqual([]);
+  });
+});

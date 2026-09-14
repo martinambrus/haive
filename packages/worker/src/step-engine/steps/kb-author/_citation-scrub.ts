@@ -62,6 +62,81 @@ export function lineRefHits(block: string): LineRefHit[] {
  *  `extractCitedPaths` therefore skips. */
 const PATH_LIKE = /(?:^|[\s`("[<])(\/?(?:\.\/)?[\w.-]+(?:\/[\w.-]+)+\/?)/g;
 
+/** A BARE filename — `acme.config.ts` — with no slash and no line number, so neither pattern
+ *  above sees it. The authoring contract forbids filenames as well as paths, and an anchored
+ *  model that has just read the tree reaches for them naturally.
+ *
+ *  The last segment must be alphabetic and at least two characters, which keeps prose out:
+ *  `e.g`, `i.e` and a version like `8.1` all have a one-character or numeric tail. */
+const BARE_FILENAME = /(?:^|[\s`("[<])([\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,8})(?=[\s`)"\].,;:!?<]|$)/g;
+
+/** Filenames that name an ECOSYSTEM TOOL rather than this repository.
+ *
+ *  Resolution alone cannot separate `acme.config.ts` from `composer.json`: both sit at the root
+ *  of the anchor repo, and they share a shape, so no pattern tells them apart. But only one of
+ *  them is "one repo's geography" — the other is vocabulary every project of that stack shares,
+ *  and a house rule that says "declare it in composer.json" is exactly the generic advice this
+ *  article is supposed to contain.
+ *
+ *  Err toward KEEPING content when extending this: a name that is missing costs a deleted block
+ *  of somebody's article, silently, while a name wrongly present costs only a filename surviving
+ *  into a draft a human reviews. Additions are cheap; removals are not. */
+const ECOSYSTEM_FILENAMES = new Set(
+  [
+    'package.json',
+    'package-lock.json',
+    'pnpm-lock.yaml',
+    'yarn.lock',
+    'bun.lockb',
+    'composer.json',
+    'composer.lock',
+    'tsconfig.json',
+    'jsconfig.json',
+    'vite.config.ts',
+    'vite.config.js',
+    'webpack.config.js',
+    'rollup.config.js',
+    'jest.config.js',
+    'vitest.config.ts',
+    'playwright.config.ts',
+    'phpunit.xml',
+    'tailwind.config.js',
+    'postcss.config.js',
+    'babel.config.js',
+    'eslint.config.js',
+    'docker-compose.yml',
+    'docker-compose.yaml',
+    'dockerfile',
+    'readme.md',
+    'license.md',
+    'changelog.md',
+    'contributing.md',
+    'makefile',
+    'settings.php',
+    'services.yml',
+    'gemfile',
+    'rakefile',
+    'go.mod',
+    'go.sum',
+    'requirements.txt',
+    'pyproject.toml',
+    'setup.py',
+    'cargo.toml',
+  ].map((n) => n.toLowerCase()),
+);
+
+/** Bare filenames in one block that might name a file in the anchor repo. */
+export function bareFilenameCandidates(block: string): string[] {
+  const out = new Set<string>();
+  for (const m of block.matchAll(BARE_FILENAME)) {
+    const name = m[1];
+    if (!name) continue;
+    if (ECOSYSTEM_FILENAMES.has(name.toLowerCase())) continue;
+    out.add(name);
+  }
+  return [...out];
+}
+
 /** Split markdown into blocks, keeping a fenced code block whole.
  *
  *  Blocks and not lines, because removing the line a citation sits on leaves a dangling
@@ -208,6 +283,18 @@ export async function scrubCitations(
         if (target && (await pathExists(target))) {
           reason = candidate;
           break;
+        }
+      }
+      // Bare filenames are checked at the repo ROOT only. That is where the config and manifest
+      // files a model reaches for actually live, and it costs one stat per candidate instead of
+      // a second walk of the tree with its own cap to get wrong.
+      if (!reason) {
+        for (const name of bareFilenameCandidates(block)) {
+          const target = resolveInsideRepo(opts.repoPath, name);
+          if (target && (await pathExists(target))) {
+            reason = name;
+            break;
+          }
         }
       }
     }
