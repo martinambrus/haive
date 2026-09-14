@@ -240,9 +240,11 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     // `main` is single-word and below the length floor — the scan must not start collecting
     // vocabulary every project shares.
     expect(symbols.has('main')).toBe(false);
-    // Java instance methods carry a return type before the name, and admitting a bare leading
-    // token there widens a shape this scan deliberately refuses to widen. Documented, not fixed.
-    expect(symbols.has('processInvoice')).toBe(false);
+    // A return-typed method is read by `cFuncRe`, in Java exactly as in C# — the same shape, so
+    // no reason to admit one and refuse the other. This assertion said `false` while that shape
+    // was excluded; it is the assertion that caught the change when the pattern learned to see
+    // an indented member.
+    expect(symbols.has('processInvoice')).toBe(true);
   });
 
   it('collects Elixir declarations, including the def- forms `def` alone cannot reach', async () => {
@@ -316,15 +318,35 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
       ].join('\n'),
       'utf8',
     );
+    // REAL C# formatting: the member is indented inside its class. The first version of this
+    // fixture put it at column 0 to match the pattern, which is the wrong way round — it proved
+    // the regex matched itself rather than that it reads C#.
     await writeFile(
       path.join(dir, 'Invoice.cs'),
-      ['public class Svc {', '}', 'public void ProcessInvoice(int id) {', '}'].join('\n'),
+      [
+        'public class InvoiceService {',
+        '    public void ProcessInvoice(int id) {',
+        '        if (condition_value) {',
+        '            indented_call(id);',
+        '        }',
+        '        foreach (var item_value in items) {}',
+        '    }',
+        '    private static Task ComputeTotalAsync(Order o) {',
+        '        return null;',
+        '    }',
+        '    public int TotalCount { get; set; }',
+        '}',
+      ].join('\n'),
       'utf8',
     );
     const symbols = await collectRepoSymbols(dir, null);
     expect(symbols.has('process_invoice_batch')).toBe(true);
     expect(symbols.has('compute_checksum')).toBe(true);
     expect(symbols.has('ProcessInvoice')).toBe(true);
+    expect(symbols.has('ComputeTotalAsync')).toBe(true);
+    // Indented control flow is still not a symbol, which is what the brace requirement buys.
+    expect(symbols.has('item_value')).toBe(false);
+    expect(symbols.has('TotalCount')).toBe(false);
     // A prototype declares no body, and control flow is not a symbol however it is written.
     expect(symbols.has('prototype_only_fn')).toBe(false);
     expect(symbols.has('condition_value')).toBe(false);

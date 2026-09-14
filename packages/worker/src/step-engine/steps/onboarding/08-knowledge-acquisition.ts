@@ -1189,11 +1189,11 @@ export async function collectRepoSymbols(
       // `fn` (Rust) and `record` (Java) are the two additions those stacks need; `class`,
       // `interface`, `enum`, `struct`, `trait` and `type` already covered the rest of both. Order
       // matters only in that `function` precedes `func` precedes `fn`, so the longest keyword wins
-      // the alternation. Java's INSTANCE METHODS stay uncollected and that is deliberate: they
-      // carry a return type between the modifiers and the name (`public void processInvoice()`),
-      // and admitting a bare leading token there widens the SHAPE this scan refuses to widen —
-      // a miss costs a symbol, over-matching costs somebody's article. Java TYPES are collected,
-      // which is the form an article cites as `new InvoiceProcessor(...)`.
+      // the alternation. A method carrying a RETURN TYPE between the modifiers and the name
+      // (`public void processInvoice()`) is not a keyword declaration and is read by `cFuncRe`
+      // below — in Java as in C#, since it is the same shape and there is no principled reason to
+      // admit one and refuse the other. That shape was excluded for a while on the argument that
+      // types carry Java anyway; C has no types to carry it, which is what forced the question.
       const defRe =
         /(?<!\buse\s)\b(?:function|func|fun|fn|defmodule|defmacrop|defmacro|defp|def|class|trait|interface|struct|type|enum|module|record|object|protocol)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
       // `enum` covers PHP 8.1 and TypeScript, `module` covers Ruby — both are unambiguous
@@ -1236,14 +1236,19 @@ export async function collectRepoSymbols(
       //
       // This IS the shape the scan otherwise refuses to widen, so it is anchored hard, and every
       // clause below is load-bearing rather than defensive:
-      //   - `^` at column 0, where a C/C++ definition sits and an indented CALL does not;
-      //   - a type token AND a name before the parens, so `if (x) {` and `while (x) {` cannot
-      //     match — they have only one;
+      //   - a type token AND a name before the parens, so `if (x) {`, `while (x) {`,
+      //     `foreach (…) {`, `using (…) {`, `lock (…) {`, `catch (…) {` and `switch (…) {` all
+      //     have only ONE and cannot match;
       //   - no `;` inside the parens, which is what excludes `for (a; b; c) {`;
       //   - a `{` after them, so a prototype (`int foo(void);`) and a bare call are both out.
       // `isDistinctiveSymbol` still applies, so a single generic word never lands.
+      //
+      // Indentation is ALLOWED. Anchoring at column 0 looked like the safe choice and was simply
+      // wrong: a C# member sits inside a class, so the pattern could not see the language's
+      // normal formatting at all. The brace requirement is what excludes an indented CALL —
+      // `indented_call(arg);` ends in a semicolon — so the anchor was never what made this safe.
       const cFuncRe =
-        /^[A-Za-z_][\w:<>,*&\s]*?\s+\*?([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?\{/gm;
+        /^[ \t]*[A-Za-z_][\w:<>,*&\s]*?\s+\*?([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?\{/gm;
       for (let m = cFuncRe.exec(body); m; m = cFuncRe.exec(body)) {
         if (m[1] && !NON_SYMBOL_KEYWORDS.has(m[1]) && isDistinctiveSymbol(m[1])) {
           symbols.add(m[1]);
