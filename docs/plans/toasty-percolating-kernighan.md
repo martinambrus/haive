@@ -70,11 +70,15 @@ type — inherits it without anyone maintaining a list of special steps.
    the inline persona. The reader never follows a repository-controlled link: the worker is
    privileged, and an untrusted repository can plant `.claude/agents/peer-reviewer.md` as a symlink
    to `/proc/self/environ` or a host secret, whose bytes would be pasted into a prompt sent to the
-   provider. So it `realpath`s the agent directory and refuses it unless it lies inside the
-   invocation tree's own realpath, opens `<id>.md` with `O_NOFOLLOW`, `fstat`s the open handle and
-   accepts only a regular file, and reads at most the remaining size budget (dispatch side, item 3)
-   plus one byte from that handle, so a size that lies (a pseudo-file reports 0) cannot slip past
-   the budget. That is the regular-files-only rule `ensureArchivesExpanded` already applies with
+   provider. So it opens `<id>.md` with `O_NOFOLLOW | O_NONBLOCK`, so a symlinked final
+   component fails the open and a FIFO cannot block the dispatch waiting for a writer. It then
+   checks the file it actually opened, not the path it asked for: it reads the descriptor's real
+   path from `/proc/self/fd/<fd>` (the worker runs on Linux) and refuses it unless it lies inside
+   the invocation tree's own realpath. No concurrent swap of `.claude/agents` for a symlink can race
+   that check, because it describes the open descriptor rather than a later re-walk of the path.
+   Finally it `fstat`s the handle, accepts only a regular file, and reads at most the remaining size
+   budget (dispatch side, item 3) plus one byte from it, so a size that lies (a pseudo-file reports
+   0) cannot slip past the budget. That is the regular-files-only rule `ensureArchivesExpanded` already applies with
    `lstat`, and a refused file is treated as missing. No directory is scanned, and no unrelated or
    out-of-tree file is ever read. It reuses the loader's frontmatter parser (`parseAgentFile`,
    exported) and leaves `loadAgentPersonas` and its only caller, 03, untouched. Codex inlining
@@ -242,7 +246,10 @@ so only a customised definition triggers it.
    candidate under the invocation's worker-side root (`resolveInvocationWorkerRoot`) and masks
    only a real directory whose realpath lies inside that root. A candidate that is, or sits under, a
    repository-controlled symlink is left unmasked (failing open, item 6), because a mount
-   destination that traverses such a link is not a path to hand Docker.
+   destination that traverses such a link is not a path to hand Docker. The builder reads no file
+   content, so a race that swaps a directory after the check can at worst leave it unmasked, which is
+   today's behaviour; the persona reader is the one place a race could leak bytes, and it checks the
+   descriptor it opened (Decision 1).
 3. **A read-only tmpfs mount.** `DockerVolumeMount` (`sandbox/docker-runner.ts`) has only volume
    and bind forms. It gains `tmpfs?: true`, rendered as
    `--mount type=tmpfs,destination=<target>[,readonly]` by a branch placed BEFORE the
@@ -321,8 +328,9 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies` with its
   scope-marker check, the switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
   (`agentGuidanceIds`, the positive arm), `step-engine/steps/workflow/_agent-loader.ts` (export
-  `parseAgentFile`; a filename-keyed single-file reader: in-tree realpath, `O_NOFOLLOW` open,
-  `fstat` regular-file check, capped read), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
+  `parseAgentFile`; a filename-keyed single-file reader: `O_NOFOLLOW | O_NONBLOCK` open, an
+  in-tree check on the opened descriptor's `/proc/self/fd` path, `fstat` regular-file check, capped
+  read), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
   `step-engine/step-runner.ts` (`resolveLlmPhase` passes `agentPool`; the retry_ai `toolProfile`
   fix is its own commit).
 - **Spec:** `cli-adapters/types.ts` (`CliCommandSpec.maskAgentDefinitions`). No `CliExecJobPayload`
@@ -382,7 +390,7 @@ scratch.
    `agentDirectoryScopeMarker` (`.claude/agents/x.md`, `./.claude/agents/x.md` and
    `/haive/workdir/.claude/agents/x.md` mark; `docs/.claude/agents/x.md` and
    `.claude/agents-old/x.md` do not), marker ids, the persona path
-   (found / missing / a symlinked or out-of-tree `<id>.md` refused / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, and `07_7-secret-sweep` declaring `'*'`.
