@@ -302,6 +302,13 @@ export async function resolveMcpExtraFiles(
     // exactly the `"git":"failed"` / `is not a valid Git repository` entry the gate above
     // exists to prevent.
     includeGit: hasRepo && !hasWorktree && !ragOnly,
+    // `filesystem` survives a rag-only run because grounding on disk is still the job. A
+    // REPO-LESS run is the one case where that argument runs out: its workspace is an empty
+    // scratch directory, so the server would announce eleven tools over nothing. Declaring it
+    // is not free either — the CLI reports a server that failed to start, and exec-core then
+    // refuses to trust the whole run (MEASURED: three kb_author invocations returned a correct
+    // article and were discarded as `filesystem: failed`).
+    includeFilesystem: hasRepo,
     includeChromeDevtools: surface.chromeDevtools.enabled,
     chromeDevtoolsBrowserUrl,
     chromeDevtoolsMcpVersion: surface.chromeDevtools.version,

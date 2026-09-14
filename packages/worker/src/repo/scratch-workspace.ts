@@ -1,5 +1,7 @@
 import { chown, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 import { SANDBOX_UID, SANDBOX_GID } from '../sandbox/sandbox-identity.js';
 
@@ -71,4 +73,35 @@ export async function removeTaskScratchWorkspace(userId: string, taskId: string)
   } catch (err) {
     log.warn({ err, taskId }, 'could not remove the scratch workspace');
   }
+}
+
+/** Drop a repo-less task's workspace once nothing can still mount it.
+ *
+ *  Task completion deliberately does not wait for the best-effort step-summary invocation, so
+ *  removing the directory at task end pulls it out from under a recap that is already starting
+ *  — MEASURED, the recap was created 32 ms BEFORE completion and started 26 ms after it, and
+ *  docker refused the mount with `cannot access path .../_scratch/<taskId>`. Unlike an auth
+ *  volume, which docker itself refuses to remove while a container holds it, a directory is
+ *  removed happily while mounted, so the deferral has to be explicit.
+ *
+ *  Both callers share this one rule: a pending summary means the LAST summary to finish does
+ *  the removal (`cleanupAuthAfterTerminalSummary`), exactly as the auth volumes already work. */
+export async function cleanupTaskScratchWorkspace(db: Database, taskId: string): Promise<void> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { userId: true, type: true, repositoryId: true },
+  });
+  if (!task || task.repositoryId || !taskTypeAllowsNoRepository(task.type)) return;
+
+  const pendingSummary = await db.query.cliInvocations.findFirst({
+    where: and(
+      eq(schema.cliInvocations.taskId, taskId),
+      isNotNull(schema.cliInvocations.summaryForStepId),
+      isNull(schema.cliInvocations.endedAt),
+    ),
+    columns: { id: true },
+  });
+  if (pendingSummary) return;
+
+  await removeTaskScratchWorkspace(task.userId, taskId);
 }

@@ -68,7 +68,7 @@ import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../sandbox/ide-runner.js';
 import {
   ensureTaskScratchWorkspace,
-  removeTaskScratchWorkspace,
+  cleanupTaskScratchWorkspace,
   taskTypeAllowsNoRepository,
 } from '../repo/scratch-workspace.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
@@ -650,15 +650,10 @@ async function cleanupTaskContainers(
 
   // The empty workspace a repo-less task ran in. Reaped here and not in the worktree branch
   // below because it is NOT a worktree — no step owns it, nothing else sweeps it, and it sits
-  // on the shared repos volume where a leak would accumulate one directory per task.
+  // on the shared repos volume where a leak would accumulate one directory per task. Defers to
+  // the last step summary when one is still in flight; see cleanupTaskScratchWorkspace.
   try {
-    const scratchTask = await db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, taskId),
-      columns: { userId: true, type: true, repositoryId: true },
-    });
-    if (scratchTask && !scratchTask.repositoryId && taskTypeAllowsNoRepository(scratchTask.type)) {
-      await removeTaskScratchWorkspace(scratchTask.userId, taskId);
-    }
+    await cleanupTaskScratchWorkspace(db, taskId);
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-scratch-workspace failed');
   }

@@ -35,6 +35,7 @@ import {
 } from '@haive/shared';
 import { resolveAgentConcurrency } from '../../sandbox/runtime-admission.js';
 import { resolvePause } from '../../orchestrator/pause.js';
+import { cleanupTaskScratchWorkspace } from '../../repo/scratch-workspace.js';
 import { LEDGER_SUMMARY_MAX_CHARS, recordLedgerEntry } from '../../step-engine/task-ledger.js';
 import {
   refreshAllCliVersions,
@@ -432,6 +433,9 @@ async function cleanupAuthAfterTerminalSummary(db: Database, taskId: string): Pr
         'terminal step summary could not remove every deferred task auth volume',
       );
     }
+    // Same deferral, different resource: a repo-less task's scratch workspace was left in
+    // place by task completion precisely so THIS invocation could mount it.
+    await cleanupTaskScratchWorkspace(db, taskId);
   } catch (err) {
     // The summary is best-effort and already finalized. Cleanup trouble must not turn its
     // successful task back into a failed queue job; boot's orphan reaper is the final backstop.
