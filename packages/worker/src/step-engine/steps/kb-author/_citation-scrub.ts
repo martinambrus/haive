@@ -15,13 +15,49 @@ export interface ScrubResult {
   removed: ScrubbedBlock[];
 }
 
-/** A `file.ext:12` or `file.ext:12-18` reference.
+/** A `file.ext:12` or `file.ext:12-18` reference — a claim about a specific file at a specific
+ *  moment, so never part of an abstracted example, and the first thing to rot. The SVG entry
+ *  that prompted all this cited `internal_menu_block.tpl.php:83-88`.
  *
- *  Unambiguous in BOTH modes and the one rule that needs no repository to check against: a line
- *  number is a claim about a specific file at a specific moment, so it is never part of an
- *  abstracted example. It is also the first thing to rot — the SVG entry that prompted all this
- *  cited `internal_menu_block.tpl.php:83-88`. */
-const LINE_REF = /[\w./-]+\.[A-Za-z][\w]*:\d+(?:-\d+)?/g;
+ *  The shape ALONE cannot decide, which is why `lineRefHits` qualifies every match rather than
+ *  treating one as a violation outright: `activit.module:534` and `api.internal:8080` are the
+ *  same token shape, and stripping a block for naming a host and port would silently delete
+ *  legitimate prose from an article about caches or services. */
+const LINE_REF = /[\w][\w./-]*\.[A-Za-z][\w]*:\d+(?:-\d+)?/g;
+
+export interface LineRefHit {
+  token: string;
+  /** The part before the line number, as a repo-relative path candidate. */
+  filePath: string;
+  /** `:12-18`. A port is never a range, so this alone settles it. */
+  hasRange: boolean;
+  /** Contains a `/`, so it is a path rather than a bare `host:port`. */
+  hasPathSeparator: boolean;
+}
+
+/** Line references in one block, each qualified so the caller can decide.
+ *
+ *  A match inside a URL authority (`redis://cache.local:6379`) is dropped: it is preceded by the
+ *  TWO slashes of a scheme. One slash is not enough to skip on — `/var/lib/foo.php:12` is an
+ *  absolute path and a real citation. The pattern must also start on a word character, or it
+ *  would swallow those slashes itself and never see what precedes them. */
+export function lineRefHits(block: string): LineRefHit[] {
+  const out: LineRefHit[] = [];
+  for (const m of block.matchAll(LINE_REF)) {
+    const token = m[0];
+    const at = m.index ?? 0;
+    if (at >= 2 && block[at - 1] === '/' && block[at - 2] === '/') continue;
+    const colon = token.lastIndexOf(':');
+    const filePath = token.slice(0, colon);
+    out.push({
+      token,
+      filePath,
+      hasRange: token.slice(colon + 1).includes('-'),
+      hasPathSeparator: filePath.includes('/'),
+    });
+  }
+  return out;
+}
 
 /** Anything shaped like a repo-relative path, WITH or without a file extension.
  *
@@ -127,8 +163,22 @@ export async function scrubCitations(
   for (const block of blocks) {
     let reason: string | null = null;
 
-    const lineRef = block.match(LINE_REF)?.[0];
-    if (lineRef) reason = lineRef;
+    // A range or a slashed path is a file reference whatever the mode. A BARE `word.word:123`
+    // is the ambiguous case — indistinguishable from `host:port` — so it only counts when the
+    // file actually resolves in the anchor repo. Repo-less it is left alone, on the same
+    // reasoning this module already applies to paths: there is nothing private to leak, and a
+    // hallucinated reference is a quality problem the draft review catches. Deleting a block
+    // that merely named a host would be the worse error, and a silent one.
+    for (const hit of lineRefHits(block)) {
+      if (hit.hasRange || hit.hasPathSeparator) {
+        reason = hit.token;
+        break;
+      }
+      if (opts.repoPath && (await pathExists(path.join(opts.repoPath, hit.filePath)))) {
+        reason = hit.token;
+        break;
+      }
+    }
 
     if (!reason && opts.repoPath) {
       for (const candidate of citationCandidates(block)) {

@@ -234,6 +234,14 @@ export default function GlobalKbPage() {
   const [scopeEdit, setScopeEdit] = useState<Record<string, string> | null>(null);
   const [scopeBusy, setScopeBusy] = useState(false);
   const [scopeError, setScopeError] = useState<string | null>(null);
+  // Drop a half-finished scope edit whenever the modal moves to another entry or closes. Keyed
+  // on the entry id and not wired into each close path on purpose: the dialog closes on Escape,
+  // on the backdrop and on the X as well as on Cancel, and a leftover editor would show the
+  // PREVIOUS entry's facets and write them over this one on Save.
+  useEffect(() => {
+    setScopeEdit(null);
+    setScopeError(null);
+  }, [selected?.id]);
   const [enrichBusy, setEnrichBusy] = useState(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
   // Arriving from the onboarding step-04 link (?repo=&cli=) pre-fills the repo +

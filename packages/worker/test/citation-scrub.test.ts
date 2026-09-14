@@ -98,3 +98,39 @@ describe('citationCandidates', () => {
     expect(citationCandidates('use and/or, see https://example.com/docs/x')).toEqual([]);
   });
 });
+
+// `activit.module:534` and `api.internal:8080` are the same token shape, so the shape alone
+// cannot decide. Stripping on shape deleted whole blocks for naming a host and a port.
+describe('line references vs host:port', () => {
+  it('strips a ranged reference in either mode', async () => {
+    const r = await scrubCitations('Look at internal_menu_block.tpl.php:83-88 for this.', {
+      repoPath: null,
+    });
+    expect(r.removed).toHaveLength(1);
+    expect(r.body).toBe('');
+  });
+
+  it('strips a slashed path reference in either mode', async () => {
+    const r = await scrubCitations('See src/Cache/Backend.php:12 here.', { repoPath: null });
+    expect(r.removed).toHaveLength(1);
+  });
+
+  it('keeps a host and port, which is not a file reference', async () => {
+    const body = [
+      'Point the app at db.example.com:5432 and the cache at api.internal:8080.',
+      '',
+      'A queue at redis://cache.local:6379/0 behaves the same way.',
+    ].join('\n');
+    const r = await scrubCitations(body, { repoPath: null });
+    expect(r.removed).toEqual([]);
+    expect(r.body).toContain('db.example.com:5432');
+    expect(r.body).toContain('redis://cache.local:6379/0');
+  });
+
+  it('strips a bare reference only when it resolves in the anchor repo', async () => {
+    const kept = await scrubCitations('Handled in api.internal:8080 today.', {
+      repoPath: '/nonexistent-repo-root',
+    });
+    expect(kept.removed).toEqual([]);
+  });
+});

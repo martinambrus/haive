@@ -984,7 +984,13 @@ export async function collectRepoSymbols(
 ): Promise<Set<string>> {
   const symbols = new Set<string>();
   const lang = (language ?? '').toLowerCase();
-  const exts = SYMBOL_SCAN_EXT[lang] ?? ['.php', '.js', '.ts', '.py'];
+  // An UNKNOWN language scans every extension this map knows, not a four-entry guess. The old
+  // default was `['.php','.js','.ts','.py']`, which silently under-covers exactly the repos the
+  // citation scrub exists for: it misses Drupal's own `.module`/`.inc`/`.theme` — the entry that
+  // motivated the scrub cited `activit.module:534` — as well as `.tsx`, `.rb` and `.go`, so a
+  // copied identifier from any of them was invisible to the symbol check. A named language is
+  // unchanged and still scans only its own extensions.
+  const exts = SYMBOL_SCAN_EXT[lang] ?? [...new Set(Object.values(SYMBOL_SCAN_EXT).flat())];
   try {
     const files = await listFilesMatching(
       repoPath,
