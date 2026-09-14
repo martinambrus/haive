@@ -23,7 +23,7 @@ import {
   taskScratchSubpath,
 } from '../repo/scratch-workspace.js';
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
-import { defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
+import { buildMountArgs, defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 
 // Per-task browser IDE: a code-server container serving the task's worktree as its
@@ -196,8 +196,16 @@ export async function startIdeRunner(params: {
       `haive.task.id=${params.taskId}`,
       '--label',
       `${IDE_RUNNER_LABEL}=1`,
-      '--mount',
-      `type=volume,source=${REPO_VOLUME},destination=/workspace,volume-subpath=${params.workspaceSubpath}`,
+      // Built by `buildMountArgs`, not spelled out here. This is the THIRD site to need
+      // `volume-nocopy` on a subpath mount and the third to have been written without it — the
+      // sandbox had it, the terminal did not, and neither did this. Docker seeds an empty subpath
+      // from the image directory at the same target and copies its OWNERSHIP, so a scratch
+      // workspace chowned to 1000:1000 comes back root:root and code-server, which runs as 1000,
+      // can open the workspace but cannot save. One function decides how a subpath mount is
+      // spelled, so a fourth site cannot get it wrong.
+      ...buildMountArgs([
+        { source: REPO_VOLUME, target: '/workspace', subpath: params.workspaceSubpath },
+      ]),
       '-v',
       `${params.extVolume}:/ext`,
       '-v',
