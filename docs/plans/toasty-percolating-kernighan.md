@@ -389,10 +389,15 @@ stores only `stepIds: string[]` and needs nothing.
 2. **`{{agent:<id>}}` tokens.** `buildPrompt` renders a token as PR 1's persona marker with no
    inline protocol, and Phase 3.1 widens PR 1's resolver for exactly those markers, because PR 1's
    LSP gate exists to protect an embedded fallback a template persona does not have. The body is
-   pasted for EVERY provider, read from the selected provider's own agent directory when that one
-   is markdown and otherwise from the first markdown agent directory in catalog order that defines
-   the id — so codex (TOML) and amp (no agent directory) get the same persona without the TOML
-   reader PR 1 defers. A marker whose body cannot be found at dispatch fails the dispatch with the
+   pasted for EVERY provider and whether or not the invocation is isolated: a template that
+   declares `file_write`, `subagents` or `agentPool: '*'`, or hands its agent an agent path, still
+   has no embedded protocol, so the widened resolver runs for these markers outside
+   `agentIsolationApplies`. The body is read from the selected provider's own agent directory when
+   that one is markdown and defines the id, and otherwise from the first markdown agent directory in
+   catalog order that does — the same directories the dangling-reference check below searches, so
+   a persona defined only in `.gemini/agents` passes task-create and still resolves for a claude
+   dispatch, and codex (TOML) and amp (no agent directory) get it without the TOML reader PR 1
+   defers. A marker whose body cannot be found at dispatch fails the dispatch with the
    dangling-reference reason below instead of running without its persona, since the tree can
    change between task-create and dispatch. The factory is also a handed-path renderer: a read-only
    template that interpolates an agent file (`Review {{path}}` with `path = .claude/agents/foo.md`)
