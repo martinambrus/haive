@@ -70,6 +70,7 @@ import {
   ensureTaskScratchWorkspace,
   cleanupTaskScratchWorkspace,
   taskTypeAllowsNoRepository,
+  taskWasCreatedRepoLess,
 } from '../repo/scratch-workspace.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { getTaskEnvTemplate, pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
@@ -241,6 +242,18 @@ async function resolveTaskContext(
     });
     repoPath = repo?.storagePath ?? repo?.localPath ?? null;
   } else if (taskTypeAllowsNoRepository(task.type)) {
+    // The type says a null repository MAY be a mode; only the task itself says whether it is.
+    // An anchored task whose repository was deleted arrives here looking identical — the FK is
+    // ON DELETE SET NULL and `cancelOpenTasksForRepo` leaves terminal tasks alone, so a failed
+    // anchored task can be retried into this branch and would quietly publish a generic article
+    // over an entry someone anchored on purpose. That is the torn state the hard failure below
+    // exists for, and the allowlist alone re-admitted it.
+    if (taskWasCreatedRepoLess(task.metadata) === false) {
+      throw new Error(
+        `task ${taskId} was anchored to a repository that no longer exists; ` +
+          're-run it from a new entry to pick another anchor, or author it without one',
+      );
+    }
     // A task type that is ALLOWED to have no repository gets an empty workspace instead of a
     // checkout. `kb_author` writing a cross-project house standard is the case: there is no
     // repo to read, but the CLI still needs a writable working directory.

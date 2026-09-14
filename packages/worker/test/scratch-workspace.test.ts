@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { taskScratchSubpath, taskTypeAllowsNoRepository } from '../src/repo/scratch-workspace.js';
+import {
+  taskScratchSubpath,
+  taskTypeAllowsNoRepository,
+  taskWasCreatedRepoLess,
+} from '../src/repo/scratch-workspace.js';
 
 // A null `tasks.repository_id` has TWO meanings — a task deliberately created without one, and
 // a task whose repository was deleted out from under it (the column is ON DELETE SET NULL).
@@ -17,6 +21,31 @@ describe('taskTypeAllowsNoRepository', () => {
     for (const type of ['workflow', 'onboarding', 'run_app', 'plan_build', 'plan_chat']) {
       expect(taskTypeAllowsNoRepository(type)).toBe(false);
     }
+  });
+});
+
+// The allowlist keys on TYPE, so for kb_author it cannot separate "created without a repo" from
+// "had one until the repository was deleted" — and the second is the torn state the hard failure
+// exists for. Deleting a repository nulls the FK and leaves TERMINAL tasks alone, so a failed
+// anchored task retries straight into the repo-less branch.
+describe('taskWasCreatedRepoLess', () => {
+  it('reads the recorded choice, not the current column', () => {
+    expect(taskWasCreatedRepoLess({ anchorRepositoryId: null })).toBe(true);
+    expect(taskWasCreatedRepoLess({ anchorRepositoryId: 'r1' })).toBe(false);
+  });
+
+  it('says "not recorded" for a task that predates the record', () => {
+    // null, never false: a legacy task keeps the answer it had, so no backfill is needed.
+    expect(taskWasCreatedRepoLess({ globalKbEntryId: 'e1' })).toBeNull();
+    expect(taskWasCreatedRepoLess(null)).toBeNull();
+    expect(taskWasCreatedRepoLess(undefined)).toBeNull();
+    expect(taskWasCreatedRepoLess('not an object')).toBeNull();
+  });
+
+  it('separates a recorded null from an absent key', () => {
+    // The two are the same JSON value on read; only the KEY's presence tells them apart.
+    expect(taskWasCreatedRepoLess({ anchorRepositoryId: null })).toBe(true);
+    expect(taskWasCreatedRepoLess({})).toBeNull();
   });
 });
 

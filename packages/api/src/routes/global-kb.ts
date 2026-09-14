@@ -372,6 +372,12 @@ globalKbRoutes.post('/enrich', async (c) => {
       cliProviderId: data.cliProviderId,
       metadata: {
         globalKbEntryId: entry.id,
+        // What the AUTHOR chose, which `repositoryId` stops being able to say the moment a
+        // repository is deleted: the FK is ON DELETE SET NULL, and `cancelOpenTasksForRepo`
+        // leaves terminal tasks alone, so a FAILED anchored task silently becomes
+        // indistinguishable from one created repo-less. Written even when null, because the
+        // KEY's presence is what separates "recorded" from "predates this".
+        anchorRepositoryId: data.repositoryId ?? null,
         ...(data.egress
           ? { egress: { mode: data.egress.mode, domains: data.egress.domains ?? [], ips: [] } }
           : {}),

@@ -32,6 +32,24 @@ export function taskTypeAllowsNoRepository(type: string): boolean {
   return REPO_OPTIONAL_TASK_TYPES.has(type);
 }
 
+/** Whether this task was CREATED without a repository, as opposed to having LOST one.
+ *
+ *  `taskTypeAllowsNoRepository` cannot answer that. It keys on the TYPE, and for `kb_author`
+ *  the two meanings of a null `repository_id` wear the same type — so the allowlist alone
+ *  re-admits exactly the torn state it was written to keep out. Deleting a repository sets the
+ *  FK to NULL (`ON DELETE SET NULL`) and `cancelOpenTasksForRepo` skips terminal tasks, so a
+ *  FAILED anchored task keeps its status and, on retry, reads as repo-less: it would be handed
+ *  an empty workspace and told no repository was selected, and could then publish a DIFFERENT,
+ *  generic article over the entry the author anchored on purpose.
+ *
+ *  `null` means the task predates the record, where the previous answer still stands and no
+ *  backfill is needed — the same presence-bit shape `tasks.cli_choice_recorded` uses. */
+export function taskWasCreatedRepoLess(metadata: unknown): boolean | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  if (!('anchorRepositoryId' in metadata)) return null;
+  return (metadata as { anchorRepositoryId?: unknown }).anchorRepositoryId == null;
+}
+
 /** Volume-relative path of a task's scratch workspace — the shape `resolveInvocationRepoMount`
  *  already uses for a repository (`<userId>/<repositoryId>`). */
 export function taskScratchSubpath(userId: string, taskId: string): string {
