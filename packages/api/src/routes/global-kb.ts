@@ -630,13 +630,18 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
           .from(globalKbEntries)
           .where(eq(globalKbEntries.id, id))
           .for('update');
-        // DRAFTS only. The link exists to stop activation archiving the wrong predecessor, and
-        // only a draft can still activate — on an entry that is already active the archive has
-        // happened and the link is history, so clearing it would erase the record of what this
-        // article replaced without un-archiving anything.
+        // Any status this entry can still be ACTIVATED from — draft or archived. The link exists
+        // to stop activation archiving the wrong predecessor, so the rule has to track what can
+        // activate, and that set grew: this said DRAFTS only, justified by "only a draft can
+        // still activate", and then archived entries became reactivatable. The justification
+        // stopped being true and the condition did not follow it.
+        //
+        // An ACTIVE entry keeps its link: there the archive has already happened and the link is
+        // history, so clearing it would erase the record of what this article replaced without
+        // un-archiving anything.
         if (
           existing?.supersedesEntryId &&
-          existing.status === 'draft' &&
+          (existing.status === 'draft' || existing.status === 'archived') &&
           scopeChanged(existing.facets, set.facets)
         ) {
           set.supersedesEntryId = null;
