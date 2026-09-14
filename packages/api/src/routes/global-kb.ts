@@ -21,7 +21,12 @@ import {
   type GlobalKbFacets,
   type GlobalKbStatus,
 } from '@haive/shared/global-kb';
-import { ollamaEmbed, probeOllama, releaseEmbedModelIfUnused } from '@haive/shared/rag';
+import {
+  FACET_FILTER_DIMENSIONS,
+  ollamaEmbed,
+  probeOllama,
+  releaseEmbedModelIfUnused,
+} from '@haive/shared/rag';
 import { getDb } from '../db.js';
 import { getGlobalKbSyncQueue, getTaskQueue } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -41,16 +46,20 @@ const CATEGORIES = [
   'quick_reference',
 ] as const;
 
+/** DERIVED from the canonical dimension list rather than restated, because `.strict()` makes a
+ *  gap here a silent 400 on a payload the rest of the system produces and stores happily.
+ *  `database` and `dbMajor` were missing: the enrich step writes them, `facetsMatchProject`
+ *  filters on them and the UI displays them, but any PATCH carrying one was refused as
+ *  `invalid update` — which is what blocked editing an entry's scope at all. Strict is still
+ *  right; a typo'd dimension stored here would simply never match anything. */
 const facetsSchema = z
-  .object({
-    framework: z.array(z.string()).optional(),
-    frameworkMajor: z.array(z.string()).optional(),
-    language: z.array(z.string()).optional(),
-    phpMajor: z.array(z.string()).optional(),
-    nodeMajor: z.array(z.string()).optional(),
-    packages: z.array(z.string()).optional(),
-    tags: z.array(z.string()).optional(),
-  })
+  .object(
+    Object.fromEntries(
+      FACET_FILTER_DIMENSIONS.map((dim) => [dim, z.array(z.string()).optional()]),
+    ) as {
+      [K in (typeof FACET_FILTER_DIMENSIONS)[number]]: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    },
+  )
   .strict();
 
 const createSchema = z.object({
@@ -63,7 +72,9 @@ const createSchema = z.object({
   seedText: z.string().optional(),
 });
 
-const updateSchema = z
+/** Exported for the test that pins the strict-schema regression: a facet dimension missing from
+ *  `facetsSchema` is a 400 on a payload every other layer accepts, and nothing else catches it. */
+export const updateSchema = z
   .object({
     title: z.string().min(1).max(300),
     body: z.string().min(1),

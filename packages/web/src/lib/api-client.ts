@@ -1116,12 +1116,17 @@ export interface RagQueryEntry {
   createdAt: string;
 }
 
+/** Mirrors `GlobalKbFacets` in @haive/shared/global-kb, which web must not import. Keep every
+ *  dimension: the api validates the same shape with `.strict()`, so a field missing here is one
+ *  the UI can neither send nor edit. */
 export interface GlobalKbFacets {
   framework?: string[];
   frameworkMajor?: string[];
   language?: string[];
   phpMajor?: string[];
   nodeMajor?: string[];
+  database?: string[];
+  dbMajor?: string[];
   packages?: string[];
   tags?: string[];
 }

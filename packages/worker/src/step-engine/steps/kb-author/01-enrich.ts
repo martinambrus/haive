@@ -14,6 +14,7 @@ import {
   SUPERSEDE_CANDIDATE_LIMIT,
 } from '../_global-kb-similarity.js';
 import { globalKbTopicKey } from '../_global-kb-promote.js';
+import { FACET_FILTER_DIMENSIONS } from '@haive/shared/rag';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { syncGlobalKbEntry } from '../../../queues/global-kb-sync-queue.js';
 
@@ -36,17 +37,9 @@ const CATEGORIES = [
 ] as const;
 type Category = (typeof CATEGORIES)[number];
 
-const FACET_DIMS = [
-  'framework',
-  'frameworkMajor',
-  'language',
-  'phpMajor',
-  'nodeMajor',
-  'database',
-  'dbMajor',
-  'packages',
-  'tags',
-] as const;
+/** The dimensions this step may write. The SAME list retrieval filters on — a dimension written
+ *  here but absent there would scope an entry by something nothing reads. */
+const FACET_DIMS = FACET_FILTER_DIMENSIONS;
 
 /** Cap on existing entries fed to the model for de-dup. House standards are a
  *  small corpus; if it ever grows past this we log rather than silently drop. */
