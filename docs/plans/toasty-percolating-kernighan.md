@@ -431,7 +431,11 @@ stores only `stepIds: string[]` and needs nothing.
    provider eligibility alone.
 2. **`{{agent:<id>}}` tokens.** `buildPrompt` renders a token as PR 1's persona marker with no
    inline protocol, and Phase 3.1 widens PR 1's resolver for exactly those markers, because PR 1's
-   LSP gate exists to protect an embedded fallback a template persona does not have. The body is
+   LSP gate exists to protect an embedded fallback a template persona does not have. A token id
+   must match the marker grammar `AGENT_GUIDANCE_PATTERN` parses (`[a-z0-9-]+`): the composer refuses
+   any other id at save, task-create refuses it with a named reason, and `agentDefinitionGuidance`
+   asserts the grammar beside its existing path assertion, so no caller can emit a marker the rewrite
+   would leave unparsed. The body is
    pasted for EVERY provider and whether or not the invocation is isolated: a template that
    declares `file_write`, `subagents` or `agentPool: '*'`, or names an agent directory or file in its prompt, still
    has no embedded protocol, so the widened resolver runs for these markers outside
