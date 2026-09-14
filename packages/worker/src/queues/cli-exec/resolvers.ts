@@ -3,8 +3,8 @@ import { join, posix } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import {
   ensureTaskScratchWorkspace,
+  taskMayRunWithoutRepository,
   taskScratchSubpath,
-  taskTypeAllowsNoRepository,
 } from '../../repo/scratch-workspace.js';
 import { schema, type Database } from '@haive/database';
 import {
@@ -430,7 +430,7 @@ export async function resolveTaskRepoMount(
 ): Promise<DockerVolumeMount | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, repositoryId: true, type: true },
+    columns: { userId: true, repositoryId: true, type: true, metadata: true },
   });
   if (!task) return null;
   if (!task.repositoryId) {
@@ -443,7 +443,11 @@ export async function resolveTaskRepoMount(
     // worktree-gated only for `workflow`/`run_app`, so a repo-less kb_author shell can be
     // opened while the task is still `created`. Ensuring is idempotent, so the task path pays
     // a mkdir it would have done anyway.
-    if (!taskTypeAllowsNoRepository(task.type)) return null;
+    // The TYPE is only half of it: an anchored task whose repository was deleted arrives with the
+    // same null column, and giving it a fresh empty workspace presents a recovery shell that was
+    // never its workspace. The Terminal reaches this resolver without going through
+    // `resolveTaskContext`, so its guard does not cover this route.
+    if (!taskMayRunWithoutRepository(task)) return null;
     await ensureTaskScratchWorkspace(task.userId, taskId);
     return {
       source: REPO_VOLUME_NAME,
@@ -502,14 +506,20 @@ export async function resolveInvocationRepoMount(
 ): Promise<{ repoMount: DockerVolumeMount | null; hasWorktree: boolean; hasRepo: boolean }> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, repositoryId: true, worktreeBranch: true, type: true },
+    columns: {
+      userId: true,
+      repositoryId: true,
+      worktreeBranch: true,
+      type: true,
+      metadata: true,
+    },
   });
   if (!task) return { repoMount: null, hasWorktree: false, hasRepo: false };
   if (!task.repositoryId) {
     // `hasRepo` is separate from "there is a mount" precisely because of this branch: a
     // repo-less task DOES get a mount (an empty scratch workspace), so a null check on
     // repoMount can no longer answer "is there a repository here".
-    if (!taskTypeAllowsNoRepository(task.type)) {
+    if (!taskMayRunWithoutRepository(task)) {
       return { repoMount: null, hasWorktree: false, hasRepo: false };
     }
     // Same reason as resolveTaskRepoMount: the directory has to EXIST before docker will

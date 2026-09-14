@@ -50,6 +50,21 @@ export function taskWasCreatedRepoLess(metadata: unknown): boolean | null {
   return (metadata as { anchorRepositoryId?: unknown }).anchorRepositoryId == null;
 }
 
+/** Whether THIS task may run without a repository: the type allows it AND it was not anchored to
+ *  a repository that has since been deleted.
+ *
+ *  One rule, because the decision has THREE call sites and they are reached by different routes —
+ *  `resolveTaskContext` when the task runs, and both mount resolvers, one of which the human
+ *  Terminal calls directly without ever going through the task context. Splitting the two halves
+ *  across those sites is how the deleted-anchor case came back after being closed in one of them.
+ *
+ *  `resolveTaskContext` deliberately does NOT use this: it distinguishes the two refusals in its
+ *  error message, and "this type never runs repo-less" and "your anchor was deleted" are different
+ *  things to tell someone. Here both mean the same thing — no scratch mount. */
+export function taskMayRunWithoutRepository(task: { type: string; metadata: unknown }): boolean {
+  return taskTypeAllowsNoRepository(task.type) && taskWasCreatedRepoLess(task.metadata) !== false;
+}
+
 /** Volume-relative path of a task's scratch workspace — the shape `resolveInvocationRepoMount`
  *  already uses for a repository (`<userId>/<repositoryId>`). */
 export function taskScratchSubpath(userId: string, taskId: string): string {

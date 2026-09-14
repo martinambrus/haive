@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  taskMayRunWithoutRepository,
   taskScratchSubpath,
   taskTypeAllowsNoRepository,
   taskWasCreatedRepoLess,
@@ -46,6 +47,37 @@ describe('taskWasCreatedRepoLess', () => {
     // The two are the same JSON value on read; only the KEY's presence tells them apart.
     expect(taskWasCreatedRepoLess({ anchorRepositoryId: null })).toBe(true);
     expect(taskWasCreatedRepoLess({})).toBeNull();
+  });
+});
+
+// Three call sites reach this decision by different routes — resolveTaskContext when the task
+// runs, and both mount resolvers, one of which the human Terminal calls WITHOUT going through the
+// task context. Splitting the two halves across them is how the deleted-anchor case survived
+// being closed in one of them.
+describe('taskMayRunWithoutRepository', () => {
+  it('allows a task actually created without a repository', () => {
+    expect(
+      taskMayRunWithoutRepository({ type: 'kb_author', metadata: { anchorRepositoryId: null } }),
+    ).toBe(true);
+  });
+
+  it('refuses a task whose recorded anchor is gone', () => {
+    expect(
+      taskMayRunWithoutRepository({ type: 'kb_author', metadata: { anchorRepositoryId: 'r1' } }),
+    ).toBe(false);
+  });
+
+  it('still allows a task that predates the record', () => {
+    expect(taskMayRunWithoutRepository({ type: 'kb_author', metadata: null })).toBe(true);
+    expect(taskMayRunWithoutRepository({ type: 'kb_author', metadata: {} })).toBe(true);
+  });
+
+  it('refuses every type whose work IS a repository, recorded or not', () => {
+    for (const type of ['workflow', 'onboarding', 'run_app']) {
+      expect(taskMayRunWithoutRepository({ type, metadata: { anchorRepositoryId: null } })).toBe(
+        false,
+      );
+    }
   });
 });
 
