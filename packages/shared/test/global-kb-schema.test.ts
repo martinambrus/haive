@@ -71,6 +71,24 @@ describe('ensureGlobalKbSchema', () => {
     expect(sql).toContain('trg_global_content_tsv');
   });
 
+  it('never lets the facet backfill store a JSON null', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const sql = queries();
+
+    // `jsonb_agg` over zero rows is SQL NULL, so aggregating an EMPTY dimension straight into
+    // `jsonb_object_agg` rewrites it as JSON `null`. Retrieval then calls
+    // `jsonb_array_length(facets->'<dim>')` on it and raises `cannot get array length of a
+    // scalar`, which fails the WHOLE query — MEASURED, a two-row set with one corrupt row
+    // returned neither row. Empty dimensions are dropped instead, which costs no meaning
+    // because absent and empty are the same claim to both filters.
+    expect(sql).toContain('WHERE a.arr IS NOT NULL');
+    expect(sql).toContain("CASE WHEN jsonb_typeof(kv.value) = 'array'");
+    // The predicate admits a non-array value, so the pass REPAIRS a row an earlier version of
+    // this migration wrote rather than needing a migration of its own.
+    expect(sql).toContain("WHERE jsonb_typeof(kv.value) <> 'array'");
+  });
+
   it('falls back to jsonb embeddings when pgvector is unavailable', async () => {
     const { conn, queries } = fakeConn({ vectorThrows: true });
     const res = await ensureGlobalKbSchema(conn);

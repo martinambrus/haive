@@ -210,19 +210,37 @@ export async function ensureGlobalKbSchema(
   // at boot rather than one per request. It carries no per-run cap, unlike its model — the work
   // is bounded by the number of LEGACY rows, which is zero after the first successful pass, and
   // a migration that converges over several boots would leave retrieval half-fixed in between.
+  // An empty or non-array dimension is OMITTED, never rewritten in place. `jsonb_agg` over zero
+  // rows is SQL NULL, so carrying it through `jsonb_object_agg` stores JSON `null` — and
+  // `buildFacetClause` calls `jsonb_array_length(facets->'<dim>')` on every candidate row, which
+  // raises `cannot get array length of a scalar` and fails the WHOLE query rather than skipping
+  // that row (MEASURED on a two-row set where one row was corrupt: the valid row was returned by
+  // neither). Omitting matches `normalizeFacets` and costs no meaning, because absent and empty
+  // are the same claim to both filters — `buildFacetClause` spells it out as its own
+  // `jsonb_array_length(...) = 0` arm, and `facetsMatchProject` as `constrained.length === 0`.
+  //
+  // The predicate admits a NON-ARRAY value as well as a non-lowercase one, so this pass repairs a
+  // row an earlier version of this same migration wrote instead of needing a migration of its own.
   for (const table of [ENTRIES_TABLE, VECTORS_TABLE]) {
     await conn.pg.unsafe(`
       UPDATE ${table} AS t
       SET facets = COALESCE((
-        SELECT jsonb_object_agg(kv.key, (
-          SELECT jsonb_agg(DISTINCT lower(v)) FROM jsonb_array_elements_text(kv.value) AS v
-        ))
-        FROM jsonb_each(t.facets) AS kv
+        SELECT jsonb_object_agg(kv.key, a.arr)
+        FROM jsonb_each(t.facets) AS kv,
+             LATERAL (
+               SELECT jsonb_agg(DISTINCT lower(v)) AS arr
+               FROM jsonb_array_elements_text(
+                 CASE WHEN jsonb_typeof(kv.value) = 'array' THEN kv.value ELSE '[]'::jsonb END
+               ) AS v
+             ) AS a
+        WHERE a.arr IS NOT NULL
       ), '{}'::jsonb)
       WHERE EXISTS (
-        SELECT 1 FROM jsonb_each(t.facets) AS kv,
-             LATERAL jsonb_array_elements_text(kv.value) AS v
-        WHERE v <> lower(v)
+        SELECT 1 FROM jsonb_each(t.facets) AS kv
+        WHERE jsonb_typeof(kv.value) <> 'array'
+           OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements_text(kv.value) AS v WHERE v <> lower(v)
+           )
       )
     `);
   }
