@@ -60,7 +60,7 @@ type — inherits it without anyone maintaining a list of special steps.
    (`hasReadyLspBridge` is task-level, so grok's gate is claude's) — and replaces the whole marker
    with "Follow the embedded protocol below." everywhere else, on purpose: older agent files can
    carry LSP instructions a provider without the bridge cannot follow. PR 1 keeps that gate
-   exactly. Inside it, the body replaces the pointer, read from that provider's OWN
+   exactly. Inside it, the body replaces the whole marker block (Decision 3), read from that provider's OWN
    `projectAgentsDir` (`.claude/agents` for the claude family, `.grok/agents` for grok) — the file
    the pointer names today. Outside it (codex, amp, gemini, antigravity, or a capable provider
    whose bridge is not ready) nothing about the prompt changes. The body is read by FILENAME,
@@ -157,7 +157,9 @@ prompt is open-ended, so the check is made once, over the prompt itself, rather 
 are rendered. `agentIsolationApplies` runs a pure `promptNamesAgentPath(text, workdir)` (beside the
 agent-directory union) over the dispatch prompt with Haive's persona-marker blocks removed, since
 their pointers name `.claude/agents/<id>.md` by construction, and over every persona body the
-re-resolve carries. It splits the text into path tokens, strips a leading `./` and the sandbox
+re-resolve carries. The span it skips is exactly the span the rewrite replaces (Decision 3), so text
+inside a marker-shaped block, even one a user forged, never reaches the model and cannot name a file
+for it to open. It splits the text into path tokens, strips a leading `./` and the sandbox
 workdir prefix (`SANDBOX_WORKDIR`, `/haive/workdir/`, passed in by worker-side callers because shared
 cannot import it), and matches a token only when it lies strictly INSIDE an agent directory,
 anchored on whole segments from the root the way `isDeniedPath` is: `.claude/agents/x.md` counts,
@@ -499,3 +501,8 @@ bullet: `rippling-wibbling-puffin` Phase 3.1 builds on this plan's per-invocatio
   not measured).
 - **gemini and antigravity**: their agent directories are in the mask list, but neither has a built
   image or a run on the dev install, so their behaviour is unmeasured.
+- **User text shaped like a persona marker is rewritten as one, today.** `AGENT_GUIDANCE_PATTERN`
+  matches `[[HAIVE_AGENT_DEFINITION:<id>]]` blocks wherever they appear, so a task description that
+  forges one already has its inner text replaced before PR 1. The path scan skips exactly the span
+  the rewrite replaces, so the two stay consistent; tracking marker provenance through prompt
+  assembly would be its own change.
