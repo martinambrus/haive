@@ -8,6 +8,7 @@ import {
   type GlobalKbCategory,
   type GlobalKbFacets,
   type ProjectFacetSet,
+  normalizeFacets,
 } from '@haive/shared/global-kb';
 import { embedQuery, ragHybridSearch, type RagConnection } from '@haive/shared/rag';
 import { facetsMatchProject } from './_global-kb-digest.js';
@@ -430,7 +431,11 @@ export async function promoteToGlobalKbDraft(
             title: clean.title,
             body: clean.body,
             category: promotion.category,
-            facets: promotion.facets,
+            // Normalised here rather than at each caller: this insert is the one place every
+            // promotion funnels through, and `techAnchorFacets` assigns a detected package
+            // VERBATIM while a project's own set is lowercased, so a capitalised package name
+            // would be stored unmatchable by the exact jsonb `?|` the search uses.
+            facets: normalizeFacets(promotion.facets),
             status: 'draft',
             source: 'promoted',
             sourceTaskId: promotion.taskId,
