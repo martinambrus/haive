@@ -173,6 +173,16 @@ const IGNORE_DIRS = new Set([
   '.build',
   'Pods',
   '.gradle',
+  // Python virtualenvs, the same class as `node_modules` and `vendor` already here: a tree of
+  // THIRD-PARTY source. `__pycache__` was excluded from the start but the environment holding
+  // site-packages was not, so a distinctive library symbol or filename could be read as this
+  // repository's own and delete the block that mentioned it — and 4,000 files of dependencies
+  // can crowd the project's own out of the cap besides.
+  //
+  // `env` is deliberately absent: it is a real directory name in plenty of projects, and the
+  // same reasoning that keeps `bin` off this list applies to it.
+  '.venv',
+  'venv',
 ]);
 
 async function collectShortFileTree(

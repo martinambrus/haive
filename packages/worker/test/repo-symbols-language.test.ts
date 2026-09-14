@@ -382,6 +382,27 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('pod_helper_fn')).toBe(false);
   });
 
+  it('skips a Python virtualenv, which is a dependency tree', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-venv-'));
+    await mkdir(path.join(dir, '.venv', 'lib', 'site-packages'), { recursive: true });
+    await mkdir(path.join(dir, 'venv', 'lib'), { recursive: true });
+    await writeFile(
+      path.join(dir, '.venv', 'lib', 'site-packages', 'dep.py'),
+      'def library_helper_fn(x):\n    return x\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, 'venv', 'lib', 'other.py'),
+      'def other_library_fn(x):\n    return x\n',
+      'utf8',
+    );
+    await writeFile(path.join(dir, 'own.py'), 'def own_project_fn(x):\n    return x\n', 'utf8');
+    const symbols = await collectRepoSymbols(dir, 'python');
+    expect(symbols.has('own_project_fn')).toBe(true);
+    expect(symbols.has('library_helper_fn')).toBe(false);
+    expect(symbols.has('other_library_fn')).toBe(false);
+  });
+
   it('skips Rust build output, which is generated rather than project vocabulary', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'symbols-rust-target-'));
     await mkdir(path.join(dir, 'target'), { recursive: true });
