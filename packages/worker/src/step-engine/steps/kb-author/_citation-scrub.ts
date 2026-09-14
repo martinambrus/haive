@@ -150,6 +150,10 @@ export const ECOSYSTEM_FILENAMES = new Set(
     'cargo.lock',
     'gemfile.lock',
     'poetry.lock',
+    'uv.lock',
+    // SwiftPM's lockfile. Added in the SAME commit as `package.swift` and still missed, which is
+    // why the pairing is now spelled out: an exempt manifest's standard lockfile is exempt too.
+    'package.resolved',
   ].map((n) => n.toLowerCase()),
 );
 
