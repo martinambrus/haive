@@ -90,6 +90,13 @@ export async function ensureGlobalKbSchema(
   await conn.pg.unsafe(
     `ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS supersedes_entry_id uuid`,
   );
+  // Indexed because the successor lookup WALKS this column: `GET /entries/:id` follows the
+  // supersession chain forward to find the live entry that replaced an archived one, which is a
+  // lookup per generation. Unindexed that is a sequential scan per level, up to the recursion's
+  // depth cap — cheap on a small store and not something to leave for a large one.
+  await conn.pg.unsafe(
+    `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_supersedes ON ${ENTRIES_TABLE} (supersedes_entry_id)`,
+  );
   // Widen the status CHECK to allow 'failed' on pre-existing DBs — a kb_author
   // enrich task that fails leaves its entry in a terminal 'failed' state. Idempotent:
   // drop the inline-named constraint and re-add it with the full value set.
