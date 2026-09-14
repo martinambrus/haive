@@ -1046,8 +1046,14 @@ export async function collectRepoSymbols(
       // file filter collected nothing from them while this still knew only the PHP/JS set —
       // Python declares with `def`, Go with `func` (optionally behind a receiver) and `type`.
       // `function` precedes `func` so the longer keyword wins the alternation.
+      // The `use` lookbehind is load-bearing: PHP's `use function array_key_exists;` is an
+      // IMPORT, not a declaration, and matching it collected the language's own built-ins as
+      // repository symbols. MEASURED across the real KB corpus — 7 of 167 blocks were deleted
+      // from PHP articles for mentioning `is_numeric`, `is_string`, `in_array` and
+      // `array_key_exists`, every one of them a false citation. A denylist of built-ins would
+      // have treated the symptom; the parse was simply wrong.
       const defRe =
-        /\b(?:function|func|def|class|trait|interface|struct|type|enum|module)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
+        /(?<!\buse\s)\b(?:function|func|def|class|trait|interface|struct|type|enum|module)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
       // `enum` covers PHP 8.1 and TypeScript, `module` covers Ruby — both are unambiguous
       // declaration keywords, so they cost nothing.
       //

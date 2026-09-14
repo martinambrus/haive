@@ -86,6 +86,27 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('InvoiceHelpers')).toBe(true);
   });
 
+  it('does not mistake a PHP import for a declaration', async () => {
+    // `use function array_key_exists;` imports a BUILT-IN. Collecting it made the language's
+    // own library look repo-specific — MEASURED, that deleted 7 of 167 blocks across the real
+    // article corpus, every one a PHP article that merely mentioned `in_array()`.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-use-'));
+    await writeFile(
+      path.join(dir, 'thing.php'),
+      [
+        '<?php',
+        'use function array_key_exists;',
+        'use function is_numeric;',
+        'function activit_build_row($x) { return $x; }',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, 'php');
+    expect(symbols.has('array_key_exists')).toBe(false);
+    expect(symbols.has('is_numeric')).toBe(false);
+    expect(symbols.has('activit_build_row')).toBe(true);
+  });
+
   it('ignores single-word names, which identify no repository', async () => {
     // bodyUsesRepoSymbol matches any `name(` in an article, so collecting `render` makes every
     // invented example that calls render(...) a citation and deletes its block. MEASURED on a
