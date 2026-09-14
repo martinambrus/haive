@@ -1454,8 +1454,15 @@ export default function GlobalKbPage() {
                 </div>
               )}
               <div className="mt-4 flex items-center justify-center gap-3">
+                {/* Activation is blocked while a scope save is in flight: the two are separate
+                    PATCHes, and activating first archives the predecessor the scope edit is
+                    about to clear — retiring an entry the reviewer just decided was unrelated. */}
                 {selected.status === 'draft' && (
-                  <Button size="sm" disabled={busy} onClick={() => void activate(selected)}>
+                  <Button
+                    size="sm"
+                    disabled={busy || scopeBusy}
+                    onClick={() => void activate(selected)}
+                  >
                     Activate
                   </Button>
                 )}

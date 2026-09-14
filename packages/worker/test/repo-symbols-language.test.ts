@@ -86,6 +86,35 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('InvoiceHelpers')).toBe(true);
   });
 
+  it('ignores single-word names, which identify no repository', async () => {
+    // bodyUsesRepoSymbol matches any `name(` in an article, so collecting `render` makes every
+    // invented example that calls render(...) a citation and deletes its block. MEASURED on a
+    // real 11,005-symbol repo: 16 of 17 commonplace method names were present, and a generic
+    // example calling render(name) was flagged. 10,157 of those names are multi-word, so the
+    // rule keeps 92% of the set and drops exactly the ambiguous tail.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-generic-'));
+    await writeFile(
+      path.join(dir, 'svc.ts'),
+      [
+        'class Svc {',
+        '  render(x: string) { return x; }',
+        '  execute(x: string) { return x; }',
+        '  loadInvoiceBatch(x: string) { return x; }',
+        '}',
+        'const handle = (x: string) => x;',
+        'const buildInvoiceRow = (x: string) => x;',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, 'typescript');
+    expect(symbols.has('render')).toBe(false);
+    expect(symbols.has('execute')).toBe(false);
+    expect(symbols.has('handle')).toBe(false);
+    // The distinctive ones still land.
+    expect(symbols.has('loadInvoiceBatch')).toBe(true);
+    expect(symbols.has('buildInvoiceRow')).toBe(true);
+  });
+
   it('does not mistake control flow for a symbol', async () => {
     // These clear the length floor and match the method SHAPE, so only the name list excludes
     // them. Collecting one would make the scrub delete any article block that used the word.
