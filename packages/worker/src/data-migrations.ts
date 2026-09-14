@@ -1,9 +1,10 @@
-import { and, desc, eq, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService, logger, type OnboardingToolingMirror } from '@haive/shared';
 import { withGlobalKb } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
+import { getCliExecQueue } from './queues/cli-exec/_shared.js';
 import { sweepOrphanScratchWorkspaces } from './repo/scratch-workspace.js';
 import { defaultDockerRunner } from './sandbox/docker-runner.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
@@ -39,6 +40,13 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
   { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
+  // BEFORE the scratch sweep, which defers to the same pending-recap predicate these rows are
+  // stuck in: finalising them first is what lets that sweep see the truth.
+  {
+    id: 'reconcileUnenqueuedStepSummaries',
+    kind: 'convergent',
+    run: reconcileUnenqueuedStepSummaries,
+  },
   // Filesystem rather than a table, like `clearPrunedSandboxImageState` reconciles against real
   // Docker images. Convergent because it only finishes a removal the normal path had already
   // decided on; a live task keeps its workspace.
@@ -95,6 +103,74 @@ export async function runDestructiveDataMigrations(db: Database): Promise<void> 
     log.info({ migration: migration.id }, 'running destructive data migration');
     await runOne(db, migration);
   }
+}
+
+/** Finalize step-summary invocations whose row exists but whose job never reached BullMQ.
+ *
+ *  `maybeEnqueueStepSummary` INSERTs the invocation and then enqueues it. Its catch covers a
+ *  THROWN enqueue — `recordSummaryEnqueueFailure` ends the row — but a process that dies between
+ *  the two runs neither half, leaving `started_at`, `ended_at` and `superseded_at` all NULL with
+ *  no job that will ever finalize it. Nothing else recovers it: `reconcileOrphanedSteps` is keyed
+ *  on `task_step_id`, which a recap leaves NULL by design, and it deliberately skips
+ *  `started_at IS NULL` rows because for a NORMAL invocation that state means "BullMQ still owes
+ *  it a run". The row is therefore pending forever, and `cleanupTaskScratchWorkspace` defers to
+ *  exactly that predicate — so a repo-less task's workspace is never reaped either.
+ *
+ *  Only the QUEUE can tell "never enqueued" from "still queued", which is why this runs here
+ *  rather than beside the other boot reaps in `index.ts`: `runDataMigrations` is called before any
+ *  worker starts, so nothing can consume or add a job underneath the scan. The `started_at` guard
+ *  on the UPDATE is the second half of that — it makes the write a compare-and-swap, so even a
+ *  job that somehow began between the scan and the write keeps its row.
+ *
+ *  Costs nothing in the common case: with no pending recap rows it never touches Redis at all. */
+async function reconcileUnenqueuedStepSummaries(db: Database): Promise<void> {
+  const pending = await db
+    .select({ id: schema.cliInvocations.id })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        isNotNull(schema.cliInvocations.summaryForStepId),
+        isNull(schema.cliInvocations.startedAt),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  if (pending.length === 0) return;
+
+  // Every state that is not finished. bullmq 6 has no 'paused' in JobState; a finished job has
+  // already written its own outcome to the row, so omitting those two cannot strand anything.
+  const jobs = await getCliExecQueue().getJobs([
+    'waiting',
+    'delayed',
+    'prioritized',
+    'active',
+    'waiting-children',
+  ]);
+  // The queue carries several payload shapes; only a cli-exec INVOKE names an invocation.
+  const stillQueued = new Set<string>();
+  for (const job of jobs) {
+    const invocationId = (job?.data as { invocationId?: unknown } | undefined)?.invocationId;
+    if (typeof invocationId === 'string') stillQueued.add(invocationId);
+  }
+
+  const orphaned = pending.filter((row) => !stillQueued.has(row.id)).map((row) => row.id);
+  if (orphaned.length === 0) return;
+
+  await db
+    .update(schema.cliInvocations)
+    .set({
+      exitCode: -1,
+      errorMessage: 'Step summary was never enqueued (worker exited before the job was added)',
+      endedAt: new Date(),
+    })
+    .where(
+      and(
+        inArray(schema.cliInvocations.id, orphaned),
+        isNull(schema.cliInvocations.startedAt),
+        isNull(schema.cliInvocations.endedAt),
+      ),
+    );
+  log.warn({ count: orphaned.length }, 'finalized step-summary rows that were never enqueued');
 }
 
 /** Flag repos whose RAG index was built with no embedding endpoint, so the query side
