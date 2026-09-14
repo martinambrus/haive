@@ -1058,7 +1058,7 @@ const LANGUAGE_BUILTIN_NAMES = new Set([
  *  uppercase-then-lowercase pair NOT at the start, which admits `CProduct` while still rejecting
  *  capitalised prose (`Postgres`, `Excel`) and all-caps words (`PDF`). Keep the two rules
  *  identical: this decides what a citation IS, and `identifiers.ts` decides what is searchable. */
-function isDistinctiveSymbol(name: string | undefined): name is string {
+export function isDistinctiveSymbol(name: string | undefined): name is string {
   if (!name || LANGUAGE_BUILTIN_NAMES.has(name)) return false;
   return /[a-z][A-Z]|_/.test(name) || /.[A-Z][a-z]/.test(name);
 }
@@ -1092,7 +1092,48 @@ export const SYMBOL_SCAN_EXT: Record<string, string[]> = {
   rust: ['.rs'],
   java: ['.java'],
   elixir: ['.ex', '.exs'],
+  // `pickPrimaryLanguage` is a SECOND source of language names, independent of the manifest
+  // markers above: it reads an ingest histogram and returns any `SERVER_LANGUAGES` member
+  // lowercased. Those names never reached this map, so a C#/Kotlin/Scala/Swift/C/C++ anchor
+  // collected nothing at all — the same total blindness Rust, Java and Elixir each had.
+  kotlin: ['.kt', '.kts'],
+  scala: ['.scala'],
+  swift: ['.swift'],
+  'c#': ['.cs'],
+  c: ['.c', '.h'],
+  'c++': ['.cpp', '.cc', '.cxx', '.hpp', '.hh'],
 };
+
+/** Basenames of this repo's own source files, lowercased.
+ *
+ *  The bare-filename rule used to resolve a candidate at the repo ROOT only — correct for the
+ *  manifests a model reaches for, but blind to `InvoiceProcessor.ts` living under `src/`, which
+ *  the authoring contract forbids just as firmly. The slashed-path rule does not cover it either:
+ *  a bare name has no separator to match on.
+ *
+ *  Bounded exactly like `collectRepoSymbols` — same walk, same depth, same caps, same ignored
+ *  directories — and empty on any failure, which simply restores the root-only behaviour. */
+export async function collectRepoBasenames(repoPath: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  try {
+    const files = await listFilesMatching(
+      repoPath,
+      (rel, isDir) => {
+        if (isDir) return false;
+        return !rel.split('/').some((p) => IGNORE_DIRS.has(p));
+      },
+      10,
+    );
+    for (const rel of files.slice(0, REPO_SYMBOL_FILE_CAP)) {
+      const base = rel.split('/').pop();
+      if (base) names.add(base.toLowerCase());
+      if (names.size > REPO_SYMBOL_CAP) break;
+    }
+  } catch {
+    // best effort — the bare-filename rule then checks the repo root only, as it always did
+  }
+  return names;
+}
 
 /** Names of functions / classes / traits / interfaces DEFINED in this repo's own
  *  source (dependency/ignored dirs excluded). Best-effort and bounded; returns an
@@ -1154,7 +1195,7 @@ export async function collectRepoSymbols(
       // a miss costs a symbol, over-matching costs somebody's article. Java TYPES are collected,
       // which is the form an article cites as `new InvoiceProcessor(...)`.
       const defRe =
-        /(?<!\buse\s)\b(?:function|func|fn|defmodule|defmacrop|defmacro|defp|def|class|trait|interface|struct|type|enum|module|record)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
+        /(?<!\buse\s)\b(?:function|func|fun|fn|defmodule|defmacrop|defmacro|defp|def|class|trait|interface|struct|type|enum|module|record|object|protocol)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
       // `enum` covers PHP 8.1 and TypeScript, `module` covers Ruby — both are unambiguous
       // declaration keywords, so they cost nothing.
       //
@@ -1214,9 +1255,19 @@ export async function collectRepoSymbols(
  *  symbol set is empty or nothing matches. (Min 5 chars to avoid prose collisions.) */
 export function bodyUsesRepoSymbol(text: string, symbols: ReadonlySet<string>): string | null {
   if (symbols.size === 0) return null;
-  const re = /\b([A-Za-z_]\w{4,})\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::/g;
+  // Calls, `new`, `::`, and a TYPE LITERAL. The fourth arm exists because the collector records
+  // custom types — `struct`/`trait`/`defmodule` and friends — and the languages that declare them
+  // do not CALL them: Go and Rust write `InvoiceRow{...}`, Elixir writes `%InvoiceRow{...}`, so a
+  // block copied straight out of a repo-defined type matched nothing and survived while its exact
+  // name sat in the symbol set.
+  //
+  // `[ \t]*` rather than `\s*` on that arm, deliberately: a newline between a name and a brace is
+  // a markdown heading followed by an unrelated block far more often than it is a literal, and
+  // over-matching here deletes somebody's article.
+  const re =
+    /\b([A-Za-z_]\w{4,})\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::|\b([A-Za-z_]\w{4,})[ \t]*\{/g;
   for (let m = re.exec(text); m; m = re.exec(text)) {
-    const name = m[1] ?? m[2] ?? m[3];
+    const name = m[1] ?? m[2] ?? m[3] ?? m[4];
     if (name && symbols.has(name)) return name;
   }
   return null;

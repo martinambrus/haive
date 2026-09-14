@@ -6,7 +6,10 @@ import {
   SYMBOL_SCAN_EXT,
   collectRepoSymbols,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
-import { STACK_INDICATORS } from '../src/step-engine/steps/onboarding/01-env-detect.js';
+import {
+  SERVER_LANGUAGES,
+  STACK_INDICATORS,
+} from '../src/step-engine/steps/onboarding/01-env-detect.js';
 
 // The citation scrub asks for an anchor repo's symbols with NO language, and the old fallback
 // was ['.php','.js','.ts','.py'] — which misses Drupal's own .module/.inc/.theme, the exact
@@ -377,8 +380,18 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
 // to the citation scrub. Asserted structurally so the next language added to the detector fails
 // here rather than silently shipping a blind spot.
 describe('symbol scan coverage', () => {
-  it('reads every language the detector can report', () => {
+  it('reads every language the MANIFEST detector can report', () => {
     const detected = [...new Set(STACK_INDICATORS.map((i) => i.language))].sort();
+    const missing = detected.filter((lang) => !SYMBOL_SCAN_EXT[lang]);
+    expect(missing).toEqual([]);
+  });
+
+  it('reads every language the HISTOGRAM detector can report', () => {
+    // Two independent sources of a language name, which is what made the first version of this
+    // test insufficient: `pickPrimaryLanguage` never consults the manifest markers — it ranks an
+    // ingest histogram and returns a SERVER_LANGUAGES member lowercased. Keying the coverage
+    // check on one list left C#, Kotlin, Scala, Swift, C and C++ blind.
+    const detected = [...SERVER_LANGUAGES].map((l) => l.toLowerCase()).sort();
     const missing = detected.filter((lang) => !SYMBOL_SCAN_EXT[lang]);
     expect(missing).toEqual([]);
   });

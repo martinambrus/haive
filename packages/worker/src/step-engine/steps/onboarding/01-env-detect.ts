@@ -192,7 +192,10 @@ const NON_PRIMARY_LANGUAGES = new Set([
 // Server-side languages preferred over JS/TS when both are present, so a PHP
 // backend with a vendored JavaScript frontend (whose file count can dominate)
 // is still reported as PHP.
-const SERVER_LANGUAGES = new Set([
+/** Exported for the same reason as `STACK_INDICATORS`: `pickPrimaryLanguage` returns these
+ *  lowercased, so a name here that `SYMBOL_SCAN_EXT` cannot read is a repository whose own
+ *  identifiers are invisible to the citation scrub. */
+export const SERVER_LANGUAGES = new Set([
   'PHP',
   'Python',
   'Ruby',
