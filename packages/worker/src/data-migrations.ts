@@ -40,6 +40,9 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
   { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
+  // Before both of the below, and before anything can retry a kb_author task: it is what makes
+  // "no record" mean "no evidence" rather than "most of the tasks on this install".
+  { id: 'backfillKbAuthorAnchors', kind: 'convergent', run: backfillKbAuthorAnchors },
   // BEFORE the scratch sweep, which defers to the same pending-recap predicate these rows are
   // stuck in: finalising them first is what lets that sweep see the truth.
   {
@@ -180,6 +183,59 @@ async function reconcileUnenqueuedStepSummaries(db: Database): Promise<void> {
       ),
     );
   log.warn({ count: orphaned.length }, 'finalized step-summary rows that were never enqueued');
+}
+
+/** Record, on every `kb_author` task that predates the record, whether it was created with a
+ *  repository — so `taskWasCreatedRepoLess`'s strict default only ever applies to a task nothing
+ *  could classify.
+ *
+ *  The default has to be strict, because `enrichSchema.repositoryId` was a REQUIRED uuid until
+ *  this branch made it optional: a task created before the record necessarily HAD a repository, so
+ *  an absent record means "anchored" and not "unknown". Left alone, every legacy task whose
+ *  repository is later deleted would retry as repo-less and quietly publish a generic article over
+ *  an entry someone anchored. MEASURED on this install: 17 kb_author tasks, none carrying the
+ *  record, and two of them ALREADY in that state — one is the very entry this work started from.
+ *
+ *  Two sources of truth, both exact, and no dates: the commit that made the field optional is not
+ *  a boundary, because the dev stack hot-reloads and tasks ran against the new code hours before
+ *  it landed.
+ *
+ *  - A task that still HAS a repository states its own anchor.
+ *  - A task that RAN repo-less proves it in its own detect payload: `hasRepo` is a field this
+ *    branch added, so `hasRepo = false` can only have been written by a genuinely repo-less run,
+ *    while a legacy anchored run carries no such key at all. MEASURED: the 6 repo-less tasks here
+ *    all record `false` and the 2 legacy ones have no key.
+ *
+ *  A task matching neither is left unstamped ON PURPOSE — it reads as anchored, which is the
+ *  honest answer when no evidence classifies it, and re-running this writes nothing for it. */
+async function backfillKbAuthorAnchors(db: Database): Promise<void> {
+  const anchored = await db.execute(sql`
+    UPDATE tasks
+    SET metadata = COALESCE(metadata, '{}'::jsonb)
+                 || jsonb_build_object('anchorRepositoryId', repository_id)
+    WHERE type = 'kb_author'
+      AND repository_id IS NOT NULL
+      AND NOT (COALESCE(metadata, '{}'::jsonb) ? 'anchorRepositoryId')
+  `);
+  const repoLess = await db.execute(sql`
+    UPDATE tasks AS t
+    SET metadata = COALESCE(t.metadata, '{}'::jsonb) || '{"anchorRepositoryId": null}'::jsonb
+    WHERE t.type = 'kb_author'
+      AND t.repository_id IS NULL
+      AND NOT (COALESCE(t.metadata, '{}'::jsonb) ? 'anchorRepositoryId')
+      AND EXISTS (
+        SELECT 1 FROM task_steps ts
+        WHERE ts.task_id = t.id AND ts.detect_output->>'hasRepo' = 'false'
+      )
+  `);
+  const anchoredCount = (anchored as { count?: number }).count ?? 0;
+  const repoLessCount = (repoLess as { count?: number }).count ?? 0;
+  if (anchoredCount > 0 || repoLessCount > 0) {
+    log.info(
+      { anchored: anchoredCount, repoLess: repoLessCount },
+      'recorded the anchor choice on kb_author tasks that predate it',
+    );
+  }
 }
 
 /** Flag repos whose RAG index was built with no embedding endpoint, so the query side

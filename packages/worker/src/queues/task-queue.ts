@@ -248,7 +248,7 @@ async function resolveTaskContext(
     // anchored task can be retried into this branch and would quietly publish a generic article
     // over an entry someone anchored on purpose. That is the torn state the hard failure below
     // exists for, and the allowlist alone re-admitted it.
-    if (taskWasCreatedRepoLess(task.metadata) === false) {
+    if (!taskWasCreatedRepoLess(task.metadata)) {
       throw new Error(
         `task ${taskId} was anchored to a repository that no longer exists; ` +
           're-run it from a new entry to pick another anchor, or author it without one',

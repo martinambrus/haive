@@ -99,12 +99,44 @@ describe('resolveInvocationRepoMount', () => {
     expect(ensureTaskScratchWorkspace).not.toHaveBeenCalled();
   });
 
+  it('refuses a workspace to a task whose recorded anchor was deleted', async () => {
+    // Same null column, opposite meaning. Deleting a repository nulls the FK and leaves TERMINAL
+    // tasks alone, so a failed anchored task reaches here looking repo-less — and the Terminal
+    // calls this resolver without passing resolveTaskContext's guard. A fresh empty workspace
+    // there is a recovery shell that was never this task's workspace.
+    const db = mkDb(
+      {
+        userId: 'u1',
+        repositoryId: null,
+        worktreeBranch: null,
+        type: 'kb_author',
+        metadata: { anchorRepositoryId: 'r-gone' },
+      },
+      null,
+    );
+    expect(await resolveInvocationRepoMount(db, 't1')).toEqual({
+      repoMount: null,
+      hasWorktree: false,
+      hasRepo: false,
+    });
+    expect(ensureTaskScratchWorkspace).not.toHaveBeenCalled();
+  });
+
   it('mounts an empty scratch workspace for a type allowed to run repo-less', async () => {
     // The sandbox always runs with `-w /haive/workdir`; with nothing mounted there that path is
     // the image WORKDIR, created root:root while the CLI runs as uid 1000, so anything written
     // relative to the CWD fails EACCES.
+    // `metadata.anchorRepositoryId: null` is what makes this a task CREATED repo-less rather
+    // than an anchored one whose repository was deleted — the two arrive with the same null
+    // column, and only the second must be refused a workspace.
     const db = mkDb(
-      { userId: 'u1', repositoryId: null, worktreeBranch: null, type: 'kb_author' },
+      {
+        userId: 'u1',
+        repositoryId: null,
+        worktreeBranch: null,
+        type: 'kb_author',
+        metadata: { anchorRepositoryId: null },
+      },
       null,
     );
     expect(await resolveInvocationRepoMount(db, 't1')).toEqual({

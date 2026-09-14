@@ -42,11 +42,18 @@ export function taskTypeAllowsNoRepository(type: string): boolean {
  *  an empty workspace and told no repository was selected, and could then publish a DIFFERENT,
  *  generic article over the entry the author anchored on purpose.
  *
- *  `null` means the task predates the record, where the previous answer still stands and no
- *  backfill is needed — the same presence-bit shape `tasks.cli_choice_recorded` uses. */
-export function taskWasCreatedRepoLess(metadata: unknown): boolean | null {
-  if (!metadata || typeof metadata !== 'object') return null;
-  if (!('anchorRepositoryId' in metadata)) return null;
+ *  An ABSENT record reads as ANCHORED, which is the opposite of the usual presence-bit default
+ *  and is not a judgement call: `enrichSchema.repositoryId` was a REQUIRED uuid until this branch
+ *  made it optional, so a `kb_author` task created before the record necessarily HAD a repository.
+ *  Absent therefore means "anchored", never "unknown", and treating it as permissive would admit
+ *  exactly the tasks the old schema proves were anchored. (`cli_choice_recorded`'s lenient default
+ *  is the right shape only where the legacy state is genuinely ambiguous; here it is not.)
+ *
+ *  `backfillKbAuthorAnchors` stamps the record on the tasks that predate it, so the strict default
+ *  applies only to a task no evidence could classify. */
+export function taskWasCreatedRepoLess(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== 'object') return false;
+  if (!('anchorRepositoryId' in metadata)) return false;
   return (metadata as { anchorRepositoryId?: unknown }).anchorRepositoryId == null;
 }
 
@@ -62,7 +69,7 @@ export function taskWasCreatedRepoLess(metadata: unknown): boolean | null {
  *  error message, and "this type never runs repo-less" and "your anchor was deleted" are different
  *  things to tell someone. Here both mean the same thing — no scratch mount. */
 export function taskMayRunWithoutRepository(task: { type: string; metadata: unknown }): boolean {
-  return taskTypeAllowsNoRepository(task.type) && taskWasCreatedRepoLess(task.metadata) !== false;
+  return taskTypeAllowsNoRepository(task.type) && taskWasCreatedRepoLess(task.metadata);
 }
 
 /** Volume-relative path of a task's scratch workspace — the shape `resolveInvocationRepoMount`
@@ -125,6 +132,11 @@ export async function cleanupTaskScratchWorkspace(db: Database, taskId: string):
     where: eq(schema.tasks.id, taskId),
     columns: { userId: true, type: true, repositoryId: true, status: true },
   });
+  // The TYPE-only check, deliberately, where the two mount resolvers use the stricter
+  // `taskMayRunWithoutRepository`. Reaping is the one direction a deleted anchor must NOT make
+  // stricter: a task that was handed a workspace before that rule existed still has a directory
+  // on disk, and refusing to recognise it here would leak it for good. Creating one is the
+  // decision worth guarding; removing one is not.
   if (!task || task.repositoryId || !taskTypeAllowsNoRepository(task.type)) return false;
 
   // Only a SETTLED, non-failed task gives up its workspace, and the check lives here so no

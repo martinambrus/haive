@@ -35,18 +35,22 @@ describe('taskWasCreatedRepoLess', () => {
     expect(taskWasCreatedRepoLess({ anchorRepositoryId: 'r1' })).toBe(false);
   });
 
-  it('says "not recorded" for a task that predates the record', () => {
-    // null, never false: a legacy task keeps the answer it had, so no backfill is needed.
-    expect(taskWasCreatedRepoLess({ globalKbEntryId: 'e1' })).toBeNull();
-    expect(taskWasCreatedRepoLess(null)).toBeNull();
-    expect(taskWasCreatedRepoLess(undefined)).toBeNull();
-    expect(taskWasCreatedRepoLess('not an object')).toBeNull();
+  it('reads an absent record as ANCHORED, not as unknown', () => {
+    // `enrichSchema.repositoryId` was a REQUIRED uuid until this branch, so a kb_author task
+    // created before the record necessarily had a repository. A lenient default here would admit
+    // exactly the tasks the old schema proves were anchored — the opposite of the usual
+    // presence-bit shape, because the legacy state is not ambiguous.
+    expect(taskWasCreatedRepoLess({ globalKbEntryId: 'e1' })).toBe(false);
+    expect(taskWasCreatedRepoLess(null)).toBe(false);
+    expect(taskWasCreatedRepoLess(undefined)).toBe(false);
+    expect(taskWasCreatedRepoLess('not an object')).toBe(false);
   });
 
   it('separates a recorded null from an absent key', () => {
-    // The two are the same JSON value on read; only the KEY's presence tells them apart.
+    // The two are the same JSON value on read; only the KEY's presence tells them apart, and
+    // they mean OPPOSITE things.
     expect(taskWasCreatedRepoLess({ anchorRepositoryId: null })).toBe(true);
-    expect(taskWasCreatedRepoLess({})).toBeNull();
+    expect(taskWasCreatedRepoLess({})).toBe(false);
   });
 });
 
@@ -67,9 +71,9 @@ describe('taskMayRunWithoutRepository', () => {
     ).toBe(false);
   });
 
-  it('still allows a task that predates the record', () => {
-    expect(taskMayRunWithoutRepository({ type: 'kb_author', metadata: null })).toBe(true);
-    expect(taskMayRunWithoutRepository({ type: 'kb_author', metadata: {} })).toBe(true);
+  it('refuses a task that predates the record, which the old schema proves was anchored', () => {
+    expect(taskMayRunWithoutRepository({ type: 'kb_author', metadata: null })).toBe(false);
+    expect(taskMayRunWithoutRepository({ type: 'kb_author', metadata: {} })).toBe(false);
   });
 
   it('refuses every type whose work IS a repository, recorded or not', () => {
