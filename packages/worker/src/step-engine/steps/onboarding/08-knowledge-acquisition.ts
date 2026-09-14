@@ -160,6 +160,19 @@ const IGNORE_DIRS = new Set([
   // vocabulary — which is the whole reason `vendor` is on this list.
   '_build',
   'deps',
+  // SwiftPM's output tree, which holds `.build/checkouts/<dep>/Sources/**/*.swift` — a
+  // DEPENDENCY's source, not this project's. Left out, a library API the article legitimately
+  // names reads as a repository-private symbol and the block is deleted, which is the
+  // false-citation direction this list exists to prevent. `Pods` is CocoaPods' equivalent, and
+  // `.gradle` is the Kotlin/Scala/Java cache. All three only matter now that those extensions
+  // are read.
+  //
+  // `bin` and `obj` are deliberately NOT here: `bin` holds real scripts in plenty of projects,
+  // and excluding either globally would take a directory out of the file tree and out of
+  // `isLikelyRepoOwnPath` for every repository, which is too much for a .NET convention.
+  '.build',
+  'Pods',
+  '.gradle',
 ]);
 
 async function collectShortFileTree(
@@ -1240,7 +1253,10 @@ export async function collectRepoSymbols(
       //     `foreach (…) {`, `using (…) {`, `lock (…) {`, `catch (…) {` and `switch (…) {` all
       //     have only ONE and cannot match;
       //   - no `;` inside the parens, which is what excludes `for (a; b; c) {`;
-      //   - a `{` after them, so a prototype (`int foo(void);`) and a bare call are both out.
+      //   - a `{` OR an `=>` after them, so a prototype (`int foo(void);`) and a bare call are
+      //     both out while C#'s expression-bodied member (`string Fmt(int id) => …;`) is in. The
+      //     `=>` arm cannot reach a lambda: `const f = (a) => …` and `items.Where(x => …)` both
+      //     carry a `=` or a `.` before the parens, and neither is in the prefix class.
       // `isDistinctiveSymbol` still applies, so a single generic word never lands.
       //
       // Indentation is ALLOWED. Anchoring at column 0 looked like the safe choice and was simply
@@ -1248,7 +1264,7 @@ export async function collectRepoSymbols(
       // normal formatting at all. The brace requirement is what excludes an indented CALL —
       // `indented_call(arg);` ends in a semicolon — so the anchor was never what made this safe.
       const cFuncRe =
-        /^[ \t]*[A-Za-z_][\w:<>,*&\s]*?\s+\*?([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?\{/gm;
+        /^[ \t]*[A-Za-z_][\w:<>,*&\s]*?\s+\*?([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?(?:\{|=>)/gm;
       for (let m = cFuncRe.exec(body); m; m = cFuncRe.exec(body)) {
         if (m[1] && !NON_SYMBOL_KEYWORDS.has(m[1]) && isDistinctiveSymbol(m[1])) {
           symbols.add(m[1]);

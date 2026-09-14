@@ -334,7 +334,9 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
         '    private static Task ComputeTotalAsync(Order o) {',
         '        return null;',
         '    }',
-        '    public int TotalCount { get; set; }',
+        '    public string FormatInvoice(int id) => id.ToString();',
+        '    public int TotalCount => items.Count;',
+        '    public int OtherCount { get; set; }',
         '}',
       ].join('\n'),
       'utf8',
@@ -347,10 +349,37 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     // Indented control flow is still not a symbol, which is what the brace requirement buys.
     expect(symbols.has('item_value')).toBe(false);
     expect(symbols.has('TotalCount')).toBe(false);
+    // C#'s expression-bodied member is a declaration too; a property using `=>` is not, because
+    // it has no parens.
+    expect(symbols.has('FormatInvoice')).toBe(true);
     // A prototype declares no body, and control flow is not a symbol however it is written.
     expect(symbols.has('prototype_only_fn')).toBe(false);
     expect(symbols.has('condition_value')).toBe(false);
     expect(symbols.has('indented_call')).toBe(false);
+  });
+
+  it('skips SwiftPM and CocoaPods dependency trees', async () => {
+    // `.build/checkouts/<dep>/Sources` is a DEPENDENCY's source. Collecting it makes a library
+    // API the article legitimately names read as repository-private, and the block is deleted —
+    // the false-citation direction, which costs somebody's prose rather than a missed symbol.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-swift-'));
+    await mkdir(path.join(dir, '.build', 'checkouts', 'dep', 'Sources'), { recursive: true });
+    await mkdir(path.join(dir, 'Pods', 'Alamofire'), { recursive: true });
+    await writeFile(
+      path.join(dir, '.build', 'checkouts', 'dep', 'Sources', 'Dep.swift'),
+      'public func dependency_helper_fn() {}',
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, 'Pods', 'Alamofire', 'A.swift'),
+      'public func pod_helper_fn() {}',
+      'utf8',
+    );
+    await writeFile(path.join(dir, 'Own.swift'), 'public func own_project_fn() {}', 'utf8');
+    const symbols = await collectRepoSymbols(dir, 'swift');
+    expect(symbols.has('own_project_fn')).toBe(true);
+    expect(symbols.has('dependency_helper_fn')).toBe(false);
+    expect(symbols.has('pod_helper_fn')).toBe(false);
   });
 
   it('skips Rust build output, which is generated rather than project vocabulary', async () => {
