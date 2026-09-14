@@ -154,6 +154,12 @@ const IGNORE_DIRS = new Set([
   // scanned: a built checkout carries generated sources there, and a generated helper is not
   // this project's vocabulary — the same reason the minified-bundle skip exists.
   'target',
+  // Elixir's equivalents, for the same reasons the entries above exist: `_build` is build output
+  // like `dist`/`target`, and `deps` is the dependency tree like `vendor`/`node_modules`. Both
+  // matter only now that `.ex` is scanned, and a dependency's functions are not this project's
+  // vocabulary — which is the whole reason `vendor` is on this list.
+  '_build',
+  'deps',
 ]);
 
 async function collectShortFileTree(
@@ -1070,7 +1076,9 @@ const NON_SYMBOL_KEYWORDS = new Set([
   'foreach',
 ]);
 
-const SYMBOL_SCAN_EXT: Record<string, string[]> = {
+/** Exported so a test can hold it to `STACK_INDICATORS`: a language the DETECTOR recognises but
+ *  this cannot read is a repository whose own identifiers are invisible to the citation scrub. */
+export const SYMBOL_SCAN_EXT: Record<string, string[]> = {
   php: ['.php', '.inc', '.module', '.install', '.theme', '.phtml', '.profile', '.engine'],
   javascript: ['.js', '.jsx', '.mjs', '.cjs'],
   typescript: ['.ts', '.tsx'],
@@ -1083,6 +1091,7 @@ const SYMBOL_SCAN_EXT: Record<string, string[]> = {
   // contributed zero of its own symbols and the citation scrub had no backstop there at all.
   rust: ['.rs'],
   java: ['.java'],
+  elixir: ['.ex', '.exs'],
 };
 
 /** Names of functions / classes / traits / interfaces DEFINED in this repo's own
@@ -1145,7 +1154,7 @@ export async function collectRepoSymbols(
       // a miss costs a symbol, over-matching costs somebody's article. Java TYPES are collected,
       // which is the form an article cites as `new InvoiceProcessor(...)`.
       const defRe =
-        /(?<!\buse\s)\b(?:function|func|fn|def|class|trait|interface|struct|type|enum|module|record)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
+        /(?<!\buse\s)\b(?:function|func|fn|defmodule|defmacrop|defmacro|defp|def|class|trait|interface|struct|type|enum|module|record)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
       // `enum` covers PHP 8.1 and TypeScript, `module` covers Ruby — both are unambiguous
       // declaration keywords, so they cost nothing.
       //

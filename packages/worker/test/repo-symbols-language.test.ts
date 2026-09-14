@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { collectRepoSymbols } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
+import {
+  SYMBOL_SCAN_EXT,
+  collectRepoSymbols,
+} from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
+import { STACK_INDICATORS } from '../src/step-engine/steps/onboarding/01-env-detect.js';
 
 // The citation scrub asks for an anchor repo's symbols with NO language, and the old fallback
 // was ['.php','.js','.ts','.py'] — which misses Drupal's own .module/.inc/.theme, the exact
@@ -238,6 +242,52 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('processInvoice')).toBe(false);
   });
 
+  it('collects Elixir declarations, including the def- forms `def` alone cannot reach', async () => {
+    // `def` was already in the alternation for Python, but `\bdef\s+` cannot match `defp ` or
+    // `defmodule `, so scanning `.ex` without those keywords would still have collected almost
+    // nothing. They precede `def` in the alternation, or the shorter keyword wins and the name
+    // group then starts mid-word.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-elixir-'));
+    await writeFile(
+      path.join(dir, 'invoice.ex'),
+      [
+        'defmodule InvoiceProcessor do',
+        '  def process_invoice(batch) do',
+        '    batch',
+        '  end',
+        '  defp normalise_invoice(batch), do: batch',
+        '  defmacro with_invoice(do: block), do: block',
+        'end',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, null);
+    expect(symbols.has('InvoiceProcessor')).toBe(true);
+    expect(symbols.has('process_invoice')).toBe(true);
+    expect(symbols.has('normalise_invoice')).toBe(true);
+    expect(symbols.has('with_invoice')).toBe(true);
+  });
+
+  it('skips Elixir dependencies and build output', async () => {
+    // `deps` is Elixir's dependency tree and `_build` its output — the same reasons `vendor`,
+    // `node_modules` and `target` are already excluded. A dependency's functions are not this
+    // project's vocabulary, and collecting them is how a generic name becomes a false citation.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-elixir-deps-'));
+    await mkdir(path.join(dir, 'deps', 'jason', 'lib'), { recursive: true });
+    await mkdir(path.join(dir, '_build'), { recursive: true });
+    await writeFile(
+      path.join(dir, 'deps', 'jason', 'lib', 'j.ex'),
+      'def decode_payload(x), do: x',
+      'utf8',
+    );
+    await writeFile(path.join(dir, '_build', 'gen.ex'), 'def generated_helper(x), do: x', 'utf8');
+    await writeFile(path.join(dir, 'own.ex'), 'def own_project_fn(x), do: x', 'utf8');
+    const symbols = await collectRepoSymbols(dir, 'elixir');
+    expect(symbols.has('own_project_fn')).toBe(true);
+    expect(symbols.has('decode_payload')).toBe(false);
+    expect(symbols.has('generated_helper')).toBe(false);
+  });
+
   it('skips Rust build output, which is generated rather than project vocabulary', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'symbols-rust-target-'));
     await mkdir(path.join(dir, 'target'), { recursive: true });
@@ -318,5 +368,18 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     const symbols = await collectRepoSymbols(dir, 'typescript');
     expect(symbols.has('while')).toBe(false);
     expect(symbols.has('switch')).toBe(false);
+  });
+});
+
+// Rust, Java and Elixir each went missing the same way: `01-env-detect` recognised the stack, the
+// scan could not read its files, and because an unknown language falls back to the UNION of this
+// map the fallback could not rescue them either — the repository's own identifiers were invisible
+// to the citation scrub. Asserted structurally so the next language added to the detector fails
+// here rather than silently shipping a blind spot.
+describe('symbol scan coverage', () => {
+  it('reads every language the detector can report', () => {
+    const detected = [...new Set(STACK_INDICATORS.map((i) => i.language))].sort();
+    const missing = detected.filter((lang) => !SYMBOL_SCAN_EXT[lang]);
+    expect(missing).toEqual([]);
   });
 });

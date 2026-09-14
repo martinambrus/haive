@@ -157,7 +157,10 @@ interface EnvDetectData {
   source: 'llm' | 'deterministic';
 }
 
-const STACK_INDICATORS: { file: string; language: string }[] = [
+/** Exported so `repo-symbols-language.test.ts` can hold `SYMBOL_SCAN_EXT` to this list: a
+ *  language this recognises but that scan cannot read is a repository whose own identifiers are
+ *  invisible to the citation scrub, which is how Rust, Java and Elixir each went missing. */
+export const STACK_INDICATORS: { file: string; language: string }[] = [
   { file: 'package.json', language: 'javascript' },
   { file: 'composer.json', language: 'php' },
   { file: 'requirements.txt', language: 'python' },
