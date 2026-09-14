@@ -1,10 +1,11 @@
 import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService, logger, type OnboardingToolingMirror } from '@haive/shared';
-import { withGlobalKb } from '@haive/shared/global-kb';
+import { FACET_VALUE_ALIAS_PAIRS, globalKbEntries, withGlobalKb } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { getCliExecQueue } from './queues/cli-exec/_shared.js';
+import { globalKbTopicKey } from './step-engine/steps/_global-kb-promote.js';
 import { sweepOrphanScratchWorkspaces } from './repo/scratch-workspace.js';
 import { defaultDockerRunner } from './sandbox/docker-runner.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
@@ -40,6 +41,9 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
   { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
+  // After the schema backfill has canonicalised the facets those keys are derived from — it runs
+  // on the global-KB connection at first use, which `withGlobalKb` here triggers.
+  { id: 'recomputeAliasedTopicKeys', kind: 'convergent', run: recomputeAliasedTopicKeys },
   // Before both of the below, and before anything can retry a kb_author task: it is what makes
   // "no record" mean "no evidence" rather than "most of the tasks on this install".
   { id: 'backfillKbAuthorAnchors', kind: 'convergent', run: backfillKbAuthorAnchors },
@@ -236,6 +240,59 @@ async function backfillKbAuthorAnchors(db: Database): Promise<void> {
       'recorded the anchor choice on kb_author tasks that predate it',
     );
   }
+}
+
+/** Recompute a topic key whose tech segment was written before the facet alias existed.
+ *
+ *  The schema backfill canonicalises an entry's FACETS (`postgresql` -> `postgres`) but leaves
+ *  `topic_key` alone, so a legacy row keeps `best_practice:postgresql:15` while every new
+ *  promotion derives `best_practice:postgres:15`. `promoteToGlobalKbDraft` matches candidates by
+ *  EXACT topic-key equality, so the existing article is missed and a duplicate independent draft
+ *  is written instead of being linked for supersession — the dedup silently off for one spelling,
+ *  which is the same defect the derivation fix closed for new rows.
+ *
+ *  Narrow on purpose. A key is rewritten ONLY when the recomputed value differs from the stored
+ *  one in exactly ONE segment AND that difference is an alias pair — so a key that a caller's
+ *  `fallbackTech` produced, or one the derivation has since changed for any other reason, is left
+ *  alone rather than silently rewritten by a migration nobody asked for that. */
+async function recomputeAliasedTopicKeys(db: Database): Promise<void> {
+  const norm = (v: string): string => v.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  await withGlobalKb(db, async ({ db: kb }) => {
+    const rows = await kb
+      .select({
+        id: globalKbEntries.id,
+        category: globalKbEntries.category,
+        facets: globalKbEntries.facets,
+        topicKey: globalKbEntries.topicKey,
+      })
+      .from(globalKbEntries)
+      .where(isNotNull(globalKbEntries.topicKey));
+    let updated = 0;
+    for (const row of rows) {
+      const stored = row.topicKey;
+      if (!stored) continue;
+      const recomputed = globalKbTopicKey(row.category, row.facets ?? {});
+      if (!recomputed || recomputed === stored) continue;
+      const before = stored.split(':');
+      const after = recomputed.split(':');
+      if (before.length !== after.length) continue;
+      const diffs = before
+        .map((seg, i) => (seg === after[i] ? null : ([seg, after[i] ?? ''] as const)))
+        .filter((d): d is readonly [string, string] => d !== null);
+      if (diffs.length !== 1) continue;
+      const [from, to] = diffs[0]!;
+      if (!FACET_VALUE_ALIAS_PAIRS.some((p) => norm(p.from) === from && norm(p.to) === to))
+        continue;
+      await kb
+        .update(globalKbEntries)
+        .set({ topicKey: recomputed })
+        .where(eq(globalKbEntries.id, row.id));
+      updated += 1;
+    }
+    if (updated > 0) {
+      log.info({ updated }, 'recomputed topic keys whose tech segment predated the facet alias');
+    }
+  });
 }
 
 /** Flag repos whose RAG index was built with no embedding endpoint, so the query side

@@ -80,6 +80,17 @@ const FACET_VALUE_ALIASES: Partial<Record<keyof GlobalKbFacets, Record<string, s
   database: { postgresql: 'postgres' },
 };
 
+/** The alias pairs as a flat list, for the migration that has to recognise a topic-key segment
+ *  written BEFORE canonicalisation. Exported instead of the map so nothing can mutate the table
+ *  through it, and derived from the same table so the two cannot drift. */
+export const FACET_VALUE_ALIAS_PAIRS: ReadonlyArray<{
+  dimension: string;
+  from: string;
+  to: string;
+}> = Object.entries(FACET_VALUE_ALIASES).flatMap(([dimension, table]) =>
+  Object.entries(table ?? {}).map(([from, to]) => ({ dimension, from, to })),
+);
+
 /** Trim, lowercase, and fold a known vocabulary alias — the ONE rule BOTH sides of a facet
  *  comparison have to apply.
  *
