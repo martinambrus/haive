@@ -50,6 +50,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started. Delivery to a published-image install DECIDED 2026-09-07: per-customer api+worker images built by the vendor; `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` inherit it |
 | `solitary-partitioning-lampson` | Per-install namespacing (two installs on one machine) | Not started; **next priority after `steadfast-committing-gray`**. Containers, networks, six volumes AND the RAG/global-KB databases all carry global names today, so a second install shares them SILENTLY |
 | `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | **SHIPPED** 2026-09-08, all five slices. Exercised for real: a published v0.1.0 install was upgraded to v0.1.2, and a deliberately failed health gate rolled back to v0.1.0 with service restored. Four defects were found by running it that reading it did not surface |
+| `toasty-percolating-kernighan` | Per-call agent isolation | Not started; planned 2026-09-14 and reviewed against the code the same day. Read-only CLI invocations stop loading every repository agent definition and get the assigned persona pasted instead; `rippling-wibbling-puffin` Phase 3.1 builds on it |
 | `translator-module` | Translator — resellable module | Not started |
 
 ## Cross-plan dependencies
@@ -92,3 +93,7 @@ Verified against the tree on this date, not taken from the plan bodies.
 - Authoring a TASK TYPE is unaffected by all of the above: `rippling-wibbling-puffin` makes task
   types data and states at Phase 3.1 that prompt-template steps need no rebuild. Only a module
   contributing steps, routes or jobs requires a build.
+- `toasty-percolating-kernighan` ships first and independently, and `rippling-wibbling-puffin`
+  Phase 3.1 builds on it: a prompt-template step's `agentPool` and `{{agent:<id>}}` tokens reach
+  the same per-invocation agent isolation, and the token widens that plan's persona resolver for
+  personas with no inline fallback.
