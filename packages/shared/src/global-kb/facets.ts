@@ -136,5 +136,15 @@ export function extractProjectFacets(
     for (const p of packages) if (typeof p === 'string' && p) facets.packages.push(p);
   }
 
+  // BOTH sides of every facet comparison have to be normalised the same way, and only one of
+  // the two comparers can be lenient: `facetsMatchProject` lowercases in JS, while
+  // `buildFacetClause` uses jsonb `?|`, which is exact. Entries are normalised on write, so
+  // normalising here is the other half — without it a project detected as `Drupal` (framework
+  // and packages were the two dimensions still pushed verbatim) matches the digest and is then
+  // filtered out of the rag_search the digest promises to agree with.
+  for (const dim of Object.keys(facets)) {
+    facets[dim] = [...new Set(facets[dim]!.map((v) => v.trim().toLowerCase()).filter(Boolean))];
+  }
+
   return facets;
 }

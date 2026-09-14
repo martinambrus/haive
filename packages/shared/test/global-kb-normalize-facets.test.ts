@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeFacets } from '../src/global-kb/schema.js';
+import { extractProjectFacets } from '../src/global-kb/facets.js';
 
 // The two filters compare differently and only the write can reconcile them: facetsMatchProject
 // lowercases both sides in JS, buildFacetClause uses jsonb `?|`, which is exact. MEASURED in
@@ -32,5 +33,31 @@ describe('normalizeFacets', () => {
   it('is a no-op on null or undefined', () => {
     expect(normalizeFacets(null)).toEqual({});
     expect(normalizeFacets(undefined)).toEqual({});
+  });
+});
+
+// The other half of the same invariant: entries are normalised on write, so a PROJECT whose
+// detected framework or packages carry capitals would match facetsMatchProject (which lowercases
+// in JS) and then be filtered out by buildFacetClause (jsonb `?|`, exact).
+describe('extractProjectFacets normalisation', () => {
+  it('lowercases the dimensions that were pushed verbatim', () => {
+    const facets = extractProjectFacets({
+      data: {
+        project: {
+          framework: 'Drupal',
+          primaryLanguage: 'PHP',
+          packages: ['Drupal/Paragraphs', 'drupal/paragraphs'],
+        },
+      },
+    });
+    expect(facets.framework).toEqual(['drupal']);
+    expect(facets.language).toEqual(['php']);
+    expect(facets.packages).toEqual(['drupal/paragraphs']);
+  });
+
+  it('agrees with normalizeFacets, so both sides of a comparison match', () => {
+    const project = extractProjectFacets({ data: { project: { framework: 'Drupal' } } });
+    const entry = normalizeFacets({ framework: ['Drupal'] });
+    expect(entry.framework).toEqual(project.framework);
   });
 });
