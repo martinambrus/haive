@@ -96,7 +96,7 @@ type — inherits it without anyone maintaining a list of special steps.
 
 ## Design — dispatch side
 
-**The rule.** An invocation is *isolated* when all four hold, decided by one pure
+**The rule.** An invocation is *isolated* when all five hold, decided by one pure
 `agentIsolationApplies(req)` in `orchestrator/dispatcher.ts`:
 
 - the kill switch is on (`DispatchRequest.agentIsolation`, resolved by `resolveTaskDispatch` and
@@ -104,19 +104,41 @@ type — inherits it without anyone maintaining a list of special steps.
 - `input.kind === 'prompt'` — the sub-agent kinds rebuild each sub-step's spec from
   `{cwd, extraEnv, effortLevel}` (`queues/cli-exec/sub-agent.ts`) and no step builds one, so they
   behave exactly as today;
-- `input.capabilities` has no `file_write` — an invocation allowed to write the tree must see the
-  tree it writes. A Docker tmpfs is writable (mode 1777), so a coder, fix round or merge fixer
-  editing `.claude/agents/x.md` under a mask would lose the edit when the container exits. Every
-  dispatch that writes already declares it: 07, 07a, 07b, 08a, 08b, 06c's coders, 09_5, 09_5b,
-  11d, the DAG merge fix, the retry_ai fix agent, and every `mergeResolve` spec
-  (`merge-resolver.ts` dispatches with `stepDef.mergeResolve.requiredCapabilities`, and
-  `12-worktree-cleanup` declares it). `resolveDispatch` reads only `subagents` and `vision` from
-  that list, so keying on it changes no provider selection;
+- `input.capabilities` has no `file_write` — an invocation that edits the project's tree must see
+  the tree it edits. A Docker tmpfs is writable (mode 1777), so a coder, fix round or merge fixer
+  editing `.claude/agents/x.md` under a writable mask would lose the edit when the container
+  exits. Every dispatch that edits the project's tree declares it: 07, 07a, 07b, 08a, 08b, 06c's
+  coders, 09_5, 09_5b, 11d, the DAG merge fix, the retry_ai fix agent, and every `mergeResolve`
+  spec (`merge-resolver.ts` dispatches with `stepDef.mergeResolve.requiredCapabilities`, and
+  `12-worktree-cleanup` declares it). Three dispatches write WITHOUT declaring it, each only into a
+  Haive-owned path: `01e-external-kb-sync` edits `KB_DIR` ("Do NOT edit source code, tests, or
+  anything outside the knowledge base"), and `08-knowledge-acquisition` and `09_2-qa-resolve` stage
+  bodies under `.haive/kb-draft/` (`_kb-body-file.ts`). None of them writes an agent directory,
+  and the mask is read-only (exec side, item 3), so one that strayed would fail loudly instead of
+  losing the write. `resolveDispatch` reads only `subagents` and `vision` from that list, so
+  keying on it changes no provider selection;
+- the prompt hands the agent no path inside an agent directory (see "Handed paths" below);
 - the step did not declare `agentPool: '*'`.
 
-In practice that isolates the 08c reviewers and lenses, the 08d adversaries, 03's mining roster,
-04, 05, 01e, 03b, 03b2, 11, the DAG replanner and onboarding's read-only mining (08, 09-qa),
-while 08a and 08b write files and keep today's pointer.
+In practice that isolates the 08c reviewers and lenses, the 08d adversaries, 08c2, 03's mining
+roster, 04, 05, 01e, 01f, 03b, 03b2, 11, the DAG replanner and onboarding's read-only mining (08,
+09-qa) — each only while the paths it is handed stay outside the agent directories — while 08a and
+08b write files and keep today's pointer.
+
+**Handed paths.** Several read-only steps are handed a list of repository paths to READ: the
+review change set (`changedFilesBlock` in `_impl-changes.ts`, rendered by 08c, 08c2 and 08d among
+others), the external drift 01e and 01f list (`resolveExternalDrift`, which drops only Haive's own
+commits), and the `filesTouched` list `11-phase-8-learning` renders into its prompt. A task that
+edits an agent definition, or an outside commit that touches one, would otherwise hand a reviewer or
+a catch-up agent a file the mask hides — a review of a change it never saw, the failure
+`changedFilesBlock`'s COVERAGE notice exists to prevent. So those renderers append
+`AGENT_DIRECTORY_SCOPE_MARKER` whenever a listed path lies inside an agent directory (a pure
+`agentDirectoryScopeMarker(paths)` beside the agent-directory union, matching repository-relative
+paths on whole segments from the root, the way `isDeniedPath` does), and `agentIsolationApplies`
+treats the marker as `agentPool: '*'`. The marker stays in the prompt, as
+`WORKTREE_GIT_BOUNDARY_MARKER` does, so a stored prompt that a mining retry re-dispatches keeps the
+decision it was built with. The rule lives at the render sites, not in a list of steps: a future
+step that reuses these helpers inherits it.
 
 1. **The declaration.** `LlmInvocationSpec.agentPool?: '*'` (`step-engine/step-definition.ts`,
    beside `toolProfile`). `'*'` is the only value PR 1 needs (see "Steps that read agent files");
@@ -222,6 +244,10 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **11-final-review, 07_5-verify-files, 07-generate-files, 12-post-onboarding, the onboarding-upgrade
   steps** — host-side reads and writes; no CLI reads the files. A retry_ai fix for a failed 07_5
   declares `file_write`, so it sees the directories it has to repair.
+- **08c, 08c2, 08d, 01e, 01f, 11-phase-8-learning** — handed lists of repository paths to read
+  (the review change set, the external drift, `filesTouched`). Isolated only while no listed path
+  lies inside an agent directory; a list that names one carries the scope marker, and that
+  invocation sees the real tree (dispatch side, "Handed paths").
 - **07_7-secret-sweep — declares `agentPool: '*'`.** It sweeps committed secrets across the whole
   tree and writes nothing, and agent definitions are committed files, so hiding them would
   silently shrink a security control's coverage. The cost is known and already handled: Haive's
@@ -247,8 +273,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 
 ## Critical files
 
-- **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies`, the
-  switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
+- **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies` with its
+  scope-marker check, the switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
   (`agentGuidanceIds`, the positive arm), `step-engine/steps/workflow/_agent-loader.ts` (directory
   argument), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
   `step-engine/step-runner.ts` (`resolveLlmPhase` passes `agentPool`; the retry_ai `toolProfile`
@@ -261,8 +287,12 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   calls `invocationRepoSubpath`).
 - **Exec:** `queues/cli-exec/agent-definition-mask.ts` (NEW), `queues/cli-exec/exec-core.ts`
   (append to `authMounts`), `sandbox/docker-runner.ts` (tmpfs branch).
-- **Steps:** `step-engine/steps/onboarding/07_7-secret-sweep.ts` (`agentPool: '*'`).
-- **Shared:** beside `packages/shared/src/cli-providers/catalog.ts` (the agent-directory union),
+- **Steps:** `step-engine/steps/onboarding/07_7-secret-sweep.ts` (`agentPool: '*'`), and the
+  handed-path renderers that append the scope marker: `step-engine/steps/workflow/_impl-changes.ts`
+  (`changedFilesBlock`), `01e-external-kb-sync.ts`, `01f-external-plan-sync.ts` and
+  `11-phase-8-learning.ts`.
+- **Shared:** beside `packages/shared/src/cli-providers/catalog.ts` (the agent-directory union and
+  `agentDirectoryScopeMarker`),
   `packages/shared/src/config/config.service.ts` (key and default).
 - **API and web:** `packages/api/src/routes/admin.ts`, `packages/web/src/app/(app)/admin/page.tsx`.
 - **Docs:** `AGENTS.md` → Sandbox, a paragraph beside "Secret-file masking" and "Worktree gitfile
@@ -298,7 +328,9 @@ scratch.
      mount the earlier captures did not exercise.
 2. **Unit tests** (`pnpm --filter @haive/worker exec vitest run`), modelled on
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
-   directories only, read-only, fail-open), `agentIsolationApplies`, marker ids, the persona path
+   directories only, read-only, fail-open), `agentIsolationApplies` (the scope marker included),
+   `agentDirectoryScopeMarker` (`.claude/agents/x.md` marks; `docs/.claude/agents/x.md` and
+   `.claude/agents-old/x.md` do not), marker ids, the persona path
    (found / missing / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
