@@ -162,8 +162,41 @@ describe('rescopedTopicKey', () => {
     );
   });
 
-  it('recomputes when the category changes', () => {
+  // A category edit changes nothing the tech half is derived from, so the suffix is carried
+  // across rather than re-derived — re-deriving loses what the key holds and the facets do not.
+  it('swaps the category prefix and keeps the tech suffix', () => {
     expect(rescopedTopicKey(promoted, { category: 'anti_pattern' })).toBe('anti_pattern:drupal:7');
+  });
+
+  // MEASURED on the live store: `quick_reference:postgres:17` sits on facets carrying `database`
+  // but no `dbMajor`, so re-deriving on a category edit would silently drop the major.
+  it('keeps a major segment the facets can no longer produce', () => {
+    const drifted = {
+      facets: { database: ['postgres'] },
+      category: 'quick_reference' as const,
+      topicKey: 'quick_reference:postgres:17',
+    };
+    expect(rescopedTopicKey(drifted, { category: 'anti_pattern' })).toBe(
+      'anti_pattern:postgres:17',
+    );
+  });
+
+  // The tech came from a promotion's free-form `tech`, which nothing persists. Re-deriving would
+  // clear the key on an edit that did not touch the technology at all.
+  it('keeps a fallback-derived tech across a category edit', () => {
+    const fallback = {
+      facets: {},
+      category: 'best_practice' as const,
+      topicKey: 'best_practice:redis',
+    };
+    expect(rescopedTopicKey(fallback, { category: 'anti_pattern' })).toBe('anti_pattern:redis');
+  });
+
+  // A facet re-scope DOES change the technology, so there the key is re-derived in full.
+  it('re-derives rather than preserving when the facets changed too', () => {
+    expect(
+      rescopedTopicKey(promoted, { category: 'anti_pattern', facets: { framework: ['laravel'] } }),
+    ).toBe('anti_pattern:laravel');
   });
 
   // Enrich derives this same value as an advisory-lock key and deliberately never stores it, so

@@ -601,6 +601,18 @@ export function rescopedTopicKey(
   const categoryChanged = next.category !== undefined && next.category !== existing.category;
   const facetsChanged = next.facets !== undefined && scopeChanged(existing.facets, next.facets);
   if (!categoryChanged && !facetsChanged) return undefined;
+  // A category-only edit changed nothing the TECH half is derived from, so the stored suffix is
+  // carried across verbatim rather than re-derived. Re-deriving there LOSES information the key
+  // holds and the facets do not: the tech may have come from a promotion's `fallbackTech`, which
+  // nothing persists, and the major segment can outlive the facet that produced it — MEASURED on
+  // the live store, `quick_reference:postgres:17` sits on facets `{"database":["postgres"]}` with
+  // no `dbMajor`, so a category edit would have silently dropped the `:17`. Preserving is also
+  // the minimal answer: reconciling a key that disagrees with its facets is
+  // `recomputeAliasedTopicKeys`' job, and it is deliberately narrow about when it does that.
+  const sep = existing.topicKey.indexOf(':');
+  if (!facetsChanged && sep > 0) {
+    return `${next.category}:${existing.topicKey.slice(sep + 1)}`;
+  }
   return globalKbTopicKey(next.category ?? existing.category, next.facets ?? existing.facets ?? {});
 }
 
