@@ -978,9 +978,12 @@ const SYMBOL_SCAN_EXT: Record<string, string[]> = {
 /** Names of functions / classes / traits / interfaces DEFINED in this repo's own
  *  source (dependency/ignored dirs excluded). Best-effort and bounded; returns an
  *  empty set on any failure (the symbol backstop then simply never fires). */
-async function collectRepoSymbols(repoPath: string, detect: KnowledgeDetect): Promise<Set<string>> {
+export async function collectRepoSymbols(
+  repoPath: string,
+  language: string | null | undefined,
+): Promise<Set<string>> {
   const symbols = new Set<string>();
-  const lang = (detect.language ?? '').toLowerCase();
+  const lang = (language ?? '').toLowerCase();
   const exts = SYMBOL_SCAN_EXT[lang] ?? ['.php', '.js', '.ts', '.py'];
   try {
     const files = await listFilesMatching(
@@ -1661,7 +1664,8 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // repo-private function/class stays local. Scanned at most once, lazily.
     let repoSymbolsCache: Set<string> | null = null;
     const getRepoSymbols = async (): Promise<Set<string>> => {
-      if (!repoSymbolsCache) repoSymbolsCache = await collectRepoSymbols(ctx.repoPath, detected);
+      if (!repoSymbolsCache)
+        repoSymbolsCache = await collectRepoSymbols(ctx.repoPath, detected.language);
       return repoSymbolsCache;
     };
     const values = args.formValues as {

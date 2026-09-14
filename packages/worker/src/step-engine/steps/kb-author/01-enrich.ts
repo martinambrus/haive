@@ -14,6 +14,8 @@ import {
   SUPERSEDE_CANDIDATE_LIMIT,
 } from '../_global-kb-similarity.js';
 import { globalKbTopicKey } from '../_global-kb-promote.js';
+import { bodyUsesRepoSymbol, collectRepoSymbols } from '../onboarding/08-knowledge-acquisition.js';
+import { scrubCitations, type ScrubbedBlock } from './_citation-scrub.js';
 import { FACET_FILTER_DIMENSIONS } from '@haive/shared/rag';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
@@ -84,6 +86,9 @@ interface KbAuthorApply {
   status: 'draft' | 'skipped';
   mode: 'new' | 'update';
   sections: number;
+  /** Blocks removed for citing a real codebase. Reported so the removal is VISIBLE at review —
+   *  a draft that silently lost its evidence reads as a thin article, not as a stripped one. */
+  scrubbed?: ScrubbedBlock[];
 }
 
 interface Enrichment {
@@ -404,6 +409,35 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         ? parsed.body
         : `# ${title}\n\n${detected.seedText}`;
 
+    // Last line of defence on "evidence is examples, never sources". The prompt asks for it;
+    // this enforces it, because a leaked path is not a style slip — the article is retrieved by
+    // every other project, where one repo's geography is noise at best.
+    //
+    // Anchored runs additionally check symbols DEFINED in that repo: a copied helper name is a
+    // citation the path rules cannot see. Repo-less has neither a repo to resolve paths against
+    // nor symbols to compare, so it scrubs line references only.
+    const repoSymbols = detected.hasRepo
+      ? await collectRepoSymbols(ctx.repoPath, null).catch(() => new Set<string>())
+      : new Set<string>();
+    const scrub = await scrubCitations(body, {
+      repoPath: detected.hasRepo ? ctx.repoPath : null,
+      repoSymbols,
+      findSymbol: bodyUsesRepoSymbol,
+    });
+    if (scrub.removed.length > 0) {
+      ctx.logger.warn(
+        {
+          entryId: skeletonId,
+          removed: scrub.removed.length,
+          reasons: scrub.removed.map((r) => r.reason),
+        },
+        'kb enrich: removed blocks that cited a real codebase',
+      );
+    }
+    // Keep the unscrubbed text when scrubbing would leave nothing: an empty article is worse
+    // than one the reviewer can see is wrong, and the removals are reported either way.
+    const finalBody = scrub.body.trim().length > 0 ? scrub.body : body;
+
     // The model may flag this as an update of an existing rule; only honor a
     // targetId we actually showed it (else treat it as a new entry).
     const existingIds = new Set(detected.existing.map((e) => e.id));
@@ -487,7 +521,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
             title,
             category,
             facets,
-            body,
+            body: finalBody,
             // ALWAYS a draft. A brand-new article is the riskiest thing that enters a store
             // shared by every project, and it used to be the one case that skipped review
             // while an UPDATE — a change to something already reviewed — was held. That is
@@ -521,7 +555,8 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
       entryId: skeletonId,
       status: 'draft',
       mode: confirmedUpdate ? 'update' : 'new',
-      sections: (body.match(/^##\s/gm) ?? []).length,
+      sections: (finalBody.match(/^##\s/gm) ?? []).length,
+      ...(scrub.removed.length > 0 ? { scrubbed: scrub.removed } : {}),
     };
   },
 };
