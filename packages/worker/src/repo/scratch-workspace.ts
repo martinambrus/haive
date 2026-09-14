@@ -101,11 +101,18 @@ export async function cleanupTaskScratchWorkspace(db: Database, taskId: string):
   // retires the old `reason !== 'failed'` condition its callers each had to remember.
   if (task.status !== 'completed' && task.status !== 'cancelled') return;
 
+  // `endedAt IS NULL` alone is not "still running". A step retry supersedes the queued recap
+  // WITHOUT ending it (`_step-reset.ts` sets `supersededAt` only, and its WHERE covers
+  // `summaryForStepId`), and the job then returns at `handlers.ts`'s already-finalized guard
+  // without stamping `endedAt` — so that row would read as pending forever and no later recap,
+  // replacement included, could ever reap the workspace. The codebase's own definition of
+  // finalized is `endedAt OR supersededAt` (`finalizedInvocationIds`, the per-task cap count).
   const pendingSummary = await db.query.cliInvocations.findFirst({
     where: and(
       eq(schema.cliInvocations.taskId, taskId),
       isNotNull(schema.cliInvocations.summaryForStepId),
       isNull(schema.cliInvocations.endedAt),
+      isNull(schema.cliInvocations.supersededAt),
     ),
     columns: { id: true },
   });
