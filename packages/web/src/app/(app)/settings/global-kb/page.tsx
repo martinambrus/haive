@@ -1464,13 +1464,19 @@ export default function GlobalKbPage() {
                 </div>
               )}
               <div className="mt-4 flex items-center justify-center gap-3">
-                {/* Activation is blocked while a scope save is in flight: the two are separate
-                    PATCHes, and activating first archives the predecessor the scope edit is
-                    about to clear — retiring an entry the reviewer just decided was unrelated. */}
+                {/* Activation is blocked while a scope edit is OPEN as well as while one is in
+                    flight. They are separate PATCHes, and activating first archives the
+                    predecessor the scope edit is about to clear — retiring an entry the reviewer
+                    just decided was unrelated. Guarding only the in-flight half missed the case
+                    that matters most: with the editor open there is no request yet, so nothing
+                    server-side can serialise it, and the reviewer's unsaved re-scope is exactly
+                    the judgement the activation would be ignoring. Saving afterwards re-scopes
+                    the now-active entry and does NOT bring the predecessor back. */}
                 {selected.status === 'draft' && (
                   <Button
                     size="sm"
-                    disabled={busy || scopeBusy}
+                    disabled={busy || scopeBusy || scopeEdit !== null}
+                    title={scopeEdit !== null ? 'Save or cancel the scope edit first' : undefined}
                     onClick={() => void activate(selected)}
                   >
                     Activate
