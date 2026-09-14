@@ -1259,7 +1259,7 @@ export default function GlobalKbPage() {
                           Go to task
                         </Button>
                       )}
-                      {e.status === 'draft' && (
+                      {(e.status === 'draft' || e.status === 'archived') && (
                         <Button
                           size="sm"
                           disabled={busy}
@@ -1268,7 +1268,7 @@ export default function GlobalKbPage() {
                             void activate(e);
                           }}
                         >
-                          Activate
+                          {e.status === 'archived' ? 'Reactivate' : 'Activate'}
                         </Button>
                       )}
                       {!inProgress && (
@@ -1388,7 +1388,7 @@ export default function GlobalKbPage() {
                     <span className="text-[11px] text-amber-400">
                       {selected.status === 'draft'
                         ? 'This draft replaces an earlier entry. Changing the scope here detaches it, so activating will no longer archive that entry.'
-                        : 'This entry replaced an earlier one, which was archived when it was activated. Re-scoping moves this rule but does not bring the archived entry back — reactivate it yourself if the old scope still needs a rule.'}
+                        : 'This entry replaced an earlier one, which was archived when it was activated. Re-scoping moves this rule but does not bring the archived entry back — open that entry and press Reactivate if the old scope still needs a rule.'}
                     </span>
                   )}
                   <FacetFields
@@ -1472,14 +1472,14 @@ export default function GlobalKbPage() {
                     server-side can serialise it, and the reviewer's unsaved re-scope is exactly
                     the judgement the activation would be ignoring. Saving afterwards re-scopes
                     the now-active entry and does NOT bring the predecessor back. */}
-                {selected.status === 'draft' && (
+                {(selected.status === 'draft' || selected.status === 'archived') && (
                   <Button
                     size="sm"
                     disabled={busy || scopeBusy || scopeEdit !== null}
                     title={scopeEdit !== null ? 'Save or cancel the scope edit first' : undefined}
                     onClick={() => void activate(selected)}
                   >
-                    Activate
+                    {selected.status === 'archived' ? 'Reactivate' : 'Activate'}
                   </Button>
                 )}
                 <Button

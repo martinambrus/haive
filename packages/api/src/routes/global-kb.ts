@@ -559,6 +559,16 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       if (data.category !== undefined) set.category = data.category;
       if (data.facets !== undefined) set.facets = normalizeFacets(data.facets as GlobalKbFacets);
       if (data.status !== undefined) set.status = data.status;
+      // Activating CLEARS the supersession stamp, or reactivating is a no-op that looks like a
+      // success. `supersededAt` means "archived because something replaced it", and retrieval
+      // filters on `status = 'active' AND superseded_at IS NULL` — so a row flipped to active
+      // with the stamp still set stays invisible to every project. The scope editor's own warning
+      // tells a reviewer to reactivate the predecessor when they move a replacement's scope, and
+      // this is what makes that instruction true rather than merely printed.
+      //
+      // `supersedesEntryId` is deliberately KEPT: it records what this entry replaced, which is
+      // history and stays true whatever the status.
+      if (data.status === 'active') set.supersededAt = null;
       // Content/scope/status edits need a re-embed.
       if (data.body !== undefined || data.facets !== undefined || data.status !== undefined) {
         set.embedStatus = 'pending';
