@@ -30,6 +30,7 @@ export async function executeSubAgentNative(
    *  which already computes it for the gitfile mask, so the MCP surface and the mask cannot
    *  disagree about whether git is usable here. */
   hasWorktree: boolean,
+  hasRepo: boolean,
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_native requires cliProviderId');
@@ -69,6 +70,7 @@ export async function executeSubAgentNative(
     // on the cli path and another on this one.
     payload.toolProfile ?? 'full',
     hasWorktree,
+    hasRepo,
   );
   // Resolved here as well: the sub-agent kinds do NOT share exec-core's per-invocation
   // composition block, so anything added there (this, the uploads mount) reaches them only
@@ -108,6 +110,7 @@ export async function executeSubAgentSequential(
    *  which already computes it for the gitfile mask, so the MCP surface and the mask cannot
    *  disagree about whether git is usable here. */
   hasWorktree: boolean,
+  hasRepo: boolean,
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_sequential requires cliProviderId');
@@ -141,6 +144,7 @@ export async function executeSubAgentSequential(
     // on the cli path and another on this one.
     payload.toolProfile ?? 'full',
     hasWorktree,
+    hasRepo,
   );
   const appReach = payload.taskId ? await resolveAppReach(db, payload.taskId) : null;
   const spawner = createSandboxSpawner(

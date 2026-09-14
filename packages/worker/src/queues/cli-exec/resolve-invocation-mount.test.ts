@@ -4,7 +4,12 @@ import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
 import { resolveInvocationRepoMount } from './resolvers.js';
 
 function mkDb(
-  task: { userId: string; repositoryId: string | null; worktreeBranch: string | null } | null,
+  task: {
+    userId: string;
+    repositoryId: string | null;
+    worktreeBranch: string | null;
+    type?: string;
+  } | null,
   repo: { source?: string; storagePath?: string | null; localPath?: string | null } | null,
 ): Database {
   return {
@@ -69,11 +74,34 @@ describe('resolveInvocationRepoMount', () => {
     expect(hasWorktree).toBe(false);
   });
 
-  it('returns no mount for a repo-less task', async () => {
-    const db = mkDb({ userId: 'u1', repositoryId: null, worktreeBranch: null }, null);
+  it('returns no mount for a repo-less task of a type that requires one', async () => {
+    // A null repositoryId on a workflow task is a TORN state — the column is ON DELETE SET
+    // NULL — not a mode, so nothing is mounted and resolveTaskContext still fails it loudly.
+    const db = mkDb(
+      { userId: 'u1', repositoryId: null, worktreeBranch: null, type: 'workflow' },
+      null,
+    );
     expect(await resolveInvocationRepoMount(db, 't1')).toEqual({
       repoMount: null,
       hasWorktree: false,
+      hasRepo: false,
+    });
+  });
+
+  it('mounts an empty scratch workspace for a type allowed to run repo-less', async () => {
+    // The sandbox always runs with `-w /haive/workdir`; with nothing mounted there that path is
+    // the image WORKDIR, created root:root while the CLI runs as uid 1000, so anything written
+    // relative to the CWD fails EACCES.
+    const db = mkDb(
+      { userId: 'u1', repositoryId: null, worktreeBranch: null, type: 'kb_author' },
+      null,
+    );
+    expect(await resolveInvocationRepoMount(db, 't1')).toEqual({
+      repoMount: { source: 'haive_repos', target: SANDBOX_WORKDIR, subpath: 'u1/_scratch/t1' },
+      hasWorktree: false,
+      // The point of the separate flag: there IS a mount, and there is NO repository. A null
+      // check on repoMount can no longer answer the second question.
+      hasRepo: false,
     });
   });
 });

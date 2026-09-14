@@ -333,7 +333,7 @@ const BROWSER_TAB_DISCIPLINE = [
  *  every one of those mentions without matching any of their wording. */
 export function mcpSurfacePrompt(
   surface: McpSurface | null,
-  opts: { noBuiltInTools?: boolean } = {},
+  opts: { noBuiltInTools?: boolean; noRepo?: boolean } = {},
 ): string {
   const lines: string[] = [MCP_SURFACE_MARKER];
   const wired: string[] = [];
@@ -381,6 +381,19 @@ export function mcpSurfacePrompt(
       'describe a command, and do not ask to inspect a file. Answer from the material below,',
       'and where it does not settle a field, emit null for that field rather than a guess.',
     );
+  } else if (opts.noRepo) {
+    // Every arm below assumes a checkout. A repo-less run has none, so the rag-absent
+    // paragraph's diagnosis ("this repository has no RAG index configured") and its remedy
+    // (grep, read the KB dir off disk) are both false — it would send the agent hunting
+    // through an empty working directory for files that do not exist.
+    lines.push(
+      '',
+      'There is NO repository in this run — nothing is checked out at the working directory, so',
+      'there is no code to search and no knowledge base on disk. That is deliberate: this task',
+      'works from the material in this prompt. Disregard any instruction to search a repository,',
+      'look for files on disk, or read a project knowledge base, whether it appears below or in',
+      'an agent definition file — there is nothing on disk for it to find.',
+    );
   } else if (!surface?.rag.enabled) {
     lines.push(
       '',
@@ -415,7 +428,7 @@ export function mcpSurfacePrompt(
 export function withMcpSurface(
   prompt: string,
   surface: McpSurface | null,
-  opts: { noBuiltInTools?: boolean } = {},
+  opts: { noBuiltInTools?: boolean; noRepo?: boolean } = {},
 ): string {
   if (prompt.includes(MCP_SURFACE_MARKER)) return prompt;
   return `${mcpSurfacePrompt(surface, opts)}\n\n${prompt}`;

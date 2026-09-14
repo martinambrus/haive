@@ -32,6 +32,7 @@ import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
 import {
   resolveInvocationUsesWorktreeGitBoundary,
   withWorktreeGitBoundary,
+  taskHasRepository,
 } from '../repo/worktree-git-boundary.js';
 import { withDdevGeneratedBoundary } from '../repo/ddev-generated-boundary.js';
 import {
@@ -112,6 +113,11 @@ export interface DispatchRequest {
   /** Computed by resolveTaskDispatch from the actual invocation target. Exposed
    *  on the pure resolver only for deterministic unit tests. */
   worktreeGitBoundary?: boolean;
+  /** Whether the task has a REPOSITORY. Computed by resolveTaskDispatch; exposed on the pure
+   *  resolver only for deterministic unit tests. False makes the MCP surface block say there is
+   *  no checkout instead of advising grep over one — the same rule as every other boundary
+   *  here: a prompt must not assert a surface the sandbox does not have. */
+  hasRepo?: boolean;
   /** The step's declared MCP narrowing, passed straight to resolveMcpSurface so the
    *  advertised surface matches the one cli-exec will wire for the same invocation. */
   toolProfile?: 'rag_only' | 'none';
@@ -148,17 +154,25 @@ export async function resolveTaskDispatch(
   taskId: string,
   req: DispatchRequest,
 ): Promise<DispatchPlan> {
-  const [lspConfigured, worktreeGitBoundary, mcpSurface, globalKbDigest, appReach, codexAppServer] =
-    await Promise.all([
-      hasReadyLspBridge(db, taskId),
-      resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
-      req.toolProfile === 'none'
-        ? emptyMcpSurface()
-        : resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
-      resolveGlobalKbDigest(db, taskId),
-      resolveAppReach(db, taskId),
-      resolveCodexAppServerVerdicts(db, taskId),
-    ]);
+  const [
+    lspConfigured,
+    worktreeGitBoundary,
+    mcpSurface,
+    globalKbDigest,
+    appReach,
+    codexAppServer,
+    hasRepo,
+  ] = await Promise.all([
+    hasReadyLspBridge(db, taskId),
+    resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
+    req.toolProfile === 'none'
+      ? emptyMcpSurface()
+      : resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
+    resolveGlobalKbDigest(db, taskId),
+    resolveAppReach(db, taskId),
+    resolveCodexAppServerVerdicts(db, taskId),
+    taskHasRepository(db, taskId),
+  ]);
   const resolved: DispatchRequest = {
     ...req,
     lspConfigured,
@@ -169,6 +183,7 @@ export async function resolveTaskDispatch(
     globalKbDigest,
     appReach,
     codexAppServer,
+    hasRepo,
   };
   const plan = resolveDispatch(resolved);
   // A provider's first steerable codex dispatch in a task is where its app-server transport is
@@ -332,6 +347,7 @@ function buildCliSidePlan(
       {
         noBuiltInTools:
           req.invokeOpts?.disableTools === true && adapter.supportsDisableTools === true,
+        noRepo: req.hasRepo === false,
       },
     );
     // Whether the app can actually be reached, and how. Same reason as the boundaries above:

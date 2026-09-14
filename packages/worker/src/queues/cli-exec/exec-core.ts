@@ -371,7 +371,7 @@ export async function executeByKind(
   // (payload.worktreeSubpath for a DAG/merge sibling, else the task's feature worktree)
   // so the agent cannot reach the repo-root checkout or any sibling worktree. The
   // worktree IS the mount root, so the container workdir is SANDBOX_WORKDIR.
-  const { repoMount, hasWorktree } = await resolveInvocationRepoMount(
+  const { repoMount, hasWorktree, hasRepo } = await resolveInvocationRepoMount(
     db,
     payload.taskId,
     payload.worktreeRel,
@@ -442,6 +442,7 @@ export async function executeByKind(
               // app URL it had no browser to reach.
               payload.toolProfile ?? 'full',
               hasWorktree,
+              hasRepo,
             )
           : { files: [], extraArgs: [] };
       // Pre-warm the shared npm cache for the MCP servers that are fetched from npm.
@@ -512,6 +513,7 @@ export async function executeByKind(
         sandboxWorkdir,
         maskFiles,
         hasWorktree,
+        hasRepo,
       );
     case 'subagent_native':
       return executeSubAgentNative(
@@ -523,6 +525,7 @@ export async function executeByKind(
         sandboxWorkdir,
         maskFiles,
         hasWorktree,
+        hasRepo,
       );
     default:
       throw new Error(

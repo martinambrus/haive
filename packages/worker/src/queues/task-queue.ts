@@ -66,6 +66,11 @@ import {
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../sandbox/ide-runner.js';
+import {
+  ensureTaskScratchWorkspace,
+  removeTaskScratchWorkspace,
+  taskTypeAllowsNoRepository,
+} from '../repo/scratch-workspace.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { getTaskEnvTemplate, pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
@@ -235,8 +240,20 @@ async function resolveTaskContext(
       columns: { storagePath: true, localPath: true },
     });
     repoPath = repo?.storagePath ?? repo?.localPath ?? null;
+  } else if (taskTypeAllowsNoRepository(task.type)) {
+    // A task type that is ALLOWED to have no repository gets an empty workspace instead of a
+    // checkout. `kb_author` writing a cross-project house standard is the case: there is no
+    // repo to read, but the CLI still needs a writable working directory.
+    //
+    // A directory rather than a nullable `repoPath`: the field is `string` on both
+    // ResolvedTaskContext and StepContext, so widening it would reach every step in the engine
+    // to serve one task type. See ensureTaskScratchWorkspace for the EACCES this also avoids.
+    repoPath = await ensureTaskScratchWorkspace(task.userId, task.id);
   }
   if (!repoPath) {
+    // Still a hard failure for every other type. A null repositoryId there is a torn state —
+    // `tasks.repository_id` is ON DELETE SET NULL — not a mode, and handing a workflow run an
+    // empty directory would surface as a baffling agent failure minutes later instead.
     throw new Error(`task ${taskId} has no resolvable repo path`);
   }
 
@@ -630,6 +647,21 @@ async function cleanupTaskContainers(
   // dropped even when their removal failed, or a task id that came round again would be
   // told its preparations are already in place.
   clearTaskAuthPreparationState(taskId);
+
+  // The empty workspace a repo-less task ran in. Reaped here and not in the worktree branch
+  // below because it is NOT a worktree — no step owns it, nothing else sweeps it, and it sits
+  // on the shared repos volume where a leak would accumulate one directory per task.
+  try {
+    const scratchTask = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { userId: true, type: true, repositoryId: true },
+    });
+    if (scratchTask && !scratchTask.repositoryId && taskTypeAllowsNoRepository(scratchTask.type)) {
+      await removeTaskScratchWorkspace(scratchTask.userId, taskId);
+    }
+  } catch (err) {
+    logger.warn({ err, taskId, reason }, 'cleanup-scratch-workspace failed');
+  }
 
   // Remove the feature worktree. On cancel: always (a task cancelled before its
   // worktree-cleanup step would leak the dir into the haive_repos volume). On

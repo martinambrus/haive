@@ -1,6 +1,7 @@
 import { stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import { and, eq } from 'drizzle-orm';
+import { taskScratchSubpath, taskTypeAllowsNoRepository } from '../../repo/scratch-workspace.js';
 import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -228,6 +229,13 @@ export async function resolveMcpExtraFiles(
    *  Deliberately REQUIRED (no default): the caller already computes it for the gitfile mask,
    *  and a default would let a new call site silently re-advertise a server that cannot work. */
   hasWorktree: boolean,
+  /** Whether this task has a REPOSITORY at all. Distinct from `repoMount != null`, which is no
+   *  longer the same question: a repo-less task is given an empty scratch workspace, so it has
+   *  a mount and nothing to serve from it.
+   *
+   *  Required for the same reason as `hasWorktree` — a default would let a new call site
+   *  silently re-advertise a server that cannot work. */
+  hasRepo: boolean,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
   if (profile === 'none') {
@@ -289,7 +297,11 @@ export async function resolveMcpExtraFiles(
     // zero `mcp__git__*` calls and zero `mcp__filesystem__*` calls, against 6 `rag_search`.
     // `filesystem` is deliberately left alone — its tools duplicate file reads the CLIs have
     // natively, but "GROUND on disk" is the one thing every one of these agents must still do.
-    includeGit: !hasWorktree && !ragOnly,
+    // ...and never without a repository: `hasWorktree` is false for a repo-less task too, so
+    // this alone would point `mcp-server-git` at the empty scratch workspace and reproduce
+    // exactly the `"git":"failed"` / `is not a valid Git repository` entry the gate above
+    // exists to prevent.
+    includeGit: hasRepo && !hasWorktree && !ragOnly,
     includeChromeDevtools: surface.chromeDevtools.enabled,
     chromeDevtoolsBrowserUrl,
     chromeDevtoolsMcpVersion: surface.chromeDevtools.version,
@@ -378,9 +390,20 @@ export async function resolveTaskRepoMount(
 ): Promise<DockerVolumeMount | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, repositoryId: true },
+    columns: { userId: true, repositoryId: true, type: true },
   });
-  if (!task?.repositoryId) return null;
+  if (!task) return null;
+  if (!task.repositoryId) {
+    // A task type allowed to run with no repository still gets a working directory — see
+    // ensureTaskScratchWorkspace. Anything else keeps the old `null`.
+    return taskTypeAllowsNoRepository(task.type)
+      ? {
+          source: REPO_VOLUME_NAME,
+          target: REPO_MOUNT_TARGET,
+          subpath: taskScratchSubpath(task.userId, taskId),
+        }
+      : null;
+  }
 
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId),
@@ -429,18 +452,34 @@ export async function resolveInvocationRepoMount(
   db: Database,
   taskId: string,
   worktreeRel?: string,
-): Promise<{ repoMount: DockerVolumeMount | null; hasWorktree: boolean }> {
+): Promise<{ repoMount: DockerVolumeMount | null; hasWorktree: boolean; hasRepo: boolean }> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, repositoryId: true, worktreeBranch: true },
+    columns: { userId: true, repositoryId: true, worktreeBranch: true, type: true },
   });
-  if (!task?.repositoryId) return { repoMount: null, hasWorktree: false };
+  if (!task) return { repoMount: null, hasWorktree: false, hasRepo: false };
+  if (!task.repositoryId) {
+    // `hasRepo` is separate from "there is a mount" precisely because of this branch: a
+    // repo-less task DOES get a mount (an empty scratch workspace), so a null check on
+    // repoMount can no longer answer "is there a repository here".
+    return {
+      repoMount: taskTypeAllowsNoRepository(task.type)
+        ? {
+            source: REPO_VOLUME_NAME,
+            target: REPO_MOUNT_TARGET,
+            subpath: taskScratchSubpath(task.userId, taskId),
+          }
+        : null,
+      hasWorktree: false,
+      hasRepo: false,
+    };
+  }
 
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId),
     columns: { source: true, storagePath: true, localPath: true },
   });
-  if (!repo) return { repoMount: null, hasWorktree: false };
+  if (!repo) return { repoMount: null, hasWorktree: false, hasRepo: false };
 
   const storagePath = repo.storagePath ?? repo.localPath;
 
@@ -453,6 +492,7 @@ export async function resolveInvocationRepoMount(
     return {
       repoMount: { source: hostPath, target: REPO_MOUNT_TARGET, readOnly: true },
       hasWorktree: false,
+      hasRepo: true,
     };
   }
 
@@ -484,6 +524,7 @@ export async function resolveInvocationRepoMount(
   return {
     repoMount: { source: REPO_VOLUME_NAME, target: REPO_MOUNT_TARGET, subpath },
     hasWorktree,
+    hasRepo: true,
   };
 }
 
