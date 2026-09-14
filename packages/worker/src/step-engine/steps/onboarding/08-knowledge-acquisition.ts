@@ -150,6 +150,10 @@ const IGNORE_DIRS = new Set([
   'dist',
   'build',
   '.ddev',
+  // Rust's build output, the same class as `dist`/`build` above. It matters now that `.rs` is
+  // scanned: a built checkout carries generated sources there, and a generated helper is not
+  // this project's vocabulary — the same reason the minified-bundle skip exists.
+  'target',
 ]);
 
 async function collectShortFileTree(
@@ -1073,6 +1077,12 @@ const SYMBOL_SCAN_EXT: Record<string, string[]> = {
   python: ['.py'],
   ruby: ['.rb'],
   go: ['.go'],
+  // `01-env-detect` recognises Cargo.toml -> rust and pom.xml/build.gradle -> java, so these are
+  // SUPPORTED stacks whose files this map did not list. The miss was total rather than partial:
+  // an unknown language falls back to the UNION of these values, so a Rust or Java anchor
+  // contributed zero of its own symbols and the citation scrub had no backstop there at all.
+  rust: ['.rs'],
+  java: ['.java'],
 };
 
 /** Names of functions / classes / traits / interfaces DEFINED in this repo's own
@@ -1126,8 +1136,16 @@ export async function collectRepoSymbols(
       // from PHP articles for mentioning `is_numeric`, `is_string`, `in_array` and
       // `array_key_exists`, every one of them a false citation. A denylist of built-ins would
       // have treated the symptom; the parse was simply wrong.
+      // `fn` (Rust) and `record` (Java) are the two additions those stacks need; `class`,
+      // `interface`, `enum`, `struct`, `trait` and `type` already covered the rest of both. Order
+      // matters only in that `function` precedes `func` precedes `fn`, so the longest keyword wins
+      // the alternation. Java's INSTANCE METHODS stay uncollected and that is deliberate: they
+      // carry a return type between the modifiers and the name (`public void processInvoice()`),
+      // and admitting a bare leading token there widens the SHAPE this scan refuses to widen —
+      // a miss costs a symbol, over-matching costs somebody's article. Java TYPES are collected,
+      // which is the form an article cites as `new InvoiceProcessor(...)`.
       const defRe =
-        /(?<!\buse\s)\b(?:function|func|def|class|trait|interface|struct|type|enum|module)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
+        /(?<!\buse\s)\b(?:function|func|fn|def|class|trait|interface|struct|type|enum|module|record)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
       // `enum` covers PHP 8.1 and TypeScript, `module` covers Ruby — both are unambiguous
       // declaration keywords, so they cost nothing.
       //

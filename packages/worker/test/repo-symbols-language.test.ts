@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -195,6 +195,61 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('Excel')).toBe(false);
     expect(symbols.has('PDF')).toBe(false);
     expect(symbols.has('CPDF')).toBe(false);
+  });
+
+  it('collects Rust and Java declarations, which detection calls supported stacks', async () => {
+    // `01-env-detect` maps Cargo.toml -> rust and pom.xml/build.gradle -> java, but the extension
+    // map listed neither, and an unknown language falls back to the UNION of its values — so a
+    // Rust or Java anchor contributed ZERO symbols and the scrub had no backstop there at all.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-rust-java-'));
+    await writeFile(
+      path.join(dir, 'invoice.rs'),
+      [
+        'pub struct InvoiceBatch { pub id: u32 }',
+        'pub fn process_invoice_batch(b: &InvoiceBatch) -> u32 { b.id }',
+        'pub trait InvoiceSink { fn accept(&self); }',
+        'fn main() {}',
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, 'Invoice.java'),
+      [
+        'public class InvoiceProcessor {',
+        '  public void processInvoice() {}',
+        '}',
+        'record InvoiceRow(String id) {}',
+        'interface InvoiceGateway {}',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, null);
+    expect(symbols.has('InvoiceBatch')).toBe(true);
+    expect(symbols.has('process_invoice_batch')).toBe(true);
+    expect(symbols.has('InvoiceSink')).toBe(true);
+    expect(symbols.has('InvoiceProcessor')).toBe(true);
+    expect(symbols.has('InvoiceRow')).toBe(true);
+    expect(symbols.has('InvoiceGateway')).toBe(true);
+    // `main` is single-word and below the length floor — the scan must not start collecting
+    // vocabulary every project shares.
+    expect(symbols.has('main')).toBe(false);
+    // Java instance methods carry a return type before the name, and admitting a bare leading
+    // token there widens a shape this scan deliberately refuses to widen. Documented, not fixed.
+    expect(symbols.has('processInvoice')).toBe(false);
+  });
+
+  it('skips Rust build output, which is generated rather than project vocabulary', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-rust-target-'));
+    await mkdir(path.join(dir, 'target'), { recursive: true });
+    await writeFile(
+      path.join(dir, 'target', 'generated.rs'),
+      'pub fn generated_helper_fn() {}',
+      'utf8',
+    );
+    await writeFile(path.join(dir, 'real.rs'), 'pub fn real_project_fn() {}', 'utf8');
+    const symbols = await collectRepoSymbols(dir, 'rust');
+    expect(symbols.has('real_project_fn')).toBe(true);
+    expect(symbols.has('generated_helper_fn')).toBe(false);
   });
 
   it('collects a TypeScript method that declares a return type', async () => {
