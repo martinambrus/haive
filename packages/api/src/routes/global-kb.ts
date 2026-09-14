@@ -491,22 +491,32 @@ globalKbRoutes.get('/entries/:id', async (c) => {
     // reviewer looking at archived entries never has the active successor in hand. A warning
     // derived from a VIEW is a warning that silently disappears when the view narrows.
     //
-    // Only for an archived row: an active entry cannot meaningfully be "replaced", and the
-    // query is not worth running for every detail open.
-    const [activeSuccessor] =
+    // Walks the CHAIN, not the direct child. An article replaced more than once leaves
+    // A -> B -> C with only C active, and C points at B: a direct lookup from A finds B,
+    // discards it for being archived, and reports no successor — so the warning vanished on
+    // exactly the entries that have been superseded most often.
+    //
+    // Bounded twice, because this is recursion over user data: a depth cap, and a visited-set
+    // guard so a cycle in `supersedes_entry_id` terminates instead of spinning. Only for an
+    // archived row — an active entry cannot meaningfully be "replaced", and the query is not
+    // worth running on every detail open.
+    const successors =
       entry.status === 'archived'
-        ? await db
-            .select({ id: globalKbEntries.id, title: globalKbEntries.title })
-            .from(globalKbEntries)
-            .where(
-              and(
-                eq(globalKbEntries.supersedesEntryId, entry.id),
-                eq(globalKbEntries.status, 'active'),
-              ),
+        ? ((await db.execute(sql`
+            WITH RECURSIVE chain AS (
+              SELECT e.id, e.status, e.title, 1 AS depth, ARRAY[e.id] AS seen
+                FROM global_kb_entries e
+               WHERE e.supersedes_entry_id = ${entry.id}
+              UNION ALL
+              SELECT n.id, n.status, n.title, c.depth + 1, c.seen || n.id
+                FROM global_kb_entries n
+                JOIN chain c ON n.supersedes_entry_id = c.id
+               WHERE c.depth < 20 AND NOT (n.id = ANY(c.seen))
             )
-            .limit(1)
+            SELECT id, title FROM chain WHERE status = 'active' LIMIT 1
+          `)) as unknown as Array<{ id: string; title: string }>)
         : [];
-    return { entry, activeSuccessor: activeSuccessor ?? null };
+    return { entry, activeSuccessor: successors[0] ?? null };
   });
   if (!found) throw new HttpError(404, 'global KB entry not found');
   return c.json(found);
