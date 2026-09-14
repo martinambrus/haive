@@ -1,4 +1,5 @@
-import { chown, mkdir, rm } from 'node:fs/promises';
+import { chown, mkdir, readdir, rm } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -86,12 +87,12 @@ export async function removeTaskScratchWorkspace(userId: string, taskId: string)
  *
  *  Both callers share this one rule: a pending summary means the LAST summary to finish does
  *  the removal (`cleanupAuthAfterTerminalSummary`), exactly as the auth volumes already work. */
-export async function cleanupTaskScratchWorkspace(db: Database, taskId: string): Promise<void> {
+export async function cleanupTaskScratchWorkspace(db: Database, taskId: string): Promise<boolean> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { userId: true, type: true, repositoryId: true, status: true },
   });
-  if (!task || task.repositoryId || !taskTypeAllowsNoRepository(task.type)) return;
+  if (!task || task.repositoryId || !taskTypeAllowsNoRepository(task.type)) return false;
 
   // Only a SETTLED, non-failed task gives up its workspace, and the check lives here so no
   // caller has to be ordered correctly. `markTaskCompleted` stamps `completed` and then runs
@@ -99,7 +100,7 @@ export async function cleanupTaskScratchWorkspace(db: Database, taskId: string):
   // Terminal are deliberately kept alive for recovery — so a reaper that fired on the earlier
   // status would have deleted the workspace those surfaces need. Guarding centrally also
   // retires the old `reason !== 'failed'` condition its callers each had to remember.
-  if (task.status !== 'completed' && task.status !== 'cancelled') return;
+  if (task.status !== 'completed' && task.status !== 'cancelled') return false;
 
   // `endedAt IS NULL` alone is not "still running". A step retry supersedes the queued recap
   // WITHOUT ending it (`_step-reset.ts` sets `supersededAt` only, and its WHERE covers
@@ -116,7 +117,70 @@ export async function cleanupTaskScratchWorkspace(db: Database, taskId: string):
     ),
     columns: { id: true },
   });
-  if (pendingSummary) return;
+  if (pendingSummary) return false;
 
   await removeTaskScratchWorkspace(task.userId, taskId);
+  return true;
+}
+
+/** Task directory names are UUIDs. Anything else under `_scratch/` was not written by us, and a
+ *  non-uuid handed to a uuid column throws rather than missing, so it is skipped and left alone. */
+const TASK_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Reap the workspaces the happy path could not.
+ *
+ *  `markTaskCompleted` stamps the status first and reaps LAST — deliberately, so nothing after
+ *  the reap can turn `completed` back into `failed` — which leaves a window where a worker that
+ *  exits in between abandons `_scratch/<taskId>` for good. Redelivery cannot recover it: a
+ *  `completed` task is never advanced again, by `handleAdvanceStep`'s own guard. One directory
+ *  per crash, accumulating, with nothing else in the tree looking at them.
+ *
+ *  CONVERGENT, not destructive, and the distinction is the guard rather than the `rm`: every
+ *  directory removed here is one the normal path had already decided to remove. A task that is
+ *  still live keeps its workspace, because this pass does not re-decide that — it defers to
+ *  `cleanupTaskScratchWorkspace`, the same settled-and-no-pending-recap rule every other caller
+ *  gets. A directory whose task ROW is gone is the one case that function cannot reap, since it
+ *  keys on a task it can no longer read, so it is handled here instead.
+ *
+ *  Runs at boot, before any queue starts, so nothing it examines can be mid-flight. */
+export async function sweepOrphanScratchWorkspaces(db: Database): Promise<void> {
+  let userDirs: Dirent[];
+  try {
+    userDirs = await readdir(REPO_STORAGE_ROOT, { withFileTypes: true });
+  } catch (err) {
+    // No repo volume mounted (a worker that has never cloned anything) is not a fault.
+    log.debug({ err }, 'scratch sweep found no repo storage root');
+    return;
+  }
+
+  let removed = 0;
+  for (const userDir of userDirs) {
+    if (!userDir.isDirectory()) continue;
+    const scratchRoot = path.join(REPO_STORAGE_ROOT, userDir.name, SCRATCH_DIR);
+    let taskDirs: Dirent[];
+    try {
+      taskDirs = await readdir(scratchRoot, { withFileTypes: true });
+    } catch {
+      continue; // this user has no scratch tree — the common case
+    }
+    for (const taskDir of taskDirs) {
+      if (!taskDir.isDirectory() || !TASK_DIR_NAME.test(taskDir.name)) continue;
+      try {
+        const task = await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, taskDir.name),
+          columns: { id: true },
+        });
+        if (!task) {
+          await removeTaskScratchWorkspace(userDir.name, taskDir.name);
+          removed += 1;
+          continue;
+        }
+        if (await cleanupTaskScratchWorkspace(db, taskDir.name)) removed += 1;
+      } catch (err) {
+        // One unreadable task must not stop the sweep for the rest.
+        log.warn({ err, taskId: taskDir.name }, 'scratch sweep skipped a workspace');
+      }
+    }
+  }
+  if (removed > 0) log.info({ removed }, 'swept scratch workspaces left by an interrupted reap');
 }

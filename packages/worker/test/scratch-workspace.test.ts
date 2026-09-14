@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdir, mkdtemp, readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
 import { taskScratchSubpath, taskTypeAllowsNoRepository } from '../src/repo/scratch-workspace.js';
 
 // A null `tasks.repository_id` has TWO meanings — a task deliberately created without one, and
@@ -24,5 +27,80 @@ describe('taskScratchSubpath', () => {
 
   it('is per task, so two repo-less tasks never share a working directory', () => {
     expect(taskScratchSubpath('u1', 't1')).not.toBe(taskScratchSubpath('u1', 't2'));
+  });
+});
+
+// `markTaskCompleted` stamps the status FIRST and reaps LAST, so a worker that exits between the
+// two abandons the directory: a `completed` task is never advanced again, so redelivery cannot
+// recover it and nothing else in the tree looks at these. The sweep is the reconciliation, and
+// what it must never do is take a workspace from a task that is still using one.
+describe('sweepOrphanScratchWorkspaces', () => {
+  const TASK = '11111111-1111-4111-8111-111111111111';
+
+  /** The storage root is read at module load, so the module is re-imported per root. */
+  async function loadWithRoot(root: string) {
+    vi.resetModules();
+    process.env.REPO_STORAGE_ROOT = root;
+    return import('../src/repo/scratch-workspace.js');
+  }
+
+  function fakeDb(task: unknown, pendingSummary: unknown = undefined) {
+    return {
+      query: {
+        tasks: { findFirst: async () => task },
+        cliInvocations: { findFirst: async () => pendingSummary },
+      },
+    } as never;
+  }
+
+  async function rootWithScratch(): Promise<{ root: string; userId: string }> {
+    const root = await mkdtemp(path.join(tmpdir(), 'scratch-sweep-'));
+    const userId = 'u1';
+    await mkdir(path.join(root, userId, '_scratch', TASK), { recursive: true });
+    return { root, userId };
+  }
+
+  async function scratchNames(root: string, userId: string): Promise<string[]> {
+    return readdir(path.join(root, userId, '_scratch'));
+  }
+
+  it('removes a workspace whose task row is gone', async () => {
+    // The one case cleanupTaskScratchWorkspace cannot handle: it keys on a task it cannot read.
+    const { root, userId } = await rootWithScratch();
+    const mod = await loadWithRoot(root);
+    await mod.sweepOrphanScratchWorkspaces(fakeDb(undefined));
+    expect(await scratchNames(root, userId)).toEqual([]);
+  });
+
+  it('leaves a live task its working directory', async () => {
+    // The whole safety argument. A task parked on a form is not settled, and taking its
+    // workspace would break the run this sweep is supposed to be invisible to.
+    const { root, userId } = await rootWithScratch();
+    const mod = await loadWithRoot(root);
+    await mod.sweepOrphanScratchWorkspaces(
+      fakeDb({ id: TASK, userId, type: 'kb_author', repositoryId: null, status: 'waiting_user' }),
+    );
+    expect(await scratchNames(root, userId)).toEqual([TASK]);
+  });
+
+  it('finishes the reap a crash interrupted', async () => {
+    const { root, userId } = await rootWithScratch();
+    const mod = await loadWithRoot(root);
+    await mod.sweepOrphanScratchWorkspaces(
+      fakeDb({ id: TASK, userId, type: 'kb_author', repositoryId: null, status: 'completed' }),
+    );
+    expect(await scratchNames(root, userId)).toEqual([]);
+  });
+
+  it('keeps a settled task whose recap has not finished', async () => {
+    const { root, userId } = await rootWithScratch();
+    const mod = await loadWithRoot(root);
+    await mod.sweepOrphanScratchWorkspaces(
+      fakeDb(
+        { id: TASK, userId, type: 'kb_author', repositoryId: null, status: 'completed' },
+        { id: 'inv1' },
+      ),
+    );
+    expect(await scratchNames(root, userId)).toEqual([TASK]);
   });
 });

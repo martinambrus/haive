@@ -4,6 +4,7 @@ import { CONFIG_KEYS, configService, logger, type OnboardingToolingMirror } from
 import { withGlobalKb } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
+import { sweepOrphanScratchWorkspaces } from './repo/scratch-workspace.js';
 import { defaultDockerRunner } from './sandbox/docker-runner.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
 import { describePlanOp, proposedOps } from './step-engine/steps/workflow/_plan-ops.js';
@@ -38,6 +39,10 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
   { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
+  // Filesystem rather than a table, like `clearPrunedSandboxImageState` reconciles against real
+  // Docker images. Convergent because it only finishes a removal the normal path had already
+  // decided on; a live task keeps its workspace.
+  { id: 'sweepOrphanScratchWorkspaces', kind: 'convergent', run: sweepOrphanScratchWorkspaces },
   // The only one. It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
   // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.
   // Nothing can undo it.
