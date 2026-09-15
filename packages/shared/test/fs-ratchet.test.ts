@@ -79,12 +79,21 @@ function isPathCall(name: string): boolean {
  *  `constants`, a descriptor-based call — binds nothing this counts. */
 type Binding = 'namespace' | 'function';
 
-function isFsImportCall(node: ts.Node): node is ts.CallExpression {
-  if (!ts.isCallExpression(node) || node.expression.kind !== ts.SyntaxKind.ImportKeyword) {
-    return false;
-  }
+/** `import('node:fs')`, `require('node:fs')` or `module.require('node:fs')`: a call that loads
+ *  the module (the CommonJS forms matter for the `.cts` sources the scan includes). */
+function isFsLoadCall(node: ts.Node): node is ts.CallExpression {
+  if (!ts.isCallExpression(node)) return false;
+  const callee = node.expression;
+  const loads =
+    callee.kind === ts.SyntaxKind.ImportKeyword ||
+    (ts.isIdentifier(callee) && callee.text === 'require') ||
+    (ts.isPropertyAccessExpression(callee) && callee.name.text === 'require');
   const arg = node.arguments[0];
-  return arg !== undefined && ts.isStringLiteral(arg) && FS_MODULE.test(arg.text);
+  return loads && arg !== undefined && ts.isStringLiteral(arg) && FS_MODULE.test(arg.text);
+}
+
+function isDynamicImport(node: ts.CallExpression): boolean {
+  return node.expression.kind === ts.SyntaxKind.ImportKeyword;
 }
 
 function isFsImportDeclaration(node: ts.Node): node is ts.ImportDeclaration {
@@ -95,10 +104,14 @@ function isFsImportDeclaration(node: ts.Node): node is ts.ImportDeclaration {
   );
 }
 
-/** `await import('node:fs')`, parenthesised or not, with any `.default` / `.promises` after it:
- *  an expression that IS the module, and so may initialise a namespace binding. */
+/** `await import('node:fs')` or `require('node:fs')`, parenthesised or not, with any `.default`
+ *  / `.promises` after it: an expression that IS the module, and so may initialise a namespace
+ *  binding. A bare `import()` without `await` is a promise, not the module, and stays out. */
 function isModuleExpression(node: ts.Expression): boolean {
-  if (ts.isAwaitExpression(node)) return isFsImportCall(node.expression);
+  if (isFsLoadCall(node)) return !isDynamicImport(node);
+  if (ts.isAwaitExpression(node)) {
+    return isFsLoadCall(node.expression) && isDynamicImport(node.expression);
+  }
   if (ts.isParenthesizedExpression(node)) return isModuleExpression(node.expression);
   if (ts.isPropertyAccessExpression(node) && ['default', 'promises'].includes(node.name.text)) {
     return isModuleExpression(node.expression);
@@ -127,6 +140,15 @@ function bindingOf(symbol: ts.Symbol | undefined): Binding | 'unknown' | null {
   }
   if (ts.isImportClause(decl)) {
     return isFsImportDeclaration(decl.parent) && !isTypeOnlyClause(decl) ? 'namespace' : null;
+  }
+  if (ts.isImportEqualsDeclaration(decl)) {
+    // `import fs = require('node:fs')`
+    const ref = decl.moduleReference;
+    const external =
+      ts.isExternalModuleReference(ref) &&
+      ts.isStringLiteral(ref.expression) &&
+      FS_MODULE.test(ref.expression.text);
+    return external && !decl.isTypeOnly ? 'namespace' : null;
   }
   if (ts.isImportSpecifier(decl)) {
     const clause = decl.parent.parent;
@@ -206,6 +228,7 @@ function isDeclarationName(id: ts.Identifier): boolean {
   const p = id.parent;
   if (ts.isImportSpecifier(p) || ts.isImportClause(p) || ts.isNamespaceImport(p)) return true;
   if (ts.isBindingElement(p) || ts.isVariableDeclaration(p)) return p.name === id;
+  if (ts.isImportEqualsDeclaration(p)) return p.name === id;
   if (ts.isPropertyAccessExpression(p)) return p.name === id;
   if (ts.isPropertyAssignment(p)) return p.name === id;
   return ts.isQualifiedName(p) || ts.isTypeQueryNode(p) || ts.isTypeReferenceNode(p);
@@ -235,12 +258,14 @@ function countInFile(sf: ts.SourceFile, checker: ts.TypeChecker): number {
     ) {
       refuse();
     }
-    if (isFsImportCall(node)) {
+    if (isFsLoadCall(node)) {
       // The module as an expression: bound to a name (handled through the binding), or used in
       // place as `(await import('node:fs')).name(`; anything else is a shape not followed.
       let expr: ts.Expression = node;
-      if (!ts.isAwaitExpression(expr.parent)) refuse();
-      expr = expr.parent as ts.Expression;
+      if (isDynamicImport(node)) {
+        if (!ts.isAwaitExpression(expr.parent)) refuse();
+        expr = expr.parent as ts.Expression;
+      }
       if (ts.isParenthesizedExpression(expr.parent)) expr = expr.parent;
       const { top } = chainFrom(expr);
       const owner = top.parent;
@@ -273,6 +298,11 @@ function countInFile(sf: ts.SourceFile, checker: ts.TypeChecker): number {
 /** One program over in-memory sources (no lib, no module resolution: the binder alone answers
  *  which declaration an identifier names), so a whole scan parses once. */
 function analyze(sources: Map<string, string>): Map<string, number | UncountableFsUse> {
+  // Only files that can bind the module enter the program: parsing the whole tree to scan a
+  // sixth of it put the scan past vitest's default timeout on a CI runner.
+  const candidates = new Set(
+    [...sources].filter(([, text]) => MENTIONS_FS.test(text)).map(([name]) => name),
+  );
   const host: ts.CompilerHost = {
     getSourceFile: (name) => {
       const text = sources.get(name);
@@ -290,14 +320,14 @@ function analyze(sources: Map<string, string>): Map<string, number | Uncountable
     readFile: (name) => sources.get(name),
   };
   const program = ts.createProgram(
-    [...sources.keys()],
+    [...candidates],
     { noResolve: true, noLib: true, types: [], noEmit: true, target: ts.ScriptTarget.ES2024 },
     host,
   );
   const checker = program.getTypeChecker();
   const out = new Map<string, number | UncountableFsUse>();
-  for (const [name, text] of sources) {
-    if (!MENTIONS_FS.test(text)) {
+  for (const name of sources.keys()) {
+    if (!candidates.has(name)) {
       out.set(name, 0);
       continue;
     }
@@ -478,6 +508,23 @@ describe('path-based fs call ratchet', () => {
     ).toThrow(/cannot count/);
   });
 
+  it('binds the CommonJS forms a .cts source can use', () => {
+    expect(countFsCalls("const fs = require('node:fs');\nfs.readFileSync(p);")).toBe(1);
+    expect(countFsCalls("import fs = require('node:fs');\nfs.readFileSync(p);")).toBe(1);
+    expect(
+      countFsCalls("const { readFile } = require('node:fs/promises');\nawait readFile(p);"),
+    ).toBe(1);
+    expect(countFsCalls("require('node:fs').readFileSync(p);")).toBe(1);
+    expect(countFsCalls("const m = module.require('node:fs');\nm.readFileSync(p);")).toBe(1);
+    expect(countFsCalls("const fsp = require('node:fs').promises;\nawait fsp.readFile(p);")).toBe(
+      1,
+    );
+    expect(() =>
+      countFsCalls("const p = import('node:fs');\np.then((m) => m.readFile(x));"),
+    ).toThrow(/cannot count/);
+    expect(() => countFsCalls("load(require('node:fs'));")).toThrow(/cannot count/);
+  });
+
   it('matches the per-file baseline exactly', () => {
     const { counts: current, uncountable } = measure();
     if (process.env.UPDATE_FS_RATCHET) {
@@ -498,5 +545,7 @@ describe('path-based fs call ratchet', () => {
       'Path-based node:fs calls on repository paths go through @haive/shared/fs-safe. ' +
         'If a change here is intended, refresh the baseline with UPDATE_FS_RATCHET=1 and say why in the PR.',
     ).toEqual([]);
-  });
+    // ~2 s here; a CI runner sharing its cores with the other vitest workers has been measured
+    // at 10 s, past the 5 s default.
+  }, 60_000);
 });
