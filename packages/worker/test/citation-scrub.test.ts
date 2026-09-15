@@ -271,6 +271,23 @@ describe('bodyUsesRepoSymbol type literals', () => {
     // Still not a match without a call: a bare mention is not a citation of the code.
     expect(bodyUsesRepoSymbol('the process_invoice! helper', symbols)).toBeNull();
   });
+
+  it('matches a qualified setter assignment, and nothing that only looks like one', () => {
+    // Ruby declares `def invoice_total=(value)`, which the scanner records as `invoice_total`, and
+    // calls it only as an assignment through a receiver: there is no parenthesis to match.
+    const setters = new Set(['invoice_total']);
+    expect(bodyUsesRepoSymbol('processor.invoice_total = value', setters)).toBe('invoice_total');
+    expect(bodyUsesRepoSymbol('self.invoice_total = value', setters)).toBe('invoice_total');
+    expect(bodyUsesRepoSymbol('processor.invoice_total ||= compute', setters)).toBe(
+      'invoice_total',
+    );
+    // A bare assignment is a local variable (PHP's `$` included); the rest compare or build a hash.
+    expect(bodyUsesRepoSymbol('invoice_total = value', setters)).toBeNull();
+    expect(bodyUsesRepoSymbol('$invoice_total = value', setters)).toBeNull();
+    expect(bodyUsesRepoSymbol('processor.invoice_total == value', setters)).toBeNull();
+    expect(bodyUsesRepoSymbol('processor.invoice_total =~ /x+/', setters)).toBeNull();
+    expect(bodyUsesRepoSymbol('{ processor.invoice_total => value }', setters)).toBeNull();
+  });
 });
 
 // The bare-filename rule resolved at the repo ROOT only, so `InvoiceProcessor.ts` living under

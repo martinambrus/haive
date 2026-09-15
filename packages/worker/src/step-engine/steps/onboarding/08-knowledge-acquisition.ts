@@ -1366,10 +1366,16 @@ export function bodyUsesRepoSymbol(text: string, symbols: ReadonlySet<string>): 
   // `process_invoice` while an article copies `process_invoice!(invoice)`. Requiring `(`
   // immediately after the base word missed every one of them, in the two languages where the
   // form is idiomatic rather than rare.
+  //
+  // The fifth arm is a QUALIFIED assignment. Ruby declares a setter `def invoice_total=(value)`,
+  // which the scanner records as `invoice_total`, and calls it only as `processor.invoice_total =
+  // value` — no parenthesis, so no other arm sees it. The receiver is required: a bare
+  // `invoice_total = value` is an ordinary local variable in every language, and matching one
+  // deletes somebody's article. `==`, `=~` and `=>` compare or build a hash; they assign nothing.
   const re =
-    /\b([A-Za-z_]\w{4,})[!?]?\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::|\b([A-Za-z_]\w{4,})[ \t]*\{/g;
+    /\b([A-Za-z_]\w{4,})[!?]?\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::|\b([A-Za-z_]\w{4,})[ \t]*\{|\.([A-Za-z_]\w{4,})[ \t]*(?:\|\||&&|[-+*\/%])?=(?![=~>])/g;
   for (let m = re.exec(text); m; m = re.exec(text)) {
-    const name = m[1] ?? m[2] ?? m[3] ?? m[4];
+    const name = m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5];
     if (name && symbols.has(name)) return name;
   }
   return null;
