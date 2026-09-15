@@ -218,14 +218,25 @@ export function assertEditableKnowledgeRelPath(root: string, target: string): vo
  *  check-then-write leaves a window in which an agent replaces the file with a
  *  symlink and has root write through it. `openFileNoFollow` walks the path one
  *  held directory descriptor at a time, refuses a link in ANY component, and
- *  proves the opened inode sits at `<root>/<rel>` through `/proc/self/fd`
+ *  proves the opened inode sits at `<anchor>/<rel>` through `/proc/self/fd`
  *  (Linux-only by construction; a `/proc` read that fails is a refusal). No
- *  `O_CREAT`: this endpoint rewrites files that exist and never creates one. */
-export async function openEditableKnowledgeFile(root: string, target: string): Promise<FileHandle> {
+ *  `O_CREAT`: this endpoint rewrites files that exist and never creates one.
+ *
+ *  `anchor` is the repository root and `root` the workspace (the worktree when
+ *  the task has one). The shape check is workspace-relative, but the walk
+ *  starts at the repository root: a worktree lives under `.haive/worktrees/`,
+ *  which the sandbox and the task terminal can rewrite, and the anchor is the
+ *  one component the walk follows, so it must be a directory nothing untrusted
+ *  can replace. */
+export async function openEditableKnowledgeFile(
+  anchor: string,
+  root: string,
+  target: string,
+): Promise<FileHandle> {
   assertEditableKnowledgeRelPath(root, target);
   let fh: FileHandle | null;
   try {
-    fh = await openFileNoFollow(root, relUnder(root, target), 'read-write', { strict: true });
+    fh = await openFileNoFollow(anchor, relUnder(anchor, target), 'read-write', { strict: true });
   } catch (err) {
     if (isPathContainmentError(err, 'link')) throw new HttpError(403, 'Path is a symlink');
     if (isPathContainmentError(err, 'not-regular-file')) {
@@ -264,7 +275,7 @@ fileRoutes.put('/:id/files/content', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const { task, root } = await resolveWorkspaceRoot(db, id, userId);
+  const { task, root, anchor } = await resolveWorkspaceRoot(db, id, userId);
   await assertWritableRepo(db, task.repositoryId);
 
   const body = (await c.req.json().catch(() => null)) as {
@@ -280,7 +291,7 @@ fileRoutes.put('/:id/files/content', async (c) => {
   }
 
   const target = validateWorkspacePath(root, body.path);
-  const fh = await openEditableKnowledgeFile(root, target);
+  const fh = await openEditableKnowledgeFile(anchor, root, target);
   try {
     // Optimistic concurrency against the bytes the client actually rendered: an
     // agent re-run or a second tab can have rewritten the file since. Reported, not

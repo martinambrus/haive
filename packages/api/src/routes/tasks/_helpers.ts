@@ -15,6 +15,7 @@ import {
   type CliRoleDescriptor,
   type CliTokenUsage,
 } from '@haive/shared';
+import { relUnder } from '@haive/shared/fs-safe';
 import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
 
@@ -1137,26 +1138,38 @@ export async function resolveWorkspaceRoot(
   db: ReturnType<typeof getDb>,
   taskId: string,
   userId: string,
-): Promise<{ task: typeof schema.tasks.$inferSelect; root: string }> {
+): Promise<{
+  task: typeof schema.tasks.$inferSelect;
+  /** The workspace: the task's worktree when it has one, else the repository root. */
+  root: string;
+  /** The repository root — the one path an fs-safe walk may follow. A worktree lives under
+   *  `.haive/worktrees/`, which the sandbox and the task terminal can rewrite, so it is never
+   *  the anchor; callers pass paths below `root` as rels below `anchor`. */
+  anchor: string;
+}> {
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
-  let root: string | null = null;
-  if (task.worktreePath) {
-    root = task.worktreePath;
-  } else if (task.repositoryId) {
-    const repo = await db.query.repositories.findFirst({
-      where: eq(schema.repositories.id, task.repositoryId),
-      columns: { storagePath: true, localPath: true },
-    });
-    root = repo?.storagePath ?? repo?.localPath ?? null;
-  }
+  const repo = task.repositoryId
+    ? await db.query.repositories.findFirst({
+        where: eq(schema.repositories.id, task.repositoryId),
+        columns: { storagePath: true, localPath: true },
+      })
+    : null;
+  const repoRoot = repo?.storagePath ?? repo?.localPath ?? null;
+  const root = task.worktreePath ?? repoRoot;
   if (!root) {
     throw new HttpError(409, 'Task has no resolvable workspace path');
   }
-  return { task, root: resolve(root) };
+  const anchor = resolve(repoRoot ?? root);
+  try {
+    relUnder(anchor, resolve(root));
+  } catch {
+    throw new HttpError(409, 'Task workspace is not inside its repository');
+  }
+  return { task, root: resolve(root), anchor };
 }
 
 export function validateWorkspacePath(root: string, requested: string | undefined): string {

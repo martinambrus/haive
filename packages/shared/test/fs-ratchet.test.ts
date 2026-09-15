@@ -38,6 +38,21 @@ const CALLS = new Set([
   'createReadStream',
   'createWriteStream',
   'realpath',
+  'lstat',
+  'readlink',
+  'symlink',
+  'link',
+  'lchown',
+  'lchmod',
+  'utimes',
+  'lutimes',
+  'mkdtemp',
+  'watch',
+  'watchFile',
+  'unwatchFile',
+  'statfs',
+  'glob',
+  'openAsBlob',
 ]);
 const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
 const IMPORT = /import\s+([^'";]+?)\s+from\s+['"]([^'"]+)['"]/g;
@@ -152,6 +167,11 @@ describe('path-based fs call ratchet', () => {
     expect(
       countFsCalls("import fs, { mkdirSync } from 'node:fs';\nfs.statSync(p); mkdirSync(p);"),
     ).toBe(2);
+    expect(
+      countFsCalls(
+        "import { lstat, readlink, symlink } from 'node:fs/promises';\nawait lstat(p); await readlink(p); await symlink(t, p);",
+      ),
+    ).toBe(3);
     expect(countFsCalls("import { constants, type Dirent } from 'node:fs';\nopen(p);")).toBe(0);
     expect(countFsCalls("import type { Dirent } from 'node:fs';\nopen(p);")).toBe(0);
     expect(countFsCalls("import { open } from './mine.js';\nopen(p);")).toBe(0);

@@ -34,7 +34,7 @@ describe('knowledge-file write guard', () => {
   });
 
   const openRel = async (rel: string): Promise<void> => {
-    const fh = await openEditableKnowledgeFile(root, path.join(root, rel));
+    const fh = await openEditableKnowledgeFile(root, root, path.join(root, rel));
     await fh.close();
   };
 
@@ -86,6 +86,45 @@ describe('knowledge-file write guard', () => {
 
     it('refuses a path outside the knowledge trees', async () => {
       await expect(openRel('src/index.md')).rejects.toThrow(/knowledge-base files/i);
+    });
+  });
+
+  describe('anchored at the repository root', () => {
+    // A worktree lives under `.haive/worktrees/`, which the sandbox and the task
+    // terminal can rewrite, so the walk starts at the repository root and must
+    // refuse a worktree directory that has been replaced by a link — the anchor
+    // is the one component the walk follows.
+    let repo: string;
+    let worktree: string;
+
+    beforeEach(async () => {
+      repo = await mkdtemp(path.join(tmpdir(), 'kbedit-repo-'));
+      worktree = path.join(repo, '.haive', 'worktrees', 'wt');
+      await mkdir(path.join(worktree, KB_DIR), { recursive: true });
+      await writeFile(path.join(worktree, KB_DIR, 'a.md'), '# a', 'utf8');
+      await mkdir(path.join(outside, KB_DIR), { recursive: true });
+      await writeFile(path.join(outside, KB_DIR, 'a.md'), 'elsewhere', 'utf8');
+    });
+
+    afterEach(async () => {
+      await rm(repo, { recursive: true, force: true });
+    });
+
+    it('opens a worktree file through the repository anchor', async () => {
+      const fh = await openEditableKnowledgeFile(
+        repo,
+        worktree,
+        path.join(worktree, KB_DIR, 'a.md'),
+      );
+      await fh.close();
+    });
+
+    it('refuses the file once the worktree directory is a link', async () => {
+      await rm(worktree, { recursive: true, force: true });
+      await symlink(outside, worktree);
+      await expect(
+        openEditableKnowledgeFile(repo, worktree, path.join(worktree, KB_DIR, 'a.md')),
+      ).rejects.toThrow(/symlink/i);
     });
   });
 });
