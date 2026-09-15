@@ -868,6 +868,16 @@ globalKbRoutes.delete('/entries/:id', async (c) => {
         await db.execute(
           sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
         );
+        // Entries that replaced this one now replace what IT replaced. Left pointing at the gap, a
+        // chain A -> B -> C loses B, and archived A stops warning that C is live, so Reactivate is
+        // offered on a rule that already has an active successor. `updated_at` is left alone, for
+        // the list-order reason the activation's predecessor archive gives.
+        await db.execute(
+          sql`UPDATE global_kb_entries
+                 SET supersedes_entry_id = CASE WHEN id = ${row.supersedesEntryId}::uuid
+                                                THEN NULL ELSE ${row.supersedesEntryId}::uuid END
+               WHERE supersedes_entry_id = ${id}::uuid`,
+        );
       }
       return row;
     }),

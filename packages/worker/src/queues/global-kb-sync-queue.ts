@@ -314,6 +314,26 @@ const PURGE_JOB_ID = 'global-kb-purge-archived-repeatable';
  *  leaves behind. Their vectors were already dropped on supersession; this clears any
  *  stragglers too. retentionDays <= 0 keeps archived entries forever (no purge).
  *  Entries archived without a superseded_at timestamp are never purged. */
+/** For each purged row, the nearest predecessor that SURVIVES the sweep: its own
+ *  `supersedes_entry_id`, followed past rows purged alongside it. Null when nothing older survives,
+ *  or when the purged links form a cycle. */
+export function survivingPredecessors(
+  purged: ReadonlyArray<{ id: string; supersedes_entry_id: string | null }>,
+): Map<string, string | null> {
+  const next = new Map(purged.map((r) => [r.id, r.supersedes_entry_id]));
+  const out = new Map<string, string | null>();
+  for (const { id } of purged) {
+    const seen = new Set([id]);
+    let target = next.get(id) ?? null;
+    while (target !== null && next.has(target) && !seen.has(target)) {
+      seen.add(target);
+      target = next.get(target) ?? null;
+    }
+    out.set(id, target !== null && seen.has(target) ? null : target);
+  }
+  return out;
+}
+
 export async function purgeArchivedGlobalKbEntries(): Promise<void> {
   const settings = await resolveGlobalKbSettings();
   if (!settings.enabled) return;
@@ -333,14 +353,23 @@ export async function purgeArchivedGlobalKbEntries(): Promise<void> {
       const rows = (await tx.unsafe(
         `DELETE FROM global_kb_entries
           WHERE status = 'archived' AND superseded_at < $1::timestamp
-          RETURNING id, namespace`,
+          RETURNING id, namespace, supersedes_entry_id`,
         [cutoff.toISOString()],
-      )) as unknown as Array<{ id: string; namespace: string }>;
+      )) as unknown as Array<{ id: string; namespace: string; supersedes_entry_id: string | null }>;
+      // Rows that replaced a purged entry now replace its nearest surviving predecessor, as the
+      // api's DELETE route does, or the chain the successor lookup walks breaks at the gap.
+      const predecessor = survivingPredecessors(rows);
       for (const r of rows) {
         await tx.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
           r.namespace,
           r.id,
         ]);
+        await tx.unsafe(
+          `UPDATE global_kb_entries
+              SET supersedes_entry_id = CASE WHEN id = $1::uuid THEN NULL ELSE $1::uuid END
+            WHERE supersedes_entry_id = $2::uuid`,
+          [predecessor.get(r.id) ?? null, r.id],
+        );
       }
       return rows.length;
     })) as number;
