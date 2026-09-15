@@ -68,6 +68,8 @@ const CALLS = new Set([
   'WriteStream',
   'FileReadStream',
   'FileWriteStream',
+  // `new fs.Utf8Stream({ dest })` opens (and may create the parent of) the path in `dest`.
+  'Utf8Stream',
 ]);
 const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
 /** Cheap pre-filter: a file that never names the module, and never names a CJS route that
@@ -385,9 +387,9 @@ function analyze(sources: Map<string, string>): Map<string, number | Uncountable
   const host: ts.CompilerHost = {
     getSourceFile: (name) => {
       const text = sources.get(name);
-      return text === undefined
-        ? undefined
-        : ts.createSourceFile(name, text, ts.ScriptTarget.ES2024, true, ts.ScriptKind.TS);
+      if (text === undefined) return undefined;
+      const kind = name.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+      return ts.createSourceFile(name, text, ts.ScriptTarget.ES2024, true, kind);
     },
     getDefaultLibFileName: () => 'lib.d.ts',
     writeFile: () => undefined,
@@ -433,7 +435,10 @@ function sourceFiles(dir: string): string[] {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       if (entry.name !== 'node_modules' && entry.name !== 'dist') out.push(...sourceFiles(full));
-    } else if (/\.[mc]?ts$/.test(entry.name) && !/\.(?:test|d)\.[mc]?ts$/.test(entry.name)) {
+    } else if (
+      /\.(?:[mc]?ts|tsx)$/.test(entry.name) &&
+      !/\.(?:test|d)\.(?:[mc]?ts|tsx)$/.test(entry.name)
+    ) {
       out.push(full);
     }
   }
@@ -627,6 +632,9 @@ describe('path-based fs call ratchet', () => {
       0,
     );
     expect(countFsCalls("import fs from 'node:fs';\nnew fs.ReadStream(p);")).toBe(1);
+    expect(
+      countFsCalls("import { Utf8Stream } from 'node:fs';\nnew Utf8Stream({ dest: p });"),
+    ).toBe(1);
     expect(
       countFsCalls(
         "import fs from 'node:fs';\nnew fs.FileReadStream(p); new fs.FileWriteStream(p);",
