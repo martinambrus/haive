@@ -598,6 +598,25 @@ export function scopeChanged(
   return key(before) !== key(after);
 }
 
+/** Why an entry cannot be edited right now, or null when it can.
+ *
+ *  Enrichment rewrites an entry's title, category, facets, body and status when it lands
+ *  (`01-enrich`'s apply) from the task's own metadata and the model's answer, never from this row,
+ *  so an edit accepted while that can still happen reports success and is then silently lost.
+ *  `failed` counts too: recovering one is a step retry, which runs the same apply, and the retry
+ *  route accepts any step status. The page already refuses to open such an entry; this is what
+ *  stops a second tab, an API client, or a modal left open on a draft that a retry has since put
+ *  back into enrichment. */
+export function enrichmentBlocksEdit(status: string): string | null {
+  if (status === 'skeleton' || status === 'enriching') {
+    return 'this entry is still being enriched, and enrichment rewrites its content when it finishes — wait for the draft, then edit it';
+  }
+  if (status === 'failed') {
+    return 'this entry is a failed enrichment, and a retry rewrites its content — retry or delete it instead of editing';
+  }
+  return null;
+}
+
 /** The promotion key a scope edit leaves behind, or `undefined` to leave the stored one alone.
  *
  *  `topic_key` is `category:tech[:major]` derived from the key-driving facets, and
@@ -655,6 +674,15 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   // while a second tab or an API client goes straight at the route.
   const result = await withGlobalKb(getDb(), async ({ db: conn }) =>
     conn.transaction(async (db) => {
+      // LOCKED, so a retry's detect — a plain UPDATE to `enriching` — waits for this transaction
+      // instead of flipping the status between the check and the write.
+      const [current] = await db
+        .select({ status: globalKbEntries.status })
+        .from(globalKbEntries)
+        .where(eq(globalKbEntries.id, id))
+        .for('update');
+      const blocked = current ? enrichmentBlocksEdit(current.status) : null;
+      if (blocked) throw new HttpError(409, blocked, 'entry_enrichment_pending');
       const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
       if (data.title !== undefined) set.title = data.title;
       if (data.body !== undefined) set.body = data.body;

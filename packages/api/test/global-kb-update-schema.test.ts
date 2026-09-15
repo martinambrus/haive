@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { FACET_DIMENSIONS, FACET_MAJOR_PARENTS } from '@haive/shared/global-kb';
 import { describe, expect, it } from 'vitest';
 import {
+  enrichmentBlocksEdit,
   enrichSchema,
   rescopedTopicKey,
   scopeChanged,
@@ -282,5 +283,21 @@ describe('the facet schema admits a major beside its technology', () => {
     expect(updateSchema.safeParse({ facets: { phpMajor: ['8'], nodeMajor: ['22'] } }).success).toBe(
       true,
     );
+  });
+});
+
+// Enrichment rewrites an entry's content when it lands, from the task's metadata rather than the
+// row, so an edit accepted before then reports success and is silently overwritten.
+describe('enrichmentBlocksEdit', () => {
+  it('refuses edits while enrichment can still rewrite the entry', () => {
+    for (const status of ['skeleton', 'enriching', 'failed']) {
+      expect(enrichmentBlocksEdit(status), status).toBeTruthy();
+    }
+  });
+
+  it('allows edits once the entry has landed', () => {
+    for (const status of ['draft', 'active', 'archived']) {
+      expect(enrichmentBlocksEdit(status), status).toBeNull();
+    }
   });
 });
