@@ -766,6 +766,17 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         if (existing?.supersedesEntryId && scopeChanged(existing.facets, set.facets)) {
           set.supersedesEntryId = null;
         }
+        // The same holds for a link POINTING AT this entry: it was decided against the old scope
+        // too. Left in place, activating that replacement — a reactivation included — archives
+        // this entry although the two rules no longer share a scope, and the successor lookup
+        // keeps warning that it has been replaced. Their `updatedAt` is left alone, for the
+        // list-order reason the activation's predecessor archive gives.
+        if (existing && scopeChanged(existing.facets, set.facets)) {
+          await db
+            .update(globalKbEntries)
+            .set({ supersedesEntryId: null })
+            .where(eq(globalKbEntries.supersedesEntryId, id));
+        }
       }
       if (existing) {
         const rekeyed = rescopedTopicKey(existing, { category: set.category, facets: set.facets });
