@@ -1,13 +1,14 @@
-import { constants, createReadStream } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { open, readdir, readlink, realpath, stat } from 'node:fs/promises';
+import { open, readdir, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, extname, join, relative } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { isReadOnlyLocalRepo } from '@haive/shared';
+import { isPathContainmentError, openFileNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNING_DRAFTS_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
@@ -215,53 +216,32 @@ export function assertEditableKnowledgeRelPath(root: string, target: string): vo
  *  The validation and the write MUST land on the same inode. This process runs
  *  as root and the repo tree is writable by every task sandbox, so a
  *  check-then-write leaves a window in which an agent replaces the file with a
- *  symlink and has root write through it — `lstat` proving "regular file" a
- *  moment earlier says nothing about what `writeFile` will re-resolve. Hence one
- *  descriptor for the whole operation:
- *
- *  - `O_NOFOLLOW` makes the kernel refuse a symlinked FINAL component at open
- *    time, so there is no window to swap it.
- *  - No `O_CREAT`: this endpoint rewrites files that exist and never plants one.
- *  - `/proc/self/fd/<fd>` is then the kernel's own answer for the inode we now
- *    hold, which is the only thing that also covers a swapped ANCESTOR
- *    directory — `O_NOFOLLOW` does not, and a `realpath` of the parent is just
- *    another check with another window after it.
- *
- *  Linux-only by construction (AGENTS.md: WSL2 + Docker is the supported
- *  environment). A `/proc` read that fails is treated as a refusal, not as a
- *  check to skip. */
+ *  symlink and has root write through it. `openFileNoFollow` walks the path one
+ *  held directory descriptor at a time, refuses a link in ANY component, and
+ *  proves the opened inode sits at `<root>/<rel>` through `/proc/self/fd`
+ *  (Linux-only by construction; a `/proc` read that fails is a refusal). No
+ *  `O_CREAT`: this endpoint rewrites files that exist and never creates one. */
 export async function openEditableKnowledgeFile(root: string, target: string): Promise<FileHandle> {
   assertEditableKnowledgeRelPath(root, target);
-  let fh: FileHandle;
+  let fh: FileHandle | null;
   try {
-    fh = await open(target, constants.O_RDWR | constants.O_NOFOLLOW);
+    fh = await openFileNoFollow(root, relUnder(root, target), 'read-write', { strict: true });
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ELOOP' || code === 'EMLINK') throw new HttpError(403, 'Path is a symlink');
-    if (code === 'EISDIR') throw new HttpError(400, 'Path is not a file');
-    if (code === 'ENOENT' || code === 'ENOTDIR') throw new HttpError(404, 'File no longer exists');
-    throw new HttpError(400, 'File cannot be opened for editing');
-  }
-  try {
-    const st = await fh.stat();
-    if (!st.isFile()) throw new HttpError(400, 'Path is not a file');
-    const resolved = await readlink(`/proc/self/fd/${fh.fd}`).catch(() => null);
-    if (resolved === null) {
+    if (isPathContainmentError(err, 'link')) throw new HttpError(403, 'Path is a symlink');
+    if (isPathContainmentError(err, 'not-regular-file')) {
+      throw new HttpError(400, 'Path is not a file');
+    }
+    if (isPathContainmentError(err, 'not-directory')) {
+      throw new HttpError(404, 'File no longer exists');
+    }
+    if (isPathContainmentError(err, 'unverifiable')) {
       throw new HttpError(403, 'Cannot verify the file path');
     }
-    const realRoot = await realpath(root);
-    const rel = relative(realRoot, resolved);
-    if (rel.startsWith('..') || isAbsolute(rel)) {
-      throw new HttpError(403, 'Path is outside the task workspace');
-    }
-    // Re-run the shape check on what the kernel actually opened: a swapped
-    // ancestor can land the same request on a different tree entirely.
-    assertEditableKnowledgeRelPath(realRoot, resolved);
-    return fh;
-  } catch (err) {
-    await fh.close().catch(() => {});
-    throw err;
+    if (isPathContainmentError(err)) throw new HttpError(403, 'Path is outside the task workspace');
+    throw new HttpError(400, 'File cannot be opened for editing');
   }
+  if (fh === null) throw new HttpError(404, 'File no longer exists');
+  return fh;
 }
 
 /** 409 when the task's repository is read-only (mirrors the attachment upload

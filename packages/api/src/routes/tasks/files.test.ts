@@ -73,12 +73,10 @@ describe('knowledge-file write guard', () => {
     });
 
     it('refuses a file reached through a symlinked ancestor', async () => {
-      // O_NOFOLLOW only guards the final component; this is the case the
-      // post-open /proc/self/fd re-validation exists for.
+      // O_NOFOLLOW only guards the final component; the anchored walk refuses
+      // the linked directory itself, one component at a time.
       await symlink(outside, path.join(root, KB_DIR, 'escape'));
-      await expect(openRel(`${KB_DIR}/escape/secret.md`)).rejects.toThrow(
-        /outside the task workspace/i,
-      );
+      await expect(openRel(`${KB_DIR}/escape/secret.md`)).rejects.toThrow(/symlink/i);
     });
 
     it('refuses a directory', async () => {

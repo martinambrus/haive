@@ -1,5 +1,5 @@
-import { open, readdir, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
-import { constants, type Dirent } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -169,54 +169,13 @@ export async function pathExists(p: string): Promise<boolean> {
   }
 }
 
-/** Lists `relDir` under `root` only when its real path is exactly `<realpath(root)>/<relDir>`,
- *  because `readdir` follows a linked directory anywhere on the privileged worker and the repository
- *  is not trusted. Null when absent, unreadable or reached through a link. Names only: read each
- *  file through `readRegularFileNoFollow`. */
-export async function readdirNoFollow(root: string, relDir: string): Promise<Dirent[] | null> {
-  try {
-    const realRoot = await realpath(root);
-    const dir = path.join(root, relDir);
-    if ((await realpath(dir)) !== path.join(realRoot, relDir)) return null;
-    return (await readdir(dir, { withFileTypes: true })) as Dirent[];
-  } catch {
-    return null;
-  }
-}
-
-/** Reads a regular file that resolves to exactly `<realpath(root)>/<relPath>`, else null.
- *  `O_NOFOLLOW` refuses a linked final component and `O_NONBLOCK` keeps a FIFO from blocking, but
- *  only the kernel's `/proc/self/fd` path for the opened descriptor also catches a linked ancestor
- *  directory (the same check as the api's `openEditableKnowledgeFile`). */
-export async function readRegularFileNoFollow(
-  root: string,
-  relPath: string,
-): Promise<string | null> {
-  let expected: string;
-  try {
-    expected = path.join(await realpath(root), relPath);
-  } catch {
-    return null;
-  }
-  let fh: FileHandle;
-  try {
-    fh = await open(
-      path.join(root, relPath),
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-  } catch {
-    return null;
-  }
-  try {
-    if (!(await fh.stat()).isFile()) return null;
-    if ((await readlink(`/proc/self/fd/${fh.fd}`)) !== expected) return null;
-    return await fh.readFile('utf8');
-  } catch {
-    return null;
-  } finally {
-    await fh.close().catch(() => {});
-  }
-}
+/** Link-refusing readers for repository paths, under the names 03 and the workflow persona loader
+ *  import from here. Null when absent or reached through a link; the implementation and the rule
+ *  live in `@haive/shared/fs-safe`. */
+export {
+  readdirNoFollow,
+  readTextNoFollow as readRegularFileNoFollow,
+} from '@haive/shared/fs-safe';
 
 export async function countFilesMatching(
   root: string,
