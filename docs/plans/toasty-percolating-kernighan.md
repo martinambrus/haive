@@ -239,9 +239,10 @@ to a regular file inside the invocation's tree, and is read up to a cap, and a l
 when its target stays inside that tree. An absent file names nothing. A file that cannot be read that
 way, or a chain past five levels of imports or 1 MiB in total, leaves the invocation unisolated —
 today's behaviour, and the direction a context control fails in, so a truncated scan can never hide a
-referenced file. Not covered: instruction files a CLI loads beyond that entry point, such as nested
-per-directory files it reads once it works in that directory, or CLI-specific extras such as
-`CLAUDE.local.md` (Out of scope).
+referenced file. Not covered: instruction files a CLI loads beyond that entry point — nested
+per-directory files it reads once it works in that directory, CLI-specific extras such as
+`CLAUDE.local.md`, and the user-level files it reads from its home (`~/.claude/CLAUDE.md`,
+`~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`), which live in the per-task auth volumes (Out of scope).
 
 1. **The declaration.** `LlmInvocationSpec.agentPool?: '*'` (`step-engine/step-definition.ts`,
    beside `toolProfile`). `'*'` is the only value PR 1 needs (see "Steps that read agent files");
@@ -690,7 +691,18 @@ bullet: `rippling-wibbling-puffin` Phase 3.1 builds on this plan's per-invocatio
   since those masks predate this plan.
 - **Instruction files beyond the entry point.** The isolation decision scans the selected provider's
   `rulesFile` and its `@` imports ("Project instructions"), not nested per-directory instruction
-  files a CLI reads once it works in that directory, nor CLI-specific extras such as
-  `CLAUDE.local.md`, so a repository whose agent references live only there has them hidden. The
-  capture harness records which of those files each CLI actually loads (Verification, item 1), so the
-  gap is sized by measurement before anyone widens the scan.
+  files a CLI reads once it works in that directory, not CLI-specific extras such as
+  `CLAUDE.local.md`, and not the user-level files a CLI reads from its home, so an agent reference
+  that lives only there is hidden. The capture harness records which of the repository-side files each
+  CLI actually loads (Verification, item 1), so that gap is sized by measurement before anyone widens
+  the scan. The user-level files are left out on measurement. MEASURED on the dev install on
+  2026-09-15 across all 63 CLI auth volumes: 11 user-level instruction files exist, every one Haive's
+  own RTK global patch (an 8-byte `CLAUDE.md` or a 26-byte codex `AGENTS.md`), none naming an agent
+  path, and no user-authored global instructions at all. They live in Docker volumes, so reading one
+  at dispatch costs a helper container per read (`readVolumeFile` runs `docker run … cat`), and the
+  per-task copy a CLI mounts is only made at exec (`ensureTaskAuthVolumes`). When a user-level
+  reference does turn up, the cheap shape is at exec: the auth-volume helper records, when it
+  populates the task's copy and beside the fingerprint it already records, whether the copied
+  instructions name an agent path, and exec DROPS the agent-definition masks for that invocation,
+  never adds one. That is the one safe direction for prompt and mounts to disagree, since an isolated
+  prompt names no agent file and leaving the files visible only restores today's listing.
