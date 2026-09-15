@@ -489,3 +489,65 @@ describe('createCodexAppServerSession transport failures', () => {
     expect(session.getResult()).toBeNull();
   });
 });
+
+describe('createCodexAppServerSession.getToolUsage', () => {
+  // Item shapes MEASURED on codex 0.154.0 app-server rows (result/arguments trimmed). Both
+  // items arrive twice — `item/started`, then `item/completed` — and only the second counts.
+  const mcpItem = {
+    id: 'exec-0ad6eea1',
+    type: 'mcpToolCall',
+    server: 'haive-rag',
+    tool: 'rag_search',
+    status: 'completed',
+    arguments: { query: 'section numbering' },
+    result: {},
+    error: null,
+  };
+  const commandItem = {
+    id: 'exec-1',
+    type: 'commandExecution',
+    command: '/bin/bash -lc "sed -n \'1,240p\' .claude/agents/pdf-specialist.md"',
+    cwd: '/haive/workdir',
+    status: 'completed',
+  };
+
+  it('tallies the completed items of our turn and ignores another turn', () => {
+    const { session } = acceptedSession();
+    session.onChunk(
+      note('item/started', { threadId: 'thread-1', turnId: 'turn-1', item: mcpItem }),
+    );
+    session.onChunk(
+      note('item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: mcpItem }),
+    );
+    session.onChunk(
+      note('item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: commandItem }),
+    );
+    session.onChunk(
+      note('item/completed', {
+        threadId: 'thread-1',
+        turnId: 'turn-9',
+        item: { ...commandItem, id: 'exec-other' },
+      }),
+    );
+    session.onChunk(
+      note('item/completed', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { id: 'exec-2', type: 'agentMessage', text: 'Done.' },
+      }),
+    );
+    session.close();
+    const usage = session.getToolUsage();
+    expect(usage.coverage).toBe('full');
+    expect(usage.tools).toEqual({ command_execution: 1 });
+    expect(usage.mcp).toEqual([{ server: 'haive-rag', tool: 'rag_search', calls: 1 }]);
+    expect(usage.agents.read).toEqual([{ id: 'pdf-specialist', reads: 1 }]);
+    expect(usage.loaded).toBeNull();
+  });
+
+  it('is not observable before any item completed', () => {
+    const { session } = acceptedSession();
+    session.close();
+    expect(session.getToolUsage().coverage).toBe('none');
+  });
+});

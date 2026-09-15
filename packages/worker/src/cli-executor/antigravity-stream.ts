@@ -1,4 +1,5 @@
-import type { CliTokenUsage } from '@haive/shared';
+import type { CliTokenUsage, InvocationToolUsage } from '@haive/shared';
+import { unobservedToolUsage } from './tool-usage.js';
 
 /* ------------------------------------------------------------------ */
 /* NDJSON parser for `agy --output-format stream-json`                 */
@@ -32,6 +33,9 @@ export interface AntigravityStreamCollector {
   getNoResultReason: () => string | null;
   getMalformedLineCount: () => number;
   getEventCount: () => number;
+  /** Always `coverage: 'none'`: agy's tool events are UNMEASURED (its init names tools, its
+   *  step_update carries a step_type, and neither has been recorded from a live run). */
+  getToolUsage: () => InvocationToolUsage;
 }
 
 /** `input + output = total` in every observed run, and `thinking_tokens` is a
@@ -118,6 +122,7 @@ export function createAntigravityStreamCollector(
         : (errorText ??
           'antigravity stream ended without a result event (likely timeout or an aborted session)'),
     getMalformedLineCount: () => malformedLineCount,
+    getToolUsage: () => unobservedToolUsage('stream'),
   };
 }
 

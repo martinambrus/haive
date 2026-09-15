@@ -597,3 +597,72 @@ describe('createStreamJsonCollector: structured rate-limit rejection', () => {
     expect(c.getNoResultReason()).toMatch(/rate limit/i);
   });
 });
+
+describe('createStreamJsonCollector.getToolUsage', () => {
+  // Block shapes MEASURED on stored claude-code 2.1.270 rows; see test/tool-usage.test.ts for
+  // the tally itself. These pin the collector's WIRING: what feeds it, and when it flushes.
+  const init = {
+    type: 'system',
+    subtype: 'init',
+    model: 'claude-opus-5',
+    tools: ['Bash', 'Read', 'mcp__haive-rag__rag_search'],
+    mcp_servers: [{ name: 'haive-rag', status: 'connected' }],
+    agents: ['peer-reviewer', 'claude'],
+    skills: ['project-context'],
+  };
+  const toolUse = (name: string, input: Record<string, unknown>) => ({
+    type: 'assistant',
+    message: {
+      model: 'claude-opus-5',
+      content: [{ type: 'tool_use', id: 'toolu_1', name, input }],
+    },
+  });
+
+  it('tallies tool_use blocks with NO progress callback (sub-agent and recap runs have none)', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      init,
+      toolUse('Bash', { command: 'cat .claude/skills/project-context/SKILL.md' }),
+      toolUse('Read', { file_path: '/haive/workdir/web/index.php' }),
+      toolUse('mcp__haive-rag__rag_search', { query: 'signing' }),
+      { type: 'result', subtype: 'success', result: 'done' },
+    ]);
+    const usage = c.getToolUsage();
+    expect(usage.coverage).toBe('full');
+    expect(usage.tools).toEqual({ Bash: 1, Read: 1 });
+    expect(usage.mcp).toEqual([{ server: 'haive-rag', tool: 'rag_search', calls: 1 }]);
+    expect(usage.skills.read).toEqual([{ id: 'project-context', reads: 1 }]);
+    expect(usage.loaded).toEqual({
+      agents: ['claude', 'peer-reviewer'],
+      skills: ['project-context'],
+      mcpServers: ['haive-rag'],
+      toolCount: 3,
+    });
+  });
+
+  it('still renders the progress line when a callback is present', () => {
+    const lines: string[] = [];
+    const c = createStreamJsonCollector((m) => lines.push(m));
+    feed(c, [toolUse('Bash', { command: 'ls -la' })]);
+    expect(lines).toEqual(['Running: ls -la']);
+    expect(c.getToolUsage().tools).toEqual({ Bash: 1 });
+  });
+
+  it('flushes a partial last line before answering, like the other accessors', () => {
+    const c = createStreamJsonCollector();
+    c.onChunk(JSON.stringify(toolUse('Read', { file_path: '.claude/agents/peer-reviewer.md' })));
+    expect(c.getToolUsage().agents.read).toEqual([{ id: 'peer-reviewer', reads: 1 }]);
+  });
+
+  it('keeps the first init event, as getModelIdentity does', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [init, { ...init, agents: ['other'] }]);
+    expect(c.getToolUsage().loaded?.agents).toEqual(['claude', 'peer-reviewer']);
+  });
+
+  it('reports plain output as not observable', () => {
+    const c = createStreamJsonCollector();
+    c.onChunk('just plain text output, no newline-delimited JSON');
+    expect(c.getToolUsage().coverage).toBe('none');
+  });
+});

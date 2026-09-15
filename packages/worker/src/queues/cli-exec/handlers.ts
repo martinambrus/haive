@@ -57,6 +57,7 @@ import { resolveGitEnv } from '../../secrets/user-git-identity.js';
 import { createSandboxLoginContainer } from '../../sandbox/login-container.js';
 import { buildSetupTokenCommand } from '../../cli-adapters/setup-token-command.js';
 import { learnModelLimitFromFailure } from '../../cli-adapters/model-capabilities.js';
+import { applyProviderObservability } from '../../cli-executor/tool-usage.js';
 import { getDb } from '../../db.js';
 import { getBullRedis } from '../../redis.js';
 import { publishCliExit } from '../cli-stream-publisher.js';
@@ -268,6 +269,9 @@ export async function handleCliExecJob(
         tokenUsage: result.tokenUsage ?? null,
         modelIdentity: result.modelIdentity ?? null,
         compaction: result.compaction ?? null,
+        // A provider whose stream carries no tool events (amp) would otherwise record "used
+        // nothing"; the rule lives beside the tally so the backfill applies the same one.
+        toolUsage: applyProviderObservability(result.toolUsage ?? null, providerName),
         cost,
         durationMs,
         errorMessage: finalErrorMessage,

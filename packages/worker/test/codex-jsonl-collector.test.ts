@@ -51,6 +51,68 @@ describe('createCodexJsonlCollector', () => {
     });
   });
 
+  it('tallies what the run used from completed items only', () => {
+    // Item shapes MEASURED on codex 0.154.0 exec --json rows (result/arguments trimmed). Every
+    // item also arrives as `item.started` first, which must not count.
+    const c = createCodexJsonlCollector();
+    feed(c, [
+      { type: 'thread.started', thread_id: 't1' },
+      { type: 'turn.started' },
+      {
+        type: 'item.started',
+        item: { id: 'item_2', type: 'command_execution', command: 'cat .agents/skills/x/SKILL.md' },
+      },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'item_2',
+          type: 'command_execution',
+          command: 'cat .agents/skills/x/SKILL.md',
+          aggregated_output: '# x',
+          exit_code: 0,
+          status: 'completed',
+        },
+      },
+      {
+        type: 'item.started',
+        item: { id: 'item_3', type: 'mcp_tool_call', server: 'haive-rag', tool: 'rag_search' },
+      },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'item_3',
+          type: 'mcp_tool_call',
+          server: 'haive-rag',
+          tool: 'rag_search',
+          arguments: { query: 'signing' },
+          result: {},
+          error: null,
+          status: 'completed',
+        },
+      },
+      {
+        type: 'item.completed',
+        item: { id: 'item_4', type: 'collab_tool_call', tool: 'wait', status: 'completed' },
+      },
+      { type: 'item.completed', item: { type: 'agent_message', text: 'Done.' } },
+      { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } },
+    ]);
+    expect(c.getResult()).toBe('Done.');
+    const usage = c.getToolUsage();
+    expect(usage.coverage).toBe('full');
+    expect(usage.tools).toEqual({ collab_tool_call: 1, command_execution: 1 });
+    expect(usage.mcp).toEqual([{ server: 'haive-rag', tool: 'rag_search', calls: 1 }]);
+    expect(usage.subagents).toEqual([{ type: 'wait', calls: 1 }]);
+    expect(usage.skills.read).toEqual([{ id: 'x', reads: 1 }]);
+    expect(usage.loaded).toBeNull();
+  });
+
+  it('reports a stream with no codex event as not observable', () => {
+    const c = createCodexJsonlCollector();
+    c.onChunk('plain text from an older binary that ignored --json\n');
+    expect(c.getToolUsage().coverage).toBe('none');
+  });
+
   it('surfaces turn.failed as the no-result reason', () => {
     const c = createCodexJsonlCollector();
     feed(c, [{ type: 'thread.started' }, { type: 'turn.failed', error: { message: 'boom' } }]);

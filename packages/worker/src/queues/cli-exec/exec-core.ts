@@ -50,6 +50,7 @@ import {
 } from '../cli-stream-publisher.js';
 import { log, type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createStreamJsonCollector, type StreamRetryInfo } from './stream.js';
+import { createToolUsageTally, unobservedToolUsage } from '../../cli-executor/tool-usage.js';
 import {
   buildModelIdentity,
   requestedFromSpec,
@@ -650,6 +651,11 @@ export async function executeCliSpec(
   // it was injected. Fed from the same two callbacks that publish the `text` and `steer`
   // frames, so what a viewer watches live and what it replays cannot drift apart.
   const cleanBuf = createCleanTranscriptBuffer();
+  // What this run USES, tallied by whichever collector parses its stream and persisted beside
+  // tokenUsage and modelIdentity. Keyed on the MOUNT ROOT rather than `sandboxWorkdir`: a
+  // worktree run's cwd sits under `.haive/worktrees/`, and an absolute repo-root path the agent
+  // opens must still classify as the repository's own file.
+  const toolUsage = createToolUsageTally({ workdir: SANDBOX_WORKDIR });
   const headerText = formatCliHeader(mergedSpec, sandboxWorkdir);
   if (invocationId) {
     await publishCliChunk(invocationId, 'stdout', headerText);
@@ -679,6 +685,7 @@ export async function executeCliSpec(
         prompt: appServerTurn.prompt,
         model: appServerTurn.model,
         effort: appServerTurn.effort,
+        toolUsage,
         onText: onProseText,
         // The turn is the whole invocation: latch the forwarder, which ends stdin after its grace,
         // and the app-server exits on EOF.
@@ -780,13 +787,14 @@ export async function executeCliSpec(
     onSteerBoundary,
     onRetry,
     onRetryResolved,
+    toolUsage,
   );
   // codex and antigravity both speak line-delimited JSON and expose the same
   // collector shape, so they share the branch below. The only per-provider
   // difference is the wording when a stream carries no answer.
   const jsonlCollector =
     outputFormat === 'codex-jsonl'
-      ? createCodexJsonlCollector(onProseText)
+      ? createCodexJsonlCollector(onProseText, toolUsage)
       : outputFormat === 'antigravity-stream-json'
         ? createAntigravityStreamCollector(onProseText)
         : null;
@@ -951,6 +959,8 @@ export async function executeCliSpec(
         false,
         appReach,
       );
+      // `toolUsage` rides the spread: the app-server run did no work before it was abandoned,
+      // so the exec run's tally is the whole truth about what this invocation used.
       return {
         ...fallback,
         streamLog: `${streamLog}${notice}${fallback.streamLog ?? ''}`,
@@ -981,6 +991,7 @@ export async function executeCliSpec(
         errorMessage: formatCliErrorMessage(result.exitCode, result.stderr, text, result.error),
         tokenUsage: appServer.getTokenUsage(),
         modelIdentity,
+        toolUsage: appServer.getToolUsage(),
         ...persisted,
         codexAppServer,
       };
@@ -997,6 +1008,7 @@ export async function executeCliSpec(
         'codex emitted no agent message',
       tokenUsage: appServer.getTokenUsage(),
       modelIdentity,
+      toolUsage: appServer.getToolUsage(),
       ...persisted,
       providerErrorScan,
       codexAppServer,
@@ -1026,6 +1038,8 @@ export async function executeCliSpec(
         // place it does. `capturedLog` is set by that adapter alone, so both of
         // these are no-ops on the codex path.
         modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
+        // codex: the tally over its completed items; antigravity: `none`, unmeasured for tools.
+        toolUsage: jsonlCollector.getToolUsage(),
         ...persisted,
         providerDiagnosticLog: result.capturedLog ?? undefined,
       };
@@ -1043,6 +1057,7 @@ export async function executeCliSpec(
         `${jsonlCliName} emitted no agent message`,
       tokenUsage,
       modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
+      toolUsage: jsonlCollector.getToolUsage(),
       ...persisted,
       providerErrorScan,
       providerDiagnosticLog: result.capturedLog ?? undefined,
@@ -1126,6 +1141,7 @@ export async function executeCliSpec(
       tokenUsage: collector.getTokenUsage(),
       modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
       compaction: compactionFrom(collector.getCompactions()),
+      toolUsage: collector.getToolUsage(),
       ...persisted,
     };
   }
@@ -1166,6 +1182,8 @@ export async function executeCliSpec(
       // is recorded on the failure branch too — the compaction is a fact about the run
       // whether or not it produced a result event.
       compaction: compactionFrom(collector.getCompactions()),
+      // Same stance as compaction: a run that died mid-stream still used what it used.
+      toolUsage: collector.getToolUsage(),
       ...persisted,
       providerErrorScan,
     };
@@ -1190,6 +1208,8 @@ export async function executeCliSpec(
         tokenUsage: extracted.tokenUsage,
         // gemini names its models only as the keys of stats.models.
         modelIdentity: modelIdentityFrom({ geminiModels: extracted.models }),
+        // gemini's JSON envelope carries no tool events; `none` is the honest record.
+        toolUsage: unobservedToolUsage('stream'),
         ...persisted,
       };
     }
@@ -1210,6 +1230,7 @@ export async function executeCliSpec(
         ),
         tokenUsage: null,
         modelIdentity: modelIdentityFrom(),
+        toolUsage: unobservedToolUsage('stream'),
         ...persisted,
         providerErrorScan,
       };
@@ -1237,6 +1258,8 @@ export async function executeCliSpec(
       stream: collector.getModelIdentity(),
       antigravityLog: result.capturedLog ?? null,
     }),
+    // Both stream-json branches returned above, so the collector saw zero events here.
+    toolUsage: unobservedToolUsage('stream'),
     ...persisted,
     providerErrorScan,
     providerDiagnosticLog: result.capturedLog ?? undefined,
