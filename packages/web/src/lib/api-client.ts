@@ -1116,6 +1116,59 @@ export interface RagQueryEntry {
   createdAt: string;
 }
 
+// Local mirrors of GET /tasks/:id/tool-usage (packages/api/src/routes/tasks/steps.ts), which
+// returns the shared `ToolUsageStepRow` per step — mirrored here rather than imported, per the
+// barrel-avoidance rule above. Keep in sync.
+
+/** One id with a count; what `n` counts is the list's business (runs a persona was assigned
+ *  in, reads of a definition file, calls of a skill or sub-agent type). */
+export interface TaskToolUsageCounted {
+  id: string;
+  n: number;
+}
+
+/** What one step used, with the coverage counters a reader needs to judge the lists by: a step
+ *  whose runs are all unobservable has empty lists that mean nothing. */
+export interface TaskToolUsageStep {
+  runs: number;
+  observable: number;
+  partial: number;
+  unobservable: number;
+  unrecorded: number;
+  personasAssigned: TaskToolUsageCounted[];
+  personasRead: TaskToolUsageCounted[];
+  skillsInvoked: TaskToolUsageCounted[];
+  skillsRead: TaskToolUsageCounted[];
+  mcp: Array<{ server: string; tool: string; calls: number }>;
+  subagents: TaskToolUsageCounted[];
+  /** Native tool calls, MCP calls excluded. */
+  toolCalls: number;
+}
+
+export interface TaskToolUsage {
+  taskId: string;
+  steps: Array<{
+    stepRowId: string;
+    stepId: string;
+    round: number;
+    title: string;
+    /** Null for a step with no attributed run — a dash, never a row of zeros. */
+    usage: TaskToolUsageStep | null;
+  }>;
+  totals: TaskToolUsageStep;
+  coverage: {
+    total: number;
+    observable: number;
+    partial: number;
+    unobservable: number;
+    unrecorded: number;
+  };
+}
+
+export async function getTaskToolUsage(taskId: string): Promise<TaskToolUsage> {
+  return api.get<TaskToolUsage>(`/tasks/${taskId}/tool-usage`);
+}
+
 /** The facet dimensions, in the order they are shown, with the label each gets.
  *
  *  One list, beside the type it describes: a form and an editor that disagree about the
