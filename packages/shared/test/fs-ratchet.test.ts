@@ -47,6 +47,7 @@ const CALLS = new Set([
   'utimes',
   'lutimes',
   'mkdtemp',
+  'mkdtempDisposable',
   'watch',
   'watchFile',
   'unwatchFile',
@@ -179,6 +180,11 @@ describe('path-based fs call ratchet', () => {
       ),
     ).toBe(2);
     expect(countFsCalls("import { realpath } from 'node:fs';\nrealpath.native(p, cb);")).toBe(1);
+    expect(
+      countFsCalls(
+        "import { mkdtempDisposable } from 'node:fs/promises';\nimport fs from 'node:fs';\nawait mkdtempDisposable(p); fs.mkdtempDisposableSync(p);",
+      ),
+    ).toBe(2);
     expect(countFsCalls("import { constants, type Dirent } from 'node:fs';\nopen(p);")).toBe(0);
     expect(countFsCalls("import type { Dirent } from 'node:fs';\nopen(p);")).toBe(0);
     expect(countFsCalls("import { open } from './mine.js';\nopen(p);")).toBe(0);
