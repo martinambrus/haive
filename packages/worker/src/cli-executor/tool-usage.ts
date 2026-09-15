@@ -253,7 +253,9 @@ export function createToolUsageTally(opts: { workdir: string | null }): ToolUsag
     map.set(key, (map.get(key) ?? 0) + 1);
   };
   const bumpMcp = (server: string, tool: string): void => {
-    const key = `${server} ${tool}`;
+    // A JSON pair, never a control-character separator: a literal NUL in the source makes
+    // the file binary to grep, which then skips it without a word.
+    const key = JSON.stringify([server, tool]);
     const entry = mcp.get(key);
     if (entry) entry.calls += 1;
     else mcp.set(key, { server, tool, calls: 1 });
