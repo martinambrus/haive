@@ -103,11 +103,12 @@ function fsBindings(source: string): FsBindings {
 export function countFsCalls(source: string): number {
   const { namespaces, locals } = fsBindings(source);
   const forms: string[] = [];
-  if (locals.length > 0) forms.push(`(?<![\\w.$])(?:${locals.join('|')})\\(`);
+  // `(?:\.native)?` is `realpath.native` / `realpathSync.native`, the one member call form.
+  if (locals.length > 0) forms.push(`(?<![\\w.$])(?:${locals.join('|')})(?:\\.native)?\\(`);
   if (namespaces.length > 0) {
     const names = [...CALLS].join('|');
     forms.push(
-      `(?<![\\w.$])(?:${namespaces.join('|')})\\.(?:promises\\.)?(?:${names})(?:Sync)?\\(`,
+      `(?<![\\w.$])(?:${namespaces.join('|')})\\.(?:promises\\.)?(?:${names})(?:Sync)?(?:\\.native)?\\(`,
     );
   }
   if (forms.length === 0) return 0;
@@ -172,6 +173,12 @@ describe('path-based fs call ratchet', () => {
         "import { lstat, readlink, symlink } from 'node:fs/promises';\nawait lstat(p); await readlink(p); await symlink(t, p);",
       ),
     ).toBe(3);
+    expect(
+      countFsCalls(
+        "import fs from 'node:fs';\nfs.realpath.native(p, cb); fs.realpathSync.native(p);",
+      ),
+    ).toBe(2);
+    expect(countFsCalls("import { realpath } from 'node:fs';\nrealpath.native(p, cb);")).toBe(1);
     expect(countFsCalls("import { constants, type Dirent } from 'node:fs';\nopen(p);")).toBe(0);
     expect(countFsCalls("import type { Dirent } from 'node:fs';\nopen(p);")).toBe(0);
     expect(countFsCalls("import { open } from './mine.js';\nopen(p);")).toBe(0);
