@@ -1,4 +1,3 @@
-import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
@@ -11,7 +10,7 @@ import type {
 import { miningLossNote, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { pathExists } from '../onboarding/_helpers.js';
+import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadAgentPersonas, type AgentPersona } from './_agent-loader.js';
 import { resolveTaskReviewDimensions } from '../../review-dimension-context.js';
@@ -96,30 +95,21 @@ function firstHeading(text: string): string | null {
 }
 
 async function collectKbSnippets(repo: string): Promise<KbSnippet[]> {
-  const dir = path.join(repo, KB_DIR);
-  if (!(await pathExists(dir))) return [];
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    const out: KbSnippet[] = [];
-    for (const e of entries) {
-      if (!e.isFile() || !e.name.endsWith('.md')) continue;
-      const id = e.name.replace(/\.md$/, '');
-      const full = path.join(dir, e.name);
-      try {
-        const text = await readFile(full, 'utf8');
-        out.push({
-          id,
-          title: firstHeading(text) ?? id,
-          preview: text.trim().slice(0, 600),
-        });
-      } catch {
-        continue;
-      }
-    }
-    return out;
-  } catch {
-    return [];
+  const entries = await readdirNoFollow(repo, KB_DIR);
+  if (!entries) return [];
+  const out: KbSnippet[] = [];
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith('.md')) continue;
+    const id = e.name.replace(/\.md$/, '');
+    const text = await readRegularFileNoFollow(repo, path.join(KB_DIR, e.name));
+    if (text === null) continue;
+    out.push({
+      id,
+      title: firstHeading(text) ?? id,
+      preview: text.trim().slice(0, 600),
+    });
   }
+  return out;
 }
 
 interface MiningJson {
