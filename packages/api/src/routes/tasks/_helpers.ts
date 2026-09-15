@@ -18,6 +18,7 @@ import {
   type CliRoleDescriptor,
   type CliTokenUsage,
 } from '@haive/shared';
+import { relUnder } from '@haive/shared/fs-safe';
 import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
 
@@ -1154,22 +1155,37 @@ export async function resolveWorkspaceRoot(
   db: ReturnType<typeof getDb>,
   taskId: string,
   userId: string,
-): Promise<{ task: typeof schema.tasks.$inferSelect; root: string }> {
+): Promise<{
+  task: typeof schema.tasks.$inferSelect;
+  /** The workspace: the task's worktree when it has one, else the repository root, else the
+   *  repo-less task's scratch directory. */
+  root: string;
+  /** The repository root (or the scratch directory itself for a repo-less task) — the one path
+   *  an fs-safe walk may follow. A worktree lives under `.haive/worktrees/`, which the sandbox
+   *  and the task terminal can rewrite, so it is never the anchor; callers pass paths below
+   *  `root` as rels below `anchor`. */
+  anchor: string;
+}> {
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
-  let root: string | null = null;
-  if (task.worktreePath) {
-    root = task.worktreePath;
-  } else if (task.repositoryId) {
-    const repo = await db.query.repositories.findFirst({
-      where: eq(schema.repositories.id, task.repositoryId),
-      columns: { storagePath: true, localPath: true },
-    });
-    root = repo?.storagePath ?? repo?.localPath ?? null;
+  const repo = task.repositoryId
+    ? await db.query.repositories.findFirst({
+        where: eq(schema.repositories.id, task.repositoryId),
+        columns: { storagePath: true, localPath: true },
+      })
+    : null;
+  const repoRoot = repo?.storagePath ?? repo?.localPath ?? null;
+  // A deleted repository leaves its tasks with `repository_id` NULL (`onDelete: 'set null'`)
+  // and `worktree_path` still set, and the cancel/cleanup that follows the delete is queued,
+  // not synchronous. With no repository there is nothing trusted to anchor at — the worktree
+  // itself is what a still-running sandbox can rewrite — so that state is refused outright.
+  if (task.worktreePath && !repoRoot) {
+    throw new HttpError(409, 'Task workspace no longer belongs to a repository');
   }
+  let root = task.worktreePath ?? repoRoot;
   if (!root) {
     // A task with neither a worktree nor a repository may still have a workspace: a repo-less
     // `kb_author` run gets an empty scratch directory, and its Editor tab is deliberately enabled
@@ -1192,7 +1208,13 @@ export async function resolveWorkspaceRoot(
   if (!root) {
     throw new HttpError(409, 'Task has no resolvable workspace path');
   }
-  return { task, root: resolve(root) };
+  const anchor = resolve(repoRoot ?? root);
+  try {
+    relUnder(anchor, resolve(root));
+  } catch {
+    throw new HttpError(409, 'Task workspace is not inside its repository');
+  }
+  return { task, root: resolve(root), anchor };
 }
 
 export function validateWorkspacePath(root: string, requested: string | undefined): string {

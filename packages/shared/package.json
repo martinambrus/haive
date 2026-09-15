@@ -75,6 +75,10 @@
       "types": "./dist/repo/scope-tree.d.ts",
       "import": "./dist/repo/scope-tree.js"
     },
+    "./fs-safe": {
+      "types": "./dist/fs-safe.d.ts",
+      "import": "./dist/fs-safe.js"
+    },
     "./knowledge-paths": {
       "types": "./dist/knowledge-paths.d.ts",
       "import": "./dist/knowledge-paths.js"
