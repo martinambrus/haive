@@ -8,14 +8,14 @@ import { describe, expect, it } from 'vitest';
 // source file: a conversion lowers its entry, a new call raises it where a reviewer sees it. Exact
 // counts, so the baseline cannot drift stale in either direction.
 //
-// Refresh after a conversion:  UPDATE_FS_RATCHET=1 pnpm --filter @haive/shared test -- fs-ratchet
+// Refresh after a conversion:  UPDATE_FS_RATCHET=1 pnpm --filter @haive/shared test
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
 const BASELINE = path.join(HERE, 'fs-ratchet.json');
 const SCAN_ROOTS = ['packages/api/src', 'packages/worker/src', 'packages/shared/src/repo'];
 
-const CALLS = [
+const CALLS = new Set([
   'readFile',
   'writeFile',
   'appendFile',
@@ -38,32 +38,64 @@ const CALLS = [
   'createReadStream',
   'createWriteStream',
   'realpath',
-];
+]);
 const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
-const IMPORT = /import\s+(?:\*\s+as\s+(\w+)|(\w+)|\{[^}]*\})\s+from\s+['"]([^'"]+)['"]/g;
+const IMPORT = /import\s+([^'";]+?)\s+from\s+['"]([^'"]+)['"]/g;
 
-/** Path-based fs calls in one source: bare names when the file has a named import from the fs
- *  module, and `<alias>.name(` / `<alias>.promises.name(` for a namespace or default import of it.
- *  Methods on anything else (`fh.stat()`, `handle.readFile()`) act on a descriptor, not a path, and
- *  do not count. Sync variants count like their async twins. */
-export function countFsCalls(source: string): number {
-  const aliases = new Set<string>();
-  let named = false;
-  for (const m of source.matchAll(IMPORT)) {
-    if (!FS_MODULE.test(m[3]!)) continue;
-    const alias = m[1] ?? m[2];
-    if (alias) aliases.add(alias);
-    else named = true;
+/** One of the path-taking fs functions, in its async or its sync form. */
+function isPathCall(name: string): boolean {
+  return CALLS.has(name) || (name.endsWith('Sync') && CALLS.has(name.slice(0, -4)));
+}
+
+interface FsBindings {
+  /** Bindings whose members are called as `<alias>.name(`: `* as fs`, a default import, and
+   *  `{ promises as fsp }`. */
+  namespaces: string[];
+  /** Local names of named imports of path-taking functions, aliased or not. */
+  locals: string[];
+}
+
+/** What a source binds from the fs module. Type-only imports bind nothing callable. An aliased
+ *  named import counts under its LOCAL name, or `import { readFile as readRepoFile }` would be a
+ *  call the baseline never sees. */
+function fsBindings(source: string): FsBindings {
+  const namespaces = new Set<string>();
+  const locals = new Set<string>();
+  for (const match of source.matchAll(IMPORT)) {
+    const clause = match[1]!.trim();
+    if (!FS_MODULE.test(match[2]!) || clause.startsWith('type ')) continue;
+    const star = /\*\s+as\s+(\w+)/.exec(clause);
+    if (star) namespaces.add(star[1]!);
+    const dflt = /^(\w+)\s*(?:,|$)/.exec(clause);
+    if (dflt) namespaces.add(dflt[1]!);
+    const braces = /\{([^}]*)\}/.exec(clause);
+    if (!braces) continue;
+    for (const spec of braces[1]!.split(',')) {
+      const [imported, alias] = spec.trim().split(/\s+as\s+/);
+      const local = alias ?? imported;
+      if (!imported || !local || imported.startsWith('type ')) continue;
+      if (imported === 'promises') namespaces.add(local);
+      else if (isPathCall(imported)) locals.add(local);
+    }
   }
-  if (!named && aliases.size === 0) return 0;
-  const names = CALLS.join('|');
+  return { namespaces: [...namespaces], locals: [...locals] };
+}
+
+/** Path-based fs calls in one source: the local names of named imports, and `<alias>.name(` /
+ *  `<alias>.promises.name(` for namespace-like bindings. Methods on anything else (`fh.stat()`,
+ *  `handle.readFile()`) act on a descriptor, not a path, and do not count. Sync variants count like
+ *  their async twins. */
+export function countFsCalls(source: string): number {
+  const { namespaces, locals } = fsBindings(source);
   const forms: string[] = [];
-  if (named) forms.push(`(?<![\\w.$])(?:${names})(?:Sync)?\\(`);
-  if (aliases.size > 0) {
+  if (locals.length > 0) forms.push(`(?<![\\w.$])(?:${locals.join('|')})\\(`);
+  if (namespaces.length > 0) {
+    const names = [...CALLS].join('|');
     forms.push(
-      `(?<![\\w.$])(?:${[...aliases].join('|')})\\.(?:promises\\.)?(?:${names})(?:Sync)?\\(`,
+      `(?<![\\w.$])(?:${namespaces.join('|')})\\.(?:promises\\.)?(?:${names})(?:Sync)?\\(`,
     );
   }
+  if (forms.length === 0) return 0;
   return source.match(new RegExp(forms.join('|'), 'g'))?.length ?? 0;
 }
 
@@ -100,15 +132,27 @@ describe('path-based fs call ratchet', () => {
   it('counts the forms the baseline is measured in', () => {
     expect(
       countFsCalls(
-        "import { readFile, stat } from 'node:fs/promises';\nawait readFile(p); await stat(p); await fh.stat();",
+        "import { readFile, stat } from 'node:fs/promises';\nawait readFile(p); await stat(p); await fh.stat(); open(p);",
       ),
     ).toBe(2);
+    expect(
+      countFsCalls(
+        "import { readFile as readRepoFile } from 'node:fs/promises';\nawait readRepoFile(p); readFile(p);",
+      ),
+    ).toBe(1);
     expect(
       countFsCalls(
         "import fs from 'node:fs';\nfs.readFileSync(p); fs.promises.rm(p); other.rm(p);",
       ),
     ).toBe(2);
     expect(countFsCalls("import * as fsp from 'fs/promises';\nawait fsp.open(p);")).toBe(1);
+    expect(
+      countFsCalls("import { promises as fsp } from 'node:fs';\nawait fsp.writeFile(p, d);"),
+    ).toBe(1);
+    expect(
+      countFsCalls("import fs, { mkdirSync } from 'node:fs';\nfs.statSync(p); mkdirSync(p);"),
+    ).toBe(2);
+    expect(countFsCalls("import { constants, type Dirent } from 'node:fs';\nopen(p);")).toBe(0);
     expect(countFsCalls("import type { Dirent } from 'node:fs';\nopen(p);")).toBe(0);
     expect(countFsCalls("import { open } from './mine.js';\nopen(p);")).toBe(0);
   });

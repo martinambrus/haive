@@ -71,7 +71,7 @@
   "packages/worker/src/step-engine/steps/onboarding/12-post-onboarding.ts": 2,
   "packages/worker/src/step-engine/steps/onboarding/_helpers.ts": 2,
   "packages/worker/src/step-engine/steps/onboarding/_kb-body-file.ts": 9,
-  "packages/worker/src/step-engine/steps/onboarding/_kb-legacy.ts": 9,
+  "packages/worker/src/step-engine/steps/onboarding/_kb-legacy.ts": 6,
   "packages/worker/src/step-engine/steps/onboarding/_kb-write.ts": 3,
   "packages/worker/src/step-engine/steps/onboarding/_manifest-deps.ts": 2,
   "packages/worker/src/step-engine/steps/onboarding/_opaque-path-scan.ts": 1,
