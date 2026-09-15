@@ -33,6 +33,16 @@ export interface StreamLogBuffer {
   toString(): string;
 }
 
+/** The marker `toString()` writes in place of the elided middle. One regex beside the writer,
+ *  so a reader of a stored transcript (the tool-usage backfill) and the writer cannot drift. */
+const ELISION_MARKER_RE = /^\[haive\] --- \d+ characters elided: /m;
+
+/** Whether a stored `stream_log` lost its middle to the cap above: every count a reader
+ *  takes from it is then a floor, not a total. */
+export function isElidedStreamLog(streamLog: string): boolean {
+  return ELISION_MARKER_RE.test(streamLog);
+}
+
 export function createStreamLogBuffer(opts: StreamLogBufferOptions = {}): StreamLogBuffer {
   const headLimit = opts.headChars ?? STREAM_LOG_HEAD_CHARS;
   const tailLimit = opts.tailChars ?? STREAM_LOG_TAIL_CHARS;
