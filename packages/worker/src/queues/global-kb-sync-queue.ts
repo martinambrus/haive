@@ -157,6 +157,54 @@ async function writeSyncResults(
   return outcome as SyncWriteOutcome;
 }
 
+/** Whether a failed sync may stamp the row `failed`: only while the row still holds the revision the
+ *  job read, and only if no other job has already embedded that revision. A newer edit committed
+ *  during the embed has marked the row `pending`, and the reconcile re-queues `pending` rows alone, so
+ *  an unconditional stamp hid exactly the revision whose lost enqueue that sweep exists to recover. */
+export function failedStampApplies(
+  job: { title: string; revision: string },
+  live:
+    | { title: string; revision: string; embedStatus: string; contentHash: string | null }
+    | undefined,
+): boolean {
+  if (!live || live.title !== job.title || live.revision !== job.revision) return false;
+  return !(live.embedStatus === 'embedded' && live.contentHash === job.revision);
+}
+
+/** The stamp under the same row lock `writeSyncResults` takes, so an edit cannot land between the
+ *  check and the write. */
+async function markSyncFailed(
+  ctx: GlobalKbContext,
+  entry: typeof globalKbEntries.$inferSelect,
+): Promise<void> {
+  await ctx.conn.pg.begin(async (tx) => {
+    const [live] = (await tx.unsafe(
+      `SELECT title, body, facets, embed_status, content_hash FROM global_kb_entries WHERE id = $1 FOR UPDATE`,
+      [entry.id],
+    )) as unknown as Array<{
+      title: string;
+      body: string;
+      facets: unknown;
+      embed_status: string;
+      content_hash: string | null;
+    }>;
+    const stamp = failedStampApplies(
+      { title: entry.title, revision: entryContentHash(entry.body, entry.facets) },
+      live && {
+        title: live.title,
+        revision: entryContentHash(live.body, live.facets),
+        embedStatus: live.embed_status,
+        contentHash: live.content_hash,
+      },
+    );
+    if (stamp) {
+      await tx.unsafe(`UPDATE global_kb_entries SET embed_status = 'failed' WHERE id = $1`, [
+        entry.id,
+      ]);
+    }
+  });
+}
+
 async function hasVectorColumn(ctx: GlobalKbContext): Promise<boolean> {
   const rows = (await ctx.conn.pg.unsafe(
     `SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_rag_embeddings' AND column_name = 'vector'`,
@@ -252,11 +300,7 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
       }
       log.info({ entryId: entry.id, chunks: chunks.length }, 'global KB entry synced');
     } catch (err) {
-      await ctx.db
-        .update(globalKbEntries)
-        .set({ embedStatus: 'failed' })
-        .where(eq(globalKbEntries.id, entry.id))
-        .catch(() => {});
+      await markSyncFailed(ctx, entry).catch(() => {});
       throw err;
     }
   });
