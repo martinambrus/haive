@@ -690,7 +690,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       if (data.facets !== undefined) set.facets = normalizeFacets(data.facets as GlobalKbFacets);
       if (data.status !== undefined) set.status = data.status;
       // Activating CLEARS the supersession stamp, or reactivating is a no-op that looks like a
-      // success. `supersededAt` means "archived because something replaced it", and retrieval
+      // success. `supersededAt` means "archived because something replaced it", and the digest
       // filters on `status = 'active' AND superseded_at IS NULL` — so a row flipped to active
       // with the stamp still set stays invisible to every project. The scope editor's own warning
       // tells a reviewer to reactivate the predecessor when they move a replacement's scope, and
@@ -785,9 +785,21 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
                WHERE namespace = ${row?.namespace ?? ''} AND entry_id = ${id}`,
         );
       }
+      // A non-active entry holds no vectors, enforced HERE, in the transaction that sets the status,
+      // rather than by the sync job enqueued after commit. Global retrieval has no status predicate:
+      // `rag.ts` ranks chunks on namespace and facets and joins the entry only to expand its body,
+      // so a chunk that outlives its entry's `active` status is served. An enqueue that failed after
+      // commit (Redis unavailable) used to leave an archived rule retrievable indefinitely, while
+      // the page reported the archive as failed. A no-op for an entry that holds none.
+      if (row && row.status !== 'active') {
+        await db.execute(
+          sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
+        );
+      }
       // Activation supersession: when a draft that proposes replacing another entry (a
       // merge produced by onboarding) is activated, archive the entry it supersedes so
-      // the topic keeps a single live article. Its vectors are dropped below.
+      // the topic keeps a single live article. Its vectors go in this transaction too, for the
+      // reason above.
       let supersededId: string | null = null;
       if (row && set.status === 'active' && row.supersedesEntryId) {
         const [archived] = await db
@@ -802,7 +814,13 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
               ne(globalKbEntries.status, 'archived'),
             ),
           )
-          .returning({ id: globalKbEntries.id });
+          .returning({ id: globalKbEntries.id, namespace: globalKbEntries.namespace });
+        if (archived) {
+          await db.execute(
+            sql`DELETE FROM ai_rag_embeddings
+                 WHERE namespace = ${archived.namespace} AND entry_id = ${archived.id}`,
+          );
+        }
         supersededId = archived?.id ?? null;
       }
       return { row, supersededId };
@@ -816,15 +834,24 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   return c.json({ entry });
 });
 
-// Hard delete (single-operator instance; no shared-corpus concern). Remove the
-// row, then enqueue a `delete` sync to drop its vectors. The UI guards this with
-// a confirm since it is irreversible.
+// Hard delete (single-operator instance; no shared-corpus concern). The UI guards this with a
+// confirm since it is irreversible. The row and its vectors go in ONE transaction: a chunk whose
+// entry is gone is still served — `expandGlobalHits` returns a global hit it has no body for
+// unchanged — so leaving the vectors to the enqueued sync kept a deleted rule retrievable whenever
+// that enqueue failed. The sync is still enqueued, and finds nothing left to remove.
 globalKbRoutes.delete('/entries/:id', async (c) => {
   const id = c.req.param('id');
-  const entry = await withGlobalKb(getDb(), async ({ db }) => {
-    const [row] = await db.delete(globalKbEntries).where(eq(globalKbEntries.id, id)).returning();
-    return row;
-  });
+  const entry = await withGlobalKb(getDb(), async ({ db: conn }) =>
+    conn.transaction(async (db) => {
+      const [row] = await db.delete(globalKbEntries).where(eq(globalKbEntries.id, id)).returning();
+      if (row) {
+        await db.execute(
+          sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
+        );
+      }
+      return row;
+    }),
+  );
   if (!entry) throw new HttpError(404, 'global KB entry not found');
   await enqueueSync(entry.id, entry.namespace, 'delete');
   return c.json({ ok: true });
