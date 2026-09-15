@@ -1246,9 +1246,12 @@ export async function collectRepoSymbols(
       // admit one and refuse the other. That shape was excluded for a while on the argument that
       // types carry Java anyway; C has no types to carry it, which is what forced the question.
       const defRe =
-        /(?<!\buse\s)\b(?:function|func|fun|fn|defmodule|defmacrop|defmacro|defp|def|class|trait|interface|struct|type|enum|module|record|object|protocol)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w{4,})/g;
+        /(?<!\buse\s)\b(?:function|func|fun|fn|defmodule|defmacrop|defmacro|defp|def|class|trait|interface|struct|type|enum|module|record|object|protocol)\s+(?:\([^)]*\)\s*)?(?:self\.)?([A-Za-z_]\w{4,})/g;
       // `enum` covers PHP 8.1 and TypeScript, `module` covers Ruby — both are unambiguous
       // declaration keywords, so they cost nothing.
+      // `self.` is skipped because Ruby declares a class method as `def self.process_invoice`, and
+      // the name capture otherwise stops at `self` — MEASURED, every such method was missing. It is
+      // honoured only right after a keyword, so a `self.` CALL is never read as a declaration.
       //
       // This scan is an APPROXIMATION and is meant to stay one. The two errors are not equal:
       // missing a symbol lets a copied identifier reach a draft a human then reviews, while
@@ -1301,6 +1304,10 @@ export async function collectRepoSymbols(
       //     six C# declarations of those shapes were invisible without them. None of the four lets
       //     a call through, for the whitespace reason above: `handler?.Invoke(x)` and
       //     `list.Where(…)` both put the name flush against the `.`.
+      //   - a `Name::` chain may sit directly before the name, because C++ defines a member outside
+      //     its class as `void InvoiceProcessor::processInvoice(…) {` — MEASURED, every such
+      //     definition was missing. The chain does not reopen calls: a qualified call still has no
+      //     type token and whitespace in front of it, and ends in `;` rather than `{`.
       // `isDistinctiveSymbol` still applies, so a single generic word never lands.
       //
       // Indentation is ALLOWED. Anchoring at column 0 looked like the safe choice and was simply
@@ -1308,7 +1315,7 @@ export async function collectRepoSymbols(
       // normal formatting at all. The brace requirement is what excludes an indented CALL —
       // `indented_call(arg);` ends in a semicolon — so the anchor was never what made this safe.
       const cFuncRe =
-        /^[ \t]*[A-Za-z_][\w:<>,*&?.[\]\s]*?\s+\*?([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?(?:\{|=>)/gm;
+        /^[ \t]*[A-Za-z_][\w:<>,*&?.[\]\s]*?\s+\*?(?:[A-Za-z_]\w*::)*([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?(?:\{|=>)/gm;
       for (let m = cFuncRe.exec(body); m; m = cFuncRe.exec(body)) {
         if (m[1] && !NON_SYMBOL_KEYWORDS.has(m[1]) && isDistinctiveSymbol(m[1])) {
           symbols.add(m[1]);

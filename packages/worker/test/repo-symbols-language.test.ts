@@ -439,6 +439,80 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     }
   });
 
+  it('reads Ruby singleton methods and qualified C++ definitions', async () => {
+    // `def self.process_invoice` is how Ruby declares a class method, and
+    // `void InvoiceProcessor::processInvoice(...)` is how C++ defines a member outside its class.
+    // MEASURED with the real scan, all five below were missing while both unqualified controls
+    // were collected: `defRe` stopped at `self`, and `cFuncRe` wants whitespace immediately before
+    // the name, which a `::` qualifier never has.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-ruby-cpp-'));
+    await writeFile(
+      path.join(dir, 'invoice_processor.rb'),
+      [
+        'class InvoiceProcessor',
+        '  def self.process_invoice(order)',
+        '    self.assign_totals_now(order)',
+        '  end',
+        '  def self.rebuild_ledger!',
+        '    true',
+        '  end',
+        '  def instance_helper_method(order)',
+        '    order',
+        '  end',
+        'end',
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, 'invoice_processor.cpp'),
+      [
+        '#include "invoice_processor.h"',
+        '',
+        'void InvoiceProcessor::processInvoice(int id) {',
+        '    std::sort_invoices_by_date(items.begin(), items.end());',
+        '    if (billing::detail::isOverdueInvoice(inv)) {',
+        '        auto handler = InvoiceProcessor::makeHandlerFor(id);',
+        '    }',
+        '}',
+        '',
+        'std::vector<int> InvoiceProcessor::buildInvoiceList() const {',
+        '    return {};',
+        '}',
+        '',
+        'bool billing::detail::ValidatorImpl::validateInvoice(const Invoice& inv) {',
+        '    return inv.valid();',
+        '}',
+        '',
+        'static int compute_checksum_value(int seed) {',
+        '    return seed * 31;',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, null);
+    for (const name of [
+      'process_invoice',
+      'rebuild_ledger',
+      'instance_helper_method',
+      'processInvoice',
+      'buildInvoiceList',
+      'validateInvoice',
+      'compute_checksum_value',
+    ]) {
+      expect(symbols.has(name), name).toBe(true);
+    }
+    // A qualifier counts only where a DEFINITION puts it: a qualified call has no type token and
+    // whitespace in front of it, and `self.` is honoured only right after `def`.
+    for (const name of [
+      'assign_totals_now',
+      'sort_invoices_by_date',
+      'isOverdueInvoice',
+      'makeHandlerFor',
+    ]) {
+      expect(symbols.has(name), name).toBe(false);
+    }
+  });
+
   it('skips SwiftPM and CocoaPods dependency trees', async () => {
     // `.build/checkouts/<dep>/Sources` is a DEPENDENCY's source. Collecting it makes a library
     // API the article legitimately names read as repository-private, and the block is deleted —
