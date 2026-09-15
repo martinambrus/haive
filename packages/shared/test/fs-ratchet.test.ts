@@ -93,9 +93,20 @@ function isFsLoadCall(node: ts.Node): node is ts.CallExpression {
   const loads =
     callee.kind === ts.SyntaxKind.ImportKeyword ||
     (ts.isIdentifier(callee) && callee.text === 'require') ||
-    (ts.isPropertyAccessExpression(callee) && callee.name.text === 'require');
+    isModuleRequire(callee);
   const arg = node.arguments[0];
   return loads && arg !== undefined && ts.isStringLiteral(arg) && FS_MODULE.test(arg.text);
+}
+
+/** Exactly `module.require` — a `require` member of anything else (Composer's `require`
+ *  section on a parsed manifest, say) is data. */
+function isModuleRequire(expr: ts.Node): expr is ts.PropertyAccessExpression {
+  return (
+    ts.isPropertyAccessExpression(expr) &&
+    expr.name.text === 'require' &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === 'module'
+  );
 }
 
 function isDynamicImport(node: ts.CallExpression): boolean {
@@ -260,7 +271,19 @@ function isDeclarationName(id: ts.Identifier): boolean {
   if (ts.isBindingElement(p) || ts.isVariableDeclaration(p)) return p.name === id;
   if (ts.isImportEqualsDeclaration(p)) return p.name === id;
   if (ts.isPropertyAccessExpression(p)) return p.name === id;
-  if (ts.isPropertyAssignment(p)) return p.name === id;
+  // A member name of any kind — an object key, a type-literal or class member, a parameter —
+  // names a slot, never the binding.
+  if (
+    ts.isPropertyAssignment(p) ||
+    ts.isPropertySignature(p) ||
+    ts.isPropertyDeclaration(p) ||
+    ts.isMethodSignature(p) ||
+    ts.isMethodDeclaration(p) ||
+    ts.isParameter(p) ||
+    ts.isEnumMember(p)
+  ) {
+    return p.name === id;
+  }
   return ts.isQualifiedName(p) || ts.isTypeQueryNode(p) || ts.isTypeReferenceNode(p);
 }
 
@@ -300,6 +323,12 @@ function countInFile(sf: ts.SourceFile, checker: ts.TypeChecker): number {
     ) {
       refuse();
     }
+    // `const load = require` aliases the loader itself, so `require` and `module.require` are
+    // accepted only as the callee of a call; anywhere else they are refused.
+    if (ts.isIdentifier(node) && node.text === 'require' && !isDeclarationName(node)) {
+      if (!isCallee(node)) refuse();
+    }
+    if (isModuleRequire(node) && !isCallee(node)) refuse();
     // `export { readFile }` of a local fs binding: the specifier's own symbol is the export
     // alias, so resolve it to the local target before asking what it binds.
     if (
@@ -559,6 +588,12 @@ describe('path-based fs call ratchet', () => {
   });
 
   it('binds the CommonJS forms a .cts source can use', () => {
+    // Composer's `require` section is data, not the loader.
+    expect(
+      countFsCalls(
+        "import fs from 'node:fs';\ninterface Composer { require?: Record<string, string> }\nconst deps = (composer as Composer).require ?? {};\nfs.readFileSync(p);",
+      ),
+    ).toBe(1);
     expect(countFsCalls("const fs = require('node:fs');\nfs.readFileSync(p);")).toBe(1);
     expect(countFsCalls("import fs = require('node:fs');\nfs.readFileSync(p);")).toBe(1);
     expect(
@@ -573,6 +608,10 @@ describe('path-based fs call ratchet', () => {
       countFsCalls("const p = import('node:fs');\np.then((m) => m.readFile(x));"),
     ).toThrow(/cannot count/);
     expect(() => countFsCalls("load(require('node:fs'));")).toThrow(/cannot count/);
+    expect(() =>
+      countFsCalls("const load = require;\nconst fs = load('node:fs');\nfs.readFileSync(p);"),
+    ).toThrow(/cannot count/);
+    expect(() => countFsCalls("const r = module.require;\nr('node:fs');")).toThrow(/cannot count/);
   });
 
   it('binds object rest as the module and counts the stream constructors', () => {
