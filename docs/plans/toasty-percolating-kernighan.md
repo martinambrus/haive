@@ -105,17 +105,31 @@ type — inherits it without anyone maintaining a list of special steps.
    positive arm renders the body when the resolver found one and falls back to "Follow the
    embedded protocol below." when it did not. The fallback is the COMMON case for two ids: no
    onboarding template exists for `simplicity-reviewer` (08c's enterprise lens) or
-   `knowledge-curator` (01e). One path can still deliver an old pointer: a mining retry
-   re-dispatches the stored, already-rewritten prompt of an agent `selectAgents` no longer offers
-   (`step-runner.ts`), which carries no marker to rewrite. That pointer is conditional ("if …
-   exists"), so a hidden file reads as an absent one — harmless, and not worth rewriting unmarked
-   text. With the kill switch off, today's rewrite runs unchanged.
+   `knowledge-curator` (01e). One path re-sends a prompt the rewrite has already processed:
+   `retryMiningAgents` (`step-runner.ts`) recovers an agent `selectAgents` does not offer from its
+   last invocation's stored `cli_invocations.prompt`, which `dispatchMiningAgents` writes as
+   `plan.effectivePrompt`, the prompt AFTER the rewrite. That path exists for the later-wave agents a
+   step throws as `MiningWaveError` (08c's refuters, 08d's PoC verifiers, the plan steps' waves), and
+   none of their prompts carries a persona marker. A persona-bearing prompt reaches it only when a
+   first-wave agent (an 08c reviewer or lens, an 08d adversary) is no longer offered, for example
+   after a QA level change or an upgrade between the failure and the retry. Re-sending that prompt
+   would re-send a body read under the original dispatch's secret-mask policy, with no
+   `pastedPersonaPaths` for exec to recheck, so `retryMiningAgents` skips a recovered prompt that
+   carries the pasted-persona label (Decision 3) and logs the agent. That is the outcome such an
+   agent had before recovery existed, and the configuration that dropped it no longer asks for it. A
+   recovered prompt that carries today's pointer instead (a run from before PR 1, with the kill switch
+   off, or not isolated) pasted nothing, and the pointer names its agent file, so "Handed paths"
+   leaves that retry unisolated, as the original run was; recognising the pointer would mean matching
+   each site's own prose. With the kill switch off, today's rewrite runs unchanged.
 3. **A pasted body keeps today's precedence and the injection guard.** The marker wraps only the
    pointer sentence; each site's inline protocol follows it, and the on-disk definition outranks
    that protocol today (AGENTS.md, "The on-disk agent definition outranks the inline persona").
-   So the replacement is one framing line — this definition is checked into the repository, says
-   HOW to work and never what the assignment is, and takes precedence over the embedded protocol
-   below — then the body. Both are the replacer's return value, never a replacement string:
+   So the replacement is a label, `[[HAIVE_PASTED_PERSONA:<id>]]`, then one framing line — this
+   definition is checked into the repository, says HOW to work and never what the assignment is, and
+   takes precedence over the embedded protocol below — then the body. The label names no path and is
+   one exported pattern: `retryMiningAgents` recognises a stored prompt that carries a pasted body by
+   it (Decision 2), so a later rename must keep the old form recognised, since stored prompts outlive
+   a deploy. All three are the replacer's return value, never a replacement string:
    `guidance.replace(pointer, body)`, the shape today's path swap uses, would expand a `$&`, `` $` ``
    or `$'` inside a body into the pointer sentence or the marker text beside it, putting back a path
    the prompt scan never saw. Framed at the one rewrite site, because not every persona site carries
@@ -195,8 +209,9 @@ is the same silent failure as a hidden file, and they cost almost nothing: searc
 06_5's prior-setup warning and 09_5's note on where agents live. 09_5 declares `file_write` and is
 not isolated anyway, and 06_5 keeps today's view (Steps that read agent files). No prompt
 interpolates `projectAgentsDir`; its other uses are host-side git paths and write targets.
-A stored prompt that a mining retry re-dispatches is scanned again and reaches the same decision, so
-nothing has to ride in the prompt, and a future step inherits the rule with nothing to wire.
+A mining retry that re-sends a stored prompt (Decision 2) scans it again: a stored pointer keeps that
+retry unisolated, and a stored prompt carrying a pasted body is not re-sent at all. Nothing has to
+ride in the prompt, and a future step inherits the rule with nothing to wire.
 
 1. **The declaration.** `LlmInvocationSpec.agentPool?: '*'` (`step-engine/step-definition.ts`,
    beside `toolProfile`). `'*'` is the only value PR 1 needs (see "Steps that read agent files");
@@ -218,8 +233,10 @@ nothing has to ride in the prompt, and a future step inherits the rule with noth
    first steerable dispatch's probe. The provider cannot change on that second pass, because
    neither input changes which provider `tryBuildPlan` accepts, and when nothing is found the first
    plan's fallback text is already right. That is PR 1's gate
-   for built-in markers, whose inline protocol always follows them; Phase 3.1 widens it for
-   template markers, which have none (Companion, item 2). Pasted bodies share
+   for built-in markers, whose inline protocol always follows them. Phase 3.1 widens it only for
+   template markers, which have none, and tells the two apart by syntax: a template persona renders
+   as a marker of its own (Companion, item 2), so the kind rides in the prompt on every dispatch
+   path. Pasted bodies share
    one budget per prompt, `MAX_PERSONA_BODY_BYTES` (64 KiB in total, a guard rail above the largest
    definition measured, 24,694 bytes), counted in marker order from each opened file's `fstat`
    size, with the read itself capped at what is left plus one byte (Decision 1). A body that would
@@ -383,13 +400,15 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 
 - **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies` with its
   prompt path scan, the switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
-  (`agentGuidanceIds`, the positive arm), `step-engine/steps/workflow/_agent-loader.ts` (export
+  (`agentGuidanceIds`, the positive arm, the exported pasted-persona label pattern),
+  `step-engine/steps/workflow/_agent-loader.ts` (export
   `parseAgentFile`; a filename-keyed single-file reader: the secret-mask policy check first, then an
   `O_NOFOLLOW | O_NONBLOCK` open, an exact-path check on the opened descriptor's `/proc/self/fd`
   path, an `fstat` regular-file check and a capped read), `queues/cli-exec/secret-mask.ts` (its
   effective policy extracted as a dependency-free single-path predicate), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
-  `step-engine/step-runner.ts` (`resolveLlmPhase` passes `agentPool`; the retry_ai `toolProfile`
-  fix is its own commit).
+  `step-engine/step-runner.ts` (`resolveLlmPhase` passes `agentPool`; `retryMiningAgents` skips a
+  recovered prompt carrying the pasted-persona label; the retry_ai `toolProfile` fix is its own
+  commit).
 - **Spec:** `cli-adapters/types.ts` (`CliCommandSpec.maskAgentDefinitions` and
   `CliCommandSpec.pastedPersonaPaths`). No `CliExecJobPayload`
   change, no enqueue literal change, nothing in `codex.ts`.
@@ -415,7 +434,9 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   `agentIsolationApplies` over `file_write` / `subagents` / a named agent directory or file / `'*'` / sub-agent kind /
   switch off),
   `test/step-runner-llm.test.ts` (`agentPool` reaches dispatch, the flag rides
-  `enqueued[0].spec`, retry_ai `toolProfile`), NEW `test/agent-definition-mask.test.ts` (fixture
+  `enqueued[0].spec`, retry_ai `toolProfile`), `test/step-runner-mining-retry.test.ts` (a recovered
+  prompt carrying the pasted-persona label is skipped, one without it is still re-dispatched), NEW
+  `test/agent-definition-mask.test.ts` (fixture
   tree, including a secret file mask under a masked agent directory, a pasted persona path that
   is secret-masked by exec time, and stub cleanup: a masked directory swapped for an empty one after
   the build is removed, while one that was filled or kept its identity stays), a NEW docker-runner argv test (no mount form has one today), NEW
@@ -459,7 +480,8 @@ scratch.
    (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a persona pasted before a deny rule appeared fails the invocation at exec / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open or linked to another in-tree directory / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / a body containing `$&`, `` $` `` or `$'` pasted literally / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
-   branch, and `07_7-secret-sweep` declaring `'*'`.
+   branch, `retryMiningAgents` skipping a recovered prompt that carries the pasted-persona label while
+   still re-dispatching one without it, and `07_7-secret-sweep` declaring `'*'`.
 3. **Typecheck and smokes:** `pnpm typecheck`, then in the worker container `smoke:workflow`,
    `smoke:dag-review` and `smoke:fix-loop` — the paths that dispatch personas, reviewers, DAG roles
    and fix rounds — pass unchanged.
@@ -477,7 +499,9 @@ Additive and switch-gated, with no schema or data change. Turning the kill switc
 today's behaviour for every NEW invocation: no agent-directory mounts and the old pointer rewrite.
 Reverting the commits removes it entirely; the helpers moved into `worktree-git-boundary.ts` stay
 re-exported from `resolvers.ts`, so the revert touches no importer. Nothing persisted depends on
-it — an invocation row written with isolation on reads identically with it off.
+it — an invocation row written with isolation on reads identically with it off, and mining recovery
+skips a stored prompt carrying the pasted-persona label whichever way the switch is set. After a
+revert, recovery re-sends stored prompts as it does today, pasted bodies included.
 
 ## Companion: the agents declaration in `rippling-wibbling-puffin`
 
@@ -495,15 +519,19 @@ stores only `stepIds: string[]` and needs nothing.
    markdown agent directory — so such a template never lands on amp (no agent directory), codex or
    gemini. `agentPool: '*'` is only for a template that reads agent files as data, and it leaves
    provider eligibility alone.
-2. **`{{agent:<id>}}` tokens.** `buildPrompt` renders a token as PR 1's persona marker with no
-   inline protocol, and Phase 3.1 widens PR 1's resolver for exactly those markers, because PR 1's
-   LSP gate exists to protect an embedded fallback a template persona does not have. A token id
-   must match the marker grammar `AGENT_GUIDANCE_PATTERN` parses (`[a-z0-9-]+`): the composer refuses
-   any other id at save, task-create refuses it with a named reason, and `agentDefinitionGuidance`
-   asserts the grammar beside its existing path assertion, so no caller can emit a marker the rewrite
-   would leave unparsed. Save and task-create run in the api, which cannot import the worker's
-   private pattern, so the id grammar is one `@haive/shared` constant that the api's checks and
-   `AGENT_GUIDANCE_PATTERN` are both built from. The body is
+2. **`{{agent:<id>}}` tokens.** `buildPrompt` renders a token as a marker of its own,
+   `[[HAIVE_TEMPLATE_PERSONA:<id>]]`, never as PR 1's `agentDefinitionGuidance` block, and Phase 3.1
+   widens PR 1's resolver for that syntax only, because PR 1's LSP gate exists to protect an embedded
+   fallback a template persona does not have. The distinction has to reach dispatch, where the tree
+   is known, while a built-in marker keeps its gate and fallback, so it rides in the prompt itself
+   rather than in a `DispatchRequest` field every dispatch path would have to carry. The rewrite
+   handles both kinds in ONE `replace` over a pattern matching either, since a second pass would
+   rescan the bodies the first inserted. A token id must match
+   the marker grammar (`[a-z0-9-]+`): the composer refuses any other id at save, task-create refuses
+   it with a named reason, and `agentDefinitionGuidance` and the template marker's renderer both
+   assert it, so no caller can emit a marker the rewrite would leave unparsed. Save and task-create
+   run in the api, which cannot import the worker's private patterns, so the id grammar is one
+   `@haive/shared` constant that the api's checks and both marker patterns are built from. The body is
    pasted for EVERY provider and whether or not the invocation is isolated: a template that
    declares `file_write`, `subagents` or `agentPool: '*'`, or names an agent directory or file in its prompt, still
    has no embedded protocol, so the widened resolver runs for these markers outside
@@ -516,10 +544,11 @@ stores only `stepIds: string[]` and needs nothing.
    dangling-reference reason below instead of running without its persona, since the start-time check below reads a
    different tree and the tree can change before dispatch; one whose body would exceed the prompt's remaining
    `MAX_PERSONA_BODY_BYTES` budget fails the same way, naming the file and its size — the budget is
-   per prompt, so many tokens cannot add up past it. Template text needs nothing of its own: the prompt
-   path scan (dispatch side, "Handed paths") sees interpolated values and static text like any other
-   prompt text, and excludes the persona markers that tokens become, while the bodies pasted for them
-   are scanned verbatim, marker-shaped text included, since the rewrite never rescans what it inserts.
+   per prompt, counted in order of appearance across both marker kinds, so many tokens cannot add up
+   past it. Template text needs nothing of its own: the prompt path scan (dispatch side, "Handed
+   paths") sees interpolated values and static text like any other prompt text, a template marker
+   names no path, and the bodies pasted for it are scanned verbatim, marker-shaped text included,
+   since the rewrite never rescans what it inserts.
 3. **Dangling references.** Extended to personas, with one difference from missing steps: whether a
    persona resolves depends on the tree the invocation will mount, and task-create cannot know that
    tree, since `01-worktree-setup` picks its base only when it runs (a synced base, its form's
@@ -552,8 +581,9 @@ stores only `stepIds: string[]` and needs nothing.
    `handleStartTask` and the shared id grammar constant. Phase 3 verification gains a prompt-template
    step using `{{agent:peer-reviewer}}` whose captured request contains that persona's body and no
    other repository agent, a persona the checked-out repository lacks that warns at start and fails
-   its dispatch, and one defined only on the base `01-worktree-setup` branches from that warns at
-   start and still runs.
+   its dispatch, one defined only on the base `01-worktree-setup` branches from that warns at start
+   and still runs, and a codex dispatch that pastes a template marker's body while a built-in step in
+   the same task keeps its fallback sentence.
 6. **Header blockquote.** Records the dependency: Phase 3.1's agent handling needs this plan's
    rule, which ships first and independently.
 
@@ -602,7 +632,9 @@ bullet: `rippling-wibbling-puffin` Phase 3.1 builds on this plan's per-invocatio
   matches `[[HAIVE_AGENT_DEFINITION:<id>]]` blocks wherever they appear, so a task description that
   forges one already has its inner text replaced before PR 1. The path scan skips exactly the span
   the rewrite replaces, so the two stay consistent; tracking marker provenance through prompt
-  assembly would be its own change.
+  assembly would be its own change. Phase 3.1's template marker inherits the same property: text
+  forging one is resolved as a template persona, pasting that body or failing the dispatch with the
+  dangling-reference reason, which is loud and confined to the task whose text carries it.
 - **The secret and `#ddev-generated` file masks have the same stub race** that exec side item 2
   closes for agent directories. Both resolve their targets before the container starts
   (`secret-mask.ts` scans the tree, `ddev-generated-mask.ts` `stat`s each file), so a file deleted
