@@ -1371,10 +1371,14 @@ export function bodyUsesRepoSymbol(text: string, symbols: ReadonlySet<string>): 
   // value` — no parenthesis, so no other arm sees it. The receiver is required: a bare
   // `invoice_total = value` is an ordinary local variable in every language, and matching one
   // deletes somebody's article. `==`, `=~` and `=>` compare or build a hash; they assign nothing.
+  //
+  // The sixth arm is Ruby's POSTFIX constructor, `InvoiceProcessor.new(order)`: the call arm sees
+  // only the too-short `new`, and the `new` arm reads the prefix form other languages use. The
+  // trailing boundary keeps a method that merely starts with `new` (`.new_record?`) from counting.
   const re =
-    /\b([A-Za-z_]\w{4,})[!?]?\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::|\b([A-Za-z_]\w{4,})[ \t]*\{|\.([A-Za-z_]\w{4,})[ \t]*(?:\|\||&&|[-+*\/%])?=(?![=~>])/g;
+    /\b([A-Za-z_]\w{4,})[!?]?\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::|\b([A-Za-z_]\w{4,})[ \t]*\{|\.([A-Za-z_]\w{4,})[ \t]*(?:\|\||&&|[-+*\/%])?=(?![=~>])|\b([A-Za-z_]\w{4,})\.new\b/g;
   for (let m = re.exec(text); m; m = re.exec(text)) {
-    const name = m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5];
+    const name = m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5] ?? m[6];
     if (name && symbols.has(name)) return name;
   }
   return null;

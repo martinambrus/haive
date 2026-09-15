@@ -288,6 +288,19 @@ describe('bodyUsesRepoSymbol type literals', () => {
     expect(bodyUsesRepoSymbol('processor.invoice_total =~ /x+/', setters)).toBeNull();
     expect(bodyUsesRepoSymbol('{ processor.invoice_total => value }', setters)).toBeNull();
   });
+
+  it('matches a Ruby postfix constructor call', () => {
+    // Ruby constructs with `InvoiceProcessor.new(order)`: the call arm sees only the too-short
+    // `new`, and the `new` arm reads the prefix form other languages use.
+    const classes = new Set(['InvoiceProcessor']);
+    expect(bodyUsesRepoSymbol('InvoiceProcessor.new(order)', classes)).toBe('InvoiceProcessor');
+    expect(bodyUsesRepoSymbol('processor = Billing::InvoiceProcessor.new', classes)).toBe(
+      'InvoiceProcessor',
+    );
+    // A method that merely starts with `new`, and a bare mention, are not constructor calls.
+    expect(bodyUsesRepoSymbol('InvoiceProcessor.new_record?', classes)).toBeNull();
+    expect(bodyUsesRepoSymbol('the InvoiceProcessor class', classes)).toBeNull();
+  });
 });
 
 // The bare-filename rule resolved at the repo ROOT only, so `InvoiceProcessor.ts` living under
