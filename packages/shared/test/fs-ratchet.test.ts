@@ -96,13 +96,14 @@ interface FsBindings {
 /** One specifier list — `{ readFile, stat as statPath }` from a static import (`sep` = ` as `) or
  *  `{ readFile, stat: statPath }` from a destructured dynamic one (`sep` = `:`). A path-taking
  *  import binds its LOCAL name, or `import { readFile as readRepoFile }` would be a call the
- *  baseline never sees; `promises` binds a namespace; a type specifier binds nothing callable. */
+ *  baseline never sees; `promises` and `default` bind a namespace; a type specifier binds nothing
+ *  callable. */
 function bindSpecifiers(list: string, sep: RegExp, into: FsBindings): void {
   for (const spec of list.split(',')) {
     const [imported, alias] = spec.trim().split(sep);
     const local = (alias ?? imported)?.trim();
     if (!imported || !local || imported.startsWith('type ')) continue;
-    if (imported === 'promises') into.namespaces.add(local);
+    if (imported === 'promises' || imported === 'default') into.namespaces.add(local);
     else if (isPathCall(imported)) into.locals.add(local);
   }
 }
@@ -213,6 +214,7 @@ describe('path-based fs call ratchet', () => {
     expect(
       countFsCalls("import fs, { mkdirSync } from 'node:fs';\nfs.statSync(p); mkdirSync(p);"),
     ).toBe(2);
+    expect(countFsCalls("import { default as fs } from 'node:fs';\nfs.readFileSync(p);")).toBe(1);
     expect(
       countFsCalls(
         "import { lstat, readlink, symlink } from 'node:fs/promises';\nawait lstat(p); await readlink(p); await symlink(t, p);",
@@ -244,6 +246,9 @@ describe('path-based fs call ratchet', () => {
       countFsCalls("const fsp = await import('node:fs/promises');\nawait fsp.readFile(p);"),
     ).toBe(1);
     expect(countFsCalls("(await import('node:fs')).readFileSync(p);")).toBe(1);
+    expect(
+      countFsCalls("const { default: fs } = await import('node:fs');\nfs.readFileSync(p);"),
+    ).toBe(1);
     expect(() => countFsCalls("import('node:fs').then((fs) => fs.readFile(p));")).toThrow(
       /cannot count/,
     );
