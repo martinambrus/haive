@@ -268,8 +268,11 @@ ride in the prompt, and a future step inherits the rule with nothing to wire.
 5. **The rewrite** (`adaptPromptForCliCapabilities`) gains optional `isolated` and `agentBodies`
    inputs and changes only its positive arm, as fixed in Decisions 1–3.
 6. **One decision, carried on the command spec.** When `agentIsolationApplies`, `buildCliSidePlan`
-   stamps `maskAgentDefinitions: true` onto the `CliCommandSpec` it returns, and records
-   `pastedPersonaPaths` for the exec-time secret-mask recheck (Decision 1). All nine enqueue
+   stamps `maskAgentDefinitions: true` onto the `CliCommandSpec` it returns. Separately, and whether
+   or not the invocation is isolated, it records `pastedPersonaPaths` for every body the rewrite
+   pasted, for the exec-time secret-mask recheck (Decision 1): PR 1 pastes only under isolation, but
+   Phase 3.1 pastes template personas outside it (Companion, item 2), and exec rechecks whatever
+   paths are recorded, whether or not it masks anything. All nine enqueue
    sites (four in `step-runner.ts`, four in `dag-executor.ts`, one in `merge-resolver.ts`) forward
    `spec: plan.invocation.spec` untouched and `executeCliSpec` spreads it, so no payload literal
    changes and the prompt and the mounts cannot disagree when the switch flips between dispatch
@@ -542,7 +545,8 @@ stores only `stepIds: string[]` and needs nothing.
    pasted for EVERY provider and whether or not the invocation is isolated: a template that
    declares `file_write`, `subagents` or `agentPool: '*'`, or names an agent directory or file in its prompt, still
    has no embedded protocol, so the widened resolver runs for these markers outside
-   `agentIsolationApplies`. The body is read by filename (`<id>.md`, as PR 1 reads it) from the
+   `agentIsolationApplies`, and every body it pastes is recorded in `pastedPersonaPaths` for the
+   exec-time recheck (dispatch side, item 6), isolated or not. The body is read by filename (`<id>.md`, as PR 1 reads it) from the
    selected provider's own agent directory when that one is markdown and holds it, and otherwise
    from the first markdown agent directory in catalog order that does — the same directories the dangling-reference check below searches, so
    a persona defined only in `.gemini/agents` raises no start-time warning and still resolves for a claude
@@ -589,8 +593,9 @@ stores only `stepIds: string[]` and needs nothing.
    step using `{{agent:peer-reviewer}}` whose captured request contains that persona's body and no
    other repository agent, a persona the checked-out repository lacks that warns at start and fails
    its dispatch, one defined only on the base `01-worktree-setup` branches from that warns at start
-   and still runs, and a codex dispatch that pastes a template marker's body while a built-in step in
-   the same task keeps its fallback sentence.
+   and still runs, a codex dispatch that pastes a template marker's body while a built-in step in
+   the same task keeps its fallback sentence, and a `file_write` template, which is not isolated,
+   whose persona file a deny rule covers by exec time failing before the CLI starts.
 6. **Header blockquote.** Records the dependency: Phase 3.1's agent handling needs this plan's
    rule, which ships first and independently.
 
