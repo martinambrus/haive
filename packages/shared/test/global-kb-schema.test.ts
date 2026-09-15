@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
-import { orphanFacetMajorSql } from '../src/global-kb/schema.js';
+import { orphanFacetMajorSql, trimFacetValueSql } from '../src/global-kb/schema.js';
 import type { GlobalKbConnection } from '../src/global-kb/connection.js';
 
 // Mirrors the repo's RAG tests (e.g. worker insertChunk upsert SQL): no live
@@ -100,9 +100,11 @@ describe('ensureGlobalKbSchema', () => {
     // `postgresql` was never selected; and a padded ` drupal ` matched neither the predicate
     // (`lower(v)` equals it) nor `?|` (which does not trim). The rule is generated from the same
     // alias table `normalizeFacets` reads, so the two engines cannot drift.
-    expect(sql).toContain('lower(btrim(v))');
-    expect(sql).toContain("WHEN kv.key = 'database' AND lower(btrim(v)) = 'postgresql'");
-    expect(sql).toContain("WHERE btrim(v) <> ''");
+    expect(sql).toContain(`lower(${trimFacetValueSql('v')})`);
+    expect(sql).toContain(
+      `WHEN kv.key = 'database' AND lower(${trimFacetValueSql('v')}) = 'postgresql'`,
+    );
+    expect(sql).toContain(`WHERE ${trimFacetValueSql('v')} <> ''`);
     // The predicate is "differs from its canonical form", which subsumes case, padding and
     // aliases — the case-only test must NOT come back.
     expect(sql).not.toContain('v <> lower(v)');

@@ -1,6 +1,6 @@
 import { logger } from '../logger/index.js';
 import type { GlobalKbConnection } from './connection.js';
-import { canonicalFacetValueSql, orphanFacetMajorSql } from './schema.js';
+import { canonicalFacetValueSql, orphanFacetMajorSql, trimFacetValueSql } from './schema.js';
 
 const log = logger.child({ module: 'global-kb-schema' });
 
@@ -255,10 +255,11 @@ export async function ensureGlobalKbSchema(
   // dropped and the major survives. Two further shapes `normalizeFacets` drops — a bare
   // `{"framework":[],...}` parent and an already-clean `{"frameworkMajor":["11"]}` — were never
   // even SELECTED, so the predicate carries the same test. It is generated from
-  // `FACET_MAJOR_PARENTS` and reads "blank" with the cleaning's own `btrim` rule, so "parent
+  // `FACET_MAJOR_PARENTS` and reads "blank" with the cleaning's own trim rule, so "parent
   // absent" means "absent after cleaning" within this one statement.
   const canon = canonicalFacetValueSql('kv.key', 'v');
   const orphan = orphanFacetMajorSql('kv.key', 't.facets');
+  const trim = trimFacetValueSql('v');
   for (const table of [ENTRIES_TABLE, VECTORS_TABLE]) {
     await conn.pg.unsafe(`
       UPDATE ${table} AS t
@@ -270,7 +271,7 @@ export async function ensureGlobalKbSchema(
                FROM jsonb_array_elements_text(
                  CASE WHEN jsonb_typeof(kv.value) = 'array' THEN kv.value ELSE '[]'::jsonb END
                ) AS v
-               WHERE btrim(v) <> ''
+               WHERE ${trim} <> ''
              ) AS a
         WHERE a.arr IS NOT NULL AND NOT ${orphan}
       ), '{}'::jsonb)
@@ -279,7 +280,7 @@ export async function ensureGlobalKbSchema(
         WHERE jsonb_typeof(kv.value) <> 'array'
            OR EXISTS (
              SELECT 1 FROM jsonb_array_elements_text(kv.value) AS v
-             WHERE v IS NULL OR btrim(v) = '' OR ${canon} <> v
+             WHERE v IS NULL OR ${trim} = '' OR ${canon} <> v
            )
            OR ${orphan}
       )

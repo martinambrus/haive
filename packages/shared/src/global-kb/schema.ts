@@ -55,7 +55,7 @@ export const FACET_DIMENSIONS = [
  *  `canonicalFacetValueSql` established for the value rule.
  *
  *  True when `keyExpr` names a major holding a non-blank value in `facetsExpr` while its parent
- *  holds none. "Blank" is the backfill's own cleaning rule, `btrim(x) = ''`, so inside one
+ *  holds none. "Blank" is the backfill's own cleaning rule, `trimFacetValueSql(x) = ''`, so inside one
  *  statement this means "absent AFTER cleaning": a parent the cleaning empties — a legacy `[""]`,
  *  or a bare `[]` — counts as absent, exactly as it does once `normalizeFacets` has dropped it.
  *  Elements are read through a CASE rather than guarded by AND, because Postgres does not promise
@@ -65,7 +65,7 @@ export const FACET_DIMENSIONS = [
  *  expressions. Only code constants are interpolated, never a stored value. */
 export function orphanFacetMajorSql(keyExpr: string, facetsExpr: string): string {
   const present = (dim: string): string =>
-    `EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${facetsExpr}->'${dim}') = 'array' THEN ${facetsExpr}->'${dim}' ELSE '[]'::jsonb END) AS fv WHERE btrim(fv) <> '')`;
+    `EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${facetsExpr}->'${dim}') = 'array' THEN ${facetsExpr}->'${dim}' ELSE '[]'::jsonb END) AS fv WHERE ${trimFacetValueSql('fv')} <> '')`;
   const arms = Object.entries(FACET_MAJOR_PARENTS).map(
     ([major, parent]) =>
       `(${keyExpr} = '${major}' AND ${present(major)} AND NOT ${present(parent)})`,
@@ -127,6 +127,28 @@ export function canonicalizeFacetValue(dimension: string, value: string): string
   return FACET_VALUE_ALIASES[dimension as keyof GlobalKbFacets]?.[v] ?? v;
 }
 
+/** The characters the SQL engine trims from a facet value, as `chr()` code points.
+ *
+ *  The write path trims with JS `String.prototype.trim()`, which strips 25 code points — MEASURED on
+ *  Node 26.7.0 by testing every one: U+0009-U+000D, U+0020, U+00A0, U+1680, U+2000-U+200A, U+2028,
+ *  U+2029, U+202F, U+205F, U+3000, U+FEFF, none astral. SQL `btrim(x)` strips U+0020 alone, which
+ *  MEASURED left a tab-, newline- or NBSP-padded legacy value untouched by the backfill that exists
+ *  to canonicalise it — and read a tab-only parent as PRESENT where the write path reads it absent.
+ *
+ *  Only the ASCII members are generated. Above 127, what `chr()` returns depends on the server
+ *  encoding (a Unicode code point only on UTF8; other multibyte encodings require ASCII), and the
+ *  global KB can be an external database whose encoding Haive does not choose — one character that
+ *  raises there fails the whole schema ensure at boot. The set is a SUBSET of JS's on purpose: SQL
+ *  then never strips more than the write path, so a value padded with a non-ASCII space still
+ *  disagrees, but only by leaving its row unreachable, never by widening it. */
+export const FACET_TRIM_CODE_POINTS_SQL = [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20] as const;
+
+/** `btrim` over `FACET_TRIM_CODE_POINTS_SQL`. `valueExpr` is a SQL expression; only code constants
+ *  are interpolated. */
+export function trimFacetValueSql(valueExpr: string): string {
+  return `btrim(${valueExpr}, ${FACET_TRIM_CODE_POINTS_SQL.map((c) => `chr(${c})`).join(' || ')})`;
+}
+
 /** The SAME value rule as SQL, built from the SAME alias table, so a backfill cannot disagree
  *  with the write path about what a facet value is.
  *
@@ -140,7 +162,7 @@ export function canonicalizeFacetValue(dimension: string, value: string): string
  *  `keyExpr` names the dimension and `valueExpr` the raw stored text; both are SQL expressions.
  *  Only code constants are interpolated, never a stored value. */
 export function canonicalFacetValueSql(keyExpr: string, valueExpr: string): string {
-  const base = `lower(btrim(${valueExpr}))`;
+  const base = `lower(${trimFacetValueSql(valueExpr)})`;
   const whens = Object.entries(FACET_VALUE_ALIASES).flatMap(([dim, table]) =>
     Object.entries(table ?? {}).map(
       ([from, to]) => `WHEN ${keyExpr} = '${dim}' AND ${base} = '${from}' THEN '${to}'`,

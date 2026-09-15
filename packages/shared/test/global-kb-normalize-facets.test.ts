@@ -5,6 +5,8 @@ import {
   normalizeFacets,
   orphanFacetMajors,
   orphanFacetMajorSql,
+  FACET_TRIM_CODE_POINTS_SQL,
+  trimFacetValueSql,
 } from '../src/global-kb/schema.js';
 import { extractProjectFacets } from '../src/global-kb/facets.js';
 
@@ -86,8 +88,10 @@ describe('extractProjectFacets normalisation', () => {
 describe('canonicalFacetValueSql', () => {
   it('trims and lowercases before folding an alias, in that order', () => {
     const sql = canonicalFacetValueSql('kv.key', 'v');
-    expect(sql).toContain('lower(btrim(v))');
-    expect(sql).toContain("WHEN kv.key = 'database' AND lower(btrim(v)) = 'postgresql'");
+    expect(sql).toContain(`lower(${trimFacetValueSql('v')})`);
+    expect(sql).toContain(
+      `WHEN kv.key = 'database' AND lower(${trimFacetValueSql('v')}) = 'postgresql'`,
+    );
     expect(sql).toContain("THEN 'postgres'");
   });
 
@@ -160,6 +164,24 @@ describe('orphanFacetMajorSql', () => {
   // on a scalar — so the element read is guarded by a CASE, which does order its evaluation.
   it("reads elements through a CASE guard and uses the cleaning's blank rule", () => {
     expect(sql).toContain("CASE WHEN jsonb_typeof(t.facets->'framework') = 'array'");
-    expect(sql).toContain("btrim(fv) <> ''");
+    expect(sql).toContain(`${trimFacetValueSql('fv')} <> ''`);
+  });
+});
+
+// The SQL engine must never strip MORE than the write path: a character SQL trims and JS keeps
+// would let the backfill read a parent as absent that the write path reads as present, widening a
+// row the write path scopes. So the set is pinned to the RUNNING engine's own `trim()` — exactly
+// its ASCII members — rather than to a list someone remembered.
+describe('FACET_TRIM_CODE_POINTS_SQL', () => {
+  it("is exactly the ASCII members of String.prototype.trim()'s set", () => {
+    const jsAscii: number[] = [];
+    for (let c = 0; c < 128; c += 1) if (String.fromCharCode(c).trim() === '') jsAscii.push(c);
+    expect([...FACET_TRIM_CODE_POINTS_SQL]).toEqual(jsAscii);
+  });
+
+  it('generates one chr() per code point inside a two-argument btrim', () => {
+    const sql = trimFacetValueSql('v');
+    expect(sql.startsWith('btrim(v, ')).toBe(true);
+    for (const c of FACET_TRIM_CODE_POINTS_SQL) expect(sql).toContain(`chr(${c})`);
   });
 });
