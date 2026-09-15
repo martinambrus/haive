@@ -488,7 +488,11 @@ async function skipRemovedSteps(db: Database): Promise<void> {
  *  longer renders these agents, so a superseded phantom stays absent instead of
  *  resurfacing as `new_artifact`. Idempotent via the `superseded_at IS NULL`
  *  guard. Step 1 (applicable-ids cleanup) runs first because it reads the
- *  still-live phantom rows; step 2 then supersedes them. */
+ *  still-live phantom rows; step 2 then supersedes them.
+ *
+ *  The length check is CASE-guarded because the `jsonb_typeof` arm beside it is not a guard:
+ *  Postgres does not promise to evaluate an AND list as written, and `jsonb_array_length`
+ *  raises on a non-array — MEASURED, the unguarded form raised at default costs. */
 async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
   // 1. Remove phantom agent template_ids from each affected repo's
   //    applicable_template_ids. The upgrade-status API reads only
@@ -507,7 +511,9 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
               AND oa.template_id LIKE 'agent.%'
               AND oa.superseded_at IS NULL
               AND jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array'
-              AND jsonb_array_length(oa.form_values_snapshot -> 'acceptedAgentIds') > 0
+              AND jsonb_array_length(
+                CASE WHEN jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array' THEN oa.form_values_snapshot -> 'acceptedAgentIds' ELSE '[]'::jsonb END
+              ) > 0
               AND NOT jsonb_exists(oa.form_values_snapshot -> 'acceptedAgentIds', replace(oa.template_id, 'agent.', ''))
           )
         ),
@@ -520,7 +526,9 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
           AND oa.template_id LIKE 'agent.%'
           AND oa.superseded_at IS NULL
           AND jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array'
-          AND jsonb_array_length(oa.form_values_snapshot -> 'acceptedAgentIds') > 0
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array' THEN oa.form_values_snapshot -> 'acceptedAgentIds' ELSE '[]'::jsonb END
+          ) > 0
           AND NOT jsonb_exists(oa.form_values_snapshot -> 'acceptedAgentIds', replace(oa.template_id, 'agent.', ''))
       )
   `);
@@ -533,7 +541,9 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
       AND template_id LIKE 'agent.%'
       AND superseded_at IS NULL
       AND jsonb_typeof(form_values_snapshot -> 'acceptedAgentIds') = 'array'
-      AND jsonb_array_length(form_values_snapshot -> 'acceptedAgentIds') > 0
+      AND jsonb_array_length(
+        CASE WHEN jsonb_typeof(form_values_snapshot -> 'acceptedAgentIds') = 'array' THEN form_values_snapshot -> 'acceptedAgentIds' ELSE '[]'::jsonb END
+      ) > 0
       AND NOT jsonb_exists(form_values_snapshot -> 'acceptedAgentIds', replace(template_id, 'agent.', ''))
   `);
 }
