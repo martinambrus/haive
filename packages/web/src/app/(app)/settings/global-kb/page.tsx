@@ -621,6 +621,33 @@ export default function GlobalKbPage() {
     }
   }
 
+  /** Retire an ACTIVE entry without deleting it. Reversible — an archived entry offers Reactivate —
+   *  and not a supersession: nothing replaced it, so `supersededAt` stays null. The successor
+   *  warning tells a reviewer to do exactly this, and the page had no control to do it with. */
+  async function archive(e: GlobalKbEntry) {
+    setBusy(true);
+    try {
+      await api.patch(`/global-kb/entries/${e.id}`, { status: 'archived' });
+      setSelected((s) => (s?.id === e.id ? null : s));
+      await load();
+    } catch (err) {
+      setLoadError((err as ApiError).message ?? 'Archive failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Open an entry by id. Fetched rather than found in `entries`, which is filtered and paginated
+   *  — the reason the successor is asked of the server in the first place. */
+  async function openEntry(id: string) {
+    try {
+      const res = await api.get<{ entry: GlobalKbEntry }>(`/global-kb/entries/${id}`);
+      setSelected(res.entry);
+    } catch (err) {
+      setLoadError((err as ApiError).message ?? 'Could not open that entry');
+    }
+  }
+
   /** Re-scope an entry that is already stored.
    *
    *  The only way to correct a facet short of deleting the article and writing it again — which
@@ -1533,10 +1560,25 @@ export default function GlobalKbPage() {
                   the same rule the scope-edit warning above follows. Two active entries is noise
                   a reviewer can see and undo; silently retiring the live one is not. */}
               {selected.status === 'archived' && activeSuccessor && (
-                <p className="mt-3 text-center text-[11px] text-amber-400">
-                  An active entry still replaces this one. Reactivating leaves both live for the
-                  same scope — re-scope or archive that entry if only one should apply.
-                </p>
+                <div className="mt-3 text-center text-[11px] text-amber-400">
+                  <p>
+                    An active entry, <span className="font-medium">{activeSuccessor.title}</span>,
+                    still replaces this one. Reactivating leaves both live for the same scope —
+                    re-scope or archive that entry if only one should apply.
+                  </p>
+                  {/* Opening another entry resets an open scope edit, so it waits for that edit to
+                      be saved or cancelled rather than discarding it silently. */}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="mt-1"
+                    disabled={busy || scopeBusy || scopeEdit !== null}
+                    title={scopeEdit !== null ? 'Save or cancel the scope edit first' : undefined}
+                    onClick={() => void openEntry(activeSuccessor.id)}
+                  >
+                    Open that entry
+                  </Button>
+                </div>
               )}
               <div className="mt-4 flex items-center justify-center gap-3">
                 {/* Activation is blocked while a scope edit is OPEN as well as while one is in
@@ -1561,6 +1603,19 @@ export default function GlobalKbPage() {
                     onClick={() => void activate(selected)}
                   >
                     {selected.status === 'archived' ? 'Reactivate' : 'Activate'}
+                  </Button>
+                )}
+                {/* Same guard as Activate: archiving mid-edit changes which branch the pending scope
+                    save takes, since the PATCH treats an archived entry's supersede link as clearable. */}
+                {selected.status === 'active' && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={busy || scopeBusy || scopeEdit !== null}
+                    title={scopeEdit !== null ? 'Save or cancel the scope edit first' : undefined}
+                    onClick={() => void archive(selected)}
+                  >
+                    Archive
                   </Button>
                 )}
                 <Button
