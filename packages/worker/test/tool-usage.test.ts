@@ -197,14 +197,16 @@ describe('commandPathTokens', () => {
 });
 
 describe('createToolUsageTally — claude family', () => {
-  it('records the init inventory, counting tools rather than naming them', () => {
+  it('records the init inventory sorted, counting tools rather than naming them', () => {
     const tally = createToolUsageTally({ workdir: WORKDIR });
     tally.claudeInit(CLAUDE_INIT);
     const usage = tally.finalize('stream');
+    // The fixture lists them in the CLI's directory order; the record sorts them like every
+    // other array, so two runs on one repository serialise identically.
     expect(usage.loaded).toEqual({
-      agents: ['peer-reviewer', 'security-code-reviewer', 'claude', 'Explore'],
-      skills: ['project-context', 'loop', 'code-review'],
-      mcpServers: ['haive-rag', 'filesystem'],
+      agents: ['Explore', 'claude', 'peer-reviewer', 'security-code-reviewer'],
+      skills: ['code-review', 'loop', 'project-context'],
+      mcpServers: ['filesystem', 'haive-rag'],
       toolCount: 9,
     });
     // An observable stream that called nothing is `full` with empty counters, not `none`.
@@ -216,7 +218,7 @@ describe('createToolUsageTally — claude family', () => {
     const tally = createToolUsageTally({ workdir: WORKDIR });
     tally.claudeInit(CLAUDE_INIT);
     tally.claudeInit({ ...CLAUDE_INIT, agents: ['other'] });
-    expect(tally.finalize('stream').loaded?.agents).toEqual(CLAUDE_INIT.agents);
+    expect(tally.finalize('stream').loaded?.agents).toEqual([...CLAUDE_INIT.agents].sort());
   });
 
   it('tallies native tools, file reads, MCP calls, sub-agents and skills from measured blocks', () => {
@@ -517,7 +519,7 @@ describe('applyProviderObservability', () => {
       ...unobservedToolUsage('stream', {
         agents: [],
         skills: [],
-        mcpServers: ['haive-rag', 'filesystem'],
+        mcpServers: ['filesystem', 'haive-rag'],
         toolCount: 2,
       }),
     });

@@ -321,10 +321,12 @@ export function createToolUsageTally(opts: { workdir: string | null }): ToolUsag
           }
         }
       }
+      // Sorted like every other array here: the CLI enumerates its inventory in directory
+      // order, which is not a fact about the run, and the record promises stable JSON.
       loaded = {
-        agents: stringsOf(event.agents),
-        skills: stringsOf(event.skills),
-        mcpServers: servers,
+        agents: stringsOf(event.agents).sort(compareStrings),
+        skills: stringsOf(event.skills).sort(compareStrings),
+        mcpServers: servers.sort(compareStrings),
         toolCount: Array.isArray(event.tools) ? event.tools.length : 0,
       };
     },
