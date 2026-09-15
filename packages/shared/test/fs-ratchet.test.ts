@@ -62,6 +62,9 @@ const CALLS = new Set([
   'statfs',
   'glob',
   'openAsBlob',
+  // The two exported stream classes take a path when constructed directly.
+  'ReadStream',
+  'WriteStream',
 ]);
 const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
 /** Cheap pre-filter: a file that never names the module, and never names a CJS route that
@@ -169,16 +172,27 @@ function bindingOf(symbol: ts.Symbol | undefined): Binding | 'unknown' | null {
     // declaration is known to hold the module — any other destructuring binds nothing here.
     const keys: string[] = [];
     let readable = true;
+    // `{ ...rest }` at the leaf is the module (or the member above it) minus a few keys.
+    const rest = decl.dotDotDotToken !== undefined;
     let node: ts.Node = decl;
     while (ts.isBindingElement(node)) {
       const key = node.propertyName ?? node.name;
-      if (ts.isIdentifier(key) && ts.isObjectBindingPattern(node.parent)) keys.unshift(key.text);
-      else readable = false;
+      if (node === decl && rest) {
+        if (!ts.isObjectBindingPattern(node.parent)) readable = false;
+      } else if (ts.isIdentifier(key) && ts.isObjectBindingPattern(node.parent)) {
+        keys.unshift(key.text);
+      } else {
+        readable = false;
+      }
       node = node.parent.parent;
     }
     if (!ts.isVariableDeclaration(node) || !node.initializer) return null;
     if (!isModuleExpression(node.initializer)) return null;
     if (!readable) return 'unknown';
+    if (rest) {
+      while (keys.length > 0 && (keys[0] === 'promises' || keys[0] === 'default')) keys.shift();
+      return keys.length === 0 ? 'namespace' : null;
+    }
     while (keys.length > 1 && (keys[0] === 'promises' || keys[0] === 'default')) keys.shift();
     return keys.length === 1 ? bindingForImported(keys[0]!) : null;
   }
@@ -199,8 +213,20 @@ function chainFrom(expr: ts.Expression): { names: string[]; top: ts.Expression }
   return { names, top };
 }
 
+/** Called, or constructed (`new fs.ReadStream(path)`). */
 function isCallee(expr: ts.Expression): boolean {
-  return ts.isCallExpression(expr.parent) && expr.parent.expression === expr;
+  const p = expr.parent;
+  return (ts.isCallExpression(p) || ts.isNewExpression(p)) && p.expression === expr;
+}
+
+/** `x instanceof fs.ReadStream` reads the class without touching a path. */
+function isInstanceofTarget(expr: ts.Expression): boolean {
+  const p = expr.parent;
+  return (
+    ts.isBinaryExpression(p) &&
+    p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword &&
+    p.right === expr
+  );
 }
 
 /** `call`: a counted path-based call. `ignore`: a member that takes no path (`fs.constants`).
@@ -208,6 +234,7 @@ function isCallee(expr: ts.Expression): boolean {
  *  rebinding this counter cannot follow, so the file is refused rather than counted low. */
 function classifyUse(expr: ts.Expression, kind: Binding): 'call' | 'ignore' | 'value' {
   const { names, top } = chainFrom(expr);
+  if (isInstanceofTarget(top)) return 'ignore';
   if (kind === 'function') {
     // `readFile(` or `realpath.native(`
     const plain = names.length === 0 || (names.length === 1 && names[0] === 'native');
@@ -523,6 +550,27 @@ describe('path-based fs call ratchet', () => {
       countFsCalls("const p = import('node:fs');\np.then((m) => m.readFile(x));"),
     ).toThrow(/cannot count/);
     expect(() => countFsCalls("load(require('node:fs'));")).toThrow(/cannot count/);
+  });
+
+  it('binds object rest as the module and counts the stream constructors', () => {
+    expect(
+      countFsCalls("const { ...fsp } = await import('node:fs/promises');\nawait fsp.readFile(p);"),
+    ).toBe(1);
+    expect(
+      countFsCalls(
+        "const { promises: { ...fsp } } = await import('node:fs');\nawait fsp.readFile(p);",
+      ),
+    ).toBe(1);
+    expect(countFsCalls("const { constants: { ...c } } = await import('node:fs');\nuse(c);")).toBe(
+      0,
+    );
+    expect(countFsCalls("import fs from 'node:fs';\nnew fs.ReadStream(p);")).toBe(1);
+    expect(countFsCalls("import { WriteStream } from 'node:fs';\nnew WriteStream(p);")).toBe(1);
+    expect(
+      countFsCalls(
+        "import fs, { type ReadStream } from 'node:fs';\nconst ok = (s: ReadStream) => s instanceof fs.ReadStream;\nfs.createReadStream(p);",
+      ),
+    ).toBe(1);
   });
 
   it('matches the per-file baseline exactly', () => {
