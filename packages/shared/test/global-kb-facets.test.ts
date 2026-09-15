@@ -68,6 +68,19 @@ describe('extractProjectFacets', () => {
     expect(facets.nodeMajor).toEqual(['20']);
   });
 
+  it('canonicalises a confirmed database alias to the token entries are stored under', () => {
+    // `databaseType` is a free-TEXT field on the confirmation form, so a person can legitimately
+    // confirm `postgresql`. Entries are canonicalised to `postgres` on write, and jsonb `?|` is
+    // exact — so normalising only the entry side would have swapped one silent mismatch for
+    // another and excluded every PostgreSQL rule from exactly the projects that want them.
+    const facets = extractProjectFacets(
+      { stack: { database: { type: 'postgres', version: '17.2' } } },
+      { databaseType: 'PostgreSQL', databaseVersion: '17.2' },
+    );
+    expect(facets.database).toEqual(['postgres']);
+    expect(facets.dbMajor).toEqual(['17']);
+  });
+
   it('reads the apply-output shape ({ enrichedData: EnvDetectData })', () => {
     const facets = extractProjectFacets({
       enrichedData: {

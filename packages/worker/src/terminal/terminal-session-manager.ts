@@ -56,7 +56,11 @@ export interface TerminalSessionManagerOptions {
   redis: Redis;
   subscriberRedis?: Redis;
   docker?: Docker;
-  buildMcpServers?: (userId: string, taskId: string) => Promise<McpServerSpec[]>;
+  buildMcpServers?: (
+    userId: string,
+    taskId: string,
+    gates: { hasRepo: boolean },
+  ) => Promise<McpServerSpec[]>;
 }
 
 // Owns per-(user,task,provider) shell containers and the PTY plumbing that
@@ -68,7 +72,11 @@ export class TerminalSessionManager {
   private readonly subscriber: Redis;
   private readonly ownsSubscriber: boolean;
   private readonly docker: Docker;
-  private readonly buildMcpServers: (userId: string, taskId: string) => Promise<McpServerSpec[]>;
+  private readonly buildMcpServers: (
+    userId: string,
+    taskId: string,
+    gates: { hasRepo: boolean },
+  ) => Promise<McpServerSpec[]>;
   private readonly sessions = new Map<string, SessionState>();
   /** Per-(user,task,provider) in-flight ensureShellContainer call. Two
    *  near-simultaneous opens (React StrictMode double-mount, or two browser
@@ -244,7 +252,27 @@ export class TerminalSessionManager {
         }
       }
       repoMount = await resolveTaskRepoMount(this.db, taskId).catch(() => null);
-      mcpServers = await this.buildMcpServers(req.userId, taskId);
+      // A task terminal without a workspace is not a terminal, it is a bare `/haive/workdir` in
+      // the image — `ensureShellContainer` treats the mount as optional and would happily open
+      // one. The resolver returns null for exactly three states and none of them wants a shell:
+      // the task is gone, its repository row is gone, or it was ANCHORED to a repository that has
+      // since been deleted. A task deliberately created repo-less is NOT one of them — it
+      // resolves to its scratch mount — so this refuses the torn state while leaving the repo-less
+      // mode working.
+      if (!repoMount) {
+        return {
+          ok: false,
+          error: 'task has no workspace - its repository is no longer available',
+        };
+      }
+      // `git` runs `mcp-server-git --repository /haive/workdir`, and a repo-less task's workspace
+      // has no `.git` — so every CLI launched from this recovery terminal would be handed a
+      // configuration that cannot start. Same gate `emittedDefaultServerNames` applies on the
+      // CLI path, from the task's own column rather than from the mount, since a repo-less task
+      // legitimately HAS a mount.
+      mcpServers = await this.buildMcpServers(req.userId, taskId, {
+        hasRepo: task.repositoryId != null,
+      });
       scopeId = taskId;
     }
 
@@ -453,9 +481,17 @@ function parseControlFrame(raw: string): TerminalControlFrame | null {
   }
 }
 
-async function defaultBuildMcpServers(_userId: string, _taskId: string): Promise<McpServerSpec[]> {
+async function defaultBuildMcpServers(
+  _userId: string,
+  _taskId: string,
+  gates: { hasRepo: boolean },
+): Promise<McpServerSpec[]> {
   // Default server set keyed off the sandbox workdir. Production wiring can
   // swap in a richer builder via TerminalSessionManager options to honour
   // user MCP settings + repo bundle servers.
-  return buildDefaultMcpServers({ repoPath: SANDBOX_WORKDIR });
+  //
+  // `git` only where there IS a repository: it points at the workdir, and a repo-less task's
+  // workspace is an empty scratch directory with no `.git`. `filesystem` is kept either way —
+  // that directory is real and writable, so the server starts and serves it.
+  return buildDefaultMcpServers({ repoPath: SANDBOX_WORKDIR, includeGit: gates.hasRepo });
 }

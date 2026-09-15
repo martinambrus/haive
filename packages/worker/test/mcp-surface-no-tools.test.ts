@@ -35,3 +35,35 @@ describe('mcpSurfacePrompt with no built-in tools', () => {
     expect(p).not.toContain('NO tools are wired into this run');
   });
 });
+
+// The same class of contradiction one level out: a task with NO repository. Every arm of this
+// block assumed a checkout, so a repo-less run was told its "repository has no RAG index
+// configured" and to grep for files in a working directory that is empty by design.
+describe('mcpSurfacePrompt with no repository', () => {
+  const noRepo = () => mcpSurfacePrompt(emptyMcpSurface(), { noRepo: true });
+
+  it('never sends the agent grepping through an empty working directory', () => {
+    const p = noRepo();
+    expect(p).not.toMatch(/ripgrep/i);
+    expect(p).not.toMatch(/\bgrep\b/i);
+  });
+
+  it('does not blame a missing RAG index for a missing repository', () => {
+    expect(noRepo()).not.toMatch(/no RAG index/i);
+    expect(noRepo()).toMatch(/NO repository in this run/);
+  });
+
+  it('voids a repo instruction the prompt or an agent file may still carry', () => {
+    // Same backstop the rag-absent arm provides: ~15 builders name these tools in their own
+    // prose, and an on-disk agent definition can too.
+    expect(noRepo()).toMatch(/Disregard any instruction/i);
+  });
+
+  it('yields to the no-tools arm, which is the stronger statement', () => {
+    // A step that declares BOTH has no shell either, so the tools paragraph is the accurate
+    // one and must win rather than both being emitted.
+    const both = mcpSurfacePrompt(emptyMcpSurface(), { noBuiltInTools: true, noRepo: true });
+    expect(both).toMatch(/NO tools are wired into this run/);
+    expect(both).not.toMatch(/NO repository in this run/);
+  });
+});

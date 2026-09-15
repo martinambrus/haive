@@ -13,6 +13,7 @@ import {
   loadRunStartedAt,
   pathExists,
 } from './_helpers.js';
+import { detectThirdPartyTrees, insideAnyTree } from './_third-party-trees.js';
 import {
   isDeniedFile,
   loadMiningScopeExcludeGlobs,
@@ -150,6 +151,44 @@ const IGNORE_DIRS = new Set([
   'dist',
   'build',
   '.ddev',
+  // Rust's build output, the same class as `dist`/`build` above. It matters now that `.rs` is
+  // scanned: a built checkout carries generated sources there, and a generated helper is not
+  // this project's vocabulary — the same reason the minified-bundle skip exists.
+  'target',
+  // Elixir's equivalents, for the same reasons the entries above exist: `_build` is build output
+  // like `dist`/`target`, and `deps` is the dependency tree like `vendor`/`node_modules`. Both
+  // matter only now that `.ex` is scanned, and a dependency's functions are not this project's
+  // vocabulary — which is the whole reason `vendor` is on this list.
+  '_build',
+  'deps',
+  // SwiftPM's output tree, which holds `.build/checkouts/<dep>/Sources/**/*.swift` — a
+  // DEPENDENCY's source, not this project's. Left out, a library API the article legitimately
+  // names reads as a repository-private symbol and the block is deleted, which is the
+  // false-citation direction this list exists to prevent. `Pods` is CocoaPods' equivalent, and
+  // `.gradle` is the Kotlin/Scala/Java cache. All three only matter now that those extensions
+  // are read.
+  //
+  // `bin` and `obj` are deliberately NOT here: `bin` holds real scripts in plenty of projects,
+  // and excluding either globally would take a directory out of the file tree and out of
+  // `isLikelyRepoOwnPath` for every repository, which is too much for a .NET convention.
+  '.build',
+  'Pods',
+  '.gradle',
+  // Python virtualenvs, the same class as `node_modules` and `vendor` already here: a tree of
+  // THIRD-PARTY source. `__pycache__` was excluded from the start but the environment holding
+  // site-packages was not, so a distinctive library symbol or filename could be read as this
+  // repository's own and delete the block that mentioned it — and 4,000 files of dependencies
+  // can crowd the project's own out of the cap besides.
+  //
+  // `env` is deliberately absent: it is a real directory name in plenty of projects, and the
+  // same reasoning that keeps `bin` off this list applies to it.
+  '.venv',
+  'venv',
+  // tox and nox build their own virtualenvs per environment, each with its own site-packages —
+  // the same third-party tree as `.venv`, reached by a different tool. Named explicitly rather
+  // than matched by prefix, because this set is compared by exact path SEGMENT.
+  '.tox',
+  '.nox',
 ]);
 
 async function collectShortFileTree(
@@ -966,44 +1005,337 @@ export async function repoOwnRef(
  * class DEFINED in this repo (e.g. a custom helper like GetPHPVariables). */
 const REPO_SYMBOL_FILE_CAP = 4000;
 const REPO_SYMBOL_CAP = 40000;
-const SYMBOL_SCAN_EXT: Record<string, string[]> = {
+/** Longest line in a file, used to spot a minified bundle without trusting its name. */
+function longestLine(text: string): number {
+  let max = 0;
+  let start = 0;
+  for (let i = 0; i <= text.length; i += 1) {
+    if (i === text.length || text[i] === '\n') {
+      if (i - start > max) max = i - start;
+      start = i + 1;
+    }
+  }
+  return max;
+}
+
+/** Names the LANGUAGE owns. A repository that declares one has written a shim or vendored a
+ *  helper; it has not coined a word, so an article mentioning `in_array()` is not citing that
+ *  repository.
+ *
+ *  MEASURED across four real checkouts with the corpus harness: `is_string` reached the symbol
+ *  set from a minified jQuery plugin declaring `function is_string(arg)`, and `in_array` from a
+ *  site's own `const in_array = ...` — both genuine declarations, both deleting a block from the
+ *  "PHP 8 Mistakes" article for naming the built-in it is about.
+ *
+ *  Unlike a list of project filenames, these are specified by the language and do not churn.
+ *  Grow it on evidence from `scripts/kb-scrub-eval.ts`; a name missing here costs a deleted
+ *  block, a name wrongly here costs only a citation reaching a reviewed draft. */
+const LANGUAGE_BUILTIN_NAMES = new Set([
+  // PHP type and array checks, the ones an article about PHP pitfalls names by definition.
+  'is_string',
+  'is_numeric',
+  'is_array',
+  'is_callable',
+  'is_object',
+  'is_bool',
+  'is_null',
+  'in_array',
+  'array_key_exists',
+  'array_merge',
+  'array_filter',
+  'array_map',
+  'array_keys',
+  'array_values',
+  'str_replace',
+  'str_contains',
+  'str_starts_with',
+  'str_ends_with',
+  'json_encode',
+  'json_decode',
+  'array_slice',
+  'array_search',
+  'call_user_func',
+  // JS/TS globals that a bundled library commonly re-declares.
+  'parseInt',
+  'parseFloat',
+  'setTimeout',
+  'setInterval',
+  'clearTimeout',
+  'encodeURIComponent',
+  'decodeURIComponent',
+  'requestAnimationFrame',
+]);
+
+/** Whether a declared name IDENTIFIES this repository, rather than merely existing in it.
+ *
+ *  A single lowercase word does not. `bodyUsesRepoSymbol` matches any `name(` in an article, so
+ *  collecting `render` means every invented example that calls `render(...)` is treated as a
+ *  citation and its block is deleted — the silent over-removal this scrub must never commit.
+ *
+ *  MEASURED on a real 11,005-symbol repository: 16 of 17 commonplace method names tested
+ *  (`render`, `handle`, `execute`, `process`, `update`, `create`, `delete`, `validate`, ...)
+ *  were present, and a generic example calling `render(name)` was flagged as a citation. The
+ *  same scan shows 10,157 of those 11,005 names carry a hump or an underscore, so requiring
+ *  multi-word keeps 92% of the set and drops precisely the ambiguous tail.
+ *
+ *  Multi-word is the structural form of "specific to this codebase": a name built from two or
+ *  more words was chosen for a domain, while a single verb is vocabulary every project shares.
+ *  It mirrors what `identifiers.ts` already treats as an identifier worth indexing — including
+ *  its SECOND hump, which is not optional here either: `[a-z][A-Z]` alone misses PascalCase with
+ *  a single-letter prefix, so a repo declaring `CProduct` had that name dropped from the symbol
+ *  set and a block copied out of that class could not be recognised. The second clause wants an
+ *  uppercase-then-lowercase pair NOT at the start, which admits `CProduct` while still rejecting
+ *  capitalised prose (`Postgres`, `Excel`) and all-caps words (`PDF`). Keep the two rules
+ *  identical: this decides what a citation IS, and `identifiers.ts` decides what is searchable. */
+function isDistinctiveSymbol(name: string | undefined): name is string {
+  if (!name || LANGUAGE_BUILTIN_NAMES.has(name)) return false;
+  return /[a-z][A-Z]|_/.test(name) || /.[A-Z][a-z]/.test(name);
+}
+
+/** Words that pass the method shape (`name(...) {`) but name no symbol. Length alone does not
+ *  exclude them — `while`, `catch` and `switch` all clear the 5-character floor. */
+const NON_SYMBOL_KEYWORDS = new Set([
+  'while',
+  'catch',
+  'switch',
+  'return',
+  'function',
+  'constructor',
+  'elseif',
+  'foreach',
+]);
+
+/** Exported so a test can hold it to `STACK_INDICATORS` and `SERVER_LANGUAGES`: a language the
+ *  detector RANKS but this cannot read is a repository whose own identifiers are invisible to the
+ *  citation scrub, which is how Rust, Java, Elixir and the C family each went missing.
+ *
+ *  It is NOT language-complete and cannot be. `pickPrimaryLanguage` falls back to any histogram
+ *  key when no server language is present (`pool = servers.length > 0 ? servers : entries`), so
+ *  Dart, Lua, Haskell and anything else an ingest histogram names are valid outputs. Two reasons
+ *  the scan stops at the supported stacks rather than chasing that set:
+ *
+ *  - An unlisted language degrades in the ACCEPTED direction. With no extensions to read, the
+ *    symbol backstop is simply absent — the same state a repo-less run is in — while the path,
+ *    line-reference and bare-filename rules still apply. A miss lets a copied identifier reach a
+ *    draft a human reviews; that is the cheap error this scan is calibrated around.
+ *  - The obvious "fix" is the expensive one. Scanning every extension that is not a known binary
+ *    would pull in dependency trees for ecosystems with no IGNORE_DIRS entry, and collecting a
+ *    third-party symbol as repository-private DELETES somebody's article. Widening coverage that
+ *    way trades the cheap error for the costly one.
+ *
+ *  So a new language belongs here when the product SUPPORTS it — when it appears in
+ *  `STACK_INDICATORS` or `SERVER_LANGUAGES` — and the test enforces exactly that, no more. */
+export const SYMBOL_SCAN_EXT: Record<string, string[]> = {
   php: ['.php', '.inc', '.module', '.install', '.theme', '.phtml', '.profile', '.engine'],
   javascript: ['.js', '.jsx', '.mjs', '.cjs'],
   typescript: ['.ts', '.tsx'],
   python: ['.py'],
   ruby: ['.rb'],
   go: ['.go'],
+  // `01-env-detect` recognises Cargo.toml -> rust and pom.xml/build.gradle -> java, so these are
+  // SUPPORTED stacks whose files this map did not list. The miss was total rather than partial:
+  // an unknown language falls back to the UNION of these values, so a Rust or Java anchor
+  // contributed zero of its own symbols and the citation scrub had no backstop there at all.
+  rust: ['.rs'],
+  java: ['.java'],
+  elixir: ['.ex', '.exs'],
+  // `pickPrimaryLanguage` is a SECOND source of language names, independent of the manifest
+  // markers above: it reads an ingest histogram and returns any `SERVER_LANGUAGES` member
+  // lowercased. Those names never reached this map, so a C#/Kotlin/Scala/Swift/C/C++ anchor
+  // collected nothing at all — the same total blindness Rust, Java and Elixir each had.
+  kotlin: ['.kt', '.kts'],
+  scala: ['.scala'],
+  swift: ['.swift'],
+  'c#': ['.cs'],
+  c: ['.c', '.h'],
+  'c++': ['.cpp', '.cc', '.cxx', '.hpp', '.hh'],
 };
 
-/** Names of functions / classes / traits / interfaces DEFINED in this repo's own
- *  source (dependency/ignored dirs excluded). Best-effort and bounded; returns an
- *  empty set on any failure (the symbol backstop then simply never fires). */
-async function collectRepoSymbols(repoPath: string, detect: KnowledgeDetect): Promise<Set<string>> {
-  const symbols = new Set<string>();
-  const lang = (detect.language ?? '').toLowerCase();
-  const exts = SYMBOL_SCAN_EXT[lang] ?? ['.php', '.js', '.ts', '.py'];
+/** Every non-ignored file of the repo except those inside a third-party tree — the listing both
+ *  scrub collectors start from. `detectThirdPartyTrees` says what counts and why. */
+async function listRepoOwnFiles(repoPath: string): Promise<string[]> {
+  const files = await listFilesMatching(
+    repoPath,
+    (rel, isDir) => !isDir && !rel.split('/').some((p) => IGNORE_DIRS.has(p)),
+    10,
+    // Prune as well as filter: without this the walk descends into every `.venv`, `target` and
+    // `Pods` in the tree and then discards what it found.
+    (name) => IGNORE_DIRS.has(name),
+  );
+  const inside = insideAnyTree(await detectThirdPartyTrees(repoPath, files));
+  return files.filter((rel) => !inside(rel));
+}
+
+/** Basenames of this repo's own source files, lowercased.
+ *
+ *  The bare-filename rule used to resolve a candidate at the repo ROOT only — correct for the
+ *  manifests a model reaches for, but blind to `InvoiceProcessor.ts` living under `src/`, which
+ *  the authoring contract forbids just as firmly. The slashed-path rule does not cover it either:
+ *  a bare name has no separator to match on.
+ *
+ *  Same listing as `collectRepoSymbols`, but bounded by the NAME cap alone: no file is read, so a
+ *  file cap saved nothing, and MEASURED it still cut every file of a WordPress child theme behind
+ *  a premium plugin's 1,366. Empty on any failure, which simply restores the root-only behaviour. */
+export async function collectRepoBasenames(repoPath: string): Promise<Set<string>> {
+  const names = new Set<string>();
   try {
-    const files = await listFilesMatching(
-      repoPath,
-      (rel, isDir) => {
-        if (isDir) return false;
-        if (rel.split('/').some((p) => IGNORE_DIRS.has(p))) return false;
-        const low = rel.toLowerCase();
-        return exts.some((e) => low.endsWith(e));
-      },
-      10,
-    );
-    for (const rel of files.slice(0, REPO_SYMBOL_FILE_CAP)) {
+    // Code-unit sort (not localeCompare, which varies by locale): `readdir` order is the
+    // filesystem's — ext4 hash-orders a large directory — so where the name cap falls would
+    // otherwise depend on the host.
+    for (const rel of (await listRepoOwnFiles(repoPath)).sort()) {
+      const base = rel.split('/').pop();
+      if (base) names.add(base.toLowerCase());
+      if (names.size > REPO_SYMBOL_CAP) break;
+    }
+  } catch {
+    // best effort — the bare-filename rule then checks the repo root only, as it always did
+  }
+  return names;
+}
+
+/** Names of functions / classes / traits / interfaces DEFINED in this repo's own
+ *  source (ignored dirs and third-party trees excluded). Best-effort and bounded; returns an
+ *  empty set on any failure (the symbol backstop then simply never fires). */
+export async function collectRepoSymbols(
+  repoPath: string,
+  language: string | null | undefined,
+): Promise<Set<string>> {
+  const symbols = new Set<string>();
+  const lang = (language ?? '').toLowerCase();
+  // An UNKNOWN language scans every extension this map knows, not a four-entry guess. The old
+  // default was `['.php','.js','.ts','.py']`, which silently under-covers exactly the repos the
+  // citation scrub exists for: it misses Drupal's own `.module`/`.inc`/`.theme` — the entry that
+  // motivated the scrub cited `activit.module:534` — as well as `.tsx`, `.rb` and `.go`, so a
+  // copied identifier from any of them was invisible to the symbol check. A named language is
+  // unchanged and still scans only its own extensions.
+  const exts = SYMBOL_SCAN_EXT[lang] ?? [...new Set(Object.values(SYMBOL_SCAN_EXT).flat())];
+  try {
+    const files = (await listRepoOwnFiles(repoPath)).filter((rel) => {
+      const low = rel.toLowerCase();
+      return exts.some((e) => low.endsWith(e));
+    });
+    // Sorted before the cap, for the host-independence reason `collectRepoBasenames` gives.
+    for (const rel of files.sort().slice(0, REPO_SYMBOL_FILE_CAP)) {
       let text: string;
       try {
         text = await readFile(path.join(repoPath, rel), 'utf8');
       } catch {
         continue;
       }
+      // A MINIFIED or generated bundle is not this project's vocabulary — it is a vendored
+      // library flattened onto one line, and parsing it yields hundreds of generic helpers.
+      // Detected by line LENGTH rather than by a `.min.js` name, which is a convention a build
+      // tool can drop. MEASURED: a minified jQuery plugin declaring `function is_string(arg)`
+      // put that name into the symbol set of a real repo.
+      if (text.length > 2000 && longestLine(text) > 1000) continue;
       const body = text.length > 200_000 ? text.slice(0, 200_000) : text;
-      const defRe = /\b(?:function|class|trait|interface)\s+([A-Za-z_]\w{4,})/g;
+      // Every keyword the SCANNED extensions can declare with. Adding `.go`/`.py`/`.rb` to the
+      // file filter collected nothing from them while this still knew only the PHP/JS set —
+      // Python declares with `def`, Go with `func` (optionally behind a receiver) and `type`.
+      // `function` precedes `func` so the longer keyword wins the alternation.
+      // The `use` lookbehind is load-bearing: PHP's `use function array_key_exists;` is an
+      // IMPORT, not a declaration, and matching it collected the language's own built-ins as
+      // repository symbols. MEASURED across the real KB corpus — 7 of 167 blocks were deleted
+      // from PHP articles for mentioning `is_numeric`, `is_string`, `in_array` and
+      // `array_key_exists`, every one of them a false citation. A denylist of built-ins would
+      // have treated the symptom; the parse was simply wrong.
+      // `fn` (Rust) and `record` (Java) are the two additions those stacks need; `class`,
+      // `interface`, `enum`, `struct`, `trait` and `type` already covered the rest of both. Order
+      // matters only in that `function` precedes `func` precedes `fn`, so the longest keyword wins
+      // the alternation. A method carrying a RETURN TYPE between the modifiers and the name
+      // (`public void processInvoice()`) is not a keyword declaration and is read by `cFuncRe`
+      // below — in Java as in C#, since it is the same shape and there is no principled reason to
+      // admit one and refuse the other. That shape was excluded for a while on the argument that
+      // types carry Java anyway; C has no types to carry it, which is what forced the question.
+      const defRe =
+        /(?<!\buse\s)\b(?:function|func|fun|fn|defmodule|defmacrop|defmacro|defp|def|class|trait|interface|struct|type|enum|module|record|object|protocol)\s+(?:\([^)]*\)\s*)?(?:self\.)?([A-Za-z_]\w{4,})/g;
+      // `enum` covers PHP 8.1 and TypeScript, `module` covers Ruby — both are unambiguous
+      // declaration keywords, so they cost nothing.
+      // `self.` is skipped because Ruby declares a class method as `def self.process_invoice`, and
+      // the name capture otherwise stops at `self` — MEASURED, every such method was missing. It is
+      // honoured only right after a keyword, so a `self.` CALL is never read as a declaration.
+      //
+      // This scan is an APPROXIMATION and is meant to stay one. The two errors are not equal:
+      // missing a symbol lets a copied identifier reach a draft a human then reviews, while
+      // inventing one deletes a block of somebody's article. So it under-collects on purpose —
+      // extend it with keywords that are unambiguous, and resist widening the SHAPES it accepts.
+      //
+      // JS/TS declare most of their helpers with no keyword at all — `const parseInvoice = () =>`
+      // and class methods `serializeInvoice() {` — so a keyword-anchored scan misses exactly the
+      // forms those repos use most, while `bodyUsesRepoSymbol` happily recognises their call
+      // syntax in an article. Two narrow patterns rather than one loose one: over-collecting here
+      // costs a FALSE citation, which deletes a block of somebody's article.
+      const assignedFnRe =
+        /\b(?:const|let|var)\s+([A-Za-z_]\w{4,})\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_]\w*\s*=>)/g;
+      // A method must sit on its OWN indented line and open a block, which a call statement
+      // (`  doThing();`) never does. Control-flow keywords reach the length floor, so they are
+      // excluded by name rather than by shape.
+      // The `(?::...)` arm is TypeScript's return annotation, which sits between `)` and `{` —
+      // `serializeInvoice(): string {`, `async load(): Promise<T> {`. Requiring the brace
+      // immediately after the parens silently skipped every typed method in a TS repo, which is
+      // most of them. Stops at `{` so an inline object return type is missed rather than
+      // over-matched: a miss costs a symbol, over-matching costs somebody's article.
+      const methodRe =
+        /^[ \t]+(?:(?:public|private|protected|static|readonly|async|get|set|\*)\s+)*([A-Za-z_]\w{4,})\s*(?:<[^<>()]*>)?\s*\([^)]*\)\s*(?::\s*[^;{]+)?\s*\{/gm;
+      // A class PROPERTY holding an arrow function — the common React/TS idiom. Anchored on the
+      // `=>`, so it declares a callable and cannot match `timeoutValue = 30` or an object
+      // literal. Deliberately NOT covered, with reasons: `#private` methods cannot be called
+      // from outside the class, so an article cannot meaningfully cite one, and an `abstract
+      // name(): T;` signature is re-declared with a body by whichever class implements it.
+      const classPropFnRe =
+        /^[ \t]+(?:(?:public|private|protected|static|readonly)\s+)*([A-Za-z_]\w{4,})\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_]\w*)\s*=>/gm;
+      // C, C++ and C# declare a callable with a RETURN TYPE and no keyword at all, so neither
+      // `defRe` (wants a keyword) nor `methodRe` (wants the name straight after the modifiers)
+      // can see `int process_invoice_batch(...)` or `public void ProcessInvoice(...)`. Those
+      // three contributed TYPES only — and C has no classes, so a C repository contributed
+      // almost nothing at all, which is not the "under-collect on purpose" this scan intends.
+      //
+      // This IS the shape the scan otherwise refuses to widen, so it is anchored hard, and every
+      // clause below is load-bearing rather than defensive:
+      //   - a type token AND a name before the parens, so `if (x) {`, `while (x) {`,
+      //     `foreach (…) {`, `using (…) {`, `lock (…) {`, `catch (…) {` and `switch (…) {` all
+      //     have only ONE and cannot match;
+      //   - no `;` inside the parens, which is what excludes `for (a; b; c) {`;
+      //   - a `{` OR an `=>` after them, so a prototype (`int foo(void);`) and a bare call are
+      //     both out while C#'s expression-bodied member (`string Fmt(int id) => …;`) is in. The
+      //     `=>` arm cannot reach a lambda: `const f = (a) => …` carries a `=`, which the prefix
+      //     class excludes, and `items.Where(x => …)` has no WHITESPACE before its name, which
+      //     the name requires;
+      //   - `?`, `[`, `]` and `.` ARE in the prefix, because a return type is not one bare word:
+      //     `InvoiceDto?`, `InvoiceDto[]`, `System.String`, `Task<InvoiceDto?>`. MEASURED, five of
+      //     six C# declarations of those shapes were invisible without them. None of the four lets
+      //     a call through, for the whitespace reason above: `handler?.Invoke(x)` and
+      //     `list.Where(…)` both put the name flush against the `.`.
+      //   - a `Name::` chain may sit directly before the name, because C++ defines a member outside
+      //     its class as `void InvoiceProcessor::processInvoice(…) {` — MEASURED, every such
+      //     definition was missing. The chain does not reopen calls: a qualified call still has no
+      //     type token and whitespace in front of it, and ends in `;` rather than `{`.
+      // `isDistinctiveSymbol` still applies, so a single generic word never lands.
+      //
+      // Indentation is ALLOWED. Anchoring at column 0 looked like the safe choice and was simply
+      // wrong: a C# member sits inside a class, so the pattern could not see the language's
+      // normal formatting at all. The brace requirement is what excludes an indented CALL —
+      // `indented_call(arg);` ends in a semicolon — so the anchor was never what made this safe.
+      const cFuncRe =
+        /^[ \t]*[A-Za-z_][\w:<>,*&?.[\]\s]*?\s+\*?(?:[A-Za-z_]\w*::)*([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?(?:\{|=>)/gm;
+      for (let m = cFuncRe.exec(body); m; m = cFuncRe.exec(body)) {
+        if (m[1] && !NON_SYMBOL_KEYWORDS.has(m[1]) && isDistinctiveSymbol(m[1])) {
+          symbols.add(m[1]);
+        }
+      }
       for (let m = defRe.exec(body); m; m = defRe.exec(body)) {
-        if (m[1]) symbols.add(m[1]);
+        if (isDistinctiveSymbol(m[1])) symbols.add(m[1]!);
+      }
+      for (let m = assignedFnRe.exec(body); m; m = assignedFnRe.exec(body)) {
+        if (isDistinctiveSymbol(m[1])) symbols.add(m[1]!);
+      }
+      for (let m = methodRe.exec(body); m; m = methodRe.exec(body)) {
+        if (m[1] && !NON_SYMBOL_KEYWORDS.has(m[1]) && isDistinctiveSymbol(m[1])) {
+          symbols.add(m[1]);
+        }
+      }
+      for (let m = classPropFnRe.exec(body); m; m = classPropFnRe.exec(body)) {
+        if (isDistinctiveSymbol(m[1])) symbols.add(m[1]!);
       }
       if (symbols.size > REPO_SYMBOL_CAP) break;
     }
@@ -1018,9 +1350,35 @@ async function collectRepoSymbols(repoPath: string, detect: KnowledgeDetect): Pr
  *  symbol set is empty or nothing matches. (Min 5 chars to avoid prose collisions.) */
 export function bodyUsesRepoSymbol(text: string, symbols: ReadonlySet<string>): string | null {
   if (symbols.size === 0) return null;
-  const re = /\b([A-Za-z_]\w{4,})\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::/g;
+  // Calls, `new`, `::`, and a TYPE LITERAL. The fourth arm exists because the collector records
+  // custom types — `struct`/`trait`/`defmodule` and friends — and the languages that declare them
+  // do not CALL them: Go and Rust write `InvoiceRow{...}`, Elixir writes `%InvoiceRow{...}`, so a
+  // block copied straight out of a repo-defined type matched nothing and survived while its exact
+  // name sat in the symbol set.
+  //
+  // `[ \t]*` rather than `\s*` on that arm, deliberately: a newline between a name and a brace is
+  // a markdown heading followed by an unrelated block far more often than it is a literal, and
+  // over-matching here deletes somebody's article.
+  // The call arm allows a trailing `!` or `?`. Ruby and Elixir spell a mutating or predicate
+  // method that way (`process_invoice!`, `valid_invoice?`), and the DECLARATION scanner captures
+  // only the base word — `[A-Za-z_]\w{4,}` stops at the punctuation — so the symbol set holds
+  // `process_invoice` while an article copies `process_invoice!(invoice)`. Requiring `(`
+  // immediately after the base word missed every one of them, in the two languages where the
+  // form is idiomatic rather than rare.
+  //
+  // The fifth arm is a QUALIFIED assignment. Ruby declares a setter `def invoice_total=(value)`,
+  // which the scanner records as `invoice_total`, and calls it only as `processor.invoice_total =
+  // value` — no parenthesis, so no other arm sees it. The receiver is required: a bare
+  // `invoice_total = value` is an ordinary local variable in every language, and matching one
+  // deletes somebody's article. `==`, `=~` and `=>` compare or build a hash; they assign nothing.
+  //
+  // The sixth arm is Ruby's POSTFIX constructor, `InvoiceProcessor.new(order)`: the call arm sees
+  // only the too-short `new`, and the `new` arm reads the prefix form other languages use. The
+  // trailing boundary keeps a method that merely starts with `new` (`.new_record?`) from counting.
+  const re =
+    /\b([A-Za-z_]\w{4,})[!?]?\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::|\b([A-Za-z_]\w{4,})[ \t]*\{|\.([A-Za-z_]\w{4,})[ \t]*(?:\|\||&&|[-+*\/%])?=(?![=~>])|\b([A-Za-z_]\w{4,})\.new\b/g;
   for (let m = re.exec(text); m; m = re.exec(text)) {
-    const name = m[1] ?? m[2] ?? m[3];
+    const name = m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5] ?? m[6];
     if (name && symbols.has(name)) return name;
   }
   return null;
@@ -1661,7 +2019,8 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // repo-private function/class stays local. Scanned at most once, lazily.
     let repoSymbolsCache: Set<string> | null = null;
     const getRepoSymbols = async (): Promise<Set<string>> => {
-      if (!repoSymbolsCache) repoSymbolsCache = await collectRepoSymbols(ctx.repoPath, detected);
+      if (!repoSymbolsCache)
+        repoSymbolsCache = await collectRepoSymbols(ctx.repoPath, detected.language);
       return repoSymbolsCache;
     };
     const values = args.formValues as {

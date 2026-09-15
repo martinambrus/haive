@@ -189,15 +189,28 @@ export async function countFilesMatching(
   return total;
 }
 
+/** `prune` skips a directory's SUBTREE; `predicate` only decides what lands in the result.
+ *  A caller that filters ignored directories out of its results still pays to enumerate them —
+ *  `.venv`, `target`, `Pods` and the rest are walked in full and then discarded — so a caller
+ *  that knows a directory is uninteresting should prune it as well as filter it. Results are
+ *  unchanged either way; only the walking is skipped. */
 export async function listFilesMatching(
   root: string,
   predicate: (relPath: string, isDir: boolean) => boolean,
   maxDepth = 3,
+  prune?: (name: string, relPath: string) => boolean,
 ): Promise<string[]> {
   const out: string[] = [];
-  await walk(root, '', 0, maxDepth, (rel, isDir) => {
-    if (predicate(rel, isDir)) out.push(rel);
-  });
+  await walk(
+    root,
+    '',
+    0,
+    maxDepth,
+    (rel, isDir) => {
+      if (predicate(rel, isDir)) out.push(rel);
+    },
+    prune,
+  );
   return out;
 }
 
@@ -209,6 +222,7 @@ async function walk(
   depth: number,
   maxDepth: number,
   visit: Visitor,
+  prune?: (name: string, relPath: string) => boolean,
 ): Promise<void> {
   if (depth > maxDepth) return;
   const dir = path.join(root, rel);
@@ -225,7 +239,10 @@ async function walk(
       if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'vendor') {
         continue;
       }
-      await walk(root, childRel, depth + 1, maxDepth, visit);
+      // The directory itself was still visited above, so a caller counting or listing
+      // directories sees it; only its contents are skipped.
+      if (prune?.(entry.name, childRel)) continue;
+      await walk(root, childRel, depth + 1, maxDepth, visit, prune);
     } else if (entry.isFile()) {
       visit(childRel, false);
     }

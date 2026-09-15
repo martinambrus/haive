@@ -188,6 +188,24 @@ describe('mcpSurfacePrompt', () => {
     expect(prompt).toContain('Project-configured servers: `chrome-devtools`.');
   });
 
+  it("names the user's own git server when the worktree gate stops Haive wiring one", () => {
+    // The shadow set used to be a hardcoded ['filesystem','git'], so this entry was reported
+    // unreachable even though serversToJsonObject left it untouched.
+    const prompt = mcpSurfacePrompt(surfaceOf({ userServers: { git: {}, filesystem: {} } }), {
+      hasWorktree: true,
+    });
+    expect(prompt).toContain('Project-configured servers: `git`.');
+    // filesystem is still emitted at a worktree, so it really is shadowed.
+    expect(prompt).not.toContain('`filesystem`');
+  });
+
+  it('names both when the run has no repository, where neither default is wired', () => {
+    const prompt = mcpSurfacePrompt(surfaceOf({ userServers: { git: {}, filesystem: {} } }), {
+      noRepo: true,
+    });
+    expect(prompt).toContain('Project-configured servers: `git`, `filesystem`.');
+  });
+
   it('treats an entirely shadowed user set as no user servers at all', () => {
     const prompt = mcpSurfacePrompt(
       surfaceOf({

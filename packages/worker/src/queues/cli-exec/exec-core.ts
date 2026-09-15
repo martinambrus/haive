@@ -67,12 +67,14 @@ import {
   createStepStatusUpdater,
   ensureRepoMountWritable,
   loadProviderRuntimeConfig,
+  networkPolicyReachesPackageRegistries,
   resolveAuthMounts,
   resolveMcpExtraFiles,
   resolveInvocationRepoMount,
   tryJsonParse,
   WORKER_REPO_STORAGE_ROOT,
 } from './resolvers.js';
+import { emittedDefaultServerNames } from '../../sandbox/mcp-config.js';
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
 import { resolveSecretMasks } from './secret-mask.js';
 import { resolveRipgrepConfigEnv } from './ripgrep-config.js';
@@ -371,7 +373,7 @@ export async function executeByKind(
   // (payload.worktreeSubpath for a DAG/merge sibling, else the task's feature worktree)
   // so the agent cannot reach the repo-root checkout or any sibling worktree. The
   // worktree IS the mount root, so the container workdir is SANDBOX_WORKDIR.
-  const { repoMount, hasWorktree } = await resolveInvocationRepoMount(
+  const { repoMount, hasWorktree, hasRepo } = await resolveInvocationRepoMount(
     db,
     payload.taskId,
     payload.worktreeRel,
@@ -442,6 +444,8 @@ export async function executeByKind(
               // app URL it had no browser to reach.
               payload.toolProfile ?? 'full',
               hasWorktree,
+              hasRepo,
+              networkPolicy,
             )
           : { files: [], extraArgs: [] };
       // Pre-warm the shared npm cache for the MCP servers that are fetched from npm.
@@ -473,7 +477,19 @@ export async function executeByKind(
         }
         // filesystem ships on every non-rag invocation but was only ever cached by
         // accident, which is how its tree ended up truncated and stayed that way.
-        if (payload.toolProfile !== 'rag_only') {
+        //
+        // Gated on the SAME rule that decides what is emitted, not on a second copy of it. A
+        // repo-less invocation wires no filesystem server — there is no tree to serve — and
+        // warming it there is not merely wasted: with a cold cache and an unreachable registry
+        // the helper can sit through two 240s attempts before the agent starts.
+        if (
+          emittedDefaultServerNames({
+            hasRepo,
+            hasWorktree,
+            ragOnly: payload.toolProfile === 'rag_only',
+            registriesReachable: networkPolicyReachesPackageRegistries(networkPolicy),
+          }).has('filesystem')
+        ) {
           await warmNpmPackage(sandboxImage, '@modelcontextprotocol/server-filesystem', ['/tmp']);
         }
       }
@@ -512,6 +528,7 @@ export async function executeByKind(
         sandboxWorkdir,
         maskFiles,
         hasWorktree,
+        hasRepo,
       );
     case 'subagent_native':
       return executeSubAgentNative(
@@ -523,6 +540,7 @@ export async function executeByKind(
         sandboxWorkdir,
         maskFiles,
         hasWorktree,
+        hasRepo,
       );
     default:
       throw new Error(

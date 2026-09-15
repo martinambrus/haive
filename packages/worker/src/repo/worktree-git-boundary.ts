@@ -6,6 +6,20 @@ export const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
 
 export const WORKTREE_GIT_BOUNDARY_MARKER = '<haive_worktree_git_boundary>';
 
+/** Whether the task has a repository at all.
+ *
+ *  Lives beside the worktree boundary because it answers the same KIND of question for the
+ *  dispatcher — what the sandbox will actually contain — and the dispatcher deliberately holds
+ *  no drizzle imports of its own. Distinct from "is there a mount": a task type allowed to run
+ *  repo-less is given an empty scratch workspace, so it is mounted and has no repository. */
+export async function taskHasRepository(db: Database, taskId: string): Promise<boolean> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { repositoryId: true },
+  });
+  return task?.repositoryId != null;
+}
+
 /** Prompt contract paired with the read-only empty-file mask over a linked
  * worktree's `.git` gitfile. It explains the boundary before a model can mistake
  * the intentional sentinel for repository corruption and try to repair it. */

@@ -2692,6 +2692,10 @@ async function maybeEnqueueStepSummary(
   output: unknown,
   logger: StepContext['logger'],
 ): Promise<void> {
+  // Hoisted: the catch has to finalise THIS row if the enqueue failed after it was inserted.
+  // Left pending it reads as a summary that is still coming, which is what the repo-less
+  // scratch-workspace reaper waits on before reclaiming a task's directory.
+  let summaryInvocationId: string | null = null;
   try {
     const { providers, deps } = params;
     if (!providers || !deps) return;
@@ -2802,6 +2806,7 @@ async function maybeEnqueueStepSummary(
       })
       .returning({ id: schema.cliInvocations.id });
     if (!invRow) return;
+    summaryInvocationId = invRow.id;
 
     await deps.enqueueCliInvocation({
       invocationId: invRow.id,
@@ -2819,7 +2824,14 @@ async function maybeEnqueueStepSummary(
     logger.info({ stepId: stepDef.metadata.id, invocationId: invRow.id }, 'step summary enqueued');
   } catch (err) {
     logger.warn({ err, stepId: stepDef.metadata.id }, 'step summary enqueue failed (best-effort)');
-    await recordSummaryEnqueueFailure(db, params.taskId, current.id, err, logger);
+    await recordSummaryEnqueueFailure(
+      db,
+      params.taskId,
+      current.id,
+      err,
+      logger,
+      summaryInvocationId,
+    );
   }
 }
 
@@ -2841,9 +2853,27 @@ async function recordSummaryEnqueueFailure(
   taskStepId: string,
   err: unknown,
   logger: StepContext['logger'],
+  /** The row already inserted for this summary, when the insert succeeded and the ENQUEUE did
+   *  not. Finalising it beats inserting a second row beside it: the original carries
+   *  `summary_for_step_id` with a null `ended_at`, which every reader has to treat as a summary
+   *  still in flight — and one of them, `cleanupTaskScratchWorkspace`, defers a repo-less task's
+   *  workspace removal on exactly that, so the directory would be leaked for good. Null when the
+   *  INSERT itself threw, where there is nothing to finalise and a fresh row is the only record. */
+  invocationId: string | null = null,
 ): Promise<void> {
   try {
     const now = new Date();
+    if (invocationId) {
+      await db
+        .update(schema.cliInvocations)
+        .set({
+          exitCode: -1,
+          errorMessage: err instanceof Error ? err.message : String(err),
+          endedAt: now,
+        })
+        .where(eq(schema.cliInvocations.id, invocationId));
+      return;
+    }
     await db.insert(schema.cliInvocations).values({
       taskId,
       taskStepId: null,
