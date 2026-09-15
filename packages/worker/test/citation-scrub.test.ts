@@ -346,6 +346,24 @@ describe('ecosystem manifest exemptions', () => {
     const missing = markers.filter((m) => !ECOSYSTEM_FILENAMES.has(m));
     expect(missing).toEqual([]);
   });
+
+  // A workspace or lock file of an exempt ecosystem is the same vocabulary as its manifest, and it
+  // lives at the repo ROOT, where the lookup resolves it and deletes the block. "Commit
+  // go.work.sum" is reusable Go guidance exactly as "commit go.sum" already was. Passed as
+  // `repoBasenames` too, as 01-enrich does: `pnpm-workspace.yaml` has a hyphenated stem, which
+  // reads as distinctive and is removed wherever it resolves.
+  it('keeps workspace and lockfile advice for exempt ecosystems', async () => {
+    for (const name of ['go.work', 'go.work.sum', 'bun.lock', 'pnpm-workspace.yaml']) {
+      await mk(name);
+      const body = `## The rule\n\nKeep ${name} committed so every checkout resolves the same dependencies.`;
+      const r = await scrubCitations(body, { repoPath: repo, repoBasenames: new Set([name]) });
+      expect(
+        r.removed.map((b) => b.reason),
+        name,
+      ).toEqual([]);
+      expect(r.body, name).toContain(name);
+    }
+  });
 });
 
 // The `{2,8}` extension floor exists to keep prose out — `e.g`, `i.e` and `8.1` all have a

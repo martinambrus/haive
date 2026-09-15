@@ -154,6 +154,15 @@ export const ECOSYSTEM_FILENAMES = new Set(
     // SwiftPM's lockfile. Added in the SAME commit as `package.swift` and still missed, which is
     // why the pairing is now spelled out: an exempt manifest's standard lockfile is exempt too.
     'package.resolved',
+    // Workspace files and the lockfiles beside them: the same vocabulary as the manifest they
+    // extend, and kept at the root, where the lookup would resolve them. `go.work` and
+    // `go.work.sum` are Go's workspace pair beside `go.mod`/`go.sum`; `pnpm-workspace.yaml` is
+    // pnpm's counterpart, and its hyphenated stem also reads as distinctive, so it was removed
+    // wherever it resolved; `bun.lock` is Bun's text lockfile beside the binary `bun.lockb`.
+    'go.work',
+    'go.work.sum',
+    'pnpm-workspace.yaml',
+    'bun.lock',
   ].map((n) => n.toLowerCase()),
 );
 
