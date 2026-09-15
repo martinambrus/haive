@@ -18,7 +18,8 @@ vi.mock('../src/step-engine/steps/onboarding/_helpers.js', async (importOriginal
 // file cap, what the scrub's collectors keep must not depend on that order. MEASURED on a real
 // 18,008-file WordPress repo: its walker order and its sorted order kept different subsets.
 //
-// More paths than the cap (4000), bracketed by two real files so the cap has to drop one of them.
+// More paths than the symbol file cap (4000), bracketed by two real files so the cap has to drop
+// one of them.
 const FIRST = 'a/alpha_helpers.php';
 const LAST = 'z/omega_helpers.php';
 const FILLER = Array.from({ length: 4500 }, (_, i) => `m/filler-${String(i).padStart(4, '0')}.php`);
@@ -26,9 +27,15 @@ const LISTED = [FIRST, ...FILLER, LAST];
 
 describe('the scrub collectors under the file cap', () => {
   it('keep the same basenames whatever order the walker lists files in', async () => {
-    vi.mocked(listFilesMatching).mockResolvedValueOnce([...LISTED]);
+    // No file is read for basenames, so only the 40,000-NAME cap bounds them: exceed that.
+    const many = Array.from(
+      { length: 40_001 },
+      (_, i) => `m/filler-${String(i).padStart(5, '0')}.php`,
+    );
+    const listed = [FIRST, ...many, LAST];
+    vi.mocked(listFilesMatching).mockResolvedValueOnce([...listed]);
     const forward = await collectRepoBasenames('/repo');
-    vi.mocked(listFilesMatching).mockResolvedValueOnce([...LISTED].reverse());
+    vi.mocked(listFilesMatching).mockResolvedValueOnce([...listed].reverse());
     const reversed = await collectRepoBasenames('/repo');
 
     expect([...reversed].sort()).toEqual([...forward].sort());

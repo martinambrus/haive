@@ -13,6 +13,7 @@ import {
   loadRunStartedAt,
   pathExists,
 } from './_helpers.js';
+import { detectThirdPartyTrees, insideAnyTree } from './_third-party-trees.js';
 import {
   isDeniedFile,
   loadMiningScopeExcludeGlobs,
@@ -1150,6 +1151,21 @@ export const SYMBOL_SCAN_EXT: Record<string, string[]> = {
   'c++': ['.cpp', '.cc', '.cxx', '.hpp', '.hh'],
 };
 
+/** Every non-ignored file of the repo except those inside a third-party tree — the listing both
+ *  scrub collectors start from. `detectThirdPartyTrees` says what counts and why. */
+async function listRepoOwnFiles(repoPath: string): Promise<string[]> {
+  const files = await listFilesMatching(
+    repoPath,
+    (rel, isDir) => !isDir && !rel.split('/').some((p) => IGNORE_DIRS.has(p)),
+    10,
+    // Prune as well as filter: without this the walk descends into every `.venv`, `target` and
+    // `Pods` in the tree and then discards what it found.
+    (name) => IGNORE_DIRS.has(name),
+  );
+  const inside = insideAnyTree(await detectThirdPartyTrees(repoPath, files));
+  return files.filter((rel) => !inside(rel));
+}
+
 /** Basenames of this repo's own source files, lowercased.
  *
  *  The bare-filename rule used to resolve a candidate at the repo ROOT only — correct for the
@@ -1157,23 +1173,16 @@ export const SYMBOL_SCAN_EXT: Record<string, string[]> = {
  *  the authoring contract forbids just as firmly. The slashed-path rule does not cover it either:
  *  a bare name has no separator to match on.
  *
- *  Bounded exactly like `collectRepoSymbols` — same walk, same depth, same caps, same ignored
- *  directories — and empty on any failure, which simply restores the root-only behaviour. */
+ *  Same listing as `collectRepoSymbols`, but bounded by the NAME cap alone: no file is read, so a
+ *  file cap saved nothing, and MEASURED it still cut every file of a WordPress child theme behind
+ *  a premium plugin's 1,366. Empty on any failure, which simply restores the root-only behaviour. */
 export async function collectRepoBasenames(repoPath: string): Promise<Set<string>> {
   const names = new Set<string>();
   try {
-    const files = await listFilesMatching(
-      repoPath,
-      (rel, isDir) => {
-        if (isDir) return false;
-        return !rel.split('/').some((p) => IGNORE_DIRS.has(p));
-      },
-      10,
-      (name) => IGNORE_DIRS.has(name),
-    );
-    // Code-unit sort before the cap (not localeCompare, which varies by locale): `readdir` order is
-    // the filesystem's — ext4 hash-orders a large directory — so an unsorted cap is host-dependent.
-    for (const rel of files.sort().slice(0, REPO_SYMBOL_FILE_CAP)) {
+    // Code-unit sort (not localeCompare, which varies by locale): `readdir` order is the
+    // filesystem's — ext4 hash-orders a large directory — so where the name cap falls would
+    // otherwise depend on the host.
+    for (const rel of (await listRepoOwnFiles(repoPath)).sort()) {
       const base = rel.split('/').pop();
       if (base) names.add(base.toLowerCase());
       if (names.size > REPO_SYMBOL_CAP) break;
@@ -1185,7 +1194,7 @@ export async function collectRepoBasenames(repoPath: string): Promise<Set<string
 }
 
 /** Names of functions / classes / traits / interfaces DEFINED in this repo's own
- *  source (dependency/ignored dirs excluded). Best-effort and bounded; returns an
+ *  source (ignored dirs and third-party trees excluded). Best-effort and bounded; returns an
  *  empty set on any failure (the symbol backstop then simply never fires). */
 export async function collectRepoSymbols(
   repoPath: string,
@@ -1201,21 +1210,11 @@ export async function collectRepoSymbols(
   // unchanged and still scans only its own extensions.
   const exts = SYMBOL_SCAN_EXT[lang] ?? [...new Set(Object.values(SYMBOL_SCAN_EXT).flat())];
   try {
-    const files = await listFilesMatching(
-      repoPath,
-      (rel, isDir) => {
-        if (isDir) return false;
-        if (rel.split('/').some((p) => IGNORE_DIRS.has(p))) return false;
-        const low = rel.toLowerCase();
-        return exts.some((e) => low.endsWith(e));
-      },
-      10,
-      // Prune as well as filter: without this the walk descends into every `.venv`, `target` and
-      // `Pods` in the tree and then discards what it found. Anchored enrichment runs this walk
-      // and the basename walk back to back, so the cost was paid twice.
-      (name) => IGNORE_DIRS.has(name),
-    );
-    // Sorted before the cap, as in `collectRepoBasenames`.
+    const files = (await listRepoOwnFiles(repoPath)).filter((rel) => {
+      const low = rel.toLowerCase();
+      return exts.some((e) => low.endsWith(e));
+    });
+    // Sorted before the cap, for the host-independence reason `collectRepoBasenames` gives.
     for (const rel of files.sort().slice(0, REPO_SYMBOL_FILE_CAP)) {
       let text: string;
       try {
