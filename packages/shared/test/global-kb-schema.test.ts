@@ -125,6 +125,20 @@ describe('ensureGlobalKbSchema', () => {
     expect(count(`OR ${orphan}`)).toBe(2);
   });
 
+  // `jsonb_typeof(x) <> 'array' OR EXISTS (... jsonb_array_elements_text(x) ...)` reads like a guard
+  // and is not one: Postgres does not promise OR evaluation order, and the expansion raises on a
+  // scalar. Pinned as an invariant over ALL emitted SQL rather than one site, so a new unguarded
+  // expansion anywhere in the ensure fails here.
+  it('guards every jsonb_array_elements_text with a CASE', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const firstTokens = [...queries().matchAll(/jsonb_array_elements_text\(\s*(\S+)/g)].map(
+      (m) => m[1],
+    );
+    expect(firstTokens.length).toBeGreaterThan(0);
+    expect(firstTokens.filter((t) => t !== 'CASE')).toEqual([]);
+  });
+
   it('falls back to jsonb embeddings when pgvector is unavailable', async () => {
     const { conn, queries } = fakeConn({ vectorThrows: true });
     const res = await ensureGlobalKbSchema(conn);

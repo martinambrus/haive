@@ -247,6 +247,13 @@ export async function ensureGlobalKbSchema(
   // dropped, not rewritten — though that one is benign for retrieval on its own (MEASURED: `?|`
   // and `jsonb_array_length` both handle it).
   //
+  // Every expansion is guarded by a CASE, the predicate's included. Its
+  // `jsonb_typeof(kv.value) <> 'array' OR EXISTS (...)` READS like a guard and is not one:
+  // Postgres documents that it does not promise OR evaluation order and names CASE as the way to
+  // force it, and `jsonb_array_elements_text` raises on a scalar — MEASURED on 18.6, `cannot extract
+  // elements from a scalar`. Evaluated in the other order, the non-array value this pass exists to
+  // repair would fail the schema ensure at boot and stay unrepaired.
+  //
   // And it applies the write path's RELATIONAL rule, not only its value rule: a major whose parent
   // is absent is dropped, because a major on its own matches that version of EVERY technology.
   // Without it the cleaning above MANUFACTURED that defect — MEASURED on the real engine, a legacy
@@ -279,7 +286,9 @@ export async function ensureGlobalKbSchema(
         SELECT 1 FROM jsonb_each(t.facets) AS kv
         WHERE jsonb_typeof(kv.value) <> 'array'
            OR EXISTS (
-             SELECT 1 FROM jsonb_array_elements_text(kv.value) AS v
+             SELECT 1 FROM jsonb_array_elements_text(
+               CASE WHEN jsonb_typeof(kv.value) = 'array' THEN kv.value ELSE '[]'::jsonb END
+             ) AS v
              WHERE v IS NULL OR ${trim} = '' OR ${canon} <> v
            )
            OR ${orphan}
