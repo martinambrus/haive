@@ -696,8 +696,8 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       // tells a reviewer to reactivate the predecessor when they move a replacement's scope, and
       // this is what makes that instruction true rather than merely printed.
       //
-      // `supersedesEntryId` is deliberately KEPT: it records what this entry replaced, which is
-      // history and stays true whatever the status.
+      // `supersedesEntryId` is deliberately KEPT here: it records what this entry replaced. Only a
+      // real re-scope clears it (below), because a rule whose scope moved no longer replaces that.
       if (data.status === 'active') set.supersededAt = null;
       // Content/scope/status edits need a re-embed.
       if (data.body !== undefined || data.facets !== undefined || data.status !== undefined) {
@@ -741,20 +741,19 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
           .for('update');
       }
       if (data.facets !== undefined) {
-        // Any status this entry can still be ACTIVATED from — draft or archived. The link exists
-        // to stop activation archiving the wrong predecessor, so the rule has to track what can
-        // activate, and that set grew: this said DRAFTS only, justified by "only a draft can
-        // still activate", and then archived entries became reactivatable. The justification
-        // stopped being true and the condition did not follow it.
+        // Cleared on ANY real re-scope, whatever the status. The link is not only history: every
+        // activation reads it — reactivation included — and archives the entry it names. So an
+        // exemption for ACTIVE entries became wrong once an active entry could be archived and
+        // reactivated from the page: re-scope an active replacement (the scope editor then tells
+        // the reviewer to reactivate the old entry), archive it, reactivate it, and its activation
+        // archived that old entry again although the two rules no longer share a scope. This
+        // condition already had to widen once, from drafts to archived entries, for the same
+        // reason: the set of states an entry can be activated from kept growing.
         //
-        // An ACTIVE entry keeps its link: there the archive has already happened and the link is
-        // history, so clearing it would erase the record of what this article replaced without
-        // un-archiving anything.
-        if (
-          existing?.supersedesEntryId &&
-          (existing.status === 'draft' || existing.status === 'archived') &&
-          scopeChanged(existing.facets, set.facets)
-        ) {
+        // Clearing costs the record of what a re-scoped entry once replaced, which stopped being
+        // true when its scope moved. The predecessor's "an active entry still replaces this one"
+        // warning follows this link too, so it stops claiming a replacement that is gone.
+        if (existing?.supersedesEntryId && scopeChanged(existing.facets, set.facets)) {
           set.supersedesEntryId = null;
         }
       }
