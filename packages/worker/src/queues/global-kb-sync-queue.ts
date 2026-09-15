@@ -76,6 +76,98 @@ async function removeVectorsUnlessActive(
   });
 }
 
+type SyncWriteOutcome = 'written' | 'stale' | 'retired';
+
+/** Land a sync's results, or refuse to — decided, written and stamped in ONE locked transaction.
+ *
+ *  The job reads the entry and then embeds, which is slow (one CPU batch measured 50-69s), so by the
+ *  time results exist the row may have moved on. Two ways, both MEASURED:
+ *  - it left `active`: an archive committed meanwhile, and replacing chunks re-inserted every vector
+ *    of an archived entry;
+ *  - its content changed: a re-scope committed meanwhile (the PATCH corrects the chunks' facets in its
+ *    own transaction), and replacing chunks wrote the OLD scope back over that correction.
+ *  So the current row is re-read here. A retired entry keeps no vectors; a changed one keeps what it
+ *  has, for the sync its edit enqueued to replace; only an unchanged active entry gets these results.
+ *  The revision is the title plus `entryContentHash(body, facets)`, every input the chunks are built
+ *  from.
+ *
+ *  `FOR UPDATE`, not `FOR SHARE`: the stamp writes this row inside the same transaction, and two syncs
+ *  of one entry holding SHARE locks would deadlock upgrading them. It still serialises with every
+ *  status writer, and each path locks the entry row before its chunks, so the order never inverts.
+ *  The stamp is inside for the same reason the check is: an edit landing between a separate stamp and
+ *  this commit would be marked `embedded` for content that was never embedded. */
+async function writeSyncResults(
+  ctx: GlobalKbContext,
+  entry: typeof globalKbEntries.$inferSelect,
+  sourcePath: string,
+  chunks: ReadonlyArray<{
+    sectionId: string;
+    chunkIndex: number;
+    chunkHash: string;
+    content: string;
+  }>,
+  embeddings: ReadonlyArray<number[]>,
+): Promise<SyncWriteOutcome> {
+  const usedPgvector = chunks.length > 0 ? await hasVectorColumn(ctx) : false;
+  const facetsJson = JSON.stringify(entry.facets ?? {});
+  const revision = entryContentHash(entry.body, entry.facets);
+  const outcome = await ctx.conn.pg.begin(async (tx): Promise<SyncWriteOutcome> => {
+    const [live] = (await tx.unsafe(
+      `SELECT status, title, body, facets FROM global_kb_entries WHERE id = $1 FOR UPDATE`,
+      [entry.id],
+    )) as unknown as Array<{ status: string; title: string; body: string; facets: unknown }>;
+    if (!live || live.status !== 'active') {
+      await tx.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
+        entry.namespace,
+        entry.id,
+      ]);
+      return 'retired';
+    }
+    if (live.title !== entry.title || entryContentHash(live.body, live.facets) !== revision) {
+      return 'stale';
+    }
+    await tx.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
+      entry.namespace,
+      entry.id,
+    ]);
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i]!;
+      const common = [
+        entry.namespace,
+        entry.userId,
+        entry.id,
+        sourcePath,
+        chunk.sectionId,
+        chunk.chunkIndex,
+        chunk.chunkHash,
+        facetsJson,
+        chunk.content,
+      ];
+      if (usedPgvector) {
+        await tx.unsafe(
+          `INSERT INTO ai_rag_embeddings (namespace, user_id, entry_id, source_type, source_path, section_id, chunk_index, chunk_hash, facets, content, vector)
+           VALUES ($1, $2, $3, 'kb', $4, $5, $6, $7, $8::jsonb, $9, $10::vector)`,
+          [...common, vectorLiteral(embeddings[i]!)],
+        );
+      } else {
+        await tx.unsafe(
+          `INSERT INTO ai_rag_embeddings (namespace, user_id, entry_id, source_type, source_path, section_id, chunk_index, chunk_hash, facets, content, embedding_json)
+           VALUES ($1, $2, $3, 'kb', $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb)`,
+          [...common, JSON.stringify(embeddings[i]!)],
+        );
+      }
+    }
+    // A timestamp column holds UTC wall clock; an ISO string with its zone ignored is exactly what
+    // drizzle writes for `new Date()` everywhere else.
+    await tx.unsafe(
+      `UPDATE global_kb_entries SET embed_status = 'embedded', content_hash = $2, updated_at = $3::timestamp WHERE id = $1`,
+      [entry.id, revision, new Date().toISOString()],
+    );
+    return 'written';
+  });
+  return outcome as SyncWriteOutcome;
+}
+
 async function hasVectorColumn(ctx: GlobalKbContext): Promise<boolean> {
   const rows = (await ctx.conn.pg.unsafe(
     `SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_rag_embeddings' AND column_name = 'vector'`,
@@ -124,6 +216,7 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
         );
       }
 
+      let outcome: SyncWriteOutcome;
       if (chunks.length > 0) {
         const texts = chunks.map((c) => c.content);
         const useOllama = !!(ctx.conn.ollamaUrl && ctx.conn.embedModel);
@@ -149,81 +242,25 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
           embeddings.push(...outcome.embeddings);
         }
 
-        const usedPgvector = await hasVectorColumn(ctx);
-        const facetsJson = JSON.stringify(entry.facets ?? {});
-
-        // Small per-entry corpus: replace all chunks atomically (delete +
-        // insert) rather than upsert + stale-key bookkeeping.
-        //
-        // The status is re-read LOCKED inside this transaction. The read at the top of the job is
-        // stale by now — embedding sits between the two, and one CPU batch alone measured 50-69s —
-        // and nothing else stops an archive that committed meanwhile from getting its vectors
-        // back. MEASURED: an archive left uncommitted while this job embedded ended `archived`
-        // with every chunk re-inserted. `FOR SHARE` conflicts with the row lock every status writer
-        // takes (the PATCH route, the enrich demotion, the DELETE route), so the two serialise and
-        // whichever commits second sees the other's result; each path locks the entry row before it
-        // touches chunks, so the order never inverts.
-        const wrote = await ctx.conn.pg.begin(async (tx) => {
-          const live = (await tx.unsafe(
-            `SELECT status FROM global_kb_entries WHERE id = $1 FOR SHARE`,
-            [entry.id],
-          )) as unknown as Array<{ status: string }>;
-          await tx.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
-            entry.namespace,
-            entry.id,
-          ]);
-          if (live[0]?.status !== 'active') return false;
-          for (let i = 0; i < chunks.length; i += 1) {
-            const chunk = chunks[i]!;
-            const common = [
-              entry.namespace,
-              entry.userId,
-              entry.id,
-              sourcePath,
-              chunk.sectionId,
-              chunk.chunkIndex,
-              chunk.chunkHash,
-              facetsJson,
-              chunk.content,
-            ];
-            if (usedPgvector) {
-              await tx.unsafe(
-                `INSERT INTO ai_rag_embeddings (namespace, user_id, entry_id, source_type, source_path, section_id, chunk_index, chunk_hash, facets, content, vector)
-                 VALUES ($1, $2, $3, 'kb', $4, $5, $6, $7, $8::jsonb, $9, $10::vector)`,
-                [...common, vectorLiteral(embeddings[i]!)],
-              );
-            } else {
-              await tx.unsafe(
-                `INSERT INTO ai_rag_embeddings (namespace, user_id, entry_id, source_type, source_path, section_id, chunk_index, chunk_hash, facets, content, embedding_json)
-                 VALUES ($1, $2, $3, 'kb', $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb)`,
-                [...common, JSON.stringify(embeddings[i]!)],
-              );
-            }
-          }
-          return true;
-        });
-        if (!wrote) {
-          // Not `embedded`: the entry no longer holds the vectors that word would describe.
-          log.info(
-            { entryId: entry.id },
-            'global KB entry left active while syncing; vectors removed, not re-inserted',
-          );
-          return;
-        }
+        outcome = await writeSyncResults(ctx, entry, sourcePath, chunks, embeddings);
       } else {
-        // No extractable content (e.g. empty body): clear any stale chunks.
-        await deleteChunks(ctx, entry.namespace, entry.id);
+        // No extractable content (e.g. an empty body): the same guarded write clears stale chunks.
+        outcome = await writeSyncResults(ctx, entry, sourcePath, [], []);
       }
-
-      await ctx.db
-        .update(globalKbEntries)
-        .set({
-          embedStatus: 'embedded',
-          contentHash: entryContentHash(entry.body, entry.facets),
-          updatedAt: new Date(),
-        })
-        .where(eq(globalKbEntries.id, entry.id));
-
+      if (outcome === 'retired') {
+        log.info(
+          { entryId: entry.id },
+          'global KB entry left active while syncing; vectors removed, not re-inserted',
+        );
+        return;
+      }
+      if (outcome === 'stale') {
+        log.info(
+          { entryId: entry.id },
+          'global KB entry changed while syncing; results discarded for its own sync to re-embed',
+        );
+        return;
+      }
       log.info({ entryId: entry.id, chunks: chunks.length }, 'global KB entry synced');
     } catch (err) {
       await ctx.db
