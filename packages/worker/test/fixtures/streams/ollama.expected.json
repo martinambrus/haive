@@ -16,6 +16,37 @@
     "served": "qwen3:1.7b",
     "billed": ["qwen3:1.7b"]
   },
+  "toolUsage": {
+    "source": "stream",
+    "coverage": "full",
+    "tools": {},
+    "mcp": [],
+    "subagents": [],
+    "skills": { "invoked": [], "read": [] },
+    "agents": { "assigned": [], "read": [] },
+    "loaded": {
+      "agents": ["Explore", "Plan", "claude", "general-purpose", "statusline-setup"],
+      "skills": [
+        "batch",
+        "claude-api",
+        "code-review",
+        "dataviz",
+        "debug",
+        "deep-research",
+        "design-sync",
+        "doctor",
+        "fewer-permission-prompts",
+        "loop",
+        "run",
+        "run-skill-generator",
+        "simplify",
+        "update-config",
+        "verify"
+      ],
+      "mcpServers": [],
+      "toolCount": 0
+    }
+  },
   "modelIdentity": {
     "requested": "qwen3:1.7b",
     "served": "qwen3:1.7b",

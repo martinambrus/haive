@@ -93,6 +93,16 @@ function execRun(text: string) {
   return (spec: RunSpec) => {
     const events = [
       { type: 'thread.started', thread_id: 't' },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'item_1',
+          type: 'command_execution',
+          command: 'cat .agents/skills/project-context/SKILL.md',
+          exit_code: 0,
+          status: 'completed',
+        },
+      },
       { type: 'item.completed', item: { type: 'agent_message', text } },
       { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 2 } },
     ];
@@ -191,6 +201,9 @@ describe('executeCliSpec on codex app-server', () => {
     });
     expect(outcome.modelIdentity?.requested).toBe('gpt-5.6-sol');
     expect(outcome.codexAppServer).toEqual({ failure: null, binaryVersion: '0.154.0' });
+    // The turn's items were parsed, so the record is observable even though it called nothing.
+    expect(outcome.toolUsage?.coverage).toBe('full');
+    expect(outcome.toolUsage?.tools).toEqual({});
   });
 
   it('re-runs the same invocation on codex exec when the app-server never accepts the turn', async () => {
@@ -217,6 +230,10 @@ describe('executeCliSpec on codex app-server', () => {
       detail: "error: unexpected argument '--json' found",
     });
     expect(outcome.streamLog).toContain('codex app-server unavailable at spawn');
+    // The exec run's tally is the whole truth: the app-server half did no work.
+    expect(outcome.toolUsage?.coverage).toBe('full');
+    expect(outcome.toolUsage?.tools).toEqual({ command_execution: 1 });
+    expect(outcome.toolUsage?.skills.read).toEqual([{ id: 'project-context', reads: 1 }]);
   });
 
   it('fails a run whose accepted turn never completed, as a transient the step re-runs', async () => {

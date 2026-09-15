@@ -16,7 +16,7 @@ import type {
   CliSignOutJobPayload,
   OllamaProvisionJobPayload,
 } from '@haive/shared';
-import { QUEUE_NAMES } from '@haive/shared';
+import { QUEUE_NAMES, type InvocationToolUsage } from '@haive/shared';
 import { defaultCliSpawner, type CliSpawner } from '../../cli-executor/index.js';
 import type { CodexAppServerFailure } from '../../cli-executor/codex-app-server.js';
 import { getBullRedis } from '../../redis.js';
@@ -76,6 +76,12 @@ export interface ExecutionOutcome {
    *  execution path captures no stream-json, and for every CLI that emits no
    *  compact_boundary event — which is all of them except the claude family. */
   compaction?: InvocationCompaction | null;
+  /** What the run USED — tool, MCP and sub-agent calls, the skill and agent files it opened —
+   *  tallied from the same stream as tokenUsage. Persisted to cli_invocations.tool_usage.
+   *  Undefined/null means "not examined" and leaves the column NULL; a path that captures no
+   *  tool events writes a `coverage: 'none'` record instead, so the backfill can tell the two
+   *  apart. */
+  toolUsage?: InvocationToolUsage | null;
   /** Full live-stream transcript (header + every stdout/stderr chunk) the
    *  same bytes published to the cli-stream Redis channel. Persisted to
    *  cli_invocations.stream_log for historical replay. Null when the
