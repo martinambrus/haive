@@ -12,6 +12,7 @@ import {
   dayKey,
   dayKeysBetween,
   hasEnoughSamples,
+  isHaiveMcpServer,
   knownTaskTypes,
   previousWindow,
   resolveTaskClass,
@@ -37,6 +38,7 @@ import {
   type TaskProviderUsage,
 } from '../tasks/_helpers.js';
 import { parseStatsQuery, type StatsQuery } from './_query.js';
+import { rollupToolUsage } from '../../lib/tool-usage-rollup.js';
 
 export const statsRoutes = new Hono<AppEnv>();
 
@@ -966,6 +968,244 @@ statsRoutes.get('/steps', async (c) => {
         differs: Number(r.differs) || 0,
       }))
       .sort((a, b) => b.invocations - a.invocations),
+  });
+});
+
+const TOOL_ROW_LIMIT = 40;
+
+interface Capped<T> {
+  rows: T[];
+  count: number;
+  truncated: boolean;
+}
+
+/** Rank by value, tie-broken on a stable key so the cap always cuts the same rows, then cap
+ *  and REPORT the cap — the STEP_ROW_LIMIT shape. */
+function capRanked<T>(rows: T[], value: (row: T) => number, key: (row: T) => string): Capped<T> {
+  const ranked = [...rows].sort((a, b) => value(b) - value(a) || key(a).localeCompare(key(b)));
+  return {
+    rows: ranked.slice(0, TOOL_ROW_LIMIT),
+    count: ranked.length,
+    truncated: ranked.length > TOOL_ROW_LIMIT,
+  };
+}
+
+/**
+ * What the agents USED across the window: personas, skills, MCP tools, sub-agents and native
+ * tools, read from `cli_invocations.tool_usage` — the column nothing could answer before it
+ * existed (MEASURED before it did: the `Skill` tool was offered in 2,465 of 2,477 claude-code
+ * runs and called 0 times; agents `cat` their skills instead).
+ *
+ * `invocationAttributionFilter` APPLIES, for the reason it does on /steps: this is a reconciling
+ * rollup whose `total` must equal the runs the steps tab and the task page count, or the
+ * coverage line cites an M no other tab recognises.
+ *
+ * The denominators are stated, never implied. `total` is the reconciliation figure; `unrecorded`
+ * (a NULL column) and `unobservable` (`coverage: 'none'` — amp, gemini, the sequential sub-agent
+ * script, plain output) enter no "not used" sentence; `observable` (full + partial, the partial
+ * ones being floors) is the ONLY denominator such a sentence may cite, and `share` is
+ * `sampledRatio(runs, observable)`, so a three-run window renders `n=3` and never a percentage.
+ *
+ * Assigned personas are counted on any RECORDED row — an assignment is a dispatch fact, valid on
+ * a `none` row — and `assignedRecordedSince` says from when they exist at all, so a client can
+ * say "not yet recorded" rather than render an empty list as "unused". The unused report itself
+ * needs the installed inventory from disk and waits for the link-refusing readers of
+ * `@haive/shared/fs-safe`; until then a repository-scoped request answers `scan-unavailable`.
+ */
+statsRoutes.get('/tool-usage', async (c) => {
+  const userId = c.get('userId');
+  const q = parseStatsQuery(c.req.query());
+  if (q.allUsers && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for install-wide statistics');
+  }
+  const db = getDb();
+
+  const from = new Date(q.fromMs);
+  const to = new Date(q.toMs);
+  const scope = taskScopeFilter(q, userId);
+  const providerTerm = q.cliProviderId
+    ? [eq(schema.cliInvocations.cliProviderId, q.cliProviderId)]
+    : [];
+  const window = and(
+    ...scope,
+    ...providerTerm,
+    invocationAttributionFilter(),
+    gte(schema.cliInvocations.startedAt, from),
+    lt(schema.cliInvocations.startedAt, to),
+  )!;
+
+  const tu = schema.cliInvocations.toolUsage;
+  const [rollup, [sinceRow]] = await Promise.all([
+    rollupToolUsage(db, { where: window, perStep: false }),
+    // Whole history of the caller's scope, not the window: the question is whether the
+    // dispatch-side stamping has EVER written an assignment here.
+    db
+      .select({ since: sql<Date | string | null>`min(${schema.cliInvocations.startedAt})` })
+      .from(schema.cliInvocations)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+      .where(
+        and(
+          ...scope,
+          invocationAttributionFilter(),
+          sql`(case when jsonb_typeof(${tu} -> 'agents' -> 'assigned') = 'array' then jsonb_array_length(${tu} -> 'agents' -> 'assigned') else 0 end) > 0`,
+        ),
+      ),
+  ]);
+
+  const coverage = {
+    total: 0,
+    recorded: 0,
+    observable: 0,
+    partial: 0,
+    unobservable: 0,
+    unrecorded: 0,
+    withLoaded: 0,
+  };
+  const byProvider = new Map<string | null, typeof coverage>();
+  for (const r of rollup.coverage) {
+    const bucket = byProvider.get(r.provider) ?? { ...coverage };
+    for (const target of [coverage, bucket]) {
+      target.total += r.total;
+      target.recorded += r.recorded;
+      target.observable += r.observable;
+      target.partial += r.partial;
+      target.unobservable += r.unobservable;
+      target.unrecorded += r.total - r.recorded;
+      target.withLoaded += r.withLoaded;
+    }
+    byProvider.set(r.provider, bucket);
+  }
+  const share = (runs: number) => sampledRatio(runs, coverage.observable);
+
+  // Offered ∪ called, per server: a server can be wired and never called (the unused signal)
+  // or called by a run whose CLI reports no inventory (codex names no `loaded`).
+  const servers = new Map<
+    string,
+    {
+      server: string;
+      haive: boolean;
+      offeredRuns: number;
+      calledRuns: number;
+      calls: number;
+      tasks: number;
+    }
+  >();
+  const serverRow = (name: string) => {
+    const known = servers.get(name);
+    if (known) return known;
+    const created = {
+      server: name,
+      haive: isHaiveMcpServer(name),
+      offeredRuns: 0,
+      calledRuns: 0,
+      calls: 0,
+      tasks: 0,
+    };
+    servers.set(name, created);
+    return created;
+  };
+  for (const r of rollup.mcpOffered) serverRow(r.name).offeredRuns += r.runs;
+  for (const r of rollup.mcpServers) {
+    const row = serverRow(r.server);
+    row.calledRuns += r.runs;
+    row.calls += r.calls;
+    row.tasks += r.tasks;
+  }
+
+  const since = sinceRow?.since ?? null;
+
+  return c.json({
+    range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
+    scope: {
+      repositoryId: q.repositoryId,
+      cliProviderId: q.cliProviderId,
+      taskClass: q.taskClass,
+      allUsers: q.allUsers,
+    },
+    coverage: {
+      ...coverage,
+      byProvider: [...byProvider.entries()]
+        .map(([provider, counts]) => ({ provider, ...counts }))
+        .sort((a, b) => b.total - a.total),
+      assignedRecordedSince: since === null ? null : new Date(since).toISOString(),
+    },
+    personas: {
+      assigned: capRanked(
+        rollup.personasAssigned.map((r) => ({
+          id: r.id,
+          runs: r.runs,
+          tasks: r.tasks,
+          share: share(r.runs),
+        })),
+        (r) => r.runs,
+        (r) => r.id,
+      ),
+      read: capRanked(
+        rollup.personasRead.map((r) => ({
+          id: r.id,
+          reads: r.n,
+          runs: r.runs,
+          tasks: r.tasks,
+          share: share(r.runs),
+        })),
+        (r) => r.reads,
+        (r) => r.id,
+      ),
+    },
+    skills: {
+      invoked: capRanked(
+        rollup.skillsInvoked.map((r) => ({
+          id: r.id,
+          calls: r.n,
+          runs: r.runs,
+          tasks: r.tasks,
+          share: share(r.runs),
+        })),
+        (r) => r.calls,
+        (r) => r.id,
+      ),
+      read: capRanked(
+        rollup.skillsRead.map((r) => ({
+          id: r.id,
+          reads: r.n,
+          runs: r.runs,
+          tasks: r.tasks,
+          share: share(r.runs),
+        })),
+        (r) => r.reads,
+        (r) => r.id,
+      ),
+    },
+    mcp: {
+      servers: capRanked(
+        [...servers.values()],
+        (r) => r.calls,
+        (r) => r.server,
+      ),
+      tools: capRanked(
+        rollup.mcpTools.map((r) => ({
+          server: r.server,
+          tool: r.tool,
+          calls: r.calls,
+          runs: r.runs,
+          tasks: r.tasks,
+          share: share(r.runs),
+        })),
+        (r) => r.calls,
+        (r) => `${r.server}/${r.tool}`,
+      ),
+    },
+    subagents: capRanked(
+      rollup.subagents.map((r) => ({ type: r.id, calls: r.n, runs: r.runs, tasks: r.tasks })),
+      (r) => r.calls,
+      (r) => r.type,
+    ),
+    nativeTools: capRanked(
+      rollup.nativeTools.map((r) => ({ tool: r.id, calls: r.n, runs: r.runs })),
+      (r) => r.calls,
+      (r) => r.tool,
+    ),
+    unused: q.repositoryId ? { available: false, reason: 'scan-unavailable' } : null,
   });
 });
 
