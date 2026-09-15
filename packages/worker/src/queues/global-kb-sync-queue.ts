@@ -49,6 +49,33 @@ async function deleteChunks(
   ]);
 }
 
+/** Remove an entry's vectors unless it is ACTIVE at the moment the delete runs.
+ *
+ *  Decided under `FOR SHARE`, which conflicts with the lock every status writer takes, so a job
+ *  queued before the entry was reactivated — or one BullMQ redelivers after a stall, once its lock
+ *  has expired and the reactivation's upsert has already run — cannot remove the vectors that
+ *  reactivation wrote. MEASURED on the unguarded version: a supersession `delete` delivered after the
+ *  reactivated entry's upsert left it `active`/`embedded` with 0 chunks, which nothing would ever
+ *  serve. A missing row counts as retired. This is reconciliation, not the only defence: every path
+ *  that retires an entry already removes its vectors in its own transaction. */
+async function removeVectorsUnlessActive(
+  ctx: GlobalKbContext,
+  namespace: string,
+  entryId: string,
+): Promise<boolean> {
+  return ctx.conn.pg.begin(async (tx) => {
+    const live = (await tx.unsafe(`SELECT status FROM global_kb_entries WHERE id = $1 FOR SHARE`, [
+      entryId,
+    ])) as unknown as Array<{ status: string }>;
+    if (live[0]?.status === 'active') return false;
+    await tx.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
+      namespace,
+      entryId,
+    ]);
+    return true;
+  });
+}
+
 async function hasVectorColumn(ctx: GlobalKbContext): Promise<boolean> {
   const rows = (await ctx.conn.pg.unsafe(
     `SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_rag_embeddings' AND column_name = 'vector'`,
@@ -64,7 +91,9 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
     const { entryId, namespace } = payload;
 
     if (payload.reason === 'delete') {
-      await deleteChunks(ctx, namespace, entryId);
+      if (!(await removeVectorsUnlessActive(ctx, namespace, entryId))) {
+        log.info({ entryId }, 'stale global KB delete job skipped: the entry is active again');
+      }
       return;
     }
 
@@ -72,9 +101,10 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
       where: eq(globalKbEntries.id, entryId),
     });
 
-    // Only `active` entries are retrievable; anything else holds no vectors.
+    // Only `active` entries are retrievable; anything else holds no vectors. Re-checked under the
+    // lock at delete time: if a reactivation committed since the read above, its own upsert embeds it.
     if (!entry || entry.status !== 'active') {
-      await deleteChunks(ctx, namespace, entryId);
+      await removeVectorsUnlessActive(ctx, namespace, entryId);
       return;
     }
 
