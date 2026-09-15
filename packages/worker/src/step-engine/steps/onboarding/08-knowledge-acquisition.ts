@@ -1171,7 +1171,9 @@ export async function collectRepoBasenames(repoPath: string): Promise<Set<string
       10,
       (name) => IGNORE_DIRS.has(name),
     );
-    for (const rel of files.slice(0, REPO_SYMBOL_FILE_CAP)) {
+    // Code-unit sort before the cap (not localeCompare, which varies by locale): `readdir` order is
+    // the filesystem's — ext4 hash-orders a large directory — so an unsorted cap is host-dependent.
+    for (const rel of files.sort().slice(0, REPO_SYMBOL_FILE_CAP)) {
       const base = rel.split('/').pop();
       if (base) names.add(base.toLowerCase());
       if (names.size > REPO_SYMBOL_CAP) break;
@@ -1213,7 +1215,8 @@ export async function collectRepoSymbols(
       // and the basename walk back to back, so the cost was paid twice.
       (name) => IGNORE_DIRS.has(name),
     );
-    for (const rel of files.slice(0, REPO_SYMBOL_FILE_CAP)) {
+    // Sorted before the cap, as in `collectRepoBasenames`.
+    for (const rel of files.sort().slice(0, REPO_SYMBOL_FILE_CAP)) {
       let text: string;
       try {
         text = await readFile(path.join(repoPath, rel), 'utf8');
