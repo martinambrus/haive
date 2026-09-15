@@ -3,7 +3,11 @@ import { bootstrap } from './bootstrap.js';
 import { getDb } from './db.js';
 import { getRedis } from './redis.js';
 import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-queue.js';
-import { scheduleGlobalKbPurge, startGlobalKbSyncWorker } from './queues/global-kb-sync-queue.js';
+import {
+  scheduleGlobalKbPurge,
+  scheduleGlobalKbReconcile,
+  startGlobalKbSyncWorker,
+} from './queues/global-kb-sync-queue.js';
 import { startRuntimeEnsureWorker } from './queues/runtime-ensure-queue.js';
 import { startIdeEnsureWorker } from './queues/ide-ensure-queue.js';
 import { startDdevControlWorker } from './queues/ddev-control-queue.js';
@@ -136,6 +140,9 @@ async function main(): Promise<void> {
   });
   await scheduleGlobalKbPurge().catch((err) => {
     logger.warn({ err }, 'failed to schedule global KB archive purge');
+  });
+  await scheduleGlobalKbReconcile().catch((err) => {
+    logger.warn({ err }, 'failed to schedule global KB lost-sync reconcile');
   });
   await scheduleUsagePollTick().catch((err) => {
     logger.warn({ err }, 'failed to schedule usage-window poll tick');

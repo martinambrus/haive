@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Queue, Worker, type Job } from 'bullmq';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull, lt } from 'drizzle-orm';
 import {
   GLOBAL_KB_JOB_NAMES,
   QUEUE_NAMES,
@@ -323,6 +323,96 @@ export async function scheduleGlobalKbPurge(): Promise<void> {
   );
 }
 
+const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
+// The api's own enqueue follows its commit by milliseconds and the live-job check cannot see an
+// `add` still in flight, so only an entry pending for longer than this is treated as lost.
+const RECONCILE_GRACE_MS = 2 * 60 * 1000;
+const RECONCILE_JOB_ID = 'global-kb-reconcile-pending-repeatable';
+
+/** The pending entries no job will embed. Only a waiting or running UPSERT counts as queued: a
+ *  `delete` job leaves an active entry alone, so it never embeds one. */
+export function pickLostSyncs<T extends { id: string }>(
+  pending: T[],
+  liveJobs: Array<{ name: string; data?: Partial<GlobalKbSyncJobPayload> }>,
+): T[] {
+  const queued = new Set(
+    liveJobs
+      .filter((j) => j.name === GLOBAL_KB_JOB_NAMES.SYNC_ENTRY && j.data?.reason === 'upsert')
+      .map((j) => j.data?.entryId),
+  );
+  return pending.filter((e) => !queued.has(e.id));
+}
+
+/** Re-queue the sync of every ACTIVE entry still `pending` with no job to embed it.
+ *
+ *  Writers commit `embed_status = 'pending'` and enqueue only afterwards, outside the transaction,
+ *  so the row is the durable record of an owed sync and the enqueue is just the fast path. An `add`
+ *  that throws (Redis refusing writes) or never lands (the api dies while it waits on a reconnect)
+ *  used to leave an activated entry with no vectors and nothing that would ever queue them — and an
+ *  activation that archived a predecessor had already deleted ITS vectors in the same transaction,
+ *  so the topic dropped out of retrieval entirely. Entries with a live upsert are skipped, or a slow
+ *  embed backlog would gain a duplicate on every sweep. */
+export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
+  const settings = await resolveGlobalKbSettings();
+  if (!settings.enabled) return;
+  const cutoff = new Date(Date.now() - RECONCILE_GRACE_MS);
+  const pending = await withGlobalKb(getDb(), (ctx) =>
+    ctx.db
+      .select({ id: globalKbEntries.id, namespace: globalKbEntries.namespace })
+      .from(globalKbEntries)
+      .where(
+        and(
+          eq(globalKbEntries.status, 'active'),
+          isNull(globalKbEntries.supersededAt),
+          eq(globalKbEntries.embedStatus, 'pending'),
+          lt(globalKbEntries.updatedAt, cutoff),
+        ),
+      ),
+  );
+  if (pending.length === 0) return;
+  const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
+  try {
+    const lost = pickLostSyncs(
+      pending,
+      await queue.getJobs(['active', 'waiting', 'delayed', 'prioritized']),
+    );
+    for (const e of lost) {
+      await queue.add(
+        GLOBAL_KB_JOB_NAMES.SYNC_ENTRY,
+        {
+          entryId: e.id,
+          namespace: e.namespace,
+          reason: 'upsert',
+        } satisfies GlobalKbSyncJobPayload,
+        { removeOnComplete: true, removeOnFail: 20 },
+      );
+    }
+    if (lost.length > 0) {
+      log.info(
+        { requeued: lost.length, pending: pending.length },
+        'requeued global KB syncs that were never queued',
+      );
+    }
+  } finally {
+    await queue.close().catch(() => {});
+  }
+}
+
+/** Register the lost-sync reconcile, keyed on RECONCILE_JOB_ID like the purge. A scheduler outlives
+ *  the code that registered it: rolling this back also takes `removeJobScheduler(RECONCILE_JOB_ID)`. */
+export async function scheduleGlobalKbReconcile(): Promise<void> {
+  const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
+  await queue.upsertJobScheduler(
+    RECONCILE_JOB_ID,
+    { every: RECONCILE_INTERVAL_MS },
+    {
+      name: GLOBAL_KB_JOB_NAMES.RECONCILE_PENDING,
+      data: {},
+      opts: { removeOnComplete: true, removeOnFail: 5 },
+    },
+  );
+}
+
 export function startGlobalKbSyncWorker(): Worker {
   const worker = new Worker<GlobalKbSyncJobPayload>(
     QUEUE_NAMES.GLOBAL_KB_SYNC,
@@ -333,6 +423,9 @@ export function startGlobalKbSyncWorker(): Worker {
           return;
         case GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED:
           await purgeArchivedGlobalKbEntries();
+          return;
+        case GLOBAL_KB_JOB_NAMES.RECONCILE_PENDING:
+          await reconcilePendingGlobalKbSyncs();
           return;
         default:
           throw new Error(`Unknown global-kb job: ${job.name}`);

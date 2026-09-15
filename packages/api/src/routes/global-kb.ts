@@ -86,6 +86,10 @@ export const updateSchema = z
   })
   .partial();
 
+/** The fast path only. Every edit that changes what gets embedded commits `embed_status = 'pending'`
+ *  before this runs, so an `add` that fails or never lands is re-queued by the worker's
+ *  `reconcilePendingGlobalKbSyncs`. A delete needs no such net: every path that retires an entry
+ *  removes its vectors in its own transaction. */
 async function enqueueSync(
   entryId: string,
   namespace: string,
@@ -699,8 +703,14 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       // `supersedesEntryId` is deliberately KEPT here: it records what this entry replaced. Only a
       // real re-scope clears it (below), because a rule whose scope moved no longer replaces that.
       if (data.status === 'active') set.supersededAt = null;
-      // Content/scope/status edits need a re-embed.
-      if (data.body !== undefined || data.facets !== undefined || data.status !== undefined) {
+      // Title/content/scope/status edits need a re-embed — the title heads every chunk — and marking
+      // them pending is what lets the worker re-queue a sync whose enqueue below is lost.
+      if (
+        data.title !== undefined ||
+        data.body !== undefined ||
+        data.facets !== undefined ||
+        data.status !== undefined
+      ) {
         set.embedStatus = 'pending';
       }
       // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
