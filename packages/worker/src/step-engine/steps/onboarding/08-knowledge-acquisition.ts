@@ -1293,8 +1293,14 @@ export async function collectRepoSymbols(
       //   - no `;` inside the parens, which is what excludes `for (a; b; c) {`;
       //   - a `{` OR an `=>` after them, so a prototype (`int foo(void);`) and a bare call are
       //     both out while C#'s expression-bodied member (`string Fmt(int id) => …;`) is in. The
-      //     `=>` arm cannot reach a lambda: `const f = (a) => …` and `items.Where(x => …)` both
-      //     carry a `=` or a `.` before the parens, and neither is in the prefix class.
+      //     `=>` arm cannot reach a lambda: `const f = (a) => …` carries a `=`, which the prefix
+      //     class excludes, and `items.Where(x => …)` has no WHITESPACE before its name, which
+      //     the name requires;
+      //   - `?`, `[`, `]` and `.` ARE in the prefix, because a return type is not one bare word:
+      //     `InvoiceDto?`, `InvoiceDto[]`, `System.String`, `Task<InvoiceDto?>`. MEASURED, five of
+      //     six C# declarations of those shapes were invisible without them. None of the four lets
+      //     a call through, for the whitespace reason above: `handler?.Invoke(x)` and
+      //     `list.Where(…)` both put the name flush against the `.`.
       // `isDistinctiveSymbol` still applies, so a single generic word never lands.
       //
       // Indentation is ALLOWED. Anchoring at column 0 looked like the safe choice and was simply
@@ -1302,7 +1308,7 @@ export async function collectRepoSymbols(
       // normal formatting at all. The brace requirement is what excludes an indented CALL —
       // `indented_call(arg);` ends in a semicolon — so the anchor was never what made this safe.
       const cFuncRe =
-        /^[ \t]*[A-Za-z_][\w:<>,*&\s]*?\s+\*?([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?(?:\{|=>)/gm;
+        /^[ \t]*[A-Za-z_][\w:<>,*&?.[\]\s]*?\s+\*?([A-Za-z_]\w{4,})\s*\([^;{)]*\)\s*(?:const\s*)?(?:\{|=>)/gm;
       for (let m = cFuncRe.exec(body); m; m = cFuncRe.exec(body)) {
         if (m[1] && !NON_SYMBOL_KEYWORDS.has(m[1]) && isDistinctiveSymbol(m[1])) {
           symbols.add(m[1]);

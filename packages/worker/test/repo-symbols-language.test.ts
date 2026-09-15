@@ -358,6 +358,87 @@ describe('collectRepoSymbols on keyword-less JS/TS declarations', () => {
     expect(symbols.has('indented_call')).toBe(false);
   });
 
+  it('reads nullable, array and qualified return types', async () => {
+    // A return type is not always one bare word: C# writes `InvoiceDto?`, `InvoiceDto[]` and
+    // `System.String`, Java the last two. The prefix class held none of `?`, `[`, `]` or `.`, so
+    // every such method was invisible — MEASURED on a real indented class, five of six missed and
+    // only the plain-typed control collected.
+    const dir = await mkdtemp(path.join(tmpdir(), 'symbols-return-types-'));
+    await writeFile(
+      path.join(dir, 'InvoiceService.cs'),
+      [
+        'namespace Billing',
+        '{',
+        '    public class InvoiceService',
+        '    {',
+        '        public InvoiceDto? FindInvoice(int id)',
+        '        {',
+        '            var active = items.Where(x => x.IsActiveItem(x));',
+        '            handler?.InvokeHandler(args);',
+        '            if (invoice?.IsOverdue(today)) { return null; }',
+        '            return null;',
+        '        }',
+        '        public InvoiceDto[] BuildInvoiceList()',
+        '        {',
+        '            return status switch',
+        '            {',
+        '                Status.Open => HandleOpenCase(invoice),',
+        '                _ => null,',
+        '            };',
+        '        }',
+        '        public System.String FormatInvoice(int id) => id.ToString();',
+        '        public Task<InvoiceDto?> LoadInvoiceAsync(int id)',
+        '        {',
+        '            return null;',
+        '        }',
+        '        public List<InvoiceDto[]> GroupInvoices()',
+        '        {',
+        '            return null;',
+        '        }',
+        '        public InvoiceDto ControlInvoice(int id)',
+        '        {',
+        '            return null;',
+        '        }',
+        '    }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, 'Parts.java'),
+      [
+        'public class Parts {',
+        '    public static String[] splitParts(String value) {',
+        '        return value.split(",");',
+        '    }',
+        '    public java.util.List<String> listNames() {',
+        '        return null;',
+        '    }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+    const symbols = await collectRepoSymbols(dir, null);
+    for (const name of [
+      'FindInvoice',
+      'BuildInvoiceList',
+      'FormatInvoice',
+      'LoadInvoiceAsync',
+      'GroupInvoices',
+      'ControlInvoice',
+      'splitParts',
+      'listNames',
+    ]) {
+      expect(symbols.has(name), name).toBe(true);
+    }
+    // Admitting `.` and `?` must not let a CALL through. A member call has no whitespace before
+    // its name, and a switch arm or an `if` has no type token before the parens — every name
+    // below is distinctive, so only the regex can keep it out.
+    for (const name of ['IsActiveItem', 'InvokeHandler', 'IsOverdue', 'HandleOpenCase']) {
+      expect(symbols.has(name), name).toBe(false);
+    }
+  });
+
   it('skips SwiftPM and CocoaPods dependency trees', async () => {
     // `.build/checkouts/<dep>/Sources` is a DEPENDENCY's source. Collecting it makes a library
     // API the article legitimately names read as repository-private, and the block is deleted —
