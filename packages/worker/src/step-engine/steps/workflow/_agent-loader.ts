@@ -1,6 +1,5 @@
-import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { pathExists } from '../onboarding/_helpers.js';
+import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
 
 export interface AgentPersona {
   id: string;
@@ -16,21 +15,17 @@ export interface AgentPersona {
 const README_BASENAME = 'readme.md';
 
 export async function loadAgentPersonas(repoPath: string): Promise<AgentPersona[]> {
-  const dir = path.join(repoPath, '.claude', 'agents');
-  if (!(await pathExists(dir))) return [];
-  const entries = await readdir(dir, { withFileTypes: true });
+  const relDir = path.join('.claude', 'agents');
+  const entries = await readdirNoFollow(repoPath, relDir);
+  if (!entries) return [];
   const personas: AgentPersona[] = [];
   for (const e of entries) {
     if (!e.isFile()) continue;
     if (!e.name.endsWith('.md')) continue;
     if (e.name.toLowerCase() === README_BASENAME) continue;
-    const sourcePath = path.join(dir, e.name);
-    let raw: string;
-    try {
-      raw = await readFile(sourcePath, 'utf8');
-    } catch {
-      continue;
-    }
+    const sourcePath = path.join(repoPath, relDir, e.name);
+    const raw = await readRegularFileNoFollow(repoPath, path.join(relDir, e.name));
+    if (raw === null) continue;
     const parsed = parseAgentFile(raw);
     if (!parsed) continue;
     const fallbackId = e.name.replace(/\.md$/i, '');
