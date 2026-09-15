@@ -15,6 +15,9 @@ const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
 const BASELINE = path.join(HERE, 'fs-ratchet.json');
 const SCAN_ROOTS = ['packages/api/src', 'packages/worker/src', 'packages/shared/src/repo'];
 
+/** Every path-taking export of `node:fs` / `node:fs/promises` on Node 26.7.0 (checked against
+ *  the runtime's own export list: what is absent here is descriptor-based — `fstat`, `ftruncate`,
+ *  `read`, `write`, … — or takes no path). Sync twins follow from the suffix rule below. */
 const CALLS = new Set([
   'readFile',
   'writeFile',
@@ -56,7 +59,20 @@ const CALLS = new Set([
   'openAsBlob',
 ]);
 const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
+const FS_SPEC = `['"](?:node:)?fs(?:\\/promises)?['"]`;
 const IMPORT = /import\s+([^'";]+?)\s+from\s+['"]([^'"]+)['"]/g;
+/** `const { a, b: c } = await import('node:fs')` and `const fs = await import('node:fs')`. */
+const DYNAMIC_IMPORT = new RegExp(
+  `(?:const|let|var)\\s+(\\{[^}]*\\}|\\w+)\\s*=\\s*await\\s+import\\(\\s*${FS_SPEC}\\s*\\)`,
+  'g',
+);
+/** `(await import('node:fs')).readFile(` — a member call on the module expression itself. */
+const INLINE_IMPORT = `\\(await\\s+import\\(\\s*${FS_SPEC}\\s*\\)\\)`;
+/** Every dynamic import of the module, parsed or not. */
+const ANY_DYNAMIC_IMPORT = new RegExp(`import\\(\\s*${FS_SPEC}`, 'g');
+/** CJS routes into a builtin. Neither appears in this ESM tree; a file that adds one is looked at,
+ *  not silently undercounted. */
+const CJS_ROUTES = /(?:getBuiltinModule|createRequire)\(/g;
 
 /** One of the path-taking fs functions, in its async or its sync form. */
 function isPathCall(name: string): boolean {
@@ -64,55 +80,74 @@ function isPathCall(name: string): boolean {
 }
 
 interface FsBindings {
-  /** Bindings whose members are called as `<alias>.name(`: `* as fs`, a default import, and
-   *  `{ promises as fsp }`. */
-  namespaces: string[];
-  /** Local names of named imports of path-taking functions, aliased or not. */
-  locals: string[];
+  /** Bindings whose members are called as `<alias>.name(`: `* as fs`, a default import,
+   *  `{ promises as fsp }`, `const fs = await import(...)`. */
+  namespaces: Set<string>;
+  /** Local names of imported path-taking functions, aliased or not. */
+  locals: Set<string>;
+  /** Ways of reaching the module the parser does not understand. */
+  unclassified: number;
 }
 
-/** What a source binds from the fs module. Type-only imports bind nothing callable. An aliased
- *  named import counts under its LOCAL name, or `import { readFile as readRepoFile }` would be a
- *  call the baseline never sees. */
+/** One specifier list — `{ readFile, stat as statPath }` from a static import (`sep` = ` as `) or
+ *  `{ readFile, stat: statPath }` from a destructured dynamic one (`sep` = `:`). A path-taking
+ *  import binds its LOCAL name, or `import { readFile as readRepoFile }` would be a call the
+ *  baseline never sees; `promises` binds a namespace; a type specifier binds nothing callable. */
+function bindSpecifiers(list: string, sep: RegExp, into: FsBindings): void {
+  for (const spec of list.split(',')) {
+    const [imported, alias] = spec.trim().split(sep);
+    const local = (alias ?? imported)?.trim();
+    if (!imported || !local || imported.startsWith('type ')) continue;
+    if (imported === 'promises') into.namespaces.add(local);
+    else if (isPathCall(imported)) into.locals.add(local);
+  }
+}
+
+/** What a source binds from the fs module, through static and dynamic imports. */
 function fsBindings(source: string): FsBindings {
-  const namespaces = new Set<string>();
-  const locals = new Set<string>();
+  const into: FsBindings = { namespaces: new Set(), locals: new Set(), unclassified: 0 };
   for (const match of source.matchAll(IMPORT)) {
     const clause = match[1]!.trim();
     if (!FS_MODULE.test(match[2]!) || clause.startsWith('type ')) continue;
     const star = /\*\s+as\s+(\w+)/.exec(clause);
-    if (star) namespaces.add(star[1]!);
+    if (star) into.namespaces.add(star[1]!);
     const dflt = /^(\w+)\s*(?:,|$)/.exec(clause);
-    if (dflt) namespaces.add(dflt[1]!);
+    if (dflt) into.namespaces.add(dflt[1]!);
     const braces = /\{([^}]*)\}/.exec(clause);
-    if (!braces) continue;
-    for (const spec of braces[1]!.split(',')) {
-      const [imported, alias] = spec.trim().split(/\s+as\s+/);
-      const local = alias ?? imported;
-      if (!imported || !local || imported.startsWith('type ')) continue;
-      if (imported === 'promises') namespaces.add(local);
-      else if (isPathCall(imported)) locals.add(local);
-    }
+    if (braces) bindSpecifiers(braces[1]!, /\s+as\s+/, into);
   }
-  return { namespaces: [...namespaces], locals: [...locals] };
+  let parsed = 0;
+  for (const match of source.matchAll(DYNAMIC_IMPORT)) {
+    parsed += 1;
+    const target = match[1]!;
+    if (target.startsWith('{')) bindSpecifiers(target.slice(1, -1), /\s*:\s*/, into);
+    else into.namespaces.add(target);
+  }
+  parsed += source.match(new RegExp(INLINE_IMPORT, 'g'))?.length ?? 0;
+  const dynamic = source.match(ANY_DYNAMIC_IMPORT)?.length ?? 0;
+  into.unclassified = dynamic - parsed + (source.match(CJS_ROUTES)?.length ?? 0);
+  return into;
 }
 
-/** Path-based fs calls in one source: the local names of named imports, and `<alias>.name(` /
- *  `<alias>.promises.name(` for namespace-like bindings. Methods on anything else (`fh.stat()`,
- *  `handle.readFile()`) act on a descriptor, not a path, and do not count. Sync variants count like
- *  their async twins. */
+/** Path-based fs calls in one source: the local names bound above, `<alias>.name(` /
+ *  `<alias>.promises.name(` on a namespace binding, and `(await import('node:fs')).name(`.
+ *  Methods on anything else (`fh.stat()`, `handle.readFile()`) act on a descriptor, not a path,
+ *  and do not count. Sync variants count like their async twins; `(?:\.native)?` is
+ *  `realpath.native` / `realpathSync.native`, the one member-call form. Throws for a source that
+ *  reaches the module in a shape this cannot classify, so the file fails the test instead of
+ *  counting low. */
 export function countFsCalls(source: string): number {
-  const { namespaces, locals } = fsBindings(source);
-  const forms: string[] = [];
-  // `(?:\.native)?` is `realpath.native` / `realpathSync.native`, the one member call form.
-  if (locals.length > 0) forms.push(`(?<![\\w.$])(?:${locals.join('|')})(?:\\.native)?\\(`);
-  if (namespaces.length > 0) {
-    const names = [...CALLS].join('|');
-    forms.push(
-      `(?<![\\w.$])(?:${namespaces.join('|')})\\.(?:promises\\.)?(?:${names})(?:Sync)?(?:\\.native)?\\(`,
+  const { namespaces, locals, unclassified } = fsBindings(source);
+  if (unclassified > 0) {
+    throw new Error(
+      'reaches node:fs through a dynamic import, createRequire or getBuiltinModule shape the ratchet cannot count',
     );
   }
-  if (forms.length === 0) return 0;
+  const names = [...CALLS].join('|');
+  const member = `\\.(?:promises\\.)?(?:${names})(?:Sync)?(?:\\.native)?\\(`;
+  const forms = [`${INLINE_IMPORT}${member}`];
+  if (locals.size > 0) forms.push(`(?<![\\w.$])(?:${[...locals].join('|')})(?:\\.native)?\\(`);
+  if (namespaces.size > 0) forms.push(`(?<![\\w.$])(?:${[...namespaces].join('|')})${member}`);
   return source.match(new RegExp(forms.join('|'), 'g'))?.length ?? 0;
 }
 
@@ -133,16 +168,22 @@ function sourceFiles(dir: string): string[] {
   return out;
 }
 
-function measure(): Record<string, number> {
+function measure(): { counts: Record<string, number>; uncountable: string[] } {
   const counts: [string, number][] = [];
+  const uncountable: string[] = [];
   for (const root of SCAN_ROOTS) {
     for (const file of sourceFiles(path.join(REPO_ROOT, root))) {
-      const n = countFsCalls(readFileSync(file, 'utf8'));
-      if (n > 0) counts.push([path.relative(REPO_ROOT, file).split(path.sep).join('/'), n]);
+      const rel = path.relative(REPO_ROOT, file).split(path.sep).join('/');
+      try {
+        const n = countFsCalls(readFileSync(file, 'utf8'));
+        if (n > 0) counts.push([rel, n]);
+      } catch (err) {
+        uncountable.push(`${rel}: ${(err as Error).message}`);
+      }
     }
   }
   counts.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return Object.fromEntries(counts);
+  return { counts: Object.fromEntries(counts), uncountable };
 }
 
 describe('path-based fs call ratchet', () => {
@@ -190,14 +231,34 @@ describe('path-based fs call ratchet', () => {
     expect(countFsCalls("import { open } from './mine.js';\nopen(p);")).toBe(0);
   });
 
+  it('counts dynamic imports, and refuses a shape it cannot classify', () => {
+    expect(
+      countFsCalls(
+        "const { readFile, stat: statPath } = await import('node:fs/promises');\nawait readFile(p); await statPath(p);",
+      ),
+    ).toBe(2);
+    expect(
+      countFsCalls("const fsp = await import('node:fs/promises');\nawait fsp.readFile(p);"),
+    ).toBe(1);
+    expect(countFsCalls("(await import('node:fs')).readFileSync(p);")).toBe(1);
+    expect(() => countFsCalls("import('node:fs').then((fs) => fs.readFile(p));")).toThrow(
+      /cannot count/,
+    );
+    expect(() => countFsCalls("const fs = process.getBuiltinModule('node:fs');")).toThrow(
+      /cannot count/,
+    );
+    expect(() =>
+      countFsCalls("import { createRequire } from 'node:module';\ncreateRequire(import.meta.url)"),
+    ).toThrow(/cannot count/);
+  });
+
   it('matches the per-file baseline exactly', () => {
-    const current = measure();
+    const { counts: current, uncountable } = measure();
     if (process.env.UPDATE_FS_RATCHET) {
       writeFileSync(BASELINE, `${JSON.stringify(current, null, 2)}\n`);
-      return;
     }
     const baseline = JSON.parse(readFileSync(BASELINE, 'utf8')) as Record<string, number>;
-    const problems: string[] = [];
+    const problems: string[] = [...uncountable];
     for (const [file, n] of Object.entries(current)) {
       const pinned = baseline[file] ?? 0;
       if (n !== pinned)
