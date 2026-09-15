@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   canonicalFacetValueSql,
+  FACET_MAJOR_PARENTS,
   normalizeFacets,
   orphanFacetMajors,
+  orphanFacetMajorSql,
 } from '../src/global-kb/schema.js';
 import { extractProjectFacets } from '../src/global-kb/facets.js';
 
@@ -136,5 +138,28 @@ describe('major-version facets must name their technology', () => {
       { dimension: 'dbMajor', parent: 'database' },
     ]);
     expect(orphanFacetMajors({ framework: ['drupal'], frameworkMajor: ['11'] })).toEqual([]);
+  });
+});
+
+// The backfill's copy of the rule is GENERATED from the same pairs, so adding a pair cannot leave
+// the SQL engine behind the write path. Behaviour on the real engine is verified against every
+// legacy shape separately; this pins the generation.
+describe('orphanFacetMajorSql', () => {
+  const sql = orphanFacetMajorSql('kv.key', 't.facets');
+
+  it('has one arm per FACET_MAJOR_PARENTS pair and none for self-identifying majors', () => {
+    for (const [major, parent] of Object.entries(FACET_MAJOR_PARENTS)) {
+      expect(sql).toContain(`kv.key = '${major}'`);
+      expect(sql).toContain(`t.facets->'${parent}'`);
+    }
+    expect(sql).not.toContain('phpMajor');
+    expect(sql).not.toContain('nodeMajor');
+  });
+
+  // Postgres does not promise AND evaluates left to right, and jsonb_array_elements_text raises
+  // on a scalar — so the element read is guarded by a CASE, which does order its evaluation.
+  it("reads elements through a CASE guard and uses the cleaning's blank rule", () => {
+    expect(sql).toContain("CASE WHEN jsonb_typeof(t.facets->'framework') = 'array'");
+    expect(sql).toContain("btrim(fv) <> ''");
   });
 });

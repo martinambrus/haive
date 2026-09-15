@@ -50,6 +50,29 @@ export const FACET_DIMENSIONS = [
   'tags',
 ] as const satisfies readonly (keyof GlobalKbFacets)[];
 
+/** `orphanFacetMajors` as a SQL boolean, generated from the SAME `FACET_MAJOR_PARENTS`, so the
+ *  schema backfill cannot disagree with `normalizeFacets` about which majors to drop — the shape
+ *  `canonicalFacetValueSql` established for the value rule.
+ *
+ *  True when `keyExpr` names a major holding a non-blank value in `facetsExpr` while its parent
+ *  holds none. "Blank" is the backfill's own cleaning rule, `btrim(x) = ''`, so inside one
+ *  statement this means "absent AFTER cleaning": a parent the cleaning empties — a legacy `[""]`,
+ *  or a bare `[]` — counts as absent, exactly as it does once `normalizeFacets` has dropped it.
+ *  Elements are read through a CASE rather than guarded by AND, because Postgres does not promise
+ *  to evaluate AND left to right and `jsonb_array_elements_text` raises on a scalar.
+ *
+ *  `keyExpr` names the dimension and `facetsExpr` the whole stored facets object; both are SQL
+ *  expressions. Only code constants are interpolated, never a stored value. */
+export function orphanFacetMajorSql(keyExpr: string, facetsExpr: string): string {
+  const present = (dim: string): string =>
+    `EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${facetsExpr}->'${dim}') = 'array' THEN ${facetsExpr}->'${dim}' ELSE '[]'::jsonb END) AS fv WHERE btrim(fv) <> '')`;
+  const arms = Object.entries(FACET_MAJOR_PARENTS).map(
+    ([major, parent]) =>
+      `(${keyExpr} = '${major}' AND ${present(major)} AND NOT ${present(parent)})`,
+  );
+  return `(${arms.join(' OR ')})`;
+}
+
 /** Facet values as they must be STORED: trimmed, lowercased, deduped, empties dropped.
  *
  *  The two filters compare differently and only one of them can be made lenient.

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
+import { orphanFacetMajorSql } from '../src/global-kb/schema.js';
 import type { GlobalKbConnection } from '../src/global-kb/connection.js';
 
 // Mirrors the repo's RAG tests (e.g. worker insertChunk upsert SQL): no live
@@ -105,6 +106,21 @@ describe('ensureGlobalKbSchema', () => {
     // The predicate is "differs from its canonical form", which subsumes case, padding and
     // aliases — the case-only test must NOT come back.
     expect(sql).not.toContain('v <> lower(v)');
+  });
+
+  // The cleaning drops a blank parent, so without the relational rule it MANUFACTURED an orphan
+  // major: a legacy `{"framework":[""],"frameworkMajor":["11"]}` came out as a rule matching every
+  // framework's v11. It has to sit in BOTH places — the aggregation, so a selected row drops the
+  // major, and the predicate, so an already-clean `{"frameworkMajor":["11"]}` is selected at all —
+  // and on BOTH tables, since retrieval reads the chunk's own copy of the facets.
+  it("applies the write path's parent/major rule in the facet backfill", async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const sql = queries();
+    const orphan = orphanFacetMajorSql('kv.key', 't.facets');
+    const count = (needle: string): number => sql.split(needle).length - 1;
+    expect(count(`WHERE a.arr IS NOT NULL AND NOT ${orphan}`)).toBe(2);
+    expect(count(`OR ${orphan}`)).toBe(2);
   });
 
   it('falls back to jsonb embeddings when pgvector is unavailable', async () => {
