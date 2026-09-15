@@ -74,6 +74,10 @@ const ANY_DYNAMIC_IMPORT = new RegExp(`import\\(\\s*${FS_SPEC}`, 'g');
  *  not silently undercounted. */
 const CJS_ROUTES = /(?:getBuiltinModule|createRequire)\(/g;
 
+/** `.name(` / `.promises.name(` for a counted function; `(?:\.native)?` is `realpath.native` /
+ *  `realpathSync.native`, the one member-call form. */
+const MEMBER = `\\.(?:promises\\.)?(?:${[...CALLS].join('|')})(?:Sync)?(?:\\.native)?\\(`;
+
 /** One of the path-taking fs functions, in its async or its sync form. */
 function isPathCall(name: string): boolean {
   return CALLS.has(name) || (name.endsWith('Sync') && CALLS.has(name.slice(0, -4)));
@@ -123,7 +127,9 @@ function fsBindings(source: string): FsBindings {
     if (target.startsWith('{')) bindSpecifiers(target.slice(1, -1), /\s*:\s*/, into);
     else into.namespaces.add(target);
   }
-  parsed += source.match(new RegExp(INLINE_IMPORT, 'g'))?.length ?? 0;
+  // Parsed only when the member call follows directly: `(await import('node:fs')).default` bound
+  // to a name would otherwise be credited here and its later calls counted under nothing.
+  parsed += source.match(new RegExp(`${INLINE_IMPORT}${MEMBER}`, 'g'))?.length ?? 0;
   const dynamic = source.match(ANY_DYNAMIC_IMPORT)?.length ?? 0;
   into.unclassified = dynamic - parsed + (source.match(CJS_ROUTES)?.length ?? 0);
   return into;
@@ -132,8 +138,7 @@ function fsBindings(source: string): FsBindings {
 /** Path-based fs calls in one source: the local names bound above, `<alias>.name(` /
  *  `<alias>.promises.name(` on a namespace binding, and `(await import('node:fs')).name(`.
  *  Methods on anything else (`fh.stat()`, `handle.readFile()`) act on a descriptor, not a path,
- *  and do not count. Sync variants count like their async twins; `(?:\.native)?` is
- *  `realpath.native` / `realpathSync.native`, the one member-call form. Throws for a source that
+ *  and do not count. Sync variants count like their async twins. Throws for a source that
  *  reaches the module in a shape this cannot classify, so the file fails the test instead of
  *  counting low. */
 export function countFsCalls(source: string): number {
@@ -143,11 +148,9 @@ export function countFsCalls(source: string): number {
       'reaches node:fs through a dynamic import, createRequire or getBuiltinModule shape the ratchet cannot count',
     );
   }
-  const names = [...CALLS].join('|');
-  const member = `\\.(?:promises\\.)?(?:${names})(?:Sync)?(?:\\.native)?\\(`;
-  const forms = [`${INLINE_IMPORT}${member}`];
+  const forms = [`${INLINE_IMPORT}${MEMBER}`];
   if (locals.size > 0) forms.push(`(?<![\\w.$])(?:${[...locals].join('|')})(?:\\.native)?\\(`);
-  if (namespaces.size > 0) forms.push(`(?<![\\w.$])(?:${[...namespaces].join('|')})${member}`);
+  if (namespaces.size > 0) forms.push(`(?<![\\w.$])(?:${[...namespaces].join('|')})${MEMBER}`);
   return source.match(new RegExp(forms.join('|'), 'g'))?.length ?? 0;
 }
 
@@ -244,6 +247,9 @@ describe('path-based fs call ratchet', () => {
     expect(() => countFsCalls("import('node:fs').then((fs) => fs.readFile(p));")).toThrow(
       /cannot count/,
     );
+    expect(() =>
+      countFsCalls("const fs = (await import('node:fs')).default;\nfs.readFileSync(p);"),
+    ).toThrow(/cannot count/);
     expect(() => countFsCalls("const fs = process.getBuiltinModule('node:fs');")).toThrow(
       /cannot count/,
     );
