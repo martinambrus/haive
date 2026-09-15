@@ -1178,6 +1178,13 @@ export async function resolveWorkspaceRoot(
       })
     : null;
   const repoRoot = repo?.storagePath ?? repo?.localPath ?? null;
+  // A deleted repository leaves its tasks with `repository_id` NULL (`onDelete: 'set null'`)
+  // and `worktree_path` still set, and the cancel/cleanup that follows the delete is queued,
+  // not synchronous. With no repository there is nothing trusted to anchor at — the worktree
+  // itself is what a still-running sandbox can rewrite — so that state is refused outright.
+  if (task.worktreePath && !repoRoot) {
+    throw new HttpError(409, 'Task workspace no longer belongs to a repository');
+  }
   let root = task.worktreePath ?? repoRoot;
   if (!root) {
     // A task with neither a worktree nor a repository may still have a workspace: a repo-less
