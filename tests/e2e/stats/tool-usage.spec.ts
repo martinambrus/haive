@@ -214,6 +214,35 @@ test.describe('tool-usage statistics', () => {
     }
   });
 
+  test('the tab renders the seeded usage', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    let fixture = null as Awaited<ReturnType<typeof seedTaskFixture>> | null;
+    try {
+      userId = (await registerUser(sql, page.request, { prefix: 'tools-page' })).userId;
+      fixture = await seedTaskFixture(sql, userId, 'tools-render');
+      const cliProviderId = await createProvider(page.request);
+      await seedSpend(
+        sql,
+        { taskId: fixture.taskId, taskStepId: fixture.failedStepId, cliProviderId },
+        [{ durationMs: 10 * 60_000, costUsd: 0.1, totalTokens: 1_000, toolUsage: OBSERVED }],
+      );
+
+      await page.goto('/stats?tab=tools');
+      await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
+      // The page resolves its zone and clock on the client and gates the first fetch on them,
+      // so the figures land a beat after the heading (see summary.spec.ts).
+      await expect(page.getByText('code-reviewer').first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText('haive-rag/rag_search').first()).toBeVisible();
+      // No repository selected: the unused card asks for one instead of reporting.
+      await expect(page.getByText(/Select a repository above/).first()).toBeVisible();
+    } finally {
+      if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
   test('another user sees none of it', async ({ page, playwright }) => {
     const sql = getSql();
     let ownerId = '';
