@@ -14,6 +14,10 @@
 > Anchor drift shared by both: `buildRunList` is now `task-queue.ts:152` (half A says 112-130)
 > and `buildRunAppRunList` is `:186` (says 146-178). Both `execution-paths.ts:98`
 > (`PATH_REQUIRED_TARGETS`) and `:133` (`orderWorkflowRunList`) still resolve exactly as cited.
+>
+> **Depends on `toasty-percolating-kernighan`** for Phase 3.1's agent handling. A prompt-template
+> step's `agentPool` and `{{agent:<id>}}` tokens ride that plan's per-invocation agent isolation,
+> which ships first and independently.
 
 ## Context
 
@@ -80,8 +84,28 @@ disabled, removed, or failed to load after a rebuild.
 - A definition with an unresolvable step becomes **not selectable, with a named reason** — "requires
   module `deep-analysis`, which is not installed". Never a crash, and never silently dropping the
   missing step, which would run a truncated pipeline the admin never authored and cannot see.
-- Tasks already running are untouched: their run list is materialised, and `buildRunList` is
-  forward-walked from the current step. This gates new task creation only.
+- A persona a prompt-template step names with `{{agent:<id>}}` follows the same never-silent rule,
+  but task-create cannot refuse one: agent definitions live per repository, and whether a persona
+  resolves depends on the tree the invocation mounts, which `01-worktree-setup` decides only when it
+  runs (it picks the base then, and a worktree holds tracked files only). So task-create refuses
+  only an id outside the marker grammar. When the worker starts the task (`handleStartTask`, beside
+  its `task.running` event, which a task-level retry runs again), that plan's reader checks the
+  repository as checked out and records an `agent_persona.unresolved` task event, naming the step
+  and the agent, for each persona it cannot use there: no `<id>.md` in any markdown agent directory,
+  a symlink, an out-of-tree path, an unparseable file, an empty body, a secret-masked file, or a
+  body past the per-prompt `MAX_PERSONA_BODY_BYTES` budget. The warning never blocks the start (a
+  check that cannot run logs, records nothing and leaves the decision to dispatch). It runs in the worker because that
+  reader and the secret-mask policy are worker code, and sharing one reader keeps the warning and
+  the dispatch from disagreeing about anything but the tree. Dispatch is authoritative: a persona it
+  cannot use fails the dispatch with a named reason ("step `<slug>` needs agent
+  `drupal7-developer`, which this repository does not define"), never an empty persona. Refusing
+  earlier would block a persona that exists only on the base the task branches from — a rule strict
+  enough to choose must not refuse (`AGENTS.md`). A definition that exists only as
+  `.codex/agents/<id>.toml` counts as absent until a TOML reader exists. Built-in steps never hit
+  it — their personas always carry an inline fallback.
+- Tasks already running are untouched by the step half of this rule: their run list is
+  materialised, and `buildRunList` is forward-walked from the current step. That half gates new task
+  creation only; the persona half warns at start and decides at every dispatch, as above.
 
 ### Spatial composability is these capability tokens — already done, do not "add" it
 
@@ -162,9 +186,11 @@ The task-detail tabs (steps/editor/terminal/activity/attachments) and the `/task
 
 ### 3.1 Prompt-template step -> synthetic StepDefinition (data, not code)
 
-A definition entry `{ kind:'prompt-template', stepSlug, title, promptTemplate, requiredCapabilities, timeoutMs, uiPanels? }` becomes a synthetic `StepDefinition` at registration time, reusing the existing runner/dispatch with no new execution path.
+A definition entry `{ kind:'prompt-template', stepSlug, title, promptTemplate, requiredCapabilities, timeoutMs, agentPool?, uiPanels? }` becomes a synthetic `StepDefinition` at registration time, reusing the existing runner/dispatch with no new execution path.
 
-- Factory `synthesizeStepDefinition(entry, defSlug, index)`: `metadata.id = 'custom.<defSlug>.<stepSlug>'`, `workflowType = defSlug`, `requiresCli: true`, capabilities from config. `llm.buildPrompt(args)` = safe mustache-style `{{field}}` interpolation of `entry.promptTemplate` against `args.formValues` (already has preAnswers overlaid) + `args.detected` — plain substitution, no eval/Function. `parseOutput` = generic JSON try-parse. `apply` = generic: write raw + parsed to `task_steps.output`; no in-process fs writes (file work goes through the sandboxed MCP tool).
+- Factory `synthesizeStepDefinition(entry, defSlug, index)`: `metadata.id = 'custom.<defSlug>.<stepSlug>'`, `workflowType = defSlug`, `requiresCli: true`, capabilities from config, `llm.agentPool` from `entry.agentPool`. `llm.buildPrompt(args)` = safe mustache-style `{{field}}` interpolation of `entry.promptTemplate` against `args.formValues` (already has preAnswers overlaid) + `args.detected` — plain substitution, no eval/Function. `parseOutput` = generic JSON try-parse. `apply` = generic: write raw + parsed to `task_steps.output`; no in-process fs writes (file work goes through the sandboxed MCP tool).
+- Repository agents follow `toasty-percolating-kernighan`'s per-invocation rule with nothing custom here. An entry whose `requiredCapabilities` carry `file_write` keeps seeing the real tree. One that carries `subagents` keeps the agent catalog, and that capability already restricts dispatch to sub-agent-capable adapters (`resolveDispatch`), every one of which reads a markdown agent directory — so a template that wants the model to spawn repository agents never lands on amp (no agent directory), codex or gemini. Any other entry sees no repository agent definitions unless it sets `agentPool: '*'`, which is for reading agent files as data and leaves provider eligibility alone.
+- `{{agent:<id>}}` is not a form field. `buildPrompt` renders it as a marker of its own, `[[HAIVE_TEMPLATE_PERSONA:<id>]]`, never as that plan's `agentDefinitionGuidance` block, and Phase 3.1 widens that plan's persona resolver for that syntax only, because the LSP gate that plan keeps exists to protect an embedded fallback a template persona does not have. The kind rides in the prompt itself, not in a `DispatchRequest` field every dispatch path would have to carry, and the rewrite handles both kinds in one `replace` over a pattern matching either, since a second pass would rescan the bodies the first inserted. A token id must match the marker grammar (`[a-z0-9-]+`): the composer refuses any other id at save, task-create refuses it with a named reason, and `agentDefinitionGuidance` and the template marker's renderer both assert it, so no caller can emit a marker the rewrite would leave unparsed. Save and task-create run in the api, which cannot import the worker's private patterns, so the id grammar is one `@haive/shared` constant that the api's checks and both marker patterns are built from. The body is pasted for EVERY provider and whether or not the invocation is isolated — a template that declares `file_write`, `subagents` or `agentPool: '*'`, or names an agent directory or file in its prompt, still has no embedded protocol — so the widened resolver runs for these markers outside that plan's isolation predicate, and every body it pastes is still recorded in `pastedPersonaPaths` for that plan's exec-time secret-mask recheck, isolated or not. It reads `<id>.md` by filename, as that plan does, from the selected provider's own agent directory when that one is markdown and holds it, and otherwise from the first markdown agent directory in catalog order that does — the same directories the dangling-reference check searches, so a persona defined only in `.gemini/agents` raises no start-time warning and still resolves for a claude dispatch, and codex (TOML) and amp (no agent directory) get it without the TOML reader that plan defers. A marker whose body cannot be found at dispatch fails the dispatch with the dangling-reference reason instead of running without its persona — the start-time check reads a different tree, and the tree can change before dispatch — and one whose body would exceed that plan's per-prompt `MAX_PERSONA_BODY_BYTES` budget fails the same way, naming the file and its size, so many tokens cannot add up past it. A template that names an agent directory or file (`Review {{path}}` with `path = .claude/agents/foo.md`) needs nothing of its own: that plan's prompt path scan sees interpolated values and static text like any other prompt text; a template marker names no path, and the bodies pasted for it are scanned verbatim, marker-shaped text included, since the rewrite never rescans what it inserts.
 - Registration: `registerCustomStepsFromDefinitions(registry, db)` runs at boot after `registerAllSteps`, reading definitions and calling `registry.override(...)` (packages/worker/src/step-engine/registry.ts:19, upserts, tolerates re-runs). `buildRunList` `require()`s ids at execution time, well after boot, so synthetics are present when needed.
 - CLI-dispatch gating caveat: `assertCliDispatchListInSync` (steps/index.ts:94) throws if an `llm` step is absent from the static `CLI_DISPATCH_STEP_IDS`. Custom synthetics register after that snapshot so they fall outside it (confirm ordering at boot). The web per-step CLI picker must treat `custom.*` as CLI-dispatching via the catalog `dispatchesCli` flag rather than the static shared array — the single static-shared-constant that does not stretch to custom steps.
 
@@ -209,7 +235,12 @@ prompt-template step is DATA, not code:
 - An admin describes the step they want in natural language ("review the changed SQL migrations for
   destructive operations and report each with severity"). An LLM turn produces a candidate
   `{ kind:'prompt-template', stepSlug, title, promptTemplate, requiredCapabilities, timeoutMs,
-  uiPanels? }` entry — the exact shape Phase 3.1 already synthesizes into a StepDefinition.
+  agentPool?, uiPanels? }` entry — the exact shape Phase 3.1 already synthesizes into a StepDefinition.
+  The turn is handed the persona catalog Haive's onboarding templates install (id + description), so
+  the template can name one with `{{agent:<id>}}`. Authoring is global, so no single repository's
+  own agents apply; a repository-specific persona typed by hand is warned about when a task starts
+  and checked authoritatively at dispatch by the dangling-reference rule, and the admin reviews the
+  pick in the composer like any other field.
 - Nothing executes on generation. The output is a definition row the admin previews, edits in the
   composer, and saves. It flows through the SAME prereq/loop-closure validator and the SAME
   `synthesizeStepDefinition` factory — there is no new execution path, no runtime code injection,
@@ -232,7 +263,7 @@ prompt-template step is DATA, not code:
 3. task-type-manifest.ts + `syncTaskTypeDefinitions` boot-upsert + boot byte-identical assertion.
 4. Shared prereq/loop-closure validator (mirrors assertPathStepSetsClosed) + `STEP_LOOP_TARGETS`.
 5. Shared `UiPanelSpec` descriptor + `resolveStepPanels` / `BUILTIN_STEP_PANELS` centralization.
-6. `synthesizeStepDefinition` factory + `registerCustomStepsFromDefinitions` boot hook.
+6. `synthesizeStepDefinition` factory (carrying `agentPool`, rendering `{{agent:<id>}}` as `[[HAIVE_TEMPLATE_PERSONA:<id>]]` markers) + `registerCustomStepsFromDefinitions` boot hook + the start-time persona check in `handleStartTask` (`agent_persona.unresolved` events) + the shared `{{agent:<id>}}` id grammar constant.
 7. Parameterized custom-mcp-server.ts + `/custom-mcp` router + vetted callback registry.
 8. `CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED` kill-switch + admin toggle card.
 9. task-types admin API router + admin page + composer component + public `GET /task-types`.
@@ -243,8 +274,8 @@ prompt-template step is DATA, not code:
 - Run list: packages/worker/src/queues/task-queue.ts:88-110 (context), :112-130 (dispatch rewrite), :180-213 (resolve by slug); buildRunAppRunList and orderWorkflowRunList bodies unchanged.
 - Boot/seed: packages/worker/src/step-engine/task-type-manifest.ts (NEW), composable-catalog.ts (NEW), bootstrap.ts:45, steps/index.ts (assertions), execution-paths.ts:98-108 (generalize).
 - Fix loop: packages/worker/src/step-engine/steps/workflow/_fix-loop.ts:16,281,315,389 + call sites task-queue.ts:982,1205.
-- Phase 3: packages/worker/src/step-engine/step-definition.ts (synthetic step shape), sandbox/mcp-config.ts:75-150, queues/cli-exec/resolvers.ts:300.
-- Shared: packages/shared/src/schemas/tasks.ts:3-8,66, types/index.ts:1, config.service.ts (kill-switch), new validator + UiPanelSpec.
+- Phase 3: packages/worker/src/step-engine/step-definition.ts (synthetic step shape, `llm.agentPool`), sandbox/mcp-config.ts:75-150, queues/cli-exec/resolvers.ts:300, queues/task-queue.ts `handleStartTask` (the start-time persona check), and the persona resolver `toasty-percolating-kernighan` adds to orchestrator/dispatcher.ts and steps/_retrieval-guidance.ts (widened for the template persona marker only, in the same single rewrite pass; both marker patterns built from the shared id grammar).
+- Shared: packages/shared/src/schemas/tasks.ts:3-8,66, types/index.ts:1, config.service.ts (kill-switch), new validator + UiPanelSpec, and the `{{agent:<id>}}` id grammar constant beside the validator.
 - Api: packages/api/src/routes/tasks/index.ts:154-247, task-types.ts (NEW), custom-mcp.ts (NEW), verify insert sites upgrades.ts:395 + global-kb.ts:336.
 - Web: packages/web/src/lib/api-client.ts:430, app/(app)/tasks/new/page.tsx, app/(app)/tasks/[id]/page.tsx (panel promotion), app/(app)/admin/task-types/page.tsx (NEW) + composer component.
 
@@ -254,7 +285,7 @@ prompt-template step is DATA, not code:
 - 1b (kill-switch off): re-run the workflow smoke (canned formPayloads; 12-worktree-cleanup must be action:'keep'); confirm run lists identical via `task_steps.run_seq` ordering. Confirm the enum->text ALTER is in-place, not drop+recreate.
 - Custom type (kill-switch on): author a static custom type in the admin UI composing [worktree-setup, a prompt-template step, a verify step]; create a task of it; confirm it runs, reuses terminal/IDE/browser, and the verify gate + panels render (via `uiPanels`, no stepId branch). Confirm the composition validator rejects an unsatisfied-prerequisite ordering and a loop step without a target.
 - Phase 2: custom type with a fix loop targeting its own implement-equivalent — confirm `loop_back` re-enters correctly; a built-in workflow task still fixes-loops identically (fallback path).
-- Phase 3: prompt-template step renders the template with form values and dispatches a sandbox CLI invocation; a custom MCP tool is injected via `buildDefaultMcpServers`, the agent calls it, and the `/custom-mcp` callback verifies the task token.
+- Phase 3: prompt-template step renders the template with form values and dispatches a sandbox CLI invocation; a custom MCP tool is injected via `buildDefaultMcpServers`, the agent calls it, and the `/custom-mcp` callback verifies the task token. A prompt-template step using `{{agent:peer-reviewer}}` produces a captured request (`toasty-percolating-kernighan`'s capture harness) that contains that persona's body and no other repository agent. A token naming a persona the checked-out repository lacks records `agent_persona.unresolved` when the task starts and fails that step's dispatch with the named reason, while one defined only on the base `01-worktree-setup` branches from warns at start and still runs; on codex the template marker's body is pasted while a built-in step's marker in the same task keeps its fallback sentence; a `file_write` template, which is not isolated, whose persona file a deny rule covers by exec time fails before the CLI starts; a token id outside the grammar is refused at task-create.
 - Use the project verify skill / chrome-devtools MCP to drive the admin UI and a custom task in the running app, not just tests.
 
 ## Rollback (write the undo before the change)
