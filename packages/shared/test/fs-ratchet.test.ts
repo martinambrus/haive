@@ -1,12 +1,17 @@
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 // `../src/fs-safe.ts` replaces path-based `node:fs` calls on repository paths one PR at a time, and
 // nothing else stops a new one landing meanwhile (there is no ESLint). This pins the count per
 // source file: a conversion lowers its entry, a new call raises it where a reviewer sees it. Exact
 // counts, so the baseline cannot drift stale in either direction.
+//
+// Calls are resolved on the TypeScript AST with the binder, not by text: a regex cannot tell
+// `const rm = runner.remove()` (a local shadowing the import, which the tree has) from
+// `const f = rm` (an alias it must refuse), and the binder answers that per identifier.
 //
 // Refresh after a conversion:  UPDATE_FS_RATCHET=1 pnpm --filter @haive/shared test
 
@@ -59,100 +64,242 @@ const CALLS = new Set([
   'openAsBlob',
 ]);
 const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
-const FS_SPEC = `['"](?:node:)?fs(?:\\/promises)?['"]`;
-const IMPORT = /import\s+([^'";]+?)\s+from\s+['"]([^'"]+)['"]/g;
-/** `const { a, b: c } = await import('node:fs')` and `const fs = await import('node:fs')`. */
-const DYNAMIC_IMPORT = new RegExp(
-  `(?:const|let|var)\\s+(\\{[^}]*\\}|\\w+)\\s*=\\s*await\\s+import\\(\\s*${FS_SPEC}\\s*\\)`,
-  'g',
-);
-/** `(await import('node:fs')).readFile(` — a member call on the module expression itself. */
-const INLINE_IMPORT = `\\(await\\s+import\\(\\s*${FS_SPEC}\\s*\\)\\)`;
-/** Every dynamic import of the module, parsed or not. */
-const ANY_DYNAMIC_IMPORT = new RegExp(`import\\(\\s*${FS_SPEC}`, 'g');
-/** CJS routes into a builtin. Neither appears in this ESM tree; a file that adds one is looked at,
- *  not silently undercounted. */
-const CJS_ROUTES = /(?:getBuiltinModule|createRequire)\(/g;
-
-/** `.name(` / `.promises.name(` for a counted function; `(?:\.native)?` is `realpath.native` /
- *  `realpathSync.native`, the one member-call form. */
-const MEMBER = `\\.(?:promises\\.)?(?:${[...CALLS].join('|')})(?:Sync)?(?:\\.native)?\\(`;
+/** Cheap pre-filter: a file that never names the module, and never names a CJS route that
+ *  could reach it without naming it at the import site, binds nothing from it. */
+const MENTIONS_FS = /['"](?:node:)?fs(?:\/promises)?['"]|createRequire|getBuiltinModule/;
 
 /** One of the path-taking fs functions, in its async or its sync form. */
 function isPathCall(name: string): boolean {
   return CALLS.has(name) || (name.endsWith('Sync') && CALLS.has(name.slice(0, -4)));
 }
 
-interface FsBindings {
-  /** Bindings whose members are called as `<alias>.name(`: `* as fs`, a default import,
-   *  `{ promises as fsp }`, `const fs = await import(...)`. */
-  namespaces: Set<string>;
-  /** Local names of imported path-taking functions, aliased or not. */
-  locals: Set<string>;
-  /** Ways of reaching the module the parser does not understand. */
-  unclassified: number;
+/** `namespace`: the whole module under a name (`* as fs`, a default import, `{ promises as
+ *  fsp }`, `{ default as fs }`, `const fs = await import(...)`). `function`: one path-taking
+ *  function under a local name, aliased or not. Anything else imported from the module — a type,
+ *  `constants`, a descriptor-based call — binds nothing this counts. */
+type Binding = 'namespace' | 'function';
+
+function isFsImportCall(node: ts.Node): node is ts.CallExpression {
+  if (!ts.isCallExpression(node) || node.expression.kind !== ts.SyntaxKind.ImportKeyword) {
+    return false;
+  }
+  const arg = node.arguments[0];
+  return arg !== undefined && ts.isStringLiteral(arg) && FS_MODULE.test(arg.text);
 }
 
-/** One specifier list — `{ readFile, stat as statPath }` from a static import (`sep` = ` as `) or
- *  `{ readFile, stat: statPath }` from a destructured dynamic one (`sep` = `:`). A path-taking
- *  import binds its LOCAL name, or `import { readFile as readRepoFile }` would be a call the
- *  baseline never sees; `promises` and `default` bind a namespace; a type specifier binds nothing
- *  callable. */
-function bindSpecifiers(list: string, sep: RegExp, into: FsBindings): void {
-  for (const spec of list.split(',')) {
-    const [imported, alias] = spec.trim().split(sep);
-    const local = (alias ?? imported)?.trim();
-    if (!imported || !local || imported.startsWith('type ')) continue;
-    if (imported === 'promises' || imported === 'default') into.namespaces.add(local);
-    else if (isPathCall(imported)) into.locals.add(local);
-  }
+function isFsImportDeclaration(node: ts.Node): node is ts.ImportDeclaration {
+  return (
+    ts.isImportDeclaration(node) &&
+    ts.isStringLiteral(node.moduleSpecifier) &&
+    FS_MODULE.test(node.moduleSpecifier.text)
+  );
 }
 
-/** What a source binds from the fs module, through static and dynamic imports. */
-function fsBindings(source: string): FsBindings {
-  const into: FsBindings = { namespaces: new Set(), locals: new Set(), unclassified: 0 };
-  for (const match of source.matchAll(IMPORT)) {
-    const clause = match[1]!.trim();
-    if (!FS_MODULE.test(match[2]!) || clause.startsWith('type ')) continue;
-    const star = /\*\s+as\s+(\w+)/.exec(clause);
-    if (star) into.namespaces.add(star[1]!);
-    const dflt = /^(\w+)\s*(?:,|$)/.exec(clause);
-    if (dflt) into.namespaces.add(dflt[1]!);
-    const braces = /\{([^}]*)\}/.exec(clause);
-    if (braces) bindSpecifiers(braces[1]!, /\s+as\s+/, into);
+/** `await import('node:fs')`, parenthesised or not, with any `.default` / `.promises` after it:
+ *  an expression that IS the module, and so may initialise a namespace binding. */
+function isModuleExpression(node: ts.Expression): boolean {
+  if (ts.isAwaitExpression(node)) return isFsImportCall(node.expression);
+  if (ts.isParenthesizedExpression(node)) return isModuleExpression(node.expression);
+  if (ts.isPropertyAccessExpression(node) && ['default', 'promises'].includes(node.name.text)) {
+    return isModuleExpression(node.expression);
   }
-  let parsed = 0;
-  for (const match of source.matchAll(DYNAMIC_IMPORT)) {
-    parsed += 1;
-    const target = match[1]!;
-    if (target.startsWith('{')) bindSpecifiers(target.slice(1, -1), /\s*:\s*/, into);
-    else into.namespaces.add(target);
-  }
-  // Parsed only when the member call follows directly: `(await import('node:fs')).default` bound
-  // to a name would otherwise be credited here and its later calls counted under nothing.
-  parsed += source.match(new RegExp(`${INLINE_IMPORT}${MEMBER}`, 'g'))?.length ?? 0;
-  const dynamic = source.match(ANY_DYNAMIC_IMPORT)?.length ?? 0;
-  into.unclassified = dynamic - parsed + (source.match(CJS_ROUTES)?.length ?? 0);
-  return into;
+  return false;
 }
 
-/** Path-based fs calls in one source: the local names bound above, `<alias>.name(` /
- *  `<alias>.promises.name(` on a namespace binding, and `(await import('node:fs')).name(`.
- *  Methods on anything else (`fh.stat()`, `handle.readFile()`) act on a descriptor, not a path,
- *  and do not count. Sync variants count like their async twins. Throws for a source that
- *  reaches the module in a shape this cannot classify, so the file fails the test instead of
- *  counting low. */
+function bindingForImported(imported: string): Binding | null {
+  if (imported === 'default' || imported === 'promises') return 'namespace';
+  return isPathCall(imported) ? 'function' : null;
+}
+
+/** `import type …`: `isTypeOnly` before TypeScript 5.9, `phaseModifier` from it on. */
+function isTypeOnlyClause(clause: ts.ImportClause): boolean {
+  const c = clause as { isTypeOnly?: boolean; phaseModifier?: number };
+  return c.isTypeOnly === true || c.phaseModifier === ts.SyntaxKind.TypeKeyword;
+}
+
+/** What the declaration a symbol resolves to binds from the fs module, if anything. */
+function bindingOf(symbol: ts.Symbol | undefined): Binding | null {
+  const decl = symbol?.declarations?.[0];
+  if (!decl) return null;
+  if (ts.isNamespaceImport(decl)) {
+    return isFsImportDeclaration(decl.parent.parent) ? 'namespace' : null;
+  }
+  if (ts.isImportClause(decl)) {
+    return isFsImportDeclaration(decl.parent) && !isTypeOnlyClause(decl) ? 'namespace' : null;
+  }
+  if (ts.isImportSpecifier(decl)) {
+    const clause = decl.parent.parent;
+    if (!isFsImportDeclaration(clause.parent) || decl.isTypeOnly || isTypeOnlyClause(clause)) {
+      return null;
+    }
+    return bindingForImported((decl.propertyName ?? decl.name).text);
+  }
+  if (ts.isVariableDeclaration(decl)) {
+    return decl.initializer && ts.isIdentifier(decl.name) && isModuleExpression(decl.initializer)
+      ? 'namespace'
+      : null;
+  }
+  if (ts.isBindingElement(decl)) {
+    const owner = decl.parent.parent;
+    if (!ts.isVariableDeclaration(owner) || !owner.initializer) return null;
+    if (!isModuleExpression(owner.initializer)) return null;
+    const key = decl.propertyName ?? decl.name;
+    return ts.isIdentifier(key) ? bindingForImported(key.text) : null;
+  }
+  return null;
+}
+
+/** The property chain hanging off `expr` (`fs.promises.readFile` → `['promises', 'readFile']`)
+ *  and the outermost expression, whose parent says whether the chain is called. */
+function chainFrom(expr: ts.Expression): { names: string[]; top: ts.Expression } {
+  let top = expr;
+  const names: string[] = [];
+  for (;;) {
+    const parent = top.parent;
+    if (!ts.isPropertyAccessExpression(parent) || parent.expression !== top) break;
+    top = parent;
+    names.push(parent.name.text);
+  }
+  return { names, top };
+}
+
+function isCallee(expr: ts.Expression): boolean {
+  return ts.isCallExpression(expr.parent) && expr.parent.expression === expr;
+}
+
+/** `call`: a counted path-based call. `ignore`: a member that takes no path (`fs.constants`).
+ *  `value`: the function or the module used as a value — passed, assigned, indexed — which is a
+ *  rebinding this counter cannot follow, so the file is refused rather than counted low. */
+function classifyUse(expr: ts.Expression, kind: Binding): 'call' | 'ignore' | 'value' {
+  const { names, top } = chainFrom(expr);
+  if (kind === 'function') {
+    // `readFile(` or `realpath.native(`
+    const plain = names.length === 0 || (names.length === 1 && names[0] === 'native');
+    return plain && isCallee(top) ? 'call' : 'value';
+  }
+  const rest = [...names];
+  while (rest.length > 0 && (rest[0] === 'promises' || rest[0] === 'default')) rest.shift();
+  const head = rest[0];
+  if (head === undefined) return 'value';
+  if (!isPathCall(head)) return 'ignore';
+  const plain = rest.length === 1 || (rest.length === 2 && rest[1] === 'native');
+  return plain && isCallee(top) ? 'call' : 'value';
+}
+
+/** True when the identifier is a declaration's own name or a property name — a site that never
+ *  reads the binding. */
+function isDeclarationName(id: ts.Identifier): boolean {
+  const p = id.parent;
+  if (ts.isImportSpecifier(p) || ts.isImportClause(p) || ts.isNamespaceImport(p)) return true;
+  if (ts.isBindingElement(p) || ts.isVariableDeclaration(p)) return p.name === id;
+  if (ts.isPropertyAccessExpression(p)) return p.name === id;
+  if (ts.isPropertyAssignment(p)) return p.name === id;
+  return ts.isQualifiedName(p) || ts.isTypeQueryNode(p) || ts.isTypeReferenceNode(p);
+}
+
+class UncountableFsUse extends Error {}
+
+const REFUSED =
+  'reaches node:fs through a shape the ratchet cannot count: an unparsed dynamic import, ' +
+  'createRequire, getBuiltinModule, or an fs function or namespace used as a value rather than called';
+
+/** Path-based fs calls in one source file, resolved through the binder. Throws
+ *  {@link UncountableFsUse} for a shape it cannot classify, so the file fails the test instead
+ *  of counting low. */
+function countInFile(sf: ts.SourceFile, checker: ts.TypeChecker): number {
+  let calls = 0;
+  const refuse = (): never => {
+    throw new UncountableFsUse(REFUSED);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      if (
+        (ts.isIdentifier(callee) && callee.text === 'createRequire') ||
+        (ts.isPropertyAccessExpression(callee) && callee.name.text === 'getBuiltinModule')
+      ) {
+        refuse();
+      }
+    }
+    if (isFsImportCall(node)) {
+      // The module as an expression: bound to a name (handled through the binding), or used in
+      // place as `(await import('node:fs')).name(`; anything else is a shape not followed.
+      let expr: ts.Expression = node;
+      if (!ts.isAwaitExpression(expr.parent)) refuse();
+      expr = expr.parent as ts.Expression;
+      if (ts.isParenthesizedExpression(expr.parent)) expr = expr.parent;
+      const { top } = chainFrom(expr);
+      const owner = top.parent;
+      if (ts.isVariableDeclaration(owner) && owner.initializer === top) {
+        if (!isModuleExpression(top)) refuse();
+      } else {
+        const use = classifyUse(expr, 'namespace');
+        if (use === 'call') calls += 1;
+        else if (use === 'value') refuse();
+      }
+    } else if (ts.isIdentifier(node) && !isDeclarationName(node)) {
+      const symbol = ts.isShorthandPropertyAssignment(node.parent)
+        ? checker.getShorthandAssignmentValueSymbol(node.parent)
+        : checker.getSymbolAtLocation(node);
+      const kind = bindingOf(symbol);
+      if (kind !== null) {
+        const use = classifyUse(node, kind);
+        if (use === 'call') calls += 1;
+        else if (use === 'value') refuse();
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return calls;
+}
+
+/** One program over in-memory sources (no lib, no module resolution: the binder alone answers
+ *  which declaration an identifier names), so a whole scan parses once. */
+function analyze(sources: Map<string, string>): Map<string, number | UncountableFsUse> {
+  const host: ts.CompilerHost = {
+    getSourceFile: (name) => {
+      const text = sources.get(name);
+      return text === undefined
+        ? undefined
+        : ts.createSourceFile(name, text, ts.ScriptTarget.ES2024, true, ts.ScriptKind.TS);
+    },
+    getDefaultLibFileName: () => 'lib.d.ts',
+    writeFile: () => undefined,
+    getCurrentDirectory: () => '/',
+    getCanonicalFileName: (name) => name,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => '\n',
+    fileExists: (name) => sources.has(name),
+    readFile: (name) => sources.get(name),
+  };
+  const program = ts.createProgram(
+    [...sources.keys()],
+    { noResolve: true, noLib: true, types: [], noEmit: true, target: ts.ScriptTarget.ES2024 },
+    host,
+  );
+  const checker = program.getTypeChecker();
+  const out = new Map<string, number | UncountableFsUse>();
+  for (const [name, text] of sources) {
+    if (!MENTIONS_FS.test(text)) {
+      out.set(name, 0);
+      continue;
+    }
+    const sf = program.getSourceFile(name)!;
+    try {
+      out.set(name, countInFile(sf, checker));
+    } catch (err) {
+      if (!(err instanceof UncountableFsUse)) throw err;
+      out.set(name, err);
+    }
+  }
+  return out;
+}
+
 export function countFsCalls(source: string): number {
-  const { namespaces, locals, unclassified } = fsBindings(source);
-  if (unclassified > 0) {
-    throw new Error(
-      'reaches node:fs through a dynamic import, createRequire or getBuiltinModule shape the ratchet cannot count',
-    );
-  }
-  const forms = [`${INLINE_IMPORT}${MEMBER}`];
-  if (locals.size > 0) forms.push(`(?<![\\w.$])(?:${[...locals].join('|')})(?:\\.native)?\\(`);
-  if (namespaces.size > 0) forms.push(`(?<![\\w.$])(?:${[...namespaces].join('|')})${MEMBER}`);
-  return source.match(new RegExp(forms.join('|'), 'g'))?.length ?? 0;
+  const result = analyze(new Map([['/one.ts', source]])).get('/one.ts')!;
+  if (result instanceof UncountableFsUse) throw result;
+  return result;
 }
 
 function sourceFiles(dir: string): string[] {
@@ -173,18 +320,20 @@ function sourceFiles(dir: string): string[] {
 }
 
 function measure(): { counts: Record<string, number>; uncountable: string[] } {
-  const counts: [string, number][] = [];
-  const uncountable: string[] = [];
+  const sources = new Map<string, string>();
   for (const root of SCAN_ROOTS) {
     for (const file of sourceFiles(path.join(REPO_ROOT, root))) {
-      const rel = path.relative(REPO_ROOT, file).split(path.sep).join('/');
-      try {
-        const n = countFsCalls(readFileSync(file, 'utf8'));
-        if (n > 0) counts.push([rel, n]);
-      } catch (err) {
-        uncountable.push(`${rel}: ${(err as Error).message}`);
-      }
+      sources.set(
+        path.relative(REPO_ROOT, file).split(path.sep).join('/'),
+        readFileSync(file, 'utf8'),
+      );
     }
+  }
+  const counts: [string, number][] = [];
+  const uncountable: string[] = [];
+  for (const [file, result] of analyze(sources)) {
+    if (result instanceof UncountableFsUse) uncountable.push(`${file}: ${result.message}`);
+    else if (result > 0) counts.push([file, result]);
   }
   counts.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return { counts: Object.fromEntries(counts), uncountable };
@@ -236,6 +385,23 @@ describe('path-based fs call ratchet', () => {
     expect(countFsCalls("import { open } from './mine.js';\nopen(p);")).toBe(0);
   });
 
+  it('follows the binder, not the text', () => {
+    // A local shadowing the import, an object key, a comment and a string all name `rm` and
+    // `open` without touching the fs bindings; a type position names the module without reading it.
+    expect(
+      countFsCalls(
+        "import { rm, open } from 'node:fs/promises';\nimport type fs from 'node:fs';\n" +
+          "const rm2 = await runner.remove(id);\nif (rm2.ok) { const open = 1; log({ open }, 'rm failed'); }\n" +
+          '// rm is refused here\nconst x: typeof fs.readFile | null = null;\nawait rm(p); await open(p);',
+      ),
+    ).toBe(2);
+    expect(
+      countFsCalls(
+        "import fs from 'node:fs';\nconst m = fs.constants.O_RDONLY; const d: fs.Dirent[] = [];\nfs.readFileSync(p);",
+      ),
+    ).toBe(1);
+  });
+
   it('counts dynamic imports, and refuses a shape it cannot classify', () => {
     expect(
       countFsCalls(
@@ -249,17 +415,43 @@ describe('path-based fs call ratchet', () => {
     expect(
       countFsCalls("const { default: fs } = await import('node:fs');\nfs.readFileSync(p);"),
     ).toBe(1);
+    expect(countFsCalls("const fs = (await import('node:fs')).default;\nfs.readFileSync(p);")).toBe(
+      1,
+    );
     expect(() => countFsCalls("import('node:fs').then((fs) => fs.readFile(p));")).toThrow(
       /cannot count/,
     );
-    expect(() =>
-      countFsCalls("const fs = (await import('node:fs')).default;\nfs.readFileSync(p);"),
-    ).toThrow(/cannot count/);
     expect(() => countFsCalls("const fs = process.getBuiltinModule('node:fs');")).toThrow(
       /cannot count/,
     );
     expect(() =>
       countFsCalls("import { createRequire } from 'node:module';\ncreateRequire(import.meta.url)"),
+    ).toThrow(/cannot count/);
+  });
+
+  it('refuses a bound fs function or namespace used as a value', () => {
+    expect(() =>
+      countFsCalls(
+        "import fs from 'node:fs';\nconst readRepoFile = fs.promises.readFile;\nawait readRepoFile(p);",
+      ),
+    ).toThrow(/cannot count/);
+    expect(() => countFsCalls("import * as fs from 'node:fs';\nconst { readFile } = fs;")).toThrow(
+      /cannot count/,
+    );
+    expect(() => countFsCalls("import fs from 'node:fs';\nconst p = fs.promises;")).toThrow(
+      /cannot count/,
+    );
+    expect(() => countFsCalls("import fs from 'node:fs';\nfs['readFile'](p);")).toThrow(
+      /cannot count/,
+    );
+    expect(() =>
+      countFsCalls("import { readFile } from 'node:fs/promises';\nconst f = readFile;\nf(p);"),
+    ).toThrow(/cannot count/);
+    expect(() =>
+      countFsCalls("import { readFile } from 'node:fs/promises';\nfiles.map(readFile);"),
+    ).toThrow(/cannot count/);
+    expect(() =>
+      countFsCalls("import { readFile } from 'node:fs/promises';\nconst api = { readFile };"),
     ).toThrow(/cannot count/);
   });
 
