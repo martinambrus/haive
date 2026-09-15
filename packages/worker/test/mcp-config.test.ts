@@ -4,6 +4,7 @@ import { DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import {
   buildDefaultMcpServers,
+  emittedDefaultServerNames,
   buildMcpAddArgv,
   buildMcpConfigForCli,
   resolveStdioMcpServers,
@@ -150,7 +151,12 @@ describe('buildDefaultMcpServers', () => {
     }).find((s) => s.name === 'chrome-devtools');
     expect(withProxy?.command).toBe('node');
     // npx stays the inner command, so the version pin and every flag survive the wrap.
-    expect(withProxy?.args.slice(0, 3)).toEqual(['/haive/haive-chrome-mcp-proxy.mjs', 'npx', '-y']);
+    expect(withProxy?.args.slice(0, 4)).toEqual([
+      '/haive/haive-chrome-mcp-proxy.mjs',
+      'npx',
+      '--prefer-offline',
+      '-y',
+    ]);
     expect(withProxy?.args).toContain('--redact-network-headers');
     expect(withProxy?.args).toContain('--no-usage-statistics');
 
@@ -162,7 +168,10 @@ describe('buildDefaultMcpServers', () => {
       includeChromeDevtools: true,
     }).find((s) => s.name === 'chrome-devtools');
     expect(noProxy?.command).toBe('npx');
-    expect(noProxy?.args[0]).toBe('-y');
+    // Cache-first, so a sandbox whose egress cannot reach the registry still starts it from
+    // the warm cache. A plain npm flag, naming no sandbox path, so it stays correct in the
+    // user's own mcp_settings.json too.
+    expect(noProxy?.args.slice(0, 2)).toEqual(['--prefer-offline', '-y']);
   });
 
   it("opts the headless launch out of Chrome's sandbox, and only that branch", () => {
@@ -607,5 +616,39 @@ describe('injectMcpConfig', () => {
     expect(result.written).toBeNull();
     expect(result.skipped).toBe(true);
     expect(result.reason).toContain('exit 1');
+  });
+});
+
+// One rule, read by resolveMcpExtraFiles to build the server list and by mcpSurfacePrompt to
+// say which of the user's OWN servers survive the name collision. They used to guess
+// separately, and the prompt's guess was a fixed ['filesystem','git'].
+describe('emittedDefaultServerNames', () => {
+  const base = { hasRepo: true, hasWorktree: false, ragOnly: false };
+
+  it('wires both for an ordinary repo-root invocation', () => {
+    expect([...emittedDefaultServerNames(base)].sort()).toEqual(['filesystem', 'git']);
+  });
+
+  it('drops git on a worktree, where its gitfile is masked', () => {
+    expect([...emittedDefaultServerNames({ ...base, hasWorktree: true })]).toEqual(['filesystem']);
+  });
+
+  it('drops git on a rag-only run but keeps filesystem for grounding on disk', () => {
+    expect([...emittedDefaultServerNames({ ...base, ragOnly: true })]).toEqual(['filesystem']);
+  });
+
+  it('wires nothing without a repository', () => {
+    expect(emittedDefaultServerNames({ ...base, hasRepo: false }).size).toBe(0);
+  });
+
+  it('drops git when the registries are unreachable, since uvx must download an interpreter', () => {
+    expect([...emittedDefaultServerNames({ ...base, registriesReachable: false })]).toEqual([
+      'filesystem',
+    ]);
+  });
+
+  it('keeps git when the caller cannot know the egress, which under-reports rather than over-reports', () => {
+    // The prompt is built at dispatch, before the invocation's egress is resolved.
+    expect([...emittedDefaultServerNames(base)].sort()).toEqual(['filesystem', 'git']);
   });
 });

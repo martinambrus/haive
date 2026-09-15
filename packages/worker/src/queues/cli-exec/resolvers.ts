@@ -1,6 +1,11 @@
 import { stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import { and, eq } from 'drizzle-orm';
+import {
+  ensureTaskScratchWorkspace,
+  taskMayRunWithoutRepository,
+  taskScratchSubpath,
+} from '../../repo/scratch-workspace.js';
 import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -25,6 +30,7 @@ import {
   buildDefaultMcpServers,
   buildMcpConfigForCli,
   resolveStdioMcpServers,
+  emittedDefaultServerNames,
   serversToJsonObject,
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
@@ -206,6 +212,22 @@ async function clearVolumeBackedMcp(
   }
 }
 
+/** Whether this invocation can reach the package registries its MCP servers are fetched from.
+ *
+ *  `uvx` has no warm cache to fall back on the way `npx` does — the sandbox image ships no
+ *  Python at all, so `mcp-server-git` downloads a managed interpreter (GitHub) as well as the
+ *  package (PyPI) on every run. Under a restricted per-task egress none of that is reachable,
+ *  the server fails to start, and exec-core then discards a run that was otherwise fine —
+ *  MEASURED, an anchored kb_author enrich with `egress: none` failed all three attempts with
+ *  `MCP server failed to start: filesystem, git`.
+ *
+ *  Only a per-task egress override can narrow this: every provider row ships `mode: 'full'`,
+ *  so nothing that works today changes. Declining to declare a server that cannot start is the
+ *  same rule the gates below already follow. */
+export function networkPolicyReachesPackageRegistries(policy: CliNetworkPolicy | null): boolean {
+  return !policy || policy.mode === 'full';
+}
+
 export async function resolveMcpExtraFiles(
   db: Database,
   taskId: string,
@@ -228,6 +250,16 @@ export async function resolveMcpExtraFiles(
    *  Deliberately REQUIRED (no default): the caller already computes it for the gitfile mask,
    *  and a default would let a new call site silently re-advertise a server that cannot work. */
   hasWorktree: boolean,
+  /** Whether this task has a REPOSITORY at all. Distinct from `repoMount != null`, which is no
+   *  longer the same question: a repo-less task is given an empty scratch workspace, so it has
+   *  a mount and nothing to serve from it.
+   *
+   *  Required for the same reason as `hasWorktree` — a default would let a new call site
+   *  silently re-advertise a server that cannot work. */
+  hasRepo: boolean,
+  /** The invocation's effective egress. Required, like the two flags above: a default would let
+   *  a new call site declare a server the sandbox cannot fetch. */
+  networkPolicy: CliNetworkPolicy | null,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
   if (profile === 'none') {
@@ -255,6 +287,15 @@ export async function resolveMcpExtraFiles(
   const chromeDevtoolsBrowserUrl = surface.chromeDevtools.enabled
     ? await resolveRunnerBrowserCdpUrl(taskId)
     : undefined;
+
+  // Which defaults this invocation gets. The rule itself is `emittedDefaultServerNames`, so the
+  // surface prompt can answer the same question; the reasoning for each gate stays below.
+  const emittedDefaults = emittedDefaultServerNames({
+    hasRepo,
+    hasWorktree,
+    ragOnly,
+    registriesReachable: networkPolicyReachesPackageRegistries(networkPolicy),
+  });
 
   const servers = buildDefaultMcpServers({
     repoPath: sandboxWorkdir,
@@ -289,7 +330,18 @@ export async function resolveMcpExtraFiles(
     // zero `mcp__git__*` calls and zero `mcp__filesystem__*` calls, against 6 `rag_search`.
     // `filesystem` is deliberately left alone — its tools duplicate file reads the CLIs have
     // natively, but "GROUND on disk" is the one thing every one of these agents must still do.
-    includeGit: !hasWorktree && !ragOnly,
+    // ...and never without a repository: `hasWorktree` is false for a repo-less task too, so
+    // this alone would point `mcp-server-git` at the empty scratch workspace and reproduce
+    // exactly the `"git":"failed"` / `is not a valid Git repository` entry the gate above
+    // exists to prevent.
+    includeGit: emittedDefaults.has('git'),
+    // `filesystem` survives a rag-only run because grounding on disk is still the job. A
+    // REPO-LESS run is the one case where that argument runs out: its workspace is an empty
+    // scratch directory, so the server would announce eleven tools over nothing. Declaring it
+    // is not free either — the CLI reports a server that failed to start, and exec-core then
+    // refuses to trust the whole run (MEASURED: three kb_author invocations returned a correct
+    // article and were discarded as `filesystem: failed`).
+    includeFilesystem: emittedDefaults.has('filesystem'),
     includeChromeDevtools: surface.chromeDevtools.enabled,
     chromeDevtoolsBrowserUrl,
     chromeDevtoolsMcpVersion: surface.chromeDevtools.version,
@@ -378,9 +430,31 @@ export async function resolveTaskRepoMount(
 ): Promise<DockerVolumeMount | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, repositoryId: true },
+    columns: { userId: true, repositoryId: true, type: true, metadata: true },
   });
-  if (!task?.repositoryId) return null;
+  if (!task) return null;
+  if (!task.repositoryId) {
+    // A task type allowed to run with no repository still gets a working directory — see
+    // ensureTaskScratchWorkspace. Anything else keeps the old `null`.
+    //
+    // CREATED here, not merely named. Docker REFUSES a volume-subpath that does not exist
+    // (MEASURED: `cannot access path ... no such file or directory`), and this resolver has a
+    // caller that runs before `resolveTaskContext` ever does — the human Terminal, which is
+    // worktree-gated only for `workflow`/`run_app`, so a repo-less kb_author shell can be
+    // opened while the task is still `created`. Ensuring is idempotent, so the task path pays
+    // a mkdir it would have done anyway.
+    // The TYPE is only half of it: an anchored task whose repository was deleted arrives with the
+    // same null column, and giving it a fresh empty workspace presents a recovery shell that was
+    // never its workspace. The Terminal reaches this resolver without going through
+    // `resolveTaskContext`, so its guard does not cover this route.
+    if (!taskMayRunWithoutRepository(task)) return null;
+    await ensureTaskScratchWorkspace(task.userId, taskId);
+    return {
+      source: REPO_VOLUME_NAME,
+      target: REPO_MOUNT_TARGET,
+      subpath: taskScratchSubpath(task.userId, taskId),
+    };
+  }
 
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId),
@@ -429,18 +503,44 @@ export async function resolveInvocationRepoMount(
   db: Database,
   taskId: string,
   worktreeRel?: string,
-): Promise<{ repoMount: DockerVolumeMount | null; hasWorktree: boolean }> {
+): Promise<{ repoMount: DockerVolumeMount | null; hasWorktree: boolean; hasRepo: boolean }> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, repositoryId: true, worktreeBranch: true },
+    columns: {
+      userId: true,
+      repositoryId: true,
+      worktreeBranch: true,
+      type: true,
+      metadata: true,
+    },
   });
-  if (!task?.repositoryId) return { repoMount: null, hasWorktree: false };
+  if (!task) return { repoMount: null, hasWorktree: false, hasRepo: false };
+  if (!task.repositoryId) {
+    // `hasRepo` is separate from "there is a mount" precisely because of this branch: a
+    // repo-less task DOES get a mount (an empty scratch workspace), so a null check on
+    // repoMount can no longer answer "is there a repository here".
+    if (!taskMayRunWithoutRepository(task)) {
+      return { repoMount: null, hasWorktree: false, hasRepo: false };
+    }
+    // Same reason as resolveTaskRepoMount: the directory has to EXIST before docker will
+    // mount the subpath, and ensuring is idempotent.
+    await ensureTaskScratchWorkspace(task.userId, taskId);
+    return {
+      repoMount: {
+        source: REPO_VOLUME_NAME,
+        target: REPO_MOUNT_TARGET,
+        subpath: taskScratchSubpath(task.userId, taskId),
+      },
+      hasWorktree: false,
+      hasRepo: false,
+    };
+  }
 
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId),
     columns: { source: true, storagePath: true, localPath: true },
   });
-  if (!repo) return { repoMount: null, hasWorktree: false };
+  if (!repo) return { repoMount: null, hasWorktree: false, hasRepo: false };
 
   const storagePath = repo.storagePath ?? repo.localPath;
 
@@ -453,6 +553,7 @@ export async function resolveInvocationRepoMount(
     return {
       repoMount: { source: hostPath, target: REPO_MOUNT_TARGET, readOnly: true },
       hasWorktree: false,
+      hasRepo: true,
     };
   }
 
@@ -484,6 +585,7 @@ export async function resolveInvocationRepoMount(
   return {
     repoMount: { source: REPO_VOLUME_NAME, target: REPO_MOUNT_TARGET, subpath },
     hasWorktree,
+    hasRepo: true,
   };
 }
 

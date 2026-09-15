@@ -1,10 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
+import { ensureTaskScratchWorkspace } from '../../repo/scratch-workspace.js';
 import { resolveInvocationRepoMount } from './resolvers.js';
 
+// Only the filesystem half is stubbed: the subpath and the repo-less predicate stay real, and
+// the resolver MUST create the directory, because docker refuses a volume-subpath that does not
+// exist (MEASURED: `cannot access path ... no such file or directory`).
+vi.mock('../../repo/scratch-workspace.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../repo/scratch-workspace.js')>();
+  return { ...actual, ensureTaskScratchWorkspace: vi.fn(async () => '/scratch/dir') };
+});
+
 function mkDb(
-  task: { userId: string; repositoryId: string | null; worktreeBranch: string | null } | null,
+  task: {
+    userId: string;
+    repositoryId: string | null;
+    worktreeBranch: string | null;
+    type?: string;
+  } | null,
   repo: { source?: string; storagePath?: string | null; localPath?: string | null } | null,
 ): Database {
   return {
@@ -69,11 +83,72 @@ describe('resolveInvocationRepoMount', () => {
     expect(hasWorktree).toBe(false);
   });
 
-  it('returns no mount for a repo-less task', async () => {
-    const db = mkDb({ userId: 'u1', repositoryId: null, worktreeBranch: null }, null);
+  it('returns no mount for a repo-less task of a type that requires one', async () => {
+    // A null repositoryId on a workflow task is a TORN state — the column is ON DELETE SET
+    // NULL — not a mode, so nothing is mounted and resolveTaskContext still fails it loudly.
+    const db = mkDb(
+      { userId: 'u1', repositoryId: null, worktreeBranch: null, type: 'workflow' },
+      null,
+    );
     expect(await resolveInvocationRepoMount(db, 't1')).toEqual({
       repoMount: null,
       hasWorktree: false,
+      hasRepo: false,
     });
+    // And nothing is created for it: a torn state must not be handed a workspace.
+    expect(ensureTaskScratchWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('refuses a workspace to a task whose recorded anchor was deleted', async () => {
+    // Same null column, opposite meaning. Deleting a repository nulls the FK and leaves TERMINAL
+    // tasks alone, so a failed anchored task reaches here looking repo-less — and the Terminal
+    // calls this resolver without passing resolveTaskContext's guard. A fresh empty workspace
+    // there is a recovery shell that was never this task's workspace.
+    const db = mkDb(
+      {
+        userId: 'u1',
+        repositoryId: null,
+        worktreeBranch: null,
+        type: 'kb_author',
+        metadata: { anchorRepositoryId: 'r-gone' },
+      },
+      null,
+    );
+    expect(await resolveInvocationRepoMount(db, 't1')).toEqual({
+      repoMount: null,
+      hasWorktree: false,
+      hasRepo: false,
+    });
+    expect(ensureTaskScratchWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('mounts an empty scratch workspace for a type allowed to run repo-less', async () => {
+    // The sandbox always runs with `-w /haive/workdir`; with nothing mounted there that path is
+    // the image WORKDIR, created root:root while the CLI runs as uid 1000, so anything written
+    // relative to the CWD fails EACCES.
+    // `metadata.anchorRepositoryId: null` is what makes this a task CREATED repo-less rather
+    // than an anchored one whose repository was deleted — the two arrive with the same null
+    // column, and only the second must be refused a workspace.
+    const db = mkDb(
+      {
+        userId: 'u1',
+        repositoryId: null,
+        worktreeBranch: null,
+        type: 'kb_author',
+        metadata: { anchorRepositoryId: null },
+      },
+      null,
+    );
+    expect(await resolveInvocationRepoMount(db, 't1')).toEqual({
+      repoMount: { source: 'haive_repos', target: SANDBOX_WORKDIR, subpath: 'u1/_scratch/t1' },
+      hasWorktree: false,
+      // The point of the separate flag: there IS a mount, and there is NO repository. A null
+      // check on repoMount can no longer answer the second question.
+      hasRepo: false,
+    });
+    // The mount is only valid if the directory EXISTS by the time it is returned: docker
+    // refuses a volume-subpath that does not, and the human Terminal resolves this before
+    // `resolveTaskContext` ever runs for a task still sitting in `created`.
+    expect(ensureTaskScratchWorkspace).toHaveBeenCalledWith('u1', 't1');
   });
 });

@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -10,6 +11,8 @@ import {
   SKIPPABLE_STEP_IDS,
   STEP_CLI_ROLES,
   STEP_MINING_SEATS,
+  taskMayRunWithoutRepository,
+  taskScratchSubpath,
   type AuthMode,
   type CliProviderName,
   type CliRoleDescriptor,
@@ -1133,6 +1136,20 @@ export async function buildUpcomingCliSteps(
   return enrichStepsWithCliPreferences(db, userId, upcoming, taskId, ignoreSaved);
 }
 
+/** Where repositories and the per-task scratch workspaces live, read the same way every other
+ *  api consumer reads it (`routes/repos.ts`, `routes/db-dumps.ts`). */
+function repoStorageRoot(): string {
+  return process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+}
+
+async function directoryExists(p: string): Promise<boolean> {
+  try {
+    return (await stat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveWorkspaceRoot(
   db: ReturnType<typeof getDb>,
   taskId: string,
@@ -1152,6 +1169,25 @@ export async function resolveWorkspaceRoot(
       columns: { storagePath: true, localPath: true },
     });
     root = repo?.storagePath ?? repo?.localPath ?? null;
+  }
+  if (!root) {
+    // A task with neither a worktree nor a repository may still have a workspace: a repo-less
+    // `kb_author` run gets an empty scratch directory, and its Editor tab is deliberately enabled
+    // (only `workflow`/`run_app` are worktree-gated), so returning 409 here advertised a recovery
+    // surface that could not open on exactly the running and failed tasks that need one.
+    //
+    // Entitlement is the RULE, and existence only confirms the directory is there to open.
+    // Existence alone was wrong: an anchored task whose repository was deleted can already have
+    // an empty scratch directory from before that case was refused, and the boot sweep keeps a
+    // FAILED task's workspace on purpose — so the stale directory would have read as permission
+    // and rooted the Editor in a workspace that was never this task's.
+    //
+    // `taskMayRunWithoutRepository` is the same function the worker applies, moved to
+    // @haive/shared rather than copied, which is what makes "one authority" true here instead of
+    // approximated. A task that has not started has no directory and still answers 409: there is
+    // nothing to edit.
+    const scratch = resolve(repoStorageRoot(), taskScratchSubpath(task.userId, task.id));
+    if (taskMayRunWithoutRepository(task) && (await directoryExists(scratch))) root = scratch;
   }
   if (!root) {
     throw new HttpError(409, 'Task has no resolvable workspace path');

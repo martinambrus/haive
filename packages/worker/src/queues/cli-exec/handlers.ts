@@ -35,6 +35,7 @@ import {
 } from '@haive/shared';
 import { resolveAgentConcurrency } from '../../sandbox/runtime-admission.js';
 import { resolvePause } from '../../orchestrator/pause.js';
+import { cleanupTaskScratchWorkspace } from '../../repo/scratch-workspace.js';
 import { LEDGER_SUMMARY_MAX_CHARS, recordLedgerEntry } from '../../step-engine/task-ledger.js';
 import {
   refreshAllCliVersions,
@@ -418,20 +419,37 @@ async function cleanupAuthAfterTerminalSummary(db: Database, taskId: string): Pr
     // record of what was applied to them goes now rather than inside the removal's success
     // path. Before the check it must NOT run: a live task's preparations are still in place.
     clearTaskAuthPreparationState(taskId);
-    await syncRefreshedAuthToUserVolumes(db, taskId);
-    const result = await cleanupTaskAuthVolumes(taskId);
-    if (result.removed.length > 0) {
-      log.info(
-        { taskId, volumes: result.removed.length },
-        'terminal step summary removed deferred task auth volumes',
-      );
+    // The auth work gets its OWN catch so a failure in it cannot skip the scratch reap below.
+    // They are unrelated resources that happen to share a trigger, and credentials are the
+    // half more likely to throw — a rotated token, a volume still held. Sharing one try meant
+    // one bad sync leaked a repo-less task's workspace for good, since this is the LAST thing
+    // that runs for that task.
+    try {
+      await syncRefreshedAuthToUserVolumes(db, taskId);
+      const result = await cleanupTaskAuthVolumes(taskId);
+      if (result.removed.length > 0) {
+        log.info(
+          { taskId, volumes: result.removed.length },
+          'terminal step summary removed deferred task auth volumes',
+        );
+      }
+      if (result.failed.length > 0) {
+        log.warn(
+          { taskId, volumes: result.failed.map((f) => f.name) },
+          'terminal step summary could not remove every deferred task auth volume',
+        );
+      }
+    } catch (err) {
+      log.warn({ err, taskId }, 'terminal step summary auth cleanup failed');
     }
-    if (result.failed.length > 0) {
-      log.warn(
-        { taskId, volumes: result.failed.map((f) => f.name) },
-        'terminal step summary could not remove every deferred task auth volume',
-      );
-    }
+    // Same deferral, different resource: a repo-less task's scratch workspace was left in
+    // place by task completion precisely so THIS invocation could mount it.
+    //
+    // NOT on a FAILED task, matching the guard on the task-queue side and the keep-alive-on-
+    // 'failed' rule its neighbours follow: a failed task keeps its workspace so the Editor and
+    // Terminal can still open it. This path admits `failed` because the AUTH volumes do go at
+    // that point, so the status has to be re-read for the one resource that does not.
+    if (task.status !== 'failed') await cleanupTaskScratchWorkspace(db, taskId);
   } catch (err) {
     // The summary is best-effort and already finalized. Cleanup trouble must not turn its
     // successful task back into a failed queue job; boot's orphan reaper is the final backstop.

@@ -39,6 +39,36 @@ export interface DockerVolumeMount {
   kind?: 'auth';
 }
 
+/** Volume mount argv.
+ *
+ *  `volume-nocopy` is load-bearing on a subpath mount. Docker SEEDS an empty volume path from
+ *  the image's directory at the same target and copies that directory's OWNERSHIP and mtime
+ *  onto it — MEASURED, a scratch workspace the worker had chowned to 1000:1000 came back
+ *  root:root carrying the image's own build timestamp, which left the sandbox user an
+ *  unwritable CWD and surfaced minutes later as `MCP server failed to start: filesystem`.
+ *  Nothing is lost by refusing the copy: the image's `/haive/workdir` is empty, so it only ever
+ *  transferred metadata. Inert for a repository, whose tree is never empty. */
+export function buildMountArgs(mounts: readonly DockerVolumeMount[]): string[] {
+  const args: string[] = [];
+  for (const m of mounts) {
+    if (m.subpath) {
+      const parts = [
+        'type=volume',
+        `source=${m.source}`,
+        `destination=${m.target}`,
+        `volume-subpath=${m.subpath}`,
+        'volume-nocopy=true',
+      ];
+      if (m.readOnly) parts.push('readonly');
+      args.push('--mount', parts.join(','));
+    } else {
+      const suffix = m.readOnly ? ':ro' : '';
+      args.push('-v', `${m.source}:${m.target}${suffix}`);
+    }
+  }
+  return args;
+}
+
 export interface DockerRunOpts {
   image: string;
   cmd: string[];
@@ -369,23 +399,7 @@ export const defaultDockerRunner: DockerRunner = {
         flagArgs.push('-e', `${key}=${value}`);
       }
     }
-    if (opts.mounts) {
-      for (const m of opts.mounts) {
-        if (m.subpath) {
-          const parts = [
-            'type=volume',
-            `source=${m.source}`,
-            `destination=${m.target}`,
-            `volume-subpath=${m.subpath}`,
-          ];
-          if (m.readOnly) parts.push('readonly');
-          flagArgs.push('--mount', parts.join(','));
-        } else {
-          const suffix = m.readOnly ? ':ro' : '';
-          flagArgs.push('-v', `${m.source}:${m.target}${suffix}`);
-        }
-      }
-    }
+    if (opts.mounts) flagArgs.push(...buildMountArgs(opts.mounts));
 
     // Per-container resource caps (machine-aware governor). --memory-swap == --memory
     // disables swap so the sandbox OOM-kills rather than driving the host into swap.

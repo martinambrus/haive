@@ -66,6 +66,12 @@ import {
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../sandbox/ide-runner.js';
+import {
+  ensureTaskScratchWorkspace,
+  cleanupTaskScratchWorkspace,
+  taskTypeAllowsNoRepository,
+  taskWasCreatedRepoLess,
+} from '../repo/scratch-workspace.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { getTaskEnvTemplate, pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
@@ -235,8 +241,32 @@ async function resolveTaskContext(
       columns: { storagePath: true, localPath: true },
     });
     repoPath = repo?.storagePath ?? repo?.localPath ?? null;
+  } else if (taskTypeAllowsNoRepository(task.type)) {
+    // The type says a null repository MAY be a mode; only the task itself says whether it is.
+    // An anchored task whose repository was deleted arrives here looking identical — the FK is
+    // ON DELETE SET NULL and `cancelOpenTasksForRepo` leaves terminal tasks alone, so a failed
+    // anchored task can be retried into this branch and would quietly publish a generic article
+    // over an entry someone anchored on purpose. That is the torn state the hard failure below
+    // exists for, and the allowlist alone re-admitted it.
+    if (!taskWasCreatedRepoLess(task.metadata)) {
+      throw new Error(
+        `task ${taskId} was anchored to a repository that no longer exists; ` +
+          're-run it from a new entry to pick another anchor, or author it without one',
+      );
+    }
+    // A task type that is ALLOWED to have no repository gets an empty workspace instead of a
+    // checkout. `kb_author` writing a cross-project house standard is the case: there is no
+    // repo to read, but the CLI still needs a writable working directory.
+    //
+    // A directory rather than a nullable `repoPath`: the field is `string` on both
+    // ResolvedTaskContext and StepContext, so widening it would reach every step in the engine
+    // to serve one task type. See ensureTaskScratchWorkspace for the EACCES this also avoids.
+    repoPath = await ensureTaskScratchWorkspace(task.userId, task.id);
   }
   if (!repoPath) {
+    // Still a hard failure for every other type. A null repositoryId there is a torn state —
+    // `tasks.repository_id` is ON DELETE SET NULL — not a mode, and handing a workflow run an
+    // empty directory would surface as a baffling agent failure minutes later instead.
     throw new Error(`task ${taskId} has no resolvable repo path`);
   }
 
@@ -400,20 +430,47 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
   await cleanupTaskContainers(db, taskId, 'completed');
   await maybeUnloadTaskEmbedModel(db, taskId);
   await unloadTaskOllamaCliModels(db, taskId);
-  // Hooked to COMPLETION specifically: cancel and fail write through their own
-  // functions, so an abandoned task can never green a plan node.
-  await completePlanNodesForTask(db, taskId);
-  // Same hook, same reason: only a run that FINISHED may say the repository is onboarded.
-  // The four on-disk markers appear at step 07 of 27 and cannot tell a finished run from a
-  // cancelled or a live one.
-  await stampRepositoryOnboarded(db, taskId);
-  // The code-link staleness pass ALSO runs here, not only in 11c-rag-reindex.
-  // 11c lives in PLAN_TASKLIST_EXTRA rather than SPINE, so a quick_bugfix task
-  // never reaches it, and it is user-skippable on the paths that do — either way
-  // a task would finish having changed the very files a plan link points at
-  // while the link still claimed to be current. Idempotent (it only touches rows
-  // that are not already stale), so the earlier mid-run call stays for its flush.
-  await markPlanCodeLinksStale(db, taskId);
+  // BOOKKEEPING, and it cannot un-complete the task. The status is already stamped, and a
+  // throw here used to reach the queue's catch and call markTaskFailed — turning a finished
+  // run into a failed one on a plan-node write, and (because `failed` keeps its recovery
+  // surfaces) stranding them on a workspace the reap had already taken. `stampRepositoryOnboarded`
+  // was the only one of the three that already swallowed its own errors; the guarantee now
+  // covers all of them, stated here rather than left to each function's internals.
+  try {
+    // Hooked to COMPLETION specifically: cancel and fail write through their own
+    // functions, so an abandoned task can never green a plan node.
+    await completePlanNodesForTask(db, taskId);
+    // Same hook, same reason: only a run that FINISHED may say the repository is onboarded.
+    // The four on-disk markers appear at step 07 of 27 and cannot tell a finished run from a
+    // cancelled or a live one.
+    await stampRepositoryOnboarded(db, taskId);
+    // The code-link staleness pass ALSO runs here, not only in 11c-rag-reindex.
+    // 11c lives in PLAN_TASKLIST_EXTRA rather than SPINE, so a quick_bugfix task
+    // never reaches it, and it is user-skippable on the paths that do — either way
+    // a task would finish having changed the very files a plan link points at
+    // while the link still claimed to be current. Idempotent (it only touches rows
+    // that are not already stale), so the earlier mid-run call stays for its flush.
+    await markPlanCodeLinksStale(db, taskId);
+  } catch (err) {
+    logger.warn({ err, taskId }, 'task completion bookkeeping failed; task stays completed');
+  }
+  // PUBLISHED here rather than by each caller. Both of them used to emit this immediately after
+  // calling us, which put a fallible insert AFTER the point where completion looked final: a
+  // throw there reached the queue's catch and called markTaskFailed, so the reap below had
+  // already taken the workspace of a task that ended up `failed` with its recovery surfaces
+  // enabled. One place, ahead of the reap, and unable to un-complete the task.
+  try {
+    await appendEvent(db, taskId, null, 'task.completed', {});
+  } catch (err) {
+    logger.warn({ err, taskId }, 'task.completed event not recorded; task stays completed');
+  }
+  // LAST, and now safe from every side: nothing after this point can turn `completed` into
+  // `failed`, so both this reap and the summary-triggered one read a settled outcome.
+  try {
+    await cleanupTaskScratchWorkspace(db, taskId);
+  } catch (err) {
+    logger.warn({ err, taskId }, 'cleanup-scratch-workspace failed');
+  }
 }
 
 async function markTaskFailed(db: Database, taskId: string, message: string): Promise<void> {
@@ -630,6 +687,16 @@ async function cleanupTaskContainers(
   // dropped even when their removal failed, or a task id that came round again would be
   // told its preparations are already in place.
   clearTaskAuthPreparationState(taskId);
+
+  // The empty workspace a repo-less task ran in. Reaped here and not in the worktree branch
+  // below because it is NOT a worktree — no step owns it, nothing else sweeps it, and it sits
+  // on the shared repos volume where a leak would accumulate one directory per task. Defers to
+  // the last step summary when one is still in flight; see cleanupTaskScratchWorkspace.
+  //
+  // NOT reaped here. `cleanupTaskScratchWorkspace` refuses any task that is not settled, and at
+  // this point a COMPLETING task has its status stamped but still has fallible bookkeeping to
+  // run — a throw there turns it `failed`, whose recovery surfaces need the workspace. The call
+  // lives at the end of markTaskCompleted and on the cancel path instead.
 
   // Remove the feature worktree. On cancel: always (a task cancelled before its
   // worktree-cleanup step would leak the dir into the haive_repos volume). On
@@ -995,7 +1062,6 @@ async function handleResult(
         );
       } else {
         await markTaskCompleted(db, ctx.taskId);
-        await appendEvent(db, ctx.taskId, null, 'task.completed', {});
       }
       return;
     }
@@ -1444,7 +1510,6 @@ async function resolveFixLoopGate(
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
     } else {
       await markTaskCompleted(db, ctx.taskId);
-      await appendEvent(db, ctx.taskId, null, 'task.completed', {});
     }
     return;
   }
@@ -2428,6 +2493,11 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     );
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  try {
+    await cleanupTaskScratchWorkspace(db, payload.taskId);
+  } catch (err) {
+    logger.warn({ err, taskId: payload.taskId }, 'cleanup-scratch-workspace failed');
+  }
   await maybeUnloadTaskEmbedModel(db, payload.taskId);
   await unloadTaskOllamaCliModels(db, payload.taskId);
   // A cancelled kb_author enrich should not leave an orphan global KB entry behind;

@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { diffLines } from 'diff';
 import {
   api,
+  GLOBAL_KB_FACET_DIMENSIONS,
+  facetScopeError,
   releaseGlobalKbEmbedModel,
   type ApiError,
   type CliProvider,
@@ -32,6 +34,57 @@ function parseList(s: string): string[] {
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+/** Comma-separated text per dimension — the `parseList` shape already used for egress domains,
+ *  rather than a tag component web does not have. An EMPTY dimension is dropped, not stored as
+ *  `[]`: naming a dimension restricts the entry to it, so "no opinion" has to be absence. */
+function facetsFromFields(fields: Record<string, string>): GlobalKbFacets {
+  const out: GlobalKbFacets = {};
+  for (const { key } of GLOBAL_KB_FACET_DIMENSIONS) {
+    const values = parseList(fields[key] ?? '');
+    if (values.length > 0) out[key] = values;
+  }
+  return out;
+}
+
+function fieldsFromFacets(f: GlobalKbFacets): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { key } of GLOBAL_KB_FACET_DIMENSIONS) out[key] = (f[key] ?? []).join(', ');
+  return out;
+}
+
+/** The one scope editor, used by the enrich form and by the entry detail modal. Two surfaces
+ *  that disagreed about the dimensions would let a scope be set that the other cannot show. */
+function FacetFields({
+  idPrefix,
+  fields,
+  onChange,
+  disabled,
+}: {
+  idPrefix: string;
+  fields: Record<string, string>;
+  onChange: (key: string, value: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {GLOBAL_KB_FACET_DIMENSIONS.map((dim) => (
+        <div key={dim.key} className="flex flex-col gap-1">
+          <Label htmlFor={`${idPrefix}-${dim.key}`} className="text-[11px] text-neutral-500">
+            {dim.label}
+          </Label>
+          <Input
+            id={`${idPrefix}-${dim.key}`}
+            value={fields[dim.key] ?? ''}
+            placeholder={dim.placeholder}
+            disabled={disabled}
+            onChange={(e) => onChange(dim.key, e.target.value)}
+          />
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function facetsSummary(f: GlobalKbFacets): string {
@@ -174,6 +227,61 @@ export default function GlobalKbPage() {
     egressMode: 'none' as 'none' | 'allowlist' | 'full',
     egressDomains: '',
   });
+  // Scope the author is sure of. Blank means "let the model decide", which is what an omitted
+  // dimension already means to retrieval.
+  const [enrichFacets, setEnrichFacets] = useState<Record<string, string>>({});
+  // Scope editor for an entry that already exists. Null = not editing; the entry's own facets
+  // are loaded into it on open so a correction starts from what is stored.
+  const [scopeEdit, setScopeEdit] = useState<Record<string, string> | null>(null);
+  const [scopeBusy, setScopeBusy] = useState(false);
+  const [scopeError, setScopeError] = useState<string | null>(null);
+  // Drop a half-finished scope edit whenever the modal moves to another entry or closes. Keyed
+  // on the entry id and not wired into each close path on purpose: the dialog closes on Escape,
+  // on the backdrop and on the X as well as on Cancel, and a leftover editor would show the
+  // PREVIOUS entry's facets and write them over this one on Save.
+  useEffect(() => {
+    setScopeEdit(null);
+    setScopeError(null);
+  }, [selected?.id]);
+  // The LIVE entry that replaced this one, asked of the SERVER rather than read out of
+  // `entries`. That list is filtered and paginated, so a reviewer who filtered to `archived`
+  // never has the active successor in hand — and a warning derived from a view is one that
+  // silently disappears exactly when the view narrows, which is the case it exists for.
+  const [activeSuccessor, setActiveSuccessor] = useState<{ id: string; title: string } | null>(
+    null,
+  );
+  // `activeSuccessor === null` alone cannot gate the button, because THREE different states
+  // produce it: the lookup is still in flight, the lookup failed, and there genuinely is no
+  // successor. Reactivation was live throughout the first of those, so a quick reviewer could
+  // reactivate before the warning had any chance to render and leave both entries retrievable
+  // for the same scope. Only the in-flight state blocks; a FAILED lookup re-enables the button
+  // with no warning, which keeps the fail-quiet rule below intact rather than turning an
+  // advisory check into a hard block on a request that may never succeed.
+  const [successorLoading, setSuccessorLoading] = useState(false);
+  useEffect(() => {
+    setActiveSuccessor(null);
+    setSuccessorLoading(false);
+    if (!selected || selected.status !== 'archived') return;
+    let cancelled = false;
+    setSuccessorLoading(true);
+    void api
+      .get<{ activeSuccessor: { id: string; title: string } | null }>(
+        `/global-kb/entries/${selected.id}`,
+      )
+      .then((res) => {
+        if (!cancelled) setActiveSuccessor(res.activeSuccessor ?? null);
+      })
+      // Fail QUIET, not loud: the warning is advisory, and a failed lookup must not block the
+      // reviewer from opening an entry. It errs toward not warning, which is why the detail
+      // view is also the only place reactivation can happen at all.
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setSuccessorLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id, selected?.status]);
   const [enrichBusy, setEnrichBusy] = useState(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
   // Arriving from the onboarding step-04 link (?repo=&cli=) pre-fills the repo +
@@ -513,6 +621,71 @@ export default function GlobalKbPage() {
     }
   }
 
+  /** Retire an ACTIVE entry without deleting it. Reversible — an archived entry offers Reactivate —
+   *  and not a supersession: nothing replaced it, so `supersededAt` stays null. The successor
+   *  warning tells a reviewer to do exactly this, and the page had no control to do it with. */
+  async function archive(e: GlobalKbEntry) {
+    setBusy(true);
+    try {
+      await api.patch(`/global-kb/entries/${e.id}`, { status: 'archived' });
+      setSelected((s) => (s?.id === e.id ? null : s));
+      await load();
+    } catch (err) {
+      setLoadError((err as ApiError).message ?? 'Archive failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Open an entry by id. Fetched rather than found in `entries`, which is filtered and paginated
+   *  — the reason the successor is asked of the server in the first place. */
+  async function openEntry(id: string) {
+    try {
+      const res = await api.get<{ entry: GlobalKbEntry }>(`/global-kb/entries/${id}`);
+      setSelected(res.entry);
+    } catch (err) {
+      setLoadError((err as ApiError).message ?? 'Could not open that entry');
+    }
+  }
+
+  /** Re-scope an entry that is already stored.
+   *
+   *  The only way to correct a facet short of deleting the article and writing it again — which
+   *  is how the first of these ended up stuck at `frameworkMajor: ["7"]`. PATCH replaces the
+   *  facets wholesale (it does not merge), which is exactly what an editor showing every
+   *  dimension needs. */
+  async function saveScope(e: GlobalKbEntry) {
+    if (!scopeEdit) return;
+    // Said in the form rather than as a failed request: a bare major names no technology, so
+    // the api refuses it and the reviewer would otherwise see only a 400.
+    const scopeIssue = facetScopeError(facetsFromFields(scopeEdit));
+    if (scopeIssue) {
+      setScopeError(scopeIssue);
+      return;
+    }
+    setScopeBusy(true);
+    setScopeError(null);
+    try {
+      // Bind to what the server STORED, never to what was typed: facet values are normalised
+      // on write (trimmed, lowercased, deduped), so echoing the raw fields would show a scope
+      // the entry does not have until the next reload.
+      const res = await api.patch<{ entry: GlobalKbEntry }>(`/global-kb/entries/${e.id}`, {
+        facets: facetsFromFields(scopeEdit),
+      });
+      // The WHOLE returned entry, not just its facets: a scope edit can also clear
+      // `supersedesEntryId` server-side, and copying one field leaves the modal showing an
+      // "Updates existing" diff against a predecessor that activation will no longer archive.
+      const saved = res.entry;
+      setSelected((cur) => (cur && cur.id === e.id ? saved : cur));
+      setEntries((rows) => rows?.map((r) => (r.id === e.id ? saved : r)) ?? rows);
+      setScopeEdit(null);
+    } catch (err) {
+      setScopeError((err as ApiError).message ?? 'Failed to save the scope');
+    } finally {
+      setScopeBusy(false);
+    }
+  }
+
   async function remove(e: GlobalKbEntry) {
     // Only a kb_author ENRICH entry (source='user' with its own task) should cascade
     // a cancel — that task exists solely to produce this row, so deleting the row
@@ -588,8 +761,16 @@ export default function GlobalKbPage() {
       setEnrichError('Write something for the AI to work from.');
       return;
     }
-    if (!enrich.repoId || !enrich.cliProviderId) {
-      setEnrichError('Pick a repository and a CLI.');
+    // No repository required: a rule that applies to every project should be writable without
+    // opening one, and anchoring to a codebase is what scoped the first of these to that
+    // codebase's own version.
+    if (!enrich.cliProviderId) {
+      setEnrichError('Pick a CLI to write it with.');
+      return;
+    }
+    const enrichScopeIssue = facetScopeError(facetsFromFields(enrichFacets));
+    if (enrichScopeIssue) {
+      setEnrichError(enrichScopeIssue);
       return;
     }
     setEnrichBusy(true);
@@ -598,8 +779,9 @@ export default function GlobalKbPage() {
       await api.post('/global-kb/enrich', {
         title: enrich.title,
         seedText: enrich.notes,
-        repositoryId: enrich.repoId,
+        ...(enrich.repoId ? { repositoryId: enrich.repoId } : {}),
         cliProviderId: enrich.cliProviderId,
+        facets: facetsFromFields(enrichFacets),
         egress: {
           mode: enrich.egressMode,
           ...(enrich.egressMode === 'allowlist'
@@ -608,6 +790,7 @@ export default function GlobalKbPage() {
         },
       });
       setEnrich({ ...enrich, title: '', notes: '' });
+      setEnrichFacets({});
       await load();
     } catch (err) {
       setEnrichError((err as ApiError).message ?? 'Enrichment failed to start');
@@ -858,10 +1041,10 @@ export default function GlobalKbPage() {
           <CardTitle>Add a house rule</CardTitle>
           <CardDescription>
             Set a title you'll recognize, then write the rule — generic or detailed; name modules,
-            paste URLs. Pick a repository so the AI can read its stack and extract the right
-            framework + major versions. It keeps your title, derives the category and facets, and
-            files the entry automatically — as a new one, or an update of a matching rule already in
-            the KB.
+            paste URLs. A repository is optional: it is somewhere the AI can SEE the rule obeyed or
+            broken, never the subject of the article. It keeps your title, derives the category, and
+            fills whatever scope you leave blank — filing the result as a draft for you to review,
+            either as a new rule or an update of one already in the KB.
           </CardDescription>
         </CardHeader>
         <div className="flex flex-col gap-3">
@@ -916,27 +1099,52 @@ export default function GlobalKbPage() {
                 }
                 className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
-                <option value="none">repo only (no web)</option>
+                <option value="none">
+                  {enrich.repoId ? 'repo only (no web)' : 'no web access'}
+                </option>
                 <option value="allowlist">specific domains</option>
                 <option value="full">full internet</option>
               </select>
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="enrich-repo">Repository</Label>
+              <Label htmlFor="enrich-repo">Repository (optional)</Label>
               <select
                 id="enrich-repo"
                 value={enrich.repoId}
                 onChange={(e) => setEnrich({ ...enrich, repoId: e.target.value })}
                 className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
-                <option value="">Select…</option>
+                {/* Default. A house standard applies to every project, so writing one should not
+                    require opening any — and anchoring is what scoped the first of these to the
+                    one codebase it was written against. */}
+                <option value="">none — write a generic rule</option>
                 {repos.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.name}
                   </option>
                 ))}
               </select>
+              <span className="text-[11px] text-neutral-500">
+                Somewhere the AI can SEE the rule obeyed or broken. It never cites the code it reads
+                — the article has to work for projects that share none of its files.
+              </span>
             </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>Applies to (optional)</Label>
+            <span className="text-[11px] text-neutral-500">
+              Leave a box empty and the rule applies to ALL values of it — that is what makes an
+              article reachable from the projects that need it. Name a technology and its version
+              stays open: scoping Framework to drupal keeps the rule across every Drupal major, so
+              fill Framework major only when the rule is genuinely specific to one. The AI fills the
+              dimensions you leave untouched and never narrows one you scoped. Comma-separated.
+            </span>
+            <FacetFields
+              idPrefix="enrich-facet"
+              fields={enrichFacets}
+              disabled={enrichBusy}
+              onChange={(key, value) => setEnrichFacets((f) => ({ ...f, [key]: value }))}
+            />
           </div>
           {enrich.egressMode === 'allowlist' && (
             <div className="flex flex-col gap-1.5">
@@ -956,8 +1164,8 @@ export default function GlobalKbPage() {
             </Button>
           </div>
           <p className="text-xs text-neutral-500">
-            A background task reads the repo and files the entry (active when done). It appears
-            below; refresh to see updates.
+            A background task writes the article and files it as a draft. It appears below; refresh
+            to see updates.
           </p>
         </div>
       </Card>
@@ -1013,9 +1221,9 @@ export default function GlobalKbPage() {
           )}
         </div>
         <p className="text-xs text-neutral-500">
-          AI-added rules activate automatically. <span className="text-neutral-300">Activate</span>{' '}
-          publishes a pending auto-promoted draft into retrieval;{' '}
-          <span className="text-neutral-300">Delete</span> permanently removes a rule.
+          AI-written rules land as drafts. <span className="text-neutral-300">Activate</span>{' '}
+          publishes one into retrieval; <span className="text-neutral-300">Delete</span> permanently
+          removes a rule.
         </p>
         {sourceTaskId && (
           <div className="flex items-center gap-2 rounded-md border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-200">
@@ -1130,6 +1338,15 @@ export default function GlobalKbPage() {
                           Go to task
                         </Button>
                       )}
+                      {/* Drafts only. Reactivating an ARCHIVED entry is a considered recovery,
+                          not a list operation: it cannot retire whatever replaced it (the API
+                          archives the predecessor named by the row being activated, and a
+                          successor points the other way), so done from here it silently leaves
+                          two entries live for one rule. Worse from a filtered list — filtering to
+                          `archived` HIDES the successor, so the conflict is not even visible. The
+                          detail view is where the warning and the diff are, and where the scope
+                          editor's own copy already sends the reviewer. Activating a draft carries
+                          no such hazard: superseding its predecessor is the designed outcome. */}
                       {e.status === 'draft' && (
                         <Button
                           size="sm"
@@ -1172,7 +1389,7 @@ export default function GlobalKbPage() {
                     )}
                     {inProgress && (
                       <span className="text-xs text-neutral-500">
-                        Reading the repo in the background — activates automatically when done.
+                        Writing the article in the background — lands as a draft to review.
                       </span>
                     )}
                     {failed && (
@@ -1247,7 +1464,57 @@ export default function GlobalKbPage() {
                   </a>
                 )}
               </div>
-              <p className="mt-2 text-xs text-neutral-400">{facetsSummary(selected.facets)}</p>
+              {scopeEdit ? (
+                <div className="mt-2 flex flex-col gap-2 rounded border border-neutral-800 p-2">
+                  <span className="text-[11px] text-neutral-500">
+                    Empty = applies to all values of that dimension. Comma-separated.
+                  </span>
+                  {/* Said rather than decided: re-scoping a replacement does not bring its
+                      predecessor back, and resurrecting an article somebody retired is not a
+                      choice this form should make for them. */}
+                  {selected.supersedesEntryId && (
+                    <span className="text-[11px] text-amber-400">
+                      {selected.status === 'draft'
+                        ? 'This draft replaces an earlier entry. Changing the scope here detaches it, so activating will no longer archive that entry.'
+                        : 'This entry replaced an earlier one, which was archived when it was activated. Re-scoping moves this rule but does not bring the archived entry back — open that entry and press Reactivate if the old scope still needs a rule.'}
+                    </span>
+                  )}
+                  <FacetFields
+                    idPrefix="scope-edit"
+                    fields={scopeEdit}
+                    disabled={scopeBusy}
+                    onChange={(key, value) => setScopeEdit((f) => ({ ...(f ?? {}), [key]: value }))}
+                  />
+                  {scopeError && <FormError message={scopeError} />}
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" disabled={scopeBusy} onClick={() => void saveScope(selected)}>
+                      {scopeBusy ? 'Saving…' : 'Save scope'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={scopeBusy}
+                      onClick={() => setScopeEdit(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 flex items-center gap-2 text-xs text-neutral-400">
+                  {facetsSummary(selected.facets)}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScopeError(null);
+                      setScopeEdit(fieldsFromFacets(selected.facets));
+                    }}
+                    className="text-indigo-400 hover:text-indigo-300"
+                  >
+                    Edit scope
+                  </button>
+                </p>
+              )}
               {supersededEntry ? (
                 <>
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
@@ -1284,10 +1551,71 @@ export default function GlobalKbPage() {
                   <MarkdownView body={selected.body} className="max-h-none overflow-visible" />
                 </div>
               )}
+              {/* Reactivating does NOT retire whatever replaced this entry: the API archives the
+                  predecessor named by the row being activated, and a successor points the other
+                  way. Done before that successor has been re-scoped, both end up active and
+                  retrievable for the same rule.
+                  Said rather than blocked, and rather than archiving the successor behind the
+                  reviewer's back — both are choices this form should not make for them, which is
+                  the same rule the scope-edit warning above follows. Two active entries is noise
+                  a reviewer can see and undo; silently retiring the live one is not. */}
+              {selected.status === 'archived' && activeSuccessor && (
+                <div className="mt-3 text-center text-[11px] text-amber-400">
+                  <p>
+                    An active entry, <span className="font-medium">{activeSuccessor.title}</span>,
+                    still replaces this one. Reactivating leaves both live for the same scope —
+                    re-scope or archive that entry if only one should apply.
+                  </p>
+                  {/* Opening another entry resets an open scope edit, so it waits for that edit to
+                      be saved or cancelled rather than discarding it silently. */}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="mt-1"
+                    disabled={busy || scopeBusy || scopeEdit !== null}
+                    title={scopeEdit !== null ? 'Save or cancel the scope edit first' : undefined}
+                    onClick={() => void openEntry(activeSuccessor.id)}
+                  >
+                    Open that entry
+                  </Button>
+                </div>
+              )}
               <div className="mt-4 flex items-center justify-center gap-3">
-                {selected.status === 'draft' && (
-                  <Button size="sm" disabled={busy} onClick={() => void activate(selected)}>
-                    Activate
+                {/* Activation is blocked while a scope edit is OPEN as well as while one is in
+                    flight. They are separate PATCHes, and activating first archives the
+                    predecessor the scope edit is about to clear — retiring an entry the reviewer
+                    just decided was unrelated. Guarding only the in-flight half missed the case
+                    that matters most: with the editor open there is no request yet, so nothing
+                    server-side can serialise it, and the reviewer's unsaved re-scope is exactly
+                    the judgement the activation would be ignoring. Saving afterwards re-scopes
+                    the now-active entry and does NOT bring the predecessor back. */}
+                {(selected.status === 'draft' || selected.status === 'archived') && (
+                  <Button
+                    size="sm"
+                    disabled={busy || scopeBusy || scopeEdit !== null || successorLoading}
+                    title={
+                      scopeEdit !== null
+                        ? 'Save or cancel the scope edit first'
+                        : successorLoading
+                          ? 'Checking whether an active entry already replaces this one…'
+                          : undefined
+                    }
+                    onClick={() => void activate(selected)}
+                  >
+                    {selected.status === 'archived' ? 'Reactivate' : 'Activate'}
+                  </Button>
+                )}
+                {/* Same guard as Activate: archiving mid-edit changes which branch the pending scope
+                    save takes, since the PATCH treats an archived entry's supersede link as clearable. */}
+                {selected.status === 'active' && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={busy || scopeBusy || scopeEdit !== null}
+                    title={scopeEdit !== null ? 'Save or cancel the scope edit first' : undefined}
+                    onClick={() => void archive(selected)}
+                  >
+                    Archive
                   </Button>
                 )}
                 <Button

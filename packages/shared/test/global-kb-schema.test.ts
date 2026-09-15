@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
+import { orphanFacetMajorSql, trimFacetValueSql } from '../src/global-kb/schema.js';
 import type { GlobalKbConnection } from '../src/global-kb/connection.js';
 
 // Mirrors the repo's RAG tests (e.g. worker insertChunk upsert SQL): no live
@@ -69,6 +70,73 @@ describe('ensureGlobalKbSchema', () => {
     expect(sql).not.toContain('idx_global_rag_facets_phpMajor');
     // tsvector trigger.
     expect(sql).toContain('trg_global_content_tsv');
+  });
+
+  it('never lets the facet backfill store a JSON null', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const sql = queries();
+
+    // `jsonb_agg` over zero rows is SQL NULL, so aggregating an EMPTY dimension straight into
+    // `jsonb_object_agg` rewrites it as JSON `null`. Retrieval then calls
+    // `jsonb_array_length(facets->'<dim>')` on it and raises `cannot get array length of a
+    // scalar`, which fails the WHOLE query — MEASURED, a two-row set with one corrupt row
+    // returned neither row. Empty dimensions are dropped instead, which costs no meaning
+    // because absent and empty are the same claim to both filters.
+    expect(sql).toContain('WHERE a.arr IS NOT NULL');
+    expect(sql).toContain("CASE WHEN jsonb_typeof(kv.value) = 'array'");
+    // The predicate admits a non-array value, so the pass REPAIRS a row an earlier version of
+    // this migration wrote rather than needing a migration of its own.
+    expect(sql).toContain("WHERE jsonb_typeof(kv.value) <> 'array'");
+  });
+
+  it("backfills through the write path's rule, not an approximation of it", async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const sql = queries();
+
+    // `lower(v)` alone left three classes of legacy row permanently unreachable: `PostgreSQL`
+    // was rewritten to `postgresql`, which no project reports; an already-lowercase
+    // `postgresql` was never selected; and a padded ` drupal ` matched neither the predicate
+    // (`lower(v)` equals it) nor `?|` (which does not trim). The rule is generated from the same
+    // alias table `normalizeFacets` reads, so the two engines cannot drift.
+    expect(sql).toContain(`lower(${trimFacetValueSql('v')})`);
+    expect(sql).toContain(
+      `WHEN kv.key = 'database' AND lower(${trimFacetValueSql('v')}) = 'postgresql'`,
+    );
+    expect(sql).toContain(`WHERE ${trimFacetValueSql('v')} <> ''`);
+    // The predicate is "differs from its canonical form", which subsumes case, padding and
+    // aliases — the case-only test must NOT come back.
+    expect(sql).not.toContain('v <> lower(v)');
+  });
+
+  // The cleaning drops a blank parent, so without the relational rule it MANUFACTURED an orphan
+  // major: a legacy `{"framework":[""],"frameworkMajor":["11"]}` came out as a rule matching every
+  // framework's v11. It has to sit in BOTH places — the aggregation, so a selected row drops the
+  // major, and the predicate, so an already-clean `{"frameworkMajor":["11"]}` is selected at all —
+  // and on BOTH tables, since retrieval reads the chunk's own copy of the facets.
+  it("applies the write path's parent/major rule in the facet backfill", async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const sql = queries();
+    const orphan = orphanFacetMajorSql('kv.key', 't.facets');
+    const count = (needle: string): number => sql.split(needle).length - 1;
+    expect(count(`WHERE a.arr IS NOT NULL AND NOT ${orphan}`)).toBe(2);
+    expect(count(`OR ${orphan}`)).toBe(2);
+  });
+
+  // `jsonb_typeof(x) <> 'array' OR EXISTS (... jsonb_array_elements_text(x) ...)` reads like a guard
+  // and is not one: Postgres does not promise OR evaluation order, and the expansion raises on a
+  // scalar. Pinned as an invariant over ALL emitted SQL rather than one site, so a new unguarded
+  // expansion anywhere in the ensure fails here.
+  it('guards every jsonb_array_elements_text with a CASE', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const firstTokens = [...queries().matchAll(/jsonb_array_elements_text\(\s*(\S+)/g)].map(
+      (m) => m[1],
+    );
+    expect(firstTokens.length).toBeGreaterThan(0);
+    expect(firstTokens.filter((t) => t !== 'CASE')).toEqual([]);
   });
 
   it('falls back to jsonb embeddings when pgvector is unavailable', async () => {

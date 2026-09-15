@@ -215,6 +215,7 @@ export const BUNDLE_JOB_NAMES = {
 export const GLOBAL_KB_JOB_NAMES = {
   SYNC_ENTRY: 'sync-global-kb-entry',
   PURGE_ARCHIVED: 'purge-archived-global-kb',
+  RECONCILE_PENDING: 'reconcile-pending-global-kb',
 } as const;
 
 /** Payload for `GLOBAL_KB_JOB_NAMES.SYNC_ENTRY`. The worker reconciles the global

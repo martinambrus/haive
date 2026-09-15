@@ -2,12 +2,14 @@ import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   globalKbEntries,
+  globalKbTopicKey,
   resolveGlobalKbSettings,
   resolveTaskFacets,
   withGlobalKb,
   type GlobalKbCategory,
   type GlobalKbFacets,
   type ProjectFacetSet,
+  normalizeFacets,
 } from '@haive/shared/global-kb';
 import { embedQuery, ragHybridSearch, type RagConnection } from '@haive/shared/rag';
 import { facetsMatchProject } from './_global-kb-digest.js';
@@ -430,7 +432,11 @@ export async function promoteToGlobalKbDraft(
             title: clean.title,
             body: clean.body,
             category: promotion.category,
-            facets: promotion.facets,
+            // Normalised here rather than at each caller: this insert is the one place every
+            // promotion funnels through, and `techAnchorFacets` assigns a detected package
+            // VERBATIM while a project's own set is lowercased, so a capitalised package name
+            // would be stored unmatchable by the exact jsonb `?|` the search uses.
+            facets: normalizeFacets(promotion.facets),
             status: 'draft',
             source: 'promoted',
             sourceTaskId: promotion.taskId,
@@ -449,51 +455,10 @@ export async function promoteToGlobalKbDraft(
   }
 }
 
-/** Stable cross-repo dedup key for a promoted entry: `category:tech[:major]`.
- *
- *  The tech + major are taken from the DETECTION-DERIVED facets (built by
- *  techAnchorFacets), which are stable across runs — unlike the free-form `tech`
- *  string the LLM emits, which drifts ("php" <-> "php5") for the SAME article and so
- *  broke dedup (the original bug: identical facets, divergent topic_key). Priority
- *  mirrors how techAnchorFacets pins a single dimension; a tech-bucket article sets
- *  exactly one. The major keeps genuinely-different majors apart (PHP 5 vs PHP 8).
- *  Falls back to the free-form `tech` only when the facets carry no anchor. Null when
- *  neither yields a tech — such a promotion is never deduped (always inserted). */
-export function globalKbTopicKey(
-  category: string,
-  facets: GlobalKbFacets,
-  fallbackTech?: string | null,
-): string | null {
-  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
-  const first = (a?: string[]): string | null => (a && a.length > 0 ? (a[0] ?? null) : null);
-
-  let tech: string | null = null;
-  let major: string | null = null;
-  const pkg = first(facets.packages); // e.g. "vitest@3", "@scope/name@18.2"
-  if (pkg) {
-    const at = pkg.lastIndexOf('@');
-    if (at > 0) {
-      tech = pkg.slice(0, at);
-      major = pkg.slice(at + 1).split('.')[0] || null;
-    } else {
-      tech = pkg;
-    }
-  } else if (first(facets.framework)) {
-    tech = first(facets.framework);
-    major = first(facets.frameworkMajor);
-  } else if (first(facets.database)) {
-    tech = first(facets.database);
-    major = first(facets.dbMajor);
-  } else if (first(facets.language)) {
-    tech = first(facets.language);
-    major = first(facets.phpMajor) ?? first(facets.nodeMajor);
-  }
-
-  const techNorm = tech ? norm(tech) : fallbackTech ? norm(fallbackTech) : '';
-  if (!techNorm) return null;
-  const majorNorm = major ? norm(major) : '';
-  return majorNorm ? `${category}:${techNorm}:${majorNorm}` : `${category}:${techNorm}`;
-}
+// `globalKbTopicKey` moved to @haive/shared: the api recomputes it when the scope editor
+// changes an entry's category or facets, and cannot import the worker. Re-exported so every
+// importer here is unchanged.
+export { globalKbTopicKey };
 
 /** Delete the DRAFT promotions a prior run of this task created, so re-running a
  *  promoting step (a Retry) REPLACES rather than DUPLICATES them. Call once

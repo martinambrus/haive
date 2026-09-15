@@ -1,9 +1,12 @@
-import { and, desc, eq, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService, logger, type OnboardingToolingMirror } from '@haive/shared';
-import { withGlobalKb } from '@haive/shared/global-kb';
+import { FACET_VALUE_ALIAS_PAIRS, globalKbEntries, withGlobalKb } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
+import { getCliExecQueue } from './queues/cli-exec/_shared.js';
+import { globalKbTopicKey } from './step-engine/steps/_global-kb-promote.js';
+import { sweepOrphanScratchWorkspaces } from './repo/scratch-workspace.js';
 import { defaultDockerRunner } from './sandbox/docker-runner.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
 import { describePlanOp, proposedOps } from './step-engine/steps/workflow/_plan-ops.js';
@@ -38,6 +41,23 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
   { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
+  // After the schema backfill has canonicalised the facets those keys are derived from — it runs
+  // on the global-KB connection at first use, which `withGlobalKb` here triggers.
+  { id: 'recomputeAliasedTopicKeys', kind: 'convergent', run: recomputeAliasedTopicKeys },
+  // Before both of the below, and before anything can retry a kb_author task: it is what makes
+  // "no record" mean "no evidence" rather than "most of the tasks on this install".
+  { id: 'backfillKbAuthorAnchors', kind: 'convergent', run: backfillKbAuthorAnchors },
+  // BEFORE the scratch sweep, which defers to the same pending-recap predicate these rows are
+  // stuck in: finalising them first is what lets that sweep see the truth.
+  {
+    id: 'reconcileUnenqueuedStepSummaries',
+    kind: 'convergent',
+    run: reconcileUnenqueuedStepSummaries,
+  },
+  // Filesystem rather than a table, like `clearPrunedSandboxImageState` reconciles against real
+  // Docker images. Convergent because it only finishes a removal the normal path had already
+  // decided on; a live task keeps its workspace.
+  { id: 'sweepOrphanScratchWorkspaces', kind: 'convergent', run: sweepOrphanScratchWorkspaces },
   // The only one. It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
   // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.
   // Nothing can undo it.
@@ -90,6 +110,189 @@ export async function runDestructiveDataMigrations(db: Database): Promise<void> 
     log.info({ migration: migration.id }, 'running destructive data migration');
     await runOne(db, migration);
   }
+}
+
+/** Finalize step-summary invocations whose row exists but whose job never reached BullMQ.
+ *
+ *  `maybeEnqueueStepSummary` INSERTs the invocation and then enqueues it. Its catch covers a
+ *  THROWN enqueue — `recordSummaryEnqueueFailure` ends the row — but a process that dies between
+ *  the two runs neither half, leaving `started_at`, `ended_at` and `superseded_at` all NULL with
+ *  no job that will ever finalize it. Nothing else recovers it: `reconcileOrphanedSteps` is keyed
+ *  on `task_step_id`, which a recap leaves NULL by design, and it deliberately skips
+ *  `started_at IS NULL` rows because for a NORMAL invocation that state means "BullMQ still owes
+ *  it a run". The row is therefore pending forever, and `cleanupTaskScratchWorkspace` defers to
+ *  exactly that predicate — so a repo-less task's workspace is never reaped either.
+ *
+ *  Only the QUEUE can tell "never enqueued" from "still queued", which is why this runs here
+ *  rather than beside the other boot reaps in `index.ts`: `runDataMigrations` is called before any
+ *  worker starts, so nothing can consume or add a job underneath the scan. The `started_at` guard
+ *  on the UPDATE is the second half of that — it makes the write a compare-and-swap, so even a
+ *  job that somehow began between the scan and the write keeps its row.
+ *
+ *  Costs nothing in the common case: with no pending recap rows it never touches Redis at all. */
+async function reconcileUnenqueuedStepSummaries(db: Database): Promise<void> {
+  const pending = await db
+    .select({ id: schema.cliInvocations.id })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        isNotNull(schema.cliInvocations.summaryForStepId),
+        isNull(schema.cliInvocations.startedAt),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  if (pending.length === 0) return;
+
+  // Every state that is not finished. A finished job has already written its own outcome to the
+  // row, so omitting `completed`/`failed` cannot strand anything.
+  //
+  // `paused` is deliberately absent and is NOT a gap. MEASURED against bullmq 6.3.4: `pause()`
+  // only sets `meta.paused = 1` and deletes the marker — the job stays on `wait` (list length 1,
+  // `paused` key absent) and `getJobs(['waiting'])` still returns it while the queue is paused.
+  // The `paused` LIST is a legacy shape older versions wrote, which `pause-7.lua` drains back
+  // into `wait` on resume under a local it names `legacyPausedRemaining`; `JobType` does not
+  // admit it, and bullmq's own all-types default omits it too. Haive never pauses the queue in
+  // any case — GLOBAL_PAUSE is a pickup gate that calls `moveToDelayed`, which is `delayed`.
+  // Re-measure before adding a state rather than taking it from the docs.
+  const jobs = await getCliExecQueue().getJobs([
+    'waiting',
+    'delayed',
+    'prioritized',
+    'active',
+    'waiting-children',
+  ]);
+  // The queue carries several payload shapes; only a cli-exec INVOKE names an invocation.
+  const stillQueued = new Set<string>();
+  for (const job of jobs) {
+    const invocationId = (job?.data as { invocationId?: unknown } | undefined)?.invocationId;
+    if (typeof invocationId === 'string') stillQueued.add(invocationId);
+  }
+
+  const orphaned = pending.filter((row) => !stillQueued.has(row.id)).map((row) => row.id);
+  if (orphaned.length === 0) return;
+
+  await db
+    .update(schema.cliInvocations)
+    .set({
+      exitCode: -1,
+      errorMessage: 'Step summary was never enqueued (worker exited before the job was added)',
+      endedAt: new Date(),
+    })
+    .where(
+      and(
+        inArray(schema.cliInvocations.id, orphaned),
+        isNull(schema.cliInvocations.startedAt),
+        isNull(schema.cliInvocations.endedAt),
+      ),
+    );
+  log.warn({ count: orphaned.length }, 'finalized step-summary rows that were never enqueued');
+}
+
+/** Record, on every `kb_author` task that predates the record, whether it was created with a
+ *  repository — so `taskWasCreatedRepoLess`'s strict default only ever applies to a task nothing
+ *  could classify.
+ *
+ *  The default has to be strict, because `enrichSchema.repositoryId` was a REQUIRED uuid until
+ *  this branch made it optional: a task created before the record necessarily HAD a repository, so
+ *  an absent record means "anchored" and not "unknown". Left alone, every legacy task whose
+ *  repository is later deleted would retry as repo-less and quietly publish a generic article over
+ *  an entry someone anchored. MEASURED on this install: 17 kb_author tasks, none carrying the
+ *  record, and two of them ALREADY in that state — one is the very entry this work started from.
+ *
+ *  Two sources of truth, both exact, and no dates: the commit that made the field optional is not
+ *  a boundary, because the dev stack hot-reloads and tasks ran against the new code hours before
+ *  it landed.
+ *
+ *  - A task that still HAS a repository states its own anchor.
+ *  - A task that RAN repo-less proves it in its own detect payload: `hasRepo` is a field this
+ *    branch added, so `hasRepo = false` can only have been written by a genuinely repo-less run,
+ *    while a legacy anchored run carries no such key at all. MEASURED: the 6 repo-less tasks here
+ *    all record `false` and the 2 legacy ones have no key.
+ *
+ *  A task matching neither is left unstamped ON PURPOSE — it reads as anchored, which is the
+ *  honest answer when no evidence classifies it, and re-running this writes nothing for it. */
+async function backfillKbAuthorAnchors(db: Database): Promise<void> {
+  const anchored = await db.execute(sql`
+    UPDATE tasks
+    SET metadata = COALESCE(metadata, '{}'::jsonb)
+                 || jsonb_build_object('anchorRepositoryId', repository_id)
+    WHERE type = 'kb_author'
+      AND repository_id IS NOT NULL
+      AND NOT (COALESCE(metadata, '{}'::jsonb) ? 'anchorRepositoryId')
+  `);
+  const repoLess = await db.execute(sql`
+    UPDATE tasks AS t
+    SET metadata = COALESCE(t.metadata, '{}'::jsonb) || '{"anchorRepositoryId": null}'::jsonb
+    WHERE t.type = 'kb_author'
+      AND t.repository_id IS NULL
+      AND NOT (COALESCE(t.metadata, '{}'::jsonb) ? 'anchorRepositoryId')
+      AND EXISTS (
+        SELECT 1 FROM task_steps ts
+        WHERE ts.task_id = t.id AND ts.detect_output->>'hasRepo' = 'false'
+      )
+  `);
+  const anchoredCount = (anchored as { count?: number }).count ?? 0;
+  const repoLessCount = (repoLess as { count?: number }).count ?? 0;
+  if (anchoredCount > 0 || repoLessCount > 0) {
+    log.info(
+      { anchored: anchoredCount, repoLess: repoLessCount },
+      'recorded the anchor choice on kb_author tasks that predate it',
+    );
+  }
+}
+
+/** Recompute a topic key whose tech segment was written before the facet alias existed.
+ *
+ *  The schema backfill canonicalises an entry's FACETS (`postgresql` -> `postgres`) but leaves
+ *  `topic_key` alone, so a legacy row keeps `best_practice:postgresql:15` while every new
+ *  promotion derives `best_practice:postgres:15`. `promoteToGlobalKbDraft` matches candidates by
+ *  EXACT topic-key equality, so the existing article is missed and a duplicate independent draft
+ *  is written instead of being linked for supersession — the dedup silently off for one spelling,
+ *  which is the same defect the derivation fix closed for new rows.
+ *
+ *  Narrow on purpose. A key is rewritten ONLY when the recomputed value differs from the stored
+ *  one in exactly ONE segment AND that difference is an alias pair — so a key that a caller's
+ *  `fallbackTech` produced, or one the derivation has since changed for any other reason, is left
+ *  alone rather than silently rewritten by a migration nobody asked for that. */
+async function recomputeAliasedTopicKeys(db: Database): Promise<void> {
+  const norm = (v: string): string => v.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  await withGlobalKb(db, async ({ db: kb }) => {
+    const rows = await kb
+      .select({
+        id: globalKbEntries.id,
+        category: globalKbEntries.category,
+        facets: globalKbEntries.facets,
+        topicKey: globalKbEntries.topicKey,
+      })
+      .from(globalKbEntries)
+      .where(isNotNull(globalKbEntries.topicKey));
+    let updated = 0;
+    for (const row of rows) {
+      const stored = row.topicKey;
+      if (!stored) continue;
+      const recomputed = globalKbTopicKey(row.category, row.facets ?? {});
+      if (!recomputed || recomputed === stored) continue;
+      const before = stored.split(':');
+      const after = recomputed.split(':');
+      if (before.length !== after.length) continue;
+      const diffs = before
+        .map((seg, i) => (seg === after[i] ? null : ([seg, after[i] ?? ''] as const)))
+        .filter((d): d is readonly [string, string] => d !== null);
+      if (diffs.length !== 1) continue;
+      const [from, to] = diffs[0]!;
+      if (!FACET_VALUE_ALIAS_PAIRS.some((p) => norm(p.from) === from && norm(p.to) === to))
+        continue;
+      await kb
+        .update(globalKbEntries)
+        .set({ topicKey: recomputed })
+        .where(eq(globalKbEntries.id, row.id));
+      updated += 1;
+    }
+    if (updated > 0) {
+      log.info({ updated }, 'recomputed topic keys whose tech segment predated the facet alias');
+    }
+  });
 }
 
 /** Flag repos whose RAG index was built with no embedding endpoint, so the query side
@@ -285,7 +488,11 @@ async function skipRemovedSteps(db: Database): Promise<void> {
  *  longer renders these agents, so a superseded phantom stays absent instead of
  *  resurfacing as `new_artifact`. Idempotent via the `superseded_at IS NULL`
  *  guard. Step 1 (applicable-ids cleanup) runs first because it reads the
- *  still-live phantom rows; step 2 then supersedes them. */
+ *  still-live phantom rows; step 2 then supersedes them.
+ *
+ *  The length check is CASE-guarded because the `jsonb_typeof` arm beside it is not a guard:
+ *  Postgres does not promise to evaluate an AND list as written, and `jsonb_array_length`
+ *  raises on a non-array — MEASURED, the unguarded form raised at default costs. */
 async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
   // 1. Remove phantom agent template_ids from each affected repo's
   //    applicable_template_ids. The upgrade-status API reads only
@@ -304,7 +511,9 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
               AND oa.template_id LIKE 'agent.%'
               AND oa.superseded_at IS NULL
               AND jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array'
-              AND jsonb_array_length(oa.form_values_snapshot -> 'acceptedAgentIds') > 0
+              AND jsonb_array_length(
+                CASE WHEN jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array' THEN oa.form_values_snapshot -> 'acceptedAgentIds' ELSE '[]'::jsonb END
+              ) > 0
               AND NOT jsonb_exists(oa.form_values_snapshot -> 'acceptedAgentIds', replace(oa.template_id, 'agent.', ''))
           )
         ),
@@ -317,7 +526,9 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
           AND oa.template_id LIKE 'agent.%'
           AND oa.superseded_at IS NULL
           AND jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array'
-          AND jsonb_array_length(oa.form_values_snapshot -> 'acceptedAgentIds') > 0
+          AND jsonb_array_length(
+            CASE WHEN jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array' THEN oa.form_values_snapshot -> 'acceptedAgentIds' ELSE '[]'::jsonb END
+          ) > 0
           AND NOT jsonb_exists(oa.form_values_snapshot -> 'acceptedAgentIds', replace(oa.template_id, 'agent.', ''))
       )
   `);
@@ -330,7 +541,9 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
       AND template_id LIKE 'agent.%'
       AND superseded_at IS NULL
       AND jsonb_typeof(form_values_snapshot -> 'acceptedAgentIds') = 'array'
-      AND jsonb_array_length(form_values_snapshot -> 'acceptedAgentIds') > 0
+      AND jsonb_array_length(
+        CASE WHEN jsonb_typeof(form_values_snapshot -> 'acceptedAgentIds') = 'array' THEN form_values_snapshot -> 'acceptedAgentIds' ELSE '[]'::jsonb END
+      ) > 0
       AND NOT jsonb_exists(form_values_snapshot -> 'acceptedAgentIds', replace(template_id, 'agent.', ''))
   `);
 }

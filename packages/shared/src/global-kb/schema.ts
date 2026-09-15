@@ -29,6 +29,211 @@ export interface GlobalKbFacets {
   tags?: string[];
 }
 
+/** Every dimension an ENTRY may carry, in the order the UI shows them.
+ *
+ *  Deliberately NOT the same list as `FACET_FILTER_DIMENSIONS`, which is what RESTRICTS
+ *  retrieval. `tags` is the one dimension with no project-side source — `extractProjectFacets`
+ *  derives a project's facets from its detected stack and never sets tags — so filtering on it
+ *  can only ever exclude. MEASURED on a real entry: an article scoped
+ *  `{framework:['drupal'], language:['php'], tags:[...10 topical labels]}` passed the framework
+ *  and language clauses and was rejected by the tags clause alone, making it unreachable from
+ *  every project. Keep the two lists apart unless projects gain real tags. */
+export const FACET_DIMENSIONS = [
+  'framework',
+  'frameworkMajor',
+  'language',
+  'phpMajor',
+  'nodeMajor',
+  'database',
+  'dbMajor',
+  'packages',
+  'tags',
+] as const satisfies readonly (keyof GlobalKbFacets)[];
+
+/** `orphanFacetMajors` as a SQL boolean, generated from the SAME `FACET_MAJOR_PARENTS`, so the
+ *  schema backfill cannot disagree with `normalizeFacets` about which majors to drop — the shape
+ *  `canonicalFacetValueSql` established for the value rule.
+ *
+ *  True when `keyExpr` names a major holding a non-blank value in `facetsExpr` while its parent
+ *  holds none. "Blank" is the backfill's own cleaning rule, `trimFacetValueSql(x) = ''`, so inside one
+ *  statement this means "absent AFTER cleaning": a parent the cleaning empties — a legacy `[""]`,
+ *  or a bare `[]` — counts as absent, exactly as it does once `normalizeFacets` has dropped it.
+ *  Elements are read through a CASE rather than guarded by AND, because Postgres does not promise
+ *  to evaluate AND left to right and `jsonb_array_elements_text` raises on a scalar.
+ *
+ *  `keyExpr` names the dimension and `facetsExpr` the whole stored facets object; both are SQL
+ *  expressions. Only code constants are interpolated, never a stored value. */
+export function orphanFacetMajorSql(keyExpr: string, facetsExpr: string): string {
+  const present = (dim: string): string =>
+    `EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${facetsExpr}->'${dim}') = 'array' THEN ${facetsExpr}->'${dim}' ELSE '[]'::jsonb END) AS fv WHERE ${trimFacetValueSql('fv')} <> '')`;
+  const arms = Object.entries(FACET_MAJOR_PARENTS).map(
+    ([major, parent]) =>
+      `(${keyExpr} = '${major}' AND ${present(major)} AND NOT ${present(parent)})`,
+  );
+  return `(${arms.join(' OR ')})`;
+}
+
+/** Facet values as they must be STORED: trimmed, lowercased, deduped, empties dropped.
+ *
+ *  The two filters compare differently and only one of them can be made lenient.
+ *  `facetsMatchProject` lowercases both sides in JS, while `buildFacetClause` uses jsonb `?|`,
+ *  which is exact — MEASURED, `'{"framework":["Drupal"]}'::jsonb->'framework' ?| array['drupal']`
+ *  is FALSE. A project's own set is already lowercased by `extractProjectFacets`, so an entry
+ *  stored as `Drupal` would be advertised by the digest and then filtered out of the very
+ *  `rag_search` the digest promises to agree with. Making the SQL lenient instead would mean
+ *  unnesting the array and losing the GIN index, so the normalisation belongs on the WRITE.
+ *
+ *  Applied wherever an entry's facets are written: the enrich request's author-stated scope,
+ *  the scope editor's PATCH, and the model's own answer. */
+/** Spellings that are not the token a PROJECT reports, per dimension.
+ *
+ *  An entry's facets and a project's are compared for OVERLAP, so a dimension whose two sides
+ *  spell one technology differently restricts that entry to nothing. `01-env-detect.ts`
+ *  canonicalises PostgreSQL to `postgres` — both its `DB_NAME_TO_TYPE` table and the container
+ *  scan's `/\b(postgres|postgresql)\b/` yield that token — and `extractProjectFacets` only
+ *  lowercases what the detector produced. So an entry stored as `postgresql` was silently
+ *  unreachable from every PostgreSQL project, which is the failure this normalisation exists to
+ *  prevent, one layer up: `Drupal` vs `drupal` is a CASE mismatch, this is a VOCABULARY one.
+ *
+ *  Deliberately tiny and grounded: only a spelling the detector itself maps away belongs here,
+ *  never a guess at what someone might type. Adding one is a claim about the detector's output
+ *  and has to be read out of that file.
+ */
+const FACET_VALUE_ALIASES: Partial<Record<keyof GlobalKbFacets, Record<string, string>>> = {
+  database: { postgresql: 'postgres' },
+};
+
+/** The alias pairs as a flat list, for the migration that has to recognise a topic-key segment
+ *  written BEFORE canonicalisation. Exported instead of the map so nothing can mutate the table
+ *  through it, and derived from the same table so the two cannot drift. */
+export const FACET_VALUE_ALIAS_PAIRS: ReadonlyArray<{
+  dimension: string;
+  from: string;
+  to: string;
+}> = Object.entries(FACET_VALUE_ALIASES).flatMap(([dimension, table]) =>
+  Object.entries(table ?? {}).map(([from, to]) => ({ dimension, from, to })),
+);
+
+/** Trim, lowercase, and fold a known vocabulary alias — the ONE rule BOTH sides of a facet
+ *  comparison have to apply.
+ *
+ *  Exported because `extractProjectFacets` must reach the identical answer: the confirmation
+ *  form's `databaseType` is a free-TEXT field (`02-detection-confirmation.ts`, placeholder
+ *  "postgres, mysql, mariadb..."), so a person can legitimately confirm `postgresql` and the
+ *  project side would then carry a token no canonicalised entry can overlap. Normalising only
+ *  the entry side trades one silent mismatch for another. */
+export function canonicalizeFacetValue(dimension: string, value: string): string {
+  const v = value.trim().toLowerCase();
+  return FACET_VALUE_ALIASES[dimension as keyof GlobalKbFacets]?.[v] ?? v;
+}
+
+/** The characters the SQL engine trims from a facet value, as `chr()` code points.
+ *
+ *  The write path trims with JS `String.prototype.trim()`, which strips 25 code points — MEASURED on
+ *  Node 26.7.0 by testing every one: U+0009-U+000D, U+0020, U+00A0, U+1680, U+2000-U+200A, U+2028,
+ *  U+2029, U+202F, U+205F, U+3000, U+FEFF, none astral. SQL `btrim(x)` strips U+0020 alone, which
+ *  MEASURED left a tab-, newline- or NBSP-padded legacy value untouched by the backfill that exists
+ *  to canonicalise it — and read a tab-only parent as PRESENT where the write path reads it absent.
+ *
+ *  Only the ASCII members are generated. Above 127, what `chr()` returns depends on the server
+ *  encoding (a Unicode code point only on UTF8; other multibyte encodings require ASCII), and the
+ *  global KB can be an external database whose encoding Haive does not choose — one character that
+ *  raises there fails the whole schema ensure at boot. The set is a SUBSET of JS's on purpose: SQL
+ *  then never strips more than the write path, so a value padded with a non-ASCII space still
+ *  disagrees, but only by leaving its row unreachable, never by widening it. */
+export const FACET_TRIM_CODE_POINTS_SQL = [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20] as const;
+
+/** `btrim` over `FACET_TRIM_CODE_POINTS_SQL`. `valueExpr` is a SQL expression; only code constants
+ *  are interpolated. */
+export function trimFacetValueSql(valueExpr: string): string {
+  return `btrim(${valueExpr}, ${FACET_TRIM_CODE_POINTS_SQL.map((c) => `chr(${c})`).join(' || ')})`;
+}
+
+/** The SAME value rule as SQL, built from the SAME alias table, so a backfill cannot disagree
+ *  with the write path about what a facet value is.
+ *
+ *  This is the shape `identifierTsvSql` established for the identifier pattern: one definition,
+ *  two engines, rather than a JS rule and a hand-written SQL copy that drift. The copy is what
+ *  drifted here — the backfill lowercased and did neither the trim nor the alias, so a legacy
+ *  `PostgreSQL` was rewritten to `postgresql` and made unreachable, an already-lowercase
+ *  `postgresql` was never even selected, and a padded ` drupal ` matched neither the predicate
+ *  (`lower(v)` equals it) nor `?|` (which does not trim).
+ *
+ *  `keyExpr` names the dimension and `valueExpr` the raw stored text; both are SQL expressions.
+ *  Only code constants are interpolated, never a stored value. */
+export function canonicalFacetValueSql(keyExpr: string, valueExpr: string): string {
+  const base = `lower(${trimFacetValueSql(valueExpr)})`;
+  const whens = Object.entries(FACET_VALUE_ALIASES).flatMap(([dim, table]) =>
+    Object.entries(table ?? {}).map(
+      ([from, to]) => `WHEN ${keyExpr} = '${dim}' AND ${base} = '${from}' THEN '${to}'`,
+    ),
+  );
+  return whens.length === 0 ? base : `CASE ${whens.join(' ')} ELSE ${base} END`;
+}
+
+/** Majors whose own dimension NAME does not say which technology they version, paired with the
+ *  dimension that does.
+ *
+ *  `buildFacetClause` tests every dimension independently, so a major standing alone constrains
+ *  the version and nothing else — VERIFIED against the jsonb engine, an entry facetted
+ *  `{"frameworkMajor":["11"]}` matches a Laravel 11 project exactly as it matches Drupal 11,
+ *  and only a project on major 10 is excluded. A Drupal 11 rule therefore reaches every other
+ *  framework's v11 while looking correctly scoped in the UI.
+ *
+ *  `phpMajor` and `nodeMajor` are deliberately NOT here: those names identify the technology
+ *  themselves, so `{"phpMajor":["8"]}` is a complete statement about PHP 8 and a project running
+ *  PHP 8 alongside another primary language is a legitimate match. The ambiguity is specific to
+ *  the two generic names. */
+export const FACET_MAJOR_PARENTS = {
+  frameworkMajor: 'framework',
+  dbMajor: 'database',
+} as const satisfies Readonly<Record<string, keyof GlobalKbFacets>>;
+
+/** Majors present WITHOUT the dimension that says what they are a version of. Empty is the
+ *  normal case. The api refuses a write carrying one so the author is told which dimension is
+ *  missing; `normalizeFacets` drops it for every writer that has no author to tell. */
+export function orphanFacetMajors(
+  facets: GlobalKbFacets | null | undefined,
+): Array<{ dimension: keyof GlobalKbFacets; parent: keyof GlobalKbFacets }> {
+  const out: Array<{ dimension: keyof GlobalKbFacets; parent: keyof GlobalKbFacets }> = [];
+  for (const [dim, parent] of Object.entries(FACET_MAJOR_PARENTS) as Array<
+    [keyof GlobalKbFacets, keyof GlobalKbFacets]
+  >) {
+    const has = (d: keyof GlobalKbFacets): boolean => {
+      const v = facets?.[d];
+      return Array.isArray(v) && v.some((x) => typeof x === 'string' && x.trim() !== '');
+    };
+    if (has(dim) && !has(parent)) out.push({ dimension: dim, parent });
+  }
+  return out;
+}
+
+export function normalizeFacets(facets: GlobalKbFacets | null | undefined): GlobalKbFacets {
+  const out: GlobalKbFacets = {};
+  for (const dim of FACET_DIMENSIONS) {
+    const values = facets?.[dim];
+    if (!Array.isArray(values)) continue;
+    // Aliasing happens INSIDE the Set, so two spellings of one technology collapse to one value
+    // rather than being stored as two.
+    const cleaned = [
+      ...new Set(
+        values
+          .filter((v): v is string => typeof v === 'string')
+          .map((v) => canonicalizeFacetValue(dim, v))
+          .filter(Boolean),
+      ),
+    ];
+    if (cleaned.length > 0) out[dim] = cleaned;
+  }
+  // A major with no parent dimension states a version of nothing, and naming a dimension
+  // RESTRICTS — so the choice is between constraining the wrong thing and stating no opinion.
+  // Absence is what "no opinion" already means here, and it leaves every OTHER dimension in the
+  // set intact, so only a facet set that was nothing BUT an orphan major widens to everything.
+  // Runs last, after every dimension is filled, so field order cannot change the answer.
+  for (const { dimension } of orphanFacetMajors(out)) delete out[dimension];
+  return out;
+}
+
 export type GlobalKbCategory =
   'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
 
@@ -88,3 +293,57 @@ export function createGlobalKbDb(pg: postgres.Sql) {
 }
 
 export type GlobalKbDb = ReturnType<typeof createGlobalKbDb>;
+
+/** Stable cross-repo dedup key for a promoted entry: `category:tech[:major]`.
+ *
+ *  The tech + major are taken from the DETECTION-DERIVED facets (built by
+ *  techAnchorFacets), which are stable across runs — unlike the free-form `tech`
+ *  string the LLM emits, which drifts ("php" <-> "php5") for the SAME article and so
+ *  broke dedup (the original bug: identical facets, divergent topic_key). Priority
+ *  mirrors how techAnchorFacets pins a single dimension; a tech-bucket article sets
+ *  exactly one. The major keeps genuinely-different majors apart (PHP 5 vs PHP 8).
+ *  Falls back to the free-form `tech` only when the facets carry no anchor. Null when
+ *  neither yields a tech — such a promotion is never deduped (always inserted). */
+export function globalKbTopicKey(
+  category: string,
+  rawFacets: GlobalKbFacets,
+  fallbackTech?: string | null,
+): string | null {
+  // Derived from the CANONICAL facets, because the entry is STORED canonical — every write path
+  // runs `normalizeFacets` — so a key built from the raw values describes a scoping no row has.
+  // `norm` lowercases, which hides a case difference but not a VOCABULARY one — a promotion
+  // carrying `database: ["postgresql"]` keyed on `postgresql` and stored `postgres`, so the
+  // exact topic-key lookup missed the earlier entry and wrote a duplicate draft instead of
+  // superseding it. Both call sites pass this same object as the promotion's `facets`, so
+  // normalising here makes the key and the row agree by construction.
+  const facets = normalizeFacets(rawFacets);
+  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const first = (a?: string[]): string | null => (a && a.length > 0 ? (a[0] ?? null) : null);
+
+  let tech: string | null = null;
+  let major: string | null = null;
+  const pkg = first(facets.packages); // e.g. "vitest@3", "@scope/name@18.2"
+  if (pkg) {
+    const at = pkg.lastIndexOf('@');
+    if (at > 0) {
+      tech = pkg.slice(0, at);
+      major = pkg.slice(at + 1).split('.')[0] || null;
+    } else {
+      tech = pkg;
+    }
+  } else if (first(facets.framework)) {
+    tech = first(facets.framework);
+    major = first(facets.frameworkMajor);
+  } else if (first(facets.database)) {
+    tech = first(facets.database);
+    major = first(facets.dbMajor);
+  } else if (first(facets.language)) {
+    tech = first(facets.language);
+    major = first(facets.phpMajor) ?? first(facets.nodeMajor);
+  }
+
+  const techNorm = tech ? norm(tech) : fallbackTech ? norm(fallbackTech) : '';
+  if (!techNorm) return null;
+  const majorNorm = major ? norm(major) : '';
+  return majorNorm ? `${category}:${techNorm}:${majorNorm}` : `${category}:${techNorm}`;
+}

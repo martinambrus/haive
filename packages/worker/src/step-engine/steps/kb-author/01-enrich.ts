@@ -1,6 +1,8 @@
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  FACET_DIMENSIONS,
+  normalizeFacets,
   globalKbEntries,
   resolveGlobalKbSettings,
   withGlobalKb,
@@ -14,18 +16,31 @@ import {
   SUPERSEDE_CANDIDATE_LIMIT,
 } from '../_global-kb-similarity.js';
 import { globalKbTopicKey } from '../_global-kb-promote.js';
+import {
+  bodyUsesRepoSymbol,
+  collectRepoBasenames,
+  collectRepoSymbols,
+} from '../onboarding/08-knowledge-acquisition.js';
+import { scrubCitations, type ScrubbedBlock } from './_citation-scrub.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { syncGlobalKbEntry } from '../../../queues/global-kb-sync-queue.js';
 
-// Repo-anchored global-KB authoring (plan serialized-crunching-aurora). The task
-// is created by the global-kb enrich endpoint with a repositoryId + cliProviderId
-// and metadata.globalKbEntryId pointing at a `skeleton` entry whose body is the
-// author's free-text notes. The generic task machinery mounts the repo and
-// dispatches the chosen CLI when this step's llm phase runs, so the model READS
-// the repo's code to derive EVERYTHING itself — title, category, version facets
-// and the article body — and decides whether the rule already exists (update) or
-// is new (insert). The result is auto-activated and embedded immediately (no
-// review step). Form-less: detect -> llm -> apply, hands-free.
+// Global-KB authoring. The task is created by the global-kb enrich endpoint with a
+// cliProviderId and metadata.globalKbEntryId pointing at a `skeleton` entry whose body is the
+// author's free-text notes; the model turns those notes into a reusable house standard and
+// decides whether the rule already exists (update) or is new (insert). Form-less:
+// detect -> llm -> apply.
+//
+// A repository is OPTIONAL and is only ever a place to SEE the rule obeyed or broken. It is
+// not the subject: the article is retrieved by other projects, so it must carry no file paths,
+// symbols, line numbers or counts from the codebase that happened to be open. MEASURED on
+// entry b15eebfb — authored against a Drupal 7 repo from notes about a Drupal 8+ rule, it came
+// out as an audit of that one repo (`sites/all/themes/.../img/`, "the 122 PNG icons",
+// "currently 2 hits") scoped `frameworkMajor: ["7"]`, which is precisely the set of projects
+// the rule does NOT apply to.
+//
+// Facets describe the RULE. The author may state them up front, and what they state wins:
+// asking the prompt was already tried and produced the "7" above. Every result is a DRAFT —
+// the shared store is not a place for unreviewed writing.
 
 const CATEGORIES = [
   'general',
@@ -36,17 +51,9 @@ const CATEGORIES = [
 ] as const;
 type Category = (typeof CATEGORIES)[number];
 
-const FACET_DIMS = [
-  'framework',
-  'frameworkMajor',
-  'language',
-  'phpMajor',
-  'nodeMajor',
-  'database',
-  'dbMajor',
-  'packages',
-  'tags',
-] as const;
+/** The dimensions this step may write. The SAME list retrieval filters on — a dimension written
+ *  here but absent there would scope an entry by something nothing reads. */
+const FACET_DIMS = FACET_DIMENSIONS;
 
 /** Cap on existing entries fed to the model for de-dup. House standards are a
  *  small corpus; if it ever grows past this we log rather than silently drop. */
@@ -60,20 +67,33 @@ interface ExistingEntry {
   excerpt: string;
 }
 
-interface KbAuthorDetect {
+export interface KbAuthorDetect {
   entryId: string | null;
   namespace: string;
   // User-set title — authoritative, the LLM does not derive its own.
   title: string;
   seedText: string;
   existing: ExistingEntry[];
+  /** Whether a repository is checked out for this run. ANCHORED mode reads one to see the
+   *  pattern in practice; repo-less writes from the notes alone. Decides which preamble the
+   *  prompt gets and whether the retrieval block is spliced at all — with nothing on disk,
+   *  telling the model to search a repo sends it after files that do not exist. */
+  hasRepo: boolean;
+  /** Scope the AUTHOR stated when creating the entry. Authoritative: these dimensions are
+   *  merged over whatever the model returns, because asking a prompt nicely is exactly what
+   *  produced a Drupal-8+ rule scoped to `frameworkMajor: ["7"]`. */
+  authorFacets: GlobalKbFacets;
 }
 
 interface KbAuthorApply {
   entryId: string | null;
-  status: 'active' | 'draft' | 'skipped';
+  /** Never 'active': every article is reviewed before it reaches the shared store. */
+  status: 'draft' | 'skipped';
   mode: 'new' | 'update';
   sections: number;
+  /** Blocks removed for citing a real codebase. Reported so the removal is VISIBLE at review —
+   *  a draft that silently lost its evidence reads as a thin article, not as a stripped one. */
+  scrubbed?: ScrubbedBlock[];
 }
 
 interface Enrichment {
@@ -85,16 +105,33 @@ interface Enrichment {
   body?: string;
 }
 
-async function loadEntryId(ctx: StepContext): Promise<string | null> {
+async function loadTaskAnchor(
+  ctx: StepContext,
+): Promise<{ entryId: string | null; hasRepo: boolean; authorFacets: GlobalKbFacets | null }> {
   const task = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
-    columns: { metadata: true },
+    columns: { metadata: true, repositoryId: true },
   });
-  const md = task?.metadata as { globalKbEntryId?: string } | null;
-  return md?.globalKbEntryId ?? null;
+  const md = task?.metadata as { globalKbEntryId?: string; authorFacets?: GlobalKbFacets } | null;
+  // ANCHORED vs repo-less is the task's own repositoryId, not `ctx.repoPath`: a repo-less task
+  // still has a repoPath — an empty scratch workspace — so the path cannot answer this.
+  // The author's OWN scope, recorded at creation. Read from the task and NOT from the entry,
+  // because apply() overwrites the entry's facets with the MERGED result — so on a retry the
+  // entry reports the model's inferred scope as if the author had stated it, `mergeAuthorFacets`
+  // then forces those values over the new answer, and retrying to correct a wrong inferred scope
+  // is the one thing that cannot work. The task row is immutable here; the entry is not.
+  //
+  // `null` means the task predates the record, where reading the entry is exactly the behaviour
+  // it had. No backfill: for an entry that has already been enriched the author's original values
+  // are gone, and recording the merged ones would assert something false.
+  return {
+    entryId: md?.globalKbEntryId ?? null,
+    hasRepo: task?.repositoryId != null,
+    authorFacets: md?.authorFacets ?? null,
+  };
 }
 
-function buildEnrichPrompt(detected: KbAuthorDetect): string {
+export function buildEnrichPrompt(detected: KbAuthorDetect): string {
   const existing = detected.existing.length
     ? detected.existing
         .map((e) => {
@@ -113,11 +150,25 @@ function buildEnrichPrompt(detected: KbAuthorDetect): string {
         })
         .join('\n')
     : '(none yet)';
+  const scope = Object.entries(detected.authorFacets)
+    .filter(([, v]) => Array.isArray(v) && v.length > 0)
+    .map(([dim, v]) => `- ${dim}: ${(v as string[]).join(', ')}`);
   return [
     'You document reusable house standards for a global, cross-project knowledge base.',
-    "You run inside a sandbox with THIS project's repository checked out at the working",
-    'directory. You have file tools to read it, and — only if network egress is permitted —',
-    'web access. Do not assume internet access; if a fetch fails, rely on the repository alone.',
+    'The article you write is retrieved by OTHER projects — different frameworks, different',
+    'layouts, different file names from anything you can see from here.',
+    '',
+    ...(detected.hasRepo
+      ? [
+          'A repository is checked out at the working directory. It is where you can SEE this rule',
+          'obeyed or broken — it is NOT the subject of the article. Read it to understand how the',
+          'pattern is used, then write a rule that holds for a project sharing none of its files.',
+          'Web access only if network egress is permitted; if a fetch fails, do not assume it.',
+        ]
+      : [
+          'NO repository is checked out, because this rule is not about any one codebase. Write it',
+          "from the author's notes below. Web access only if network egress is permitted.",
+        ]),
     '',
     '## The title (user-set — write the article under THIS exact title; do not change it)',
     detected.title || '(untitled)',
@@ -125,23 +176,64 @@ function buildEnrichPrompt(detected: KbAuthorDetect): string {
     "## The author's notes (free text — the house rule to capture)",
     detected.seedText || '(empty)',
     '',
+    ...(scope.length
+      ? [
+          '## The scope the author set (AUTHORITATIVE — do not narrow or widen it)',
+          ...scope,
+          'These dimensions are already decided. Fill in only the ones missing below — and where',
+          'the author named a technology without pinning its version, the rule covers EVERY',
+          'version of it, so leave that version dimension out rather than inferring one.',
+          '',
+        ]
+      : []),
     '## Existing house rules (for de-duplication)',
     existing,
     '',
-    '## How to find the code — follow this order',
-    ...retrievalGuidanceLines(),
+    ...(detected.hasRepo
+      ? ['## How to find the code — follow this order', ...retrievalGuidanceLines(), '']
+      : []),
+    '## What the article must look like',
+    '- A reader who cannot see any repository must be able to apply it.',
+    '- NEVER cite a file path, a file name, a symbol from a real codebase, a line number or a',
+    '  count of occurrences. Those belong to ONE project at ONE moment: they mean nothing in the',
+    '  next project and they are wrong in this one as soon as a file is renamed.',
+    '  This bans MEASURING the repository, not using numbers. "This codebase has 122 inline',
+    '  icons" is a fact about one checkout and is forbidden; "eight icons per card at ~800 bytes',
+    '  each is ~2.4 KB per cached copy" is reasoning any reader can apply to their own project',
+    '  and is exactly what makes a rule land. When a figure is illustrative, say so.',
+    '- Show the pattern with SHORT, self-contained code examples, abstracted or invented. An',
+    '  example carries HOW the pattern looks, never WHERE it was seen.',
+    '- Give both sides, in this order: a `## The wrong way` section, then `## The right way`.',
+    '  The wrong way is what a reader must recognise in their own code before the rule means',
+    '  anything, so put a `// ANTI-PATTERN — do not copy` comment INSIDE its code fence.',
+    '  Ending on the right way leaves the correct form as the last thing read.',
     '',
     '## Your task',
-    '1. READ the relevant module / library / code in THIS repository that the notes refer to.',
-    '   Cite real file paths and copy concrete, working examples from the repo, not generic advice.',
-    '2. From the repo manifests (composer.json drupal/core, package.json, lockfiles) determine the',
-    '   framework and its MAJOR version + any relevant packages. MAJOR only (e.g. 11, not 11.2).',
-    '3. If web access is available, consult official docs / module READMEs (including any URLs the',
-    '   author wrote) to fill gaps. Otherwise rely on the repository.',
+    ...(detected.hasRepo
+      ? [
+          '1. Read the code the notes point at — to understand the pattern and how it is misused,',
+          '   not to quote it. Nothing you read gets cited in the article.',
+        ]
+      : ['1. Work the rule out from the notes and from what you know of the technology.']),
+    '2. Decide the SCOPE: which technologies does this rule actually apply to? Name the base',
+    // "postgres", not "postgresql": the example has to be the token a PROJECT reports, or the
+    // prompt teaches the one spelling `buildFacetClause` can never overlap (`01-env-detect.ts`
+    // canonicalises it). `normalizeFacets` now aliases it too, so this is belt AND braces.
+    '   technology (e.g. "drupal", "postgres", "php"). Add a MAJOR version ONLY when the rule',
+    '   is genuinely specific to it — a rule that holds across majors must NOT name one, because',
+    '   naming a dimension RESTRICTS the entry to it and an omitted dimension applies to all.',
+    ...(detected.hasRepo
+      ? [
+          '   Do NOT read the scope off the repository in front of you. What it happens to have',
+          '   installed is not what the rule applies to — a rule about Drupal 8+ seen in a Drupal 7',
+          '   codebase is still a Drupal 8+ rule.',
+        ]
+      : []),
+    '3. If web access is available, consult official docs to fill gaps.',
     '4. Decide whether this rule already exists above. If it is the SAME rule (same topic / module /',
     '   scope) as one listed, set mode="update" and targetId to that id — you will REPLACE it with a',
     '   complete, improved article that incorporates the new notes. Otherwise set mode="new".',
-    `5. Pick the best CATEGORY (one of: ${CATEGORIES.join(', ')}) and the version FACETS, then`,
+    `5. Pick the best CATEGORY (one of: ${CATEGORIES.join(', ')}) and the FACETS, then`,
     '   write the full, self-contained markdown article BODY under the user-set title above.',
     '',
     '## Output — emit EXACTLY ONE fenced ```json block and nothing else:',
@@ -151,18 +243,22 @@ function buildEnrichPrompt(detected: KbAuthorDetect): string {
     '  "targetId": "<the existing id when mode=update; omit otherwise>",',
     '  "category": "<one of the categories listed above>",',
     '  "facets": {',
-    '    "framework": ["<e.g. drupal>"],',
-    '    "frameworkMajor": ["<e.g. 11>"],',
+    '    "framework": ["<e.g. drupal — omit the major unless the rule needs it>"],',
+    '    "frameworkMajor": ["<e.g. 11 — ONLY for a rule that is specific to that major>"],',
     '    "language": ["<e.g. php>"],',
+    '    "phpMajor": ["<e.g. 8 — only for a rule specific to it>"],',
+    '    "nodeMajor": ["<e.g. 22 — only for a rule specific to it>"],',
     '    "database": ["<e.g. mysql or mariadb — for datastore-only rules>"],',
-    '    "dbMajor": ["<e.g. 10 — the datastore major>"],',
-    '    "packages": ["<name@major, e.g. drupal/paragraphs@8>"]',
+    '    "dbMajor": ["<e.g. 10 — only for a rule specific to it>"],',
+    '    "packages": ["<name@major, e.g. drupal/paragraphs@8>"],',
+    '    "tags": ["<free-form, e.g. performance>"]',
     '  },',
     '  "body": "<the full markdown article>"',
     '}',
     '```',
-    'Set facets to the versions you actually found in the repository; omit a dimension that does not',
-    'apply (an omitted dimension means the rule applies to all values). Major versions only.',
+    'Facets describe the RULE, not any codebase. Omit every dimension the rule does not depend',
+    'on — an omitted dimension means it applies to all values of that dimension, which is what',
+    'makes an entry reachable from the projects that need it. Major versions only.',
   ].join('\n');
 }
 
@@ -185,15 +281,57 @@ export function parseEnrichment(raw: unknown): Enrichment | null {
 }
 
 /** Sanitize the LLM's facets to clean string sets per known dimension. */
-export function cleanFacets(llm?: GlobalKbFacets): GlobalKbFacets {
-  const out: GlobalKbFacets = {};
-  for (const d of FACET_DIMS) {
-    const v = llm?.[d];
-    if (Array.isArray(v) && v.length) {
-      out[d] = [...new Set(v.filter((x) => typeof x === 'string' && x).map(String))];
+/** The author's stated scope overlaid on the model's, dimension by dimension.
+ *
+ *  A REPLACE per dimension, not a union: the author saying "drupal" and the model saying
+ *  "drupal 7" must not become "drupal, 7" — that is the over-scoping this exists to stop, and
+ *  naming a dimension RESTRICTS the entry to it. Dimensions the author left blank are the
+ *  model's to fill, which is the whole point of asking it.
+ *
+ *  Enforced HERE rather than in the prompt because the prompt already asked, politely, and got
+ *  `frameworkMajor: ["7"]` on a rule the author wrote for Drupal 8+. */
+/** Version dimensions that a broader dimension already covers.
+ *
+ *  Naming a technology and leaving its version blank is how the form says "every version of it"
+ *  — an omitted dimension is exactly what retrieval reads as "applies to all". Without this the
+ *  model's own guess survived in the subordinate slot, so an author who scoped `framework:
+ *  ['drupal']` against a Drupal 7 checkout still got `frameworkMajor: ['7']` — the precise
+ *  regression this whole step exists to stop, arriving through the field meant to prevent it.
+ *
+ *  Only a dimension the author actually stated clears its children, and an author who wants a
+ *  version-specific rule still gets one by filling the version box themselves. */
+const FACET_VERSION_CHILDREN: Partial<Record<keyof GlobalKbFacets, (keyof GlobalKbFacets)[]>> = {
+  framework: ['frameworkMajor'],
+  language: ['phpMajor', 'nodeMajor'],
+  database: ['dbMajor'],
+};
+
+export function mergeAuthorFacets(
+  authorFacets: GlobalKbFacets,
+  modelFacets: GlobalKbFacets,
+): GlobalKbFacets {
+  const merged: GlobalKbFacets = { ...modelFacets };
+  const stated = (dim: keyof GlobalKbFacets): boolean => {
+    const v = authorFacets[dim];
+    return Array.isArray(v) && v.length > 0;
+  };
+  for (const dim of FACET_DIMS) {
+    if (stated(dim)) merged[dim] = [...(authorFacets[dim] as string[])];
+  }
+  for (const [parent, children] of Object.entries(FACET_VERSION_CHILDREN)) {
+    if (!stated(parent as keyof GlobalKbFacets)) continue;
+    for (const child of children) {
+      if (!stated(child)) delete merged[child];
     }
   }
-  return out;
+  return merged;
+}
+
+/** Keep only the known dimensions, and store them the way retrieval compares them.
+ *  `normalizeFacets` owns that rule — jsonb `?|` is exact, so a model answering `Drupal` would
+ *  be advertised by the digest and filtered out of rag_search. */
+export function cleanFacets(llm?: GlobalKbFacets): GlobalKbFacets {
+  return normalizeFacets(llm);
 }
 
 export function normCategory(c?: string): Category {
@@ -225,7 +363,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
   },
 
   async detect(ctx): Promise<KbAuthorDetect> {
-    const entryId = await loadEntryId(ctx);
+    const { entryId, hasRepo, authorFacets } = await loadTaskAnchor(ctx);
     if (!entryId) throw new Error('kb_author task is missing metadata.globalKbEntryId');
     return withGlobalKb(ctx.db, async ({ db }) => {
       const entry = await db.query.globalKbEntries.findFirst({
@@ -272,6 +410,12 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         title: entry.title,
         seedText: entry.seedText ?? entry.body,
         existing,
+        hasRepo,
+        // Whatever the author stated when creating the entry. The skeleton is inserted with
+        // `facets: {}` when they state nothing, so this is empty in that case and the model
+        // decides every dimension. Taken from the TASK, which never changes; the entry's own
+        // column is rewritten by apply() and so reports the model's scope on a retry.
+        authorFacets: authorFacets ?? entry.facets ?? {},
       };
     });
   },
@@ -305,11 +449,66 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     }
     const title = detected.title.trim() || 'Untitled house rule';
     const category = normCategory(parsed?.category);
-    const facets = cleanFacets(parsed?.facets);
+    const facets = mergeAuthorFacets(
+      cleanFacets(detected.authorFacets),
+      cleanFacets(parsed?.facets),
+    );
     const body =
       parsed?.body && parsed.body.trim().length > 0
         ? parsed.body
         : `# ${title}\n\n${detected.seedText}`;
+
+    // Last line of defence on "evidence is examples, never sources". The prompt asks for it;
+    // this enforces it, because a leaked path is not a style slip — the article is retrieved by
+    // every other project, where one repo's geography is noise at best.
+    //
+    // Anchored runs additionally check symbols DEFINED in that repo: a copied helper name is a
+    // citation the path rules cannot see. Repo-less has neither a repo to resolve paths against
+    // nor symbols to compare, so it scrubs line references only.
+    const repoSymbols = detected.hasRepo
+      ? await collectRepoSymbols(ctx.repoPath, null).catch(() => new Set<string>())
+      : new Set<string>();
+    const repoBasenames = detected.hasRepo
+      ? await collectRepoBasenames(ctx.repoPath).catch(() => new Set<string>())
+      : new Set<string>();
+    const scrub = await scrubCitations(body, {
+      repoPath: detected.hasRepo ? ctx.repoPath : null,
+      repoSymbols,
+      findSymbol: bodyUsesRepoSymbol,
+      repoBasenames,
+    });
+    if (scrub.removed.length > 0) {
+      ctx.logger.warn(
+        {
+          entryId: skeletonId,
+          removed: scrub.removed.length,
+          reasons: scrub.removed.map((r) => r.reason),
+        },
+        'kb enrich: removed blocks that cited a real codebase',
+      );
+    }
+    // Scrubbing everything means the answer was a repo audit rather than a house rule — there
+    // is no generic article under the citations. Restoring the raw text here is the one case
+    // that must NOT happen: the guard would fail open exactly when the violation is total,
+    // handing the shared store a draft that is nothing but citations, and its `scrubbed` list
+    // would contradict the body the reviewer is shown.
+    //
+    // Retried first, on the same ladder the unparseable case uses a few lines up: the prompt
+    // already asks for an abstracted rule, so another pass is a real chance rather than a
+    // formality. On the final attempt it fails, the way a declared-but-missing KB body does —
+    // publishing the wrong thing under a canonical name is worse than publishing nothing.
+    if (scrub.body.trim().length === 0) {
+      if (!args.isFinalLlmAttempt) {
+        throw new RetryableParseError(
+          'kb enrichment scrubbed to nothing — every block cited the anchor repo, retrying',
+        );
+      }
+      throw new Error(
+        'kb enrichment produced no publishable article: every block cited the anchor repository ' +
+          `(${scrub.removed.length} removed, e.g. ${scrub.removed[0]?.reason ?? 'n/a'})`,
+      );
+    }
+    const finalBody = scrub.body;
 
     // The model may flag this as an update of an existing rule; only honor a
     // targetId we actually showed it (else treat it as a new entry).
@@ -323,13 +522,13 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     // the model's proposed update target PLUS any entry that APPEARED SINCE this task's
     // detect snapshot (created by a concurrent enrich) — so the second of two racing
     // tasks sees the first's committed entry. Real embeddings (not the coarse lock key)
-    // decide identity: a confirmed same-article match (>=0.72) becomes a review-gated
-    // DRAFT superseding it (target left untouched until the user activates); anything
-    // else — or ollama unavailable — is a brand-new active, so a wrong match can never
-    // silently overwrite a good article. topicKey is the lock key ONLY, never stored on
+    // decide identity: a confirmed same-article match (>=0.72) records what it supersedes so
+    // review can show the diff (the target is left untouched until the user activates);
+    // anything else — or ollama unavailable — is simply a new entry, so a wrong match can
+    // never overwrite a good article. topicKey is the lock key ONLY, never stored on
     // the entry, so enrich stays isolated from the promote path's topicKey dedup.
     const lockTopic = globalKbTopicKey(category, facets) ?? `kbauthor:${category}`;
-    const { confirmedUpdate, namespace } = await withGlobalKb(ctx.db, async ({ db }) =>
+    const { confirmedUpdate } = await withGlobalKb(ctx.db, async ({ db }) =>
       db.transaction(async (tx) => {
         const lockKey = `${detected.namespace}:${lockTopic}`;
         await tx.execute(
@@ -376,7 +575,11 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
           candidates.length > 0
             ? await confirmSupersedeByEmbedding(
                 { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
-                `${title}\n\n${body}`,
+                // The SCRUBBED article, not the model's raw answer. `finalBody` is what gets
+                // saved and reviewed, and if scrubbing removed repo-specific material that
+                // dominated the original text, superseding on that text archives an existing
+                // entry over content nobody will ever see published.
+                `${title}\n\n${finalBody}`,
                 candidates.map((c) => ({
                   id: c.id,
                   status: c.status,
@@ -385,23 +588,48 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
               )
             : null;
         const isUpdate = matchId != null;
-        // The SKELETON row carries the article either way: a confirmed match becomes a
-        // draft superseding it; otherwise it goes live immediately as a new entry.
-        const [row] = await tx
+        // The SKELETON row carries the article either way. A confirmed match additionally
+        // records what it supersedes, so review can show the diff; the target itself is left
+        // untouched until the user activates.
+        await tx
           .update(globalKbEntries)
           .set({
             title,
             category,
             facets,
-            body,
-            status: isUpdate ? 'draft' : 'active',
+            body: finalBody,
+            // ALWAYS a draft. A brand-new article is the riskiest thing that enters a store
+            // shared by every project, and it used to be the one case that skipped review
+            // while an UPDATE — a change to something already reviewed — was held. That is
+            // backwards, and it is what the endpoint's own contract says ("the user reviews +
+            // activates the draft"). Activation embeds it, through the API's enqueueSync.
+            status: 'draft',
             supersedesEntryId: matchId,
             embedStatus: 'pending',
             updatedAt: new Date(),
           })
-          .where(eq(globalKbEntries.id, skeletonId))
-          .returning({ namespace: globalKbEntries.namespace });
-        return { confirmedUpdate: isUpdate, namespace: row?.namespace ?? detected.namespace };
+          .where(eq(globalKbEntries.id, skeletonId));
+        // Drop any vectors this entry still owns, IN THE SAME TRANSACTION as the demotion.
+        //
+        // "Drafts hold no vectors" is an invariant, and an invariant asserted in a comment is
+        // how the retry path came to violate it. A NEW entry was never embedded, but a RETRIED
+        // one was: a step that completed under the old auto-activate behaviour left its entry
+        // `active` WITH chunks, and this update rewrites the body and demotes the row while
+        // those chunks stay. Retrieval has no status predicate — `ragHybridSearch` filters on
+        // namespace and facets, and the body expansion joins a chunk to its entry and returns
+        // the entry's CURRENT body — so a survivor serves the new, explicitly unreviewed text
+        // to every project.
+        //
+        // Atomic rather than enqueued or called afterwards, and that is the point: the body
+        // change and the chunk removal commit together or not at all, so there is no window in
+        // which the new text is live against old vectors, and no failure mode that leaves the
+        // two disagreeing. A queue would have both. Both tables live on this connection, so the
+        // transaction already spans them. Cheap and a no-op for a new entry, which owns none.
+        await tx.execute(
+          sql`DELETE FROM ai_rag_embeddings
+               WHERE namespace = ${detected.namespace} AND entry_id = ${skeletonId}`,
+        );
+        return { confirmedUpdate: isUpdate };
       }),
     );
 
@@ -412,31 +640,19 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
       );
     }
 
-    // Auto-activate ONLY the new path: embed now so it's retrievable immediately.
-    // A confirmed update is a draft (drafts hold no vectors) until the user reviews
-    // and activates it — activation re-embeds via the API's enqueueSync.
-    if (!confirmedUpdate) {
-      try {
-        await syncGlobalKbEntry({ entryId: skeletonId, namespace, reason: 'upsert' });
-      } catch (err) {
-        ctx.logger.warn(
-          { err, entryId: skeletonId },
-          'global KB embed after enrich failed; entry is active but unembedded',
-        );
-      }
-    }
-
+    // No embed here any more, and no reconciliation to chase either: the demotion above
+    // removed this entry's chunks in the same transaction that wrote the draft. Activation
+    // re-embeds through the API's enqueueSync.
     ctx.logger.info(
       { entryId: skeletonId, mode: confirmedUpdate ? 'update' : 'new', enriched: !!parsed?.body },
-      confirmedUpdate
-        ? 'kb enrichment complete → draft (awaiting review)'
-        : 'kb enrichment complete → active',
+      'kb enrichment complete → draft (awaiting review)',
     );
     return {
       entryId: skeletonId,
-      status: confirmedUpdate ? 'draft' : 'active',
+      status: 'draft',
       mode: confirmedUpdate ? 'update' : 'new',
-      sections: (body.match(/^##\s/gm) ?? []).length,
+      sections: (finalBody.match(/^##\s/gm) ?? []).length,
+      ...(scrub.removed.length > 0 ? { scrubbed: scrub.removed } : {}),
     };
   },
 };

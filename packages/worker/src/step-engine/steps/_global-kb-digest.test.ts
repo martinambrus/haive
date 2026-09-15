@@ -109,3 +109,36 @@ describe('withGlobalKbDigest', () => {
     expect(withGlobalKbDigest(once, entries)).toBe(once);
   });
 });
+
+// `tags` is a topical label on the ARTICLE and a project has no counterpart — extractProjectFacets
+// never sets it — so filtering on it could only ever exclude. MEASURED on the live store before
+// this: an article facetted {framework:[drupal], language:[php], tags:[...]} passed both stack
+// clauses and was rejected by the tags clause alone, i.e. reachable from no project at all.
+describe('facetsMatchProject and tags', () => {
+  const project = {
+    framework: ['drupal'],
+    frameworkMajor: ['11'],
+    language: ['php'],
+    phpMajor: [],
+    nodeMajor: [],
+    database: [],
+    dbMajor: [],
+    packages: [],
+    tags: [],
+  };
+
+  it('matches an entry that carries tags the project cannot have', () => {
+    expect(
+      facetsMatchProject(
+        { framework: ['drupal'], language: ['php'], tags: ['performance', 'svg', 'caching'] },
+        project,
+      ),
+    ).toBe(true);
+  });
+
+  it('still restricts on a stack dimension the project does not satisfy', () => {
+    expect(facetsMatchProject({ framework: ['laravel'], tags: ['performance'] }, project)).toBe(
+      false,
+    );
+  });
+});

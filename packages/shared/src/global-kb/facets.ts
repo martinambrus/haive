@@ -2,6 +2,8 @@
 // filter the GLOBAL KB at query time so a project only retrieves stack/version-
 // compatible house standards.
 
+import { canonicalizeFacetValue } from './schema.js';
+
 export interface ProjectFacetSet {
   framework: string[];
   frameworkMajor: string[];
@@ -134,6 +136,23 @@ export function extractProjectFacets(
   const packages = data.project?.packages;
   if (Array.isArray(packages)) {
     for (const p of packages) if (typeof p === 'string' && p) facets.packages.push(p);
+  }
+
+  // BOTH sides of every facet comparison have to be normalised the same way, and only one of
+  // the two comparers can be lenient: `facetsMatchProject` lowercases in JS, while
+  // `buildFacetClause` uses jsonb `?|`, which is exact. Entries are normalised on write, so
+  // normalising here is the other half — without it a project detected as `Drupal` (framework
+  // and packages were the two dimensions still pushed verbatim) matches the digest and is then
+  // filtered out of the rag_search the digest promises to agree with.
+  //
+  // Through the SAME function the write side uses, so the two cannot answer differently. Case
+  // is not the only way they can disagree: `databaseType` is a free-text field on the
+  // confirmation form, so a project can carry `postgresql` where the detector would have said
+  // `postgres`, and canonicalising one side alone just moves the mismatch.
+  for (const dim of Object.keys(facets)) {
+    facets[dim] = [
+      ...new Set(facets[dim]!.map((v) => canonicalizeFacetValue(dim, v)).filter(Boolean)),
+    ];
   }
 
   return facets;

@@ -1,5 +1,6 @@
 import { logger } from '../logger/index.js';
 import type { GlobalKbConnection } from './connection.js';
+import { canonicalFacetValueSql, orphanFacetMajorSql, trimFacetValueSql } from './schema.js';
 
 const log = logger.child({ module: 'global-kb-schema' });
 
@@ -88,6 +89,13 @@ export async function ensureGlobalKbSchema(
   // activation. Additive column for pre-existing DBs.
   await conn.pg.unsafe(
     `ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS supersedes_entry_id uuid`,
+  );
+  // Indexed because the successor lookup WALKS this column: `GET /entries/:id` follows the
+  // supersession chain forward to find the live entry that replaced an archived one, which is a
+  // lookup per generation. Unindexed that is a sequential scan per level, up to the recursion's
+  // depth cap — cheap on a small store and not something to leave for a large one.
+  await conn.pg.unsafe(
+    `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_supersedes ON ${ENTRIES_TABLE} (supersedes_entry_id)`,
   );
   // Widen the status CHECK to allow 'failed' on pre-existing DBs — a kb_author
   // enrich task that fails leaves its entry in a terminal 'failed' state. Idempotent:
@@ -189,6 +197,102 @@ export async function ensureGlobalKbSchema(
       CREATE TRIGGER trg_global_content_tsv
         BEFORE INSERT OR UPDATE ON ${VECTORS_TABLE}
         FOR EACH ROW EXECUTE FUNCTION update_content_tsv()
+    `);
+  }
+
+  // Facet values are stored LOWERCASE, because retrieval compares them two ways and only one
+  // can be lenient: `facetsMatchProject` lowercases in JS while `buildFacetClause` uses jsonb
+  // `?|`, which is exact. Every write path normalises now, and the PROJECT side is normalised
+  // too — which is precisely what makes this backfill necessary rather than optional. An
+  // upgraded install can still hold `Drupal` or `github.com/Azure/foo@1` written by the old
+  // paths, and normalising only the live sides would leave those rows advertised by the digest
+  // and unreachable through rag_search: worse than before the change, because before it both
+  // sides were un-normalised and matched.
+  //
+  // Rides ensureGlobalKbSchema in the shape `backfillIdentifierTsv` established: no
+  // applied-record, converges structurally, and re-running writes nothing because the predicate
+  // only selects rows that still hold a non-lowercase VALUE. Both tables, since the search
+  // reads the chunk's own copy of the facets rather than the entry's.
+  //
+  // Cost: `withGlobalKb` ensures the schema ONCE PER PROCESS, not per call, so this is one scan
+  // at boot rather than one per request. It carries no per-run cap, unlike its model — the work
+  // is bounded by the number of LEGACY rows, which is zero after the first successful pass, and
+  // a migration that converges over several boots would leave retrieval half-fixed in between.
+  // An empty or non-array dimension is OMITTED, never rewritten in place. `jsonb_agg` over zero
+  // rows is SQL NULL, so carrying it through `jsonb_object_agg` stores JSON `null` — and
+  // `buildFacetClause` calls `jsonb_array_length(facets->'<dim>')` on every candidate row, which
+  // raises `cannot get array length of a scalar` and fails the WHOLE query rather than skipping
+  // that row (MEASURED on a two-row set where one row was corrupt: the valid row was returned by
+  // neither). Omitting matches `normalizeFacets` and costs no meaning, because absent and empty
+  // are the same claim to both filters — `buildFacetClause` spells it out as its own
+  // `jsonb_array_length(...) = 0` arm, and `facetsMatchProject` as `constrained.length === 0`.
+  //
+  // The predicate admits a NON-ARRAY value as well as a non-lowercase one, so this pass repairs a
+  // row an earlier version of this same migration wrote instead of needing a migration of its own.
+  // The value rule comes from `canonicalFacetValueSql`, which is generated from the same alias
+  // table `normalizeFacets` reads, so this pass applies the WRITE path's rule rather than a
+  // hand-written approximation of it. It had been exactly that approximation — `lower(v)` alone
+  // — which left three classes of legacy row permanently unreachable: `PostgreSQL` was rewritten
+  // to `postgresql`, which no project reports; an already-lowercase `postgresql` was not even
+  // selected; and a padded ` drupal ` matched neither the predicate (`lower(v)` equals it) nor
+  // `?|`, which does not trim. The predicate is now "the stored value differs from its canonical
+  // form", which subsumes case, padding and aliases and needs no clause per rule.
+  //
+  // It must also catch the values the aggregation DROPS rather than rewrites. An empty or
+  // whitespace-only token canonicalises TO ITSELF, so `canon <> v` is false for it while the
+  // rewrite would still discard it — and a legacy `{"framework": [""]}` (the old API took a bare
+  // `z.string()`) therefore kept a NON-EMPTY array that overlaps nothing, with
+  // `jsonb_array_length` = 1 so `buildFacetClause`'s "= 0 applies to all" arm does not fire
+  // either. Unreachable from every project. A null element is folded in for the same reason —
+  // dropped, not rewritten — though that one is benign for retrieval on its own (MEASURED: `?|`
+  // and `jsonb_array_length` both handle it).
+  //
+  // Every expansion is guarded by a CASE, the predicate's included. Its
+  // `jsonb_typeof(kv.value) <> 'array' OR EXISTS (...)` READS like a guard and is not one:
+  // Postgres documents that it does not promise OR evaluation order and names CASE as the way to
+  // force it, and `jsonb_array_elements_text` raises on a scalar — MEASURED on 18.6, `cannot extract
+  // elements from a scalar`. Evaluated in the other order, the non-array value this pass exists to
+  // repair would fail the schema ensure at boot and stay unrepaired.
+  //
+  // And it applies the write path's RELATIONAL rule, not only its value rule: a major whose parent
+  // is absent is dropped, because a major on its own matches that version of EVERY technology.
+  // Without it the cleaning above MANUFACTURED that defect — MEASURED on the real engine, a legacy
+  // `{"framework":[""],"frameworkMajor":["11"]}` (unreachable: its parent overlaps nothing) came
+  // out as `{"frameworkMajor":["11"]}`, matching every framework's v11, because the blank parent is
+  // dropped and the major survives. Two further shapes `normalizeFacets` drops — a bare
+  // `{"framework":[],...}` parent and an already-clean `{"frameworkMajor":["11"]}` — were never
+  // even SELECTED, so the predicate carries the same test. It is generated from
+  // `FACET_MAJOR_PARENTS` and reads "blank" with the cleaning's own trim rule, so "parent
+  // absent" means "absent after cleaning" within this one statement.
+  const canon = canonicalFacetValueSql('kv.key', 'v');
+  const orphan = orphanFacetMajorSql('kv.key', 't.facets');
+  const trim = trimFacetValueSql('v');
+  for (const table of [ENTRIES_TABLE, VECTORS_TABLE]) {
+    await conn.pg.unsafe(`
+      UPDATE ${table} AS t
+      SET facets = COALESCE((
+        SELECT jsonb_object_agg(kv.key, a.arr)
+        FROM jsonb_each(t.facets) AS kv,
+             LATERAL (
+               SELECT jsonb_agg(DISTINCT ${canon}) AS arr
+               FROM jsonb_array_elements_text(
+                 CASE WHEN jsonb_typeof(kv.value) = 'array' THEN kv.value ELSE '[]'::jsonb END
+               ) AS v
+               WHERE ${trim} <> ''
+             ) AS a
+        WHERE a.arr IS NOT NULL AND NOT ${orphan}
+      ), '{}'::jsonb)
+      WHERE EXISTS (
+        SELECT 1 FROM jsonb_each(t.facets) AS kv
+        WHERE jsonb_typeof(kv.value) <> 'array'
+           OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements_text(
+               CASE WHEN jsonb_typeof(kv.value) = 'array' THEN kv.value ELSE '[]'::jsonb END
+             ) AS v
+             WHERE v IS NULL OR ${trim} = '' OR ${canon} <> v
+           )
+           OR ${orphan}
+      )
     `);
   }
 

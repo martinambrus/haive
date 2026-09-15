@@ -233,7 +233,7 @@ export async function ensureShellContainer(
     Source: string;
     Target: string;
     ReadOnly?: boolean;
-    VolumeOptions?: { Subpath?: string };
+    VolumeOptions?: { Subpath?: string; NoCopy?: boolean };
   }> = [];
   if (repoMount) {
     if (repoMount.subpath) {
@@ -242,7 +242,14 @@ export async function ensureShellContainer(
         Source: repoMount.source,
         Target: repoMount.target,
         ReadOnly: repoMount.readOnly ?? false,
-        VolumeOptions: { Subpath: repoMount.subpath },
+        // `NoCopy` for the same reason `buildMountArgs` sets `volume-nocopy=true` — read its
+        // header. Docker SEEDS an empty volume subpath from the image directory at the same
+        // target and copies that directory's OWNERSHIP onto it, so a scratch workspace chowned
+        // to 1000:1000 comes back root:root and the terminal's own user cannot write its CWD.
+        // Only reachable since a repo-less task started getting a mount here, and only while the
+        // workspace is still empty — which is exactly when someone opens a recovery terminal.
+        // Inert for a repository, whose tree is never empty.
+        VolumeOptions: { Subpath: repoMount.subpath, NoCopy: true },
       });
     } else {
       const suffix = repoMount.readOnly ? ':ro' : '';
