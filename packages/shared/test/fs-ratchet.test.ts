@@ -62,9 +62,12 @@ const CALLS = new Set([
   'statfs',
   'glob',
   'openAsBlob',
-  // The two exported stream classes take a path when constructed directly.
+  // The two exported stream classes take a path when constructed directly; `File*Stream` are
+  // the undocumented legacy aliases of the same classes.
   'ReadStream',
   'WriteStream',
+  'FileReadStream',
+  'FileWriteStream',
 ]);
 const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
 /** Cheap pre-filter: a file that never names the module, and never names a CJS route that
@@ -282,6 +285,26 @@ function countInFile(sf: ts.SourceFile, checker: ts.TypeChecker): number {
     if (
       ts.isIdentifier(node) &&
       (node.text === 'createRequire' || node.text === 'getBuiltinModule')
+    ) {
+      refuse();
+    }
+    // `export { readFile } from 'node:fs/promises'` / `export * from 'node:fs'` hand the module
+    // to a consumer that never names it, and this program resolves nothing across files — so an
+    // fs re-export is refused at its source. (Re-exporting a LOCAL fs binding is already a
+    // value use.)
+    if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      FS_MODULE.test(node.moduleSpecifier.text)
+    ) {
+      refuse();
+    }
+    // `export { readFile }` of a local fs binding: the specifier's own symbol is the export
+    // alias, so resolve it to the local target before asking what it binds.
+    if (
+      ts.isExportSpecifier(node) &&
+      bindingOf(checker.getExportSpecifierLocalTargetSymbol(node)) !== null
     ) {
       refuse();
     }
@@ -565,6 +588,18 @@ describe('path-based fs call ratchet', () => {
       0,
     );
     expect(countFsCalls("import fs from 'node:fs';\nnew fs.ReadStream(p);")).toBe(1);
+    expect(
+      countFsCalls(
+        "import fs from 'node:fs';\nnew fs.FileReadStream(p); new fs.FileWriteStream(p);",
+      ),
+    ).toBe(2);
+    expect(() => countFsCalls("export { readFile } from 'node:fs/promises';")).toThrow(
+      /cannot count/,
+    );
+    expect(() => countFsCalls("export * from 'node:fs';")).toThrow(/cannot count/);
+    expect(() =>
+      countFsCalls("import { readFile } from 'node:fs/promises';\nexport { readFile };"),
+    ).toThrow(/cannot count/);
     expect(countFsCalls("import { WriteStream } from 'node:fs';\nnew WriteStream(p);")).toBe(1);
     expect(
       countFsCalls(
