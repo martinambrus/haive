@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, eq, lt } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import {
   GLOBAL_KB_JOB_NAMES,
   QUEUE_NAMES,
@@ -36,17 +36,6 @@ function entryContentHash(body: string, facets: unknown): string {
     .update(body)
     .update(JSON.stringify(facets ?? {}))
     .digest('hex');
-}
-
-async function deleteChunks(
-  ctx: GlobalKbContext,
-  namespace: string,
-  entryId: string,
-): Promise<void> {
-  await ctx.conn.pg.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
-    namespace,
-    entryId,
-  ]);
 }
 
 /** Remove an entry's vectors unless it is ACTIVE at the moment the delete runs.
@@ -288,19 +277,31 @@ export async function purgeArchivedGlobalKbEntries(): Promise<void> {
   if (!Number.isFinite(days) || days <= 0) return;
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   await withGlobalKb(getDb(), async (ctx) => {
-    const rows = await ctx.db
-      .select({ id: globalKbEntries.id, namespace: globalKbEntries.namespace })
-      .from(globalKbEntries)
-      .where(and(eq(globalKbEntries.status, 'archived'), lt(globalKbEntries.supersededAt, cutoff)));
-    for (const r of rows) {
-      await deleteChunks(ctx, r.namespace, r.id);
-      await ctx.db.delete(globalKbEntries).where(eq(globalKbEntries.id, r.id));
-    }
-    if (rows.length > 0) {
-      log.info(
-        { purged: rows.length, retentionDays: days },
-        'purged expired archived global KB entries',
-      );
+    // ONE conditional statement, never select-then-delete-by-id. The WHERE is the whole decision,
+    // and when the delete has to wait for a concurrent writer's row lock Postgres re-evaluates it
+    // against the row that writer committed — so an entry reactivated while the sweep runs (the
+    // PATCH holds the row, then commits `active` with `superseded_at` cleared) no longer matches and
+    // survives. MEASURED on the select-then-delete version: a reactivation held open while the purge
+    // ran was deleted the moment it committed, after the page had reported success. The cutoff is
+    // bound the way drizzle binds a Date to a `timestamp` column, an ISO string whose zone is
+    // ignored, so the retention window is unchanged. Vectors go in the same transaction as rows.
+    const purged = (await ctx.conn.pg.begin(async (tx) => {
+      const rows = (await tx.unsafe(
+        `DELETE FROM global_kb_entries
+          WHERE status = 'archived' AND superseded_at < $1::timestamp
+          RETURNING id, namespace`,
+        [cutoff.toISOString()],
+      )) as unknown as Array<{ id: string; namespace: string }>;
+      for (const r of rows) {
+        await tx.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
+          r.namespace,
+          r.id,
+        ]);
+      }
+      return rows.length;
+    })) as number;
+    if (purged > 0) {
+      log.info({ purged, retentionDays: days }, 'purged expired archived global KB entries');
     }
   });
 }
