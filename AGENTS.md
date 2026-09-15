@@ -1123,6 +1123,28 @@ are near-unique too — so a "most used agents" list is ~1,400 entries tied at n
 `agent_title` is worse (1,456 distinct), because those are per-node prose rather than persona
 names. The only signal in that table is failure rate, which belongs on the reliability tab.
 
+### Agents, skills and MCP tools
+
+`GET /stats/tool-usage` and `GET /tasks/:id/tool-usage` read `cli_invocations.tool_usage` through
+ONE SQL rollup (`api/src/lib/tool-usage-rollup.ts`). The caller composes the predicate and the
+rollup never decides which rows count; its LATERAL `jsonb_array_elements` / `jsonb_each_text`
+reads are guarded INSIDE the function argument because both throw on a JSON null, which `loaded`
+IS for every codex, amp and gemini row. `invocationAttributionFilter` APPLIES, as on `/steps`: a
+reconciling rollup whose `total` must equal the runs the other tabs count.
+
+**Denominators are stated, never implied.** `total` is the reconciliation figure; `unrecorded`
+(a NULL column) and `unobservable` (`coverage: 'none'`) enter no "not used" sentence;
+`observable` (full + partial, the partial ones flagged as floors) is the ONLY denominator such a
+sentence may cite, and `share` is `sampledRatio(runs, observable)` so a three-run window renders
+`n=3`. Assigned personas are counted on any RECORDED row — an assignment is a dispatch fact,
+valid on a `none` row — and `assignedRecordedSince` says from when they exist at all, so the UI
+says "not yet recorded" instead of rendering an empty list as "unused". The task endpoint groups
+by the same `coalesce(task_step_id, summary_for_step_id)` fold as the step badges and sums its
+per-step rows with `sumToolUsageSteps` (`@haive/shared/stats`), so the browser does no
+arithmetic. The unused report needs the installed inventory read from disk and waits for the
+link-refusing readers of `@haive/shared/fs-safe`; until then a repository-scoped request answers
+`unused: { available: false, reason: 'scan-unavailable' }`.
+
 ## Sandbox
 
 `packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. Only the cloned repository is bind-mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end.

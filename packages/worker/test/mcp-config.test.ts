@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
+import { HAIVE_MCP_SERVER_NAMES } from '@haive/shared/stats';
 import {
   buildDefaultMcpServers,
   emittedDefaultServerNames,
@@ -650,5 +651,27 @@ describe('emittedDefaultServerNames', () => {
   it('keeps git when the caller cannot know the egress, which under-reports rather than over-reports', () => {
     // The prompt is built at dispatch, before the invocation's egress is resolved.
     expect([...emittedDefaultServerNames(base)].sort()).toEqual(['filesystem', 'git']);
+  });
+});
+
+describe('HAIVE_MCP_SERVER_NAMES', () => {
+  it('names exactly the servers this module can wire, so the stats badge cannot drift', () => {
+    // The api tells a Haive-wired server from a repository's own one by this shared list; a
+    // server added here without a matching entry there would show up as the user's.
+    const everything = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      databaseUrl: 'postgres://user:pass@db:5432/haive',
+      includeChromeDevtools: true,
+      chromeDevtoolsBrowserUrl: 'http://127.0.0.1:9222',
+      includeRagSearch: true,
+      ragServerPath: '/haive/haive-rag-mcp.mjs',
+      ragApiUrl: 'http://api:3001',
+      ragToken: 'tok-rag',
+      includeDdevControl: true,
+      ddevControlServerPath: '/haive/haive-ddev-mcp.mjs',
+      ddevApiUrl: 'http://api:3001',
+      ddevToken: 'tok-ddev',
+    });
+    expect(everything.map((s) => s.name).sort()).toEqual([...HAIVE_MCP_SERVER_NAMES].sort());
   });
 });
