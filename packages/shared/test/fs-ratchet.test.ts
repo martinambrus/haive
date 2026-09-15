@@ -117,8 +117,9 @@ function isTypeOnlyClause(clause: ts.ImportClause): boolean {
   return c.isTypeOnly === true || c.phaseModifier === ts.SyntaxKind.TypeKeyword;
 }
 
-/** What the declaration a symbol resolves to binds from the fs module, if anything. */
-function bindingOf(symbol: ts.Symbol | undefined): Binding | null {
+/** What the declaration a symbol resolves to binds from the fs module, if anything. `unknown`
+ *  is a destructuring the walk cannot read (a computed or array pattern), which is refused. */
+function bindingOf(symbol: ts.Symbol | undefined): Binding | 'unknown' | null {
   const decl = symbol?.declarations?.[0];
   if (!decl) return null;
   if (ts.isNamespaceImport(decl)) {
@@ -140,11 +141,24 @@ function bindingOf(symbol: ts.Symbol | undefined): Binding | null {
       : null;
   }
   if (ts.isBindingElement(decl)) {
-    const owner = decl.parent.parent;
-    if (!ts.isVariableDeclaration(owner) || !owner.initializer) return null;
-    if (!isModuleExpression(owner.initializer)) return null;
-    const key = decl.propertyName ?? decl.name;
-    return ts.isIdentifier(key) ? bindingForImported(key.text) : null;
+    // Climb nested patterns (`const { promises: { readFile } } = await import(...)`) to the
+    // declaration, collecting the keys on the way down from the module.
+    // Readability (identifier keys, object patterns only) is judged only once the owning
+    // declaration is known to hold the module — any other destructuring binds nothing here.
+    const keys: string[] = [];
+    let readable = true;
+    let node: ts.Node = decl;
+    while (ts.isBindingElement(node)) {
+      const key = node.propertyName ?? node.name;
+      if (ts.isIdentifier(key) && ts.isObjectBindingPattern(node.parent)) keys.unshift(key.text);
+      else readable = false;
+      node = node.parent.parent;
+    }
+    if (!ts.isVariableDeclaration(node) || !node.initializer) return null;
+    if (!isModuleExpression(node.initializer)) return null;
+    if (!readable) return 'unknown';
+    while (keys.length > 1 && (keys[0] === 'promises' || keys[0] === 'default')) keys.shift();
+    return keys.length === 1 ? bindingForImported(keys[0]!) : null;
   }
   return null;
 }
@@ -212,14 +226,14 @@ function countInFile(sf: ts.SourceFile, checker: ts.TypeChecker): number {
     throw new UncountableFsUse(REFUSED);
   };
   const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node)) {
-      const callee = node.expression;
-      if (
-        (ts.isIdentifier(callee) && callee.text === 'createRequire') ||
-        (ts.isPropertyAccessExpression(callee) && callee.name.text === 'getBuiltinModule')
-      ) {
-        refuse();
-      }
+    // A CJS route into a builtin has to NAME `createRequire` or `getBuiltinModule` somewhere —
+    // at its import, its alias, its destructuring or its call — so any identifier by either name
+    // is refused, whatever the binding shape. Neither occurs in this tree.
+    if (
+      ts.isIdentifier(node) &&
+      (node.text === 'createRequire' || node.text === 'getBuiltinModule')
+    ) {
+      refuse();
     }
     if (isFsImportCall(node)) {
       // The module as an expression: bound to a name (handled through the binding), or used in
@@ -242,7 +256,9 @@ function countInFile(sf: ts.SourceFile, checker: ts.TypeChecker): number {
         ? checker.getShorthandAssignmentValueSymbol(node.parent)
         : checker.getSymbolAtLocation(node);
       const kind = bindingOf(symbol);
-      if (kind !== null) {
+      if (kind === 'unknown') {
+        refuse();
+      } else if (kind !== null) {
         const use = classifyUse(node, kind);
         if (use === 'call') calls += 1;
         else if (use === 'value') refuse();
@@ -308,11 +324,7 @@ function sourceFiles(dir: string): string[] {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       if (entry.name !== 'node_modules' && entry.name !== 'dist') out.push(...sourceFiles(full));
-    } else if (
-      entry.name.endsWith('.ts') &&
-      !entry.name.endsWith('.test.ts') &&
-      !entry.name.endsWith('.d.ts')
-    ) {
+    } else if (/\.[mc]?ts$/.test(entry.name) && !/\.(?:test|d)\.[mc]?ts$/.test(entry.name)) {
       out.push(full);
     }
   }
@@ -427,6 +439,17 @@ describe('path-based fs call ratchet', () => {
     expect(() =>
       countFsCalls("import { createRequire } from 'node:module';\ncreateRequire(import.meta.url)"),
     ).toThrow(/cannot count/);
+    expect(
+      countFsCalls(
+        "const { promises: { readFile }, constants: { O_RDONLY } } = await import('node:fs');\nawait readFile(p); use(O_RDONLY);",
+      ),
+    ).toBe(1);
+    expect(() =>
+      countFsCalls("import { createRequire as cr } from 'node:module';\ncr(import.meta.url)"),
+    ).toThrow(/cannot count/);
+    expect(() => countFsCalls("const { getBuiltinModule: g } = process;\ng('node:fs');")).toThrow(
+      /cannot count/,
+    );
   });
 
   it('refuses a bound fs function or namespace used as a value', () => {
