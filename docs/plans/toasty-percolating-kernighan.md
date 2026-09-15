@@ -180,14 +180,15 @@ type — inherits it without anyone maintaining a list of special steps.
   `supportsSubagents` (`resolveDispatch`: the claude family, grok and antigravity), each of which
   reads a markdown agent directory, and no built-in step declares it, so this changes nothing for
   PR 1's steps;
-- the prompt names no agent directory and no file inside one (see "Handed paths" below);
+- neither the prompt nor the selected provider's project instructions name an agent directory or a
+  file inside one (see "Handed paths" and "Project instructions" below);
 - the step did not declare `agentPool: '*'`.
 
 In practice that isolates the 08c reviewers and lenses, the 08d adversaries, 08c2, 03's mining
 roster, 04, 05, 01e, 01f, 03b, 03b2, 11, 11f, the DAG per-issue reviewer, issue advisor and
-replanner, and onboarding's read-only mining (08, 09-qa) — each only while its prompt names no
-agent directory and no file inside one — while 08a, 08b and the DAG coders declare `file_write` and are
-not isolated.
+replanner, and onboarding's read-only mining (08, 09-qa) — each only while neither its prompt nor
+the repository's instructions name an agent directory or a file inside one — while 08a, 08b and the
+DAG coders declare `file_write` and are not isolated.
 
 **Handed paths.** A prompt that names an agent directory, or a file inside one, must be able to open
 it. The path can come from a review change set that includes an edited agent definition, an outside
@@ -219,6 +220,29 @@ A mining retry that re-sends a stored prompt (Decision 2) scans it again: a stor
 retry unisolated, and a stored prompt carrying a pasted body is not re-sent at all. Nothing has to
 ride in the prompt, and a future step inherits the rule with nothing to wire.
 
+**Project instructions.** The prompt is not all a CLI reads: it loads the repository's own instruction
+file itself, after it starts, and that file can send the agent to a definition the mask would hide.
+MEASURED on the dev install on 2026-09-15 across every repository's root instruction files (27
+`CLAUDE.md`, 26 `AGENTS.md`, 10 `GEMINI.md`): none `@`-imports an agent path, and Haive's own chain
+names none (`CLAUDE.md` and `GEMINI.md` are a lone `@AGENTS.md`, and the project-info, cli-rules and
+RTK regions onboarding writes into `AGENTS.md` name no agent directory), but one repository's
+`AGENTS.md` carries a legacy workflow's standing instruction, "FIRST: Read your full agent definition
+from .claude/agents/{agent-name}.md". So the decision also scans the selected provider's instructions
+with the same `promptNamesAgentPath` rule. The entry point is the adapter's own `rulesFile`, which
+onboarding already writes by (`CLAUDE.md` for the claude family, `GEMINI.md` for gemini, `AGENTS.md`
+for codex, amp, antigravity and grok). For an `import`-mode `rulesFileMode` the scan also follows every
+`@` reference that resolves to a file inside the tree, relative to the file that makes it, so the
+`CLAUDE.md` → `@AGENTS.md` chain is covered; `native` readers do not expand `@` references, so theirs
+are not followed. A match counts as `agentPool: '*'`, like a handed path. The files are only scanned,
+never pasted, so a scan returns a verdict and no bytes: each file is opened non-blocking, must resolve
+to a regular file inside the invocation's tree, and is read up to a cap, and a link is followed only
+when its target stays inside that tree. An absent file names nothing. A file that cannot be read that
+way, or a chain past five levels of imports or 1 MiB in total, leaves the invocation unisolated —
+today's behaviour, and the direction a context control fails in, so a truncated scan can never hide a
+referenced file. Not covered: instruction files a CLI loads beyond that entry point, such as nested
+per-directory files it reads once it works in that directory, or CLI-specific extras such as
+`CLAUDE.local.md` (Out of scope).
+
 1. **The declaration.** `LlmInvocationSpec.agentPool?: '*'` (`step-engine/step-definition.ts`,
    beside `toolProfile`). `'*'` is the only value PR 1 needs (see "Steps that read agent files");
    pools naming specific agents are out of scope. It is passed as `DispatchRequest.agentPool` by
@@ -232,12 +256,15 @@ ride in the prompt, and a future step inherits the rule with nothing to wire.
    Persona bodies take the same shape: once `plan` exists, if `agentIsolationApplies(resolved)`,
    `plan.adapter` passes the gate (`supportsLsp`, `lspConfigured`, a catalog `projectAgentsDir`
    with `agentFileFormat: 'markdown'`) and the prompt has marker ids, read `<id>.md` for each
-   marker id from that ONE directory in the invocation's tree (by filename, per Decision 1). The persona bodies and the codex app-server verdict are both gathered
-   BEFORE re-resolving, and `resolveDispatch` runs a second time only when either is new, carrying
-   both (`{ ...resolved, agentBodies, codexAppServer }`). Two early returns would each skip the
-   other the moment Phase 3.1 resolves template personas on codex, losing either the persona or the
-   first steerable dispatch's probe. The provider cannot change on that second pass, because
-   neither input changes which provider `tryBuildPlan` accepts, and when nothing is found the first
+   marker id from that ONE directory in the invocation's tree (by filename, per Decision 1). The
+   project-instruction verdict ("Project instructions" above), the persona bodies and the codex
+   app-server verdict are all gathered BEFORE re-resolving, the instruction scan first because a match
+   ends isolation and leaves no built-in body to read, and `resolveDispatch` runs a second time only
+   when one of them is new, carrying them together (`{ ...resolved, instructionsNameAgentPath,
+   agentBodies, codexAppServer }`). Early returns would each skip the others the moment Phase 3.1
+   resolves template personas on codex, losing the persona, the verdict or the first steerable
+   dispatch's probe. The provider cannot change on that second pass, because none of these inputs
+   changes which provider `tryBuildPlan` accepts, and when nothing is found the first
    plan's fallback text is already right. That is PR 1's gate
    for built-in markers, whose inline protocol always follows them. Phase 3.1 widens it only for
    template markers, which have none, and tells the two apart by syntax: a template persona renders
@@ -264,7 +291,7 @@ ride in the prompt, and a future step inherits the rule with nothing to wire.
    predicate prompt and mount share (`invocationUsesWorktreeGitBoundary`) and imports nothing
    from cli-exec. A new async `resolveInvocationWorkerTree(db, taskId, worktreeRel)` beside it
    loads the task (`repositoryId`, `worktreeBranch`, `userId`) and repo (`storagePath`,
-   `localPath`), and runs only on the persona path above.
+   `localPath`), and runs only on the project-instruction and persona paths above.
 5. **The rewrite** (`adaptPromptForCliCapabilities`) gains optional `isolated` and `agentBodies`
    inputs and changes only its positive arm, as fixed in Decisions 1–3.
 6. **One decision, carried on the command spec.** When `agentIsolationApplies`, `buildCliSidePlan`
@@ -408,7 +435,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 ## Critical files
 
 - **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies` with its
-  prompt path scan, the switch read, the post-selection body read, the spec flag), `step-engine/steps/_retrieval-guidance.ts`
+  prompt path scan, the switch read, the post-selection project-instruction scan and body read, the
+  spec flag), `step-engine/steps/_retrieval-guidance.ts`
   (`agentGuidanceIds`, the positive arm, the exported pasted-persona label pattern),
   `step-engine/steps/workflow/_agent-loader.ts` (export
   `parseAgentFile`; a filename-keyed single-file reader: the secret-mask policy check first, then an
@@ -440,7 +468,10 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   masking": what is hidden, from which invocations, why it fails open, why the persona reader never
   follows a repository-controlled link, and the measured listing costs.
 - **Tests:** `test/dispatcher.test.ts` (isolated twins, grok, a template-less id, one re-resolve
-  carrying both persona bodies and a codex verdict, and
+  carrying the instruction verdict, persona bodies and a codex verdict, project instructions (a
+  `CLAUDE.md` whose `@AGENTS.md` names `.claude/agents/` and a codex `AGENTS.md` naming one both
+  leave the invocation unisolated, as does an unreadable or over-cap chain, while a lone
+  `@AGENTS.md` naming nothing stays isolated), and
   `agentIsolationApplies` over `file_write` / `subagents` / a named agent directory or file / `'*'` / sub-agent kind /
   switch off),
   `test/step-runner-llm.test.ts` (`agentPool` reaches dispatch, the flag rides
@@ -476,7 +507,10 @@ scratch.
    - an untracked deny-listed file inside a masked agent directory still lets the container start,
      because its file mask is dropped rather than stacked under the read-only tmpfs;
    - an agent directory removed after the masks are built and before the container starts comes
-     back root-owned, as exec side item 2 predicts, and is gone again once the run returns.
+     back root-owned, as exec side item 2 predicts, and is gone again once the run returns;
+   - a fixture repository with a distinct sentinel in each candidate instruction file (`CLAUDE.md`,
+     `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, and a copy in a nested directory) shows which of
+     them each CLI puts in its first request, checked against its `rulesFile` and that file's imports.
 2. **Unit tests** (`pnpm --filter @haive/worker exec vitest run`), modelled on
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
    real directories only, symlinked ones left unmasked, read-only, fail-open, secret and ddev file
@@ -654,3 +688,9 @@ bullet: `rippling-wibbling-puffin` Phase 3.1 builds on this plan's per-invocatio
   runtime, which mounts the same tree unmasked, then reads it in place of a missing one. The same
   identity-checked cleanup would cover them with `unlink` in place of `rmdir`; a separate change,
   since those masks predate this plan.
+- **Instruction files beyond the entry point.** The isolation decision scans the selected provider's
+  `rulesFile` and its `@` imports ("Project instructions"), not nested per-directory instruction
+  files a CLI reads once it works in that directory, nor CLI-specific extras such as
+  `CLAUDE.local.md`, so a repository whose agent references live only there has them hidden. The
+  capture harness records which of those files each CLI actually loads (Verification, item 1), so the
+  gap is sized by measurement before anyone widens the scan.
