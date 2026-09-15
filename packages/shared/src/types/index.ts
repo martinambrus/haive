@@ -225,6 +225,70 @@ export interface CleanTranscript {
   elided?: { segments: number; chars: number; afterIndex: number };
 }
 
+/** What one CLI invocation USED, persisted to `cli_invocations.tool_usage`: native tool calls,
+ *  MCP tool calls, native sub-agent spawns, `Skill` calls, and the agent-definition / skill
+ *  FILES the agent opened on its own. Tallied by the same pass that extracts tokenUsage and
+ *  modelIdentity, so it costs no extra call or tokens, and backfilled from stored `stream_log`
+ *  transcripts.
+ *
+ *  An object with every top-level key always present (empty when nothing was seen) and every
+ *  array sorted, so two backfill runs over one row write byte-identical JSON and the `->>`
+ *  access every other jsonb artifact column on that table uses keeps working.
+ *
+ *  A NULL column means "not yet examined": a running invocation, a failure-path row until the
+ *  next boot's backfill reaches it, a legacy row the backfill has not reached. A written
+ *  `coverage: 'none'` means "examined, and tool calls are not observable on this path": gemini
+ *  (no stream parser), antigravity (unmeasured), plain output, the sequential sub-agent script
+ *  (N processes under one row, no stream), amp (MEASURED: its stream-json assistant events carry
+ *  text blocks only), or a row that stored no transcript. That is the one deliberate departure
+ *  from `InvocationCompaction`'s "never write an empty object": a written `none` is a fact about
+ *  the path, and it is what lets the backfill's `tool_usage IS NULL` predicate converge instead
+ *  of re-examining the same unobservable rows on every boot. */
+export interface InvocationToolUsage {
+  /** 'stream' = tallied live while the CLI ran; 'backfill' = parsed from the stored transcript. */
+  source: 'stream' | 'backfill';
+  /** 'full' = every event the CLI emitted was parsed (says nothing about whether the run
+   *  FINISHED); 'partial' = a backfill of a head+tail-elided `stream_log`, so every counter is
+   *  a floor while `loaded` (from the init event in the head) is still complete; 'none' = not
+   *  observable on this path, every list below empty. */
+  coverage: 'full' | 'partial' | 'none';
+  /** Native tool calls by the CLI's own tool name (`Bash`, `Read`, grok's `read_file`, …).
+   *  MCP-wrapped calls are NEVER here — see `mcp` — so sum(tools) + sum(mcp[].calls) is the
+   *  run's total. Codex counts item types (`command_execution`, `file_change`, …), with the
+   *  app-server's camelCase spellings folded to the exec ones. Keys sorted. */
+  tools: Record<string, number>;
+  /** MCP tool calls, sorted by server then tool: `mcp__<server>__<tool>` on the claude family,
+   *  grok's `use_tool{tool_name:'<server>__<tool>'}`, codex's `mcp_tool_call{server,tool}`. */
+  mcp: Array<{ server: string; tool: string; calls: number }>;
+  /** Native sub-agent activity. `type` is the claude `subagent_type`, codex's collab tool name
+   *  (MEASURED: only ever `wait` — activity, never a recorded spawn), null when the CLI names
+   *  none. Sorted by type, null last. */
+  subagents: Array<{ type: string | null; calls: number }>;
+  skills: {
+    /** `Skill` tool calls. `id` is null when the input carried no recognisable key — the
+     *  shape is UNMEASURED (0 calls across 3,509 stored runs). */
+    invoked: Array<{ id: string | null; calls: number }>;
+    /** Skill files the agent opened itself (`<skillsDir>/<id>/SKILL.md` or a sub-skill under
+     *  it), by skill id. "Opened", never "applied" — a transcript cannot say the latter. */
+    read: Array<{ id: string; reads: number }>;
+  };
+  agents: {
+    /** Persona ids Haive ASSIGNED at dispatch. Always `[]` until the dispatch-side stamping
+     *  ships (it waits for the per-call agent isolation refactor); present from day one so
+     *  that follow-up needs no migration. */
+    assigned: string[];
+    /** Agent definition files the agent opened itself (`<agentsDir>/<id>.md|.toml`), by id. */
+    read: Array<{ id: string; reads: number }>;
+  };
+  /** What the CLI reported it had LOADED, from the claude-family / grok `init` event: agent
+   *  and skill names (the CLI's own built-ins included — `claude`, `Explore`, … and 16
+   *  built-in skills are not repository files), configured MCP server names, and how many
+   *  tools were offered. Tool NAMES are deliberately not stored: that list carries every MCP
+   *  tool name, ~55 entries identical for every run on a repository. Null for a CLI whose
+   *  output reports no inventory (codex, gemini, antigravity). */
+  loaded: { agents: string[]; skills: string[]; mcpServers: string[]; toolCount: number } | null;
+}
+
 export type RepoSource =
   | 'local_path'
   | 'git_https'
