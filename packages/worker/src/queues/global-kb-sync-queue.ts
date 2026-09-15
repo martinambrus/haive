@@ -124,11 +124,25 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
 
         // Small per-entry corpus: replace all chunks atomically (delete +
         // insert) rather than upsert + stale-key bookkeeping.
-        await ctx.conn.pg.begin(async (tx) => {
+        //
+        // The status is re-read LOCKED inside this transaction. The read at the top of the job is
+        // stale by now — embedding sits between the two, and one CPU batch alone measured 50-69s —
+        // and nothing else stops an archive that committed meanwhile from getting its vectors
+        // back. MEASURED: an archive left uncommitted while this job embedded ended `archived`
+        // with every chunk re-inserted. `FOR SHARE` conflicts with the row lock every status writer
+        // takes (the PATCH route, the enrich demotion, the DELETE route), so the two serialise and
+        // whichever commits second sees the other's result; each path locks the entry row before it
+        // touches chunks, so the order never inverts.
+        const wrote = await ctx.conn.pg.begin(async (tx) => {
+          const live = (await tx.unsafe(
+            `SELECT status FROM global_kb_entries WHERE id = $1 FOR SHARE`,
+            [entry.id],
+          )) as unknown as Array<{ status: string }>;
           await tx.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
             entry.namespace,
             entry.id,
           ]);
+          if (live[0]?.status !== 'active') return false;
           for (let i = 0; i < chunks.length; i += 1) {
             const chunk = chunks[i]!;
             const common = [
@@ -156,7 +170,16 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
               );
             }
           }
+          return true;
         });
+        if (!wrote) {
+          // Not `embedded`: the entry no longer holds the vectors that word would describe.
+          log.info(
+            { entryId: entry.id },
+            'global KB entry left active while syncing; vectors removed, not re-inserted',
+          );
+          return;
+        }
       } else {
         // No extractable content (e.g. empty body): clear any stale chunks.
         await deleteChunks(ctx, entry.namespace, entry.id);
