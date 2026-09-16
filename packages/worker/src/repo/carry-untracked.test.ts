@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -80,6 +80,25 @@ describe('carryUntrackedRuntimeFiles', () => {
     expect(res.copied).toEqual([]);
     expect(res.skippedExisting).toBe(1);
     expect(await readFile(path.join(wt, 'test-playwright/.env'), 'utf8')).toContain('"branch"');
+  });
+
+  it('refuses a DANGLING link at the destination instead of writing through it', async () => {
+    const repo = await seedRepo();
+    const wt = await tmp('carry-wt-');
+    const outside = await tmp('carry-outside-');
+    // An agent's worktree is writable, and `stat` reports a dangling link as ABSENT — so the old
+    // copy wrote the root's `.env` to wherever the link pointed, outside the worktree entirely.
+    await mkdir(path.join(wt, 'test-playwright'), { recursive: true });
+    await symlink(path.join(outside, 'planted.env'), path.join(wt, 'test-playwright/.env'));
+
+    const res = await carryUntrackedRuntimeFiles(repo, wt);
+
+    expect(res.copied).toEqual([]);
+    expect(res.skippedExisting).toBe(1);
+    await expect(readFile(path.join(outside, 'planted.env'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect((await lstat(path.join(wt, 'test-playwright/.env'))).isSymbolicLink()).toBe(true);
   });
 
   it('does not descend into sibling worktrees', async () => {

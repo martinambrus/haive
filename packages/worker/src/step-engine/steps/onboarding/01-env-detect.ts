@@ -1,9 +1,9 @@
-import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
+import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { FRAMEWORK_PATTERNS, type FrameworkName, type DetectResult } from '@haive/shared';
+import { lstatNoFollow, readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition, LlmBuildArgs } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
@@ -51,7 +51,9 @@ function deriveNameFromGitUrl(url: string): string | null {
 }
 
 async function detectGitRemoteName(repoPath: string): Promise<string | null> {
-  const text = await readTextSafe(path.join(repoPath, '.git', 'config'));
+  // `.git` is a directory in the repository root and a FILE in a worktree; either way the walk
+  // refuses a link planted at or below it, so a repository cannot point this read elsewhere.
+  const text = await readTextNoFollow(repoPath, '.git/config');
   if (!text) return null;
   const originBlockMatch = text.match(/\[remote\s+"origin"\][\s\S]*?(?=\n\[|$)/);
   const block = originBlockMatch?.[0];
@@ -268,21 +270,22 @@ const TEST_DIR_CANDIDATES = [
   'features',
 ];
 
-async function pathExists(p: string): Promise<boolean> {
-  try {
-    await stat(p);
-    return true;
-  } catch {
-    return false;
-  }
+/** Whether `rel` is a real file in the repository — a LINK is not one.
+ *
+ *  The `stat`-based check this replaces reported a dangling link as present, and a live one as
+ *  whatever it pointed at, so a planted `manage.py -> …` could put the detector on the wrong
+ *  framework and every later step on the wrong runtime. */
+async function repoFileExists(repoPath: string, rel: string): Promise<boolean> {
+  return (await lstatNoFollow(repoPath, rel))?.kind === 'file';
 }
 
-async function readTextSafe(p: string): Promise<string | null> {
-  try {
-    return await readFile(p, 'utf8');
-  } catch {
-    return null;
-  }
+/** Whether `rel` is a real directory in the repository — a LINK to one is not.
+ *
+ *  Same reason as {@link repoFileExists}: the `stat` this replaces answered for a link's target,
+ *  so a planted `tests -> /somewhere` put an outside path into the detected test paths, and from
+ *  there into the scope pickers and the RAG index. */
+async function repoDirExists(repoPath: string, rel: string): Promise<boolean> {
+  return (await lstatNoFollow(repoPath, rel))?.kind === 'directory';
 }
 
 async function detectContainer(repoPath: string): Promise<ContainerDetection> {
@@ -298,9 +301,9 @@ async function detectContainer(repoPath: string): Promise<ContainerDetection> {
     runtimeVersions: {},
   };
 
-  const ddevConfig = path.join(repoPath, '.ddev', 'config.yaml');
-  if (await pathExists(ddevConfig)) {
-    const text = (await readTextSafe(ddevConfig)) ?? '';
+  const ddevText = await readTextNoFollow(repoPath, '.ddev/config.yaml');
+  if (ddevText !== null) {
+    const text = ddevText;
     const result: ContainerDetection = {
       type: 'ddev',
       configFile: '.ddev/config.yaml',
@@ -325,9 +328,8 @@ async function detectContainer(repoPath: string): Promise<ContainerDetection> {
     'compose.yml',
     'compose.yaml',
   ]) {
-    const composeFile = path.join(repoPath, compose);
-    if (!(await pathExists(composeFile))) continue;
-    const text = (await readTextSafe(composeFile)) ?? '';
+    const text = await readTextNoFollow(repoPath, compose);
+    if (text === null) continue;
     let dbType: string | null = null;
     if (/\b(postgres|postgresql)\b/i.test(text)) dbType = 'postgres';
     else if (/\bmariadb\b/i.test(text)) dbType = 'mariadb';
@@ -346,9 +348,9 @@ async function detectContainer(repoPath: string): Promise<ContainerDetection> {
     };
   }
 
-  const lando = path.join(repoPath, '.lando.yml');
-  if (await pathExists(lando)) {
-    const text = (await readTextSafe(lando)) ?? '';
+  const landoText = await readTextNoFollow(repoPath, '.lando.yml');
+  if (landoText !== null) {
+    const text = landoText;
     return {
       type: 'lando',
       configFile: '.lando.yml',
@@ -362,7 +364,7 @@ async function detectContainer(repoPath: string): Promise<ContainerDetection> {
     };
   }
 
-  if (await pathExists(path.join(repoPath, 'Vagrantfile'))) {
+  if (await repoFileExists(repoPath, 'Vagrantfile')) {
     return { ...empty, type: 'vagrant', configFile: 'Vagrantfile' };
   }
 
@@ -447,7 +449,7 @@ async function detectNodeVersion(
   pkg: PackageJsonShape | null,
 ): Promise<string | null> {
   const fromFile = async (name: string): Promise<string | null> =>
-    numericVersion((await readTextSafe(path.join(repoPath, name)))?.trim() ?? null);
+    numericVersion((await readTextNoFollow(repoPath, name))?.trim() ?? null);
   return (
     (await fromFile('.nvmrc')) ??
     (await fromFile('.node-version')) ??
@@ -478,14 +480,14 @@ async function detectStack(
   let composer: ComposerJsonShape | null = null;
 
   for (const { file, language: lang } of STACK_INDICATORS) {
-    if (await pathExists(path.join(repoPath, file))) {
+    if (await repoFileExists(repoPath, file)) {
       indicators.push(file);
       if (!language) language = lang;
     }
   }
 
   if (indicators.includes('package.json')) {
-    const text = await readTextSafe(path.join(repoPath, 'package.json'));
+    const text = await readTextNoFollow(repoPath, 'package.json');
     if (text) {
       try {
         pkg = JSON.parse(text) as PackageJsonShape;
@@ -500,7 +502,7 @@ async function detectStack(
   }
 
   if (indicators.includes('composer.json')) {
-    const text = await readTextSafe(path.join(repoPath, 'composer.json'));
+    const text = await readTextNoFollow(repoPath, 'composer.json');
     let phpFramework: FrameworkName = 'general';
     if (text) {
       try {
@@ -512,9 +514,7 @@ async function detectStack(
       }
     }
     if (phpFramework === 'drupal') {
-      framework = (await pathExists(path.join(repoPath, 'includes', 'bootstrap.inc')))
-        ? 'drupal7'
-        : 'drupal';
+      framework = (await repoFileExists(repoPath, 'includes/bootstrap.inc')) ? 'drupal7' : 'drupal';
     } else if (phpFramework === 'laravel') {
       framework = 'laravel';
     } else if (!framework) {
@@ -524,7 +524,7 @@ async function detectStack(
   }
 
   if (indicators.includes('pyproject.toml') || indicators.includes('requirements.txt')) {
-    if (await pathExists(path.join(repoPath, 'manage.py'))) {
+    if (await repoFileExists(repoPath, 'manage.py')) {
       framework = 'django';
     } else if (!framework) {
       framework = 'python';
@@ -563,7 +563,7 @@ async function detectStack(
   for (const marker of ['wp-includes/version.php', 'wp-config.php']) {
     for (const root of DOCROOT_CANDIDATES) {
       const rel = root ? `${root}/${marker}` : marker;
-      if (await pathExists(path.join(repoPath, rel))) {
+      if (await repoFileExists(repoPath, rel)) {
         framework = 'wordpress';
         language = 'php';
         break;
@@ -585,7 +585,7 @@ async function detectStack(
   // `general` counts as unrecognised here, not as an answer: it is what the composer
   // branch above writes when it parsed a manifest and recognised nothing in it.
   if (!framework || framework === 'general') {
-    if (await pathExists(path.join(repoPath, 'includes', 'bootstrap.inc'))) {
+    if (await repoFileExists(repoPath, 'includes/bootstrap.inc')) {
       framework = 'drupal7';
       language = 'php';
     }
@@ -663,25 +663,20 @@ const DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html', 'public_html
 /** The WordPress extension header, read from the first file in the directory that carries
  *  one — `style.css` for a theme, the main `.php` for a plugin. Not recursive: a header in
  *  a bundled sub-library is not this extension's. */
-async function wpFileHeader(file: string): Promise<string> {
-  try {
-    const text = (await readFile(file, 'utf8')).slice(0, 4000);
-    return /^\s*\*?\s*(Plugin Name|Theme Name)\s*:/im.test(text) ? text : '';
-  } catch {
-    return ''; // unreadable or binary — carries no header as far as we can tell
-  }
+async function wpFileHeader(repoPath: string, rel: string): Promise<string> {
+  // Capped and link-refusing: these bytes decide whether an extension counts as this repo's own
+  // code, which the scope pickers and the knowledge miner then act on.
+  const text = await readTextNoFollow(repoPath, rel, { maxBytes: 4000 });
+  if (text === null) return ''; // absent, unreadable, or reached through a link
+  return /^\s*\*?\s*(Plugin Name|Theme Name)\s*:/im.test(text) ? text : '';
 }
 
-async function wpExtensionHeader(dir: string): Promise<string> {
-  let names: string[];
-  try {
-    names = (await readdir(dir)).sort();
-  } catch {
-    return '';
-  }
-  for (const name of names) {
-    if (!name.endsWith('.php') && !name.endsWith('.css')) continue;
-    const header = await wpFileHeader(path.join(dir, name));
+async function wpExtensionHeader(repoPath: string, rel: string): Promise<string> {
+  const entries = await readdirNoFollow(repoPath, rel);
+  if (entries === null) return '';
+  for (const entry of entries.map((e) => e.name).sort()) {
+    if (!entry.endsWith('.php') && !entry.endsWith('.css')) continue;
+    const header = await wpFileHeader(repoPath, `${rel}/${entry}`);
     if (header) return header;
   }
   return '';
@@ -754,8 +749,12 @@ async function isDistributedHeader(
   return hasDistributionMarker(dir, header);
 }
 
-async function looksDistributed(dir: string, kind: 'themes' | 'plugins'): Promise<boolean> {
-  return isDistributedHeader(await wpExtensionHeader(dir), dir, kind);
+async function looksDistributed(
+  repoPath: string,
+  rel: string,
+  kind: 'themes' | 'plugins',
+): Promise<boolean> {
+  return isDistributedHeader(await wpExtensionHeader(repoPath, rel), rel, kind);
 }
 
 /** What one framework-specific scan concluded about a repo's own code.
@@ -787,16 +786,12 @@ async function detectWordPressCustomPaths(repoPath: string): Promise<CustomPathS
     const base = root ? `${root}/wp-content` : 'wp-content';
     for (const kind of ['themes', 'plugins'] as const) {
       const rel = `${base}/${kind}`;
-      let entries: Dirent[];
-      try {
-        entries = await readdir(path.join(repoPath, rel), { withFileTypes: true });
-      } catch {
-        continue;
-      }
+      const entries = await readdirNoFollow(repoPath, rel);
+      if (entries === null) continue;
       scanned = true;
       for (const entry of entries) {
         if (entry.isDirectory()) {
-          if (await looksDistributed(path.join(repoPath, rel, entry.name), kind)) continue;
+          if (await looksDistributed(repoPath, `${rel}/${entry.name}`, kind)) continue;
           found.push(`${rel}/${entry.name}/`);
           continue;
         }
@@ -807,7 +802,7 @@ async function detectWordPressCustomPaths(repoPath: string): Promise<CustomPathS
         // silence-is-golden stub is dropped by the HEADER test rather than by its name, so
         // any other headerless file goes with it.
         if (kind !== 'plugins' || !entry.isFile() || !entry.name.endsWith('.php')) continue;
-        const header = await wpFileHeader(path.join(repoPath, rel, entry.name));
+        const header = await wpFileHeader(repoPath, `${rel}/${entry.name}`);
         if (!header) continue;
         if (await isDistributedHeader(header, null, kind)) continue;
         found.push(`${rel}/${entry.name}`);
@@ -857,12 +852,8 @@ async function drupalExtensionParents(
   const parents: string[] = [];
   for (const root of DOCROOT_CANDIDATES) {
     const sitesRel = root ? `${root}/sites` : 'sites';
-    let entries: Dirent[];
-    try {
-      entries = await readdir(path.join(repoPath, sitesRel), { withFileTypes: true });
-    } catch {
-      continue;
-    }
+    const entries = await readdirNoFollow(repoPath, sitesRel);
+    if (entries === null) continue;
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       parents.push(`${sitesRel}/${entry.name}/modules`, `${sitesRel}/${entry.name}/themes`);
@@ -888,30 +879,21 @@ async function detectDrupalCustomPaths(
 ): Promise<CustomPathScan> {
   const found: string[] = [];
   for (const parent of await drupalExtensionParents(repoPath, framework)) {
-    let entries: Dirent[];
-    try {
-      entries = await readdir(path.join(repoPath, parent), { withFileTypes: true });
-    } catch {
-      continue;
-    }
+    const entries = await readdirNoFollow(repoPath, parent);
+    if (entries === null) continue;
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name === 'contrib') continue;
-      const dir = path.join(repoPath, parent, entry.name);
-      let info: string | null = null;
-      try {
-        const names = await readdir(dir);
-        info = names.find((n) => n.endsWith('.info') || n.endsWith('.info.yml')) ?? null;
-      } catch {
-        continue;
-      }
+      const extRel = `${parent}/${entry.name}`;
+      const names = await readdirNoFollow(repoPath, extRel);
+      if (names === null) continue;
+      const info =
+        names.map((e) => e.name).find((n) => n.endsWith('.info') || n.endsWith('.info.yml')) ??
+        null;
       if (!info) continue;
-      try {
-        const text = await readFile(path.join(dir, info), 'utf8');
-        if (/^\s*project\s*[:=]/m.test(text)) continue; // packaged by drupal.org => contrib
-      } catch {
-        continue;
-      }
-      found.push(`${parent}/${entry.name}/`);
+      const text = await readTextNoFollow(repoPath, `${extRel}/${info}`);
+      if (text === null) continue;
+      if (/^\s*project\s*[:=]/m.test(text)) continue; // packaged by drupal.org => contrib
+      found.push(`${extRel}/`);
     }
   }
   // Never exhaustive, and that holds even when this DID find something: the common D8 layout
@@ -925,13 +907,7 @@ async function detectDrupalCustomPaths(
 async function detectPaths(repoPath: string, framework: FrameworkName): Promise<PathsDetection> {
   const testPaths: string[] = [];
   for (const candidate of TEST_DIR_CANDIDATES) {
-    const full = path.join(repoPath, candidate);
-    try {
-      const s = await stat(full);
-      if (s.isDirectory()) testPaths.push(candidate);
-    } catch {
-      /* missing dir */
-    }
+    if (await repoDirExists(repoPath, candidate)) testPaths.push(candidate);
   }
 
   const envFiles: string[] = [];
@@ -961,13 +937,11 @@ async function detectPaths(repoPath: string, framework: FrameworkName): Promise<
   for (const candidate of scan?.exhaustive ? [] : pattern.customPaths) {
     for (const root of DOCROOT_CANDIDATES) {
       const rel = root ? `${root}/${candidate}` : candidate;
-      try {
-        if ((await stat(path.join(repoPath, rel))).isDirectory()) {
-          if (!customPaths.includes(rel)) customPaths.push(rel);
-          break;
-        }
-      } catch {
-        /* try the next docroot; none matching means the convention is not this repo's */
+      // None matching means the convention is not this repo's — and a link is not a match, or a
+      // planted one would put the framework's convention path on an outside tree.
+      if (await repoDirExists(repoPath, rel)) {
+        if (!customPaths.includes(rel)) customPaths.push(rel);
+        break;
       }
     }
   }
@@ -988,13 +962,7 @@ async function collectEnvFiles(
   out: string[],
 ): Promise<void> {
   if (depth > 2 || out.length >= 10) return;
-  const dir = path.join(root, rel);
-  let entries: Dirent[] = [];
-  try {
-    entries = (await readdir(dir, { withFileTypes: true })) as Dirent[];
-  } catch {
-    return;
-  }
+  const entries = (await readdirNoFollow(root, rel.split(path.sep).join('/'))) ?? [];
   for (const entry of entries) {
     if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'vendor') continue;
     const childRel = rel ? path.join(rel, entry.name) : entry.name;
@@ -1160,7 +1128,7 @@ async function detectNodeRunner(repoPath: string): Promise<string> {
     ['bun.lockb', 'bun'],
   ];
   for (const [lockfile, runner] of byLockfile) {
-    if (await pathExists(path.join(repoPath, lockfile))) return runner;
+    if (await repoFileExists(repoPath, lockfile)) return runner;
   }
   return 'npm';
 }
@@ -1183,7 +1151,7 @@ function parseMakefileTargets(text: string): string[] {
 async function detectCommands(repoPath: string): Promise<string[]> {
   const commands: string[] = [];
 
-  const pkgText = await readTextSafe(path.join(repoPath, 'package.json'));
+  const pkgText = await readTextNoFollow(repoPath, 'package.json');
   if (pkgText) {
     try {
       const scripts = (JSON.parse(pkgText) as { scripts?: Record<string, string> }).scripts ?? {};
@@ -1196,7 +1164,7 @@ async function detectCommands(repoPath: string): Promise<string[]> {
     }
   }
 
-  const composerText = await readTextSafe(path.join(repoPath, 'composer.json'));
+  const composerText = await readTextNoFollow(repoPath, 'composer.json');
   if (composerText) {
     try {
       const scripts =
@@ -1209,7 +1177,7 @@ async function detectCommands(repoPath: string): Promise<string[]> {
     }
   }
 
-  const makefileText = await readTextSafe(path.join(repoPath, 'Makefile'));
+  const makefileText = await readTextNoFollow(repoPath, 'Makefile');
   if (makefileText) {
     for (const target of parseMakefileTargets(makefileText).filter(isInterestingCommandName)) {
       commands.push(`make ${target}`);
@@ -1247,7 +1215,7 @@ async function collectConfigFileContents(repoPath: string): Promise<string> {
   ];
   const parts: string[] = [];
   for (const name of candidates) {
-    const content = await readTextSafe(path.join(repoPath, name));
+    const content = await readTextNoFollow(repoPath, name);
     if (content !== null) {
       // Truncate large files (README etc.) to keep prompt reasonable
       const truncated =
@@ -1268,7 +1236,9 @@ async function collectSourceSamples(repoPath: string, fileTree: string[]): Promi
   const hits = fileTree.filter((p) => DB_HINT_FILE_RE.test(p)).slice(0, 2);
   const parts: string[] = [];
   for (const rel of hits) {
-    const content = await readTextSafe(path.join(repoPath, rel));
+    // These bytes go straight into the detection prompt, and the tree they were chosen from is a
+    // repository nobody vets — the reason this whole series exists.
+    const content = await readTextNoFollow(repoPath, rel);
     if (content !== null) {
       const truncated =
         content.length > 2500 ? content.slice(0, 2500) + '\n[...truncated]' : content;

@@ -1,6 +1,5 @@
-import { readFile, readdir } from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
 import path from 'node:path';
+import { readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 
 export type TechCategory =
   | 'framework'
@@ -766,16 +765,16 @@ interface ParsedDep {
   version: string | null;
 }
 
-async function readTextSafe(p: string): Promise<string | null> {
-  try {
-    return await readFile(p, 'utf8');
-  } catch {
-    return null;
-  }
+/** A repository file as text, or null — refusing a link in any component.
+ *
+ *  Every manifest parser below reads through this, and each of their results reaches the
+ *  onboarding prompt and the stored tech inventory. */
+async function readTextSafe(repoPath: string, rel: string): Promise<string | null> {
+  return await readTextNoFollow(repoPath, rel.split(path.sep).join('/'));
 }
 
 async function parsePackageJson(repoPath: string, file = 'package.json'): Promise<ParsedDep[]> {
-  const txt = await readTextSafe(path.join(repoPath, file));
+  const txt = await readTextSafe(repoPath, file);
   if (!txt) return [];
   try {
     const obj = JSON.parse(txt) as Record<string, unknown>;
@@ -795,7 +794,7 @@ async function parsePackageJson(repoPath: string, file = 'package.json'): Promis
 }
 
 async function parseComposerJson(repoPath: string): Promise<ParsedDep[]> {
-  const txt = await readTextSafe(path.join(repoPath, 'composer.json'));
+  const txt = await readTextSafe(repoPath, 'composer.json');
   if (!txt) return [];
   try {
     const obj = JSON.parse(txt) as Record<string, unknown>;
@@ -818,7 +817,7 @@ async function parseComposerJson(repoPath: string): Promise<ParsedDep[]> {
 async function parseGradle(repoPath: string): Promise<ParsedDep[]> {
   const out: ParsedDep[] = [];
   for (const file of ['build.gradle', 'build.gradle.kts']) {
-    const txt = await readTextSafe(path.join(repoPath, file));
+    const txt = await readTextSafe(repoPath, file);
     if (!txt) continue;
     /* Synthetic marker so the gradle catalog `*:*` always matches even when
        a project declares deps via `fileTree(...)` / version catalogs / Spring
@@ -857,7 +856,7 @@ async function parseGradle(repoPath: string): Promise<ParsedDep[]> {
 }
 
 async function parsePomXml(repoPath: string): Promise<ParsedDep[]> {
-  const txt = await readTextSafe(path.join(repoPath, 'pom.xml'));
+  const txt = await readTextSafe(repoPath, 'pom.xml');
   if (!txt) return [];
   const out: ParsedDep[] = [];
   /* Synthetic marker so the maven catalog `*:*` always matches even when
@@ -882,7 +881,7 @@ async function parsePomXml(repoPath: string): Promise<ParsedDep[]> {
 }
 
 async function parsePyproject(repoPath: string): Promise<ParsedDep[]> {
-  const txt = await readTextSafe(path.join(repoPath, 'pyproject.toml'));
+  const txt = await readTextSafe(repoPath, 'pyproject.toml');
   if (!txt) return [];
   const out: ParsedDep[] = [];
   /* PEP 621 array form */
@@ -911,7 +910,7 @@ async function parsePyproject(repoPath: string): Promise<ParsedDep[]> {
 }
 
 async function parseRequirementsTxt(repoPath: string): Promise<ParsedDep[]> {
-  const txt = await readTextSafe(path.join(repoPath, 'requirements.txt'));
+  const txt = await readTextSafe(repoPath, 'requirements.txt');
   if (!txt) return [];
   const out: ParsedDep[] = [];
   for (const line of txt.split('\n')) {
@@ -925,7 +924,7 @@ async function parseRequirementsTxt(repoPath: string): Promise<ParsedDep[]> {
 }
 
 async function parseCargoToml(repoPath: string): Promise<ParsedDep[]> {
-  const txt = await readTextSafe(path.join(repoPath, 'Cargo.toml'));
+  const txt = await readTextSafe(repoPath, 'Cargo.toml');
   if (!txt) return [];
   const out: ParsedDep[] = [];
   const tableRe = /\[(?:dev-|build-)?dependencies\]\s*([\s\S]*?)(?=^\[|$)/gm;
@@ -941,7 +940,7 @@ async function parseCargoToml(repoPath: string): Promise<ParsedDep[]> {
 }
 
 async function parseGoMod(repoPath: string): Promise<ParsedDep[]> {
-  const txt = await readTextSafe(path.join(repoPath, 'go.mod'));
+  const txt = await readTextSafe(repoPath, 'go.mod');
   if (!txt) return [];
   const out: ParsedDep[] = [];
   /* `require ( ... )` block */
@@ -964,7 +963,7 @@ async function parseGoMod(repoPath: string): Promise<ParsedDep[]> {
 }
 
 async function parseGemfile(repoPath: string): Promise<ParsedDep[]> {
-  const txt = await readTextSafe(path.join(repoPath, 'Gemfile'));
+  const txt = await readTextSafe(repoPath, 'Gemfile');
   if (!txt) return [];
   const out: ParsedDep[] = [];
   const re = /^\s*gem\s+['"]([^'"]+)['"]/gm;
@@ -976,7 +975,7 @@ async function parseGemfile(repoPath: string): Promise<ParsedDep[]> {
 }
 
 async function parseMixExs(repoPath: string): Promise<ParsedDep[]> {
-  const txt = await readTextSafe(path.join(repoPath, 'mix.exs'));
+  const txt = await readTextSafe(repoPath, 'mix.exs');
   if (!txt) return [];
   const out: ParsedDep[] = [];
   const re = /\{\s*:([a-z_][a-z0-9_]*)\s*,/g;
@@ -1036,12 +1035,10 @@ async function walkSourceFiles(
   excludePrefixes: readonly string[] = [],
 ): Promise<void> {
   if (depth > maxDepth) return;
-  let entries: Dirent[];
-  try {
-    entries = (await readdir(path.join(repoPath, rel), { withFileTypes: true })) as Dirent[];
-  } catch {
-    return;
-  }
+  // No-follow: this walk chooses which files `countAllTechMatches` opens, so a linked directory
+  // here would put an outside tree's sources into the inventory the onboarding prompt renders.
+  const entries = await readdirNoFollow(repoPath, rel.split(path.sep).join('/'));
+  if (entries === null) return;
   for (const e of entries) {
     if (IGNORE_DIRS.has(e.name)) continue;
     const childRel = rel ? path.join(rel, e.name) : e.name;
@@ -1093,7 +1090,7 @@ async function countAllTechMatches(
     const files = filesByExt.get(ext);
     if (!files) continue;
     for (const rel of files) {
-      const text = await readTextSafe(path.join(repoPath, rel));
+      const text = await readTextSafe(repoPath, rel);
       if (text === null) continue;
       const slice = text.length > 64 * 1024 ? text.slice(0, 64 * 1024) : text;
       for (const { name, pattern } of patterns) {

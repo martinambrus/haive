@@ -1,6 +1,6 @@
-import { readdir, stat } from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
+import { readdirNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -225,13 +225,13 @@ async function walk(
   prune?: (name: string, relPath: string) => boolean,
 ): Promise<void> {
   if (depth > maxDepth) return;
-  const dir = path.join(root, rel);
-  let entries: Dirent[];
-  try {
-    entries = (await readdir(dir, { withFileTypes: true })) as Dirent[];
-  } catch {
-    return;
-  }
+  // No-follow, because this is the enumerator behind every `listFilesMatching` /
+  // `countFilesMatching` caller: the file tree in an onboarding prompt, the KB scan, the RAG
+  // candidate set. A linked directory here would enumerate — and hand downstream readers — a tree
+  // that is not this repository's. A `Dirent` answers the kind without following anything, so a
+  // link is neither visited as a file nor descended as a directory.
+  const entries = await readdirNoFollow(root, rel.split(path.sep).join('/'));
+  if (entries === null) return;
   for (const entry of entries) {
     const childRel = rel ? path.join(rel, entry.name) : entry.name;
     if (entry.isDirectory()) {

@@ -1,9 +1,9 @@
-import { copyFile, mkdir, stat } from 'node:fs/promises';
-import { dirname, join, posix } from 'node:path';
+import { posix } from 'node:path';
 import { glob } from 'tinyglobby';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, computeEffectiveSecretGlobs, configService, logger } from '@haive/shared';
+import { copyFileNoFollow } from '@haive/shared/fs-safe';
 import { listTrackedFiles } from '../queues/cli-exec/secret-mask.js';
 import { WORKTREE_SUBDIR } from './worktree-paths.js';
 
@@ -82,18 +82,19 @@ export async function carryUntrackedRuntimeFiles(
 
   const result: CarryUntrackedResult = { copied: [], skippedExisting: 0, failed: 0 };
   for (const rel of untracked) {
-    const dest = join(worktreePath, rel);
     try {
-      // Never overwrite. A file already present in the worktree was either checked out or
-      // written there deliberately; the root's copy is not more authoritative than either.
-      if (await stat(dest).catch(() => null)) {
+      // Never overwrite — and the exclusive create is what decides that, not a `stat` first. A
+      // DANGLING link at the destination reads as absent to `stat`, and `copyFile` then wrote the
+      // root's file through it, wherever it pointed. A file already present in the worktree was
+      // either checked out or written there deliberately; the root's copy is not more
+      // authoritative than either, and neither is a link an agent left behind.
+      await copyFileNoFollow(repoRoot, rel, worktreePath, rel, { createParents: true });
+      result.copied.push(rel);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
         result.skippedExisting += 1;
         continue;
       }
-      await mkdir(dirname(dest), { recursive: true });
-      await copyFile(join(repoRoot, rel), dest);
-      result.copied.push(rel);
-    } catch (err) {
       result.failed += 1;
       logger.warn({ err, rel, worktreePath }, 'carry-untracked: copy failed');
     }

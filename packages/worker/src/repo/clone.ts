@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -286,11 +286,18 @@ function runExtract(cmd: string, args: string[], okExits: number[] = [0]): Promi
   });
 }
 
+/** `spec.zip` holding a single `spec/` directory becomes that directory's contents.
+ *
+ *  `lstat`, not `stat`: the lone entry comes out of an untrusted archive, and a LINK there used to
+ *  be followed — `readdir` then listed the target's children and each `rename` moved one of them
+ *  into the destination. With `x -> ..` those children are the user's other repositories, and with
+ *  an absolute link they are whatever it points at on the same volume. Only a real directory is
+ *  flattened now. */
 async function flattenSingleTopLevel(dest: string): Promise<void> {
   const entries = await readdir(dest);
   if (entries.length !== 1) return;
   const only = path.join(dest, entries[0]!);
-  const st = await stat(only);
+  const st = await lstat(only);
   if (!st.isDirectory()) return;
   const inner = await readdir(only);
   for (const name of inner) {
