@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { toolUsageFromStreamLog } from '../src/queues/cli-exec/tool-usage-backfill.js';
+import {
+  timestampLiteral,
+  toolUsageFromStreamLog,
+} from '../src/queues/cli-exec/tool-usage-backfill.js';
 import { formatCliHeader } from '../src/queues/cli-exec/exec-core.js';
 import { formatSteerLine } from '../src/queues/cli-exec/steer-echo.js';
 import { createStreamLogBuffer } from '../src/queues/cli-exec/stream-log-buffer.js';
@@ -41,6 +44,14 @@ function claudeTranscript(): string {
     line({ type: 'result', subtype: 'success', result: 'done' })
   );
 }
+
+describe('timestampLiteral', () => {
+  it('renders the zone-less wall-clock form a timestamp column compares against', () => {
+    // A JS Date bound inside a raw sql tuple is handed to postgres.js unmapped, which has no
+    // serializer for `timestamp without time zone`; the literal is what the cursor sends instead.
+    expect(timestampLiteral(new Date('2026-09-14T07:01:44.848Z'))).toBe('2026-09-14 07:01:44.848');
+  });
+});
 
 describe('toolUsageFromStreamLog', () => {
   it('reads a claude transcript past its header, steer echo and stderr lines', () => {
