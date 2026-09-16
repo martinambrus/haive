@@ -2004,7 +2004,10 @@ export default function TaskDetailPage() {
             providerBreakdown={providerBreakdown}
             costDisplay={costDisplay}
           />
-          {task.startedAt && (
+          {/* Keyed on runs having happened, not on the task clock: the panel is about what the
+              runs used, and a task row can carry attributed invocations without a startedAt
+              (the e2e fixtures do), while a started task with no run yet has nothing to show. */}
+          {steps.some((s) => s.cliInvocationCount > 0) && (
             <PersistedDetails
               lazy
               persistKey={`task-ui:${task.id}:tool-usage`}
