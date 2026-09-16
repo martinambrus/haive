@@ -132,6 +132,14 @@ function buildToolingDirs(): ToolingDir[] {
 const TOOLING_DIRS = buildToolingDirs();
 const WORKTREE_SEGMENTS = WORKTREE_SUBDIR.split('/').filter((s) => s.length > 0);
 const AGENT_FILE_RE = /^(.+)\.(md|toml)$/;
+/** What a persona or skill id may look like: a plain filename stem. The tokenizer hands over
+ *  whatever sat in the command, so a glob or a shell variable arrives too — MEASURED on the dev
+ *  install, `cat .claude/agents/*.md` and `sed -n 1,40p .claude/agents/$f.md` ranked `*` and
+ *  `$f` beside real personas. Such a read names every file or none, and the tally cannot say
+ *  which, so it counts as no read. Exported as a string so the data migration that resets rows
+ *  written before this check can use the SAME pattern in SQL. */
+export const TOOLING_ID_PATTERN = '^[A-Za-z0-9_.-]+$';
+const TOOLING_ID_RE = new RegExp(TOOLING_ID_PATTERN);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -195,11 +203,11 @@ export function classifyReadPath(raw: string, workdir: string | null): ReadTarge
       if (rest.length !== 1) return null;
       const m = AGENT_FILE_RE.exec(rest[0] ?? '');
       const stem = m?.[1];
-      if (!stem || stem.toLowerCase() === 'readme') return null;
+      if (!stem || stem.toLowerCase() === 'readme' || !TOOLING_ID_RE.test(stem)) return null;
       return { kind: 'agent', id: stem, dir: dir.dir };
     }
     const skillId = rest[0];
-    if (!skillId) return null;
+    if (!skillId || !TOOLING_ID_RE.test(skillId)) return null;
     if (rest.length === 2 && rest[1] === 'SKILL.md')
       return { kind: 'skill', id: skillId, dir: dir.dir };
     if (rest.length === 3 && rest[1] === 'sub-skills' && (rest[2] ?? '').endsWith('.md')) {
