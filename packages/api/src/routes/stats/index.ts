@@ -2,11 +2,12 @@ import { Hono } from 'hono';
 import { and, eq, gte, inArray, isNotNull, isNull, lt, notInArray, or, sql } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService, isDisplayCurrency } from '@haive/shared';
+import { CONFIG_KEYS, configService, isDisplayCurrency, logger } from '@haive/shared';
 import { computeTaskTiming } from '@haive/shared/timing';
 import { buildEstimationAccuracy } from '@haive/shared';
 import {
   buildTaskTimeBreakdown,
+  buildUnusedReport,
   computeBusySpan,
   computeDelta,
   dayKey,
@@ -20,6 +21,7 @@ import {
   normalizeTokens,
   sumNormalizedTokens,
   TASK_CLASSES,
+  type UnusedToolingRow,
   typesForClass,
   type Delta,
   type TaskClass,
@@ -38,7 +40,14 @@ import {
   type TaskProviderUsage,
 } from '../tasks/_helpers.js';
 import { parseStatsQuery, type StatsQuery } from './_query.js';
-import { rollupToolUsage } from '../../lib/tool-usage-rollup.js';
+import {
+  rollupToolUsage,
+  toolUsageLastSeen,
+  toolUsageLoadedIds,
+  toolUsageObservableSpan,
+  type ToolUsageRollup,
+} from '../../lib/tool-usage-rollup.js';
+import { InventoryAnchorError, scanInstalledTooling } from '../../lib/tool-inventory.js';
 
 export const statsRoutes = new Hono<AppEnv>();
 
@@ -1118,6 +1127,17 @@ statsRoutes.get('/tool-usage', async (c) => {
 
   const since = sinceRow?.since ?? null;
 
+  const unused = q.repositoryId
+    ? await resolveUnusedTooling(db, {
+        repositoryId: q.repositoryId,
+        userId: q.allUsers ? null : userId,
+        window,
+        history: and(...scope, invocationAttributionFilter())!,
+        rollup,
+        observableInWindow: coverage.observable,
+      })
+    : null;
+
   return c.json({
     range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
     scope: {
@@ -1209,9 +1229,140 @@ statsRoutes.get('/tool-usage', async (c) => {
       (r) => r.calls,
       (r) => r.tool,
     ),
-    unused: q.repositoryId ? { available: false, reason: 'scan-unavailable' } : null,
+    unused,
   });
 });
+
+type UnusedTooling =
+  | { available: false; reason: 'no-repository' | 'no-path' | 'unreadable' }
+  | {
+      available: true;
+      repositoryId: string;
+      scannedAt: string;
+      dirsScanned: string[];
+      inventoryTruncated: boolean;
+      skippedLinks: number;
+      installedCount: number;
+      window: { observableRuns: number };
+      history: { observableRuns: number; observableSince: string | null };
+      rows: UnusedToolingRow[];
+    };
+
+/**
+ * The unused report: what the repository has installed or offered against what its runs used.
+ *
+ * Installed comes from DISK, read by name through `@haive/shared/fs-safe` from the repository
+ * root (`storagePath ?? localPath`, as `resolveRepoRoot` picks it; never a task worktree). The
+ * three failures are answers, never a 404, because the rest of the tab must still render: a
+ * repository outside the caller's scope, one with no path, and one whose path this container
+ * cannot read (an anchor that is not a directory is `unreadable`, never "nothing installed").
+ *
+ * Two facts per item come from the database. A live `onboarding_artifacts` row on one of its
+ * paths or an `agent.<id>` template in `template_manifest_cache` makes it Haive's — an upgrade
+ * would write it back, so it is never a purge candidate. The MCP inventory is database-only on
+ * purpose: `loaded.mcpServers` is what was wired into observed runs, while
+ * `.claude/mcp_settings.json` is user-owned and never read here.
+ *
+ * "Used" is judged over the WINDOW; "last seen" over the caller's whole history, because "not
+ * seen in this window" and "never seen since install" are different claims and only the second
+ * supports deleting a file.
+ */
+async function resolveUnusedTooling(
+  db: ReturnType<typeof getDb>,
+  opts: {
+    repositoryId: string;
+    /** Null = admin install-wide view: no owner filter on the repository. */
+    userId: string | null;
+    window: SQL;
+    history: SQL;
+    rollup: ToolUsageRollup;
+    observableInWindow: number;
+  },
+): Promise<UnusedTooling> {
+  const repo = await db.query.repositories.findFirst({
+    where: and(
+      eq(schema.repositories.id, opts.repositoryId),
+      ...(opts.userId === null ? [] : [eq(schema.repositories.userId, opts.userId)]),
+    ),
+    columns: { storagePath: true, localPath: true },
+  });
+  if (!repo) return { available: false, reason: 'no-repository' };
+  const root = repo.storagePath ?? repo.localPath;
+  if (!root) return { available: false, reason: 'no-path' };
+
+  let inventory;
+  try {
+    inventory = await scanInstalledTooling(root);
+  } catch (err) {
+    if (!(err instanceof InventoryAnchorError)) {
+      logger.warn({ err, repositoryId: opts.repositoryId }, 'installed-tooling scan failed');
+    }
+    return { available: false, reason: 'unreadable' };
+  }
+
+  const [templates, artifacts, lastSeen, loaded, span] = await Promise.all([
+    db
+      .select({ id: schema.templateManifestCache.templateId })
+      .from(schema.templateManifestCache)
+      .where(eq(schema.templateManifestCache.templateKind, 'agent')),
+    db
+      .select({ diskPath: schema.onboardingArtifacts.diskPath })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, opts.repositoryId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      ),
+    toolUsageLastSeen(db, opts.history),
+    toolUsageLoadedIds(db, opts.window),
+    toolUsageObservableSpan(db, opts.history),
+  ]);
+
+  const AGENT_TEMPLATE_PREFIX = 'agent.';
+  const knownTemplateAgents = new Set(
+    templates
+      .map((t) => t.id)
+      .filter((id) => id.startsWith(AGENT_TEMPLATE_PREFIX))
+      .map((id) => id.slice(AGENT_TEMPLATE_PREFIX.length)),
+  );
+  const livePaths = new Set(artifacts.map((a) => a.diskPath));
+  const ids = (rows: Array<{ id: string }>): string[] => rows.map((r) => r.id);
+
+  const rows = buildUnusedReport({
+    installed: inventory.items.map((item) => ({
+      ...item,
+      liveArtifact: item.paths.some((p) => livePaths.has(p)),
+      knownTemplate: item.kind === 'agent' && knownTemplateAgents.has(item.id),
+    })),
+    loaded: {
+      agents: ids(loaded.filter((r) => r.kind === 'agent')),
+      skills: ids(loaded.filter((r) => r.kind === 'skill')),
+      mcpServers: opts.rollup.mcpOffered.map((r) => r.name),
+    },
+    seen: {
+      agents: ids([...opts.rollup.personasAssigned, ...opts.rollup.personasRead]),
+      skills: ids([...opts.rollup.skillsInvoked, ...opts.rollup.skillsRead]),
+      mcpServers: opts.rollup.mcpServers.map((r) => r.server),
+    },
+    knownTemplateAgents,
+    lastSeenAt: new Map(lastSeen.map((r) => [`${r.kind}:${r.id}`, r.lastSeenAt])),
+    observableRuns: opts.observableInWindow,
+  });
+
+  return {
+    available: true,
+    repositoryId: opts.repositoryId,
+    scannedAt: new Date().toISOString(),
+    dirsScanned: inventory.dirsScanned,
+    inventoryTruncated: inventory.truncated,
+    skippedLinks: inventory.skippedLinks,
+    installedCount: inventory.items.length,
+    window: { observableRuns: opts.observableInWindow },
+    history: { observableRuns: span.runs, observableSince: span.since },
+    rows,
+  };
+}
 
 /**
  * Reliability: what wasted time, and where.

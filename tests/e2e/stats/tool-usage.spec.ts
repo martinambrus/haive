@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import { cleanupTaskFixture, cleanupUser, getSql, seedTaskFixture } from '../helpers/db.js';
+import {
+  cleanupRepoFixture,
+  cleanupTaskFixture,
+  cleanupUser,
+  getSql,
+  seedRepoFixture,
+  seedTaskFixture,
+} from '../helpers/db.js';
 import { API_BASE, registerUser } from '../helpers/auth.js';
 import { seedSpend } from '../helpers/spend.js';
 
@@ -208,16 +215,30 @@ test.describe('tool-usage statistics', () => {
       expect(body.nativeTools.rows.map((r) => r.tool).sort()).toEqual(['Bash', 'Read']);
       expect(body.unused).toBeNull();
 
-      // The unused report is keyed on a repository facet being PRESENT; until the on-disk
-      // inventory scan ships it answers unavailable, and never a 404.
-      const withRepo = await page.request.get(
+      // The unused report is keyed on a repository facet being PRESENT, and its failures are
+      // answers, never a 404: a repository outside the caller's scope, and one whose path this
+      // container cannot read (the fixture's `/tmp/e2e-fake` exists nowhere).
+      const withUnknownRepo = await page.request.get(
         `${API_BASE}/stats/tool-usage?repositoryId=${randomUUID()}`,
       );
-      expect(withRepo.status()).toBe(200);
-      expect(((await withRepo.json()) as ToolUsageStats).unused).toMatchObject({
+      expect(withUnknownRepo.status()).toBe(200);
+      expect(((await withUnknownRepo.json()) as ToolUsageStats).unused).toEqual({
         available: false,
-        reason: 'scan-unavailable',
+        reason: 'no-repository',
       });
+      const repo = await seedRepoFixture(sql, userId, 'stats-tools');
+      try {
+        const withRepo = await page.request.get(
+          `${API_BASE}/stats/tool-usage?repositoryId=${repo.repoId}`,
+        );
+        expect(withRepo.status()).toBe(200);
+        expect(((await withRepo.json()) as ToolUsageStats).unused).toEqual({
+          available: false,
+          reason: 'unreadable',
+        });
+      } finally {
+        await cleanupRepoFixture(sql, repo.repoId);
+      }
 
       const perTask = await page.request.get(`${API_BASE}/tasks/${fixture.taskId}/tool-usage`);
       expect(perTask.status()).toBe(200);

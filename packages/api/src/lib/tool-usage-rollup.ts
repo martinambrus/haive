@@ -290,3 +290,132 @@ export async function rollupToolUsage(
     nativeTools: idRows(nativeTools),
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* The unused report's three questions                                  */
+/* ------------------------------------------------------------------ */
+
+const iso = (value: unknown): string | null => {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'string' && value.length > 0) return new Date(value).toISOString();
+  return null;
+};
+
+const from = sql`from ${inv} inner join ${schema.tasks} on ${schema.tasks.id} = ${inv.taskId}`;
+
+export type ToolUsageSeenKind = 'agent' | 'skill' | 'mcp';
+
+export interface ToolUsageLastSeenRow {
+  kind: ToolUsageSeenKind;
+  id: string;
+  /** ISO time of the newest run under `where` that used it. */
+  lastSeenAt: string;
+}
+
+/** When each persona (assigned ∪ opened), skill (invoked ∪ opened) and MCP server (called) was
+ *  LAST used under `where`. The unused report passes the caller's whole history — scope and
+ *  attribution, no window — because "not seen in this window" and "never seen since install"
+ *  are different claims and only the second supports deleting a file. */
+export async function toolUsageLastSeen(db: Database, where: SQL): Promise<ToolUsageLastSeenRow[]> {
+  const part = (kind: ToolUsageSeenKind, lateral: SQL, id: SQL, predicate: SQL): SQL => sql`
+    select ${sql.raw(`'${kind}'`)} as kind, ${id} as id, ${inv.startedAt} as started_at
+    ${from} cross join lateral ${lateral} where ${where} and ${predicate}`;
+  const rows = await run(
+    db,
+    sql`
+    select u.kind as kind, u.id as id, max(u.started_at) as last_seen from (
+      ${part(
+        'agent',
+        sql`jsonb_array_elements_text(${arr(sql`${tu} -> 'agents' -> 'assigned'`)}) as r(id)`,
+        sql`r.id`,
+        toolUsageRecorded(),
+      )}
+      union all
+      ${part(
+        'agent',
+        sql`jsonb_array_elements(${arr(sql`${tu} -> 'agents' -> 'read'`)}) as r(value)`,
+        sql`r.value ->> 'id'`,
+        toolUsageObservable(),
+      )}
+      union all
+      ${part(
+        'skill',
+        sql`jsonb_array_elements(${arr(sql`${tu} -> 'skills' -> 'invoked'`)}) as r(value)`,
+        sql`r.value ->> 'id'`,
+        toolUsageObservable(),
+      )}
+      union all
+      ${part(
+        'skill',
+        sql`jsonb_array_elements(${arr(sql`${tu} -> 'skills' -> 'read'`)}) as r(value)`,
+        sql`r.value ->> 'id'`,
+        toolUsageObservable(),
+      )}
+      union all
+      ${part(
+        'mcp',
+        sql`jsonb_array_elements(${arr(sql`${tu} -> 'mcp'`)}) as r(value)`,
+        sql`r.value ->> 'server'`,
+        toolUsageObservable(),
+      )}
+    ) u where u.id is not null group by 1, 2`,
+  );
+  const out: ToolUsageLastSeenRow[] = [];
+  for (const r of rows) {
+    const lastSeenAt = iso(r.last_seen);
+    if (typeof r.id !== 'string' || lastSeenAt === null) continue;
+    if (r.kind !== 'agent' && r.kind !== 'skill' && r.kind !== 'mcp') continue;
+    out.push({ kind: r.kind, id: r.id, lastSeenAt });
+  }
+  return out;
+}
+
+export interface ToolUsageLoadedRow {
+  kind: 'agent' | 'skill';
+  id: string;
+  runs: number;
+}
+
+/** Ids the CLIs reported as LOADED (`loaded.agents`, `loaded.skills`) on recorded rows under
+ *  `where`: the inventory a run saw, against which "installed but not on disk" is judged. MCP
+ *  servers have their own list in the main rollup (`mcpOffered`). */
+export async function toolUsageLoadedIds(db: Database, where: SQL): Promise<ToolUsageLoadedRow[]> {
+  const part = (kind: 'agent' | 'skill', field: string): SQL => sql`
+    select ${sql.raw(`'${kind}'`)} as kind, r.id as id, ${inv.id} as inv_id
+    ${from} cross join lateral jsonb_array_elements_text(${arr(sql`${tu} -> 'loaded' -> ${sql.raw(`'${field}'`)}`)}) as r(id)
+    where ${where} and ${toolUsageRecorded()}`;
+  const rows = await run(
+    db,
+    sql`
+    select u.kind as kind, u.id as id, count(distinct u.inv_id)::int as runs from (
+      ${part('agent', 'agents')}
+      union all
+      ${part('skill', 'skills')}
+    ) u group by 1, 2`,
+  );
+  return rows
+    .filter((r) => typeof r.id === 'string' && (r.kind === 'agent' || r.kind === 'skill'))
+    .map((r) => ({ kind: r.kind as 'agent' | 'skill', id: r.id as string, runs: num(r.runs) }));
+}
+
+export interface ToolUsageObservableSpan {
+  runs: number;
+  /** ISO time of the earliest observable run under `where`; null when there is none. */
+  since: string | null;
+}
+
+/** How many observable runs `where` covers and from when — the denominators an unused row is
+ *  read against. */
+export async function toolUsageObservableSpan(
+  db: Database,
+  where: SQL,
+): Promise<ToolUsageObservableSpan> {
+  const [row] = await run(
+    db,
+    sql`
+    select count(*) filter (where ${toolUsageObservable()})::int as runs,
+      min(${inv.startedAt}) filter (where ${toolUsageObservable()}) as since
+    ${from} where ${where}`,
+  );
+  return { runs: num(row?.runs), since: iso(row?.since) };
+}
