@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -442,7 +442,9 @@ export async function runRagIndexSync(
 
       let text: string;
       try {
-        text = await readFile(path.join(repoPath, relPath), 'utf8');
+        const read = await readTextNoFollow(repoPath, relPath);
+        if (read === null) continue;
+        text = read;
       } catch {
         continue;
       }

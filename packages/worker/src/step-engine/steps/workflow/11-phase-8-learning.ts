@@ -1,6 +1,8 @@
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -548,18 +550,15 @@ interface PlannedLearningOp {
 /** Read the existing learnings so the agent can reconcile against them and the
  *  diff/apply can update/delete by id. Missing dir -> []. */
 export async function readExistingLearnings(worktree: string): Promise<ExistingLearning[]> {
-  const dir = path.join(worktree, LEARNINGS_DIR);
-  let names: string[];
-  try {
-    names = await readdir(dir);
-  } catch {
-    return [];
-  }
+  const entries = await readdirNoFollow(worktree, LEARNINGS_DIR);
+  if (entries === null) return [];
+  const names = entries.filter((e) => e.isFile()).map((e) => e.name);
   const out: ExistingLearning[] = [];
   for (const name of names) {
     if (!name.endsWith('.md')) continue;
     try {
-      const body = await readFile(path.join(dir, name), 'utf8');
+      const body = await readTextNoFollow(worktree, `${LEARNINGS_DIR}/${name}`);
+      if (body === null) continue;
       const title = (body.match(/^#\s+(.+)$/m)?.[1] ?? name.slice(0, -3)).trim();
       out.push({ id: name.slice(0, -3), title, body });
     } catch {
@@ -663,6 +662,16 @@ export function planLearningReconciliation(
 const LEARNING_DRAFT_SUBDIR = 'learnings';
 const INVESTIGATION_DRAFT_NAME = 'investigation.md';
 
+/** The staging rels, beside the absolute builders: a read anchors at the worktree and never
+ *  follows a component, while `writeFile` and the form's `editPath` still need the full path. */
+function learningDraftRel(id: string): string {
+  return `${LEARNING_DRAFTS_DIR}/${LEARNING_DRAFT_SUBDIR}/${id}.md`;
+}
+
+function investigationDraftRel(): string {
+  return `${LEARNING_DRAFTS_DIR}/${INVESTIGATION_DRAFT_NAME}`;
+}
+
 function learningDraftPath(worktree: string, id: string): string {
   return path.join(worktree, LEARNING_DRAFTS_DIR, LEARNING_DRAFT_SUBDIR, `${id}.md`);
 }
@@ -694,12 +703,8 @@ export async function stageLearningDrafts(
  *  from before staging existed, or a prepareForm that failed — and the caller
  *  keeps the agent's own body. An EMPTY file is NOT null: that is the reviewer
  *  clearing the draft, which callers honor by dropping the entry. */
-async function readStagedDraft(file: string): Promise<string | null> {
-  try {
-    return await readFile(file, 'utf8');
-  } catch {
-    return null;
-  }
+async function readStagedDraft(worktree: string, rel: string): Promise<string | null> {
+  return await readTextNoFollow(worktree, rel);
 }
 
 /** Fold the reviewer's staged edits into the plan: an edited body replaces the
@@ -714,7 +719,7 @@ export async function applyStagedLearningEdits(
       out.push(p);
       continue;
     }
-    const staged = await readStagedDraft(learningDraftPath(worktree, p.id));
+    const staged = await readStagedDraft(worktree, learningDraftRel(p.id));
     if (staged === null) {
       out.push(p);
       continue;
@@ -850,7 +855,7 @@ async function investigationDiffFile(
   const rel = investigationRelPath(inv);
   let oldContent = '';
   try {
-    oldContent = await readFile(path.join(worktree, rel), 'utf8');
+    oldContent = (await readTextNoFollow(worktree, rel)) ?? '';
   } catch {
     // not there yet -> a new file
   }
@@ -1432,7 +1437,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     // An investigation the reviewer emptied at the gate is dropped, whichever
     // destination the checkboxes name; an unstaged one keeps the agent's draft.
     const stagedInvestigation = investigation
-      ? await readStagedDraft(investigationDraftPath(worktreePath))
+      ? await readStagedDraft(worktreePath, investigationDraftRel())
       : null;
     const investigationCleared = stagedInvestigation !== null && stagedInvestigation.trim() === '';
     if (investigation && values.writeInvestigation !== false && !investigationCleared) {

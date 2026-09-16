@@ -1,4 +1,5 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -6,12 +7,7 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { skillEntrySchema } from '@haive/shared';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
-import {
-  listFilesMatching,
-  loadPreviousStepOutput,
-  pathExists,
-  resolveSkillTargetDirs,
-} from './_helpers.js';
+import { listFilesMatching, loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
 import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
@@ -190,10 +186,8 @@ function parseKbSectionBodies(text: string): Record<string, string> {
 }
 
 export async function listKbFiles(repoRoot: string): Promise<KbFileSummary[]> {
-  const kbDir = path.join(repoRoot, KB_DIR);
-  if (!(await pathExists(kbDir))) return [];
   const out: KbFileSummary[] = [];
-  await collectKbDir(kbDir, kbDir, out);
+  await collectKbDir(repoRoot, '', out);
   out.sort((a, b) => a.relPath.localeCompare(b.relPath));
   return out;
 }
@@ -242,12 +236,8 @@ async function loadCapabilitySections(
   if (requiredDomains.length === 0) return {};
   const biz = findBusinessLogicKb(kbFiles);
   if (!biz) return {};
-  let text: string;
-  try {
-    text = await readFile(path.join(repoRoot, biz.relPath), 'utf8');
-  } catch {
-    return {};
-  }
+  const text = await readTextNoFollow(repoRoot, biz.relPath);
+  if (text === null) return {};
   const all = parseKbSectionBodies(text);
   const out: Record<string, string> = {};
   for (const cap of requiredDomains) {
@@ -261,28 +251,22 @@ async function loadCapabilitySections(
   return out;
 }
 
-async function collectKbDir(rootDir: string, current: string, out: KbFileSummary[]): Promise<void> {
-  let entries;
-  try {
-    entries = await readdir(current, { withFileTypes: true });
-  } catch {
-    return;
-  }
+/** Walks the KB tree anchored at the REPOSITORY, carrying `KB_DIR` in the rel: a linked directory
+ *  below it is refused rather than descended, and a linked `.md` is never read. */
+async function collectKbDir(repoRoot: string, dirRel: string, out: KbFileSummary[]): Promise<void> {
+  const entries = await readdirNoFollow(repoRoot, dirRel ? `${KB_DIR}/${dirRel}` : KB_DIR);
+  if (entries === null) return;
   for (const entry of entries) {
-    const full = path.join(current, entry.name);
+    const childRel = dirRel ? `${dirRel}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
-      await collectKbDir(rootDir, full, out);
+      await collectKbDir(repoRoot, childRel, out);
       continue;
     }
     if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-    let text: string;
-    try {
-      text = await readFile(full, 'utf8');
-    } catch {
-      continue;
-    }
+    const text = await readTextNoFollow(repoRoot, `${KB_DIR}/${childRel}`);
+    if (text === null) continue;
     const parsed = parseKbFile(text);
-    const relInsideKb = path.relative(rootDir, full);
+    const relInsideKb = childRel;
     out.push({
       id: relInsideKb.replace(/\.md$/, ''),
       title: parsed.title || relInsideKb,

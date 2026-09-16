@@ -1,4 +1,5 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
@@ -215,15 +216,9 @@ async function collectShortFileTree(
 
 async function readReadmeExcerpt(repoPath: string): Promise<string | null> {
   for (const name of ['README.md', 'README.rst', 'readme.md']) {
-    const p = path.join(repoPath, name);
-    if (await pathExists(p)) {
-      try {
-        const full = await readFile(p, 'utf8');
-        return full.length > 2000 ? full.slice(0, 2000) + '\n[...truncated]' : full;
-      } catch {
-        continue;
-      }
-    }
+    const full = await readTextNoFollow(repoPath, name);
+    if (full === null) continue;
+    return full.length > 2000 ? full.slice(0, 2000) + '\n[...truncated]' : full;
   }
   return null;
 }
@@ -234,16 +229,27 @@ async function readReadmeExcerpt(repoPath: string): Promise<string | null> {
  *  Reuses listFilesMatching + readFile (already imported); deliberately
  *  self-contained so it doesn't couple to the skill/qa steps. */
 async function scanExistingKb(repoPath: string): Promise<ExistingKbFile[]> {
-  const kbDir = path.join(repoPath, KB_DIR);
-  if (!(await pathExists(kbDir))) return [];
-  const rels = await listFilesMatching(kbDir, (rel, isDir) => !isDir && rel.endsWith('.md'), 6);
+  // Anchored at the REPOSITORY with `KB_DIR` in the rel, not at `kbDir` itself: anchoring at the KB
+  // directory starts the walk's containment BELOW the one component that may be a link, so a linked
+  // `.haive-data/knowledge_base` would have been enumerated as though it were the repo's own.
+  // The depth budget is measured from the repository now, so it has to carry `KB_DIR`'s own
+  // segments on top of the six levels this scan always allowed inside the KB tree.
+  const rels = (
+    await listFilesMatching(
+      repoPath,
+      (rel, isDir) => !isDir && rel.endsWith('.md'),
+      KB_DIR.split('/').length + 6,
+    )
+  )
+    .filter((rel) => rel.startsWith(`${KB_DIR}/`))
+    .map((rel) => rel.slice(KB_DIR.length + 1));
   const out: ExistingKbFile[] = [];
   for (const rel of rels) {
     if (rel === 'INDEX.md') continue; // generated index, not content
     let title = rel;
     try {
-      const text = await readFile(path.join(kbDir, rel), 'utf8');
-      const m = text.match(/^#\s+(.+)$/m);
+      const text = await readTextNoFollow(repoPath, `${KB_DIR}/${rel}`);
+      const m = text?.match(/^#\s+(.+)$/m);
       if (m?.[1]) title = m[1].trim();
     } catch {
       /* keep the relPath as the title */
@@ -985,7 +991,7 @@ export async function repoOwnRef(
   // way rather than letting it veto every path and silently disable this guard.
   const usableInclude: string[] = [];
   for (const prefix of include) {
-    if (await pathExists(path.join(repoPath, prefix))) usableInclude.push(prefix);
+    if ((await lstatNoFollow(repoPath, prefix)) !== null) usableInclude.push(prefix);
   }
   const candidates = [
     ...extractCitedPaths(sectionsText),
@@ -996,7 +1002,9 @@ export async function repoOwnRef(
       usableInclude.length > 0
         ? isRepoOwnPath(rel, usableInclude, exclude)
         : isLikelyRepoOwnPath(rel, exclude);
-    if (repoOwn && (await pathExists(path.join(repoPath, rel)))) return rel;
+    // `rel` here is MODEL-SUPPLIED (a cited path or a declared source file), so this is the one
+    // probe in the file an agent chooses the argument for: a real file only, never a link.
+    if (repoOwn && (await lstatNoFollow(repoPath, rel))?.kind === 'file') return rel;
   }
   return null;
 }
@@ -1216,12 +1224,8 @@ export async function collectRepoSymbols(
     });
     // Sorted before the cap, for the host-independence reason `collectRepoBasenames` gives.
     for (const rel of files.sort().slice(0, REPO_SYMBOL_FILE_CAP)) {
-      let text: string;
-      try {
-        text = await readFile(path.join(repoPath, rel), 'utf8');
-      } catch {
-        continue;
-      }
+      const text = await readTextNoFollow(repoPath, rel);
+      if (text === null) continue;
       // A MINIFIED or generated bundle is not this project's vocabulary — it is a vendored
       // library flattened onto one line, and parsing it yields hundreds of generic helpers.
       // Detected by line LENGTH rather than by a `.min.js` name, which is a convention a build
@@ -2166,7 +2170,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         // otherwise keep it local (fall through to the re-place branch below).
         let content: string;
         try {
-          content = await readFile(path.join(kbDir, src.relPath), 'utf8');
+          const routed = await readTextNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
+          if (routed === null) throw new Error('unreadable, or reached through a link');
+          content = routed;
         } catch (err) {
           ctx.logger.warn({ err, path: p.path }, 'kb global re-route failed');
           continue;
@@ -2241,7 +2247,8 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       handledSrc.add(src.relPath);
       if (dest === src.relPath) continue; // already where it belongs
       try {
-        const content = await readFile(path.join(kbDir, src.relPath), 'utf8');
+        const content = await readTextNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
+        if (content === null) throw new Error('unreadable, or reached through a link');
         const destPath = path.join(kbDir, dest);
         await mkdir(path.dirname(destPath), { recursive: true });
         await writeFile(destPath, content, 'utf8');

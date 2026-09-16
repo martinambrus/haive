@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { DetectResult, SkillEntry } from '@haive/shared';
@@ -13,11 +14,7 @@ import {
 } from '../../mining-failure.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import type { KbFileSummary } from '../onboarding/09-qa.js';
-import {
-  loadPreviousStepOutput,
-  pathExists,
-  resolveSkillTargetDirs,
-} from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import { buildSkillContractBlocks } from '../onboarding/_skill-prompt.js';
 import {
   loadMiningScopeExcludeGlobs,
@@ -321,15 +318,14 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     const readExcerpt = async (skillId: string): Promise<string | null> => {
       for (const dir of skillTargetDirs) {
         const parts = dir.split('/').filter((p) => p.length > 0);
-        const skillMd = path.join(worktreePath, ...parts, skillId, 'SKILL.md');
-        if (await pathExists(skillMd)) {
-          try {
-            const text = await readFile(skillMd, 'utf8');
-            return text.length > 2000 ? text.slice(0, 2000) : text;
-          } catch {
-            return null;
-          }
-        }
+        // Capped at the excerpt length rather than read whole and sliced, and anchored at the
+        // worktree: these bytes go into the sync prompt, from a tree the agents write.
+        const text = await readTextNoFollow(
+          worktreePath,
+          [...parts, skillId, 'SKILL.md'].join('/'),
+          { maxBytes: 2000 },
+        );
+        if (text !== null) return text;
       }
       return null;
     };
@@ -510,7 +506,9 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     if (hasGit) {
       const present: string[] = [];
       for (const dir of targetDirs) {
-        if (await pathExists(path.join(worktree, dir))) present.push(dir);
+        // A DIRECTORY check, and a link is not one: `git add` on a linked skills dir would stage
+        // whatever it points at, or fail, depending on where that lands.
+        if ((await lstatNoFollow(worktree, dir))?.kind === 'directory') present.push(dir);
       }
       if (present.length > 0) {
         const add = await gitRun(worktree, ['add', '--', ...present]);

@@ -1,4 +1,5 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -12,7 +13,7 @@ import {
   shouldRetryMiningTerminalFailure,
   type MinedAgentOutcome,
 } from '../../mining-failure.js';
-import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
+import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
 import {
   loadMiningScopeExcludeGlobs,
@@ -235,14 +236,10 @@ export async function readDiskSkillSummaries(
   const parts = dir.split('/').filter((p) => p.length > 0);
   const out: { id: string; title: string; description: string }[] = [];
   for (const id of ids) {
-    const skillMd = path.join(repoPath, ...parts, id, 'SKILL.md');
-    if (!(await pathExists(skillMd))) continue;
-    let text: string;
-    try {
-      text = await readFile(skillMd, 'utf8');
-    } catch {
-      continue;
-    }
+    // One anchored read: null covers absent, unreadable and reached-through-a-link alike, which is
+    // what the guard-plus-catch pair it replaces already treated as "skip this skill".
+    const text = await readTextNoFollow(repoPath, [...parts, id, 'SKILL.md'].join('/'));
+    if (text === null) continue;
     const parsed = parseSkillMarkdown(text);
     out.push({ id, title: id, description: parsed.description ?? id });
   }
@@ -324,14 +321,13 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       let excerpt: string | null = null;
       for (const dir of skillTargetDirs) {
         const parts = dir.split('/').filter((p) => p.length > 0);
-        const skillMd = path.join(ctx.repoPath, ...parts, skillId, 'SKILL.md');
-        if (await pathExists(skillMd)) {
-          try {
-            const text = await readFile(skillMd, 'utf8');
-            excerpt = text.length > 2000 ? text.slice(0, 2000) : text;
-          } catch {
-            excerpt = null;
-          }
+        const text = await readTextNoFollow(
+          ctx.repoPath,
+          [...parts, skillId, 'SKILL.md'].join('/'),
+          { maxBytes: 2000 },
+        );
+        if (text !== null) {
+          excerpt = text;
           if (excerpt) break;
         }
       }
