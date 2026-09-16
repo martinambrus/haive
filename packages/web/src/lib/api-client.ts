@@ -2629,10 +2629,43 @@ export interface StatsToolUsage {
   };
   subagents: StatsCapped<{ type: string; calls: number; runs: number; tasks: number }>;
   nativeTools: StatsCapped<{ tool: string; calls: number; runs: number }>;
-  /** Null without a repository facet; the installed-inventory scan is not available yet, so a
-   *  repository-scoped request answers with the reason. */
-  unused: null | { available: false; reason: string };
+  /** Null without a repository facet. */
+  unused: StatsUnusedReport | null;
 }
+
+/** `haive`: on disk and Haive's (an artifact row or a template vouches for it), never a purge
+ *  candidate. `unmanaged`: on disk and nobody's — the candidates. `cli-builtin`: listed by the
+ *  CLI but not a file in the repository — a built-in, or a file removed since the run. */
+export type StatsUnusedToolingClass = 'haive' | 'unmanaged' | 'cli-builtin';
+
+export interface StatsUnusedRow {
+  kind: 'agent' | 'skill' | 'mcp';
+  id: string;
+  class: StatsUnusedToolingClass;
+  /** Repository-relative definition paths; empty for an MCP server or a CLI built-in. */
+  paths: string[];
+  /** Last use in the caller's WHOLE history; null = never since install. */
+  lastSeenAt: string | null;
+}
+
+export type StatsUnusedReport =
+  | {
+      available: false;
+      reason: 'no-repository' | 'no-path' | 'unreadable' | 'scan-unavailable';
+    }
+  | {
+      available: true;
+      repositoryId: string;
+      scannedAt: string;
+      dirsScanned: string[];
+      inventoryTruncated: boolean;
+      skippedLinks: number;
+      installedCount: number;
+      window: { observableRuns: number };
+      history: { observableRuns: number; observableSince: string | null };
+      /** Empty when the window has no observable run — nothing can then be called unused. */
+      rows: StatsUnusedRow[];
+    };
 
 export async function getStatsToolUsage(params: StatsQueryParams = {}): Promise<StatsToolUsage> {
   return api.get<StatsToolUsage>(`/stats/tool-usage${statsQueryString(params)}`);
