@@ -31,6 +31,7 @@ import {
   type StatsTimeline,
   type StatsToolUsage,
   type UiPrefs,
+  type StatsUnusedReport,
 } from '@/lib/api-client';
 import { Card, CardDescription, CardHeader, CardTitle, Input } from '@/components/ui';
 import { TabNav } from '@/components/tabs';
@@ -113,6 +114,92 @@ const UNUSED_CLASS_TITLE: Record<UnusedClass, string> = {
   'cli-builtin':
     'Listed by the CLI but not a file in this repository: a built-in, or a file removed since the run. A flag, not a deletion.',
 };
+
+/** The available report. Candidates — files on disk and servers offered — go in the table; CLI
+ *  built-ins fold into one line, because a built-in is not a file in the repository and the
+ *  question this card answers is what to remove. MEASURED on a repository still mid-onboarding:
+ *  37 of 39 rows were claude's own agents and skills, and the table said nothing else. */
+function UnusedReportBody({ report }: { report: Extract<StatsUnusedReport, { available: true }> }) {
+  if (report.window.observableRuns === 0) {
+    return (
+      <p className="text-sm text-neutral-500">
+        No observable run in this window, so nothing here can be called unused.
+      </p>
+    );
+  }
+  const candidates = report.rows.filter((r) => r.class !== 'cli-builtin');
+  const builtins = report.rows.filter((r) => r.class === 'cli-builtin');
+  return (
+    <>
+      <p className="mb-3 text-xs text-neutral-500">
+        {formatCount(report.installedCount)} personas and skills installed
+        {report.dirsScanned.length > 0 ? ` under ${report.dirsScanned.join(', ')}` : ''}. Listed
+        below is what none of the {formatCount(report.window.observableRuns)} observable runs in
+        this window used
+        {report.history.observableSince !== null
+          ? `; “never” means not once in ${formatCount(report.history.observableRuns)} observable runs since ${new Date(report.history.observableSince).toLocaleDateString()}`
+          : ''}
+        .
+        {report.skippedLinks > 0
+          ? ` ${formatCount(report.skippedLinks)} symlinks were skipped, never followed.`
+          : ''}
+        {report.inventoryTruncated
+          ? ' A directory held more entries than the scan reads, so the inventory is incomplete.'
+          : ''}
+      </p>
+      {candidates.length === 0 ? (
+        <p className="text-sm text-neutral-500">
+          Every installed persona and skill, and every offered server, was used in this window.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                <th className="pb-2 font-medium">Item</th>
+                <th className="pb-2 font-medium">Kind</th>
+                <th className="pb-2 font-medium">Where</th>
+                <th className="pb-2 font-medium">Class</th>
+                <th className="pb-2 text-right font-medium">Last seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((r) => (
+                <tr key={`${r.kind}:${r.id}`} className="border-t border-neutral-800">
+                  <td className="py-2 font-mono text-xs text-neutral-200">{r.id}</td>
+                  <td className="py-2 text-xs text-neutral-400">{UNUSED_KIND_TEXT[r.kind]}</td>
+                  <td className="py-2 font-mono text-[11px] text-neutral-500">
+                    {r.paths.length > 0 ? r.paths.join(', ') : '—'}
+                  </td>
+                  <td
+                    className={`py-2 text-xs ${UNUSED_CLASS_STYLE[r.class]}`}
+                    title={UNUSED_CLASS_TITLE[r.class]}
+                  >
+                    {UNUSED_CLASS_TEXT[r.class]}
+                  </td>
+                  <td className="py-2 text-right font-mono text-xs text-neutral-400">
+                    {r.lastSeenAt ? new Date(r.lastSeenAt).toLocaleDateString() : 'never'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {builtins.length > 0 && (
+        <p className="mt-3 text-xs text-neutral-500" title={UNUSED_CLASS_TITLE['cli-builtin']}>
+          {formatCount(builtins.length)} CLI built-ins were loaded and not used (
+          {builtins
+            .slice(0, 5)
+            .map((r) => r.id)
+            .join(', ')}
+          {builtins.length > 5 ? ', …' : ''}). They are not files in this repository, so there is
+          nothing to remove; a CLI flag is what disables one.
+        </p>
+      )}
+    </>
+  );
+}
 
 const TABS = [
   'money',
@@ -1469,75 +1556,8 @@ function StatsPageInner() {
                         'The installed-inventory scan is not available.')}{' '}
                     The lists above still say what this repository&apos;s runs used.
                   </p>
-                ) : toolUsage.unused.window.observableRuns === 0 ? (
-                  <p className="text-sm text-neutral-500">
-                    No observable run in this window, so nothing here can be called unused.
-                  </p>
                 ) : (
-                  <>
-                    <p className="mb-3 text-xs text-neutral-500">
-                      {formatCount(toolUsage.unused.installedCount)} personas and skills installed
-                      {toolUsage.unused.dirsScanned.length > 0
-                        ? ` under ${toolUsage.unused.dirsScanned.join(', ')}`
-                        : ''}
-                      . Listed below is what none of the{' '}
-                      {formatCount(toolUsage.unused.window.observableRuns)} observable runs in this
-                      window used
-                      {toolUsage.unused.history.observableSince !== null
-                        ? `; “never” means not once in ${formatCount(toolUsage.unused.history.observableRuns)} observable runs since ${new Date(toolUsage.unused.history.observableSince).toLocaleDateString()}`
-                        : ''}
-                      .
-                      {toolUsage.unused.skippedLinks > 0
-                        ? ` ${formatCount(toolUsage.unused.skippedLinks)} symlinks were skipped, never followed.`
-                        : ''}
-                      {toolUsage.unused.inventoryTruncated
-                        ? ' A directory held more entries than the scan reads, so the inventory is incomplete.'
-                        : ''}
-                    </p>
-                    {toolUsage.unused.rows.length === 0 ? (
-                      <p className="text-sm text-neutral-500">
-                        Everything installed or offered was used in this window.
-                      </p>
-                    ) : (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
-                              <th className="pb-2 font-medium">Item</th>
-                              <th className="pb-2 font-medium">Kind</th>
-                              <th className="pb-2 font-medium">Where</th>
-                              <th className="pb-2 font-medium">Class</th>
-                              <th className="pb-2 text-right font-medium">Last seen</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {toolUsage.unused.rows.map((r) => (
-                              <tr key={`${r.kind}:${r.id}`} className="border-t border-neutral-800">
-                                <td className="py-2 font-mono text-xs text-neutral-200">{r.id}</td>
-                                <td className="py-2 text-xs text-neutral-400">
-                                  {UNUSED_KIND_TEXT[r.kind]}
-                                </td>
-                                <td className="py-2 font-mono text-[11px] text-neutral-500">
-                                  {r.paths.length > 0 ? r.paths.join(', ') : '—'}
-                                </td>
-                                <td
-                                  className={`py-2 text-xs ${UNUSED_CLASS_STYLE[r.class]}`}
-                                  title={UNUSED_CLASS_TITLE[r.class]}
-                                >
-                                  {UNUSED_CLASS_TEXT[r.class]}
-                                </td>
-                                <td className="py-2 text-right font-mono text-xs text-neutral-400">
-                                  {r.lastSeenAt
-                                    ? new Date(r.lastSeenAt).toLocaleDateString()
-                                    : 'never'}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </>
+                  <UnusedReportBody report={toolUsage.unused} />
                 )}
               </Card>
             </>
