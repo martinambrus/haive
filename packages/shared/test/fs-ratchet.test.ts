@@ -18,7 +18,9 @@ import { describe, expect, it } from 'vitest';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
 const BASELINE = path.join(HERE, 'fs-ratchet.json');
-const SCAN_ROOTS = ['packages/api/src', 'packages/worker/src', 'packages/shared/src/repo'];
+const SCAN_ROOTS = ['packages/api/src', 'packages/worker/src', 'packages/shared/src'];
+/** The one file whose whole job is to make these calls. */
+const SCAN_EXCLUDE = new Set(['packages/shared/src/fs-safe.ts']);
 
 /** Every path-taking export of `node:fs` / `node:fs/promises` on Node 26.7.0 (checked against
  *  the runtime's own export list: what is absent here is descriptor-based — `fstat`, `ftruncate`,
@@ -449,10 +451,8 @@ function measure(): { counts: Record<string, number>; uncountable: string[] } {
   const sources = new Map<string, string>();
   for (const root of SCAN_ROOTS) {
     for (const file of sourceFiles(path.join(REPO_ROOT, root))) {
-      sources.set(
-        path.relative(REPO_ROOT, file).split(path.sep).join('/'),
-        readFileSync(file, 'utf8'),
-      );
+      const rel = path.relative(REPO_ROOT, file).split(path.sep).join('/');
+      if (!SCAN_EXCLUDE.has(rel)) sources.set(rel, readFileSync(file, 'utf8'));
     }
   }
   const counts: [string, number][] = [];

@@ -13,6 +13,7 @@
   "packages/api/src/routes/tasks/files.ts": 6,
   "packages/api/src/routes/user-settings.ts": 7,
   "packages/shared/src/repo/scope-tree.ts": 3,
+  "packages/shared/src/utils/host-resources.ts": 2,
   "packages/worker/src/attachments/expand-archives.ts": 11,
   "packages/worker/src/bootstrap.ts": 2,
   "packages/worker/src/bundle-parser/classifier.ts": 1,

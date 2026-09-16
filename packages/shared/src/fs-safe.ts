@@ -203,6 +203,40 @@ export type OpenMode = 'read' | 'read-write';
  *  verified through `/proc/self/fd` after the open, so a caller can stream from it or rewrite
  *  through it with no second path resolution. The `lstat` before the open plus `O_NONBLOCK` keep a
  *  FIFO or a device from ever being opened; `O_NOCTTY` keeps a terminal from becoming ours. */
+/** The open half of every read, throwing rather than applying the refusal rule: the callers wrap
+ *  it, so an open and a read of the same path cannot come to different verdicts. */
+async function openVerified(anchor: string, safe: string, mode: OpenMode): Promise<FileHandle> {
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (leaf === undefined) throw new PathContainmentError('not-regular-file', anchor, safe, '');
+  const dir = await walkDir(anchor, safe, segs);
+  try {
+    const st = await lstat(at(dir.fh.fd, leaf));
+    if (st.isSymbolicLink()) throw new PathContainmentError('link', anchor, safe, safe);
+    if (!st.isFile()) throw new PathContainmentError('not-regular-file', anchor, safe, safe);
+    const flags = (mode === 'read' ? O_RDONLY : O_RDWR) | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY;
+    let fh: FileHandle;
+    try {
+      fh = await open(at(dir.fh.fd, leaf), flags);
+    } catch (err) {
+      if (errno(err) === 'ELOOP') throw new PathContainmentError('link', anchor, safe, safe);
+      throw err;
+    }
+    try {
+      if (!(await fh.stat()).isFile()) {
+        throw new PathContainmentError('not-regular-file', anchor, safe, safe);
+      }
+      await assertHeldAt(fh, below(dir.real, leaf), anchor, safe, safe);
+      return fh;
+    } catch (err) {
+      await closeQuietly(fh);
+      throw err;
+    }
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+}
+
 export async function openFileNoFollow(
   anchor: string,
   rel: string,
@@ -210,37 +244,7 @@ export async function openFileNoFollow(
   opts: StrictOption = {},
 ): Promise<FileHandle | null> {
   const safe = toSafeRel(rel);
-  return readResult(opts.strict, async () => {
-    const segs = segments(safe);
-    const leaf = segs.pop();
-    if (leaf === undefined) throw new PathContainmentError('not-regular-file', anchor, safe, '');
-    const dir = await walkDir(anchor, safe, segs);
-    try {
-      const st = await lstat(at(dir.fh.fd, leaf));
-      if (st.isSymbolicLink()) throw new PathContainmentError('link', anchor, safe, safe);
-      if (!st.isFile()) throw new PathContainmentError('not-regular-file', anchor, safe, safe);
-      const flags = (mode === 'read' ? O_RDONLY : O_RDWR) | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY;
-      let fh: FileHandle;
-      try {
-        fh = await open(at(dir.fh.fd, leaf), flags);
-      } catch (err) {
-        if (errno(err) === 'ELOOP') throw new PathContainmentError('link', anchor, safe, safe);
-        throw err;
-      }
-      try {
-        if (!(await fh.stat()).isFile()) {
-          throw new PathContainmentError('not-regular-file', anchor, safe, safe);
-        }
-        await assertHeldAt(fh, below(dir.real, leaf), anchor, safe, safe);
-        return fh;
-      } catch (err) {
-        await closeQuietly(fh);
-        throw err;
-      }
-    } finally {
-      await closeQuietly(dir.fh);
-    }
-  });
+  return readResult(opts.strict, () => openVerified(anchor, safe, mode));
 }
 
 export interface ReadOptions extends StrictOption {
@@ -256,27 +260,37 @@ export interface ReadResult {
   truncated: boolean;
 }
 
+/** The whole read — open, size, allocation and the read loop — runs under the refusal rule, not
+ *  just the open: an uncapped read of an untrusted file can fail after it (a size past Node's
+ *  maximum buffer length makes the allocation throw), and a lenient caller must see that as
+ *  `null` rather than a step failure. Pass `maxBytes` wherever a bound is known. */
 export async function readFileNoFollow(
   anchor: string,
   rel: string,
   opts: ReadOptions = {},
 ): Promise<ReadResult | null> {
-  const fh = await openFileNoFollow(anchor, rel, 'read', { strict: opts.strict });
-  if (fh === null) return null;
-  try {
-    const size = (await fh.stat()).size;
-    const want = Math.min(size, opts.maxBytes ?? Number.POSITIVE_INFINITY);
-    const buf = Buffer.allocUnsafe(want);
-    let filled = 0;
-    while (filled < want) {
-      const { bytesRead } = await fh.read(buf, filled, want - filled, filled);
-      if (bytesRead === 0) break;
-      filled += bytesRead;
+  const safe = toSafeRel(rel);
+  return readResult(opts.strict, async () => {
+    const fh = await openVerified(anchor, safe, 'read');
+    try {
+      const size = (await fh.stat()).size;
+      const want = Math.min(size, opts.maxBytes ?? Number.POSITIVE_INFINITY);
+      const buf = Buffer.allocUnsafe(want);
+      let filled = 0;
+      while (filled < want) {
+        const { bytesRead } = await fh.read(buf, filled, want - filled, filled);
+        if (bytesRead === 0) break;
+        filled += bytesRead;
+      }
+      return {
+        data: filled === want ? buf : buf.subarray(0, filled),
+        size,
+        truncated: size > want,
+      };
+    } finally {
+      await closeQuietly(fh);
     }
-    return { data: filled === want ? buf : buf.subarray(0, filled), size, truncated: size > want };
-  } finally {
-    await closeQuietly(fh);
-  }
+  });
 }
 
 export async function readTextNoFollow(
