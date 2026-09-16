@@ -15,9 +15,12 @@ import { seedSpend } from '../helpers/spend.js';
  * and the join that scopes it all to one user.
  */
 
-async function createProvider(request: APIRequestContext): Promise<string> {
+async function createProvider(
+  request: APIRequestContext,
+  name: 'claude-code' | 'codex' = 'claude-code',
+): Promise<string> {
   const res = await request.post(`${API_BASE}/cli-providers`, {
-    data: { name: 'claude-code', label: 'E2E tool-usage provider', authMode: 'subscription' },
+    data: { name, label: `E2E tool-usage provider (${name})`, authMode: 'subscription' },
   });
   expect(res.status(), `provider create failed: ${await res.text()}`).toBe(201);
   return ((await res.json()) as { provider: { id: string } }).provider.id;
@@ -68,6 +71,13 @@ interface ToolUsageStats {
     unobservable: number;
     unrecorded: number;
     withLoaded: number;
+    byProvider: Array<{
+      provider: string | null;
+      total: number;
+      observable: number;
+      unobservable: number;
+      unrecorded: number;
+    }>;
     assignedRecordedSince: string | null;
   };
   personas: {
@@ -129,22 +139,49 @@ test.describe('tool-usage statistics', () => {
           { durationMs: 10 * 60_000, costUsd: 0.1, totalTokens: 1_000 },
         ],
       );
+      // A second provider with one unobservable run: its per-provider row must carry ITS
+      // counts, not a copy of the totals folded before it (measured once on the dev install,
+      // where every provider row showed the running sum).
+      const secondProviderId = await createProvider(page.request, 'codex');
+      await seedSpend(
+        sql,
+        {
+          taskId: fixture.taskId,
+          taskStepId: fixture.failedStepId,
+          cliProviderId: secondProviderId,
+        },
+        [{ durationMs: 5 * 60_000, costUsd: 0.05, totalTokens: 500, toolUsage: UNOBSERVABLE }],
+        { endedMinutesAgo: 60 },
+      );
 
       const res = await page.request.get(`${API_BASE}/stats/tool-usage`);
       expect(res.status()).toBe(200);
       const body = (await res.json()) as ToolUsageStats;
 
-      // Three buckets, three rows: the NULL one is unrecorded, the `none` one unobservable, and
-      // only the full one enters any list below.
+      // Four buckets, four rows: the NULL one is unrecorded, the two `none` ones unobservable,
+      // and only the full one enters any list below.
       expect(body.coverage).toMatchObject({
-        total: 3,
-        recorded: 2,
+        total: 4,
+        recorded: 3,
         observable: 1,
         partial: 0,
-        unobservable: 1,
+        unobservable: 2,
         unrecorded: 1,
         withLoaded: 1,
         assignedRecordedSince: null,
+      });
+      const byProvider = Object.fromEntries(body.coverage.byProvider.map((p) => [p.provider, p]));
+      expect(byProvider['claude-code']).toMatchObject({
+        total: 3,
+        observable: 1,
+        unobservable: 1,
+        unrecorded: 1,
+      });
+      expect(byProvider.codex).toMatchObject({
+        total: 1,
+        observable: 0,
+        unobservable: 1,
+        unrecorded: 0,
       });
       expect(body.personas.assigned.rows).toEqual([]);
       expect(body.personas.read.rows).toMatchObject([{ id: 'code-reviewer', reads: 2, runs: 1 }]);
