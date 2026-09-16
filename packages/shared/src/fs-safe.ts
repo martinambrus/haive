@@ -1,5 +1,15 @@
 import { constants, type Dirent, type Stats } from 'node:fs';
-import { lstat, open, readdir, readlink, type FileHandle } from 'node:fs/promises';
+import {
+  chmod,
+  chown,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readlink,
+  unlink,
+  type FileHandle,
+} from 'node:fs/promises';
 import path from 'node:path';
 
 /**
@@ -93,7 +103,17 @@ if (process.platform !== 'linux' || (process.arch !== 'x64' && process.arch !== 
     `@haive/shared/fs-safe needs Linux x64/arm64 (O_PATH and /proc/self/fd); got ${process.platform}/${process.arch}`,
   );
 }
-const { O_RDONLY, O_RDWR, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_NOCTTY } = constants;
+const {
+  O_RDONLY,
+  O_RDWR,
+  O_WRONLY,
+  O_CREAT,
+  O_EXCL,
+  O_DIRECTORY,
+  O_NOFOLLOW,
+  O_NONBLOCK,
+  O_NOCTTY,
+} = constants;
 
 const fdPath = (fd: number): string => `/proc/self/fd/${fd}`;
 /** `openat(dirfd, name)` as a path: the magic link resolves to the held directory inode and
@@ -133,11 +153,36 @@ async function assertHeldAt(
   );
 }
 
+export interface Owner {
+  uid: number;
+  gid: number;
+}
+
+export interface EnsureDirOptions {
+  /** Mode for the directories THIS call creates; an existing one is left as it is. Applied with an
+   *  explicit `chmod`, because `mkdir`'s mode argument is masked by the process umask. */
+  mode?: number;
+  /** Owner for the directories THIS call creates. The worker runs as root and the sandbox as uid
+   *  1000, so a directory an agent must write has to be handed over explicitly. */
+  owner?: Owner;
+}
+
 /** Opens the directory `segs` below the anchor one component at a time. Only the anchor may be
  *  followed; every later lookup is relative to the descriptor just opened, and `O_NOFOLLOW` with
  *  `O_DIRECTORY` answers ENOTDIR for a link (an `O_PATH` open never says ELOOP). The caller closes
- *  the returned handle. Errnos other than a refused component (ENOENT, EACCES) propagate. */
-async function walkDir(anchor: string, rel: string, segs: string[]): Promise<HeldDir> {
+ *  the returned handle. Errnos other than a refused component (ENOENT, EACCES) propagate.
+ *
+ *  With `create`, a missing segment is made rather than refused — and a segment this call creates
+ *  is the only one whose mode and owner are touched, so an existing directory's permissions are
+ *  never rewritten as a side effect of walking to something below it. `mkdir` never follows a final
+ *  link (a live or dangling one answers EEXIST), and the reopen then refuses that link, so the
+ *  create path cannot be redirected either. */
+async function walkDir(
+  anchor: string,
+  rel: string,
+  segs: string[],
+  create?: EnsureDirOptions,
+): Promise<HeldDir> {
   let fh = await open(anchor, O_PATH | O_DIRECTORY);
   let real = await readlink(fdPath(fh.fd)).catch(() => null);
   if (real === null) {
@@ -147,22 +192,53 @@ async function walkDir(anchor: string, rel: string, segs: string[]): Promise<Hel
   for (const [i, seg] of segs.entries()) {
     const here = segs.slice(0, i + 1).join('/');
     let next: FileHandle;
+    let made = false;
     try {
       next = await open(at(fh.fd, seg), O_PATH | O_DIRECTORY | O_NOFOLLOW);
     } catch (err) {
       const code = errno(err);
-      let reason: ContainmentReason | null = null;
-      if (code === 'ENOTDIR' || code === 'ELOOP') {
-        const st = await lstat(at(fh.fd, seg)).catch(() => null);
-        reason = st?.isSymbolicLink() ? 'link' : 'not-directory';
+      if (code === 'ENOENT' && create) {
+        try {
+          await mkdir(at(fh.fd, seg));
+          made = true;
+        } catch (mkErr) {
+          if (errno(mkErr) !== 'EEXIST') {
+            await closeQuietly(fh);
+            throw mkErr;
+          }
+        }
+        try {
+          next = await open(at(fh.fd, seg), O_PATH | O_DIRECTORY | O_NOFOLLOW);
+        } catch (reErr) {
+          const reCode = errno(reErr);
+          await closeQuietly(fh);
+          if (reCode === 'ENOTDIR' || reCode === 'ELOOP') {
+            throw new PathContainmentError('link', anchor, rel, here);
+          }
+          throw reErr;
+        }
+      } else {
+        let reason: ContainmentReason | null = null;
+        if (code === 'ENOTDIR' || code === 'ELOOP') {
+          const st = await lstat(at(fh.fd, seg)).catch(() => null);
+          reason = st?.isSymbolicLink() ? 'link' : 'not-directory';
+        }
+        await closeQuietly(fh);
+        if (reason) throw new PathContainmentError(reason, anchor, rel, here);
+        throw err;
       }
-      await closeQuietly(fh);
-      if (reason) throw new PathContainmentError(reason, anchor, rel, here);
-      throw err;
     }
     await closeQuietly(fh);
     fh = next;
     real = below(real, seg);
+    if (made && create) {
+      // Through `/proc/self/fd`, so both land on the inode just created rather than on whatever
+      // the name resolves to now. Owner before mode: the kernel clears setuid on a chown.
+      if (create.owner) {
+        await chown(fdPath(fh.fd), create.owner.uid, create.owner.gid);
+      }
+      if (create.mode !== undefined) await chmod(fdPath(fh.fd), create.mode);
+    }
   }
   try {
     await assertHeldAt(fh, real, anchor, rel, segs.join('/'));
@@ -357,4 +433,126 @@ export async function lstatNoFollow(
       await closeQuietly(dir.fh);
     }
   });
+}
+
+/**
+ * Create `<anchor>/<relDir>` and any missing parent, following nothing.
+ *
+ * A MUTATION, so the refusal rule is the strict one: a link anywhere in the path throws rather than
+ * reading as absent. That is the whole difference from `mkdir(p, { recursive: true })`, which
+ * follows every intermediate component and would create the tail inside whatever a planted link
+ * points at. `mode` and `owner` apply only to the directories this call creates, so walking to a
+ * deep path never rewrites the permissions of a directory that was already there.
+ */
+export async function ensureDirNoFollow(
+  anchor: string,
+  relDir: string,
+  opts: EnsureDirOptions = {},
+): Promise<void> {
+  const safe = toSafeRel(relDir);
+  const dir = await walkDir(anchor, safe, segments(safe), opts);
+  await closeQuietly(dir.fh);
+}
+
+export interface CopyFileOptions extends EnsureDirOptions {
+  /** Create the destination's missing parent directories (with `mode`/`owner` where given), the way
+   *  `mkdir -p` would — except that a link in the chain is refused rather than followed. */
+  createParents?: boolean;
+  /** Refuse an existing destination with EEXIST instead of replacing it (default true). The
+   *  exclusive create is what makes that refusal race-free — and it treats a planted link at the
+   *  destination as "already there", so nothing is written through one. */
+  noReplace?: boolean;
+  /** Copy the source's permission bits (default true), setuid/setgid/sticky excluded. */
+  preserveMode?: boolean;
+  /** Refuse a source larger than this. */
+  maxBytes?: number;
+}
+
+/**
+ * Copy `<srcAnchor>/<srcRel>` to `<destAnchor>/<destRel>` without following a link on either side.
+ *
+ * Both ends are the problem this solves. The source is read through the same verified descriptor
+ * `readFileNoFollow` uses, so a link there copies nothing (and a FIFO cannot stall the copy). The
+ * destination is created with `O_CREAT|O_EXCL|O_NOFOLLOW`, so an existing entry — including a
+ * dangling link, which `stat` reports as absent and `copyFile` would happily write through —
+ * answers EEXIST rather than being followed. The bytes move in chunks through the two descriptors,
+ * never by path.
+ */
+export async function copyFileNoFollow(
+  srcAnchor: string,
+  srcRel: string,
+  destAnchor: string,
+  destRel: string,
+  opts: CopyFileOptions = {},
+): Promise<void> {
+  const safeSrc = toSafeRel(srcRel);
+  const safeDest = toSafeRel(destRel);
+  const destSegs = segments(safeDest);
+  const leaf = destSegs.pop();
+  if (leaf === undefined) {
+    throw new PathContainmentError('invalid-path', destAnchor, destRel, destRel);
+  }
+  if (opts.noReplace === false) {
+    // Not implemented rather than silently ignored: replacing a file safely needs the temp+rename
+    // dance, which belongs with the write primitives.
+    throw new Error('copyFileNoFollow: replacing an existing destination is not supported yet');
+  }
+
+  const src = await openVerified(srcAnchor, safeSrc, 'read');
+  try {
+    const size = (await src.stat()).size;
+    if (opts.maxBytes !== undefined && size > opts.maxBytes) {
+      throw new PathContainmentError('not-regular-file', srcAnchor, srcRel, srcRel);
+    }
+    const srcMode = (await src.stat()).mode & 0o777;
+    const dir = await walkDir(
+      destAnchor,
+      safeDest,
+      destSegs,
+      opts.createParents ? { mode: opts.mode, owner: opts.owner } : undefined,
+    );
+    let dest: FileHandle;
+    try {
+      dest = await open(
+        at(dir.fh.fd, leaf),
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NOCTTY,
+        0o600,
+      );
+    } finally {
+      await closeQuietly(dir.fh);
+    }
+    let ok = false;
+    try {
+      const buf = Buffer.allocUnsafe(Math.min(size || 1, 64 * 1024));
+      let pos = 0;
+      for (;;) {
+        const { bytesRead } = await src.read(buf, 0, buf.length, pos);
+        if (bytesRead === 0) break;
+        let written = 0;
+        while (written < bytesRead) {
+          const res = await dest.write(buf, written, bytesRead - written, pos + written);
+          written += res.bytesWritten;
+        }
+        pos += bytesRead;
+      }
+      await dest.chmod(
+        opts.preserveMode === false ? (opts.mode ?? 0o644) : srcMode || (opts.mode ?? 0o644),
+      );
+      if (opts.owner) await dest.chown(opts.owner.uid, opts.owner.gid);
+      ok = true;
+    } finally {
+      await closeQuietly(dest);
+      // A half-written destination is worse than none: the caller was told the copy failed, and a
+      // truncated `.env` reads as a valid one. Unlinked through the parent descriptor's path.
+      if (!ok) {
+        const cleanup = await walkDir(destAnchor, safeDest, destSegs).catch(() => null);
+        if (cleanup) {
+          await unlink(at(cleanup.fh.fd, leaf)).catch(() => undefined);
+          await closeQuietly(cleanup.fh);
+        }
+      }
+    }
+  } finally {
+    await closeQuietly(src);
+  }
 }

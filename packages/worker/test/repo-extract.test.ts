@@ -105,6 +105,30 @@ describe('extractArchive', () => {
     expect(entries.sort()).toEqual(['dirA', 'dirB']);
   });
 
+  it('does not flatten when the only top-level entry is a link', async () => {
+    // An uploaded archive is untrusted, and the flatten used to `stat` its lone entry: a LINK there
+    // was followed, `readdir` listed the TARGET's children, and each was renamed into the
+    // destination. With `x -> ..` those children are the user's other repositories.
+    const staging = path.join(tmpRoot, 'staging');
+    const sibling = path.join(tmpRoot, 'sibling-repo');
+    await mkdir(staging, { recursive: true });
+    await mkdir(sibling, { recursive: true });
+    await writeFile(path.join(sibling, 'their-file.txt'), 'another repo\n');
+    await run('ln', ['-s', '..', path.join(staging, 'escape')]);
+    const archivePath = path.join(tmpRoot, 'link.tar.gz');
+    // No `-h`: tar stores a symlink AS a symlink by default, which is the fixture this needs.
+    await run('tar', ['-czf', archivePath, '-C', staging, 'escape']);
+
+    const dest = path.join(tmpRoot, 'out-link');
+    await extractArchive(archivePath, 'tar.gz', dest);
+
+    // The link is still the only entry. Had the flatten followed it, `dest/escape -> ..` would have
+    // resolved to the staging parent and every sibling there would have been renamed in.
+    const entries = await readdir(dest);
+    expect(entries).toEqual(['escape']);
+    expect(entries).not.toContain('sibling-repo');
+  });
+
   it('rejects unsupported format', async () => {
     const archivePath = path.join(tmpRoot, 'fake.bin');
     await writeFile(archivePath, 'not an archive');

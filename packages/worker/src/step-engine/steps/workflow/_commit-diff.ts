@@ -1,5 +1,6 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readFileNoFollow } from '@haive/shared/fs-safe';
 
 /** Runs git in `cwd` and returns stdout/stderr/exit code. Matches the gitRun
  *  helper in 10-gate-3-commit.ts so the builder can reuse it. */
@@ -125,19 +126,20 @@ export async function buildFileEntry(
   let newBinary = false;
   let newTooBig = false;
   if (status !== 'deleted') {
-    try {
-      const st = await stat(path.join(workspacePath, e.path));
-      if (st.isFile()) {
-        if (st.size > PER_FILE_CONTENT_CAP) {
-          newTooBig = true;
-        } else {
-          const buf = await readFile(path.join(workspacePath, e.path));
-          newBinary = buf.includes(0);
-          if (!newBinary) newContent = buf.toString('utf8');
-        }
+    // One capped read from the verified descriptor, where it used to be `stat` by path and then
+    // `readFile` by the same path — two resolutions of a name git reported, in a tree the agents
+    // write. A link, a FIFO or a vanished file all read as empty, which is what this artifact
+    // already means by an unreadable working file.
+    const read = await readFileNoFollow(workspacePath, e.path, {
+      maxBytes: PER_FILE_CONTENT_CAP + 1,
+    });
+    if (read !== null) {
+      if (read.size > PER_FILE_CONTENT_CAP) {
+        newTooBig = true;
+      } else {
+        newBinary = read.data.includes(0);
+        if (!newBinary) newContent = read.data.toString('utf8');
       }
-    } catch {
-      // working file missing/unreadable -> treat as empty
     }
   }
 

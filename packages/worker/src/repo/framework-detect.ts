@@ -1,6 +1,6 @@
 import path from 'node:path';
-import { readdir, stat } from 'node:fs/promises';
 import { DEFAULT_EXCLUDED_PATTERNS, FRAMEWORK_PATTERNS, type FrameworkName } from '@haive/shared';
+import { lstatNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 
 export interface DetectionResult {
   framework: FrameworkName | null;
@@ -72,14 +72,17 @@ export async function detectFromDirectory(rootDir: string): Promise<DetectionRes
   return { framework, languages, fileTree, sizeBytes };
 }
 
-export async function buildFileTree(dir: string, prefix = ''): Promise<string[]> {
+/** Every non-excluded file under `root`, as repository-relative paths.
+ *
+ *  Walked with `readdirNoFollow`, so a linked directory is never descended and a linked entry is
+ *  never listed: this tree is what `01-env-detect` picks database-config samples from and what the
+ *  detection prompt renders, and a repository is not trusted input. A `Dirent` answers the kind
+ *  without following anything, so only real directories recurse and only real files are listed —
+ *  links, FIFOs and sockets, which the old `else` branch reported as files, are all skipped. */
+export async function buildFileTree(root: string, prefix = ''): Promise<string[]> {
   const files: string[] = [];
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return files;
-  }
+  const entries = await readdirNoFollow(root, prefix);
+  if (entries === null) return files;
 
   for (const entry of entries) {
     const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
@@ -88,9 +91,9 @@ export async function buildFileTree(dir: string, prefix = ''): Promise<string[]>
     if (entry.name.startsWith('.') && entry.name !== '.ddev') continue;
 
     if (entry.isDirectory()) {
-      const subFiles = await buildFileTree(path.join(dir, entry.name), relPath);
+      const subFiles = await buildFileTree(root, relPath);
       files.push(...subFiles);
-    } else {
+    } else if (entry.isFile()) {
       const ext = path.extname(entry.name).toLowerCase();
       const isExcluded = DEFAULT_EXCLUDED_PATTERNS.some((pattern) => {
         if (pattern.startsWith('*.')) return ext === pattern.slice(1);
@@ -152,26 +155,23 @@ export function detectLanguages(fileTree: string[]): Record<string, number> {
   return counts;
 }
 
-async function calculateSize(dir: string): Promise<number> {
+/** Bytes under `root`, excluding the usual generated trees.
+ *
+ *  Walks with the same no-follow listing as `buildFileTree` and sizes each entry with `lstat`, so a
+ *  linked directory is not descended (which would have counted an outside tree, or the repository
+ *  twice through a self-referential link) and a link is counted as the few bytes it is. */
+async function calculateSize(root: string, rel = ''): Promise<number> {
   let total = 0;
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
+  const entries = await readdirNoFollow(root, rel);
+  if (entries === null) return 0;
   for (const entry of entries) {
     if (EXCLUDED_DIRS.has(entry.name)) continue;
-    const fullPath = path.join(dir, entry.name);
+    const childRel = rel ? `${rel}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
-      total += await calculateSize(fullPath);
+      total += await calculateSize(root, childRel);
     } else {
-      try {
-        const s = await stat(fullPath);
-        total += s.size;
-      } catch {
-        // ignore unreadable files
-      }
+      const info = await lstatNoFollow(root, childRel);
+      if (info !== null) total += info.stats.size;
     }
   }
   return total;
