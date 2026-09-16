@@ -42,15 +42,26 @@ export function sandboxWritableTreeRepair(
   return 'unavailable';
 }
 
-/** GNU's `u+rwX` and `o+rwX` as a per-entry function. Uppercase X is the part that matters: it
- *  adds traversal to a directory and to an already-executable file, and leaves a plain source file
- *  non-executable — a blanket `+x` would mark every file in the checkout executable. */
+const RWX = {
+  owner: { rw: 0o600, x: 0o100 },
+  other: { rw: 0o006, x: 0o001 },
+} as const;
+
+/** GNU's `u+rwX` / `o+rwX` as a per-entry function, over one or more permission classes. Uppercase
+ *  X is the part that matters: it adds traversal to a directory and to an already-executable file,
+ *  and leaves a plain source file non-executable — a blanket `+x` would mark every file in the
+ *  checkout executable. */
 const addRwX =
-  (who: 'owner' | 'other') =>
+  (...classes: ('owner' | 'other')[]) =>
   (mode: number, isDir: boolean): number => {
-    const rw = who === 'owner' ? 0o600 : 0o006;
-    const x = who === 'owner' ? 0o100 : 0o001;
-    return mode | rw | (isDir || (mode & 0o111) !== 0 ? x : 0);
+    // Decided from the ORIGINAL mode, so granting one class cannot make the next class executable.
+    const executable = isDir || (mode & 0o111) !== 0;
+    let next = mode;
+    for (const cls of classes) {
+      next |= RWX[cls].rw;
+      if (executable) next |= RWX[cls].x;
+    }
+    return next;
   };
 
 /**
@@ -99,8 +110,14 @@ export async function ensureSandboxWritableTree(anchor: string, rel: string): Pr
       await applyTreeNoFollow(anchor, rel, { mode: addRwX('owner') });
     } else {
       // The non-root worker owns this checkout but cannot chown it to uid 1000. Grant the `other`
-      // class, which is the class the kernel matches for the otherwise-unrelated sandbox identity.
-      await applyTreeNoFollow(anchor, rel, { mode: addRwX('other') });
+      // class, which is the class the kernel matches for the otherwise-unrelated sandbox identity —
+      // and the OWNER class as well, because the kernel matches THAT one for this process. Granting
+      // `other` alone leaves a tree whose owner bits were stripped unwritable by the very worker
+      // that just reported repairing it, while the root-only verdict below still passes. MEASURED
+      // on a uid-1001 runner: a 0500 directory became 0507, so the owner kept r-x and could not
+      // unlink inside it. The shell-out this replaces had the same hole and never surfaced it,
+      // because nothing verified anything below the tree root.
+      await applyTreeNoFollow(anchor, rel, { mode: addRwX('owner', 'other') });
     }
   } catch (err) {
     const operation = repair === 'chown' ? 'chown/chmod' : 'chmod';

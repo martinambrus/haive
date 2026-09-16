@@ -148,6 +148,9 @@ nonRootIt('repairs a 0200 tree it owns without following a link inside it', asyn
     await ensureSandboxWritableTree(tree, '');
 
     expect(isSandboxWritableTreeRoot(await stat(tree))).toBe(true);
+    // Whichever repair applied, the process that ran it must be able to write inside afterwards:
+    // the kernel matches the OWNER class for the owner, so granting `other` alone is not enough.
+    expect((await stat(path.join(tree, 'nested'))).mode & 0o700).toBe(0o700);
     // It reached a nested file behind a 0500 directory…
     expect((await stat(path.join(tree, 'nested', 'tracked.php'))).mode & 0o777).not.toBe(0o400);
     // …and left the link's target, which is outside the tree, exactly as it was.
