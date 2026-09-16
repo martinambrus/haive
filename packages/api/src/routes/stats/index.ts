@@ -1052,7 +1052,7 @@ statsRoutes.get('/tool-usage', async (c) => {
       ),
   ]);
 
-  const coverage = {
+  const emptyCoverage = () => ({
     total: 0,
     recorded: 0,
     observable: 0,
@@ -1060,10 +1060,14 @@ statsRoutes.get('/tool-usage', async (c) => {
     unobservable: 0,
     unrecorded: 0,
     withLoaded: 0,
-  };
-  const byProvider = new Map<string | null, typeof coverage>();
+  });
+  const coverage = emptyCoverage();
+  // Each provider's bucket starts from ZEROS, never from a copy of the running totals: seeding
+  // it from `coverage` handed every provider the sum of the rows folded before it — MEASURED on
+  // the dev install, amp (39 runs, none observable) rendered 2,215 runs and 2,176 observable.
+  const byProvider = new Map<string | null, ReturnType<typeof emptyCoverage>>();
   for (const r of rollup.coverage) {
-    const bucket = byProvider.get(r.provider) ?? { ...coverage };
+    const bucket = byProvider.get(r.provider) ?? emptyCoverage();
     for (const target of [coverage, bucket]) {
       target.total += r.total;
       target.recorded += r.recorded;
