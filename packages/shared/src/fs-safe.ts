@@ -556,3 +556,248 @@ export async function copyFileNoFollow(
     await closeQuietly(src);
   }
 }
+
+/** An `O_PATH` handle on `<anchor>/<rel>` (the anchor itself when `rel` is empty) plus its stats,
+ *  for a metadata change and nothing else. `O_PATH` is what makes this work at all on the paths a
+ *  repair has to reach: it needs no read or write permission, so a 0200 or 0000 entry is still
+ *  addressable, and it never really opens the file, so a FIFO cannot stall and a device node cannot
+ *  be touched. `O_PATH|O_NOFOLLOW` on a symlink SUCCEEDS and yields the link itself rather than
+ *  ELOOP, which is why the refusal below reads the fstat instead of catching an errno. */
+async function openForMeta(
+  anchor: string,
+  safe: string,
+  rel: string,
+): Promise<{ fh: FileHandle; stats: Stats }> {
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  const dir = await walkDir(anchor, safe, segs);
+  // `rel === ''` addresses the anchor, and the walk already verified that handle.
+  if (leaf === undefined) return { fh: dir.fh, stats: await dir.fh.stat() };
+  try {
+    const fh = await open(at(dir.fh.fd, leaf), O_PATH | O_NOFOLLOW);
+    try {
+      const stats = await fh.stat();
+      if (stats.isSymbolicLink()) throw new PathContainmentError('link', anchor, rel, safe);
+      await assertHeldAt(fh, below(dir.real, leaf), anchor, rel, safe);
+      return { fh, stats };
+    } catch (err) {
+      await closeQuietly(fh);
+      throw err;
+    }
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+}
+
+/**
+ * Set the mode of `<anchor>/<rel>`, following nothing.
+ *
+ * A MUTATION: a link anywhere in the path throws instead of reading as absent. The callback form
+ * takes the current permission bits so a caller can express `u+rwX` — a relative change — without a
+ * second stat of its own, and without the by-name `chmod` that shell form performs.
+ */
+export async function chmodNoFollow(
+  anchor: string,
+  rel: string,
+  mode: number | ((current: number, isDir: boolean) => number),
+): Promise<void> {
+  const safe = toSafeRel(rel);
+  const { fh, stats } = await openForMeta(anchor, safe, rel);
+  try {
+    const current = stats.mode & 0o7777;
+    const want = (typeof mode === 'number' ? mode : mode(current, stats.isDirectory())) & 0o7777;
+    if (want !== current) await chmod(fdPath(fh.fd), want);
+  } finally {
+    await closeQuietly(fh);
+  }
+}
+
+/** Set the owner of `<anchor>/<rel>`, following nothing. A MUTATION, so a link throws. */
+export async function chownNoFollow(anchor: string, rel: string, owner: Owner): Promise<void> {
+  const safe = toSafeRel(rel);
+  const { fh, stats } = await openForMeta(anchor, safe, rel);
+  try {
+    if (stats.uid !== owner.uid || stats.gid !== owner.gid) {
+      await chown(fdPath(fh.fd), owner.uid, owner.gid);
+    }
+  } finally {
+    await closeQuietly(fh);
+  }
+}
+
+export interface ApplyTreeOptions {
+  owner?: Owner;
+  /** Receives the entry's current permission bits and whether it is a directory, so GNU's capital-X
+   *  can be expressed: `u+rwX` is `m | 0o600 | ((isDir || m & 0o111) ? 0o100 : 0)`. */
+  mode?: (current: number, isDir: boolean) => number;
+}
+
+export interface ApplyTreeResult {
+  /** Entries visited, the tree root included. */
+  entries: number;
+  changed: number;
+  /** Links found and left alone. Reported rather than silent: on a tree that has any, the caller's
+   *  "everything under here is now uid N" is not true of those paths. */
+  linksSkipped: number;
+}
+
+const APPLY_TREE_CONCURRENCY = 32;
+
+function wantedOwner(stats: Stats, opts: ApplyTreeOptions): Owner | null {
+  if (!opts.owner) return null;
+  return stats.uid === opts.owner.uid && stats.gid === opts.owner.gid ? null : opts.owner;
+}
+
+function wantedMode(stats: Stats, isDir: boolean, opts: ApplyTreeOptions): number | null {
+  if (!opts.mode) return null;
+  const current = stats.mode & 0o7777;
+  const want = opts.mode(current, isDir) & 0o7777;
+  return want === current ? null : want;
+}
+
+const needsApply = (stats: Stats, isDir: boolean, opts: ApplyTreeOptions): boolean =>
+  wantedOwner(stats, opts) !== null || wantedMode(stats, isDir, opts) !== null;
+
+/** Owner BEFORE mode: the kernel clears setuid and setgid on a chown, so the opposite order can
+ *  hand back a tree whose modes are not the ones this call just set. */
+async function applyMeta(
+  fh: FileHandle,
+  stats: Stats,
+  isDir: boolean,
+  opts: ApplyTreeOptions,
+): Promise<boolean> {
+  const owner = wantedOwner(stats, opts);
+  const mode = wantedMode(stats, isDir, opts);
+  if (owner) await chown(fdPath(fh.fd), owner.uid, owner.gid);
+  if (mode !== null) await chmod(fdPath(fh.fd), mode);
+  return owner !== null || mode !== null;
+}
+
+/** Bounded fan-out over one directory's entries. The first failure stops the workers and is
+ *  rethrown; without the latch the remaining promises would reject unobserved. */
+async function forEachBounded<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  let failure: unknown;
+  let failed = false;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (failed || next >= items.length) return;
+      const item = items[next];
+      next += 1;
+      if (item === undefined) return;
+      try {
+        await fn(item);
+      } catch (err) {
+        if (!failed) {
+          failed = true;
+          failure = err;
+        }
+        return;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failed) throw failure;
+}
+
+async function applyTreeAt(
+  dirFh: FileHandle,
+  dirStats: Stats,
+  opts: ApplyTreeOptions,
+  acc: ApplyTreeResult,
+): Promise<void> {
+  acc.entries += 1;
+  if (await applyMeta(dirFh, dirStats, true, opts)) acc.changed += 1;
+
+  const names = await readdir(fdPath(dirFh.fd));
+  const dirs: string[] = [];
+
+  // One `lstat` decides everything about an entry, so a tree that already matches costs exactly
+  // that per entry and no open at all — this runs on repositories with 100k+ entries, repeatedly.
+  await forEachBounded(names, APPLY_TREE_CONCURRENCY, async (name) => {
+    const st = await lstat(at(dirFh.fd, name)).catch((err: unknown) => {
+      if (ABSENT.has(errno(err) ?? '')) return null;
+      throw err;
+    });
+    if (st === null) return;
+    if (st.isSymbolicLink()) {
+      acc.linksSkipped += 1;
+      return;
+    }
+    if (st.isDirectory()) {
+      dirs.push(name);
+      return;
+    }
+    acc.entries += 1;
+    if (!needsApply(st, false, opts)) return;
+    const fh = await open(at(dirFh.fd, name), O_PATH | O_NOFOLLOW);
+    try {
+      // Re-read through the descriptor: an entry swapped for a link since the lstat is skipped
+      // rather than chmodded. It cannot have been swapped for something OUTSIDE the tree, because
+      // the lookup ran inside the directory this call holds open.
+      const fresh = await fh.stat();
+      if (fresh.isSymbolicLink()) {
+        acc.linksSkipped += 1;
+        return;
+      }
+      if (await applyMeta(fh, fresh, false, opts)) acc.changed += 1;
+    } finally {
+      await closeQuietly(fh);
+    }
+  });
+
+  // Depth-first and sequential, so the descriptors held at once are the tree's DEPTH and not its
+  // width; the bounded pass above is where the concurrency is spent.
+  for (const name of dirs) {
+    let child: FileHandle;
+    try {
+      child = await open(at(dirFh.fd, name), O_PATH | O_DIRECTORY | O_NOFOLLOW);
+    } catch (err) {
+      const code = errno(err);
+      if (code === 'ENOTDIR' || code === 'ELOOP') {
+        acc.linksSkipped += 1;
+        continue;
+      }
+      if (ABSENT.has(code ?? '')) continue;
+      throw err;
+    }
+    try {
+      await applyTreeAt(child, await child.stat(), opts, acc);
+    } finally {
+      await closeQuietly(child);
+    }
+  }
+}
+
+/**
+ * Apply owner and/or mode to `<anchor>/<relDir>` and everything under it, following nothing.
+ *
+ * This replaces every `chown -R` / `chmod -R` shell-out, and the reason is that the two tools this
+ * code runs under do not agree. Production is BusyBox, where `chmod` at depth 0 changes a link's
+ * TARGET and the recursion is by path; CI is GNU coreutils, where `chmod -R` follows a linked
+ * argument through `FTS_COMFOLLOW`. So no test on CI can tell you what production does, and neither
+ * behaviour is the one wanted here. Links are skipped and COUNTED instead — Linux ignores a link's
+ * own permission bits, so nothing is lost by not touching them, and the count is what tells a
+ * caller its blanket statement has exceptions.
+ *
+ * A MUTATION: a link on the way to `relDir` throws rather than reading as absent.
+ */
+export async function applyTreeNoFollow(
+  anchor: string,
+  relDir: string,
+  opts: ApplyTreeOptions = {},
+): Promise<ApplyTreeResult> {
+  const safe = toSafeRel(relDir);
+  const acc: ApplyTreeResult = { entries: 0, changed: 0, linksSkipped: 0 };
+  const dir = await walkDir(anchor, safe, segments(safe));
+  try {
+    await applyTreeAt(dir.fh, await dir.fh.stat(), opts, acc);
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+  return acc;
+}

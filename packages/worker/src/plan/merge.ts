@@ -1,6 +1,7 @@
 import { access } from 'node:fs/promises';
 import { HAIVE_DATA_FILES } from '@haive/shared';
 import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js';
+import { relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
 import { PLAN_SNAPSHOT_GIT_PATHS } from './snapshot-git.js';
@@ -69,7 +70,7 @@ export async function ensurePlanMergeWorktree(repoPath: string): Promise<string>
       throw new Error(`git worktree add (plan merge) failed: ${add.stderr || add.stdout}`);
     }
   }
-  await ensureSandboxWritableTree(worktreePath);
+  await ensureSandboxWritableTree(repoPath, relUnder(repoPath, worktreePath));
   return worktreePath;
 }
 

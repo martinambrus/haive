@@ -1,4 +1,4 @@
-import { chmod, chown, mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, chown, mkdtemp, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -60,7 +60,7 @@ rootIt('repairs a root-owned tree even when the legacy marker is present', async
     await chmod(tree, 0o200);
 
     expect((await stat(tree)).uid).toBe(0);
-    await ensureSandboxWritableTree(tree);
+    await ensureSandboxWritableTree(tree, '');
 
     const rootAfter = await stat(tree);
     expect(rootAfter.uid).toBe(1000);
@@ -90,7 +90,7 @@ rootIt('grants sandbox access when a non-root worker owns the tree', async () =>
     await chown(tree, 1001, 1001);
     getuidSpy = vi.spyOn(process, 'getuid').mockReturnValue(1001);
 
-    await ensureSandboxWritableTree(tree);
+    await ensureSandboxWritableTree(tree, '');
 
     const rootAfter = await stat(tree);
     const nestedAfter = await stat(nested);
@@ -114,7 +114,7 @@ rootIt('repairs damaged owner mode when a uid-1000 worker owns the tree', async 
     await chmod(tree, 0o200);
     getuidSpy = vi.spyOn(process, 'getuid').mockReturnValue(1000);
 
-    await ensureSandboxWritableTree(tree);
+    await ensureSandboxWritableTree(tree, '');
 
     const rootAfter = await stat(tree);
     expect(rootAfter.uid).toBe(1000);
@@ -123,5 +123,42 @@ rootIt('repairs damaged owner mode when a uid-1000 worker owns the tree', async 
   } finally {
     getuidSpy?.mockRestore();
     await rm(tree, { recursive: true, force: true });
+  }
+});
+
+const nonRootIt = process.getuid?.() === 0 ? it.skip : it;
+
+// The case every developer host and CI runner can actually exercise: a tree this process owns,
+// chmodded 0200 by the app inside it. Which repair applies depends on the uid (owner class at 1000,
+// other class anywhere else), so this asserts the VERDICT rather than a literal mode — and asserts
+// the one thing that must hold either way, that the walk did not follow a link out of the tree.
+nonRootIt('repairs a 0200 tree it owns without following a link inside it', async () => {
+  const tree = await mkdtemp(path.join(os.tmpdir(), 'haive-worktree-0200-'));
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'haive-worktree-0200-out-'));
+  try {
+    await writeFile(path.join(outside, 'secret.txt'), 'elsewhere', 'utf8');
+    await chmod(path.join(outside, 'secret.txt'), 0o400);
+    await mkdir(path.join(tree, 'nested'));
+    await writeFile(path.join(tree, 'nested', 'tracked.php'), '<?php\n');
+    await symlink(path.join(outside, 'secret.txt'), path.join(tree, 'nested', 'link.php'));
+    await chmod(path.join(tree, 'nested', 'tracked.php'), 0o400);
+    await chmod(path.join(tree, 'nested'), 0o500);
+    await chmod(tree, 0o200);
+
+    await ensureSandboxWritableTree(tree, '');
+
+    expect(isSandboxWritableTreeRoot(await stat(tree))).toBe(true);
+    // Whichever repair applied, the process that ran it must be able to write inside afterwards:
+    // the kernel matches the OWNER class for the owner, so granting `other` alone is not enough.
+    expect((await stat(path.join(tree, 'nested'))).mode & 0o700).toBe(0o700);
+    // It reached a nested file behind a 0500 directory…
+    expect((await stat(path.join(tree, 'nested', 'tracked.php'))).mode & 0o777).not.toBe(0o400);
+    // …and left the link's target, which is outside the tree, exactly as it was.
+    expect((await stat(path.join(outside, 'secret.txt'))).mode & 0o777).toBe(0o400);
+  } finally {
+    await chmod(path.join(tree, 'nested'), 0o700).catch(() => undefined);
+    await chmod(tree, 0o700).catch(() => undefined);
+    await rm(tree, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });

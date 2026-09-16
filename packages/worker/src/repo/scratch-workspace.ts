@@ -1,4 +1,5 @@
-import { chown, mkdir, readdir, rm } from 'node:fs/promises';
+import { readdir, rm } from 'node:fs/promises';
+import { chownNoFollow, ensureDirNoFollow } from '@haive/shared/fs-safe';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
@@ -46,9 +47,16 @@ export function taskScratchPath(userId: string, taskId: string): string {
  *  Idempotent — `resolveTaskContext` runs on every advance, not once per task. */
 export async function ensureTaskScratchWorkspace(userId: string, taskId: string): Promise<string> {
   const dir = taskScratchPath(userId, taskId);
-  await mkdir(dir, { recursive: true });
+  // `<storage>/<userId>` is the anchor: it and its parents are the worker's, while everything below
+  // is reachable from a sandbox. The owner passed here applies to what this call CREATES.
+  const anchor = path.join(REPO_STORAGE_ROOT, userId);
+  const rel = `${TASK_SCRATCH_DIR}/${taskId}`;
+  const owner = { uid: SANDBOX_UID, gid: SANDBOX_GID };
+  await ensureDirNoFollow(anchor, rel, { owner });
   try {
-    await chown(dir, SANDBOX_UID, SANDBOX_GID);
+    // Separate from the create above, which only hands over directories it made: a scratch dir an
+    // earlier run left root-owned still has to be repaired. A no-op when the owner already matches.
+    await chownNoFollow(anchor, rel, owner);
   } catch (err) {
     // Best-effort, like `prepareAgentWritableDir`: on a host where chown is not permitted the
     // directory still exists and the agent still has a CWD to read from.

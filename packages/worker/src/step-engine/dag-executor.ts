@@ -43,6 +43,7 @@ import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
 import { worktreeDirName, worktreeDirPaths, WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
+import { relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { carryUntrackedForTask } from '../repo/carry-untracked.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
@@ -187,7 +188,7 @@ async function createIssueWorktree(
   }
   // Always check reused worktrees too: retry/recovery can encounter one created
   // by an older worker and left root-owned.
-  await ensureSandboxWritableTree(worktreePath);
+  await ensureSandboxWritableTree(ctx.repoPath, relUnder(ctx.repoPath, worktreePath));
 
   // Same gap as the spec artifact below, one level up: the repo's untracked runtime files
   // (a suite's .env, settings.local.php …) are not carried by `git worktree add` either, so

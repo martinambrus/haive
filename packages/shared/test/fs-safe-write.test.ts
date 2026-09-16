@@ -1,10 +1,27 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { copyFileNoFollow, ensureDirNoFollow, isPathContainmentError } from '../src/fs-safe.js';
+import {
+  applyTreeNoFollow,
+  chmodNoFollow,
+  chownNoFollow,
+  copyFileNoFollow,
+  ensureDirNoFollow,
+  isPathContainmentError,
+} from '../src/fs-safe.js';
 
 const run = promisify(execFile);
 
@@ -158,6 +175,121 @@ describe('fs-safe write primitives', () => {
       });
       await expect(copyFileNoFollow(root, 'src/a.txt', root, '../out.txt')).rejects.toMatchObject({
         reason: 'invalid-path',
+      });
+    });
+  });
+
+  // GNU's capital-X, which is what the shell-outs these replace actually applied: add execute only
+  // where it already means something — a directory, or a file that is already executable.
+  const uPlusRwX = (mode: number, isDir: boolean): number =>
+    mode | 0o600 | (isDir || (mode & 0o111) !== 0 ? 0o100 : 0);
+
+  describe('chmodNoFollow', () => {
+    it('sets a mode, takes the callback form, and addresses the anchor itself', async () => {
+      await chmodNoFollow(root, 'src/a.txt', 0o640);
+      expect((await stat(path.join(root, 'src', 'a.txt'))).mode & 0o777).toBe(0o640);
+      await chmodNoFollow(root, 'src/a.txt', uPlusRwX);
+      expect((await stat(path.join(root, 'src', 'a.txt'))).mode & 0o777).toBe(0o640);
+      await chmodNoFollow(root, 'src', uPlusRwX);
+      expect((await stat(path.join(root, 'src'))).mode & 0o700).toBe(0o700);
+      await chmodNoFollow(root, '', 0o700);
+      expect((await stat(root)).mode & 0o777).toBe(0o700);
+    });
+
+    it('needs no read permission on the file', async () => {
+      // The repair cases this exists for: an app chmodded its own tree to 0000. An O_PATH handle
+      // addresses the inode without opening it, so there is nothing to be denied.
+      await writeFile(path.join(root, 'locked.txt'), 'x', 'utf8');
+      await chmodNoFollow(root, 'locked.txt', 0o000);
+      await chmodNoFollow(root, 'locked.txt', 0o600);
+      expect((await stat(path.join(root, 'locked.txt'))).mode & 0o777).toBe(0o600);
+    });
+
+    it('refuses a linked leaf without touching what it points at', async () => {
+      await chmod(path.join(outside, 'secret.txt'), 0o400);
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'srclink.txt'));
+      await expect(chmodNoFollow(root, 'srclink.txt', 0o777)).rejects.toMatchObject({
+        reason: 'link',
+      });
+      expect((await stat(path.join(outside, 'secret.txt'))).mode & 0o777).toBe(0o400);
+    });
+
+    it('refuses a linked directory component', async () => {
+      await symlink(outside, path.join(root, 'linkdir'));
+      await expect(chmodNoFollow(root, 'linkdir/secret.txt', 0o777)).rejects.toMatchObject({
+        reason: 'link',
+        at: 'linkdir',
+      });
+    });
+  });
+
+  describe('chownNoFollow', () => {
+    it('refuses a linked leaf', async () => {
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'srclink.txt'));
+      await expect(
+        chownNoFollow(root, 'srclink.txt', { uid: process.getuid?.() ?? 0, gid: 0 }),
+      ).rejects.toMatchObject({ reason: 'link' });
+    });
+
+    it('is a no-op when the owner already matches', async () => {
+      const uid = process.getuid?.() ?? 0;
+      const gid = process.getgid?.() ?? 0;
+      await expect(chownNoFollow(root, 'src/a.txt', { uid, gid })).resolves.toBeUndefined();
+    });
+  });
+
+  describe('applyTreeNoFollow', () => {
+    // `run.sh` is the entry that separates capital-X from a blanket +x, and `link.txt` is the one
+    // the recursion must NOT follow — its target is 0400 outside the tree.
+    beforeEach(async () => {
+      await mkdir(path.join(root, 'tree', 'sub'), { recursive: true });
+      await writeFile(path.join(root, 'tree', 'file.txt'), 'a', { encoding: 'utf8', mode: 0o400 });
+      await writeFile(path.join(root, 'tree', 'run.sh'), '#!/bin/sh\n', {
+        encoding: 'utf8',
+        mode: 0o510,
+      });
+      await writeFile(path.join(root, 'tree', 'sub', 'deep.txt'), 'b', {
+        encoding: 'utf8',
+        mode: 0o400,
+      });
+      await chmod(path.join(outside, 'secret.txt'), 0o400);
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'tree', 'link.txt'));
+      await chmod(path.join(root, 'tree', 'sub'), 0o500);
+      await chmod(path.join(root, 'tree'), 0o500);
+    });
+
+    // The fixture leaves `tree` at 0500 on purpose, which is also a directory the outer cleanup
+    // cannot unlink inside. Runs innermost-first, so it lands before that `rm`.
+    afterEach(async () => {
+      for (const dir of ['tree/sub', 'tree']) {
+        await chmod(path.join(root, dir), 0o700).catch(() => undefined);
+      }
+    });
+
+    it('applies capital-X through the tree, skips links and counts what it saw', async () => {
+      const res = await applyTreeNoFollow(root, 'tree', { mode: uPlusRwX });
+      expect(res).toEqual({ entries: 5, changed: 5, linksSkipped: 1 });
+      expect((await stat(path.join(root, 'tree'))).mode & 0o777).toBe(0o700);
+      expect((await stat(path.join(root, 'tree', 'sub'))).mode & 0o777).toBe(0o700);
+      expect((await stat(path.join(root, 'tree', 'sub', 'deep.txt'))).mode & 0o777).toBe(0o600);
+      // No execute bit invented for a plain file, and the executable one keeps its own.
+      expect((await stat(path.join(root, 'tree', 'file.txt'))).mode & 0o777).toBe(0o600);
+      expect((await stat(path.join(root, 'tree', 'run.sh'))).mode & 0o777).toBe(0o710);
+      // The link was counted, not followed: its target is untouched and still a link here.
+      expect((await stat(path.join(outside, 'secret.txt'))).mode & 0o777).toBe(0o400);
+      expect((await lstat(path.join(root, 'tree', 'link.txt'))).isSymbolicLink()).toBe(true);
+    });
+
+    it('changes nothing on a second pass', async () => {
+      await applyTreeNoFollow(root, 'tree', { mode: uPlusRwX });
+      const again = await applyTreeNoFollow(root, 'tree', { mode: uPlusRwX });
+      expect(again).toEqual({ entries: 5, changed: 0, linksSkipped: 1 });
+    });
+
+    it('refuses a link on the way to the tree', async () => {
+      await symlink(outside, path.join(root, 'linkdir'));
+      await expect(applyTreeNoFollow(root, 'linkdir', { mode: uPlusRwX })).rejects.toMatchObject({
+        reason: 'link',
       });
     });
   });

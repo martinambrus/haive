@@ -784,7 +784,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       if ((detected as BrowserVerifyDetect).mode !== 'mcp') return;
       // Hand the capture directory to the sandbox uid before the agent asks
       // chrome-devtools to write its first screenshot into it.
-      await ensureScreenshotsDir(await resolveScreenshotRoot(ctx));
+      await ensureScreenshotsDir(ctx.repoPath, await resolveScreenshotRoot(ctx));
       await ctx.emitProgress('Starting the browser desktop for agent testing…');
       // mcp drives the SAME visible browser via chrome-devtools, so the app must
       // be serving and the headed desktop up. ensureAppServing boots DDEV /

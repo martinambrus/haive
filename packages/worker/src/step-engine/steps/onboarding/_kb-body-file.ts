@@ -1,4 +1,5 @@
-import { chown, lstat, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { lstat, readFile, realpath, rm } from 'node:fs/promises';
+import { chownNoFollow, ensureDirNoFollow, lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import path from 'node:path';
 
 /** Where a KB miner stages an entry's body before the step files it. Inside the
@@ -246,12 +247,16 @@ export async function prepareAgentWritableDir(
   // drafts a failed run left for diagnosis, which is the right trade — by the time anyone
   // retries, they have looked.
   await rm(abs, { recursive: true, force: true });
-  await mkdir(abs, { recursive: true });
+  await ensureDirNoFollow(repoPath, relDir);
   try {
-    const owner = await stat(repoPath);
+    const owner = await lstatNoFollow(repoPath, '', { strict: true });
+    if (owner === null) throw new Error(`repository root ${repoPath} could not be read`);
+    const handOver = { uid: owner.stats.uid, gid: owner.stats.gid };
     // Every level we created, not just the leaf: `.haive/` is root-owned from earlier
     // steps and an unwritable parent defeats a writable child.
-    for (const dir of ancestorsWithin(repoPath, abs)) await chown(dir, owner.uid, owner.gid);
+    for (const dir of ancestorsWithin(repoPath, abs)) {
+      await chownNoFollow(repoPath, relUnder(repoPath, dir), handOver);
+    }
   } catch (err) {
     logger?.warn({ err, relDir }, 'could not hand the draft dir to the sandbox user');
   }
