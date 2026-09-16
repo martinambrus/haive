@@ -128,3 +128,158 @@ export function sumToolUsageSteps(rows: ToolUsageStepRow[]): ToolUsageStepRow {
   total.subagents = mergeCounted(rows.map((r) => r.subagents));
   return total;
 }
+
+/* ------------------------------------------------------------------ */
+/* Installed against used: the unused report                            */
+/* ------------------------------------------------------------------ */
+
+/** How an installed persona or skill relates to Haive. `haive`: on disk and Haive's — a live
+ *  artifact row or a known template — so never a purge candidate, an onboarding upgrade would
+ *  write it back. `unmanaged`: on disk and nobody's, the real candidates. `cli-builtin`: not on
+ *  disk yet listed in a run's `loaded` inventory and not a template — a CLI built-in (claude's
+ *  `Explore`, `general-purpose`, …) or a file removed since the run; the lever is a flag, not a
+ *  deletion. */
+export type InstalledToolingClass = 'haive' | 'unmanaged' | 'cli-builtin';
+
+export interface InstalledToolingFacts {
+  /** A definition file for the id exists under the repository. */
+  onDisk: boolean;
+  /** A live `onboarding_artifacts` row names one of its paths. */
+  liveArtifact: boolean;
+  /** Haive's template manifest knows the id, so an upgrade would write it back. */
+  knownTemplate: boolean;
+  /** A CLI listed the id in a run's `loaded` inventory within the window. */
+  loadedByCli: boolean;
+}
+
+/** Decided from the four facts and nothing else. A known template that is not on disk is a
+ *  removed one, which is `null`: neither installed nor built in. */
+export function classifyInstalledItem(facts: InstalledToolingFacts): InstalledToolingClass | null {
+  if (facts.onDisk) return facts.liveArtifact || facts.knownTemplate ? 'haive' : 'unmanaged';
+  if (facts.loadedByCli && !facts.knownTemplate) return 'cli-builtin';
+  return null;
+}
+
+export type UnusedToolingKind = 'agent' | 'skill' | 'mcp';
+
+/** One persona or skill the on-disk scan found, with the two facts the database adds. */
+export interface InstalledToolingItem {
+  kind: 'agent' | 'skill';
+  id: string;
+  /** Repository-relative definition paths, one per CLI directory it is installed in. */
+  paths: string[];
+  liveArtifact: boolean;
+  knownTemplate: boolean;
+}
+
+export interface UnusedToolingRow {
+  kind: UnusedToolingKind;
+  id: string;
+  class: InstalledToolingClass;
+  paths: string[];
+  /** ISO time a run in the caller's WHOLE history last used it; null = never since install. */
+  lastSeenAt: string | null;
+}
+
+export interface UnusedReportInput {
+  installed: InstalledToolingItem[];
+  /** Ids the CLIs listed as loaded in the window's runs (`loaded.agents`, `loaded.skills`,
+   *  `loaded.mcpServers`). */
+  loaded: { agents: Iterable<string>; skills: Iterable<string>; mcpServers: Iterable<string> };
+  /** Ids the window's runs USED: assigned ∪ opened personas, invoked ∪ opened skills, called
+   *  servers. */
+  seen: { agents: Iterable<string>; skills: Iterable<string>; mcpServers: Iterable<string> };
+  /** Agent ids Haive's template manifest knows, for the verdict on ids that are not on disk. */
+  knownTemplateAgents: Iterable<string>;
+  /** `${kind}:${id}` → ISO time of the last use in the caller's whole history. */
+  lastSeenAt: ReadonlyMap<string, string>;
+  /** Observable runs in the window. */
+  observableRuns: number;
+}
+
+const UNUSED_KIND_ORDER: Record<UnusedToolingKind, number> = { agent: 0, skill: 1, mcp: 2 };
+
+/**
+ * What is installed or offered and was not used in the window. EMPTY when the window has no
+ * observable run: with nothing observed, nothing can be called unused. "Not seen in this
+ * window" and "never seen since install" are different claims, which is why every row carries
+ * `lastSeenAt` from the whole history — only the second supports deleting a file. MCP rows are
+ * offered-minus-called from the runs' own inventories, never from a settings file. Ordered by
+ * kind, then id, so the same facts always render the same table.
+ */
+export function buildUnusedReport(input: UnusedReportInput): UnusedToolingRow[] {
+  if (input.observableRuns <= 0) return [];
+  const loaded = {
+    agents: new Set(input.loaded.agents),
+    skills: new Set(input.loaded.skills),
+    mcpServers: new Set(input.loaded.mcpServers),
+  };
+  const seen = {
+    agents: new Set(input.seen.agents),
+    skills: new Set(input.seen.skills),
+    mcpServers: new Set(input.seen.mcpServers),
+  };
+  const templates = new Set(input.knownTemplateAgents);
+  const lastSeen = (kind: UnusedToolingKind, id: string): string | null =>
+    input.lastSeenAt.get(`${kind}:${id}`) ?? null;
+  const onDisk = { agent: new Set<string>(), skill: new Set<string>() };
+  const rows: UnusedToolingRow[] = [];
+
+  for (const item of input.installed) {
+    onDisk[item.kind].add(item.id);
+    const seenIds = item.kind === 'agent' ? seen.agents : seen.skills;
+    if (seenIds.has(item.id)) continue;
+    const loadedIds = item.kind === 'agent' ? loaded.agents : loaded.skills;
+    const cls = classifyInstalledItem({
+      onDisk: true,
+      liveArtifact: item.liveArtifact,
+      knownTemplate: item.knownTemplate,
+      loadedByCli: loadedIds.has(item.id),
+    });
+    if (cls === null) continue;
+    rows.push({
+      kind: item.kind,
+      id: item.id,
+      class: cls,
+      paths: [...item.paths].sort(compareStrings),
+      lastSeenAt: lastSeen(item.kind, item.id),
+    });
+  }
+  for (const id of loaded.agents) {
+    if (onDisk.agent.has(id) || seen.agents.has(id)) continue;
+    const cls = classifyInstalledItem({
+      onDisk: false,
+      liveArtifact: false,
+      knownTemplate: templates.has(id),
+      loadedByCli: true,
+    });
+    if (cls !== null) {
+      rows.push({ kind: 'agent', id, class: cls, paths: [], lastSeenAt: lastSeen('agent', id) });
+    }
+  }
+  for (const id of loaded.skills) {
+    if (onDisk.skill.has(id) || seen.skills.has(id)) continue;
+    const cls = classifyInstalledItem({
+      onDisk: false,
+      liveArtifact: false,
+      knownTemplate: false,
+      loadedByCli: true,
+    });
+    if (cls !== null) {
+      rows.push({ kind: 'skill', id, class: cls, paths: [], lastSeenAt: lastSeen('skill', id) });
+    }
+  }
+  for (const server of loaded.mcpServers) {
+    if (seen.mcpServers.has(server)) continue;
+    rows.push({
+      kind: 'mcp',
+      id: server,
+      class: isHaiveMcpServer(server) ? 'haive' : 'unmanaged',
+      paths: [],
+      lastSeenAt: lastSeen('mcp', server),
+    });
+  }
+  return rows.sort(
+    (a, b) => UNUSED_KIND_ORDER[a.kind] - UNUSED_KIND_ORDER[b.kind] || compareStrings(a.id, b.id),
+  );
+}
