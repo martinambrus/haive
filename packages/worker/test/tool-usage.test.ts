@@ -114,6 +114,26 @@ describe('classifyReadPath', () => {
     expect(classifyReadPath('.claude/agents-legacy/peer-reviewer.md', WORKDIR)).toBeNull();
   });
 
+  it('rejects a glob or a shell variable where an id should be', () => {
+    // MEASURED on the dev install: `cat .claude/agents/*.md` and a `$f` loop variable both
+    // reached the report as personas. Such a read names every file or none.
+    expect(classifyReadPath('.claude/agents/*.md', WORKDIR)).toBeNull();
+    expect(classifyReadPath('.claude/agents/$f.md', WORKDIR)).toBeNull();
+    expect(classifyReadPath('.claude/agents/{a,b}.md', WORKDIR)).toBeNull();
+    expect(classifyReadPath('.claude/skills/*/SKILL.md', WORKDIR)).toBeNull();
+    expect(classifyReadPath('.claude/skills/$s/SKILL.md', WORKDIR)).toBeNull();
+    expect(classifyReadPath('.claude/agents/drupal7-developer.md', WORKDIR)).toEqual({
+      kind: 'agent',
+      id: 'drupal7-developer',
+      dir: '.claude/agents',
+    });
+    expect(classifyReadPath('.claude/skills/spec_writer.v2/SKILL.md', WORKDIR)).toEqual({
+      kind: 'skill',
+      id: 'spec_writer.v2',
+      dir: '.claude/skills',
+    });
+  });
+
   it('anchors on whole segments from the root, never on a substring', () => {
     expect(classifyReadPath('docs/.claude/agents/peer-reviewer.md', WORKDIR)).toBeNull();
     expect(classifyReadPath('.claude/agentsx/peer-reviewer.md', WORKDIR)).toBeNull();

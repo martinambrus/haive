@@ -4,6 +4,7 @@ import { CONFIG_KEYS, configService, logger, type OnboardingToolingMirror } from
 import { FACET_VALUE_ALIAS_PAIRS, globalKbEntries, withGlobalKb } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
+import { TOOLING_ID_PATTERN } from './cli-executor/tool-usage.js';
 import { getCliExecQueue } from './queues/cli-exec/_shared.js';
 import { backfillToolUsageAtBoot } from './queues/cli-exec/tool-usage-backfill.js';
 import { globalKbTopicKey } from './step-engine/steps/_global-kb-promote.js';
@@ -59,6 +60,9 @@ const DATA_MIGRATIONS: DataMigration[] = [
   // Docker images. Convergent because it only finishes a removal the normal path had already
   // decided on; a live task keeps its workspace.
   { id: 'sweepOrphanScratchWorkspaces', kind: 'convergent', run: sweepOrphanScratchWorkspaces },
+  // BEFORE the backfill, which re-examines the rows this one NULLs in the same boot. Convergent:
+  // once re-read under the id check, no row matches again.
+  { id: 'resetMalformedToolUsageIds', kind: 'convergent', run: resetMalformedToolUsageIds },
   // Reads stored transcripts into `cli_invocations.tool_usage` where it is still NULL. Budgeted
   // and keyset-paged, so a large install converges over a few boots rather than holding one
   // boot for the whole rewrite; every examined row is written (an unobservable one as
@@ -703,5 +707,44 @@ async function relabelPlanReconcileForms(db: Database): Promise<void> {
     if (fixed > 0) log.info({ fixed }, 'relabelled parked plan-reconcile forms');
   } catch (err) {
     log.warn({ err }, 'plan reconcile form relabel skipped');
+  }
+}
+
+/** NULL every `tool_usage` whose persona or skill read list carries an id that is not a plain
+ *  filename stem — a glob or a shell variable the classifier admitted before
+ *  `TOOLING_ID_PATTERN` existed (MEASURED: 4 rows on the dev install, ids `*` and `$f`). NULL
+ *  means "not yet examined", so the backfill registered right after this re-reads each row's
+ *  transcript under the current check in the same boot. Convergent: a re-read row cannot match
+ *  again, and the pattern is the classifier's own, so the two cannot disagree. */
+async function resetMalformedToolUsageIds(db: Database): Promise<void> {
+  try {
+    const rows = await db.execute(sql`
+      UPDATE cli_invocations ci
+      SET tool_usage = NULL
+      WHERE ci.tool_usage IS NOT NULL
+        AND (
+          EXISTS (
+            SELECT 1 FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(ci.tool_usage -> 'agents' -> 'read') = 'array'
+                   THEN ci.tool_usage -> 'agents' -> 'read' ELSE '[]'::jsonb END
+            ) e WHERE e ->> 'id' !~ ${TOOLING_ID_PATTERN}
+          )
+          OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(ci.tool_usage -> 'skills' -> 'read') = 'array'
+                   THEN ci.tool_usage -> 'skills' -> 'read' ELSE '[]'::jsonb END
+            ) e WHERE e ->> 'id' !~ ${TOOLING_ID_PATTERN}
+          )
+        )
+      RETURNING ci.id
+    `);
+    if (rows.length > 0) {
+      log.info(
+        { reset: rows.length },
+        'reset tool usage rows carrying a malformed persona or skill id',
+      );
+    }
+  } catch (err) {
+    log.warn({ err }, 'malformed tool usage id reset skipped');
   }
 }
