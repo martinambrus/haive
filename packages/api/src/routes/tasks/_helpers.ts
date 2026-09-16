@@ -1,5 +1,5 @@
 import { stat } from 'node:fs/promises';
-import { relative, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -1215,15 +1215,6 @@ export async function resolveWorkspaceRoot(
     throw new HttpError(409, 'Task workspace is not inside its repository');
   }
   return { task, root: resolve(root), anchor };
-}
-
-export function validateWorkspacePath(root: string, requested: string | undefined): string {
-  const target = requested ? resolve(requested) : root;
-  const rel = relative(root, target);
-  if (rel.startsWith('..') || rel === '..' || rel.includes('\0')) {
-    throw new HttpError(403, 'Path is outside the task workspace');
-  }
-  return target;
 }
 
 export async function appendTaskEvent(

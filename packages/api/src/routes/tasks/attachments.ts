@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createWriteStream } from 'node:fs';
 import { access, chmod, chown, mkdir, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
@@ -18,6 +18,8 @@ import {
   splitAttachmentPath,
   uploadTaskAttachmentQuerySchema,
 } from '@haive/shared';
+import { openFileNoFollow } from '@haive/shared/fs-safe';
+import { containmentHttpError } from '../../lib/fs-http.js';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
 
@@ -395,17 +397,31 @@ attachmentRoutes.get('/:id/attachments/:attachmentId/raw', async (c) => {
   await requireOwnedTask(taskId, userId);
   const row = await findAttachment(taskId, userId, attachmentId);
 
-  const onDisk = await stat(row.storedPath).catch(() => null);
-  if (!onDisk) throw new HttpError(404, 'Attachment file is missing on disk');
+  // The uploads dir sits at `<storagePath>/.haive/task-uploads/<taskId>`, and `.haive` is
+  // sandbox-writable, so neither it nor the uploads dir may be the anchor: the repository root is.
+  // Derived from the row's own `storedPath` by removing the suffix the api wrote, which also
+  // refuses a legacy row whose path does not have that shape rather than guessing an anchor.
+  const suffix = `/${join('.haive', 'task-uploads', taskId, row.filename)}`;
+  if (!row.storedPath.endsWith(suffix)) {
+    throw new HttpError(404, 'Attachment file is missing on disk');
+  }
+  const anchor = row.storedPath.slice(0, -suffix.length);
+  const rel = join('.haive', 'task-uploads', taskId, row.filename);
+
+  const fh = await openFileNoFollow(anchor, rel, 'read', { strict: true }).catch((err: unknown) =>
+    containmentHttpError(err, 'Attachment path is outside the task workspace'),
+  );
+  if (fh === null) throw new HttpError(404, 'Attachment file is missing on disk');
+  const size = (await fh.stat()).size;
 
   // The BASENAME: `filename` may be a relative path now, and a header carrying
   // `docs/api/spec.md` names a directory the downloader does not have.
   const safeHeaderName = splitAttachmentPath(row.filename).base.replace(/["\r\n]/g, '_');
   c.header('Content-Type', row.contentType ?? 'application/octet-stream');
   c.header('Content-Disposition', `attachment; filename="${safeHeaderName}"`);
-  c.header('Content-Length', String(onDisk.size));
+  c.header('Content-Length', String(size));
   c.header('Cache-Control', 'no-store');
-  return c.body(Readable.toWeb(createReadStream(row.storedPath)) as never);
+  return c.body(Readable.toWeb(fh.createReadStream()) as never);
 });
 
 attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
