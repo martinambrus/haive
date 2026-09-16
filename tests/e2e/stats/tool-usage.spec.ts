@@ -223,25 +223,27 @@ test.describe('tool-usage statistics', () => {
       expect(perTask.status()).toBe(200);
       const task = (await perTask.json()) as TaskToolUsage;
       const seededStep = task.steps.find((s) => s.stepRowId === fixture!.failedStepId);
-      expect(seededStep?.usage).toMatchObject({ runs: 3, observable: 1, toolCalls: 7 });
+      // Four rows on the step: the three claude-code ones plus the codex provider's, which the
+      // per-task rollup folds by step regardless of provider.
+      expect(seededStep?.usage).toMatchObject({ runs: 4, observable: 1, toolCalls: 7 });
       expect(seededStep?.usage?.personasRead).toEqual([{ id: 'code-reviewer', n: 2 }]);
       // A step with no attributed run is a dash, never a row of zeros.
       expect(
         task.steps.some((s) => s.stepRowId !== fixture!.failedStepId && s.usage === null),
       ).toBe(true);
       expect(task.totals).toMatchObject({
-        runs: 3,
+        runs: 4,
         observable: 1,
-        unobservable: 1,
+        unobservable: 2,
         unrecorded: 1,
         toolCalls: 7,
       });
       expect(task.totals.mcp).toEqual([{ server: 'haive-rag', tool: 'rag_search', calls: 3 }]);
       expect(task.coverage).toEqual({
-        total: 3,
+        total: 4,
         observable: 1,
         partial: 0,
-        unobservable: 1,
+        unobservable: 2,
         unrecorded: 1,
       });
     } finally {
