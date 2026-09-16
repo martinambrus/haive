@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq, and, desc, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { containmentHttpError } from '../lib/fs-http.js';
 import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -19,6 +20,7 @@ import {
   HAIVE_DATA_DIR,
   type ArchiveFormat,
 } from '@haive/shared';
+import { readFileNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import { parseScpLikeGitUrl } from '@haive/shared/schemas';
 import {
@@ -682,41 +684,33 @@ repoRoutes.get('/:id/file', async (c) => {
   const root = repo.storagePath ?? repo.localPath;
   if (!root) throw new HttpError(409, 'Repository has no on-disk path yet');
 
-  // Resolve THEN contain: `path.resolve` collapses `..`, so the containment
-  // check sees where the read would actually land rather than what was typed.
-  const target = path.resolve(root, requested);
-  const rel = path.relative(root, target);
-  if (rel.startsWith('..') || path.isAbsolute(rel) || rel.includes('\0')) {
+  // `relUnder` resolves THEN contains — `path.resolve` collapses `..`, so containment is judged
+  // on where the read would land — and hands the walk a rel whose components it never follows.
+  let rel: string;
+  try {
+    rel = relUnder(root, path.resolve(root, requested));
+  } catch {
     throw new HttpError(403, 'Path is outside the repository');
   }
 
-  let st;
-  try {
-    st = await stat(target);
-  } catch {
-    throw new HttpError(404, 'File not found');
-  }
-  if (st.isDirectory()) throw new HttpError(400, 'Path is a directory, not a file');
+  const read = await readFileNoFollow(root, rel, {
+    maxBytes: MAX_FILE_CONTENT_BYTES,
+    strict: true,
+  }).catch((err: unknown) => containmentHttpError(err, 'Path is outside the repository'));
+  if (read === null) throw new HttpError(404, 'File not found');
 
-  const handle = await open(target, 'r');
-  try {
-    const buf = Buffer.alloc(Math.min(st.size, MAX_FILE_CONTENT_BYTES));
-    await handle.read(buf, 0, buf.length, 0);
-    // A NUL in the first block is the usual "this is not text" tell; returning
-    // it as a string would render as mojibake in the preview.
-    if (buf.includes(0)) {
-      return c.json({ path: rel, size: st.size, binary: true, truncated: false, content: null });
-    }
-    return c.json({
-      path: rel,
-      size: st.size,
-      binary: false,
-      truncated: st.size > buf.length,
-      content: buf.toString('utf8'),
-    });
-  } finally {
-    await handle.close();
+  // A NUL in the first block is the usual "this is not text" tell; returning
+  // it as a string would render as mojibake in the preview.
+  if (read.data.includes(0)) {
+    return c.json({ path: rel, size: read.size, binary: true, truncated: false, content: null });
   }
+  return c.json({
+    path: rel,
+    size: read.size,
+    binary: false,
+    truncated: read.truncated,
+    content: read.data.toString('utf8'),
+  });
 });
 
 repoRoutes.patch('/:id/exclusions', async (c) => {

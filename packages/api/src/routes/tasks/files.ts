@@ -1,25 +1,44 @@
-import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { open, readdir, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { basename, dirname, extname, join, relative } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { isReadOnlyLocalRepo } from '@haive/shared';
-import { isPathContainmentError, openFileNoFollow, relUnder } from '@haive/shared/fs-safe';
+import {
+  isPathContainmentError,
+  lstatNoFollow,
+  openFileNoFollow,
+  readdirNoFollow,
+  readFileNoFollow,
+  relUnder,
+} from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNING_DRAFTS_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
+import { containmentHttpError } from '../../lib/fs-http.js';
 import { createTaskArchiveStream } from '../../lib/task-archive.js';
 import {
   MAX_FILE_CONTENT_BYTES,
   mimeForExtension,
   resolveWorkspaceRoot,
   TEXT_EXTENSIONS,
-  validateWorkspacePath,
 } from './_helpers.js';
+
+/** The workspace-relative path of an absolute `?path=` argument, or a 403.
+ *
+ *  The wire format stays absolute — the Editor tab round-trips the `path` it was given — so this
+ *  is where it becomes the `rel` the primitives take. The ANCHOR is the repository root, never the
+ *  workspace: a task's workspace is a worktree under `.haive/worktrees/`, which the sandbox and the
+ *  task terminal can rewrite, and the anchor is the one component a walk follows. */
+function workspaceRel(anchor: string, root: string, requested: string | undefined): string {
+  try {
+    return relUnder(anchor, requested ? resolve(requested) : root);
+  } catch {
+    throw new HttpError(403, 'Path is outside the task workspace');
+  }
+}
 
 export const fileRoutes = new Hono<AppEnv>();
 
@@ -42,34 +61,29 @@ fileRoutes.get('/:id/files', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const { root } = await resolveWorkspaceRoot(db, id, userId);
+  const { root, anchor } = await resolveWorkspaceRoot(db, id, userId);
 
   const requested = c.req.query('path') ?? root;
-  const dir = validateWorkspacePath(root, requested);
+  const rel = workspaceRel(anchor, root, requested);
+  const dir = resolve(anchor, rel);
 
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    throw new HttpError(404, 'Directory not found or unreadable');
-  }
+  const entries = await readdirNoFollow(anchor, rel, { strict: true }).catch(containmentHttpError);
+  if (entries === null) throw new HttpError(404, 'Directory not found or unreadable');
 
   const result = await Promise.all(
     entries.map(async (entry) => {
-      const fullPath = join(dir, entry.name);
-      let size: number | null = null;
-      try {
-        const s = await stat(fullPath);
-        size = entry.isFile() ? s.size : null;
-      } catch {
-        // ignore stat failures
-      }
+      // `lstat`, so a linked entry reports its own size and is neither file nor directory — the
+      // listing describes what is there rather than what it points at, and the routes below refuse
+      // to open it. `Dirent` already answers the kind without following anything.
+      const info = entry.isFile()
+        ? await lstatNoFollow(anchor, rel === '' ? entry.name : `${rel}/${entry.name}`)
+        : null;
       return {
         name: entry.name,
-        path: fullPath,
+        path: join(dir, entry.name),
         isDirectory: entry.isDirectory(),
         hidden: entry.name.startsWith('.'),
-        size,
+        size: info?.kind === 'file' ? info.stats.size : null,
       };
     }),
   );
@@ -87,31 +101,21 @@ fileRoutes.get('/:id/files/content', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const { root } = await resolveWorkspaceRoot(db, id, userId);
+  const { root, anchor } = await resolveWorkspaceRoot(db, id, userId);
 
   const requested = c.req.query('path');
   if (!requested) throw new HttpError(400, 'Missing path query parameter');
-  const target = validateWorkspacePath(root, requested);
+  const rel = workspaceRel(anchor, root, requested);
+  const target = resolve(anchor, rel);
 
-  let st;
-  try {
-    st = await stat(target);
-  } catch {
-    throw new HttpError(404, 'File not found');
-  }
-  if (st.isDirectory()) {
-    throw new HttpError(400, 'Path is a directory, not a file');
-  }
-
-  const truncated = st.size > MAX_FILE_CONTENT_BYTES;
-  const readSize = Math.min(st.size, MAX_FILE_CONTENT_BYTES);
-  const buf = Buffer.alloc(readSize);
-  const fh = await open(target, 'r');
-  try {
-    await fh.read({ buffer: buf, offset: 0, position: 0, length: readSize });
-  } finally {
-    await fh.close();
-  }
+  const read = await readFileNoFollow(anchor, rel, {
+    maxBytes: MAX_FILE_CONTENT_BYTES,
+    strict: true,
+  }).catch(containmentHttpError);
+  if (read === null) throw new HttpError(404, 'File not found');
+  const st = { size: read.size };
+  const truncated = read.truncated;
+  const buf = read.data;
 
   const ext = extname(target).toLowerCase();
   const name = basename(target);
@@ -151,27 +155,26 @@ fileRoutes.get('/:id/files/raw', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const { root } = await resolveWorkspaceRoot(db, id, userId);
+  const { root, anchor } = await resolveWorkspaceRoot(db, id, userId);
 
   const requested = c.req.query('path');
   if (!requested) throw new HttpError(400, 'Missing path query parameter');
-  const target = validateWorkspacePath(root, requested);
+  const rel = workspaceRel(anchor, root, requested);
 
-  let st;
-  try {
-    st = await stat(target);
-  } catch {
-    throw new HttpError(404, 'File not found');
-  }
-  if (st.isDirectory()) {
-    throw new HttpError(400, 'Path is a directory, not a file');
-  }
+  // Streamed from the descriptor the walk verified, not from the path again: a second resolution
+  // is a second chance for the tree to have changed under it. `Content-Length` comes from that
+  // same descriptor's fstat, so the header cannot describe a different file than the body.
+  const fh = await openFileNoFollow(anchor, rel, 'read', { strict: true }).catch(
+    containmentHttpError,
+  );
+  if (fh === null) throw new HttpError(404, 'File not found');
+  const size = (await fh.stat()).size;
 
-  c.header('Content-Type', mimeForExtension(extname(target).toLowerCase()));
-  c.header('Content-Length', String(st.size));
+  c.header('Content-Type', mimeForExtension(extname(rel).toLowerCase()));
+  c.header('Content-Length', String(size));
   c.header('Cache-Control', 'no-store');
 
-  return c.body(Readable.toWeb(createReadStream(target)) as ReadableStream);
+  return c.body(Readable.toWeb(fh.createReadStream()) as ReadableStream);
 });
 
 // --- Inline knowledge-base editing -----------------------------------------
@@ -290,7 +293,7 @@ fileRoutes.put('/:id/files/content', async (c) => {
     throw new HttpError(413, 'File is too large to edit here');
   }
 
-  const target = validateWorkspacePath(root, body.path);
+  const target = resolve(anchor, workspaceRel(anchor, root, body.path));
   const fh = await openEditableKnowledgeFile(anchor, root, target);
   try {
     // Optimistic concurrency against the bytes the client actually rendered: an

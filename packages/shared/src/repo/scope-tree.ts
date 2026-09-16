@@ -1,6 +1,5 @@
-import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-import type { Dirent } from 'node:fs';
+import { readdirNoFollow } from '../fs-safe.js';
 import type { TreeNode } from '../schemas/form.js';
 
 /** Directories shown in the scope tree as collapsed, toggleable leaves but NOT
@@ -71,7 +70,7 @@ export async function buildScopeTree(
   const extensions = opts.extensions ?? null;
 
   const subdirs = await childDirNodes(root, '', 0, maxDepth, extensions);
-  const rootFileCount = await countDirectFiles(root, extensions);
+  const rootFileCount = await countDirectFiles(root, '', extensions);
 
   // Root's own direct files get their OWN leaf (deny token ROOT_FILES_SCOPE) so
   // they can be unticked — the previous tree had no node for them, so they were
@@ -98,18 +97,15 @@ export async function buildScopeTree(
   return [{ path: REPO_ROOT_NODE_PATH, label: 'Repository root', kind: 'repo-root', children }];
 }
 
-/** Count the direct (non-recursive) code files of `absDir`, honouring the same
- *  extension filter as the tree nodes. Used for the root-files leaf count. */
+/** Count the direct (non-recursive) code files of `rel` under `root`, honouring the
+ *  same extension filter as the tree nodes. Used for the root-files leaf count. */
 async function countDirectFiles(
-  absDir: string,
+  root: string,
+  rel: string,
   extensions: ReadonlySet<string> | null,
 ): Promise<number> {
-  let entries: Dirent[];
-  try {
-    entries = (await readdir(absDir, { withFileTypes: true })) as Dirent[];
-  } catch {
-    return 0;
-  }
+  const entries = await readdirNoFollow(root, rel);
+  if (entries === null) return 0;
   let count = 0;
   for (const entry of entries) {
     if (!entry.isFile()) continue;
@@ -128,13 +124,8 @@ async function childDirNodes(
   maxDepth: number,
   extensions: ReadonlySet<string> | null,
 ): Promise<TreeNode[]> {
-  const absDir = relDir ? path.join(absRoot, relDir) : absRoot;
-  let entries: Dirent[];
-  try {
-    entries = (await readdir(absDir, { withFileTypes: true })) as Dirent[];
-  } catch {
-    return [];
-  }
+  const entries = await readdirNoFollow(absRoot, relDir);
+  if (entries === null) return [];
 
   const nodes: TreeNode[] = [];
   for (const entry of entries) {
@@ -160,13 +151,7 @@ async function buildDirNode(
   maxDepth: number,
   extensions: ReadonlySet<string> | null,
 ): Promise<TreeNode> {
-  const absDir = path.join(absRoot, rel);
-  let entries: Dirent[];
-  try {
-    entries = (await readdir(absDir, { withFileTypes: true })) as Dirent[];
-  } catch {
-    entries = [];
-  }
+  const entries = (await readdirNoFollow(absRoot, rel)) ?? [];
 
   let fileCount = 0;
   const subdirs: string[] = [];
