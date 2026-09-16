@@ -1,4 +1,3 @@
-import { stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import {
@@ -58,9 +57,11 @@ import {
   sandboxWorktreePath,
   worktreeDirName,
   WORKTREE_SUBDIR,
+  splitRepoSubpath,
 } from '../../repo/worktree-paths.js';
 import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../../repo/worktree-permissions.js';
 import {
   HOST_REPO_ROOT,
@@ -673,15 +674,19 @@ export async function ensureRepoMountWritable(repoMount: DockerVolumeMount | nul
   if (repoMount.source !== REPO_VOLUME_NAME) return;
   if (!repoMount.subpath) return;
 
+  // The repository root is the anchor; a worktree tail in the subpath is walked, never joined.
+  const { anchor, rel } = splitRepoSubpath(WORKER_REPO_STORAGE_ROOT, repoMount.subpath);
   const workerVolumePath = join(WORKER_REPO_STORAGE_ROOT, repoMount.subpath);
   try {
-    const before = await stat(workerVolumePath);
-    await ensureSandboxWritableTree(workerVolumePath);
-    const after = await stat(workerVolumePath);
+    const before = await lstatNoFollow(anchor, rel, { strict: true });
+    await ensureSandboxWritableTree(anchor, rel);
+    const after = await lstatNoFollow(anchor, rel, { strict: true });
     if (
-      before.uid !== after.uid ||
-      before.gid !== after.gid ||
-      (before.mode & 0o777) !== (after.mode & 0o777)
+      before !== null &&
+      after !== null &&
+      (before.stats.uid !== after.stats.uid ||
+        before.stats.gid !== after.stats.gid ||
+        (before.stats.mode & 0o777) !== (after.stats.mode & 0o777))
     ) {
       log.info({ workerVolumePath }, 'repaired repo volume access for node user (1000:1000)');
     }

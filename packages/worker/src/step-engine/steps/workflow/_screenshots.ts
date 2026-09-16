@@ -2,6 +2,7 @@ import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
+import { ensureDirNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
 import { resolveTaskWorktreePath } from './_spec-artifact.js';
 
@@ -86,11 +87,16 @@ export async function resolveScreenshotRoot(ctx: StepContext): Promise<string> {
  *
  *  Best-effort by design: a browser verification must not fail because its evidence
  *  gallery could not be prepared. */
-export async function ensureScreenshotsDir(workspacePath: string): Promise<void> {
+export async function ensureScreenshotsDir(repoRoot: string, workspacePath: string): Promise<void> {
   const dir = path.join(workspacePath, SCREENSHOTS_DIR_REL);
   try {
-    await mkdir(dir, { recursive: true });
-    await ensureSandboxWritableTree(dir);
+    // The anchor is the REPOSITORY ROOT, never the worktree: a worktree sits under `.haive/`,
+    // which the sandbox mounts read-write, so it is not a directory to resolve a path against.
+    const workspaceRel = relUnder(repoRoot, workspacePath);
+    const rel =
+      workspaceRel === '' ? SCREENSHOTS_DIR_REL : `${workspaceRel}/${SCREENSHOTS_DIR_REL}`;
+    await ensureDirNoFollow(repoRoot, rel);
+    await ensureSandboxWritableTree(repoRoot, rel);
   } catch (err) {
     log.warn({ err, dir }, 'could not prepare the screenshot directory for the sandbox');
   }

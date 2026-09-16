@@ -8,6 +8,7 @@ import type { FormField, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
+import { relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
 import { ensureGitExcludeEntry, initGitWorkspace } from '../../../repo/git-init.js';
 import { findBranchClaimant } from '../../../repo/worktree-claims.js';
@@ -383,7 +384,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     // `git worktree add` runs as the worker (root in compose), while cli-exec
     // runs as uid 1000. Repair both new and reused worktrees and fail before a
     // model call if the ownership cannot be made writable.
-    await ensureSandboxWritableTree(worktreePath);
+    await ensureSandboxWritableTree(ctx.repoPath, relUnder(ctx.repoPath, worktreePath));
 
     // `git worktree add` checks out TRACKED files only, so the repo's untracked runtime
     // files (a test suite's .env, settings.local.php …) exist at the root and nowhere here.

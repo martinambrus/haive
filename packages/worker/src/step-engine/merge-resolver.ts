@@ -18,6 +18,7 @@ import { parseJsonLoose } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { overrideOr } from './dispatch-timeout.js';
 import { worktreeDirName, worktreeDirPaths } from '../repo/worktree-paths.js';
+import { relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { MergeResolveSpec, StepContext, StepDefinition } from './step-definition.js';
@@ -211,7 +212,7 @@ async function ensureBaseWorktree(
       throw new Error(`git worktree add (base) failed: ${res.stderr || res.stdout}`);
     }
   }
-  await ensureSandboxWritableTree(worktreePath);
+  await ensureSandboxWritableTree(ctx.repoPath, relUnder(ctx.repoPath, worktreePath));
 }
 
 async function removeBaseWorktree(repoPath: string, worktreePath: string): Promise<void> {

@@ -1,11 +1,11 @@
 import path from 'node:path';
-import { execFile } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
+import { applyTreeNoFollow, relUnder } from '@haive/shared/fs-safe';
+import { SANDBOX_GID, SANDBOX_UID } from '../../../sandbox/sandbox-identity.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
@@ -30,11 +30,8 @@ import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
 
 const REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
 
-const execFileAsync = promisify(execFile);
-
 /** The repo volume is chowned to uid 1000 (the `node`/`ddev` sandbox user) so
  *  DDEV and sandboxed CLIs can write. See resolvers.ts chownRepoVolume. */
-const SANDBOX_OWNER = '1000:1000';
 
 interface DdevEnvDetect {
   ddevConfigured: boolean;
@@ -308,7 +305,9 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     // the worktree. chown the worktree (incl. the .ddev we just wrote) so DDEV — and
     // its web/db containers — can write throughout the project.
     if (d.workspace) {
-      await execFileAsync('chown', ['-R', SANDBOX_OWNER, d.workspace]).catch((err) => {
+      await applyTreeNoFollow(ctx.repoPath, relUnder(ctx.repoPath, d.workspace), {
+        owner: { uid: SANDBOX_UID, gid: SANDBOX_GID },
+      }).catch((err: unknown) => {
         ctx.logger.warn(
           { err: String(err), workspace: d.workspace },
           'ddev worktree chown to 1000:1000 failed — ddev start may hit permission denied',

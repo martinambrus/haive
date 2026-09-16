@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +46,8 @@ import {
   parseUnresolvableAptPins,
   unpinAptPackages,
 } from './ddev-build-guard.js';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { splitRepoSubpath } from '../repo/worktree-paths.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
@@ -1754,14 +1756,17 @@ async function ensureDdevStartedInner(
   // unreadable between steps. Repair it before even probing `ddev describe`:
   // otherwise warm-start and cold-boot both fail their initial `cd`, and the
   // later CLI repair comes too late to bring the browser runtime back.
-  const workspacePath = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
-  const accessBefore = await stat(workspacePath);
-  await ensureSandboxWritableTree(workspacePath);
-  const accessAfter = await stat(workspacePath);
+  // The repository root is the anchor; a worktree tail in the subpath is walked, never joined.
+  const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
+  const accessBefore = (await lstatNoFollow(anchor, rel, { strict: true }))?.stats;
+  await ensureSandboxWritableTree(anchor, rel);
+  const accessAfter = (await lstatNoFollow(anchor, rel, { strict: true }))?.stats;
   if (
-    accessBefore.uid !== accessAfter.uid ||
-    accessBefore.gid !== accessAfter.gid ||
-    (accessBefore.mode & 0o777) !== (accessAfter.mode & 0o777)
+    accessBefore &&
+    accessAfter &&
+    (accessBefore.uid !== accessAfter.uid ||
+      accessBefore.gid !== accessAfter.gid ||
+      (accessBefore.mode & 0o777) !== (accessAfter.mode & 0o777))
   ) {
     log.warn(
       {

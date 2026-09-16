@@ -1,9 +1,5 @@
-import { execFile } from 'node:child_process';
-import { stat } from 'node:fs/promises';
-import { promisify } from 'node:util';
+import { applyTreeNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
 import { SANDBOX_GID, SANDBOX_UID } from '../sandbox/sandbox-identity.js';
-
-const exec = promisify(execFile);
 
 export type SandboxWritableTreeRepair =
   'none' | 'chown' | 'chmod-owner' | 'chmod-other' | 'unavailable';
@@ -46,8 +42,24 @@ export function sandboxWritableTreeRepair(
   return 'unavailable';
 }
 
+/** GNU's `u+rwX` and `o+rwX` as a per-entry function. Uppercase X is the part that matters: it
+ *  adds traversal to a directory and to an already-executable file, and leaves a plain source file
+ *  non-executable — a blanket `+x` would mark every file in the checkout executable. */
+const addRwX =
+  (who: 'owner' | 'other') =>
+  (mode: number, isDir: boolean): number => {
+    const rw = who === 'owner' ? 0o600 : 0o006;
+    const x = who === 'owner' ? 0o100 : 0o001;
+    return mode | rw | (isDir || (mode & 0o111) !== 0 ? x : 0);
+  };
+
 /**
  * Make a repository/worktree tree writable by the cli-exec sandbox user.
+ *
+ * Takes `(anchor, rel)`: the anchor is the repository root, whose parents are the worker's own,
+ * and `rel` is walked one held descriptor at a time, so a link committed anywhere under it is
+ * refused rather than repaired through. That replaces a recursive `chown`/`chmod` shell-out whose
+ * behaviour differed between the BusyBox in the shipped image and the GNU coreutils on CI.
  *
  * The worker creates linked worktrees as root but runs agents as uid 1000. Do
  * not cache this result in the repository: an in-tree marker can be committed,
@@ -57,51 +69,52 @@ export function sandboxWritableTreeRepair(
  * This is intentionally fail-closed. Dispatching an agent into an unwritable
  * tree wastes a model call and can later be mistaken for implementation debt.
  */
-export async function ensureSandboxWritableTree(treePath: string): Promise<void> {
-  const before = await stat(treePath);
+export async function ensureSandboxWritableTree(anchor: string, rel: string): Promise<void> {
+  const shown = rel === '' ? anchor : `${anchor}/${rel}`;
+  const before = await lstatNoFollow(anchor, rel, { strict: true });
+  if (before === null) {
+    throw new Error(`workspace ${shown} does not exist, so its sandbox access cannot be repaired`);
+  }
   const workerUid = process.getuid?.();
-  const repair = sandboxWritableTreeRepair(before, workerUid);
+  const repair = sandboxWritableTreeRepair(before.stats, workerUid);
   if (repair === 'none') return;
   if (repair === 'unavailable') {
     throw new Error(
-      `workspace ${treePath} is uid ${before.uid}:${before.gid} mode ${(before.mode & 0o777).toString(8)}, ` +
+      `workspace ${shown} is uid ${before.stats.uid}:${before.stats.gid} mode ${(before.stats.mode & 0o777).toString(8)}, ` +
         `but the sandbox runs as ${SANDBOX_UID}:${SANDBOX_GID} and worker uid ${workerUid ?? 'unknown'} cannot repair its access`,
     );
   }
 
   try {
     if (repair === 'chown') {
-      await exec('chown', ['-R', `${SANDBOX_UID}:${SANDBOX_GID}`, treePath]);
-      // Chown deliberately leaves mode bits untouched. That is not sufficient
-      // when an app running inside DDEV chmods the mounted project root (a
-      // legacy installer has produced mode 0200 in practice): ownership becomes
-      // correct while the sandbox and DDEV still cannot read or traverse the
-      // checkout. Restore owner rwX recursively as part of the same repair.
-      // Uppercase X adds traversal to directories and preserves the executable
-      // status of ordinary source files.
-      await exec('chmod', ['-R', 'u+rwX', treePath]);
+      // Owner and mode in ONE walk, owner first per entry. Ownership alone is not sufficient:
+      // an app running inside DDEV can chmod the mounted project root (a legacy installer has
+      // produced mode 0200 in practice), which leaves the owner correct while neither the sandbox
+      // nor DDEV can read or traverse the checkout.
+      await applyTreeNoFollow(anchor, rel, {
+        owner: { uid: SANDBOX_UID, gid: SANDBOX_GID },
+        mode: addRwX('owner'),
+      });
     } else if (repair === 'chmod-owner') {
-      await exec('chmod', ['-R', 'u+rwX', treePath]);
+      await applyTreeNoFollow(anchor, rel, { mode: addRwX('owner') });
     } else {
-      // The non-root worker owns this checkout but cannot chown it to uid 1000.
-      // Grant the `other` class (which includes the otherwise-unmatched sandbox
-      // identity) recursive rwX access. Uppercase X adds directory traversal
-      // without making ordinary source files executable.
-      await exec('chmod', ['-R', 'o+rwX', treePath]);
+      // The non-root worker owns this checkout but cannot chown it to uid 1000. Grant the `other`
+      // class, which is the class the kernel matches for the otherwise-unrelated sandbox identity.
+      await applyTreeNoFollow(anchor, rel, { mode: addRwX('other') });
     }
   } catch (err) {
     const operation = repair === 'chown' ? 'chown/chmod' : 'chmod';
     throw new Error(
-      `failed to ${operation} workspace ${treePath} for sandbox ${SANDBOX_UID}:${SANDBOX_GID}: ${err instanceof Error ? err.message : String(err)}`,
+      `failed to ${operation} workspace ${shown} for sandbox ${SANDBOX_UID}:${SANDBOX_GID}: ${err instanceof Error ? err.message : String(err)}`,
       { cause: err },
     );
   }
 
-  const after = await stat(treePath);
-  if (!isSandboxWritableTreeRoot(after)) {
-    throw new Error(
-      `workspace ${repair} repair did not make ${treePath} sandbox-writable ` +
-        `(uid ${after.uid}:${after.gid}, mode ${(after.mode & 0o777).toString(8)})`,
-    );
+  const after = await lstatNoFollow(anchor, rel, { strict: true });
+  if (after === null || !isSandboxWritableTreeRoot(after.stats)) {
+    const detail = after
+      ? `(uid ${after.stats.uid}:${after.stats.gid}, mode ${(after.stats.mode & 0o777).toString(8)})`
+      : '(it no longer exists)';
+    throw new Error(`workspace ${repair} repair did not make ${shown} sandbox-writable ${detail}`);
   }
 }
