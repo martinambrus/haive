@@ -14,9 +14,9 @@
  *    statement, `UPDATE cli_invocations SET tool_usage = NULL WHERE tool_usage->>'source' = 'backfill'`.
  *  - Idempotent: a written row no longer matches the selection, so a second run finds nothing.
  *
- * Run (inside the worker container):
- *   docker exec haive-worker sh -lc 'cd /app/packages/worker && tsx scripts/backfill-tool-usage.ts'         # dry run
- *   docker exec haive-worker sh -lc 'cd /app/packages/worker && APPLY=1 tsx scripts/backfill-tool-usage.ts' # apply
+ * Run (inside the worker container; `tsx` is not on the shell's PATH there, `pnpm exec` finds it):
+ *   docker exec haive-worker sh -lc 'cd /app/packages/worker && pnpm exec tsx scripts/backfill-tool-usage.ts'         # dry run
+ *   docker exec haive-worker sh -lc 'cd /app/packages/worker && APPLY=1 pnpm exec tsx scripts/backfill-tool-usage.ts' # apply
  */
 import { createDatabase } from '@haive/database';
 import type { InvocationToolUsage } from '@haive/shared';

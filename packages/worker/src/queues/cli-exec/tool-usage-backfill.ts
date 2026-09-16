@@ -39,6 +39,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** `2026-09-14 07:01:44.848` — the zone-less form a `timestamp without time zone` column
+ *  compares against directly. Exported for the test. */
+export function timestampLiteral(date: Date): string {
+  return date.toISOString().replace('T', ' ').replace('Z', '');
+}
+
 /** Feed one parsed transcript line to the tally, dispatching on the line's SHAPE rather than
  *  on the provider: the three vocabularies are disjoint (claude-family `type` in
  *  `system|assistant|user|result|…`, codex exec `type` in `thread.*|turn.*|item.*|error`,
@@ -148,7 +154,13 @@ export async function backfillToolUsage(
   };
   const inv = schema.cliInvocations;
   const base = and(isNull(inv.toolUsage), isNotNull(inv.endedAt));
-  let cursor: { endedAt: Date; id: string } | null = null;
+  // The cursor's timestamp travels as a LITERAL with an explicit cast, never as a JS Date: inside
+  // a raw `sql` tuple drizzle hands the value to postgres.js unmapped, and postgres.js has no
+  // serializer for `timestamp without time zone`, so a Date bound there fails the Bind step
+  // ("must be of type string … Received an instance of Date") — MEASURED on the dev install at
+  // the second batch of the first boot. The column holds UTC wall clock, which is what the
+  // zone-less ISO form is.
+  let cursor: { endedAt: string; id: string } | null = null;
 
   for (;;) {
     if (Date.now() - startedAt > opts.budgetMs) {
@@ -166,7 +178,10 @@ export async function backfillToolUsage(
       .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, inv.cliProviderId))
       .where(
         cursor
-          ? and(base, sql`(${inv.endedAt}, ${inv.id}) < (${cursor.endedAt}, ${cursor.id})`)
+          ? and(
+              base,
+              sql`(${inv.endedAt}, ${inv.id}) < (${cursor.endedAt}::timestamp, ${cursor.id}::uuid)`,
+            )
           : base,
       )
       .orderBy(desc(inv.endedAt), desc(inv.id))
@@ -174,7 +189,7 @@ export async function backfillToolUsage(
     if (rows.length === 0) break;
 
     for (const row of rows) {
-      cursor = { endedAt: row.endedAt as Date, id: row.id };
+      cursor = { endedAt: timestampLiteral(row.endedAt as Date), id: row.id };
       let usage: InvocationToolUsage;
       try {
         usage = toolUsageFromStreamLog(row.providerName ?? null, row.streamLog, workdir);
