@@ -1143,9 +1143,27 @@ valid on a `none` row — and `assignedRecordedSince` says from when they exist 
 says "not yet recorded" instead of rendering an empty list as "unused". The task endpoint groups
 by the same `coalesce(task_step_id, summary_for_step_id)` fold as the step badges and sums its
 per-step rows with `sumToolUsageSteps` (`@haive/shared/stats`), so the browser does no
-arithmetic. The unused report needs the installed inventory read from disk and waits for the
-link-refusing readers of `@haive/shared/fs-safe`; until then a repository-scoped request answers
-`unused: { available: false, reason: 'scan-unavailable' }`.
+arithmetic.
+
+**The unused report compares what is installed with what the runs used, and it reads the
+installed half from disk by NAME only.** `api/src/lib/tool-inventory.ts` walks the catalog's
+`projectAgentsDir` / `projectSkillsDir` union through `@haive/shared/fs-safe` from the repository
+root (`storagePath ?? localPath`, never a task worktree): a symlink anywhere is counted under
+`skippedLinks` and never followed, no file content is opened, and an anchor that is not a
+directory answers `unreadable` — never "nothing installed", which is what a lenient `readdir` on
+a missing path would have said. `classifyInstalledItem` (`@haive/shared/stats`) decides from
+four facts and nothing else: on disk plus a live `onboarding_artifacts` row on one of its paths
+or an `agent.<id>` row in `template_manifest_cache` is `haive` (an upgrade writes it back, so
+never a purge candidate); on disk and nobody's is `unmanaged`, the candidates; named in a run's
+`loaded` inventory but not on disk and not a template is `cli-builtin` — claude's `Explore` and
+`general-purpose`, or a file removed since the run — where the lever is a flag, not a deletion.
+"Used" is judged over the WINDOW and `lastSeenAt` over the caller's whole history
+(`toolUsageLastSeen`), because "not seen in this window" and "never seen since install" are
+different claims and only the second supports deleting a file; a window with no observable run
+reports NO rows, since nothing can then be called unused. MCP rows are offered-minus-called from
+the runs' own `loaded.mcpServers`, never from `.claude/mcp_settings.json`, which is user-owned
+and not read here. The three failures — `no-repository`, `no-path`, `unreadable` — are answers,
+never a 404, so the rest of the tab still renders.
 
 ## Sandbox
 
