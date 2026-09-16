@@ -1232,7 +1232,7 @@ function StatsPageInner() {
                       rows={toolUsage.personas.assigned.rows.map((r) => ({
                         key: r.id,
                         value: r.runs,
-                        hint: `· ${formatCount(r.tasks)} tasks · ${formatSampledRatio(r.share)} of observable runs`,
+                        hint: `· ${formatCount(r.tasks)} tasks · ${formatSampledRatio(r.share, 1)} of observable runs`,
                       }))}
                       formatValue={formatCount}
                       color={CHART_COLORS.agent}
@@ -1250,7 +1250,7 @@ function StatsPageInner() {
                   rows={toolUsage.personas.read.rows.map((r) => ({
                     key: r.id,
                     value: r.reads,
-                    hint: `· ${formatCount(r.runs)} runs · ${formatSampledRatio(r.share)} of observable runs`,
+                    hint: `· ${formatCount(r.runs)} runs · ${formatSampledRatio(r.share, 1)} of observable runs`,
                   }))}
                   formatValue={formatCount}
                   color={CHART_COLORS.agent}
@@ -1281,7 +1281,7 @@ function StatsPageInner() {
                   rows={toolUsage.skills.read.rows.map((r) => ({
                     key: r.id,
                     value: r.reads,
-                    hint: `· ${formatCount(r.runs)} runs · ${formatSampledRatio(r.share)} of observable runs`,
+                    hint: `· ${formatCount(r.runs)} runs · ${formatSampledRatio(r.share, 1)} of observable runs`,
                   }))}
                   formatValue={formatCount}
                   color={CHART_COLORS.agent}
@@ -1364,7 +1364,7 @@ function StatsPageInner() {
                   rows={toolUsage.mcp.tools.rows.map((r) => ({
                     key: `${r.server}/${r.tool}`,
                     value: r.calls,
-                    hint: `· ${formatCount(r.runs)} runs · ${formatSampledRatio(r.share)} of observable runs`,
+                    hint: `· ${formatCount(r.runs)} runs · ${formatSampledRatio(r.share, 1)} of observable runs`,
                   }))}
                   formatValue={formatCount}
                   color={CHART_COLORS.agent}
