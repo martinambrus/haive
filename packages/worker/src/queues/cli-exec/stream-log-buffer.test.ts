@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createStreamLogBuffer } from './stream-log-buffer.js';
+import { createStreamLogBuffer, isElidedStreamLog } from './stream-log-buffer.js';
 
 describe('createStreamLogBuffer', () => {
   it('returns the transcript verbatim while it stays within the bounds', () => {
@@ -55,5 +55,19 @@ describe('createStreamLogBuffer', () => {
     expect(out.endsWith('tttt')).toBe(true);
     // five 4-char middle chunks pushed, the last of which is displaced by the tail
     expect(out).toContain('20 characters elided');
+  });
+});
+
+describe('isElidedStreamLog', () => {
+  it('recognises the marker this buffer writes, and nothing else', () => {
+    const buf = createStreamLogBuffer({ headChars: 4, tailChars: 4 });
+    buf.push('h'.repeat(4));
+    buf.push('m'.repeat(8));
+    buf.push('t'.repeat(4));
+    expect(isElidedStreamLog(buf.toString())).toBe(true);
+
+    const whole = createStreamLogBuffer({ headChars: 100, tailChars: 100 });
+    whole.push('a transcript that fits, mentioning "characters elided" in its own prose\n');
+    expect(isElidedStreamLog(whole.toString())).toBe(false);
   });
 });

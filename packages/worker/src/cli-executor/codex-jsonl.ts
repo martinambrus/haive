@@ -1,5 +1,6 @@
-import type { CliTokenUsage } from '@haive/shared';
+import type { CliTokenUsage, InvocationToolUsage } from '@haive/shared';
 import { sumTokenUsage, tokenUsageFromCodexUsage } from './usage-extract.js';
+import { createToolUsageTally, type ToolUsageTally } from './tool-usage.js';
 
 /* ------------------------------------------------------------------ */
 /* JSONL parser for `codex exec --json`                                */
@@ -24,9 +25,18 @@ export interface CodexJsonlCollector {
    *  premature-end message. Null when a result exists. */
   getNoResultReason: () => string | null;
   getMalformedLineCount: () => number;
+  /** What the run USED, tallied from every `item.completed` item (commands, MCP calls,
+   *  collab activity, file changes). Never null: a stream with no codex event at all
+   *  finalizes as `coverage: 'none'`. */
+  getToolUsage: () => InvocationToolUsage;
 }
 
-export function createCodexJsonlCollector(onText?: (text: string) => void): CodexJsonlCollector {
+export function createCodexJsonlCollector(
+  onText?: (text: string) => void,
+  /** The tool-usage tally exec-core owns for this invocation. Defaults to a private one with
+   *  no workdir (only relative paths classify) for callers that never persist it. */
+  toolUsage: ToolUsageTally = createToolUsageTally({ workdir: null }),
+): CodexJsonlCollector {
   let buffer = '';
   let eventCount = 0;
   let malformedLineCount = 0;
@@ -50,6 +60,9 @@ export function createCodexJsonlCollector(onText?: (text: string) => void): Code
     const type = event.type;
     if (type === 'item.completed') {
       const item = event.item as Record<string, unknown> | undefined;
+      // Completed items only: every item also arrives as `item.started` first, and counting
+      // both would double every call.
+      if (item && typeof item === 'object') toolUsage.codexExecItem(item);
       if (item?.type === 'agent_message' && typeof item.text === 'string') {
         lastAgentMessage = item.text;
         onText?.(item.text);
@@ -108,6 +121,10 @@ export function createCodexJsonlCollector(onText?: (text: string) => void): Code
     },
     getMalformedLineCount(): number {
       return malformedLineCount;
+    },
+    getToolUsage(): InvocationToolUsage {
+      flush();
+      return toolUsage.finalize('stream');
     },
   };
 }

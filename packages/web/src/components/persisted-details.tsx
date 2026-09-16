@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 
 /** A `<details>` disclosure whose open/closed state is persisted per `persistKey`
@@ -15,6 +15,7 @@ import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 export function PersistedDetails({
   persistKey,
   defaultOpen = false,
+  lazy = false,
   className,
   summaryClassName,
   summary,
@@ -22,16 +23,22 @@ export function PersistedDetails({
 }: {
   persistKey: string | null;
   defaultOpen?: boolean;
+  /** Mount `children` only once the disclosure has been opened, and keep them mounted after:
+   *  a body that fetches on mount then costs nothing while closed and does not refetch on
+   *  every toggle. */
+  lazy?: boolean;
   className?: string;
   summaryClassName?: string;
   summary: ReactNode;
   children: ReactNode;
 }) {
   const [open, setOpen] = usePersistedToggle(persistKey, defaultOpen);
+  const [everOpened, setEverOpened] = useState(open);
+  if (open && !everOpened) setEverOpened(true);
   return (
     <details open={open} onToggle={(e) => setOpen(e.currentTarget.open)} className={className}>
       <summary className={summaryClassName}>{summary}</summary>
-      {children}
+      {lazy && !everOpened ? null : children}
     </details>
   );
 }

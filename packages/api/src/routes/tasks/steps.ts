@@ -36,7 +36,13 @@ import {
   type CliProviderName,
   type TaskJobPayload,
 } from '@haive/shared';
+import {
+  emptyToolUsageStepRow,
+  sumToolUsageSteps,
+  type ToolUsageStepRow,
+} from '@haive/shared/stats';
 import { getDb } from '../../db.js';
+import { rollupToolUsage } from '../../lib/tool-usage-rollup.js';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
@@ -306,6 +312,115 @@ stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
     .orderBy(asc(schema.ragQueryLog.createdAt));
 
   return c.json({ queries });
+});
+
+// What the task's runs USED, per step, from cli_invocations.tool_usage: personas, skills, MCP
+// tools, sub-agents and native tool calls. Drives the task page's "Agents, skills and tools
+// used" panel. Attributed by the same coalesce(task_step_id, summary_for_step_id) fold as the
+// step badges (enrichStepsWithCliStats), so the panel reconciles with them; a step with no
+// attributed invocation carries `usage: null`, which the client renders as a dash and never as
+// zeros. Totals are summed here with the shared pure merge so the browser does no arithmetic.
+stepRoutes.get('/:id/tool-usage', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+
+  const inv = schema.cliInvocations;
+  const [rollup, stepRows] = await Promise.all([
+    rollupToolUsage(db, {
+      where: and(
+        eq(inv.taskId, id),
+        isNull(inv.supersededAt),
+        or(isNotNull(inv.taskStepId), isNotNull(inv.summaryForStepId)),
+      )!,
+      perStep: true,
+    }),
+    db
+      .select({
+        id: schema.taskSteps.id,
+        stepId: schema.taskSteps.stepId,
+        round: schema.taskSteps.round,
+        title: schema.taskSteps.title,
+      })
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.taskId, id))
+      // The run-list order GET /tasks/:id uses, for the same reasons it gives there.
+      .orderBy(
+        asc(schema.taskSteps.round),
+        asc(schema.taskSteps.runSeq),
+        asc(schema.taskSteps.createdAt),
+        asc(schema.taskSteps.stepIndex),
+      ),
+  ]);
+
+  const byStep = new Map<string, ToolUsageStepRow>();
+  const rowFor = (key: string): ToolUsageStepRow => {
+    const known = byStep.get(key);
+    if (known) return known;
+    const created = emptyToolUsageStepRow();
+    byStep.set(key, created);
+    return created;
+  };
+  for (const r of rollup.coverage) {
+    if (!r.stepKey) continue;
+    const row = rowFor(r.stepKey);
+    row.runs += r.total;
+    row.observable += r.observable;
+    row.partial += r.partial;
+    row.unobservable += r.unobservable;
+    row.unrecorded += r.total - r.recorded;
+  }
+  for (const r of rollup.personasAssigned) {
+    if (r.stepKey) rowFor(r.stepKey).personasAssigned.push({ id: r.id, n: r.runs });
+  }
+  for (const r of rollup.personasRead) {
+    if (r.stepKey) rowFor(r.stepKey).personasRead.push({ id: r.id, n: r.n });
+  }
+  for (const r of rollup.skillsInvoked) {
+    if (r.stepKey) rowFor(r.stepKey).skillsInvoked.push({ id: r.id, n: r.n });
+  }
+  for (const r of rollup.skillsRead) {
+    if (r.stepKey) rowFor(r.stepKey).skillsRead.push({ id: r.id, n: r.n });
+  }
+  for (const r of rollup.mcpTools) {
+    if (r.stepKey) {
+      rowFor(r.stepKey).mcp.push({ server: r.server, tool: r.tool, calls: r.calls });
+    }
+  }
+  for (const r of rollup.subagents) {
+    if (r.stepKey) rowFor(r.stepKey).subagents.push({ id: r.id, n: r.n });
+  }
+  for (const r of rollup.nativeTools) {
+    if (r.stepKey) rowFor(r.stepKey).toolCalls += r.n;
+  }
+  // The merge of one row is its own normalisation: lists ordered by count, then id.
+  for (const [key, row] of byStep) byStep.set(key, sumToolUsageSteps([row]));
+
+  const totals = sumToolUsageSteps([...byStep.values()]);
+  return c.json({
+    taskId: id,
+    steps: stepRows.map((s) => ({
+      stepRowId: s.id,
+      stepId: s.stepId,
+      round: s.round,
+      title: s.title,
+      usage: byStep.get(s.id) ?? null,
+    })),
+    totals,
+    coverage: {
+      total: totals.runs,
+      observable: totals.observable,
+      partial: totals.partial,
+      unobservable: totals.unobservable,
+      unrecorded: totals.unrecorded,
+    },
+  });
 });
 
 // Increment a step's user-active time. The browser measures the focused-and-

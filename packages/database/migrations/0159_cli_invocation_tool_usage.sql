@@ -1,0 +1,46 @@
+-- cli_invocations.tool_usage — what one invocation USED: native tool calls, MCP tool calls,
+-- native sub-agent spawns, `Skill` calls, and the agent-definition / skill files the agent
+-- opened on its own.
+--
+-- Every claude-family, grok and codex transcript Haive stores in `stream_log` already carries
+-- structured tool events, and nothing has ever read them for this: `stream.ts` turned a
+-- `tool_use` block into a throwaway progress string, and only when a status callback existed
+-- (sub-agent and step-summary runs never inspected one), while both codex parsers kept only
+-- the agent's final message. So which persona a step used, which skills were opened and which
+-- MCP tools were called were sitting in 782 MB of text no query could answer.
+--
+-- MEASURED on the dev install before this shipped (3,509 rows, 3,367 with a transcript):
+-- claude-family runs made 17,418 Bash calls, 1,155 Read calls, 168 `mcp__haive-rag__rag_search`
+-- calls and 2 native sub-agent spawns; the `Skill` tool was offered in 2,465 of 2,477 runs and
+-- called 0 times — agents open skills with `cat` instead (397 commands across 121 runs); codex
+-- made 944 `mcp_tool_call`s and 989 `collab_tool_call`s, every one of them `wait`; amp's
+-- assistant events carry text blocks only, across all 39 runs. 12 rows sit at the 4 MiB
+-- head+tail elision cap.
+--
+-- An OBJECT rather than a bare array, matching every other artifact column on this table
+-- (token_usage, cost, model_identity, effort, compaction, clean_transcript) so the `->>` access
+-- `/stats` and `/reliability` already use keeps working. Every top-level key is present even when
+-- empty and every array is sorted, so a backfill run over one row twice writes identical JSON.
+--
+-- NULL means "not yet examined": a running invocation, a failure-path row until the next boot's
+-- backfill reaches it, a legacy row the backfill has not reached. A written `coverage: 'none'`
+-- means "examined, and tool calls are not observable on this path" — gemini (no stream parser),
+-- antigravity (unmeasured), plain output, the sequential sub-agent script (N processes under one
+-- row, no stream), amp, or a row that stored no transcript. That is the one deliberate departure
+-- from compaction's "never write an empty object": a written `none` is a fact about the path, and
+-- it is what lets the backfill's `tool_usage IS NULL` predicate converge instead of re-examining
+-- the same unobservable rows on every boot.
+--
+-- `agents.assigned` — the persona ids Haive assigned at dispatch — is present from day one and
+-- always empty until the dispatch-side stamping ships behind the per-call agent isolation
+-- refactor, so that follow-up needs no second migration. Not swept by the stream-log retention
+-- sweep: the record is bounded by the tool vocabulary, not by the transcript's length. Rows whose
+-- transcript a retention window already dropped can only ever backfill as `none`, so the backfill
+-- should run before a window is enabled.
+--
+-- Additive and idempotent, no FK, no index, nothing joins on it. Rollback: revert the code, which
+-- leaves the column unwritten and unread, then optionally
+--   ALTER TABLE "cli_invocations" DROP COLUMN IF EXISTS "tool_usage";
+-- That statement stands alone.
+
+ALTER TABLE "cli_invocations" ADD COLUMN IF NOT EXISTS "tool_usage" jsonb;

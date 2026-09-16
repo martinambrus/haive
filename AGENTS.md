@@ -376,6 +376,8 @@ means "not recorded" — every pre-existing row, and any run with no model prose
 
 Two traps in that data. `result.modelUsage` keys are recorded as `billed` and are NOT an identity source: `grok` serves `grok-4.6` while billing `grok-4.6-build`, and `claude-code` bills a `claude-haiku-*` call for its own session titling. And an `assistant` event with `model:"<synthetic>"` is a message the BINARY authored (an API error), not a model reply — filtered on the angle-bracket convention rather than the literal word, so a future sentinel is excluded too. `requested`/`served` are stored verbatim; only `match` is lenient, and only for one case: an endpoint that DROPS a trailing variant tag while naming the same model (`glm-5.3[1m]` to `glm-5.3`) is `exact`. That keys on the tag's PRESENCE differing, not on tag-stripped equality, so a version swap (`glm-5.2[1m]` to `glm-5.3`) and a different variant (`[1m]` to `[200k]`) both stay `differs`, and ollama's colon marker (`glm-5.2:cloud`) is untouched. A mismatch warns and never blocks — claude-code legitimately resolves an alias to a dated snapshot — unless `CONFIG_KEYS.MODEL_IDENTITY_STRICT` (default false, admin toggle) is on. Capture rides the same parse as token usage, so it costs no extra call, prompt or tokens; the canary (`00-model-health`) then copies the task-default provider's identity onto `tasks.model_identity`, while per-invocation truth stays on `cli_invocations.model_identity` because per-step CLI preferences let one task run several models. Re-measure with `packages/worker/test/model-report-discover.ts` before "correcting" any of this — it runs each adapter's real invocation and feeds the live output through the shipped parser.
 
+`tool_usage` (`cli-executor/tool-usage.ts`) records what a run USED — native tool calls, MCP tool calls (`mcp__<server>__<tool>`, grok's `use_tool`, codex's `mcp_tool_call`), native sub-agent activity, `Skill` calls, and the agent-definition / skill FILES the agent opened — tallied by the same pass as `token_usage` and `model_identity`, so it costs nothing extra, and persisted to `cli_invocations.tool_usage` (migration 0159). Three facts to keep. NULL means "not yet examined"; a written `coverage: 'none'` means "examined, not observable on this path" — amp (MEASURED: its stream-json assistant events carry text blocks only, across all 39 stored runs), gemini (no stream parser), antigravity (unmeasured), plain output and the sequential sub-agent script — the one deliberate departure from `compaction`'s "never write an empty object", because it is what lets the backfill's `IS NULL` predicate converge. Codex items arrive TWICE, `item.started` then `item.completed` (app-server: `item/started`, `item/completed`), so only the completed one counts, and the app-server's camelCase item types are folded onto the exec spellings so one record covers both transports. And a read is classified against the provider catalog's `projectAgentsDir`/`projectSkillsDir` union, matched on whole segments from the sandbox MOUNT ROOT (`/haive/workdir`, never the resolved cwd — a worktree run's cwd sits under `.haive/worktrees/`), with `README.md`, the `-legacy` quarantine and a CLI's own skills outside the tree (`/home/node/.codex/skills`, grok's `bundled/skills`) never counting. Every CLI naming quirk sits in ONE volatile constant in that module; re-measure against stored rows before "correcting" it.
+
 The dispatcher (`resolveDispatch`) filters to enabled providers, orders the resolved preferred provider first, and picks the first whose adapter is registered and has `supportsCliAuth` — plus `supportsSubagents` when the step declares the `subagents` capability. If none matches, the step is skipped. Every plan it emits is a CLI invocation; there is no API-mode branch. Auth mode selects which credentials the CLI is given, not whether the dispatcher bypasses the CLI.
 
 The sub-agent emulator splits a single sub-agent specification into either a native `Task()` call (Claude Code) or a sequential prompt script (everything else). A sequential script runs inside a single `cli-exec-queue` job — the runner is an in-memory for-loop over the sub-steps, with no per-sub-step DB writes. A crash mid-script therefore fails the whole invocation; restart re-runs from sub-step 0. (Mid-script resume would require persisting each sub-step's parsed output to `cli_invocations` before moving on — not implemented.)
@@ -1122,6 +1124,28 @@ across 1,467 distinct `agent_id`s — 321 are generated `plan-expand-<nodeId>-p<
 are near-unique too — so a "most used agents" list is ~1,400 entries tied at n=1-2. Grouping on
 `agent_title` is worse (1,456 distinct), because those are per-node prose rather than persona
 names. The only signal in that table is failure rate, which belongs on the reliability tab.
+
+### Agents, skills and MCP tools
+
+`GET /stats/tool-usage` and `GET /tasks/:id/tool-usage` read `cli_invocations.tool_usage` through
+ONE SQL rollup (`api/src/lib/tool-usage-rollup.ts`). The caller composes the predicate and the
+rollup never decides which rows count; its LATERAL `jsonb_array_elements` / `jsonb_each_text`
+reads are guarded INSIDE the function argument because both throw on a JSON null, which `loaded`
+IS for every codex, amp and gemini row. `invocationAttributionFilter` APPLIES, as on `/steps`: a
+reconciling rollup whose `total` must equal the runs the other tabs count.
+
+**Denominators are stated, never implied.** `total` is the reconciliation figure; `unrecorded`
+(a NULL column) and `unobservable` (`coverage: 'none'`) enter no "not used" sentence;
+`observable` (full + partial, the partial ones flagged as floors) is the ONLY denominator such a
+sentence may cite, and `share` is `sampledRatio(runs, observable)` so a three-run window renders
+`n=3`. Assigned personas are counted on any RECORDED row — an assignment is a dispatch fact,
+valid on a `none` row — and `assignedRecordedSince` says from when they exist at all, so the UI
+says "not yet recorded" instead of rendering an empty list as "unused". The task endpoint groups
+by the same `coalesce(task_step_id, summary_for_step_id)` fold as the step badges and sums its
+per-step rows with `sumToolUsageSteps` (`@haive/shared/stats`), so the browser does no
+arithmetic. The unused report needs the installed inventory read from disk and waits for the
+link-refusing readers of `@haive/shared/fs-safe`; until then a repository-scoped request answers
+`unused: { available: false, reason: 'scan-unavailable' }`.
 
 ## Sandbox
 

@@ -35,6 +35,8 @@ export interface SeededInvocation {
   /** Written to `cost.costUsd` with `billable: true`, so it lands in REAL spend. */
   costUsd: number;
   totalTokens: number;
+  /** Written verbatim to `tool_usage`; omitted or null leaves the column NULL ("not examined"). */
+  toolUsage?: Record<string, unknown> | null;
 }
 
 export interface SpendFixture {
@@ -83,7 +85,7 @@ export async function seedSpend(
     await sql`
       insert into cli_invocations (
         id, task_id, task_step_id, cli_provider_id, mode, prompt, exit_code,
-        started_at, ended_at, duration_ms, token_usage, cost
+        started_at, ended_at, duration_ms, token_usage, cost, tool_usage
       ) values (
         ${id}, ${target.taskId}, ${target.taskStepId}, ${target.cliProviderId},
         'cli', 'e2e seeded invocation', 0,
@@ -93,7 +95,8 @@ export async function seedSpend(
           outputTokens: Math.round(row.totalTokens * 0.3),
           totalTokens: row.totalTokens,
         })},
-        ${sql.json({ billable: true, costUsd: row.costUsd, source: 'computed' })}
+        ${sql.json({ billable: true, costUsd: row.costUsd, source: 'computed' })},
+        ${row.toolUsage ? sql.json(row.toolUsage as postgres.JSONValue) : null}
       )
     `;
     ids.push(id);

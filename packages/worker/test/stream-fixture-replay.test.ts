@@ -25,6 +25,8 @@ interface ExpectedReading {
   malformedLines: number;
   tokenUsage: unknown;
   streamModelIdentity: unknown;
+  /** Absent on a recording made before the tally existed; compared only when present. */
+  toolUsage?: unknown;
 }
 
 function fixtureNames(): string[] {
@@ -65,6 +67,7 @@ describe('recorded provider streams', () => {
           malformedLines: collector.getMalformedLineCount(),
           tokenUsage: collector.getTokenUsage(),
           streamModelIdentity: collector.getModelIdentity(),
+          ...('toolUsage' in expected ? { toolUsage: collector.getToolUsage() } : {}),
         };
       };
 
@@ -75,6 +78,7 @@ describe('recorded provider streams', () => {
         malformedLines: expected.malformedLines,
         tokenUsage: expected.tokenUsage,
         streamModelIdentity: expected.streamModelIdentity,
+        ...('toolUsage' in expected ? { toolUsage: expected.toolUsage } : {}),
       };
 
       it('parses to what it parsed to when it was recorded', () => {

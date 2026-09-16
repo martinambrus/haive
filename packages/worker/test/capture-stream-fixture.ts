@@ -168,6 +168,8 @@ async function main(): Promise<void> {
     tokenUsage: collector.getTokenUsage(),
     /** Stream-derived, so the replay test can assert it. Everything above is too. */
     streamModelIdentity: collector.getModelIdentity(),
+    /** Also stream-derived: the tally of what the run used and what the init listed. */
+    toolUsage: collector.getToolUsage(),
     /** Informational only — `requested` comes from the invocation spec, not the stream,
      *  so a replay cannot reproduce it and does not assert it. */
     modelIdentity: buildModelIdentity({

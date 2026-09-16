@@ -990,10 +990,7 @@ export const cliInvocations = pgTable(
      *  and any run that produced neither model prose nor a steer, where rawOutput already is
      *  the whole answer.
      *  Keep in sync with `CleanTranscript` in @haive/shared — this package cannot import
-     *  shared (circular; same note as tokenUsage above). Migration 0156.
-     *
-     *  Declared LAST because ALTER TABLE ADD COLUMN appends while drizzle-kit push builds
-     *  the table in declaration order; anywhere else and schema-parity goes red. */
+     *  shared (circular; same note as tokenUsage above). Migration 0156. */
     cleanTranscript: jsonb('clean_transcript').$type<{
       segments: Array<{
         kind: 'model' | 'user';
@@ -1003,6 +1000,43 @@ export const cliInvocations = pgTable(
         consumed?: boolean;
       }>;
       elided?: { segments: number; chars: number; afterIndex: number };
+    }>(),
+    /** What this invocation USED — native tool calls, MCP tool calls, native sub-agent
+     *  spawns, `Skill` calls, and the agent-definition / skill files the agent opened on its
+     *  own — tallied by the same pass that extracts tokenUsage and modelIdentity, and
+     *  backfilled from stored `stream_log` transcripts (source 'backfill').
+     *
+     *  NULL means "not yet examined": a running invocation, a failure-path row until the next
+     *  boot's backfill reaches it, a legacy row the backfill has not reached. A written
+     *  `coverage: 'none'` means "examined, not observable on this path" (gemini, antigravity,
+     *  plain output, the sequential sub-agent script, amp, or a row with no transcript) — the
+     *  one deliberate departure from compaction's "never write an empty object", because it is
+     *  what lets the backfill's `tool_usage IS NULL` predicate converge. An OBJECT with every
+     *  key present and every array sorted, for the same `->>` reason as its siblings.
+     *  `agents.assigned` is always `[]` until the dispatch-side stamping ships; present from
+     *  day one so that follow-up needs no migration.
+     *  Keep in sync with `InvocationToolUsage` in @haive/shared — this package cannot import
+     *  shared (circular; same note as tokenUsage above). Migration 0159.
+     *
+     *  Declared LAST because ALTER TABLE ADD COLUMN appends while drizzle-kit push builds
+     *  the table in declaration order; anywhere else and schema-parity goes red. */
+    toolUsage: jsonb('tool_usage').$type<{
+      source: 'stream' | 'backfill';
+      coverage: 'full' | 'partial' | 'none';
+      tools: Record<string, number>;
+      mcp: Array<{ server: string; tool: string; calls: number }>;
+      subagents: Array<{ type: string | null; calls: number }>;
+      skills: {
+        invoked: Array<{ id: string | null; calls: number }>;
+        read: Array<{ id: string; reads: number }>;
+      };
+      agents: { assigned: string[]; read: Array<{ id: string; reads: number }> };
+      loaded: {
+        agents: string[];
+        skills: string[];
+        mcpServers: string[];
+        toolCount: number;
+      } | null;
     }>(),
   },
   (table) => [

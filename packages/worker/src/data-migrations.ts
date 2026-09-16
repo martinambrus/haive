@@ -5,6 +5,7 @@ import { FACET_VALUE_ALIAS_PAIRS, globalKbEntries, withGlobalKb } from '@haive/s
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { getCliExecQueue } from './queues/cli-exec/_shared.js';
+import { backfillToolUsageAtBoot } from './queues/cli-exec/tool-usage-backfill.js';
 import { globalKbTopicKey } from './step-engine/steps/_global-kb-promote.js';
 import { sweepOrphanScratchWorkspaces } from './repo/scratch-workspace.js';
 import { defaultDockerRunner } from './sandbox/docker-runner.js';
@@ -58,6 +59,11 @@ const DATA_MIGRATIONS: DataMigration[] = [
   // Docker images. Convergent because it only finishes a removal the normal path had already
   // decided on; a live task keeps its workspace.
   { id: 'sweepOrphanScratchWorkspaces', kind: 'convergent', run: sweepOrphanScratchWorkspaces },
+  // Reads stored transcripts into `cli_invocations.tool_usage` where it is still NULL. Budgeted
+  // and keyset-paged, so a large install converges over a few boots rather than holding one
+  // boot for the whole rewrite; every examined row is written (an unobservable one as
+  // `coverage: 'none'`), which is what makes the selection shrink to nothing.
+  { id: 'backfillToolUsage', kind: 'convergent', run: backfillToolUsageAtBoot },
   // The only one. It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
   // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.
   // Nothing can undo it.

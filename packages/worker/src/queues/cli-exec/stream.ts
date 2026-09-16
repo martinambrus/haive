@@ -2,8 +2,9 @@
 /* NDJSON stream-json parser for Claude Code / Zai / Amp               */
 /* ------------------------------------------------------------------ */
 
-import type { CliTokenUsage, CompactionEvent } from '@haive/shared';
+import type { CliTokenUsage, CompactionEvent, InvocationToolUsage } from '@haive/shared';
 import { normalizeClaudeUsage } from '../../cli-executor/usage-extract.js';
+import { createToolUsageTally, type ToolUsageTally } from '../../cli-executor/tool-usage.js';
 import { classifyStreamFailure, OUTPUT_TRUNCATION_HEADLINE } from './failure-class.js';
 import { isPlaceholderModel, type StreamModelReport } from './model-identity.js';
 
@@ -51,6 +52,10 @@ interface StreamJsonCollector {
    *  did not compact AND for every CLI that emits no such event at all — absence is not
    *  evidence either way, which is why nothing branches on this. */
   getCompactions: () => CompactionEvent[];
+  /** What the run USED — every `tool_use` block and the init inventory, tallied whether or
+   *  not a progress callback was watching. Never null: a stream that carried no tool-bearing
+   *  event finalizes as `coverage: 'none'`. */
+  getToolUsage: () => InvocationToolUsage;
 }
 
 export function createStreamJsonCollector(
@@ -75,6 +80,10 @@ export function createStreamJsonCollector(
    *  assistant event — so the CLI producing anything else at all IS the recovery signal. A
    *  `system`/`thinking_tokens` line counts: it is the binary talking. */
   onRetryResolved?: () => void,
+  /** The tool-usage tally exec-core owns for this invocation, fed the init event and every
+   *  `tool_use` block. Defaults to a private one with no workdir (only relative paths
+   *  classify) for callers that never persist it. */
+  toolUsage: ToolUsageTally = createToolUsageTally({ workdir: null }),
 ): StreamJsonCollector {
   let buffer = '';
   /** True between an api_retry event and the next event of any other kind. */
@@ -170,6 +179,7 @@ export function createStreamJsonCollector(
     // First one wins: a session emits exactly one, and a later one would be a new
     // session rather than a correction.
     if (type === 'system' && subtype === 'init' && requestedModel === null) {
+      toolUsage.claudeInit(event);
       if (typeof event.model === 'string' && event.model.trim()) {
         requestedModel = event.model.trim();
       }
@@ -302,11 +312,17 @@ export function createStreamJsonCollector(
           if (b.type === 'text' && typeof b.text === 'string') {
             assistantText += b.text;
             onText?.(b.text);
-          } else if (b.type === 'tool_use' && onProgress) {
-            const toolName = b.name as string;
+          } else if (b.type === 'tool_use' && typeof b.name === 'string') {
+            const toolName = b.name;
             const input = b.input as Record<string, unknown> | undefined;
-            const desc = describeToolUse(toolName, input);
-            if (desc) onProgress(desc);
+            // Tallied whether or not anyone is watching: the progress line is only rendered
+            // for a run with a status callback, but what the run USED is a fact about it
+            // either way — sub-agent and step-summary runs have no callback.
+            toolUsage.claudeToolUse(toolName, input);
+            if (onProgress) {
+              const desc = describeToolUse(toolName, input);
+              if (desc) onProgress(desc);
+            }
           }
         }
       }
@@ -423,6 +439,13 @@ export function createStreamJsonCollector(
         buffer = '';
       }
       return [...compactions];
+    },
+    getToolUsage(): InvocationToolUsage {
+      if (buffer.trim()) {
+        processLine(buffer);
+        buffer = '';
+      }
+      return toolUsage.finalize('stream');
     },
     getModelIdentity(): StreamModelReport | null {
       if (buffer.trim()) {

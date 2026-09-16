@@ -6,6 +6,7 @@ import type { SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { SubAgentInvocation } from '../../cli-adapters/types.js';
 import { runSequentialSubAgent, type SubAgentRunResult } from '../../cli-executor/index.js';
+import { unobservedToolUsage } from '../../cli-executor/tool-usage.js';
 import { assembleNativePrompt } from '../../sub-agent-emulator/native-mode.js';
 import { type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createSandboxSpawner, executeCliSpec } from './exec-core.js';
@@ -182,6 +183,8 @@ export async function executeSubAgentSequential(
     parsedOutput: { collected: result.collected, synthesis: result.synthesis },
     errorMessage: failed ? describeFailedSubAgent(result) : null,
     tokenUsage: result.tokenUsage,
+    // N processes under one row and no stream: what each sub-step used is not observable here.
+    toolUsage: unobservedToolUsage('stream'),
   };
 }
 

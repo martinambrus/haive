@@ -1,5 +1,6 @@
-import { APP_VERSION, type CliTokenUsage } from '@haive/shared';
+import { APP_VERSION, type CliTokenUsage, type InvocationToolUsage } from '@haive/shared';
 import { tokenUsageFromCodexUsage } from './usage-extract.js';
+import { createToolUsageTally, type ToolUsageTally } from './tool-usage.js';
 
 /* ------------------------------------------------------------------ */
 /* JSON-RPC over stdio for `codex app-server`                          */
@@ -286,6 +287,9 @@ export interface CodexAppServerSessionOptions {
   /** The server refused a steer. Logged and left unconsumed; never a transport verdict, because a
    *  steer that races the turn's completion is refused with the same -32600 as a missing method. */
   onSteerRejected?: (steerId: string, detail: string) => void;
+  /** The tool-usage tally exec-core owns for this invocation, fed every completed item of our
+   *  turn. Defaults to a private one with no workdir for callers that never persist it. */
+  toolUsage?: ToolUsageTally;
 }
 
 export interface CodexAppServerSession {
@@ -303,6 +307,8 @@ export interface CodexAppServerSession {
   /** requested = the model `thread/start` resolved; served = a `model/rerouted` target, the only
    *  channel that names what answered. */
   getModelReport(): { requested: string | null; served: string | null; billed: string[] } | null;
+  /** What the turn USED, tallied from its `item/completed` items. Read after close(). */
+  getToolUsage(): InvocationToolUsage;
   getTurnStatus(): string | null;
   getTurnError(): string | null;
   /** `thread.cliVersion` as this app-server reported it — the binary that actually ran, which is
@@ -335,6 +341,7 @@ export function createCodexAppServerSession(
   let requestedModel: string | null = null;
   let binaryVersion: string | null = null;
   let servedModel: string | null = null;
+  const toolUsage = opts.toolUsage ?? createToolUsageTally({ workdir: null });
   let lastAgentMessage: string | null = null;
   let usage: CliTokenUsage | null = null;
   let promptSeen = false;
@@ -415,6 +422,8 @@ export function createCodexAppServerSession(
       case 'item/completed': {
         const item = params.item;
         if (!forOurTurn || !isRecord(item)) return;
+        // Completed items only: each also arrives as `item/started`, which must not count.
+        toolUsage.codexAppServerItem(item);
         if (item.type === 'agentMessage' && typeof item.text === 'string') {
           lastAgentMessage = item.text;
           opts.onText?.(item.text);
@@ -559,6 +568,9 @@ export function createCodexAppServerSession(
     getModelReport() {
       if (requestedModel === null && servedModel === null) return null;
       return { requested: requestedModel, served: servedModel, billed: [] };
+    },
+    getToolUsage(): InvocationToolUsage {
+      return toolUsage.finalize('stream');
     },
     getTurnStatus(): string | null {
       return turnStatus;

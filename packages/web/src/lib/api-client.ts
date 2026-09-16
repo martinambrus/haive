@@ -1116,6 +1116,59 @@ export interface RagQueryEntry {
   createdAt: string;
 }
 
+// Local mirrors of GET /tasks/:id/tool-usage (packages/api/src/routes/tasks/steps.ts), which
+// returns the shared `ToolUsageStepRow` per step — mirrored here rather than imported, per the
+// barrel-avoidance rule above. Keep in sync.
+
+/** One id with a count; what `n` counts is the list's business (runs a persona was assigned
+ *  in, reads of a definition file, calls of a skill or sub-agent type). */
+export interface TaskToolUsageCounted {
+  id: string;
+  n: number;
+}
+
+/** What one step used, with the coverage counters a reader needs to judge the lists by: a step
+ *  whose runs are all unobservable has empty lists that mean nothing. */
+export interface TaskToolUsageStep {
+  runs: number;
+  observable: number;
+  partial: number;
+  unobservable: number;
+  unrecorded: number;
+  personasAssigned: TaskToolUsageCounted[];
+  personasRead: TaskToolUsageCounted[];
+  skillsInvoked: TaskToolUsageCounted[];
+  skillsRead: TaskToolUsageCounted[];
+  mcp: Array<{ server: string; tool: string; calls: number }>;
+  subagents: TaskToolUsageCounted[];
+  /** Native tool calls, MCP calls excluded. */
+  toolCalls: number;
+}
+
+export interface TaskToolUsage {
+  taskId: string;
+  steps: Array<{
+    stepRowId: string;
+    stepId: string;
+    round: number;
+    title: string;
+    /** Null for a step with no attributed run — a dash, never a row of zeros. */
+    usage: TaskToolUsageStep | null;
+  }>;
+  totals: TaskToolUsageStep;
+  coverage: {
+    total: number;
+    observable: number;
+    partial: number;
+    unobservable: number;
+    unrecorded: number;
+  };
+}
+
+export async function getTaskToolUsage(taskId: string): Promise<TaskToolUsage> {
+  return api.get<TaskToolUsage>(`/tasks/${taskId}/tool-usage`);
+}
+
 /** The facet dimensions, in the order they are shown, with the label each gets.
  *
  *  One list, beside the type it describes: a form and an editor that disagree about the
@@ -2484,6 +2537,105 @@ export interface StatsSteps {
 
 export async function getStatsSteps(params: StatsQueryParams = {}): Promise<StatsSteps> {
   return api.get<StatsSteps>(`/stats/steps${statsQueryString(params)}`);
+}
+
+/** One capped, ranked list: the rows shown, how many there were, and whether the cap cut any. */
+export interface StatsCapped<T> {
+  rows: T[];
+  count: number;
+  truncated: boolean;
+}
+
+/** How many of the window's runs the usage lists can speak for. `unrecorded` rows carry no
+ *  record at all and `unobservable` ones ran on a CLI whose output carries no tool events
+ *  (amp, gemini, the sequential sub-agent script); only `observable` runs — `partial` ones
+ *  being floors — enter any "not used" reading. */
+export interface StatsToolUsageCoverage {
+  total: number;
+  recorded: number;
+  observable: number;
+  partial: number;
+  unobservable: number;
+  unrecorded: number;
+  withLoaded: number;
+  byProvider: Array<{
+    provider: string | null;
+    total: number;
+    recorded: number;
+    observable: number;
+    partial: number;
+    unobservable: number;
+    unrecorded: number;
+    withLoaded: number;
+  }>;
+  /** When the first assigned persona was recorded, whole history; null = never yet, which the
+   *  page must say rather than render an empty list as "unused". */
+  assignedRecordedSince: string | null;
+}
+
+export interface StatsToolUsage {
+  range: { from: string; to: string; timeZone: string };
+  scope: {
+    repositoryId: string | null;
+    cliProviderId: string | null;
+    taskClass: StatsTaskClass | null;
+    allUsers: boolean;
+  };
+  coverage: StatsToolUsageCoverage;
+  personas: {
+    assigned: StatsCapped<{ id: string; runs: number; tasks: number; share: SampledRatio }>;
+    read: StatsCapped<{
+      id: string;
+      reads: number;
+      runs: number;
+      tasks: number;
+      share: SampledRatio;
+    }>;
+  };
+  skills: {
+    invoked: StatsCapped<{
+      id: string;
+      calls: number;
+      runs: number;
+      tasks: number;
+      share: SampledRatio;
+    }>;
+    read: StatsCapped<{
+      id: string;
+      reads: number;
+      runs: number;
+      tasks: number;
+      share: SampledRatio;
+    }>;
+  };
+  mcp: {
+    /** Offered ∪ called per server; `haive` marks the ones Haive wires itself. */
+    servers: StatsCapped<{
+      server: string;
+      haive: boolean;
+      offeredRuns: number;
+      calledRuns: number;
+      calls: number;
+      tasks: number;
+    }>;
+    tools: StatsCapped<{
+      server: string;
+      tool: string;
+      calls: number;
+      runs: number;
+      tasks: number;
+      share: SampledRatio;
+    }>;
+  };
+  subagents: StatsCapped<{ type: string; calls: number; runs: number; tasks: number }>;
+  nativeTools: StatsCapped<{ tool: string; calls: number; runs: number }>;
+  /** Null without a repository facet; the installed-inventory scan is not available yet, so a
+   *  repository-scoped request answers with the reason. */
+  unused: null | { available: false; reason: string };
+}
+
+export async function getStatsToolUsage(params: StatsQueryParams = {}): Promise<StatsToolUsage> {
+  return api.get<StatsToolUsage>(`/stats/tool-usage${statsQueryString(params)}`);
 }
 
 /** GET /auth/registration-status — unauthenticated, because an install with no users has nobody
