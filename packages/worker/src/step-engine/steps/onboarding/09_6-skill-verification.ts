@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { lstatNoFollow, readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -6,7 +6,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
-import { pathExists, resolveSkillTargetDirs } from './_helpers.js';
+import { resolveSkillTargetDirs } from './_helpers.js';
 
 /** Fallback skills dir when no enabled CLI declares one — passed explicitly to
  *  resolveSkillTargetDirs so verification always has somewhere to look. */
@@ -148,17 +148,12 @@ export function parseSkillMarkdown(text: string): ParsedSkill {
 }
 
 export async function listSkillDirs(repo: string, skillsDir: string): Promise<string[]> {
-  const root = path.join(repo, ...skillsDirParts(skillsDir));
-  if (!(await pathExists(root))) return [];
-  try {
-    const entries = await readdir(root, { withFileTypes: true });
-    return entries
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name)
-      .sort();
-  } catch {
-    return [];
-  }
+  const entries = await readdirNoFollow(repo, skillsDirParts(skillsDir).join('/'));
+  if (entries === null) return [];
+  return entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort();
 }
 
 /** List *.md leaf docs under <skillsDir>/<id>/sub-skills/. Returns [] when the dir
@@ -168,17 +163,17 @@ async function listSubSkillFiles(
   skillsDir: string,
   skillId: string,
 ): Promise<string[]> {
-  const dir = path.join(repo, ...skillsDirParts(skillsDir), skillId, 'sub-skills');
-  if (!(await pathExists(dir))) return [];
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    return entries
-      .filter((e) => e.isFile() && e.name.endsWith('.md'))
-      .map((e) => e.name)
-      .sort();
-  } catch {
-    return [];
-  }
+  const entries = await readdirNoFollow(
+    repo,
+    [...skillsDirParts(skillsDir), skillId, 'sub-skills'].join('/'),
+  );
+  // No try: `readdirNoFollow` already answers null for an absent directory, an unreadable one, or
+  // one reached through a link — the three cases this used to catch and flatten to an empty list.
+  if (entries === null) return [];
+  return entries
+    .filter((e) => e.isFile() && e.name.endsWith('.md'))
+    .map((e) => e.name)
+    .sort();
 }
 
 /** Structural validation of a single sub-skill leaf doc against the invariants
@@ -186,12 +181,10 @@ async function listSubSkillFiles(
  *  title, a `## Identification` block, and a non-empty body. Catches a present-but-
  *  truncated/empty/corrupt leaf file that listSubSkillFiles' count alone passes.
  *  Returns issue strings prefixed with the filename, empty when valid. */
-async function checkSubSkillFile(filePath: string, fileName: string): Promise<string[]> {
-  let text: string;
-  try {
-    text = await readFile(filePath, 'utf8');
-  } catch (err) {
-    return [`sub-skills/${fileName}: read failed: ${(err as Error).message}`];
+async function checkSubSkillFile(repo: string, rel: string, fileName: string): Promise<string[]> {
+  const text = await readTextNoFollow(repo, rel);
+  if (text === null) {
+    return [`sub-skills/${fileName}: read failed (absent, unreadable, or reached through a link)`];
   }
   if (text.trim().length === 0) return [`sub-skills/${fileName}: empty`];
   const issues: string[] = [];
@@ -218,27 +211,23 @@ export async function checkSkill(
   skillId: string,
   isBundle = false,
 ): Promise<SkillCheck> {
-  const skillPath = path.join(repo, ...skillsDirParts(skillsDir), skillId, 'SKILL.md');
-  if (!(await pathExists(skillPath))) {
+  const skillRel = [...skillsDirParts(skillsDir), skillId, 'SKILL.md'].join('/');
+  // `skillPath` stays in the result, so callers and the UI keep the absolute path they had; the
+  // READ goes through the anchored walk.
+  const skillPath = path.join(repo, skillRel);
+  const text = await readTextNoFollow(repo, skillRel);
+  if (text === null) {
+    // `'SKILL.md missing'` is a KEY, not prose: detect() partitions its checks on exactly this
+    // string (missingSkillIds versus broken), so an absent file has to keep saying it. A file that
+    // IS there but could not be read — unreadable, or reached through a link — is a different
+    // verdict and says so, which also keeps it out of the "regenerate this skill" bucket.
+    const present = (await lstatNoFollow(repo, skillRel)) !== null;
     return {
       skillId,
       skillsDir,
       skillPath,
       passed: false,
-      issues: ['SKILL.md missing'],
-      subSkillCount: 0,
-    };
-  }
-  let text: string;
-  try {
-    text = await readFile(skillPath, 'utf8');
-  } catch (err) {
-    return {
-      skillId,
-      skillsDir,
-      skillPath,
-      passed: false,
-      issues: [`read failed: ${(err as Error).message}`],
+      issues: [present ? 'SKILL.md unreadable, or reached through a link' : 'SKILL.md missing'],
       subSkillCount: 0,
     };
   }
@@ -269,8 +258,8 @@ export async function checkSkill(
   // Validate the leaf docs themselves. Sequential (a skill carries 3-8 sub-skills,
   // trivial I/O) so we don't nest a concurrency fan-out inside detect's per-skill one.
   for (const name of subSkillFiles) {
-    const subPath = path.join(repo, ...skillsDirParts(skillsDir), skillId, 'sub-skills', name);
-    issues.push(...(await checkSubSkillFile(subPath, name)));
+    const subRel = [...skillsDirParts(skillsDir), skillId, 'sub-skills', name].join('/');
+    issues.push(...(await checkSubSkillFile(repo, subRel, name)));
   }
 
   return {

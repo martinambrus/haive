@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
@@ -107,7 +106,8 @@ async function collectKbFiles(repo: string): Promise<RagSourceFile[]> {
 
   for (const rel of candidates) {
     try {
-      const text = await readFile(path.join(repo, rel), 'utf8');
+      const text = await readTextNoFollow(repo, rel);
+      if (text === null) continue;
       out.push({ relPath: rel, sizeBytes: Buffer.byteLength(text, 'utf8') });
     } catch {
       continue;
@@ -137,7 +137,8 @@ async function collectCodeFiles(
   const out: RagSourceFile[] = [];
   for (const rel of rels) {
     try {
-      const text = await readFile(path.join(repo, rel), 'utf8');
+      const text = await readTextNoFollow(repo, rel);
+      if (text === null) continue;
       out.push({ relPath: rel, sizeBytes: Buffer.byteLength(text, 'utf8') });
     } catch {
       continue;
@@ -772,7 +773,9 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
 
         let text: string;
         try {
-          text = await readFile(path.join(ctx.repoPath, file.relPath), 'utf8');
+          const read = await readTextNoFollow(ctx.repoPath, file.relPath);
+          if (read === null) throw new Error('unreadable or reached through a link');
+          text = read;
         } catch (err) {
           ctx.logger.warn({ err, file: file.relPath }, 'failed to read KB file; skipping');
           continue;
@@ -832,7 +835,9 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
 
         let text: string;
         try {
-          text = await readFile(path.join(ctx.repoPath, file.relPath), 'utf8');
+          const read = await readTextNoFollow(ctx.repoPath, file.relPath);
+          if (read === null) throw new Error('unreadable or reached through a link');
+          text = read;
         } catch (err) {
           ctx.logger.warn({ err, file: file.relPath }, 'failed to read code file; skipping');
           continue;

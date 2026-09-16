@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { jsonrepair } from 'jsonrepair';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -14,7 +13,7 @@ import { RetryableParseError } from '../../step-definition.js';
 import type { AgentColor, AgentSpec } from './_agent-templates.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { extractFencedJson } from '../_fenced-json.js';
-import { listFilesMatching, pathExists, resolveConfirmedProject } from './_helpers.js';
+import { listFilesMatching, resolveConfirmedProject } from './_helpers.js';
 import {
   FILE_COUNT_THRESHOLD,
   buildTechInventory,
@@ -377,8 +376,10 @@ async function scanPattern(
   pattern: Pattern,
 ): Promise<{ count: number; dirs: { dir: string; count: number }[]; dirTotal: number }> {
   if (pattern.requireDir) {
-    const dir = path.join(repo, pattern.requireDir);
-    if (!(await pathExists(dir))) return { count: 0, dirs: [], dirTotal: 0 };
+    // A DIRECTORY gate in front of the enumeration below, so a link is not one: a planted
+    // `app/Http/Controllers -> …` would otherwise vouch for a framework this repo does not use.
+    const kind = (await lstatNoFollow(repo, pattern.requireDir))?.kind;
+    if (kind !== 'directory') return { count: 0, dirs: [], dirTotal: 0 };
   }
   const matches = await listFilesMatching(repo, pattern.predicate, 5);
   const byDir = new Map<string, number>();
@@ -490,12 +491,10 @@ async function collectFileTree(repoPath: string): Promise<string> {
     : tree;
 }
 
-async function readTextSafe(filePath: string): Promise<string | null> {
-  try {
-    return await readFile(filePath, 'utf8');
-  } catch {
-    return null;
-  }
+/** A repository file as text, refusing a link in any component. These bytes reach the
+ *  agent-discovery prompt, and the tree they are chosen from is not trusted input. */
+async function readTextSafe(repoPath: string, rel: string): Promise<string | null> {
+  return await readTextNoFollow(repoPath, rel);
 }
 
 async function collectKeyFiles(repoPath: string): Promise<string> {
@@ -520,7 +519,7 @@ async function collectKeyFiles(repoPath: string): Promise<string> {
   ];
   const parts: string[] = [];
   for (const name of candidates) {
-    const content = await readTextSafe(path.join(repoPath, name));
+    const content = await readTextSafe(repoPath, name);
     if (content !== null) {
       const truncated =
         content.length > 3000 ? content.slice(0, 3000) + '\n[...truncated]' : content;
