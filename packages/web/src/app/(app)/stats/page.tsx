@@ -14,6 +14,7 @@ import {
   getStatsSummary,
   getStatsTaskTime,
   getStatsTimeline,
+  getStatsToolUsage,
   getUiPrefs,
   patchUiPrefs,
   type Repository,
@@ -28,6 +29,7 @@ import {
   type StatsTaskClass,
   type StatsTaskTime,
   type StatsTimeline,
+  type StatsToolUsage,
   type UiPrefs,
 } from '@/lib/api-client';
 import { Card, CardDescription, CardHeader, CardTitle, Input } from '@/components/ui';
@@ -85,12 +87,22 @@ const PlanVelocityChart = dynamic(
 const SELECT_CLASS =
   'h-9 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500';
 
-const TABS = ['money', 'time', 'steps', 'plan', 'reliability', 'quality', 'estimates'] as const;
+const TABS = [
+  'money',
+  'time',
+  'steps',
+  'tools',
+  'plan',
+  'reliability',
+  'quality',
+  'estimates',
+] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABELS: Record<Tab, string> = {
   money: 'Money',
   time: 'Time & throughput',
   steps: 'Steps & models',
+  tools: 'Agents & tools',
   plan: 'Plan',
   reliability: 'Reliability',
   quality: 'Quality',
@@ -209,6 +221,7 @@ function StatsPageInner() {
   const [plan, setPlan] = useState<StatsPlan | null>(null);
   const [taskTime, setTaskTime] = useState<StatsTaskTime | null>(null);
   const [steps, setSteps] = useState<StatsSteps | null>(null);
+  const [toolUsage, setToolUsage] = useState<StatsToolUsage | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -335,10 +348,15 @@ function StatsPageInner() {
         .then((d) => !cancelled && setSteps(d))
         .catch(() => undefined);
     }
+    if (tab === 'tools' && !toolUsage) {
+      getStatsToolUsage(params)
+        .then((d) => !cancelled && setToolUsage(d))
+        .catch(() => undefined);
+    }
     return () => {
       cancelled = true;
     };
-  }, [tab, params, reliability, quality, estimates, plan, taskTime, steps]);
+  }, [tab, params, reliability, quality, estimates, plan, taskTime, steps, toolUsage]);
 
   // A filter change invalidates the lazily-loaded tabs, or switching back would show the
   // previous window's numbers under the new filter's heading.
@@ -349,6 +367,7 @@ function StatsPageInner() {
     setPlan(null);
     setTaskTime(null);
     setSteps(null);
+    setToolUsage(null);
   }, [params]);
 
   const cd = summary?.costDisplay ?? null;
@@ -1097,6 +1116,333 @@ function StatsPageInner() {
                     </table>
                   </div>
                 )}
+              </Card>
+            </>
+          )}
+        </>
+      )}
+
+      {tab === 'tools' && (
+        <>
+          {!toolUsage ? (
+            <div className="text-sm text-neutral-500">Loading...</div>
+          ) : (
+            <>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Coverage</CardTitle>
+                  <CardDescription>
+                    How many of the window&apos;s runs the lists below can speak for. A run is
+                    observable when its CLI reports tool calls in its output — the claude family,
+                    grok and codex do. amp and gemini carry no tool events, a sequential sub-agent
+                    script runs several processes under one row, and a run recorded before this
+                    existed has no record at all: none of those can say what they used, and none of
+                    them counts as &ldquo;used nothing&rdquo;. Partial runs lost the middle of their
+                    transcript to the size cap, so their counts are floors.
+                  </CardDescription>
+                </CardHeader>
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                  <StatTile
+                    label="Observable runs"
+                    value={formatCount(toolUsage.coverage.observable)}
+                    hint={`of ${formatCount(toolUsage.coverage.total)} in the window`}
+                    tone="text-indigo-300"
+                  />
+                  <StatTile
+                    label="Partial"
+                    value={formatCount(toolUsage.coverage.partial)}
+                    hint="counts are floors"
+                    tone={toolUsage.coverage.partial > 0 ? 'text-amber-300' : 'text-neutral-400'}
+                  />
+                  <StatTile
+                    label="Not observable"
+                    value={formatCount(toolUsage.coverage.unobservable)}
+                    hint="no tool events on this CLI"
+                    tone="text-neutral-400"
+                  />
+                  <StatTile
+                    label="Not recorded"
+                    value={formatCount(toolUsage.coverage.unrecorded)}
+                    hint="ran before the record existed"
+                    tone="text-neutral-400"
+                  />
+                </div>
+                {toolUsage.coverage.byProvider.length > 0 && (
+                  <div className="mt-6 overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                          <th className="pb-2 font-medium">Provider</th>
+                          <th className="pb-2 text-right font-medium">Runs</th>
+                          <th className="pb-2 text-right font-medium">Observable</th>
+                          <th className="pb-2 text-right font-medium">Partial</th>
+                          <th className="pb-2 text-right font-medium">Not recorded</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {toolUsage.coverage.byProvider.map((p) => (
+                          <tr
+                            key={p.provider ?? '(no provider)'}
+                            className="border-t border-neutral-800"
+                          >
+                            <td className="py-2 font-mono text-xs text-neutral-200">
+                              {p.provider ?? <span className="text-neutral-500">no provider</span>}
+                            </td>
+                            <td className="py-2 text-right font-mono text-neutral-400">
+                              {formatCount(p.total)}
+                            </td>
+                            <td className="py-2 text-right font-mono text-indigo-300">
+                              {p.observable === 0 && p.total > 0 ? (
+                                <span className="font-sans text-neutral-500">
+                                  tool events not observable
+                                </span>
+                              ) : (
+                                formatCount(p.observable)
+                              )}
+                            </td>
+                            <td className="py-2 text-right font-mono text-neutral-400">
+                              {p.partial || ''}
+                            </td>
+                            <td className="py-2 text-right font-mono text-neutral-400">
+                              {p.unrecorded || ''}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Agent personas</CardTitle>
+                  <CardDescription>
+                    {toolUsage.coverage.assignedRecordedSince === null
+                      ? 'Assigned personas are not yet recorded; the list below counts the persona definition files the agent opened on its own, which most runs never do. A persona absent here has not been shown unused.'
+                      : `Assigned personas recorded from ${new Date(toolUsage.coverage.assignedRecordedSince).toLocaleDateString()}. The second list counts the definition files an agent opened on its own.`}
+                  </CardDescription>
+                </CardHeader>
+                {toolUsage.coverage.assignedRecordedSince !== null && (
+                  <>
+                    <h3 className="mb-2 text-xs uppercase tracking-wider text-neutral-500">
+                      Assigned by Haive
+                    </h3>
+                    <RankedBars
+                      rows={toolUsage.personas.assigned.rows.map((r) => ({
+                        key: r.id,
+                        value: r.runs,
+                        hint: `· ${formatCount(r.tasks)} tasks · ${formatSampledRatio(r.share)} of observable runs`,
+                      }))}
+                      formatValue={formatCount}
+                      color={CHART_COLORS.agent}
+                      limit={12}
+                      emptyMessage="No persona was assigned in this window."
+                      elisionNote={(n) => `+${n.toLocaleString()} more personas not shown`}
+                      className="mb-6"
+                    />
+                  </>
+                )}
+                <h3 className="mb-2 text-xs uppercase tracking-wider text-neutral-500">
+                  Definition files opened
+                </h3>
+                <RankedBars
+                  rows={toolUsage.personas.read.rows.map((r) => ({
+                    key: r.id,
+                    value: r.reads,
+                    hint: `· ${formatCount(r.runs)} runs · ${formatSampledRatio(r.share)} of observable runs`,
+                  }))}
+                  formatValue={formatCount}
+                  color={CHART_COLORS.agent}
+                  limit={12}
+                  emptyMessage="No agent opened a persona definition in this window."
+                  elisionNote={(n) => `+${n.toLocaleString()} more personas not shown`}
+                />
+                {toolUsage.personas.read.truncated && (
+                  <p className="mt-3 text-xs text-neutral-500">
+                    Showing the {formatCount(toolUsage.personas.read.rows.length)} most-opened of{' '}
+                    {formatCount(toolUsage.personas.read.count)}.
+                  </p>
+                )}
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Skills</CardTitle>
+                  <CardDescription>
+                    Skill files the agents opened, by skill id. Agents open skills with a shell
+                    command rather than the CLI&apos;s own skill tool — measured before this
+                    existed, the tool was offered in nearly every claude-code run and called in none
+                    — so &ldquo;invoked&rdquo; stays near zero while &ldquo;opened&rdquo; is the
+                    real figure. Opened is not applied: a transcript cannot say the latter.
+                  </CardDescription>
+                </CardHeader>
+                <RankedBars
+                  rows={toolUsage.skills.read.rows.map((r) => ({
+                    key: r.id,
+                    value: r.reads,
+                    hint: `· ${formatCount(r.runs)} runs · ${formatSampledRatio(r.share)} of observable runs`,
+                  }))}
+                  formatValue={formatCount}
+                  color={CHART_COLORS.agent}
+                  limit={12}
+                  emptyMessage="No agent opened a skill in this window."
+                  elisionNote={(n) => `+${n.toLocaleString()} more skills not shown`}
+                />
+                {toolUsage.skills.invoked.rows.length > 0 && (
+                  <p className="mt-3 text-xs text-neutral-500">
+                    Invoked through the skill tool:{' '}
+                    {toolUsage.skills.invoked.rows
+                      .map((r) => `${r.id} (${formatCount(r.calls)})`)
+                      .join(', ')}
+                  </p>
+                )}
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>MCP servers and tools</CardTitle>
+                  <CardDescription>
+                    Every server a run was wired with, whether it was called, and the tools that
+                    were. &ldquo;Offered&rdquo; is read from the runs that report their inventory
+                    (the claude family and grok do; codex names its calls but not its inventory). A
+                    server offered in many runs and called in none is the one worth removing from
+                    the repository&apos;s MCP settings.
+                  </CardDescription>
+                </CardHeader>
+                {toolUsage.mcp.servers.rows.length === 0 ? (
+                  <p className="text-sm text-neutral-500">No MCP server in this window.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                          <th className="pb-2 font-medium">Server</th>
+                          <th className="pb-2 font-medium">Origin</th>
+                          <th className="pb-2 text-right font-medium">Offered in</th>
+                          <th className="pb-2 text-right font-medium">Called in</th>
+                          <th className="pb-2 text-right font-medium">Calls</th>
+                          <th className="pb-2 text-right font-medium">Tasks</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {toolUsage.mcp.servers.rows.map((s) => (
+                          <tr key={s.server} className="border-t border-neutral-800">
+                            <td className="py-2 font-mono text-xs text-neutral-200">{s.server}</td>
+                            <td className="py-2 text-xs text-neutral-400">
+                              {s.haive ? 'Haive' : 'repository settings'}
+                            </td>
+                            <td className="py-2 text-right font-mono text-neutral-400">
+                              {formatCount(s.offeredRuns)} of{' '}
+                              {formatCount(toolUsage.coverage.withLoaded)}
+                            </td>
+                            <td
+                              className={`py-2 text-right font-mono ${
+                                s.calledRuns === 0 && s.offeredRuns > 0
+                                  ? 'text-amber-300'
+                                  : 'text-neutral-400'
+                              }`}
+                            >
+                              {formatCount(s.calledRuns)}
+                            </td>
+                            <td className="py-2 text-right font-mono text-indigo-300">
+                              {formatCount(s.calls)}
+                            </td>
+                            <td className="py-2 text-right font-mono text-neutral-400">
+                              {formatCount(s.tasks)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                <h3 className="mb-2 mt-6 text-xs uppercase tracking-wider text-neutral-500">
+                  Tools called
+                </h3>
+                <RankedBars
+                  rows={toolUsage.mcp.tools.rows.map((r) => ({
+                    key: `${r.server}/${r.tool}`,
+                    value: r.calls,
+                    hint: `· ${formatCount(r.runs)} runs · ${formatSampledRatio(r.share)} of observable runs`,
+                  }))}
+                  formatValue={formatCount}
+                  color={CHART_COLORS.agent}
+                  limit={12}
+                  emptyMessage="No MCP tool was called in this window."
+                  elisionNote={(n) => `+${n.toLocaleString()} more tools not shown`}
+                />
+              </Card>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Sub-agents</CardTitle>
+                    <CardDescription>
+                      Native sub-agent activity by type. Haive fans work out itself, so a claude
+                      spawn here is the model&apos;s own choice; codex reports its multi-agent
+                      activity only as &ldquo;wait&rdquo; calls, never as a spawn.
+                    </CardDescription>
+                  </CardHeader>
+                  <RankedBars
+                    rows={toolUsage.subagents.rows.map((r) => ({
+                      key: r.type,
+                      value: r.calls,
+                      hint: `· ${formatCount(r.runs)} runs`,
+                    }))}
+                    formatValue={formatCount}
+                    color={CHART_COLORS.agent}
+                    limit={8}
+                    emptyMessage="No sub-agent activity in this window."
+                    elisionNote={(n) => `+${n.toLocaleString()} more not shown`}
+                  />
+                </Card>
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Native tools</CardTitle>
+                    <CardDescription>
+                      The CLI&apos;s own tools by name, MCP calls excluded. Names differ per CLI
+                      (claude&apos;s Bash and Read, grok&apos;s run_terminal_command and read_file,
+                      codex&apos;s command_execution) and are not merged.
+                    </CardDescription>
+                  </CardHeader>
+                  <RankedBars
+                    rows={toolUsage.nativeTools.rows.map((r) => ({
+                      key: r.tool,
+                      value: r.calls,
+                      hint: `· ${formatCount(r.runs)} runs`,
+                    }))}
+                    formatValue={formatCount}
+                    color={CHART_COLORS.agent}
+                    limit={8}
+                    emptyMessage="No native tool call in this window."
+                    elisionNote={(n) => `+${n.toLocaleString()} more not shown`}
+                  />
+                </Card>
+              </div>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Unused</CardTitle>
+                  <CardDescription>
+                    What is installed in a repository against what its runs actually used. Report
+                    only: nothing here deletes a file.
+                  </CardDescription>
+                </CardHeader>
+                {!repositoryId ? (
+                  <p className="text-sm text-neutral-500">
+                    Select a repository above to compare what is installed with what the agents
+                    actually used.
+                  </p>
+                ) : toolUsage.unused === null || !toolUsage.unused.available ? (
+                  <p className="text-sm text-neutral-500">
+                    The installed-inventory scan is not available yet
+                    {toolUsage.unused && toolUsage.unused.reason
+                      ? ` (${toolUsage.unused.reason.replace(/-/g, ' ')})`
+                      : ''}
+                    . The lists above still say what this repository&apos;s runs used.
+                  </p>
+                ) : null}
               </Card>
             </>
           )}
