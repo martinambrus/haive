@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -129,6 +129,20 @@ describe('mcpSettingsDefaultFor', () => {
       expect(Object.keys(owned)).toEqual(['sneaky']);
       expect((owned.sneaky as { command: string }).command).toBe('/bin/sh');
     });
+  });
+
+  // A settings file that is a LINK is read as absent rather than followed. The prefill is a config
+  // the user accepts by submitting, and the commands in it are executed — so it is built from what
+  // the repository tree itself holds, never from wherever a link points.
+  it('reads a linked settings file as absent instead of following it', async () => {
+    const repo = path.join(dir, 'linked');
+    await mkdir(path.join(repo, '.claude'), { recursive: true });
+    const outside = path.join(dir, 'outside-settings.json');
+    await writeFile(outside, JSON.stringify({ mcpServers: { elsewhere: { command: '/bin/sh' } } }));
+    await symlink(outside, path.join(repo, '.claude/mcp_settings.json'));
+
+    expect(await servers(repo)).toEqual(['chrome-devtools']);
+    expect(await repoOwnedMcpServerNames(repo)).toEqual([]);
   });
 
   it('falls back to the managed set when the file cannot be parsed', async () => {

@@ -1,7 +1,6 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { isPathContainmentError, updateFileNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEGACY_KB_DIR } from '@haive/shared/knowledge-paths';
-import { pathExists } from './_helpers.js';
 
 /* ------------------------------------------------------------------ */
 /* Knowledge-base write helpers                                        */
@@ -104,7 +103,6 @@ export async function applyKbWrites(
 }> {
   const written: { relPath: string; section: string }[] = [];
   const skipped: { relPath: string; reason: string }[] = [];
-  const kbDir = path.join(repoRoot, KB_DIR);
 
   for (const write of writes) {
     const check = sanitizeKbRelPath(write.relPath);
@@ -112,22 +110,34 @@ export async function applyKbWrites(
       skipped.push({ relPath: write.relPath, reason: check.reason });
       continue;
     }
-    const fullPath = path.join(kbDir, check.normalized);
-    const dir = path.dirname(fullPath);
-    await mkdir(dir, { recursive: true });
-    let existing = '';
-    if (await pathExists(fullPath)) {
-      try {
-        existing = await readFile(fullPath, 'utf8');
-      } catch {
-        existing = '';
-      }
+    // One descriptor for the probe, the read AND the write, where there were four path
+    // resolutions. `pathExists` is `stat`-based, so it followed a link and read a DANGLING one as
+    // absent — the probe then said "new file" and the write landed on whatever the link named.
+    //
+    // `sanitizeKbRelPath` above still gates the path and is not replaced by `toSafeRel`: it reports
+    // a bad entry as `skipped` and the loop carries on, where the primitive throws. That is the
+    // difference between dropping one proposed write and failing the whole step.
+    //
+    // An existing file that cannot be READ now throws rather than being treated as empty. That is
+    // the intended direction: silently overwriting a file we could not read is worse than failing.
+    try {
+      await updateFileNoFollow(
+        repoRoot,
+        `${KB_DIR}/${check.normalized}`,
+        (existing) =>
+          existing === null || existing.length === 0
+            ? `# ${check.normalized.replace(/\.md$/, '').replace(/[/\\]/g, ' / ')}\n\n## ${write.section} (added ${nowIso.slice(0, 10)})\n\n${write.content.trim()}\n`
+            : appendSection(existing, write.section, write.content, nowIso),
+        { create: true, createParents: true },
+      );
+    } catch (err) {
+      // A refused target joins the `skipped` list rather than aborting the loop: this function
+      // already treats one bad path as a per-item outcome, and a link is the same class of problem.
+      // Anything else is a real failure and propagates.
+      if (!isPathContainmentError(err)) throw err;
+      skipped.push({ relPath: write.relPath, reason: `refused: ${err.reason}` });
+      continue;
     }
-    const next =
-      existing.length === 0
-        ? `# ${check.normalized.replace(/\.md$/, '').replace(/[/\\]/g, ' / ')}\n\n## ${write.section} (added ${nowIso.slice(0, 10)})\n\n${write.content.trim()}\n`
-        : appendSection(existing, write.section, write.content, nowIso);
-    await writeFile(fullPath, next, 'utf8');
     written.push({ relPath: path.join(KB_DIR, check.normalized), section: write.section });
   }
   return { written, skipped };

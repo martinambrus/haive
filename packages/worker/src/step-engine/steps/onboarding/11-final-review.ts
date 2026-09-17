@@ -1,12 +1,11 @@
-import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { lstatNoFollow, readdirNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { pathExists } from './_helpers.js';
 
 interface ActiveAgentsTarget {
   dir: string;
@@ -51,45 +50,43 @@ interface FinalReviewApply {
   source: 'llm' | 'template';
 }
 
-async function countFiles(dir: string, predicate: (name: string) => boolean): Promise<number> {
-  if (!(await pathExists(dir))) return 0;
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    return entries.filter((e) => e.isFile() && predicate(e.name)).length;
-  } catch {
-    return 0;
-  }
+async function countFiles(
+  anchor: string,
+  relDir: string,
+  predicate: (name: string) => boolean,
+): Promise<number> {
+  // null is absence, or a directory reached through a link. Both mean nothing is installed here,
+  // which is what the `pathExists` probe and the `catch` around the read used to say in two steps.
+  const entries = await readdirNoFollow(anchor, relDir);
+  if (entries === null) return 0;
+  return entries.filter((e) => e.isFile() && predicate(e.name)).length;
 }
 
-async function countSkillDirs(skillsRoot: string): Promise<number> {
-  if (!(await pathExists(skillsRoot))) return 0;
-  try {
-    const entries = await readdir(skillsRoot, { withFileTypes: true });
-    let n = 0;
-    for (const e of entries) {
-      if (!e.isDirectory()) continue;
-      const skillFile = path.join(skillsRoot, e.name, 'SKILL.md');
-      if (await pathExists(skillFile)) n += 1;
-    }
-    return n;
-  } catch {
-    return 0;
+async function countSkillDirs(anchor: string, relDir: string): Promise<number> {
+  const entries = await readdirNoFollow(anchor, relDir);
+  if (entries === null) return 0;
+  let n = 0;
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    // A skill counts only when its SKILL.md is a REGULAR FILE. `pathExists` is `stat`-based, so it
+    // followed a link — counting a skill whose definition lives wherever that link pointed.
+    const info = await lstatNoFollow(anchor, `${relDir}/${e.name}/SKILL.md`);
+    if (info?.kind === 'file') n += 1;
   }
+  return n;
 }
 
 export async function collectReviewFindings(
   repo: string,
   activeAgentsTarget: ActiveAgentsTarget | null = { dir: '.claude/agents', ext: '.md' },
 ): Promise<FinalReviewDetect> {
-  const kbDir = path.join(repo, KB_DIR);
-  const skillsDir = path.join(repo, '.claude', 'skills');
-  const agentsDir = activeAgentsTarget ? path.join(repo, activeAgentsTarget.dir) : null;
+  const agentsRel = activeAgentsTarget?.dir ?? null;
   const agentExt = activeAgentsTarget?.ext ?? '.md';
 
   const [knowledgeBase, skills, agents] = await Promise.all([
-    countFiles(kbDir, (n) => n.endsWith('.md')),
-    countSkillDirs(skillsDir),
-    agentsDir ? countFiles(agentsDir, (n) => n.endsWith(agentExt)) : Promise.resolve(0),
+    countFiles(repo, KB_DIR, (n) => n.endsWith('.md')),
+    countSkillDirs(repo, '.claude/skills'),
+    agentsRel ? countFiles(repo, agentsRel, (n) => n.endsWith(agentExt)) : Promise.resolve(0),
   ]);
   const findings: ReviewFinding[] = [];
   if (knowledgeBase === 0) {
@@ -265,10 +262,9 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
     const fallback = defaultReviewMarkdown(detected, notes);
     const markdown =
       args.llmOutput != null ? llmReviewMarkdown(args.llmOutput, fallback) : fallback;
-    const claudeDir = path.join(ctx.repoPath, '.claude');
-    await mkdir(claudeDir, { recursive: true });
-    const reviewPath = path.join(claudeDir, 'onboarding-review.md');
-    await writeFile(reviewPath, markdown, 'utf8');
+    const reviewRel = '.claude/onboarding-review.md';
+    await writeFileNoFollow(ctx.repoPath, reviewRel, markdown, { createParents: true });
+    const reviewPath = path.join(ctx.repoPath, reviewRel);
     const source: 'llm' | 'template' = args.llmOutput != null ? 'llm' : 'template';
     ctx.logger.info(
       { reviewPath, source, acknowledged: !!values.acknowledged },

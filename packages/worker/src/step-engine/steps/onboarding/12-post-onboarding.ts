@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type {
@@ -35,7 +34,7 @@ import { detectOrigin, getOriginUrl, gitRun } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
-import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
+import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import {
   expandCustomBundlesFor,
   expandManifestFor,
@@ -351,9 +350,9 @@ async function writeHaiveDataMirror(
   }
 
   const writeJson = async (rel: string, value: unknown): Promise<void> => {
-    const abs = path.join(ctx.repoPath, rel);
-    await mkdir(path.dirname(abs), { recursive: true });
-    await writeFile(abs, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await writeFileNoFollow(ctx.repoPath, rel, `${JSON.stringify(value, null, 2)}\n`, {
+      createParents: true,
+    });
     filesWritten.push(rel);
   };
 
@@ -636,7 +635,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     );
     const existingPaths: string[] = [];
     for (const rel of stagePaths) {
-      if (await pathExists(path.join(ctx.repoPath, rel))) existingPaths.push(rel);
+      if ((await lstatNoFollow(ctx.repoPath, rel)) !== null) existingPaths.push(rel);
     }
 
     if (existingPaths.length === 0) {
