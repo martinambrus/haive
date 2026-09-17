@@ -1,5 +1,6 @@
-import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../repo/worktree-paths.js';
 
 /**
  * Pre-flight check that the project's DDEV web-container entrypoint scripts can run at all.
@@ -464,13 +465,17 @@ export function findDdevEntrypointBreakage(files: DdevEntrypointScript[]): strin
  * check's.
  */
 export async function checkDdevWebEntrypoints(workspace: string): Promise<string | null> {
-  const dir = path.join(workspace, '.ddev', ENTRYPOINT_DIR);
-  const names = await readdir(dir).catch(() => null);
-  if (names === null) return null;
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const relDir = `${prefix}.ddev/${ENTRYPOINT_DIR}`;
+  const entries = await readdirNoFollow(anchor, relDir);
+  if (entries === null) return null;
 
   const files: DdevEntrypointScript[] = [];
-  for (const name of names.filter((n) => n.endsWith('.sh')).sort()) {
-    const content = await readFile(path.join(dir, name), 'utf8').catch(() => null);
+  for (const name of entries
+    .map((e) => e.name)
+    .filter((n) => n.endsWith('.sh'))
+    .sort()) {
+    const content = await readTextNoFollow(anchor, `${relDir}/${name}`);
     if (content !== null) files.push({ name, content });
   }
   return findDdevEntrypointBreakage(files);

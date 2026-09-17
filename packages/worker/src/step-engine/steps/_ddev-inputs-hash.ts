@@ -3,9 +3,9 @@
 // (target) to decide whether the post-implementation DDEV inputs drifted from the
 // booted env. Lives in its own module (not `_ddev-config.ts`, which is intentionally
 // dependency-free) because it shells out to git + reads files.
-import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import path from 'node:path';
+import { readFileNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../repo/worktree-paths.js';
 import { gitRun } from '../../repo/git-push.js';
 
 export interface DdevInputEntry {
@@ -51,14 +51,22 @@ export async function hashDdevInputs(workspace: string): Promise<string | null> 
   ]);
   if (ls.code !== 0) return null;
 
+  // The workspace is a WORKTREE, which sits under `.haive/` and so can never be the anchor;
+  // `workspaceAnchor` splits it at the repository root and falls back to the path itself in root
+  // mode. The rels come from git's own listing, and every component of them is walked.
+  const { anchor, prefix } = workspaceAnchor(workspace);
   const rels = ls.stdout.split('\0').filter(Boolean);
   const entries: DdevInputEntry[] = [];
   for (const rel of rels) {
     // Listed-but-unreadable (a delete racing the listing) — skip; its absence still
-    // changes the hash versus the baseline that included it.
-    const content = await readFile(path.join(workspace, rel)).catch(() => null);
-    if (content === null) continue;
-    entries.push({ rel, content });
+    // changes the hash versus the baseline that included it. A refused path reads the same way,
+    // and the lenient read folds both into null.
+    //
+    // BYTES, not text: `hashDdevEntries` feeds `content` straight into the digest, so decoding
+    // here would change the hash of every binary input under `.ddev/`.
+    const read = await readFileNoFollow(anchor, `${prefix}${rel}`);
+    if (read === null) continue;
+    entries.push({ rel, content: read.data });
   }
   return hashDdevEntries(entries);
 }

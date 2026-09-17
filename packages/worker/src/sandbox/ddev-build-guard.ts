@@ -1,5 +1,6 @@
-import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { DDEV_NGINX_INCLUDE_PREFIX } from './ddev-nginx-include-guard.js';
 import { DDEV_ENTRYPOINT_PREFIX } from './ddev-entrypoint-guard.js';
 import { DDEV_CONFIG_YAML_PREFIX } from './ddev-config-yaml-guard.js';
@@ -212,13 +213,22 @@ export function findDdevSpecBreakage(specText: string): string | null {
  * cannot be read — an unreadable workspace is the boot's problem to report, not this check's.
  */
 export async function checkDdevBuildInputs(workspace: string): Promise<string | null> {
+  // The workspace is a WORKTREE, which sits under `.haive/` and so can never be the anchor;
+  // `workspaceAnchor` splits it at the repository root and falls back to the path itself in root
+  // mode. Every read stays lenient, which is what the `.catch(() => null)` pairs already meant:
+  // an unreadable workspace is the boot's problem to report, not this check's — and now a link
+  // standing anywhere in the path reads the same way instead of being followed.
+  const { anchor, prefix } = workspaceAnchor(workspace);
   const files: DdevBuildFile[] = [];
   for (const dir of BUILD_DIRS) {
-    const abs = path.join(workspace, '.ddev', dir);
-    const names = await readdir(abs).catch(() => null);
-    if (names === null) continue;
-    for (const name of names.filter(isBuildDockerfile).sort()) {
-      const content = await readFile(path.join(abs, name), 'utf8').catch(() => null);
+    const relDir = `${prefix}.ddev/${dir}`;
+    const entries = await readdirNoFollow(anchor, relDir);
+    if (entries === null) continue;
+    for (const name of entries
+      .map((e) => e.name)
+      .filter(isBuildDockerfile)
+      .sort()) {
+      const content = await readTextNoFollow(anchor, `${relDir}/${name}`);
       if (content !== null) files.push({ name: `.ddev/${dir}/${name}`, content });
     }
   }

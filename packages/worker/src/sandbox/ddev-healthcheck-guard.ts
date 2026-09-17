@@ -1,5 +1,5 @@
-import { readdir, readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { parseDdevConfig } from '../step-engine/steps/_ddev-config.js';
 
 /**
@@ -141,9 +141,8 @@ export function findDdevHealthcheckBreakage(input: {
  * be read — an unreadable workspace is the boot's problem to report, not this check's.
  */
 export async function checkDdevHealthcheckConfig(workspace: string): Promise<string | null> {
-  const configText = await readFile(path.join(workspace, '.ddev', 'config.yaml'), 'utf8').catch(
-    () => null,
-  );
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const configText = await readTextNoFollow(anchor, `${prefix}.ddev/config.yaml`);
   if (configText === null) return null;
 
   const webserverType = parseDdevConfig(configText).webserver;
@@ -153,13 +152,13 @@ export async function checkDdevHealthcheckConfig(workspace: string): Promise<str
   const generated = GENERATED_SITE_CONF[family];
   if (!generated) return null;
 
-  const dir = path.join(workspace, '.ddev', generated.dir);
-  const names = await readdir(dir).catch(() => null);
-  if (names === null) return null;
+  const relDir = `${prefix}.ddev/${generated.dir}`;
+  const entries = await readdirNoFollow(anchor, relDir);
+  if (entries === null) return null;
 
   const confs: DdevSiteConf[] = [];
-  for (const name of names.filter((n) => n.endsWith('.conf'))) {
-    const content = await readFile(path.join(dir, name), 'utf8').catch(() => null);
+  for (const name of entries.map((e) => e.name).filter((n) => n.endsWith('.conf'))) {
+    const content = await readTextNoFollow(anchor, `${relDir}/${name}`);
     if (content !== null) confs.push({ name, content });
   }
   return findDdevHealthcheckBreakage({ webserverType, confs });
