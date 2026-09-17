@@ -1,5 +1,5 @@
-import { open, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { openFileNoFollow, relUnder, writeFileNoFollow } from '@haive/shared/fs-safe';
 import type { DetectResult, FrameworkName } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
@@ -35,10 +35,13 @@ interface RipgrepDetect {
   lines: string[];
 }
 
-async function isPhpFile(filePath: string): Promise<boolean> {
+async function isPhpFile(anchor: string, rel: string): Promise<boolean> {
   let handle;
   try {
-    handle = await open(filePath, 'r');
+    // null is absence OR a refusal (a link, a FIFO, a device). Either way this is not a PHP file,
+    // which is what the surrounding `catch` already concluded for an unreadable path.
+    handle = await openFileNoFollow(anchor, rel, 'read');
+    if (handle === null) return false;
     const buf = Buffer.alloc(128);
     const { bytesRead } = await handle.read(buf, 0, 128, 0);
     if (bytesRead === 0) return false;
@@ -155,7 +158,7 @@ async function scanExtensions(
     if (PHP_CANDIDATE_EXTENSIONS.has(ext)) {
       // Check up to 3 sample files for <?php
       for (const sample of samplePaths) {
-        if (await isPhpFile(sample)) {
+        if (await isPhpFile(repoPath, relUnder(repoPath, sample))) {
           isPhp = true;
           break;
         }
@@ -257,7 +260,9 @@ export const ripgrepConfigStep: StepDefinition<
       return { configWritten: false, path: null, extensions: detected.extensions };
     }
     const target = path.join(ctx.repoPath, '.ripgreprc');
-    await writeFile(target, detected.lines.join('\n'), 'utf8');
+    await writeFileNoFollow(ctx.repoPath, '.ripgreprc', detected.lines.join('\n'), {
+      createParents: true,
+    });
     ctx.logger.info(
       {
         target,

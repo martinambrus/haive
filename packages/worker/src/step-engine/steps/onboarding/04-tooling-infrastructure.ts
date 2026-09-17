@@ -1,5 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -67,9 +66,7 @@ export function mergeRepoOwnedMcpServers(
 
 /** The repo's own (non-managed) server definitions, by name. */
 export async function repoOwnedMcpServers(repoPath: string): Promise<Record<string, unknown>> {
-  const raw = await readFile(path.join(repoPath, '.claude/mcp_settings.json'), 'utf8').catch(
-    () => null,
-  );
+  const raw = await readTextNoFollow(repoPath, '.claude/mcp_settings.json');
   if (raw === null) return {};
   try {
     const onDisk = (JSON.parse(raw) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
@@ -83,9 +80,7 @@ export async function repoOwnedMcpServers(repoPath: string): Promise<Record<stri
 }
 
 export async function mcpSettingsDefaultFor(repoPath: string): Promise<string> {
-  const raw = await readFile(path.join(repoPath, '.claude/mcp_settings.json'), 'utf8').catch(
-    () => null,
-  );
+  const raw = await readTextNoFollow(repoPath, '.claude/mcp_settings.json');
   if (raw === null) return DEFAULT_MCP_SETTINGS_JSON;
 
   let onDisk: Record<string, unknown>;
@@ -117,9 +112,7 @@ export async function mcpSettingsDefaultFor(repoPath: string): Promise<string> {
  *  submitting the form. So the field NAMES them rather than merging them in silently — the
  *  same stance the review dimensions take, where a skipped one is disclosed and never implied. */
 export async function repoOwnedMcpServerNames(repoPath: string): Promise<string[]> {
-  const raw = await readFile(path.join(repoPath, '.claude/mcp_settings.json'), 'utf8').catch(
-    () => null,
-  );
+  const raw = await readTextNoFollow(repoPath, '.claude/mcp_settings.json');
   if (raw === null) return [];
   try {
     const onDisk = (JSON.parse(raw) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
@@ -489,9 +482,12 @@ export const toolingInfrastructureStep: StepDefinition<
     if (tooling.keepRepoMcpServers === true) {
       mcpInput = mergeRepoOwnedMcpServers(mcpInput, await repoOwnedMcpServers(ctx.repoPath));
     }
-    const mcpPath = path.join(ctx.repoPath, '.claude/mcp_settings.json');
-    await mkdir(path.dirname(mcpPath), { recursive: true });
-    await writeFile(mcpPath, mcpSettingsFileContent(mcpInput), 'utf8');
+    await writeFileNoFollow(
+      ctx.repoPath,
+      '.claude/mcp_settings.json',
+      mcpSettingsFileContent(mcpInput),
+      { createParents: true },
+    );
 
     // Persist `rtk_enabled` on the repo row so the choice survives CLI swaps,
     // upgrade re-runs, and tasks that don't go through step 04. The `tooling`

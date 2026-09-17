@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -81,6 +81,30 @@ describe('applyKbWrites', () => {
     expect(created).toContain('# QA / order-delivery');
     expect(created).toContain('## Partial delivery');
     expect(created).toContain('Body.');
+  });
+
+  it('records a KB target that is a link as skipped, and still writes the rest', async () => {
+    const outside = path.join(tmpRoot, 'outside.md');
+    await writeFile(outside, 'not ours\n', 'utf8');
+    await symlink(outside, path.join(kbDir, 'LINKED.md'));
+
+    const { written, skipped } = await applyKbWrites(
+      tmpRoot,
+      [
+        { relPath: 'LINKED.md', section: 'X', content: 'Y' },
+        { relPath: 'OK2.md', section: 'OK section', content: 'OK body' },
+      ],
+      nowIso,
+    );
+
+    // One refused target must not discard the writes beside it — the same per-item contract
+    // `skipped` already carries for an unsafe path.
+    expect(written).toHaveLength(1);
+    expect(written[0]!.relPath).toBe('.haive-data/knowledge_base/OK2.md');
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.relPath).toBe('LINKED.md');
+    // And the file the link named is untouched.
+    expect(await readFile(outside, 'utf8')).toBe('not ours\n');
   });
 
   it('records skipped writes for unsafe paths instead of writing', async () => {
