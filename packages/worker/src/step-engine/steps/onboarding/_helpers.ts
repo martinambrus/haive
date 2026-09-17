@@ -1,4 +1,3 @@
-import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, isNull } from 'drizzle-orm';
@@ -158,15 +157,6 @@ export async function resolveConfirmedProject(
     (envPrev?.detect as { data?: { project?: Record<string, unknown> } } | null)?.data?.project,
     (confirmPrev?.output as { values?: Record<string, unknown> } | null)?.values,
   );
-}
-
-export async function pathExists(p: string): Promise<boolean> {
-  try {
-    await stat(p);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** Link-refusing readers for repository paths, under the names 03 and the workflow persona loader
