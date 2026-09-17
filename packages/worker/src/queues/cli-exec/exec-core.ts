@@ -1,4 +1,4 @@
-import { stat } from 'node:fs/promises';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -330,11 +330,14 @@ async function resolveTaskUploadsMount(
   });
   if (rows.length === 0) return null;
   const repoBase = repoMount.subpath.split('/').slice(0, 2).join('/');
-  const uploadsSubpath = `${repoBase}/.haive/task-uploads/${taskId}`;
-  const present = await stat(join(WORKER_REPO_STORAGE_ROOT, uploadsSubpath))
-    .then((s) => s.isDirectory())
-    .catch(() => false);
-  if (!present) return null;
+  const uploadsRel = `.haive/task-uploads/${taskId}`;
+  const uploadsSubpath = `${repoBase}/${uploadsRel}`;
+  // Anchored on the repository root `repoBase` names, never on the uploads dir itself: that dir
+  // is under `.haive/`, which the sandbox mounts read-write, so it is walked a component at a
+  // time. Lenient — null folds absence and a refusal into the same "skip the mount" answer the
+  // `catch` gave, and a LINKED uploads dir is no longer bound into the sandbox.
+  const uploads = await lstatNoFollow(join(WORKER_REPO_STORAGE_ROOT, repoBase), uploadsRel);
+  if (uploads?.kind !== 'directory') return null;
   return {
     source: repoMount.source,
     target: `${SANDBOX_WORKDIR}/.haive/task-uploads/${taskId}`,

@@ -1,7 +1,8 @@
-import { stat } from 'node:fs/promises';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { posix } from 'node:path';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
+import { workspaceAnchor } from '../../repo/worktree-paths.js';
 import { WORKER_REPO_STORAGE_ROOT } from './resolvers.js';
 
 /** The file `01_5-ripgrep-config` writes, at the repo root. */
@@ -52,8 +53,14 @@ export async function resolveRipgrepConfigEnv(
   const workerRoot = workerRootForMount(repoMount);
   if (!workerRoot) return {};
 
-  const found = await stat(posix.join(workerRoot, RIPGREP_CONFIG_FILE)).catch(() => null);
-  if (!found?.isFile()) return {};
+  // `workerRoot` is the WORKTREE this invocation is isolated to as often as the repo root, and a
+  // worktree sits under `.haive/`, which the sandbox mounts read-write — so it is SPLIT rather
+  // than used as the anchor. Lenient: null folds absent, unreadable and refused into the same
+  // empty env the `.catch` produced, so a `.ripgreprc` reached through a link is not this
+  // project's config and the variable simply stays unset.
+  const { anchor, prefix } = workspaceAnchor(workerRoot);
+  const found = await lstatNoFollow(anchor, `${prefix}${RIPGREP_CONFIG_FILE}`);
+  if (found?.kind !== 'file') return {};
 
   return {
     RIPGREP_CONFIG_PATH: posix.join(repoMount.target || containerWorkdir, RIPGREP_CONFIG_FILE),
