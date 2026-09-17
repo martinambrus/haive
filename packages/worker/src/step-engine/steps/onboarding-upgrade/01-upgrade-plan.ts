@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -30,7 +29,7 @@ import {
   loadBundlesForExpansion,
   type BundleWithMeta,
 } from '../../_custom-bundle-loader.js';
-import { pathExists, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
+import { resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import type { GenerateFilesDetect } from '../onboarding/07-generate-files.js';
 import { computeLineDelta } from './_diff.js';
 import { buildBlankRenderContext } from '../../../repo/blank-scaffold.js';
@@ -266,10 +265,14 @@ async function readDiskContent(
   repoPath: string,
   diskPath: string,
 ): Promise<{ content: string | null; hash: string | null }> {
-  const abs = path.join(repoPath, diskPath);
-  if (!(await pathExists(abs))) return { content: null, hash: null };
   try {
-    const raw = await readFile(abs, 'utf8');
+    // The probe and the read collapse into ONE lenient call: null already covers absent,
+    // unreadable and refused, which is what `pathExists` plus this `catch` folded together — and
+    // that probe was `stat`-based, so it followed a link and read a dangling one as absent.
+    // `diskPath` comes from the manifest, so a malformed one throws `invalid-path` from inside the
+    // primitive and lands in this same catch: one unreadable row, never a failed upgrade plan.
+    const raw = await readTextNoFollow(repoPath, diskPath);
+    if (raw === null) return { content: null, hash: null };
     const normalized = normalizeContent(raw);
     return { content: raw, hash: sha256Hex(normalized) };
   } catch {

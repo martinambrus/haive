@@ -1,7 +1,6 @@
-import { access } from 'node:fs/promises';
 import { HAIVE_DATA_FILES } from '@haive/shared';
 import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js';
-import { relUnder } from '@haive/shared/fs-safe';
+import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
 import { PLAN_SNAPSHOT_GIT_PATHS } from './snapshot-git.js';
@@ -35,13 +34,6 @@ export function planMergeWorktreePath(repoPath: string): string {
   return `${repoPath}/${WORKTREE_SUBDIR}/${PLAN_MERGE_DIR}`;
 }
 
-async function pathExists(p: string): Promise<boolean> {
-  return access(p).then(
-    () => true,
-    () => false,
-  );
-}
-
 /**
  * The scratch worktree, checked out DETACHED at the current HEAD.
  *
@@ -62,7 +54,10 @@ export async function ensurePlanMergeWorktree(repoPath: string): Promise<string>
   const registered =
     list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
   if (!registered) {
-    if (await pathExists(worktreePath)) {
+    // Anchored on the repository root, with the worktree walked below it. A LINK planted at that
+    // path still answers non-null and is still removed — a name taken is not free space, the same
+    // reading `_kb-legacy` settled on — but it is no longer followed to decide that.
+    if ((await lstatNoFollow(repoPath, `${WORKTREE_SUBDIR}/${PLAN_MERGE_DIR}`)) !== null) {
       await gitRun(repoPath, ['worktree', 'remove', '--force', worktreePath]);
     }
     const add = await gitRun(repoPath, ['worktree', 'add', '--detach', worktreePath, 'HEAD']);
