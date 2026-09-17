@@ -25,6 +25,7 @@ import {
   openFileNoFollow,
   removeNoFollow,
   renameNoFollow,
+  updateFileNoFollow,
   writeFileNoFollow,
 } from '../src/fs-safe.js';
 
@@ -536,6 +537,89 @@ describe('fs-safe write primitives', () => {
       await expect(writeFileNoFollow(root, '', 'x')).rejects.toMatchObject({
         reason: 'invalid-path',
       });
+    });
+  });
+
+  describe('updateFileNoFollow', () => {
+    it('hands the current content to the updater and writes back what it returns', async () => {
+      expect(await updateFileNoFollow(root, 'src/a.txt', (cur) => `${cur} world`)).toBe('updated');
+      expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('hello world');
+    });
+
+    it('writes SHORTER content with no hole in front of it', async () => {
+      // The trap this primitive exists to avoid: writing through a handle that has just been read
+      // lands at the old EOF, and `truncate` does not move the offset — so the file comes back
+      // NUL-padded. Asserted on the byte length, which a trimmed string comparison would hide.
+      await writeFile(path.join(root, 'src', 'a.txt'), 'a'.repeat(500), 'utf8');
+      await updateFileNoFollow(root, 'src/a.txt', () => 'tiny');
+      const buf = await readFile(path.join(root, 'src', 'a.txt'));
+      expect(buf.length).toBe(4);
+      expect(buf.toString('utf8')).toBe('tiny');
+    });
+
+    it('keeps the inode, owner and mode of the file it updates', async () => {
+      const before = await stat(path.join(root, 'src', 'a.txt'));
+      await updateFileNoFollow(root, 'src/a.txt', (cur) => `${cur}!`);
+      const after = await stat(path.join(root, 'src', 'a.txt'));
+      expect(after.ino).toBe(before.ino);
+      expect(after.mode & 0o777).toBe(0o600);
+      expect(after.uid).toBe(before.uid);
+    });
+
+    it('writes nothing when the updater returns null or the identical string', async () => {
+      const before = await stat(path.join(root, 'src', 'a.txt'));
+      expect(await updateFileNoFollow(root, 'src/a.txt', () => null)).toBe('unchanged');
+      expect(await updateFileNoFollow(root, 'src/a.txt', (cur) => cur)).toBe('unchanged');
+      const after = await stat(path.join(root, 'src', 'a.txt'));
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+      expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('hello');
+    });
+
+    it('creates the file, and its parents, only when asked to', async () => {
+      await expect(updateFileNoFollow(root, 'src/new.txt', () => 'x')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      const made = await updateFileNoFollow(
+        root,
+        'deep/er/new.txt',
+        (cur) => {
+          expect(cur).toBeNull();
+          return 'fresh';
+        },
+        { create: true, createParents: true },
+      );
+      expect(made).toBe('created');
+      expect(await readFile(path.join(root, 'deep', 'er', 'new.txt'), 'utf8')).toBe('fresh');
+    });
+
+    it('creates nothing when the updater declines an absent file', async () => {
+      expect(await updateFileNoFollow(root, 'src/absent.txt', () => null, { create: true })).toBe(
+        'unchanged',
+      );
+      await expect(stat(path.join(root, 'src', 'absent.txt'))).rejects.toThrow();
+    });
+
+    it('refuses a link at the leaf and leaves its target alone', async () => {
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'link.txt'));
+      await expect(
+        updateFileNoFollow(root, 'link.txt', () => 'rewritten', { create: true }),
+      ).rejects.toMatchObject({ reason: 'link' });
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+    });
+
+    it('refuses a linked ancestor', async () => {
+      await symlink(outside, path.join(root, 'linkdir'));
+      await expect(
+        updateFileNoFollow(root, 'linkdir/secret.txt', (cur) => `${cur} no`),
+      ).rejects.toMatchObject({ reason: 'link' });
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+    });
+
+    it('refuses a file over maxBytes rather than reading part of it', async () => {
+      await expect(
+        updateFileNoFollow(root, 'src/a.txt', (cur) => `${cur}!`, { maxBytes: 2 }),
+      ).rejects.toThrow(/over the 2 byte update cap/);
+      expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('hello');
     });
   });
 });

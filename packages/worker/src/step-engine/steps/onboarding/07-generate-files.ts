@@ -1,10 +1,15 @@
-import type { Dirent } from 'node:fs';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
-import { isPathContainmentError, renameNoFollow } from '@haive/shared/fs-safe';
+import {
+  isPathContainmentError,
+  lstatNoFollow,
+  readdirNoFollow,
+  readLinkNoFollow,
+  renameNoFollow,
+  updateFileNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import {
   buildCliRulesBlock,
   CLI_RULES_START,
@@ -26,7 +31,7 @@ import {
   shouldEmitAgentsReadme,
   stubCustomAgent,
 } from './_agent-templates.js';
-import { loadCliProviderMetadata, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { loadCliProviderMetadata, loadPreviousStepOutput } from './_helpers.js';
 import {
   buildClaudeSettingsJson,
   buildGeminiSettingsJson,
@@ -443,12 +448,11 @@ export async function findUnmanagedAgentFiles(
     const ext = target.format === 'toml' ? 'toml' : 'md';
     const managed = new Set<string>(agents.map((a) => `${a.id}.${ext}`));
     managed.add('README.md');
-    let entries: Dirent[];
-    try {
-      entries = await readdir(path.join(repoPath, target.dir), { withFileTypes: true });
-    } catch {
-      continue; // no such dir — the ordinary case on a first onboarding
-    }
+    // null covers absence — the ordinary case on a first onboarding — and a directory reached
+    // through a link, which is refused: a linked agents dir is handled at its own path, not followed
+    // from here.
+    const entries = await readdirNoFollow(repoPath, target.dir);
+    if (entries === null) continue;
     const files = entries
       .filter((e) => e.isFile())
       .map((e) => e.name)
@@ -673,7 +677,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     ];
     const existingFiles: string[] = [];
     for (const rel of candidates) {
-      if (await pathExists(path.join(ctx.repoPath, rel))) existingFiles.push(rel);
+      if ((await lstatNoFollow(ctx.repoPath, rel)) !== null) existingFiles.push(rel);
     }
 
     const taskRows = await ctx.db
@@ -779,14 +783,14 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const quarantinedAgentFiles: { from: string; to: string }[] = [];
 
     const writeIfAllowed = async (rel: string, contents: string): Promise<void> => {
-      const full = path.join(ctx.repoPath, rel);
-      const exists = await pathExists(full);
-      if (exists && !overwrite) {
+      // `lstatNoFollow` rather than the old `stat` probe: `stat` follows a link, and reports a
+      // DANGLING one as absent — so the exists check could pass and the write then land on whatever
+      // the link names. replace-atomic (the default) because every file here is machine-parsed.
+      if ((await lstatNoFollow(ctx.repoPath, rel)) !== null && !overwrite) {
         skippedFiles.push(rel);
         return;
       }
-      await mkdir(path.dirname(full), { recursive: true });
-      await writeFile(full, contents, 'utf8');
+      await writeFileNoFollow(ctx.repoPath, rel, contents, { createParents: true });
       wroteFiles.push(rel);
     };
 
@@ -801,31 +805,36 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       marker: string,
       endMarker?: string,
     ): Promise<void> => {
-      const full = path.join(ctx.repoPath, rel);
-      const exists = await pathExists(full);
-      if (exists) {
-        const current = await readFile(full, 'utf8');
-        if (current.includes(marker)) {
-          if (overwrite && endMarker && current.includes(endMarker)) {
-            const start = current.indexOf(marker);
-            const endIdx = current.indexOf(endMarker, start);
-            const end = endIdx + endMarker.length;
-            const replaced = current.slice(0, start) + block.trimEnd() + current.slice(end);
-            await writeFile(full, replaced, 'utf8');
-            wroteFiles.push(rel);
-            return;
+      // One descriptor for the read AND the write: reading a path and then writing it are two
+      // resolutions, and the file can become a link in between.
+      let appended = false;
+      const result = await updateFileNoFollow(
+        ctx.repoPath,
+        rel,
+        (current) => {
+          if (current === null) return block;
+          if (!current.includes(marker)) {
+            const sep = current.length === 0 || current.endsWith('\n') ? '' : '\n';
+            appended = true;
+            return current + sep + block;
           }
-          skippedFiles.push(rel);
-          return;
-        }
-        const sep = current.length === 0 || current.endsWith('\n') ? '' : '\n';
-        await writeFile(full, current + sep + block, 'utf8');
-        appendedFiles.push(rel);
-        return;
-      }
-      await mkdir(path.dirname(full), { recursive: true });
-      await writeFile(full, block, 'utf8');
-      wroteFiles.push(rel);
+          const start = current.indexOf(marker);
+          const endAt = endMarker === undefined ? -1 : current.indexOf(endMarker, start);
+          // `endAt === -1` covers both "no end marker" (the legacy never-overwrite append) and an
+          // end marker sitting BEFORE the start one. The old code tested `includes(endMarker)`,
+          // which is true in that second case, then took `indexOf(endMarker, start)` of -1 as a
+          // position and sliced from `endMarker.length - 1` — silently mangling the file.
+          if (!overwrite || endMarker === undefined || endAt === -1) return null;
+          return (
+            current.slice(0, start) + block.trimEnd() + current.slice(endAt + endMarker.length)
+          );
+        },
+        { create: true, createParents: true },
+      );
+      if (result === 'created') wroteFiles.push(rel);
+      else if (result === 'unchanged') skippedFiles.push(rel);
+      else if (appended) appendedFiles.push(rel);
+      else wroteFiles.push(rel);
     };
 
     await writeIfAllowed('.claude/workflow-config.json', workflowConfigJson(detected.framework));
@@ -889,11 +898,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         }
         if (quarantinedAgentFiles.some((q) => q.to.startsWith(`${destDir}/`))) {
           const readmeRel = `${destDir}/README.md`;
-          await writeFile(
-            path.join(ctx.repoPath, readmeRel),
-            legacyAgentsReadme(group.dir, destDir),
-            'utf8',
-          );
+          await writeFileNoFollow(ctx.repoPath, readmeRel, legacyAgentsReadme(group.dir, destDir), {
+            createParents: true,
+          });
           wroteFiles.push(readmeRel);
         }
       }
@@ -941,10 +948,23 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     if (rulesPlan.agentsRulesBlock) {
       await appendOrCreate('AGENTS.md', rulesPlan.agentsRulesBlock, CLI_RULES_START, CLI_RULES_END);
     }
+    // A repo may legitimately carry `CLAUDE.md -> AGENTS.md`: the convention predates Haive, and the
+    // target is written at its own path in the same run, so such a link is SKIPPED with a note
+    // rather than written through. Any OTHER link stays refused — `updateFileNoFollow` throws —
+    // because a rules file pointing somewhere nobody here chose is exactly what must not be written.
+    const linkedToAgentsMd = async (rel: string): Promise<boolean> => {
+      if ((await lstatNoFollow(ctx.repoPath, rel))?.kind !== 'symlink') return false;
+      const target = await readLinkNoFollow(ctx.repoPath, rel);
+      if (target !== 'AGENTS.md' && target !== './AGENTS.md') return false;
+      skippedFiles.push(rel);
+      return true;
+    };
     for (const rf of rulesPlan.importFiles) {
+      if (await linkedToAgentsMd(rf)) continue;
       await appendOrCreate(rf, '@AGENTS.md\n', '@AGENTS.md');
     }
     for (const rf of rulesPlan.copyFiles) {
+      if (await linkedToAgentsMd(rf)) continue;
       await appendOrCreate(
         rf,
         projectInfoMarkdown(detected.projectInfo),

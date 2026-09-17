@@ -53,7 +53,6 @@
   "packages/worker/src/step-engine/steps/onboarding/01-env-detect.ts": 2,
   "packages/worker/src/step-engine/steps/onboarding/01_5-ripgrep-config.ts": 2,
   "packages/worker/src/step-engine/steps/onboarding/04-tooling-infrastructure.ts": 5,
-  "packages/worker/src/step-engine/steps/onboarding/07-generate-files.ts": 9,
   "packages/worker/src/step-engine/steps/onboarding/07_7-secret-sweep.ts": 1,
   "packages/worker/src/step-engine/steps/onboarding/08-knowledge-acquisition.ts": 13,
   "packages/worker/src/step-engine/steps/onboarding/09_5-skill-generation.ts": 6,

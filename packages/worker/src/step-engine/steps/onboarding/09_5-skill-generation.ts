@@ -328,7 +328,16 @@ async function loadBundleSkills(ctx: StepContext): Promise<SkillEntry[]> {
   const out: SkillEntry[] = [];
   for (const item of items) {
     const parsed = skillEntrySchema.safeParse(item.normalizedSpec);
-    if (!parsed.success) continue;
+    if (!parsed.success) {
+      // Never a bare `continue`: the id grammar makes a malformed id the likeliest reason a skill
+      // disappears here, and it is the one cause a bundle author can fix — so name it, as
+      // `06_5-agent-discovery` and `_custom-bundle-loader` already do for their own drops.
+      ctx.logger.warn(
+        { sourcePath: item.sourcePath, issues: parsed.error.issues },
+        'skill-generation: bundle skill failed schema validation, skipping',
+      );
+      continue;
+    }
     out.push(parsed.data);
   }
   return out;
