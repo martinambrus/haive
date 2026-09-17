@@ -322,34 +322,44 @@ function runExtract(cmd: string, args: string[], okExits: number[] = [0]): Promi
 
 /** Feed the archive on STDIN, so the parent opens it and the child never resolves a path. Also the
  *  only way tar can read an archive the unprivileged extraction uid cannot open itself. */
-function runExtractStdin(cmd: string, args: string[], archivePath: string): Promise<void> {
+async function runExtractStdin(cmd: string, args: string[], archivePath: string): Promise<void> {
   const asRoot = process.getuid?.() === 0;
-  return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, {
-      stdio: ['pipe', 'ignore', 'pipe'],
-      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C' },
-      ...(asRoot ? { uid: EXTRACT_UID, gid: EXTRACT_UID } : {}),
+  const fh = await open(archivePath, 'r');
+  // The stream does NOT own this handle, so `autoClose` cannot be trusted with it: Node 26 turns a
+  // FileHandle reclaimed without an explicit close into a hard ERR_INVALID_STATE. MEASURED on CI —
+  // every one of 4670 tests passed and the run still exited 1 on "A FileHandle object was closed
+  // during garbage collection", which names no test because it is raised by the collector.
+  const stream = fh.createReadStream({ autoClose: false });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(cmd, args, {
+        stdio: ['pipe', 'ignore', 'pipe'],
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C' },
+        ...(asRoot ? { uid: EXTRACT_UID, gid: EXTRACT_UID } : {}),
+      });
+      let stderr = '';
+      proc.stderr?.on('data', (d: Buffer) => {
+        stderr += d.toString();
+      });
+      proc.on('error', reject);
+      proc.on('exit', (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`${cmd} failed (exit ${code}): ${stderr.trim()}`));
+      });
+      // A tool that rejects the archive exits while we are still writing, so a broken pipe is the
+      // NORMAL shape of a failure here. The exit code is what to report; an unhandled 'error' on
+      // the write end would take the whole process down instead of failing this extraction.
+      stream.on('error', reject);
+      proc.stdin?.on('error', () => undefined);
+      stream.pipe(proc.stdin!);
     });
-    let stderr = '';
-    proc.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(`${cmd} failed (exit ${code}): ${stderr.trim()}`));
-    });
-    open(archivePath, 'r')
-      .then((fh) => {
-        const stream = fh.createReadStream({ autoClose: true });
-        stream.on('error', reject);
-        stream.pipe(proc.stdin!);
-      })
-      .catch(reject);
-  });
+  } finally {
+    stream.destroy();
+    await fh.close().catch(() => undefined);
+  }
 }
 
 export type DroppedReason = 'symlink' | 'special-file' | 'setuid' | 'hard-link' | 'foreign-owner';
@@ -473,7 +483,12 @@ export async function extractArchive(
   const expectedUid = asRoot ? EXTRACT_UID : selfUid;
 
   const stageLeaf = `.haive-extract-${process.pid}-${randomUUID()}`;
-  await ensureDirNoFollow(anchor, stageLeaf, { mode: 0o700 });
+  // 0711, not 0700: the stage stays UNLISTABLE by others, but the extraction uid has to TRAVERSE it
+  // to reach the `x/` it writes into. MEASURED in the worker image — 0700 owned by root gave
+  // `tar: .../x: Cannot open: Permission denied` for every archive, because uid 65534 could not
+  // cross the parent. The host CI job never caught it: a non-root worker cannot setuid, so it keeps
+  // its own identity and the traversal always worked there.
+  await ensureDirNoFollow(anchor, stageLeaf, { mode: 0o711 });
   try {
     const innerRel = `${stageLeaf}/x`;
     await ensureDirNoFollow(anchor, innerRel, { mode: 0o755 });

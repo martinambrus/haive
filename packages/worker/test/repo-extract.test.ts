@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
@@ -34,6 +34,13 @@ let tmpRoot: string;
 
 beforeEach(async () => {
   tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-extract-'));
+  // mkdtemp is ALWAYS 0700, which the unprivileged extraction uid cannot traverse — so when these
+  // run as root (the in-image CI job) every case fails on the fixture rather than on the code, and
+  // both the stage and the archive `unzip` has to open sit under here. MEASURED in the running
+  // worker: every level of every real anchor chain — the storage and bundle roots, each `<userId>`
+  // and `<repoId>`, `.haive` and the uploads dir — is 0755. So this matches production rather than
+  // relaxing anything: extraction requires the destination's parents to be traversable.
+  await chmod(tmpRoot, 0o711);
 });
 
 afterEach(async () => {
