@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyApplyAction,
   resolveBundleItemId,
+  safeDiskRel,
   type ApplyAction,
   type ApplySelections,
 } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
@@ -57,6 +58,40 @@ function classify(
   const e = entry(bucket, diskPath, over);
   return classifyApplyAction(e, [e, ...others], selections(sel));
 }
+
+describe('safeDiskRel', () => {
+  // Every write and delete in the upgrade and rollback steps joins `diskPath` onto the repository
+  // root, and it arrives from a plan row — i.e. from the database — with no validation anywhere
+  // before this.
+  it('accepts the disk paths the manifest actually produces', () => {
+    for (const p of [
+      'AGENTS.md',
+      '.claude/agents/peer-reviewer.md',
+      '.claude/skills/testing/SKILL.md',
+      '.haive/install.json',
+      // Dotfile SEGMENTS are not traversal, and the Drupal LSP plugin files are full of them.
+      '.claude/plugins/drupal-php-lsp/.claude-plugin/plugin.json',
+    ]) {
+      expect(safeDiskRel(p)).toBe(p);
+    }
+  });
+
+  it('refuses anything that would leave the repository, by returning null rather than throwing', () => {
+    for (const p of ['..', '../escape.md', 'a/../b.md', '/etc/passwd', '']) {
+      // Returning null is the whole point: the apply branch is not inside a `try`, so a throw would
+      // abort every remaining entry instead of skipping the one bad row.
+      expect(safeDiskRel(p)).toBeNull();
+    }
+  });
+
+  // Counterintuitive and deliberate: a template ID is a COMPOSITE KEY that embeds a path, so it
+  // passes this check while yielding a nonsense rel — its first segment contains `..` without
+  // BEING `..`. The guard is "never hand an id to it", not "it will catch one".
+  it('does NOT protect against a template id being passed where a disk path belongs', () => {
+    const id = 'plugin.drupal-php-lsp..claude/plugins/drupal-php-lsp/.claude-plugin/plugin.json';
+    expect(safeDiskRel(id)).not.toBeNull();
+  });
+});
 
 describe('classifyApplyAction — primary buckets', () => {
   it('clean_update with id selected → apply', () => {

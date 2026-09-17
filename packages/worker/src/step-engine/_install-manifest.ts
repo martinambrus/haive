@@ -1,5 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getHaiveVersion, normalizeContent, type InstallManifest } from '@haive/shared';
@@ -75,11 +74,8 @@ export async function writeInstallManifestFromLiveRows(
       : {}),
   };
 
-  const installDir = path.join(ctx.repoPath, '.haive');
-  const installPath = path.join(installDir, 'install.json');
-  await mkdir(installDir, { recursive: true });
   const content = normalizeContent(`${JSON.stringify(installManifest, null, 2)}\n`);
-  await writeFile(installPath, content, 'utf8');
+  await writeFileNoFollow(ctx.repoPath, '.haive/install.json', content, { createParents: true });
   ctx.logger.info(
     {
       installPath: '.haive/install.json',
