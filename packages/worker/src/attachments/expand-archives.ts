@@ -1,7 +1,8 @@
-import { lstat, readdir, stat } from 'node:fs/promises';
 import {
   chmodNoFollow,
   chownNoFollow,
+  lstatNoFollow,
+  readdirNoFollow,
   removeNoFollow,
   renameNoFollow,
   writeFileNoFollow,
@@ -63,37 +64,47 @@ interface WalkedFile {
   size: number;
 }
 
-/** Every REGULAR file under `root`. Symlinks, devices and fifos are dropped
+/** Every REGULAR file under `baseRel`. Symlinks, devices and fifos are dropped
  *  rather than followed: an archive is untrusted input, and a symlink is how one
  *  reaches out of the directory it was extracted into. Directories are implied by
- *  the paths and recreated at the destination. */
+ *  the paths and recreated at the destination.
+ *
+ *  TWO rels are tracked on purpose. `baseRel` plus the walk position is what the
+ *  primitives walk from the repository root — the extraction directory sits under
+ *  `.haive/`, which the sandbox mounts read-write, so neither it nor the uploads dir
+ *  above it can be the anchor — while a `WalkedFile.rel` stays relative to the
+ *  extraction root, because that is what places the file at the destination. */
 async function walkRegularFiles(
-  root: string,
+  anchor: string,
+  baseRel: string,
   rel = '',
 ): Promise<{ files: WalkedFile[]; skipped: number }> {
-  const entries = await readdir(path.join(root, rel), { withFileTypes: true });
+  const entries = await readdirNoFollow(anchor, rel === '' ? baseRel : `${baseRel}/${rel}`);
+  // Absent or refused: the extraction tree should be there, so count it rather than
+  // throwing — the caller already reports what the walk could not take.
+  if (entries === null) return { files: [], skipped: 1 };
   const files: WalkedFile[] = [];
   let skipped = 0;
   for (const entry of entries) {
     const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`;
     // lstat, not the dirent alone: what matters is that the entry is not a
     // symlink, and that is the question lstat answers about the entry itself.
-    const st = await lstat(path.join(root, childRel)).catch(() => null);
+    const st = await lstatNoFollow(anchor, `${baseRel}/${childRel}`);
     if (!st) {
       skipped += 1;
       continue;
     }
-    if (st.isDirectory()) {
-      const nested = await walkRegularFiles(root, childRel);
+    if (st.kind === 'directory') {
+      const nested = await walkRegularFiles(anchor, baseRel, childRel);
       files.push(...nested.files);
       skipped += nested.skipped;
       continue;
     }
-    if (!st.isFile()) {
+    if (st.kind !== 'file') {
       skipped += 1;
       continue;
     }
-    files.push({ rel: childRel, size: st.size });
+    files.push({ rel: childRel, size: st.stats.size });
   }
   return { files, skipped };
 }
@@ -101,11 +112,13 @@ async function walkRegularFiles(
 /** A directory name for the archive's contents that is not already taken. Mirrors
  *  the api's per-directory de-dupe, so an archive uploaded twice lands as `spec/`
  *  and `spec (2)/` rather than merging into one tree. */
-async function uniqueDirName(uploadsDir: string, stem: string): Promise<string> {
+async function uniqueDirName(anchor: string, uploadsRel: string, stem: string): Promise<string> {
   const base = sanitizeAttachmentPath(stem).split('/').pop() || 'archive';
   let candidate = base;
   let n = 1;
-  while (await stat(path.join(uploadsDir, candidate)).catch(() => null)) {
+  // A LINK at that name counts as TAKEN, which is the point: an occupied name is not free
+  // space, and the `stat` this replaced would have followed it to decide.
+  while ((await lstatNoFollow(anchor, `${uploadsRel}/${candidate}`)) !== null) {
     n += 1;
     candidate = `${base} (${n})`;
   }
@@ -247,11 +260,19 @@ export async function ensureArchivesExpanded(
     // put the expansion's working set on a different filesystem from the attachments it feeds,
     // turning every `placeFile` rename into a cross-device copy.
     const tmp = path.join(uploadsDir, `.expanding-${archive.id}`);
+    // The same directory as a rel, which is what everything except `extractArchive` wants: that
+    // takes an absolute destination, while the walk, the placement source and the cleanup are all
+    // anchored on the repository root.
+    const tmpRel = `${uploadsRel}/.expanding-${archive.id}`;
     let note: string | null = null;
     let added = 0;
     try {
-      const onDisk = await stat(archive.storedPath).catch(() => null);
-      if (!onDisk?.isFile()) {
+      // Split PER ROW rather than reusing the first archive's anchor with a composed rel: a row
+      // whose stored path is not the layout the api writes is then reported as missing instead of
+      // being probed at a guessed path — the same refusal the split above makes for the batch.
+      const rowSplit = splitAttachmentStoredPath(archive, taskId);
+      const onDisk = rowSplit ? await lstatNoFollow(rowSplit.anchor, rowSplit.rel) : null;
+      if (onDisk?.kind !== 'file') {
         note = 'the archive file is missing from the task workspace';
       } else {
         // The report is the extraction's own account of what it would not write — symlinks, device
@@ -259,7 +280,7 @@ export async function ensureArchivesExpanded(
         // counted by `walkRegularFiles` as `skipped`, and now they are gone before that walk runs,
         // so without this the drop would happen with nothing said about it.
         const report = await extractArchive(archive.storedPath, format, tmp);
-        const { files, skipped } = await walkRegularFiles(tmp);
+        const { files, skipped } = await walkRegularFiles(anchor, tmpRel);
         const dropNote = report.note;
         const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
 
@@ -274,7 +295,7 @@ export async function ensureArchivesExpanded(
         } else if (totalBytes > ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES) {
           note = `expands to ${Math.round(totalBytes / 1024 / 1024)} MB, over the ${Math.round(ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES / 1024 / 1024)} MB limit — nothing was extracted`;
         } else {
-          const dirName = await uniqueDirName(uploadsDir, archiveStem(archive.filename));
+          const dirName = await uniqueDirName(anchor, uploadsRel, archiveStem(archive.filename));
           // Two members can sanitise to ONE name (`a?.md` and `a*.md` both become
           // `a_.md`), and the second would then overwrite the first while both
           // rows pointed at it. Same ` (n)` de-dupe the api applies to uploads.
@@ -290,12 +311,7 @@ export async function ensureArchivesExpanded(
               log.warn({ member: file.rel, archive: archive.filename }, 'dropped archive member');
               continue;
             }
-            const stored = await placeFile(
-              anchor,
-              uploadsRel,
-              relPath,
-              `${uploadsRel}/.expanding-${archive.id}/${file.rel}`,
-            );
+            const stored = await placeFile(anchor, uploadsRel, relPath, `${tmpRel}/${file.rel}`);
             await db.insert(schema.taskAttachments).values({
               taskId,
               userId: archive.userId,
