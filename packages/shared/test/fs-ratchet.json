@@ -32,12 +32,5 @@
   "packages/worker/src/step-engine/steps/onboarding/_helpers.ts": 1,
   "packages/worker/src/step-engine/steps/plan/00-plan-inputs.ts": 2,
   "packages/worker/src/step-engine/steps/plan/01-plan-build.ts": 1,
-  "packages/worker/src/step-engine/steps/plan/02-plan-coverage.ts": 1,
-  "packages/worker/src/step-engine/steps/workflow/01a-app-boot.ts": 1,
-  "packages/worker/src/step-engine/steps/workflow/06a-db-migrate.ts": 1,
-  "packages/worker/src/step-engine/steps/workflow/08-phase-5-verify.ts": 1,
-  "packages/worker/src/step-engine/steps/workflow/08b-test-management.ts": 2,
-  "packages/worker/src/step-engine/steps/workflow/_app-runtime.ts": 2,
-  "packages/worker/src/step-engine/steps/workflow/_browser-runtime.ts": 1,
-  "packages/worker/src/step-engine/steps/workflow/_test-preflight.ts": 1
+  "packages/worker/src/step-engine/steps/plan/02-plan-coverage.ts": 1
 }

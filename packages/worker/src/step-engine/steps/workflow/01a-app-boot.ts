@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -77,10 +78,13 @@ async function detectPackageManager(workspace: string): Promise<PackageManager> 
 }
 
 async function readPackageScripts(workspace: string): Promise<Record<string, string>> {
-  const pkgPath = path.join(workspace, 'package.json');
-  if (!(await pathExists(pkgPath))) return {};
+  // The workspace is a WORKTREE, which sits under `.haive/` and so is never the anchor. One lenient
+  // read replaces the probe AND the read: `null` covers absent, unreadable and refused alike, which
+  // is what the `pathExists` + `catch` pair already folded together.
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const raw = await readTextNoFollow(anchor, `${prefix}package.json`);
+  if (raw === null) return {};
   try {
-    const raw = await readFile(pkgPath, 'utf8');
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (parsed?.scripts && typeof parsed.scripts === 'object') {
       return parsed.scripts as Record<string, string>;

@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from '../onboarding/_helpers.js';
@@ -71,21 +72,24 @@ const FRAMEWORK_MARKERS: ReadonlyArray<readonly [Framework, readonly string[]]> 
 ];
 
 async function detectFramework(workspace: string): Promise<Framework> {
+  // The workspace is a WORKTREE, which sits under `.haive/` — the tree the sandbox mounts
+  // read-write — so it can never be the anchor itself. Both probes in this function are converted
+  // together; the OTHER `pathExists` calls in this package stay for the `pathExists` gap.
+  const { anchor, prefix } = workspaceAnchor(workspace);
   for (const [framework, markers] of FRAMEWORK_MARKERS) {
     for (const marker of markers) {
-      if (await pathExists(path.join(workspace, ...marker.split('/')))) return framework;
+      // A marker reached through a link no longer counts as present — and these markers are
+      // deliberately TRACKED files, which a worktree materialises and a link is not.
+      if ((await lstatNoFollow(anchor, `${prefix}${marker}`)) !== null) return framework;
     }
   }
-  const composer = path.join(workspace, 'composer.json');
-  if (await pathExists(composer)) {
-    try {
-      const raw = await readFile(composer, 'utf8');
-      if (/drupal\/core/.test(raw)) return 'drupal';
-      if (/laravel\/framework/.test(raw)) return 'laravel';
-      if (/symfony\//.test(raw)) return 'symfony';
-    } catch {
-      /* fall through */
-    }
+  // One lenient read replaces the probe AND the read: `null` covers absent, unreadable and refused
+  // alike, which is exactly what the `pathExists` + `catch` pair already folded together.
+  const raw = await readTextNoFollow(anchor, `${prefix}composer.json`);
+  if (raw !== null) {
+    if (/drupal\/core/.test(raw)) return 'drupal';
+    if (/laravel\/framework/.test(raw)) return 'laravel';
+    if (/symfony\//.test(raw)) return 'symfony';
   }
   return 'unknown';
 }

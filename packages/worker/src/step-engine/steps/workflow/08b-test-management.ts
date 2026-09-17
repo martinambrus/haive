@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
@@ -327,10 +328,14 @@ export function buildEnumerateAllCommand(
   return { kind: 'host', args: ['npx', 'playwright', 'test', '--list'], cwd: root };
 }
 
-async function readJson(file: string): Promise<Record<string, unknown> | null> {
-  if (!(await pathExists(file))) return null;
+/** One JSON manifest from the workspace, or null when it is absent, unreadable, refused or does not
+ *  parse — the four outcomes the `pathExists` + `catch` pair already collapsed into one. */
+async function readJson(workspace: string, rel: string): Promise<Record<string, unknown> | null> {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const raw = await readTextNoFollow(anchor, `${prefix}${rel}`);
+  if (raw === null) return null;
   try {
-    return JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
+    return JSON.parse(raw) as Record<string, unknown>;
   } catch {
     return null;
   }
@@ -376,7 +381,8 @@ const ROOT_SEARCH_SKIP = new Set(['node_modules', 'vendor', 'dist', 'build', 'co
 async function resolveFrameworkRoot(workspace: string, configs: string[]): Promise<string | null> {
   if (configs.length === 0) return '';
   if (await anyExists(workspace, configs)) return '';
-  const entries = await readdir(workspace, { withFileTypes: true }).catch(() => []);
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const entries = (await readdirNoFollow(anchor, prefix === '' ? '' : prefix.slice(0, -1))) ?? [];
   const dirs = entries
     .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !ROOT_SEARCH_SKIP.has(e.name))
     .map((e) => e.name)
@@ -428,12 +434,12 @@ export async function scanTestInfra(workspace: string): Promise<InfraScan> {
     frameworks.push('pytest');
   }
 
-  const pkg = await readJson(path.join(workspace, 'package.json'));
+  const pkg = await readJson(workspace, 'package.json');
   const pkgScripts = (pkg?.scripts ?? {}) as Record<string, unknown>;
   if (typeof pkgScripts.test === 'string' && pkgScripts.test.length > 0) {
     frameworks.push('pkg-script');
   }
-  const composer = await readJson(path.join(workspace, 'composer.json'));
+  const composer = await readJson(workspace, 'composer.json');
   const composerScripts = (composer?.scripts ?? {}) as Record<string, unknown>;
   if (composerScripts.test !== undefined) {
     frameworks.push('composer-script');

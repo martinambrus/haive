@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -207,10 +208,13 @@ export function buildVerifyCommand(
 }
 
 async function readJsonScripts(workspace: string, file: string): Promise<Record<string, string>> {
-  const p = path.join(workspace, file);
-  if (!(await pathExists(p))) return {};
+  // One lenient read for the probe and the read together: `null` is absent, unreadable or refused,
+  // and all three already meant "no scripts" here.
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const raw = await readTextNoFollow(anchor, `${prefix}${file}`);
+  if (raw === null) return {};
   try {
-    const parsed = JSON.parse(await readFile(p, 'utf8')) as Record<string, unknown>;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
     const s = parsed?.scripts;
     return s && typeof s === 'object' ? (s as Record<string, string>) : {};
   } catch {
