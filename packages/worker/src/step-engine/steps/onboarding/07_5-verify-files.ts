@@ -1,10 +1,10 @@
-import path from 'node:path';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { listFilesMatching, pathExists } from './_helpers.js';
+import { listFilesMatching } from './_helpers.js';
 
 interface ActiveAgentsTarget {
   dir: string;
@@ -107,8 +107,7 @@ export const verifyFilesStep: StepDefinition<
       detail: `found ${skillsCount}`,
     });
 
-    const workflowConfigPath = path.join(repo, '.claude', 'workflow-config.json');
-    const workflowConfigOk = await pathExists(workflowConfigPath);
+    const workflowConfigOk = await hasWorkspaceEntry(repo, '.claude/workflow-config.json');
     checks.push({
       id: 'workflow_config',
       label: '.claude/workflow-config.json exists',

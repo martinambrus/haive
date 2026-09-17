@@ -1,10 +1,10 @@
-import path from 'node:path';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, ExecutionPath } from '@haive/shared';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseConfigRecommendation, markRecommended } from './_gate1-recommendation.js';
 import { buildBrowserModeOptions } from './_browser-modes.js';
@@ -140,8 +140,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     // ddev probe mirrors 08a's detect. Determines whether the mcp/interactive browser
     // options are offered.
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-    const ddevMode =
-      ws !== null && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')));
+    const ddevMode = ws !== null && (await hasWorkspaceEntry(ws.workspace, '.ddev/config.yaml'));
     // Best-effort app-runner detection: a ready env image with browser testing means 08a
     // will run mcp/interactive INSIDE the app-runner. 08a is authoritative.
     let appRunnerMode = false;
