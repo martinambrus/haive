@@ -6,7 +6,6 @@
   "packages/api/src/routes/db-dumps.ts": 8,
   "packages/api/src/routes/filesystem.ts": 1,
   "packages/api/src/routes/plan.ts": 1,
-  "packages/api/src/routes/repos.ts": 15,
   "packages/api/src/routes/tasks/_helpers.ts": 1,
   "packages/api/src/routes/tasks/browser-access.ts": 1,
   "packages/api/src/routes/user-settings.ts": 7,

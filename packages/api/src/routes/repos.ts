@@ -1,12 +1,23 @@
-import { createWriteStream } from 'node:fs';
-import { mkdir, open, readdir, readFile, rm, stat, rename, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq, and, desc, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { removeNoFollow } from '@haive/shared/fs-safe';
+import {
+  ensureDirNoFollow,
+  isPathContainmentError,
+  lstatNoFollow,
+  openFileNoFollow,
+  readFileNoFollow,
+  readTextNoFollow,
+  readdirNoFollow,
+  relUnder,
+  removeNoFollow,
+  renameNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
 import { execFile } from 'node:child_process';
@@ -21,7 +32,6 @@ import {
   HAIVE_DATA_DIR,
   type ArchiveFormat,
 } from '@haive/shared';
-import { readFileNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import { parseScpLikeGitUrl } from '@haive/shared/schemas';
 import {
@@ -68,6 +78,50 @@ function detectArchiveFormat(filename: string): ArchiveFormat | null {
 
 function repoStorageRoot(): string {
   return process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+}
+
+/**
+ * The uploads staging directory, split for the anchored walk.
+ *
+ * That directory cannot itself be the anchor: it lives in the `haive_repos` named volume, which
+ * `ddev-runner.ts` and `app-runner.ts` both mount WHOLE at `/repos`, so a project's own runtime
+ * can write into it. The storage root is the trusted end of the path, and every component below
+ * it is walked rather than resolved by name.
+ */
+function uploadsRel(userId: string): string {
+  return `_uploads/${userId}`;
+}
+
+/**
+ * The rel of an archive this route wrote, recovered from the session row.
+ *
+ * A row carries an ABSOLUTE path, which is a path this code did not build, so the SHAPE is the
+ * validation — the rule `splitAttachmentStoredPath` already applies to an attachment. Anything
+ * that is not exactly `<storage root>/_uploads/<userId>/<name>` is refused rather than repaired,
+ * since every path the two init routes write has that shape.
+ */
+function uploadArchiveRel(userId: string, stored: string): string {
+  const prefix = `${path.join(repoStorageRoot(), '_uploads', userId)}/`;
+  const name = stored.startsWith(prefix) ? stored.slice(prefix.length) : '';
+  if (name === '' || name.includes('/')) {
+    throw new HttpError(409, 'Upload session archive is not in this user uploads directory');
+  }
+  return `${uploadsRel(userId)}/${name}`;
+}
+
+/** Roll a partial upload back to the byte count the session row still claims.
+ *
+ *  A second verified open rather than the write stream's own handle: MEASURED on node v26.7.0, a
+ *  FileHandle write stream CLOSES the handle at `finish`, so after a failed chunk the name has to
+ *  be resolved again anyway — and resolving it again re-checks it. */
+async function truncateUploadArchive(anchor: string, rel: string, size: number): Promise<void> {
+  const fh = await openFileNoFollow(anchor, rel, 'read-write');
+  if (!fh) return;
+  try {
+    await fh.truncate(size);
+  } finally {
+    await fh.close();
+  }
 }
 
 function deriveRepoName(opts: {
@@ -337,21 +391,38 @@ repoRoutes.post('/upload', async (c) => {
     .returning();
   const repo = inserted[0]!;
 
-  const uploadDir = path.join(repoStorageRoot(), '_uploads', userId);
-  await mkdir(uploadDir, { recursive: true });
+  const storageRoot = repoStorageRoot();
+  await ensureDirNoFollow(storageRoot, uploadsRel(userId), { mode: 0o755 });
   const ext = format === 'tar.gz' ? 'tar.gz' : format;
-  const archivePath = path.join(uploadDir, `${repo.id}.${ext}`);
+  const archiveRel = `${uploadsRel(userId)}/${repo.id}.${ext}`;
+  const archivePath = path.join(storageRoot, archiveRel);
 
+  let fh: FileHandle | null = null;
   try {
+    // Created exclusively and streamed through that one descriptor, so the bytes cannot land
+    // anywhere but the inode this route made. `open(path, 'w')` truncated whatever stood at the
+    // name and followed a link there; the name embeds a fresh row id, so EEXIST is a collision to
+    // fail on rather than overwrite.
+    fh = await openFileNoFollow(storageRoot, archiveRel, 'create-exclusive', { fileMode: 0o644 });
     const body = archiveField.stream() as unknown as ReadableStream<Uint8Array>;
     const nodeStream = Readable.fromWeb(body as never);
-    await pipeline(nodeStream, createWriteStream(archivePath));
-    const written = await stat(archivePath);
-    if (written.size > maxUploadBytes()) {
+    let total = 0;
+    nodeStream.on('data', (buf: Buffer) => {
+      total += buf.length;
+    });
+    await pipeline(nodeStream, fh.createWriteStream());
+    // Counted off the stream rather than stat'ed back off the path. The multipart `size` checked
+    // above is the client's claim, which is what this second check has always been guarding.
+    if (total > maxUploadBytes()) {
       throw new HttpError(413, `archive exceeds ${maxUploadBytes()} bytes limit`);
     }
   } catch (err) {
-    await rm(archivePath, { force: true }).catch(() => {});
+    if (fh) {
+      // The stream closes the handle at `finish` and `pipeline` destroys it on failure; a close
+      // after either is a no-op, and this also covers a stream that never started.
+      await fh.close().catch(() => {});
+      await removeNoFollow(storageRoot, archiveRel).catch(() => {});
+    }
     await db.delete(schema.repositories).where(eq(schema.repositories.id, repo.id));
     if (err instanceof HttpError) throw err;
     throw new HttpError(500, `failed to write archive: ${(err as Error).message}`);
@@ -412,8 +483,8 @@ repoRoutes.post('/upload/init', async (c) => {
     throw new HttpError(400, 'unsupported archive format (allowed: .zip, .tar, .tar.gz, .tgz)');
   }
 
-  const uploadDir = path.join(repoStorageRoot(), '_uploads', userId);
-  await mkdir(uploadDir, { recursive: true });
+  const storageRoot = repoStorageRoot();
+  await ensureDirNoFollow(storageRoot, uploadsRel(userId), { mode: 0o755 });
 
   const inserted = await db
     .insert(schema.repoUploads)
@@ -433,8 +504,13 @@ repoRoutes.post('/upload/init', async (c) => {
   const session = inserted[0]!;
 
   const ext = format === 'tar.gz' ? 'tar.gz' : format;
-  const archivePath = path.join(uploadDir, `${session.id}.${ext}.partial`);
-  const fh = await open(archivePath, 'w');
+  const archiveRel = `${uploadsRel(userId)}/${session.id}.${ext}.partial`;
+  const archivePath = path.join(storageRoot, archiveRel);
+  // `open(path, 'w')` truncated whatever stood at the name, a link included. The name embeds a
+  // fresh session id, so exclusive creation is the same outcome for every legitimate call.
+  const fh = await openFileNoFollow(storageRoot, archiveRel, 'create-exclusive', {
+    fileMode: 0o644,
+  });
   await fh.close();
 
   const updated = await db
@@ -505,30 +581,28 @@ repoRoutes.put('/upload/:id/chunk', async (c) => {
 
   const rawBody = c.req.raw.body;
   if (!rawBody) throw new HttpError(400, 'request body is empty');
+  const storageRoot = repoStorageRoot();
+  const archiveRel = uploadArchiveRel(userId, row.archivePath);
   const nodeStream = Readable.fromWeb(rawBody as never);
-  const writeStream = createWriteStream(row.archivePath, { flags: 'a' });
+  // Written at the session's OWN offset instead of with `flags: 'a'`: the offset is the fact the
+  // row already tracks and the claim above just verified, where appending trusted the file's
+  // current length. MEASURED on node v26.7.0, `createWriteStream({ start })` positions the write.
+  const fh = await openFileNoFollow(storageRoot, archiveRel, 'read-write', { strict: true }).catch(
+    (err: unknown) => containmentHttpError(err, 'Upload archive is outside the uploads directory'),
+  );
+  if (!fh) throw new HttpError(409, 'Upload archive is missing on disk');
   let written = 0;
   nodeStream.on('data', (buf: Buffer) => {
     written += buf.length;
   });
   try {
-    await pipeline(nodeStream, writeStream);
+    await pipeline(nodeStream, fh.createWriteStream({ start }));
   } catch (err) {
-    const fh = await open(row.archivePath, 'r+');
-    try {
-      await fh.truncate(Number(row.bytesReceived));
-    } finally {
-      await fh.close();
-    }
+    await truncateUploadArchive(storageRoot, archiveRel, Number(row.bytesReceived));
     throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
   }
   if (written !== expectedLen) {
-    const fh = await open(row.archivePath, 'r+');
-    try {
-      await fh.truncate(Number(row.bytesReceived));
-    } finally {
-      await fh.close();
-    }
+    await truncateUploadArchive(storageRoot, archiveRel, Number(row.bytesReceived));
     throw new HttpError(400, `chunk body length ${written} != expected ${expectedLen}`);
   }
 
@@ -557,16 +631,20 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
     throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
   }
 
-  const onDisk = await stat(row.archivePath).catch(() => null);
-  if (!onDisk || onDisk.size !== Number(row.totalSize)) {
+  const storageRoot = repoStorageRoot();
+  const archiveRel = uploadArchiveRel(userId, row.archivePath);
+  // A link at that name now fails this check rather than reporting its target's size.
+  const onDisk = await lstatNoFollow(storageRoot, archiveRel);
+  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
     throw new HttpError(409, 'archive size mismatch on disk');
   }
 
-  const finalPath = row.archivePath.replace(/\.partial$/, '');
-  if (finalPath === row.archivePath) {
+  const finalRel = archiveRel.replace(/\.partial$/, '');
+  if (finalRel === archiveRel) {
     throw new HttpError(500, 'archive path missing .partial suffix');
   }
-  await rename(row.archivePath, finalPath);
+  const finalPath = path.join(storageRoot, finalRel);
+  await renameNoFollow(storageRoot, archiveRel, finalRel);
 
   const repoName = deriveRepoName({
     name: row.name ?? undefined,
@@ -621,7 +699,14 @@ repoRoutes.delete('/upload/:id', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
-  await rm(row.archivePath, { force: true }).catch(() => {});
+  // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
+  // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem rather
+  // than a reason to refuse the cancel.
+  try {
+    await removeNoFollow(repoStorageRoot(), uploadArchiveRel(userId, row.archivePath));
+  } catch {
+    // absent, refused, or a path this api never wrote
+  }
   await db
     .update(schema.repoUploads)
     .set({ status: 'cancelled', updatedAt: new Date() })
@@ -799,13 +884,12 @@ function getScaffoldEntries(): Set<string> {
  * onboard would hide the feature outright.
  */
 export async function hasOnboardableSource(root: string): Promise<boolean> {
-  try {
-    const entries = await readdir(root);
-    const scaffold = getScaffoldEntries();
-    return entries.some((e) => !scaffold.has(e));
-  } catch {
-    return true;
-  }
+  // Lenient rather than strict, because `null` covers an absent root, an unreadable one and a
+  // refused one alike — and all three mean the same thing here, per the note above.
+  const entries = await readdirNoFollow(root, '');
+  if (entries === null) return true;
+  const scaffold = getScaffoldEntries();
+  return entries.some((e) => !scaffold.has(e.name));
 }
 
 /** Which ONBOARDING_MARKERS exist on disk. NOT the onboarded verdict on its own — every
@@ -813,11 +897,17 @@ export async function hasOnboardableSource(root: string): Promise<boolean> {
  *  cancelled run and a live one leave exactly the same files; `resolveOnboardingVerdict`
  *  combines this with the repo's onboarding task history. Marker checks run in parallel;
  *  results keep marker order so the detail endpoint's present/missing lists stay stable. */
-async function checkOnboardingMarkers(
+export async function checkOnboardingMarkers(
   root: string,
 ): Promise<{ present: string[]; missing: string[] }> {
   const results = await Promise.all(
-    ONBOARDING_MARKERS.map(async (rel) => [rel, await pathExists(path.join(root, rel))] as const),
+    ONBOARDING_MARKERS.map(async (rel) => {
+      // `pathExists` is `stat`-based: it followed a link and read a dangling one as absent, so a
+      // linked `.claude/agents` counted as installed while the definitions it named lived outside
+      // the tree — and these counts are what the onboarded verdict and `mark-onboarded` rest on.
+      const info = await lstatNoFollow(root, rel);
+      return [rel, info !== null && (info.kind === 'file' || info.kind === 'directory')] as const;
+    }),
   );
   return {
     present: results.filter(([, ok]) => ok).map(([rel]) => rel),
@@ -833,12 +923,18 @@ const HAIVE_MARKER_PAIRS: Array<[string, string]> = [
   ['<!-- haive:cli-rules -->', '<!-- /haive:cli-rules -->'],
 ];
 
-async function stripHaiveContent(
+/** Remove Haive's own marker regions from one rules file, reporting what that did to it.
+ *
+ *  `null` means there is nothing here, which replaces the caller's `pathExists` probe: that probe
+ *  FOLLOWED a link, so a rules file pointing out of the tree had its TARGET rewritten by the
+ *  reset, and it read a dangling link as absent. Strict, so a link THROWS and the caller records
+ *  it per item — an in-tree target is still handled on its own iteration of the same loop. */
+export async function stripHaiveContent(
   root: string,
   rel: string,
-): Promise<{ changed: boolean; deleted: boolean }> {
-  const full = path.join(root, rel);
-  const content = await readFile(full, 'utf8');
+): Promise<{ changed: boolean; deleted: boolean } | null> {
+  const content = await readTextNoFollow(root, rel, { strict: true });
+  if (content === null) return null;
   let next = content;
   for (const [start, end] of HAIVE_MARKER_PAIRS) {
     while (true) {
@@ -856,7 +952,7 @@ async function stripHaiveContent(
     await removeNoFollow(root, rel);
     return { changed: true, deleted: true };
   }
-  await writeFile(full, cleaned + '\n', 'utf8');
+  await writeFileNoFollow(root, rel, cleaned + '\n');
   return { changed: true, deleted: false };
 }
 
@@ -1069,6 +1165,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
 
   const removed: string[] = [];
   const cleaned: string[] = [];
+  const skipped: Array<{ path: string; reason: string }> = [];
 
   for (const rel of ONBOARDING_RESET_DIRS) {
     // The return value replaces the `pathExists` probe, and is strictly better evidence: the probe
@@ -1081,11 +1178,18 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
     if (await removeNoFollow(root, rel)) removed.push(rel);
   }
   for (const rel of ONBOARDING_RULES_FILES) {
-    const full = path.join(root, rel);
-    if (!(await pathExists(full))) continue;
-    const result = await stripHaiveContent(root, rel);
-    if (result.deleted) removed.push(rel);
-    else if (result.changed) cleaned.push(rel);
+    // A refusal is a per-item outcome, not a floor: one linked rules file must not discard the
+    // strip of the two beside it, and the reset says what it left alone instead of reporting a
+    // clean run over a file it never touched.
+    try {
+      const result = await stripHaiveContent(root, rel);
+      if (result === null) continue;
+      if (result.deleted) removed.push(rel);
+      else if (result.changed) cleaned.push(rel);
+    } catch (err) {
+      if (!isPathContainmentError(err)) throw err;
+      skipped.push({ path: rel, reason: err.reason });
+    }
   }
   // The completion stamp cannot outlive the files it vouches for: this is the "start over"
   // action, and a repo whose artifacts are gone is not onboarded however it got marked.
@@ -1093,7 +1197,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
     .update(schema.repositories)
     .set({ onboardedAt: null, updatedAt: new Date() })
     .where(eq(schema.repositories.id, id));
-  return c.json({ ok: true, removed, cleaned });
+  return c.json({ ok: true, removed, cleaned, skipped });
 });
 
 repoRoutes.delete('/:id', async (c) => {

@@ -183,6 +183,7 @@ export default function NewTaskPage() {
   const [statusError, setStatusError] = useState<string | null>(null);
 
   const [resetting, setResetting] = useState(false);
+  const [resetNote, setResetNote] = useState<string | null>(null);
   const [marking, setMarking] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
@@ -410,10 +411,22 @@ export default function NewTaskPage() {
     );
     if (!confirmed) return;
     setResetting(true);
+    setResetNote(null);
     try {
-      await api.delete<{ ok: boolean; removed: string[]; cleaned: string[] }>(
-        `/repos/${repositoryId}/onboarding-artifacts`,
-      );
+      const res = await api.delete<{
+        ok: boolean;
+        removed: string[];
+        cleaned: string[];
+        skipped?: { path: string; reason: string }[];
+      }>(`/repos/${repositoryId}/onboarding-artifacts`);
+      // A reset that could not touch one of the rules files has to SAY so. The run afterwards
+      // re-generates its own markers, so a file the strip skipped silently keeps whatever the
+      // previous run left in it — and this is not an error: everything else was reset.
+      if (res.skipped?.length) {
+        setResetNote(
+          `Left alone: ${res.skipped.map((s) => `${s.path} (${s.reason})`).join(', ')}.`,
+        );
+      }
       await refreshStatus(repositoryId);
     } catch (err) {
       setStatusError((err as Error).message ?? 'Failed to reset onboarding');
@@ -674,6 +687,7 @@ export default function NewTaskPage() {
             <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-xs">
               {statusLoading && <span className="text-neutral-400">Checking onboarding...</span>}
               {statusError && <span className="text-red-400">{statusError}</span>}
+              {resetNote && <p className="text-amber-300">{resetNote}</p>}
               {!statusLoading && !statusError && onboardingStatus && (
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">
