@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -8,7 +8,7 @@ import { STACK_INDICATORS } from '../src/step-engine/steps/onboarding/01-env-det
 import { ECOSYSTEM_FILENAMES } from '../src/step-engine/steps/kb-author/_citation-scrub.js';
 import {
   citationCandidates,
-  resolveInsideRepo,
+  repoHoldsCitation,
   scrubCitations,
   splitIntoBlocks,
 } from '../src/step-engine/steps/kb-author/_citation-scrub.js';
@@ -149,20 +149,37 @@ describe('line references vs host:port', () => {
 // not one. Probing it anyway made any article that SHOWS a traversal example a false positive:
 // `../../../../../../etc/passwd` joins to `/etc/passwd`, which exists on the worker.
 describe('path probes stay inside the anchor repo', () => {
-  it('rejects a traversal candidate instead of probing it', () => {
-    expect(
-      resolveInsideRepo('/var/lib/haive/repos/u/r', '../../../../../../etc/passwd'),
-    ).toBeNull();
+  it('rejects a traversal candidate instead of probing it', async () => {
+    // That path resolves to a file which really exists on the worker, so a block warning about
+    // traversal was once deleted for naming the thing it warns about.
+    expect(await repoHoldsCitation(repo, '../../../../../../etc/passwd')).toBe(false);
   });
 
-  it('rejects a sibling directory that merely shares the prefix', () => {
-    expect(resolveInsideRepo('/repos/app', '../app-backup/secrets.env')).toBeNull();
+  it('rejects a sibling directory that merely shares the prefix', async () => {
+    expect(await repoHoldsCitation(repo, '../app-backup/secrets.env')).toBe(false);
   });
 
-  it('accepts an ordinary repo-relative path', () => {
-    expect(resolveInsideRepo('/repos/app', 'src/Cache/Backend.php')).toBe(
-      '/repos/app/src/Cache/Backend.php',
-    );
+  it('accepts an ordinary repo-relative path that is really there', async () => {
+    await mk('src/Cache/Backend.php');
+    expect(await repoHoldsCitation(repo, 'src/Cache/Backend.php')).toBe(true);
+  });
+
+  it('does not count a path the repo does not hold', async () => {
+    expect(await repoHoldsCitation(repo, 'src/Cache/Missing.php')).toBe(false);
+  });
+
+  it('does not count a file reached through a link', async () => {
+    // The lexical check this replaced compared the RESOLVED STRING against the root, so a link
+    // standing where a directory should be passed it and the probe followed it out of the tree —
+    // scrubbing an article for citing a path that is not in this repository at all.
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'haive-scrub-out-'));
+    try {
+      await writeFile(path.join(outside, 'secrets.env'), 'x');
+      await symlink(outside, path.join(repo, 'vendor'));
+      expect(await repoHoldsCitation(repo, 'vendor/secrets.env')).toBe(false);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('keeps a block that only shows a traversal example', async () => {
@@ -187,7 +204,7 @@ describe('absolute sandbox paths', () => {
   });
 
   it('leaves an absolute path that is not the workdir alone', async () => {
-    // Belongs to no repository, and resolveInsideRepo would reject it anyway — but it must not
+    // Belongs to no repository, and the containment check would reject it anyway — but it must not
     // even become a candidate, or an article about file permissions loses a block.
     const r = await scrubCitations('Never expose /etc/ssl/private/server.key in a build.', {
       repoPath: repo,

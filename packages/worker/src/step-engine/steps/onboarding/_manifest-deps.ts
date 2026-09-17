@@ -1,6 +1,4 @@
-import { readFile, readdir } from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
-import path from 'node:path';
+import { readTextNoFollow, readdirNoFollow, toSafeRel } from '@haive/shared/fs-safe';
 
 // Deterministic, dependency-free manifest parsing for the global-KB `packages`
 // facet. Each parser turns a manifest's text into direct `[name, constraint]`
@@ -57,9 +55,29 @@ export function manifestPackages(deps: ManifestDep[]): string[] {
   return out;
 }
 
-async function readSafe(p: string): Promise<string | null> {
+/** One manifest, read under the repository root without following anything.
+ *
+ *  `null` covers absent, unreadable and refused alike — which is exactly what every caller already
+ *  did with this helper's `catch`, so no call site changes its behaviour. */
+async function readSafe(repoPath: string, rel: string): Promise<string | null> {
+  return readTextNoFollow(repoPath, rel);
+}
+
+/** A workspace glob's literal part as a rel under the repository root, or null when it is not one.
+ *
+ *  THE GLOBS ARE REPOSITORY CONTENT — a `packages:` list in `pnpm-workspace.yaml`, or a root
+ *  package.json `workspaces` field — so `packages: ['../../../etc']` used to join straight onto
+ *  `repoPath`, and the loop below then read a `package.json` from wherever that landed. `toSafeRel`
+ *  throws on a traversal, which the refusal rule defines as a caller bug, so this answers null and
+ *  the glob is skipped instead: under-capture keeps an entry local, which this module's own header
+ *  already calls the safe direction.
+ *
+ *  `''` is returned as itself rather than refused, because a `*` glob at the root has an empty
+ *  literal prefix and `readdirNoFollow` accepts `''` as the anchor. The exact-path branch rejects
+ *  it separately — there the root is not a workspace package, and its manifest is read anyway. */
+function workspaceRel(candidate: string): string | null {
   try {
-    return await readFile(p, 'utf8');
+    return toSafeRel(candidate);
   } catch {
     return null;
   }
@@ -152,7 +170,8 @@ async function expandWorkspaceDirs(repoPath: string, globs: string[]): Promise<s
     if (dirs.size >= MAX_WORKSPACE_DIRS) break;
     const starIdx = glob.indexOf('*');
     if (starIdx === -1) {
-      dirs.add(path.join(repoPath, glob));
+      const rel = workspaceRel(glob);
+      if (rel !== null && rel !== '') dirs.add(rel);
       continue;
     }
     // Literal prefix = everything up to (not including) the wildcard segment.
@@ -160,16 +179,14 @@ async function expandWorkspaceDirs(repoPath: string, globs: string[]): Promise<s
       .slice(0, starIdx)
       .replace(/\/[^/]*$/, '')
       .replace(/\/+$/, '');
-    let entries: Dirent[] = [];
-    try {
-      entries = (await readdir(path.join(repoPath, base), { withFileTypes: true })) as Dirent[];
-    } catch {
-      continue;
-    }
+    const baseRel = workspaceRel(base);
+    if (baseRel === null) continue;
+    const entries = await readdirNoFollow(repoPath, baseRel);
+    if (entries === null) continue;
     for (const e of entries) {
       if (!e.isDirectory()) continue;
       if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
-      dirs.add(path.join(repoPath, base, e.name));
+      dirs.add(baseRel === '' ? e.name : `${baseRel}/${e.name}`);
       if (dirs.size >= MAX_WORKSPACE_DIRS) break;
     }
   }
@@ -303,25 +320,25 @@ export function parseRubyVersion(text: string): string | null {
 export async function detectLanguageRuntimes(repoPath: string): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
 
-  const pyFile = numericVersion((await readSafe(path.join(repoPath, '.python-version')))?.trim());
-  const runtimeTxt = await readSafe(path.join(repoPath, 'runtime.txt'));
-  const pyproject = await readSafe(path.join(repoPath, 'pyproject.toml'));
+  const pyFile = numericVersion((await readSafe(repoPath, '.python-version'))?.trim());
+  const runtimeTxt = await readSafe(repoPath, 'runtime.txt');
+  const pyproject = await readSafe(repoPath, 'pyproject.toml');
   const python =
     pyFile ??
     (runtimeTxt ? numericVersion(runtimeTxt.match(/python-([\d.]+)/i)?.[1]) : null) ??
     (pyproject ? parsePythonVersion(pyproject) : null);
   if (python) out.python = python;
 
-  const rbFile = numericVersion((await readSafe(path.join(repoPath, '.ruby-version')))?.trim());
-  const gemfile = await readSafe(path.join(repoPath, 'Gemfile'));
+  const rbFile = numericVersion((await readSafe(repoPath, '.ruby-version'))?.trim());
+  const gemfile = await readSafe(repoPath, 'Gemfile');
   const ruby = rbFile ?? (gemfile ? parseRubyVersion(gemfile) : null);
   if (ruby) out.ruby = ruby;
 
-  const goMod = await readSafe(path.join(repoPath, 'go.mod'));
+  const goMod = await readSafe(repoPath, 'go.mod');
   const go = goMod ? parseGoVersion(goMod) : null;
   if (go) out.go = go;
 
-  const cargo = await readSafe(path.join(repoPath, 'Cargo.toml'));
+  const cargo = await readSafe(repoPath, 'Cargo.toml');
   const rust = cargo ? parseRustVersion(cargo) : null;
   if (rust) out.rust = rust;
 
@@ -332,23 +349,25 @@ async function collectWorkspaceNpmDeps(
   repoPath: string,
   rootPkgText: string | null,
 ): Promise<ManifestDep[]> {
-  const pnpmYaml = await readSafe(path.join(repoPath, 'pnpm-workspace.yaml'));
+  const pnpmYaml = await readSafe(repoPath, 'pnpm-workspace.yaml');
   const globs = parseWorkspaceGlobs(pnpmYaml, rootPkgText);
   if (globs.length === 0) return [];
+  // Rels now, not absolute paths: every component below the repository root is walked, so a glob
+  // cannot name a directory outside it and the manifest read below cannot land there.
   const dirs = await expandWorkspaceDirs(repoPath, globs);
   const out: ManifestDep[] = [];
   for (const dir of dirs) {
-    const text = await readSafe(path.join(dir, 'package.json'));
+    const text = await readSafe(repoPath, `${dir}/package.json`);
     if (text) out.push(...parsePackageJsonDeps(text));
   }
   return out;
 }
 
 async function collectRubyDeps(repoPath: string): Promise<ManifestDep[]> {
-  const gemfile = await readSafe(path.join(repoPath, 'Gemfile'));
+  const gemfile = await readSafe(repoPath, 'Gemfile');
   if (!gemfile) return [];
   const direct = parseGemfile(gemfile);
-  const lockText = await readSafe(path.join(repoPath, 'Gemfile.lock'));
+  const lockText = await readSafe(repoPath, 'Gemfile.lock');
   const lockMap = new Map(lockText ? parseGemfileLock(lockText) : []);
   // Bound to direct gems; fill a missing inline version from the resolved lock.
   return direct.map(([name, ver]) => [name, ver || lockMap.get(name) || '']);
@@ -360,16 +379,14 @@ async function collectRubyDeps(repoPath: string): Promise<ManifestDep[]> {
  *  Cargo.toml. Best-effort and bounded — a missing or malformed file yields
  *  nothing rather than throwing. */
 export async function collectExtraManifestDeps(repoPath: string): Promise<ManifestDep[]> {
-  const rootPkgText = await readSafe(path.join(repoPath, 'package.json'));
+  const rootPkgText = await readSafe(repoPath, 'package.json');
   const [workspace, ruby, reqs, pyproj, gomod, cargo] = await Promise.all([
     collectWorkspaceNpmDeps(repoPath, rootPkgText),
     collectRubyDeps(repoPath),
-    readSafe(path.join(repoPath, 'requirements.txt')).then((t) =>
-      t ? parseRequirementsTxt(t) : [],
-    ),
-    readSafe(path.join(repoPath, 'pyproject.toml')).then((t) => (t ? parsePyprojectDeps(t) : [])),
-    readSafe(path.join(repoPath, 'go.mod')).then((t) => (t ? parseGoMod(t) : [])),
-    readSafe(path.join(repoPath, 'Cargo.toml')).then((t) => (t ? parseCargoToml(t) : [])),
+    readSafe(repoPath, 'requirements.txt').then((t) => (t ? parseRequirementsTxt(t) : [])),
+    readSafe(repoPath, 'pyproject.toml').then((t) => (t ? parsePyprojectDeps(t) : [])),
+    readSafe(repoPath, 'go.mod').then((t) => (t ? parseGoMod(t) : [])),
+    readSafe(repoPath, 'Cargo.toml').then((t) => (t ? parseCargoToml(t) : [])),
   ]);
   return [...workspace, ...ruby, ...reqs, ...pyproj, ...gomod, ...cargo];
 }

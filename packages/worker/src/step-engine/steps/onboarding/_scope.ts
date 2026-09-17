@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { Database } from '@haive/database';
@@ -291,8 +290,10 @@ function denyFrontierNode(node: TreeNode, selected: Set<string>, out: string[]):
 
 /** Parsed composer.json (or null) — a seed input for computeSeedExcludeGlobs. */
 export async function readComposerJson(repoPath: string): Promise<unknown> {
+  const text = await readTextNoFollow(repoPath, 'composer.json');
+  if (text === null) return null;
   try {
-    return JSON.parse(await readFile(path.join(repoPath, 'composer.json'), 'utf8'));
+    return JSON.parse(text);
   } catch {
     return null;
   }
@@ -300,9 +301,5 @@ export async function readComposerJson(repoPath: string): Promise<unknown> {
 
 /** Raw .gitignore text (or null) — a seed input for computeSeedExcludeGlobs. */
 export async function readGitignore(repoPath: string): Promise<string | null> {
-  try {
-    return await readFile(path.join(repoPath, '.gitignore'), 'utf8');
-  } catch {
-    return null;
-  }
+  return readTextNoFollow(repoPath, '.gitignore');
 }
