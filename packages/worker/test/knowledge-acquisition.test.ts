@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -269,6 +269,63 @@ describe('knowledgeAcquisitionStep.apply', () => {
       llmOutput: entries,
     });
     expect(result.written.map((w) => w.id)).toEqual(['a', 'c']);
+  });
+});
+
+describe('knowledgeAcquisitionStep.apply — a page whose name is a link', () => {
+  // The probe this replaced was `stat`-based, so it read a DANGLING link as ABSENT and the write
+  // then landed on whatever the link named, outside the knowledge base. `create-exclusive` answers
+  // EEXIST for any existing entry, a dangling link included, so the page is skipped and the target
+  // is never created.
+  const linkNamed = async (rel: string, target: string): Promise<void> => {
+    const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
+    await mkdir(kbDir, { recursive: true });
+    await symlink(target, path.join(kbDir, rel));
+  };
+
+  it('does not write a stub through a dangling link, and writes the topics beside it', async () => {
+    const outside = path.join(tmpRoot, 'outside-stub.md');
+    await linkNamed('testing-strategy.md', outside);
+
+    const result = await knowledgeAcquisitionStep.apply(makeCtx(tmpRoot), {
+      detected: { framework: null, language: null },
+      formValues: { manualTopics: 'Testing strategy\nDeployment' },
+      llmOutput: null,
+    });
+
+    // Nothing was written through the link — its target was never created.
+    await expect(stat(outside)).rejects.toThrow();
+    // The blocked topic is not claimed as written; the one beside it still is, so this is a
+    // per-page refusal rather than a loop that gave up.
+    expect(result.written.map((w) => w.id)).toEqual(['deployment']);
+  });
+
+  it('does not write an LLM gap entry through a dangling link', async () => {
+    const outside = path.join(tmpRoot, 'outside-entry.md');
+    await linkNamed('architecture.md', outside);
+
+    const raw = [
+      '```json',
+      JSON.stringify({
+        entries: [
+          {
+            id: 'architecture',
+            title: 'Architecture',
+            sections: [{ heading: 'Module structure', body: 'Layered architecture.' }],
+          },
+        ],
+      }),
+      '```',
+    ].join('\n');
+
+    const result = await knowledgeAcquisitionStep.apply(makeCtx(tmpRoot), {
+      detected: { framework: null, language: null },
+      formValues: { selectedTopics: ['architecture'] },
+      llmOutput: raw,
+    });
+
+    await expect(stat(outside)).rejects.toThrow();
+    expect(result.written).toHaveLength(0);
   });
 });
 

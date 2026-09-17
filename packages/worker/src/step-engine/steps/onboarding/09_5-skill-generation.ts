@@ -1,5 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import { readdirNoFollow, readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -1301,19 +1300,24 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       let primaryPath = '';
       for (const targetDir of targetDirs) {
         const parts = targetDir.split('/').filter((p) => p.length > 0);
-        const dir = path.join(ctx.repoPath, ...parts, entry.id);
-        await mkdir(dir, { recursive: true });
-        const filePath = path.join(dir, 'SKILL.md');
-        await writeFile(filePath, skillMd, 'utf8');
+        // `createParents` replaces both `mkdir`s, which is also why the sub-skill loop no longer
+        // needs its own length guard — it was there to avoid creating an empty `sub-skills/`.
+        const skillRel = [...parts, entry.id].join('/');
+        const filePath = path.join(ctx.repoPath, skillRel, 'SKILL.md');
+        await writeFileNoFollow(ctx.repoPath, `${skillRel}/SKILL.md`, skillMd, {
+          createParents: true,
+        });
         if (!primaryPath) primaryPath = filePath;
 
-        if (renderedSubs.length > 0) {
-          const subDir = path.join(dir, 'sub-skills');
-          await mkdir(subDir, { recursive: true });
-          for (const rs of renderedSubs) {
-            const subPath = path.join(subDir, `${rs.slug}.md`);
-            await writeFile(subPath, rs.content, 'utf8');
-          }
+        for (const rs of renderedSubs) {
+          await writeFileNoFollow(
+            ctx.repoPath,
+            `${skillRel}/sub-skills/${rs.slug}.md`,
+            rs.content,
+            {
+              createParents: true,
+            },
+          );
         }
       }
 
@@ -1335,15 +1339,14 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     if (written.length > 0) {
       for (const targetDir of targetDirs) {
         const parts = targetDir.split('/').filter((p) => p.length > 0);
-        const readmePath = path.join(ctx.repoPath, ...parts, 'README.md');
-        await mkdir(path.dirname(readmePath), { recursive: true });
-        await writeFile(
-          readmePath,
+        await writeFileNoFollow(
+          ctx.repoPath,
+          [...parts, 'README.md'].join('/'),
           skillsReadmeMarkdown(
             written.map((w) => ({ id: w.id, title: w.title, description: w.description })),
             targetDir,
           ),
-          'utf8',
+          { createParents: true },
         );
       }
     }

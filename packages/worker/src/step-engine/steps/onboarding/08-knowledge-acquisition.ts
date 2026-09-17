@@ -1,5 +1,12 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import {
+  ensureDirNoFollow,
+  isPathContainmentError,
+  lstatNoFollow,
+  readTextNoFollow,
+  relUnder,
+  removeNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
@@ -8,12 +15,7 @@ import { LEGACY_IMPORT_SUBDIR, migrateLegacyKnowledge } from './_kb-legacy.js';
 import { sanitizeKbRelPath } from './_kb-write.js';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import {
-  listFilesMatching,
-  loadPreviousStepOutput,
-  loadRunStartedAt,
-  pathExists,
-} from './_helpers.js';
+import { listFilesMatching, loadPreviousStepOutput, loadRunStartedAt } from './_helpers.js';
 import { detectThirdPartyTrees, insideAnyTree } from './_third-party-trees.js';
 import {
   isDeniedFile,
@@ -2044,7 +2046,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     delete (detected as unknown as Record<string, unknown>).__existingKb;
 
     const kbDir = path.join(ctx.repoPath, KB_DIR);
-    await mkdir(kbDir, { recursive: true });
+    await ensureDirNoFollow(ctx.repoPath, KB_DIR);
 
     const rawEntries = extractEntries(args.llmOutput ?? null);
     const placements = parseKbPlacements(args.llmOutput ?? null);
@@ -2114,18 +2116,20 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       handledSrc.add(src.relPath);
       try {
         const destPath = path.join(kbDir, dest);
-        await mkdir(path.dirname(destPath), { recursive: true });
-        await writeFile(
-          destPath,
+        await writeFileNoFollow(
+          ctx.repoPath,
+          `${KB_DIR}/${dest}`,
           entryToMarkdown({
             id: u.path,
             title: u.title,
             sections: u.sections,
             sourceFiles: u.sourceFiles,
           }),
-          'utf8',
+          { createParents: true },
         );
-        if (dest !== src.relPath) await rm(path.join(kbDir, src.relPath), { force: true });
+        if (dest !== src.relPath) {
+          await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
+        }
         // The legacy copies this page absorbed. Removed only AFTER the merged page is on
         // disk, so a failed write leaves the original where it is rather than deleting the
         // one surviving copy of that knowledge.
@@ -2145,7 +2149,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             );
             continue;
           }
-          await rm(path.join(kbDir, safe.normalized), { force: true });
+          await removeNoFollow(ctx.repoPath, `${KB_DIR}/${safe.normalized}`);
           mergedRemoved.push(safe.normalized);
         }
         written.push({ id: src.relPath, filePath: destPath, source: 'updated' });
@@ -2210,7 +2214,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
               ctx.logger,
             );
             if (promo && !promo.deduped) {
-              await rm(path.join(kbDir, src.relPath), { force: true });
+              await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
               globalPromoted += 1;
               written.push({
                 id: src.relPath,
@@ -2250,9 +2254,12 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         const content = await readTextNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
         if (content === null) throw new Error('unreadable, or reached through a link');
         const destPath = path.join(kbDir, dest);
-        await mkdir(path.dirname(destPath), { recursive: true });
-        await writeFile(destPath, content, 'utf8');
-        await rm(path.join(kbDir, src.relPath), { force: true });
+        // Written first, deleted second — the ordering the comment above this loop exists for: a
+        // failed write must leave the one surviving copy of that knowledge where it is.
+        await writeFileNoFollow(ctx.repoPath, `${KB_DIR}/${dest}`, content, {
+          createParents: true,
+        });
+        await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
         written.push({ id: src.relPath, filePath: destPath, source: 'existing' });
       } catch (err) {
         ctx.logger.warn({ err, path: p.path, dest }, 'kb placement move failed');
@@ -2347,15 +2354,33 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       const routed = routeEntries(localChosen);
       for (const r of routed) {
         const filePath = path.join(kbDir, r.relPath);
-        if (await pathExists(filePath)) {
-          ctx.logger.info(
-            { relPath: r.relPath },
-            'kb gap entry skipped — preserving existing file',
+        // `create-exclusive` IS the "preserve an existing file" rule — race-free, no separate probe,
+        // and EEXIST covers a DANGLING link, which the `pathExists` probe read as absent and then
+        // wrote through.
+        try {
+          await writeFileNoFollow(
+            ctx.repoPath,
+            `${KB_DIR}/${r.relPath}`,
+            entryToMarkdown(r.entry),
+            {
+              mode: 'create-exclusive',
+              createParents: true,
+            },
           );
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+            ctx.logger.info(
+              { relPath: r.relPath },
+              'kb gap entry skipped — preserving existing file',
+            );
+            continue;
+          }
+          // One refused entry must not discard the others, the same per-item rule the loops above
+          // already apply through their own catch.
+          if (!isPathContainmentError(err)) throw err;
+          ctx.logger.warn({ err, relPath: r.relPath }, 'kb gap entry refused');
           continue;
         }
-        await mkdir(path.dirname(filePath), { recursive: true });
-        await writeFile(filePath, entryToMarkdown(r.entry), 'utf8');
         written.push({ id: r.entry.id, filePath, source: 'llm' });
       }
     } else {
@@ -2373,8 +2398,14 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           .replace(/^-|-$/g, '');
         if (!id) continue;
         const filePath = path.join(kbDir, `${id}.md`);
-        if (await pathExists(filePath)) continue;
-        await writeFile(filePath, stubMarkdown(title), 'utf8');
+        try {
+          await writeFileNoFollow(ctx.repoPath, `${KB_DIR}/${id}.md`, stubMarkdown(title), {
+            mode: 'create-exclusive',
+            createParents: true,
+          });
+        } catch {
+          continue; // already there, or refused — either way this stub is not written
+        }
         written.push({ id, filePath, source: 'stub' });
       }
     }
@@ -2388,10 +2419,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         bucket: bucketFromRelPath(f.relPath),
         key: f.relPath,
       }));
-      await writeFile(
-        path.join(kbDir, 'INDEX.md'),
+      await writeFileNoFollow(
+        ctx.repoPath,
+        `${KB_DIR}/INDEX.md`,
         kbIndexMarkdown(routedForIndex, detected.projectName),
-        'utf8',
+        { createParents: true },
       );
     }
 
@@ -2405,7 +2437,12 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       .filter((fp) => !fp.startsWith(GLOBAL_KB_FILE_PATH_PREFIX));
     const missingPages: string[] = [];
     for (const fp of expectedOnDisk) {
-      if (!(await pathExists(fp))) missingPages.push(path.relative(ctx.repoPath, fp));
+      // These are absolute paths this step recorded as written, and the filter above has already
+      // dropped the global-KB ones — so `relUnder` turns each back into the shape the walk takes,
+      // the same bridge the ripgrep sample probe uses. It yields exactly what `path.relative` did,
+      // so the message below is unchanged.
+      const rel = relUnder(ctx.repoPath, fp);
+      if ((await lstatNoFollow(ctx.repoPath, rel)) === null) missingPages.push(rel);
     }
     if (missingPages.length > 0) {
       throw new Error(

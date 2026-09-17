@@ -1,6 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
-import path from 'node:path';
+import { readTextNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, SkillEntry } from '@haive/shared';
@@ -451,24 +449,20 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
 
       for (const dir of targetDirs) {
         const parts = dir.split('/').filter((p) => p.length > 0);
-        const skillDir = path.join(ctx.repoPath, ...parts, failing.skillId);
+        const skillRel = [...parts, failing.skillId].join('/');
         // Clear the dir before rewriting so stale/broken leaf files from the truncated
         // generation don't survive and re-fail verification.
-        await removeNoFollow(ctx.repoPath, [...parts, failing.skillId].join('/'), {
-          recursive: true,
+        await removeNoFollow(ctx.repoPath, skillRel, { recursive: true });
+        await writeFileNoFollow(ctx.repoPath, `${skillRel}/SKILL.md`, skillMd, {
+          createParents: true,
         });
-        await mkdir(skillDir, { recursive: true });
-        await writeFile(path.join(skillDir, 'SKILL.md'), skillMd, 'utf8');
-        if (subs.length > 0) {
-          const subDir = path.join(skillDir, 'sub-skills');
-          await mkdir(subDir, { recursive: true });
-          for (const sub of subs) {
-            await writeFile(
-              path.join(subDir, `${sub.slug}.md`),
-              subSkillToMarkdown(entry.id, sub),
-              'utf8',
-            );
-          }
+        for (const sub of subs) {
+          await writeFileNoFollow(
+            ctx.repoPath,
+            `${skillRel}/sub-skills/${sub.slug}.md`,
+            subSkillToMarkdown(entry.id, sub),
+            { createParents: true },
+          );
         }
       }
       repaired.push(failing.skillId);
@@ -480,9 +474,12 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
         const summaries = await readDiskSkillSummaries(ctx.repoPath, dir);
         if (summaries.length === 0) continue;
         const parts = dir.split('/').filter((p) => p.length > 0);
-        const readmePath = path.join(ctx.repoPath, ...parts, 'README.md');
-        await mkdir(path.dirname(readmePath), { recursive: true });
-        await writeFile(readmePath, skillsReadmeMarkdown(summaries, dir), 'utf8');
+        await writeFileNoFollow(
+          ctx.repoPath,
+          [...parts, 'README.md'].join('/'),
+          skillsReadmeMarkdown(summaries, dir),
+          { createParents: true },
+        );
       }
     }
 
