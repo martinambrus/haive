@@ -1,5 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
@@ -131,9 +130,12 @@ export async function seedBlankScaffold(
   const expanded: ExpandedRendering[] = expandManifestFor(renderCtx);
 
   for (const r of expanded) {
-    const full = path.join(dest, r.diskPath);
-    await mkdir(path.dirname(full), { recursive: true });
-    await writeFile(full, r.content, 'utf8');
+    // `dest` is the repository root the INIT job has already created and `git init`ed, so it is a
+    // valid anchor, and `createParents` builds the `.claude/…` chain UNDER it — what the `mkdir -p`
+    // this replaced did. The diskPaths come from the BUILT-IN manifest, so the primitive's own
+    // `toSafeRel` is the only guard wanted here: a throw would mean a malformed manifest, which is
+    // the caller bug `invalid-path` names, and repo INIT already degrades on one.
+    await writeFileNoFollow(dest, r.diskPath, r.content, { createParents: true, fileMode: 0o644 });
   }
   return expanded.map((r) => r.diskPath);
 }

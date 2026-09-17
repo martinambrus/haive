@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -60,6 +60,16 @@ describe('gitWorkspaceStatus', () => {
     expect(await gitWorkspaceStatus(await seedPoisonedWorktree())).toBe('broken');
   });
 
+  // A link is neither "no repository" nor a usable one. `absent` would make a caller treat this
+  // as an empty tree and skip the commit — the failure requireUsableGit exists to prevent — and
+  // git itself would have accepted the pointed-at repo, so this used to read as a working tree.
+  it('broken when .git is a symbolic link, never absent', async () => {
+    const repo = await seedRepo();
+    const linked = await tmp('gw-linked-');
+    await symlink(path.join(repo, '.git'), path.join(linked, '.git'));
+    expect(await gitWorkspaceStatus(linked)).toBe('broken');
+  });
+
   // Probe order matters: git's upward discovery would report the PARENT repo here.
   it('absent for a nested dir with no .git, not the parent repo', async () => {
     const repo = await seedRepo();
@@ -84,5 +94,14 @@ describe('requireUsableGit', () => {
     await expect(requireUsableGit(await seedPoisonedWorktree())).rejects.toThrow(
       /git cannot use it/,
     );
+  });
+
+  // Same contract for a link: the caller must fail loudly rather than be told there is no repo
+  // and silently commit nothing.
+  it('throws on a linked .git instead of reporting no-git', async () => {
+    const repo = await seedRepo();
+    const linked = await tmp('gw-linked-');
+    await symlink(path.join(repo, '.git'), path.join(linked, '.git'));
+    await expect(requireUsableGit(linked)).rejects.toThrow(/git cannot use it/);
   });
 });

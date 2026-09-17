@@ -1,5 +1,9 @@
-import { readdir, rm } from 'node:fs/promises';
-import { chownNoFollow, ensureDirNoFollow } from '@haive/shared/fs-safe';
+import {
+  chownNoFollow,
+  ensureDirNoFollow,
+  readdirNoFollow,
+  removeNoFollow,
+} from '@haive/shared/fs-safe';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
@@ -69,7 +73,13 @@ export async function ensureTaskScratchWorkspace(userId: string, taskId: string)
  *  reason to fail a teardown that is also releasing volumes and containers. */
 export async function removeTaskScratchWorkspace(userId: string, taskId: string): Promise<void> {
   try {
-    await rm(taskScratchPath(userId, taskId), { recursive: true, force: true });
+    // The same split `ensureTaskScratchWorkspace` makes above: `<storage>/<userId>` is the
+    // anchor, and the scratch dir below it is walked rather than trusted because everything
+    // under a user dir is reachable from a sandbox. An already-absent dir answers `false`,
+    // which needs no handling — that is what `force: true` bought before.
+    await removeNoFollow(path.join(REPO_STORAGE_ROOT, userId), `${TASK_SCRATCH_DIR}/${taskId}`, {
+      recursive: true,
+    });
   } catch (err) {
     log.warn({ err, taskId }, 'could not remove the scratch workspace');
   }
@@ -148,25 +158,24 @@ const TASK_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
  *
  *  Runs at boot, before any queue starts, so nothing it examines can be mid-flight. */
 export async function sweepOrphanScratchWorkspaces(db: Database): Promise<void> {
-  let userDirs: Dirent[];
-  try {
-    userDirs = await readdir(REPO_STORAGE_ROOT, { withFileTypes: true });
-  } catch (err) {
+  // `rel: ''` addresses the anchor itself, which is the one directory here that IS trusted: the
+  // storage root and its parents are the worker's, and only what sits below a `<userId>` dir is
+  // reachable from a sandbox. Lenient, so null covers an unmounted volume as the `catch` did.
+  const userDirs: Dirent[] | null = await readdirNoFollow(REPO_STORAGE_ROOT, '');
+  if (userDirs === null) {
     // No repo volume mounted (a worker that has never cloned anything) is not a fault.
-    log.debug({ err }, 'scratch sweep found no repo storage root');
+    log.debug('scratch sweep found no repo storage root');
     return;
   }
 
   let removed = 0;
   for (const userDir of userDirs) {
     if (!userDir.isDirectory()) continue;
-    const scratchRoot = path.join(REPO_STORAGE_ROOT, userDir.name, TASK_SCRATCH_DIR);
-    let taskDirs: Dirent[];
-    try {
-      taskDirs = await readdir(scratchRoot, { withFileTypes: true });
-    } catch {
-      continue; // this user has no scratch tree — the common case
-    }
+    const taskDirs = await readdirNoFollow(
+      path.join(REPO_STORAGE_ROOT, userDir.name),
+      TASK_SCRATCH_DIR,
+    );
+    if (taskDirs === null) continue; // this user has no scratch tree — the common case
     for (const taskDir of taskDirs) {
       if (!taskDir.isDirectory() || !TASK_DIR_NAME.test(taskDir.name)) continue;
       try {
