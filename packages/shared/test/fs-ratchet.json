@@ -2,7 +2,6 @@
   "packages/api/src/lib/filesystem.ts": 2,
   "packages/api/src/lib/repo-archive.ts": 1,
   "packages/api/src/lib/task-archive.ts": 1,
-  "packages/api/src/routes/bundles.ts": 20,
   "packages/api/src/routes/filesystem.ts": 1,
   "packages/api/src/routes/plan.ts": 1,
   "packages/api/src/routes/tasks/_helpers.ts": 1,

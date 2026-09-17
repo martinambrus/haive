@@ -27,9 +27,18 @@ export function uploadsRel(userId: string): string {
   return `_uploads/${userId}`;
 }
 
-/** Create `<root>/_uploads/<userId>`, walking each component. Returns the anchor to use with it. */
-export async function ensureUploadsDir(userId: string): Promise<string> {
-  const root = uploadsStorageRoot();
+/**
+ * Create `<root>/_uploads/<userId>`, walking each component. Returns the anchor to use with it.
+ *
+ * `root` is a parameter because the bundle routes stage into the SAME `_uploads/<userId>` shape
+ * under a different volume (`BUNDLE_STORAGE_ROOT`). Defaulted, so the repo-storage callers read
+ * exactly as they did before — and parameterised only once a second caller existed to shape it
+ * against, rather than guessed at when this module was written.
+ */
+export async function ensureUploadsDir(
+  userId: string,
+  root = uploadsStorageRoot(),
+): Promise<string> {
   await ensureDirNoFollow(root, uploadsRel(userId), { mode: 0o755 });
   return root;
 }
@@ -47,8 +56,12 @@ export async function ensureUploadsDir(userId: string): Promise<string> {
  * `invalid-path` on it, which the refusal rule defines as a caller bug, and several callers wrap
  * their primitive in a `.catch` — so the throw would be swallowed and read as "nothing to do".
  */
-export function uploadFileRel(userId: string, stored: string): string | null {
-  const prefix = `${uploadsStorageRoot()}/${uploadsRel(userId)}/`;
+export function uploadFileRel(
+  userId: string,
+  stored: string,
+  root = uploadsStorageRoot(),
+): string | null {
+  const prefix = `${root}/${uploadsRel(userId)}/`;
   if (!stored.startsWith(prefix)) return null;
   const name = stored.slice(prefix.length);
   if (name === '' || name.includes('/') || name === '.' || name === '..') return null;
@@ -62,8 +75,13 @@ export function uploadFileRel(userId: string, stored: string): string | null {
  * conflict between the row and the layout rather than a missing file. `what` names the column in
  * the message, since a user reading it has no idea which of several upload kinds refused.
  */
-export function uploadFileRelOrThrow(userId: string, stored: string, what: string): string {
-  const rel = uploadFileRel(userId, stored);
+export function uploadFileRelOrThrow(
+  userId: string,
+  stored: string,
+  what: string,
+  root = uploadsStorageRoot(),
+): string {
+  const rel = uploadFileRel(userId, stored, root);
   if (rel === null) throw new HttpError(409, `${what} is not in this user uploads directory`);
   return rel;
 }
