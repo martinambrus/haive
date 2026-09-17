@@ -7,7 +7,6 @@
   "packages/api/src/routes/tasks/_helpers.ts": 1,
   "packages/api/src/routes/tasks/browser-access.ts": 1,
   "packages/shared/src/utils/host-resources.ts": 2,
-  "packages/worker/src/attachments/expand-archives.ts": 4,
   "packages/worker/src/bootstrap.ts": 2,
   "packages/worker/src/queues/cli-exec/handlers.ts": 3,
   "packages/worker/src/repo/clone.ts": 14,
