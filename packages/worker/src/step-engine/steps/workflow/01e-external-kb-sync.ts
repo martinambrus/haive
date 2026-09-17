@@ -2,7 +2,7 @@ import path from 'node:path';
 import { CONFIG_KEYS, configService, type FormSchema, type FormValues } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { pathExists } from '../onboarding/_helpers.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { commitKnowledgeTrees, gitRun, revertKnowledgeBase } from './_kb-commit.js';
@@ -178,7 +178,9 @@ export const externalKbSyncStep: StepDefinition<ExternalKbSyncDetect, ExternalKb
     // fallback for a task with no worktree, and using it here would read and commit a
     // different tree than the one the sandboxed agent edits.
     const worktreePath = drift.worktreePath;
-    const hasKbDir = await pathExists(path.join(worktreePath, KB_DIR));
+    // `KB_DIR` is a DIRECTORY, which the shared probe answers for because it is kind-agnostic:
+    // an entry is here and is not a link.
+    const hasKbDir = await hasWorkspaceEntry(worktreePath, KB_DIR);
     return {
       repositoryId: drift.repositoryId,
       worktreePath,

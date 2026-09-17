@@ -1,9 +1,8 @@
-import path from 'node:path';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import {
   runnerHandleForTask,
@@ -38,10 +37,6 @@ interface MigrateApply {
   output: string;
 }
 
-function ddevConfigPath(workspace: string): string {
-  return path.join(workspace, '.ddev', 'config.yaml');
-}
-
 /** Files that identify a framework, checked before any composer.json.
  *
  *  A marker is a TRACKED file the framework itself ships, never a local config the
@@ -74,7 +69,8 @@ const FRAMEWORK_MARKERS: ReadonlyArray<readonly [Framework, readonly string[]]> 
 async function detectFramework(workspace: string): Promise<Framework> {
   // The workspace is a WORKTREE, which sits under `.haive/` — the tree the sandbox mounts
   // read-write — so it can never be the anchor itself. Both probes in this function are converted
-  // together; the OTHER `pathExists` calls in this package stay for the `pathExists` gap.
+  // together, and `shouldRun`'s config probe joined them once the shared walk existed — so this
+  // file now holds no `stat`-based probe at all.
   const { anchor, prefix } = workspaceAnchor(workspace);
   for (const [framework, markers] of FRAMEWORK_MARKERS) {
     for (const marker of markers) {
@@ -134,7 +130,7 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-    return ws ? pathExists(ddevConfigPath(ws.workspace)) : false;
+    return ws ? hasWorkspaceEntry(ws.workspace, '.ddev/config.yaml') : false;
   },
 
   async detect(ctx: StepContext): Promise<MigrateDetect> {

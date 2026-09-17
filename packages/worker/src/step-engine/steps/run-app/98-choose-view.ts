@@ -1,11 +1,10 @@
-import path from 'node:path';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { FormSchema } from '@haive/shared';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveDdevWorkspace } from '../workflow/_task-meta.js';
-import { pathExists } from '../onboarding/_helpers.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 
 interface ChooseViewDetect {
@@ -59,7 +58,7 @@ export const chooseViewStep: StepDefinition<ChooseViewDetect, ChooseViewApply> =
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
     const ddevMode =
       containerTool === 'ddev' ||
-      (ws !== null && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml'))));
+      (ws !== null && (await hasWorkspaceEntry(ws.workspace, '.ddev/config.yaml')));
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
       columns: { exposeDbPort: true },

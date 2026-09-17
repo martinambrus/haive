@@ -1,10 +1,9 @@
-import path from 'node:path';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 
@@ -46,7 +45,7 @@ async function hasBrowsableRuntime(ctx: StepContext): Promise<boolean> {
   const containerTool = (deps?.containerTool as string | undefined) ?? 'none';
   if (containerTool === 'ddev') return true;
   const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-  if (ws && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')))) return true;
+  if (ws && (await hasWorkspaceEntry(ws.workspace, '.ddev/config.yaml'))) return true;
   // App-runner web arm: a runnable web app in this task's per-task app-runner.
   if (
     containerTool === 'none' &&

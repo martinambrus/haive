@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import path from 'node:path';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, FormField, FormSchema } from '@haive/shared';
@@ -11,7 +11,6 @@ import type { StepDefinition } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
-import { pathExists } from '../onboarding/_helpers.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -178,7 +177,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     const stagePaths = await resolveStagePaths(ctx.db, ctx.userId);
     const existingPaths: string[] = [];
     for (const rel of stagePaths) {
-      if (await pathExists(path.join(ctx.repoPath, rel))) existingPaths.push(rel);
+      if (await hasWorkspaceEntry(ctx.repoPath, rel)) existingPaths.push(rel);
     }
     if (existingPaths.length === 0) {
       warnings.push('no upgrade files found to stage');
