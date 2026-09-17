@@ -1,5 +1,9 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import {
+  readTextNoFollow,
+  removeNoFollow,
+  toSafeRel,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -120,13 +124,39 @@ function templateKindLabel(kind: string): string {
 
 /** Read a file, returning '' when it does not exist. Used by the cli-rules
  *  region writes so a missing AGENTS.md is treated as empty (upsertRegion then
- *  creates the region) rather than throwing. */
-export async function readFileOrEmpty(absPath: string): Promise<string> {
+ *  creates the region) rather than throwing.
+ *
+ *  Takes `(anchor, rel)` like every other repository read: `null` covers absence AND a refusal —
+ *  a link, or a non-regular file — which both mean "nothing to merge into", exactly what the
+ *  `catch` this replaces already concluded for an unreadable path. */
+export async function readFileOrEmpty(anchor: string, rel: string): Promise<string> {
+  return (await readTextNoFollow(anchor, rel)) ?? '';
+}
+
+/** `diskPath` reaches this step from a plan row — i.e. from the database — and is joined onto the
+ *  repository root, so it is validated before it addresses anything.
+ *
+ *  A bad one is REPORTED and skipped rather than thrown. An upgrade must not fail wholesale because
+ *  one row carries a path it should not, and `onboarding_artifacts` was EMPTY on the install this
+ *  shipped from, so nothing measured what is actually out there; failing soft is the only honest
+ *  default. It also matters that the apply branch below is not inside a `try` — a throw there would
+ *  abort every remaining entry.
+ *
+ *  This validates the derived DISK PATH and never a template id: an id is a composite key that
+ *  embeds a path (`plugin.drupal-php-lsp..claude/plugins/…`), which `toSafeRel` would accept while
+ *  yielding nonsense, because its first segment contains `..` without BEING `..`. */
+export function safeDiskRel(diskPath: string): string | null {
+  let rel: string;
   try {
-    return await readFile(absPath, 'utf8');
+    rel = toSafeRel(diskPath);
   } catch {
-    return '';
+    return null;
   }
+  // `toSafeRel('')` is NOT an error: it drops empty segments and returns `''`, which addresses the
+  // ANCHOR itself — legitimate for a read, never for one of these writes or deletes. Left to fall
+  // through it would reach the primitives, which refuse it by throwing, in the one branch that has
+  // no `try` around it.
+  return rel === '' ? null : rel;
 }
 
 interface UpgradeApplyOutput {
@@ -371,19 +401,24 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       }
 
       if (action === 'delete') {
+        const rel = safeDiskRel(entry.diskPath);
+        if (rel === null) {
+          warnings.push(`refusing to delete ${entry.diskPath}: not a path inside the repository`);
+          skippedCount += 1;
+          continue;
+        }
         try {
           if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
             // Region-scoped artifact: strip just the cli-rules block, leaving
             // the rest of AGENTS.md (project-info, RTK, user content) intact.
-            const absPath = path.join(ctx.repoPath, entry.diskPath);
-            const existing = await readFileOrEmpty(absPath);
-            await writeFile(
-              absPath,
+            const existing = await readFileOrEmpty(ctx.repoPath, rel);
+            await writeFileNoFollow(
+              ctx.repoPath,
+              rel,
               upsertRegion(existing, '', CLI_RULES_START, CLI_RULES_END),
-              'utf8',
             );
           } else {
-            await rm(path.join(ctx.repoPath, entry.diskPath), { force: true });
+            await removeNoFollow(ctx.repoPath, rel);
           }
           if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
           deletedCount += 1;
@@ -400,12 +435,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         continue;
       }
 
-      const absPath = path.join(ctx.repoPath, entry.diskPath);
-      await mkdir(path.dirname(absPath), { recursive: true });
+      // Validated before anything is written, and a refusal skips this entry rather than throwing:
+      // this branch is NOT inside a `try`, so a throw here would abort every remaining entry.
+      const rel = safeDiskRel(entry.diskPath);
+      if (rel === null) {
+        warnings.push(`refusing to write ${entry.diskPath}: not a path inside the repository`);
+        skippedCount += 1;
+        continue;
+      }
       if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
         // Merge the new block into the existing AGENTS.md in place, replacing
         // only the cli-rules region and leaving every other region untouched.
-        const existing = await readFileOrEmpty(absPath);
+        const existing = await readFileOrEmpty(ctx.repoPath, rel);
         // A region already on disk with no live tracking row (new_artifact) is
         // an untracked onboarding baseline. Capture it as a superseded backfill
         // row before overwriting so a rollback of this upgrade restores the
@@ -436,13 +477,14 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             });
           }
         }
-        await writeFile(
-          absPath,
+        await writeFileNoFollow(
+          ctx.repoPath,
+          rel,
           upsertRegion(existing, entry.newContent, CLI_RULES_START, CLI_RULES_END),
-          'utf8',
+          { createParents: true },
         );
       } else {
-        await writeFile(absPath, entry.newContent, 'utf8');
+        await writeFileNoFollow(ctx.repoPath, rel, entry.newContent, { createParents: true });
       }
       appliedCount += 1;
 

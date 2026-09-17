@@ -1,5 +1,4 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -19,7 +18,7 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
-import { readFileOrEmpty, resolveBundleItemId } from './02-upgrade-apply.js';
+import { readFileOrEmpty, resolveBundleItemId, safeDiskRel } from './02-upgrade-apply.js';
 
 function isRollback(ctx: StepContext): Promise<boolean> {
   return ctx.db
@@ -347,19 +346,23 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         templateKind: restoreTemplateKind,
       } = decision.plan;
 
-      const absPath = path.join(ctx.repoPath, target.diskPath);
-      await mkdir(path.dirname(absPath), { recursive: true });
+      const rel = safeDiskRel(target.diskPath);
+      if (rel === null) {
+        warnings.push(`refusing to restore ${target.diskPath}: not a path inside the repository`);
+        continue;
+      }
       if (restoreTemplateKind === CLI_RULES_TEMPLATE_KIND) {
         // Restore only the cli-rules region from the prior baseline bytes,
         // leaving the rest of AGENTS.md as it currently stands.
-        const existing = await readFileOrEmpty(absPath);
-        await writeFile(
-          absPath,
+        const existing = await readFileOrEmpty(ctx.repoPath, rel);
+        await writeFileNoFollow(
+          ctx.repoPath,
+          rel,
           upsertRegion(existing, restoreContent, CLI_RULES_START, CLI_RULES_END),
-          'utf8',
+          { createParents: true },
         );
       } else {
-        await writeFile(absPath, restoreContent, 'utf8');
+        await writeFileNoFollow(ctx.repoPath, rel, restoreContent, { createParents: true });
       }
       revertedCount += 1;
 
@@ -392,18 +395,22 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     const undoneNewArtifactIds: string[] = [];
     for (const item of detected.newArtifactsToUndo) {
       try {
+        const rel = safeDiskRel(item.diskPath);
+        if (rel === null) {
+          warnings.push(`refusing to undo ${item.diskPath}: not a path inside the repository`);
+          continue;
+        }
         if (item.templateKind === CLI_RULES_TEMPLATE_KIND) {
           // The upgrade introduced the cli-rules region; undo removes just the
           // region, not the shared AGENTS.md file.
-          const absPath = path.join(ctx.repoPath, item.diskPath);
-          const existing = await readFileOrEmpty(absPath);
-          await writeFile(
-            absPath,
+          const existing = await readFileOrEmpty(ctx.repoPath, rel);
+          await writeFileNoFollow(
+            ctx.repoPath,
+            rel,
             upsertRegion(existing, '', CLI_RULES_START, CLI_RULES_END),
-            'utf8',
           );
         } else {
-          await rm(path.join(ctx.repoPath, item.diskPath), { force: true });
+          await removeNoFollow(ctx.repoPath, rel);
         }
         undoneNewArtifactIds.push(item.upgradeArtifactId);
         revertedCount += 1;
@@ -532,11 +539,8 @@ async function writeInstallManifest(
       .sort((a, b) => a.id.localeCompare(b.id)),
   };
 
-  const installDir = path.join(ctx.repoPath, '.haive');
-  const installPath = path.join(installDir, 'install.json');
-  await mkdir(installDir, { recursive: true });
   const content = normalizeContent(`${JSON.stringify(installManifest, null, 2)}\n`);
-  await writeFile(installPath, content, 'utf8');
+  await writeFileNoFollow(ctx.repoPath, '.haive/install.json', content, { createParents: true });
 
   return true;
 }
