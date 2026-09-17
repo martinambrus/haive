@@ -1,13 +1,18 @@
-import path from 'node:path';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
-import { applyTreeNoFollow, relUnder } from '@haive/shared/fs-safe';
+import {
+  applyTreeNoFollow,
+  lstatNoFollow,
+  readTextNoFollow,
+  relUnder,
+  removeNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { SANDBOX_GID, SANDBOX_UID } from '../../../sandbox/sandbox-identity.js';
+import { splitUploadPath, workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
 import { hashDdevInputs } from '../_ddev-inputs-hash.js';
@@ -71,8 +76,25 @@ export interface DdevEnvApply {
   baseline: DdevBaseline | null;
 }
 
-function ddevConfigPath(workspace: string): string {
-  return path.join(workspace, '.ddev', 'config.yaml');
+/** The project's `.ddev/config.yaml`, split for the anchored walk.
+ *
+ *  The workspace is a WORKTREE (see resolveDdevWorkspace), which sits under `.haive/` — the tree
+ *  the sandbox mounts read-write — so it can never be the anchor itself. `workspaceAnchor` returns
+ *  the repository root plus the worktree prefix, and falls back to the path itself in root mode. */
+function ddevConfigRef(workspace: string): { anchor: string; rel: string } {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  return { anchor, rel: `${prefix}.ddev/config.yaml` };
+}
+
+/** Whether the project has a real `.ddev/config.yaml`.
+ *
+ *  `pathExists` was `stat`-based, so it followed a link and read a dangling one as absent. A linked
+ *  config now reads as ABSENT, which routes the step to "no config yet" rather than booting DDEV
+ *  against a file outside the tree — and 01c never rewrites an existing config, so the honest
+ *  answer is the safe one. */
+async function ddevConfigExists(workspace: string): Promise<boolean> {
+  const { anchor, rel } = ddevConfigRef(workspace);
+  return (await lstatNoFollow(anchor, rel))?.kind === 'file';
 }
 
 /** Read + parse the booted `.ddev/config.yaml` into a baseline. null when the
@@ -82,7 +104,10 @@ function ddevConfigPath(workspace: string): string {
  *  a non-git workspace — 07c recomputes the same way so both sides stay comparable. */
 async function readDdevBaseline(workspace: string | null): Promise<DdevBaseline | null> {
   if (!workspace) return null;
-  const text = await readFile(ddevConfigPath(workspace), 'utf8').catch(() => null);
+  const { anchor, rel } = ddevConfigRef(workspace);
+  // Lenient: `null` covers absent, unreadable and refused alike, and the documented contract for
+  // all three is the same — the caller stores null and 07c skips the reconcile.
+  const text = await readTextNoFollow(anchor, rel);
   if (text === null) return null;
   const parsed = parseDdevConfig(text);
   return {
@@ -121,8 +146,10 @@ async function loadRepoName(ctx: StepContext): Promise<string | null> {
  *  keeps DDEV's nginx-fpm default. Always overridable in the config-review form. */
 const APACHE_DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html'];
 async function detectWebserverType(workspace: string): Promise<string | null> {
+  const { anchor, prefix } = workspaceAnchor(workspace);
   for (const sub of APACHE_DOCROOT_CANDIDATES) {
-    if (await pathExists(path.join(workspace, sub, '.htaccess'))) return 'apache-fpm';
+    const rel = sub === '' ? `${prefix}.htaccess` : `${prefix}${sub}/.htaccess`;
+    if ((await lstatNoFollow(anchor, rel))?.kind === 'file') return 'apache-fpm';
   }
   return null;
 }
@@ -175,7 +202,7 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
   async shouldRun(ctx: StepContext): Promise<boolean> {
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
     if (!ws) return false;
-    if (await pathExists(ddevConfigPath(ws.workspace))) return true;
+    if (await ddevConfigExists(ws.workspace)) return true;
     // No config yet — run only when the project declares DDEV, so we generate one.
     const deps = await loadDeclaredDeps(ctx);
     return deps?.containerTool === 'ddev';
@@ -185,7 +212,7 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     // All work runs in the worktree, so the `.ddev` config + the runner project
     // dir must point there, not the repo root. See resolveDdevWorkspace.
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-    const ddevConfigured = ws ? await pathExists(ddevConfigPath(ws.workspace)) : false;
+    const ddevConfigured = ws ? await ddevConfigExists(ws.workspace) : false;
     const repoSubpath = ws?.repoSubpath ?? null;
 
     let needsConfig = false;
@@ -285,9 +312,10 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     if (d.needsConfig && d.workspace) {
       const cfg = String(args.formValues.ddevConfig ?? d.proposedConfig ?? '').trim();
       if (!cfg) throw new Error('ddev config cannot be empty');
-      const dir = path.join(d.workspace, '.ddev');
-      await mkdir(dir, { recursive: true });
-      await writeFile(path.join(dir, 'config.yaml'), cfg.endsWith('\n') ? cfg : `${cfg}\n`, 'utf8');
+      const { anchor, rel } = ddevConfigRef(d.workspace);
+      await writeFileNoFollow(anchor, rel, cfg.endsWith('\n') ? cfg : `${cfg}\n`, {
+        createParents: true,
+      });
       await ctx.emitProgress('Generated .ddev/config.yaml from declared dependencies');
     } else if (!d.ddevConfigured) {
       return {
@@ -325,13 +353,21 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       // with pg_restore inside the db container first. Classified by magic bytes,
       // not by the filename, which carries no reliable extension (`.backup`,
       // `.dump`, `.pgsql`, …).
-      const format: DumpImportFormat = d.dumpWorkerPath
-        ? await sniffDumpFormat(d.dumpWorkerPath)
+      // The dump sits in `_uploads/<userId>/`, which is NOT an anchor: that directory is in the
+      // `haive_repos` volume, which this very runner mounts whole at `/repos`. The storage root
+      // anchors it and both segments below are walked; a row whose path is not that shape answers
+      // null and the sniff is skipped, exactly as an unreadable dump already was.
+      const dump = d.dumpWorkerPath ? splitUploadPath(REPO_STORAGE_ROOT, d.dumpWorkerPath) : null;
+      const format: DumpImportFormat = dump
+        ? await sniffDumpFormat(dump.anchor, dump.rel)
         : { pgRestore: false, gzipped: false };
       // Read once: the engine decides both whether a pg archive can be restored at
       // all and which client the post-import table count speaks.
       const cfgText = d.workspace
-        ? await readFile(ddevConfigPath(d.workspace), 'utf8').catch(() => null)
+        ? await (async () => {
+            const { anchor, rel } = ddevConfigRef(d.workspace!);
+            return readTextNoFollow(anchor, rel);
+          })()
         : null;
       const dbType = cfgText === null ? null : parseDdevConfig(cfgText).dbType;
       if (format.pgRestore) {
@@ -393,7 +429,7 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
         );
       }
       // Delete the dump immediately + mark the upload consumed (the env now holds it).
-      if (d.dumpWorkerPath) await rm(d.dumpWorkerPath, { force: true }).catch(() => {});
+      if (dump) await removeNoFollow(dump.anchor, dump.rel).catch(() => {});
       await ctx.db
         .update(schema.dbUploads)
         .set({ status: 'consumed', updatedAt: new Date() })

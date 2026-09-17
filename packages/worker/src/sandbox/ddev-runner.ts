@@ -1,6 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { createReadStream } from 'node:fs';
-import { mkdir, open, readdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -46,8 +45,16 @@ import {
   parseUnresolvableAptPins,
   unpinAptPackages,
 } from './ddev-build-guard.js';
-import { lstatNoFollow } from '@haive/shared/fs-safe';
+import {
+  applyTreeNoFollow,
+  lstatNoFollow,
+  openFileNoFollow,
+  readTextNoFollow,
+  readdirNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { splitRepoSubpath } from '../repo/worktree-paths.js';
+import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
@@ -75,6 +82,11 @@ export const DDEV_PROJECT_MOUNT = '/var/www/html';
 /** Worker-side root of the haive_repos volume (same mount the runner sees at
  *  /repos). Used to write the per-task xdebug ini straight into the worktree. */
 const XDEBUG_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+
+/** Append a tail to a `splitRepoSubpath` rel, which is `''` when the workspace IS the repo root. */
+function joinRel(rel: string, tail: string): string {
+  return rel === '' ? tail : `${rel}/${tail}`;
+}
 
 /** Xdebug 3 DBGp port the IDE's php-debug listener binds and the runner forwards. */
 const XDEBUG_PORT = 9003;
@@ -556,16 +568,22 @@ async function repairVersionConstraint(
   ddevOutput: string,
   onProgress?: (line: string) => void,
 ): Promise<boolean> {
-  const configPath = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath, '.ddev', 'config.yaml');
+  // The repository root is the anchor; a worktree tail in the subpath is walked, never joined —
+  // the same split `ensureDdevStartedInner` already makes, since `.ddev/` is repository content
+  // that the project's own runtime can rewrite between steps.
+  const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
+  const configRel = joinRel(rel, '.ddev/config.yaml');
+  const configPath = path.join(anchor, configRel);
   try {
-    const before = await readFile(configPath, 'utf8');
+    const before = await readTextNoFollow(anchor, configRel, { strict: true });
+    if (before === null) return false;
     let relaxed = relaxExactDdevVersionConstraint(before);
     if (!relaxed) {
       const runnerVersion = parseRunnerVersionFromConstraintError(ddevOutput);
       if (runnerVersion) relaxed = relaxCappedDdevConstraintForRunner(before, runnerVersion);
     }
     if (!relaxed) return false;
-    await writeFile(configPath, relaxed.text, 'utf8');
+    await writeFileNoFollow(anchor, configRel, relaxed.text);
     log.warn(
       { taskId, configPath, from: relaxed.from, to: relaxed.to },
       'relaxed an unsatisfiable ddev_version_constraint the runner could not meet',
@@ -604,19 +622,26 @@ async function repairAptVersionPins(
   const pins = parseUnresolvableAptPins(ddevOutput);
   if (pins.length === 0) return false;
   const packages = pins.map((pin) => pin.package);
-  const ddevDir = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath, '.ddev');
+  const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
   let repaired = false;
   for (const dir of BUILD_DIRS) {
-    const buildDir = path.join(ddevDir, dir);
-    const names = await readdir(buildDir).catch(() => null);
-    if (names === null) continue;
-    for (const name of names.filter(isBuildDockerfile).sort()) {
-      const file = path.join(buildDir, name);
+    const buildRel = joinRel(rel, `.ddev/${dir}`);
+    const entries = await readdirNoFollow(anchor, buildRel);
+    if (entries === null) continue;
+    for (const name of entries
+      .map((e) => e.name)
+      .filter(isBuildDockerfile)
+      .sort()) {
+      const fileRel = `${buildRel}/${name}`;
+      const file = path.join(anchor, fileRel);
       try {
-        const before = await readFile(file, 'utf8');
+        // The per-file `catch` below is what makes a containment refusal a per-item outcome: one
+        // linked Dockerfile must not discard the unpin of the ones beside it.
+        const before = await readTextNoFollow(anchor, fileRel, { strict: true });
+        if (before === null) continue;
         const after = unpinAptPackages(before, packages);
         if (after === null) continue;
-        await writeFile(file, after, 'utf8');
+        await writeFileNoFollow(anchor, fileRel, after);
         repaired = true;
         log.warn(
           { runner, file, packages },
@@ -1236,9 +1261,9 @@ const DUMP_HEAD_BYTES = 512;
 /** Offset of the `ustar` magic in a POSIX tar header. */
 const TAR_MAGIC_OFFSET = 257;
 
-/** The head of `workerPath`, or null when it cannot be read. */
-async function readHead(workerPath: string, n: number): Promise<Buffer | null> {
-  const fh = await open(workerPath, 'r').catch(() => null);
+/** The head of `<anchor>/<rel>`, or null when it cannot be read. */
+async function readHead(anchor: string, rel: string, n: number): Promise<Buffer | null> {
+  const fh = await openFileNoFollow(anchor, rel, 'read').catch(() => null);
   if (!fh) return null;
   try {
     const buf = Buffer.alloc(n);
@@ -1251,34 +1276,45 @@ async function readHead(workerPath: string, n: number): Promise<Buffer | null> {
   }
 }
 
-/** The head of `workerPath` AFTER gzip inflation, without reading (or inflating)
- *  the whole file — a dump is gigabytes. Null when it does not inflate. */
-function readGunzippedHead(workerPath: string, n: number): Promise<Buffer | null> {
-  return new Promise((resolve) => {
-    const src = createReadStream(workerPath);
-    const gz = createGunzip();
-    const chunks: Buffer[] = [];
-    let total = 0;
-    let settled = false;
-    const done = (value: Buffer | null): void => {
-      if (settled) return;
-      settled = true;
-      src.destroy();
-      gz.destroy();
-      resolve(value);
-    };
-    src.on('error', () => done(null));
-    // Tearing the stream down at `n` bytes makes gz emit a premature-close error;
-    // `settled` swallows it, as it does any real inflate failure (-> null).
-    gz.on('error', () => done(null));
-    gz.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
-      total += chunk.length;
-      if (total >= n) done(Buffer.concat(chunks).subarray(0, n));
+/** The head of `<anchor>/<rel>` AFTER gzip inflation, without reading (or inflating)
+ *  the whole file — a dump is gigabytes. Null when it does not inflate.
+ *
+ *  The descriptor is closed EXPLICITLY, not left to the stream: this tears the stream down at `n`
+ *  bytes, which is exactly the shape that leaks a FileHandle on Node 26 — a handle reclaimed by the
+ *  collector is a fatal `ERR_INVALID_STATE`, and PR 8's host CI failure was that, with every test
+ *  passing. Closing twice is a no-op, so the `finally` is safe after a normal end too. */
+async function readGunzippedHead(anchor: string, rel: string, n: number): Promise<Buffer | null> {
+  const fh = await openFileNoFollow(anchor, rel, 'read').catch(() => null);
+  if (!fh) return null;
+  try {
+    return await new Promise((resolve) => {
+      const src = fh.createReadStream({ autoClose: false });
+      const gz = createGunzip();
+      const chunks: Buffer[] = [];
+      let total = 0;
+      let settled = false;
+      const done = (value: Buffer | null): void => {
+        if (settled) return;
+        settled = true;
+        src.destroy();
+        gz.destroy();
+        resolve(value);
+      };
+      src.on('error', () => done(null));
+      // Tearing the stream down at `n` bytes makes gz emit a premature-close error;
+      // `settled` swallows it, as it does any real inflate failure (-> null).
+      gz.on('error', () => done(null));
+      gz.on('data', (chunk: Buffer) => {
+        chunks.push(chunk);
+        total += chunk.length;
+        if (total >= n) done(Buffer.concat(chunks).subarray(0, n));
+      });
+      gz.on('end', () => done(Buffer.concat(chunks)));
+      src.pipe(gz);
     });
-    gz.on('end', () => done(Buffer.concat(chunks)));
-    src.pipe(gz);
-  });
+  } finally {
+    await fh.close().catch(() => undefined);
+  }
 }
 
 /** Whether `head` opens a pg_dump archive, i.e. something only pg_restore reads.
@@ -1307,11 +1343,11 @@ function isPgArchiveHead(head: Buffer): boolean {
  *
  *  An unreadable file classifies as plain — the import then takes the plain path
  *  and `ddev import-db` reports the real problem. */
-export async function sniffDumpFormat(workerPath: string): Promise<DumpImportFormat> {
-  const raw = await readHead(workerPath, DUMP_HEAD_BYTES);
+export async function sniffDumpFormat(anchor: string, rel: string): Promise<DumpImportFormat> {
+  const raw = await readHead(anchor, rel, DUMP_HEAD_BYTES);
   if (!raw) return { pgRestore: false, gzipped: false };
   const gzipped = raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b;
-  const head = gzipped ? await readGunzippedHead(workerPath, DUMP_HEAD_BYTES) : raw;
+  const head = gzipped ? await readGunzippedHead(anchor, rel, DUMP_HEAD_BYTES) : raw;
   if (!head) return { pgRestore: false, gzipped };
   return { pgRestore: isPgArchiveHead(head), gzipped };
 }
@@ -2001,15 +2037,13 @@ export function warmStartRecoveryVerdict(args: {
  *  engine suffix to the name it was given (`…-postgres_17.zst`), so the match is a
  *  prefix on a filename, not a column in human-facing output. */
 async function hasDurabilitySnapshot(taskId: string, repoSubpath: string): Promise<boolean> {
-  const dir = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath, '.ddev', 'db_snapshots');
+  const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
   const names = [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)];
-  try {
-    const entries = await readdir(dir);
-    return entries.some((entry) => names.some((name) => entry.startsWith(name)));
-  } catch {
-    // No directory is the common case (no snapshot was ever taken) and never an error.
-    return false;
-  }
+  // Lenient: `null` is an absent directory (the common case — no snapshot was ever taken), an
+  // unreadable one, and a refused one alike, and none of the three is a snapshot this task left.
+  const entries = await readdirNoFollow(anchor, joinRel(rel, '.ddev/db_snapshots'));
+  if (entries === null) return false;
+  return entries.some((entry) => names.some((name) => entry.name.startsWith(name)));
 }
 
 /** Table count for a caller with no parsed `.ddev/config.yaml` in hand: ask postgres,
@@ -2337,18 +2371,24 @@ export async function ensureDdevXdebug(
   }
   const major = await resolveXdebugMajor(handle);
 
-  const iniPath = path.join(XDEBUG_REPO_STORAGE_ROOT, opts.repoSubpath, ...XDEBUG_INI_RELPATH);
+  // The repository root anchors it; the worktree tail in the subpath is walked, never joined.
+  const { anchor, rel } = splitRepoSubpath(XDEBUG_REPO_STORAGE_ROOT, opts.repoSubpath);
+  const iniRel = joinRel(rel, XDEBUG_INI_RELPATH.join('/'));
+  const iniDirRel = joinRel(rel, XDEBUG_INI_RELPATH.slice(0, -1).join('/'));
   const desired = renderXdebugIni(gateway, major);
-  const prev = await readFile(iniPath, 'utf8').catch(() => null);
+  const prev = await readTextNoFollow(anchor, iniRel);
   const changed = prev !== desired;
   if (changed) {
-    await mkdir(path.dirname(iniPath), { recursive: true });
-    await writeFile(iniPath, desired, 'utf8');
-    // New file is worker(root)-owned inside the 1000-owned worktree; chown so the
-    // ddev user (uid 1000) reads it when DDEV copies .ddev/php/*.ini into conf.d.
-    await exec('chown', ['-R', '1000:1000', path.dirname(iniPath)], { timeout: 15_000 }).catch(
-      () => {},
-    );
+    await writeFileNoFollow(anchor, iniRel, desired, { createParents: true });
+    // New file is worker(root)-owned inside the 1000-owned worktree; hand the php dir to the ddev
+    // user (uid 1000) so it reads the ini when DDEV copies .ddev/php/*.ini into conf.d.
+    //
+    // This replaces a `chown -R` SHELL-OUT, which no fs scan could see and which does not behave
+    // the same in the two places it ran: BusyBox recurses by path, GNU coreutils follows a linked
+    // argument. The anchored walk skips links and counts them instead. Best-effort, as before.
+    await applyTreeNoFollow(anchor, iniDirRel, {
+      owner: { uid: SANDBOX_UID, gid: SANDBOX_GID },
+    }).catch(() => {});
   }
 
   // socat forward on the runner: runner:9003 -> <ide>:9003. The runner resolves the
