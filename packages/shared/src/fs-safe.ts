@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { constants, type Dirent, type Stats } from 'node:fs';
 import {
   chmod,
@@ -316,12 +317,27 @@ async function openVerified(anchor: string, safe: string, mode: OpenMode): Promi
   }
 }
 
-export async function openFileNoFollow(
+export function openFileNoFollow(
   anchor: string,
   rel: string,
   mode: OpenMode,
-  opts: StrictOption = {},
+  opts?: StrictOption,
+): Promise<FileHandle | null>;
+/** Creating is a MUTATION, so this overload never returns `null`: it either hands back a descriptor
+ *  on a file it just created or it throws. */
+export function openFileNoFollow(
+  anchor: string,
+  rel: string,
+  mode: 'create-exclusive',
+  opts?: CreateExclusiveOptions,
+): Promise<FileHandle>;
+export async function openFileNoFollow(
+  anchor: string,
+  rel: string,
+  mode: OpenMode | 'create-exclusive',
+  opts: StrictOption & CreateExclusiveOptions = {},
 ): Promise<FileHandle | null> {
+  if (mode === 'create-exclusive') return createExclusive(anchor, rel, opts);
   const safe = toSafeRel(rel);
   return readResult(opts.strict, () => openVerified(anchor, safe, mode));
 }
@@ -1017,4 +1033,173 @@ export async function renameNoFollow(
   } finally {
     await closeQuietly(fromDir.fh);
   }
+}
+
+export interface CreateExclusiveOptions {
+  /** Permission bits once the content is written; the file is created 0600 and chmodded after, so a
+   *  reader never sees a world-readable empty file. */
+  fileMode?: number;
+  owner?: Owner;
+  createParents?: boolean;
+}
+
+/**
+ * Create `<anchor>/<rel>` and hand back the descriptor, or fail.
+ *
+ * `O_CREAT|O_EXCL|O_NOFOLLOW` is what makes this safe AND race-free: any existing entry answers
+ * EEXIST, a **dangling link included** — and that is the case worth naming, because `access` and
+ * `stat` both report a dangling link as absent and a create through one lands on its target.
+ */
+async function createExclusive(
+  anchor: string,
+  rel: string,
+  opts: CreateExclusiveOptions,
+): Promise<FileHandle> {
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (leaf === undefined) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  const dir = await walkDir(
+    anchor,
+    safe,
+    segs,
+    opts.createParents ? { owner: opts.owner } : undefined,
+  );
+  const dirReal = dir.real;
+  let fh: FileHandle;
+  try {
+    fh = await open(
+      at(dir.fh.fd, leaf),
+      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NOCTTY,
+      0o600,
+    );
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+  try {
+    await assertHeldAt(fh, below(dirReal, leaf), anchor, rel, safe);
+    await fh.chmod(opts.fileMode ?? 0o644);
+    if (opts.owner) await fh.chown(opts.owner.uid, opts.owner.gid);
+    return fh;
+  } catch (err) {
+    await closeQuietly(fh);
+    // Leave nothing behind: a 0600 empty stub at a name a caller was told it could not have is
+    // worse than no file, because the next attempt then fails EEXIST against our own leftover.
+    const cleanup = await walkDir(anchor, safe, segs).catch(() => null);
+    if (cleanup) {
+      await unlink(at(cleanup.fh.fd, leaf)).catch(() => undefined);
+      await closeQuietly(cleanup.fh);
+    }
+    throw err;
+  }
+}
+
+/** Write every byte. `FileHandle.write` may write short, and a partial config file that parses is
+ *  worse than one that does not. */
+async function writeAll(fh: FileHandle, bytes: Buffer): Promise<void> {
+  let written = 0;
+  while (written < bytes.length) {
+    const res = await fh.write(bytes, written, bytes.length - written, written);
+    written += res.bytesWritten;
+  }
+}
+
+export type WriteMode = 'create-exclusive' | 'overwrite-in-place' | 'replace-atomic';
+
+export interface WriteFileOptions {
+  /** Default `replace-atomic`. */
+  mode?: WriteMode;
+  /** Permission bits. `replace-atomic` defaults to the REPLACED file's mode, then 0644. */
+  fileMode?: number;
+  /** Owner. `replace-atomic` defaults to the REPLACED file's owner — without that, every rewrite
+   *  hands a uid-1000 file back to root and the agent that owned it can no longer write it. */
+  owner?: Owner;
+  createParents?: boolean;
+  /** fsync the content before it becomes visible. */
+  durable?: boolean;
+}
+
+/**
+ * Write `<anchor>/<rel>`, following nothing. A MUTATION throughout: a link anywhere throws.
+ *
+ * Never `O_TRUNC`. That flag truncates as part of the open, i.e. before anything has verified what
+ * was opened, so a file swapped for a link between the walk and the open is emptied through the
+ * link. Truncation happens only after `fstat` and the descriptor check have passed.
+ *
+ * Three modes, because the right one depends on who else is reading the file:
+ * - `replace-atomic` (default) — write a temp beside it and rename over. A concurrent reader sees
+ *   the old bytes or the new ones, never a half-written file. For anything parsed by a machine.
+ * - `overwrite-in-place` — keeps the inode, owner and mode, for a file something holds open or
+ *   whose identity matters (the api's knowledge editor).
+ * - `create-exclusive` — refuses to replace anything at all.
+ */
+export async function writeFileNoFollow(
+  anchor: string,
+  rel: string,
+  data: string | Buffer,
+  opts: WriteFileOptions = {},
+): Promise<'created' | 'overwritten'> {
+  const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
+  const mode = opts.mode ?? 'replace-atomic';
+
+  if (mode === 'create-exclusive') {
+    const fh = await createExclusive(anchor, rel, opts);
+    try {
+      await writeAll(fh, bytes);
+      if (opts.durable) await fh.sync();
+    } finally {
+      await closeQuietly(fh);
+    }
+    return 'created';
+  }
+
+  const safe = toSafeRel(rel);
+
+  if (mode === 'overwrite-in-place') {
+    // `openVerified` refuses a link or a non-regular file and verifies the descriptor, so the
+    // truncate below cannot reach anything but the file this call resolved.
+    const fh = await openVerified(anchor, safe, 'read-write');
+    try {
+      await fh.truncate(0);
+      await writeAll(fh, bytes);
+      if (opts.durable) await fh.sync();
+      if (opts.fileMode !== undefined) await fh.chmod(opts.fileMode);
+      if (opts.owner) await fh.chown(opts.owner.uid, opts.owner.gid);
+    } finally {
+      await closeQuietly(fh);
+    }
+    return 'overwritten';
+  }
+
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (leaf === undefined) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  const existing = await lstatNoFollow(anchor, safe, { strict: true });
+  if (existing !== null && existing.kind === 'symlink') {
+    throw new PathContainmentError('link', anchor, rel, safe);
+  }
+  if (existing !== null && existing.kind !== 'file') {
+    throw new PathContainmentError('not-regular-file', anchor, rel, safe);
+  }
+
+  // Dotted and pid/uuid-suffixed so two writers cannot collide and a leftover is recognisable.
+  const tmpRel = [...segs, `.${leaf}.haive-tmp-${process.pid}-${randomUUID()}`].join('/');
+  const fh = await createExclusive(anchor, tmpRel, {
+    createParents: opts.createParents,
+    owner:
+      opts.owner ?? (existing ? { uid: existing.stats.uid, gid: existing.stats.gid } : undefined),
+    fileMode: opts.fileMode ?? (existing ? existing.stats.mode & 0o777 : 0o644),
+  });
+  let renamed = false;
+  try {
+    await writeAll(fh, bytes);
+    if (opts.durable) await fh.sync();
+    await fh.close();
+    await renameNoFollow(anchor, tmpRel, safe);
+    renamed = true;
+  } finally {
+    await closeQuietly(fh);
+    if (!renamed) await removeNoFollow(anchor, tmpRel).catch(() => undefined);
+  }
+  return existing === null ? 'created' : 'overwritten';
 }

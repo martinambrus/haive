@@ -1,4 +1,11 @@
-import { chmod, chown, lstat, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, readdir, stat } from 'node:fs/promises';
+import {
+  chmodNoFollow,
+  chownNoFollow,
+  removeNoFollow,
+  renameNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { Database } from '@haive/database';
@@ -9,11 +16,11 @@ import {
   ATTACHMENT_ARCHIVE_MAX_TOTAL_BYTES,
   ATTACHMENTS_MANIFEST_NAME,
   AttachmentPathError,
-  attachmentUploadsRoot,
   detectAttachmentArchiveFormat,
   logger,
   renderAttachmentsManifest,
   sanitizeAttachmentPath,
+  splitAttachmentStoredPath,
 } from '@haive/shared';
 import { extractArchive } from '../repo/clone.js';
 
@@ -128,39 +135,56 @@ function uniqueWithin(taken: Set<string>, relPath: string): string {
   return candidate;
 }
 
-async function harmonize(target: string, mode: number): Promise<void> {
-  await chmod(target, mode).catch(() => {});
-  await chown(target, NODE_UID, NODE_GID).catch(() => {});
+async function harmonize(anchor: string, rel: string, mode: number): Promise<void> {
+  await chownNoFollow(anchor, rel, { uid: NODE_UID, gid: NODE_GID }).catch(() => {});
+  await chmodNoFollow(anchor, rel, mode).catch(() => {});
 }
 
 /** Rewrite `_ATTACHMENTS.md` from the task's rows. The api owns this file on
  *  upload and delete; expansion is the third writer, and a prompt that tells every
  *  agent to read it must not point at an index missing the files just added. */
-async function rewriteManifest(db: Database, taskId: string, uploadsDir: string): Promise<void> {
+async function rewriteManifest(
+  db: Database,
+  taskId: string,
+  anchor: string,
+  uploadsRel: string,
+): Promise<void> {
   const rows = await db.query.taskAttachments.findMany({
     where: eq(schema.taskAttachments.taskId, taskId),
     orderBy: asc(schema.taskAttachments.createdAt),
     columns: { filename: true, description: true },
   });
-  const manifestPath = path.join(uploadsDir, ATTACHMENTS_MANIFEST_NAME);
+  const manifestRel = `${uploadsRel}/${ATTACHMENTS_MANIFEST_NAME}`;
   const body = renderAttachmentsManifest(rows);
   if (body === null) {
-    await rm(manifestPath, { force: true }).catch(() => {});
+    await removeNoFollow(anchor, manifestRel).catch(() => {});
     return;
   }
-  await writeFile(manifestPath, body, 'utf8');
-  await harmonize(manifestPath, 0o644);
+  // Replace-atomic, and owned by the sandbox uid: every agent is told to read this index, so a
+  // reader must see the old one or the new one and never a partial write.
+  await writeFileNoFollow(anchor, manifestRel, body, {
+    fileMode: 0o644,
+    owner: { uid: NODE_UID, gid: NODE_GID },
+  });
 }
 
 /** Move one extracted file to its place under the uploads dir, creating the
  *  directories it needs. Returns the relative path it now lives at. */
-async function placeFile(uploadsDir: string, relPath: string, from: string): Promise<string> {
-  const dest = path.join(uploadsDir, relPath);
-  const dir = path.dirname(dest);
-  await mkdir(dir, { recursive: true });
-  await harmonize(dir, 0o755);
-  await rename(from, dest);
-  await harmonize(dest, 0o644);
+async function placeFile(
+  anchor: string,
+  uploadsRel: string,
+  relPath: string,
+  fromRel: string,
+): Promise<string> {
+  const destRel = `${uploadsRel}/${relPath}`;
+  // `createParents` does the `mkdir -p`, refusing a link in the chain rather than creating below it.
+  await renameNoFollow(anchor, fromRel, destRel, {
+    createParents: true,
+    owner: { uid: NODE_UID, gid: NODE_GID },
+  });
+  const dirRel = destRel.slice(0, destRel.lastIndexOf('/'));
+  await harmonize(anchor, dirRel, 0o755);
+  await harmonize(anchor, destRel, 0o644);
   return relPath;
 }
 
@@ -198,10 +222,19 @@ export async function ensureArchivesExpanded(
 
   const result: ExpandArchivesResult = { expanded: 0, filesAdded: 0, notes: [] };
 
-  // Taken from the row rather than from the task's repository: the row says where
-  // its own bytes are, so this needs no repo lookup and cannot write the expanded
-  // tree somewhere the originals are not.
-  const uploadsDir = attachmentUploadsRoot(archives[0]!);
+  // Derived from the row rather than from the task's repository: the row says where its own bytes
+  // are, so this needs no repo lookup and cannot write the expanded tree somewhere the originals
+  // are not. The ANCHOR is the repository root, recovered by removing the suffix the api wrote —
+  // the uploads dir itself sits under `.haive/`, which the sandbox mounts read-write, so it can
+  // never be one. A row that does not have that shape is refused rather than expanded from a
+  // guessed root.
+  const split = splitAttachmentStoredPath(archives[0]!, taskId);
+  if (!split) {
+    log.warn({ taskId, archive: archives[0]!.filename }, 'unrecognised attachment path layout');
+    return EMPTY;
+  }
+  const { anchor, uploadsRel } = split;
+  const uploadsDir = path.join(anchor, uploadsRel);
 
   for (const archive of archives) {
     const format = detectAttachmentArchiveFormat(archive.filename)!;
@@ -246,7 +279,12 @@ export async function ensureArchivesExpanded(
               log.warn({ member: file.rel, archive: archive.filename }, 'dropped archive member');
               continue;
             }
-            const stored = await placeFile(uploadsDir, relPath, path.join(tmp, file.rel));
+            const stored = await placeFile(
+              anchor,
+              uploadsRel,
+              relPath,
+              `${uploadsRel}/.expanding-${archive.id}/${file.rel}`,
+            );
             await db.insert(schema.taskAttachments).values({
               taskId,
               userId: archive.userId,
@@ -268,7 +306,9 @@ export async function ensureArchivesExpanded(
       note = `could not be expanded: ${(err as Error).message}`;
       log.warn({ err, taskId, archive: archive.filename }, 'archive expansion failed');
     } finally {
-      await rm(tmp, { recursive: true, force: true }).catch(() => {});
+      await removeNoFollow(anchor, `${uploadsRel}/.expanding-${archive.id}`, {
+        recursive: true,
+      }).catch(() => {});
     }
 
     // Stamped whatever happened. Without it a failed or capped archive is retried
@@ -287,7 +327,7 @@ export async function ensureArchivesExpanded(
   }
 
   if (result.filesAdded > 0) {
-    await rewriteManifest(db, taskId, uploadsDir).catch((err: unknown) => {
+    await rewriteManifest(db, taskId, anchor, uploadsRel).catch((err: unknown) => {
       log.warn({ err, taskId }, 'could not rewrite the attachments manifest after expansion');
     });
   }
