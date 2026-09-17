@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { stat } from 'node:fs/promises';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { posix } from 'node:path';
 import { promisify } from 'node:util';
 import { glob } from 'tinyglobby';
@@ -13,7 +13,7 @@ import {
 } from '@haive/shared';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
-import { WORKTREE_SUBDIR } from '../../repo/worktree-paths.js';
+import { splitWorktreePath, WORKTREE_SUBDIR } from '../../repo/worktree-paths.js';
 import { resolveInvocationWorkerRoot } from './resolvers.js';
 import { log } from './_shared.js';
 
@@ -134,8 +134,17 @@ export async function computeSecretMasks(
   // the volume unmounted, a repo whose files were never written) would mount the real
   // tree and mask nothing, silently and for every repo. Assert the tree exists before
   // trusting the scan that reads it.
-  const rootStat = await stat(workerRoot).catch(() => null);
-  if (!rootStat?.isDirectory()) {
+  // SPLIT rather than anchored: `workerRoot` is a worktree as often as a repo root, and a worktree
+  // sits under `.haive/`, which the sandbox mounts read-write — so its `.haive/worktrees/<dir>` tail
+  // is walked a component at a time. A repo-root `workerRoot` IS the anchor, and an anchor may be
+  // followed by design, so this neither refuses nor needs to refuse a linked storage root: that path
+  // comes from the worker's own env, not from the tree. Lenient, because the guard below fails
+  // CLOSED — an absent root and a refused component land in the same refusal.
+  const split = splitWorktreePath(workerRoot);
+  const rootInfo = split
+    ? await lstatNoFollow(split.anchor, split.rel)
+    : await lstatNoFollow(workerRoot, '');
+  if (rootInfo?.kind !== 'directory') {
     throw new SecretMaskError(
       `secret-mask root ${workerRoot} is not a readable directory, so a scan of it would ` +
         'report no secrets whether or not the repository has any. Refusing the invocation ' +
