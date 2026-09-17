@@ -1,5 +1,6 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
+import { writeFileNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, SPEC_VIEW_MODES, type SpecViewMode } from '@haive/shared';
@@ -53,9 +54,12 @@ export async function resolveTaskWorktreePath(ctx: StepContext): Promise<string 
 /** Write the spec to `<worktreePath>/.haive/spec.md`. Idempotent (plain overwrite, so a
  *  gate-1 re-approval after a re-draft refreshes it). Returns the relative path. */
 export async function writeSpecArtifact(worktreePath: string, spec: string): Promise<string> {
-  const abs = join(worktreePath, SPEC_ARTIFACT_RELPATH);
-  await mkdir(dirname(abs), { recursive: true });
-  await writeFile(abs, spec, 'utf8');
+  // The anchor is the repository ROOT, never the worktree: a worktree sits under `.haive/`, which
+  // the sandbox mounts read-write, so its own components are the ones an agent can redirect.
+  const wa = workspaceAnchor(worktreePath);
+  await writeFileNoFollow(wa.anchor, `${wa.prefix}${SPEC_ARTIFACT_RELPATH}`, spec, {
+    createParents: true,
+  });
   return SPEC_ARTIFACT_RELPATH;
 }
 

@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { writeFileNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
@@ -80,12 +81,12 @@ export async function buildKnowledgeDiffArtifact(
     files,
   };
 
-  const artifactPath = path.join(
-    workspacePath,
-    '.haive',
-    opts.artifactName ?? KNOWLEDGE_DIFF_ARTIFACT_NAME,
-  );
-  await mkdir(path.dirname(artifactPath), { recursive: true });
-  await writeFile(artifactPath, JSON.stringify(artifact), 'utf8');
+  const name = opts.artifactName ?? KNOWLEDGE_DIFF_ARTIFACT_NAME;
+  // Anchored at the repository root, not the worktree this is handed — see `workspaceAnchor`.
+  const wa = workspaceAnchor(workspacePath);
+  const artifactPath = path.join(workspacePath, '.haive', name);
+  await writeFileNoFollow(wa.anchor, `${wa.prefix}.haive/${name}`, JSON.stringify(artifact), {
+    createParents: true,
+  });
   return artifactPath;
 }

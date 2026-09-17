@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
@@ -121,6 +121,24 @@ describe('buildScreenshotManifest', () => {
     await rm(path.join(ws, SCREENSHOTS_DIR_REL, '01-first.webp'));
     await buildScreenshotManifest(ws, [{ file: '01-first.webp', caption: 'one' }]);
     expect((await readManifest(ws)).shots).toHaveLength(0);
+  });
+
+  it('counts nothing when the screenshots directory is a link', async () => {
+    const ws = await workspace();
+    const outside = await mkdtemp(path.join(tmpdir(), 'haive-shots-out-'));
+    await writeFile(path.join(outside, '01-theirs.webp'), 'x', 'utf8');
+    await mkdir(path.dirname(path.join(ws, SCREENSHOTS_DIR_REL)), { recursive: true });
+    await symlink(outside, path.join(ws, SCREENSHOTS_DIR_REL));
+
+    const res = await buildScreenshotManifest(ws, []);
+
+    // A linked directory is refused rather than followed, so images sitting outside the workspace
+    // are never listed as this task's evidence. The manifest is still written — an empty one, which
+    // is what a rebuild should leave behind.
+    expect(res.count).toBe(0);
+    expect(await readManifest(ws)).toEqual({ count: 0, truncated: false, shots: [] });
+
+    await rm(outside, { recursive: true, force: true });
   });
 });
 

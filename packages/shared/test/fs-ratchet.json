@@ -62,18 +62,11 @@
   "packages/worker/src/step-engine/steps/workflow/01a-app-boot.ts": 1,
   "packages/worker/src/step-engine/steps/workflow/01c-ddev-env.ts": 5,
   "packages/worker/src/step-engine/steps/workflow/04-phase-0b-pre-planning.ts": 1,
-  "packages/worker/src/step-engine/steps/workflow/05a-resolve-spec-warnings.ts": 4,
   "packages/worker/src/step-engine/steps/workflow/06a-db-migrate.ts": 1,
   "packages/worker/src/step-engine/steps/workflow/07c-ddev-reconcile.ts": 2,
   "packages/worker/src/step-engine/steps/workflow/08-phase-5-verify.ts": 1,
   "packages/worker/src/step-engine/steps/workflow/08b-test-management.ts": 2,
-  "packages/worker/src/step-engine/steps/workflow/11-phase-8-learning.ts": 7,
-  "packages/worker/src/step-engine/steps/workflow/11d-skill-sync.ts": 6,
   "packages/worker/src/step-engine/steps/workflow/_app-runtime.ts": 2,
   "packages/worker/src/step-engine/steps/workflow/_browser-runtime.ts": 1,
-  "packages/worker/src/step-engine/steps/workflow/_commit-diff.ts": 2,
-  "packages/worker/src/step-engine/steps/workflow/_knowledge-diff.ts": 2,
-  "packages/worker/src/step-engine/steps/workflow/_screenshots.ts": 3,
-  "packages/worker/src/step-engine/steps/workflow/_spec-artifact.ts": 2,
   "packages/worker/src/step-engine/steps/workflow/_test-preflight.ts": 1
 }
