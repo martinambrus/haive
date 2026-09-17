@@ -1,12 +1,11 @@
 import { execFile } from 'node:child_process';
-import path from 'node:path';
-import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -69,11 +68,22 @@ interface RunRecipe {
   port: number;
 }
 
+/** A marker FILE in the workspace, walked rather than joined.
+ *
+ *  The workspace is a WORKTREE — under `.haive/`, which the sandbox mounts read-write — so it is
+ *  SPLIT rather than used as the anchor, exactly as `readPackageScripts` does below. `kind === 'file'`
+ *  is what every caller here means: all of these markers are files, and the `pathExists` this
+ *  replaced was `stat`-based, so it followed a link AND read a dangling one as absent. */
+async function hasWorkspaceFile(workspace: string, rel: string): Promise<boolean> {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  return (await lstatNoFollow(anchor, `${prefix}${rel}`))?.kind === 'file';
+}
+
 async function detectPackageManager(workspace: string): Promise<PackageManager> {
-  if (await pathExists(path.join(workspace, 'pnpm-lock.yaml'))) return 'pnpm';
-  if (await pathExists(path.join(workspace, 'bun.lockb'))) return 'bun';
-  if (await pathExists(path.join(workspace, 'yarn.lock'))) return 'yarn';
-  if (await pathExists(path.join(workspace, 'package-lock.json'))) return 'npm';
+  if (await hasWorkspaceFile(workspace, 'pnpm-lock.yaml')) return 'pnpm';
+  if (await hasWorkspaceFile(workspace, 'bun.lockb')) return 'bun';
+  if (await hasWorkspaceFile(workspace, 'yarn.lock')) return 'yarn';
+  if (await hasWorkspaceFile(workspace, 'package-lock.json')) return 'npm';
   return 'none';
 }
 
@@ -105,12 +115,12 @@ function pickDevScript(scripts: Record<string, string>): string | null {
 
 async function detectFrameworkFiles(workspace: string): Promise<FrameworkFiles> {
   const [artisan, managePy, binRails, configRu, goMod, phpPublicIndex] = await Promise.all([
-    pathExists(path.join(workspace, 'artisan')),
-    pathExists(path.join(workspace, 'manage.py')),
-    pathExists(path.join(workspace, 'bin', 'rails')),
-    pathExists(path.join(workspace, 'config.ru')),
-    pathExists(path.join(workspace, 'go.mod')),
-    pathExists(path.join(workspace, 'public', 'index.php')),
+    hasWorkspaceFile(workspace, 'artisan'),
+    hasWorkspaceFile(workspace, 'manage.py'),
+    hasWorkspaceFile(workspace, 'bin/rails'),
+    hasWorkspaceFile(workspace, 'config.ru'),
+    hasWorkspaceFile(workspace, 'go.mod'),
+    hasWorkspaceFile(workspace, 'public/index.php'),
   ]);
   return { artisan, managePy, rails: binRails || configRu, goMod, phpPublicIndex };
 }
@@ -284,7 +294,7 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
     const devScript = pickDevScript(scripts);
     const pm = await detectPackageManager(workspace);
     const fw = await detectFrameworkFiles(workspace);
-    const hasPackageJson = await pathExists(path.join(workspace, 'package.json'));
+    const hasPackageJson = await hasWorkspaceFile(workspace, 'package.json');
     const suggestedPort = guessPort(containerTool, devScript, scripts, fw);
     const suggestedBootCommand = buildSuggestedCommand(
       containerTool,
