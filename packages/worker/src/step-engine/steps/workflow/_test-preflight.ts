@@ -2,7 +2,7 @@ import path from 'node:path';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { FormSchema } from '@haive/shared';
-import { pathExists } from '../onboarding/_helpers.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 
 /**
  * Pre-flight for 08b: can the runner load this repo's EXISTING tests at all, before a tester
@@ -75,10 +75,12 @@ export async function findMissingEnvFiles(
     const envRel = path.posix.join(root, '.env');
     if (seen.has(envRel)) continue;
     seen.add(envRel);
-    if (await pathExists(path.join(workspace, root, '.env'))) continue;
+    // The rels the report already carries are exactly what the walk needs, so one string now serves
+    // both rather than a posix rel for the message and a joined absolute for the probe.
+    if (await hasWorkspaceEntry(workspace, envRel)) continue;
     for (const suffix of ENV_SAMPLE_SUFFIXES) {
       const sampleRel = path.posix.join(root, `.env${suffix}`);
-      if (await pathExists(path.join(workspace, root, `.env${suffix}`))) {
+      if (await hasWorkspaceEntry(workspace, sampleRel)) {
         found.push({ expected: envRel, sample: sampleRel });
         break;
       }
