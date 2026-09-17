@@ -1,5 +1,4 @@
-import { readFile, stat } from 'node:fs/promises';
-import path from 'node:path';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -1060,7 +1059,7 @@ function parseExtraPackages(raw: string): string[] {
 const APACHE_DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html'];
 async function detectWebserver(repoPath: string): Promise<WebserverType> {
   for (const sub of APACHE_DOCROOT_CANDIDATES) {
-    if (await fileExists(path.join(repoPath, sub, '.htaccess'))) return 'apache-fpm';
+    if (await fileExists(repoPath, sub ? `${sub}/.htaccess` : '.htaccess')) return 'apache-fpm';
   }
   return 'nginx-fpm';
 }
@@ -1083,7 +1082,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
   const runtimes: DetectedRuntime[] = [];
   const suggestedLsp = new Set<LspKey>();
 
-  const packageJson = await readJsonIfExists(path.join(repoPath, 'package.json'));
+  const packageJson = await readJsonIfExists(repoPath, 'package.json');
   if (packageJson) {
     const engines = (packageJson as Record<string, unknown>).engines as
       Record<string, string> | undefined;
@@ -1097,7 +1096,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     suggestedLsp.add('vtsls');
   }
 
-  const composerJson = await readJsonIfExists(path.join(repoPath, 'composer.json'));
+  const composerJson = await readJsonIfExists(repoPath, 'composer.json');
   let isCmsPhpProject = false;
   if (composerJson) {
     const requireField = (composerJson as Record<string, unknown>).require as
@@ -1121,10 +1120,10 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     suggestedLsp.add(isCmsPhpProject ? 'intelephense-extended' : 'intelephense');
   }
 
-  const requirementsTxt = await fileExists(path.join(repoPath, 'requirements.txt'));
-  const pyprojectToml = await fileExists(path.join(repoPath, 'pyproject.toml'));
+  const requirementsTxt = await fileExists(repoPath, 'requirements.txt');
+  const pyprojectToml = await fileExists(repoPath, 'pyproject.toml');
   if (requirementsTxt || pyprojectToml) {
-    const pythonVersionFile = await readTextIfExists(path.join(repoPath, '.python-version'));
+    const pythonVersionFile = await readTextIfExists(repoPath, '.python-version');
     runtimes.push({
       language: 'python',
       version: pythonVersionFile?.trim() || null,
@@ -1134,7 +1133,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     suggestedLsp.add('pyright');
   }
 
-  const goMod = await readTextIfExists(path.join(repoPath, 'go.mod'));
+  const goMod = await readTextIfExists(repoPath, 'go.mod');
   if (goMod) {
     const match = goMod.match(/^go\s+(\S+)/m);
     runtimes.push({
@@ -1146,7 +1145,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     suggestedLsp.add('gopls');
   }
 
-  const cargoToml = await readTextIfExists(path.join(repoPath, 'Cargo.toml'));
+  const cargoToml = await readTextIfExists(repoPath, 'Cargo.toml');
   if (cargoToml) {
     const match = cargoToml.match(/rust-version\s*=\s*"([^"]+)"/);
     runtimes.push({
@@ -1158,9 +1157,9 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     suggestedLsp.add('rust-analyzer');
   }
 
-  const pomXml = await readTextIfExists(path.join(repoPath, 'pom.xml'));
-  const buildGradle = await readTextIfExists(path.join(repoPath, 'build.gradle'));
-  const buildGradleKts = await readTextIfExists(path.join(repoPath, 'build.gradle.kts'));
+  const pomXml = await readTextIfExists(repoPath, 'pom.xml');
+  const buildGradle = await readTextIfExists(repoPath, 'build.gradle');
+  const buildGradleKts = await readTextIfExists(repoPath, 'build.gradle.kts');
   if (pomXml || buildGradle || buildGradleKts) {
     let version: string | null = null;
     if (pomXml) {
@@ -1188,14 +1187,14 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     suggestedLsp.add('jdtls');
   }
 
-  const gemfile = await readTextIfExists(path.join(repoPath, 'Gemfile'));
+  const gemfile = await readTextIfExists(repoPath, 'Gemfile');
   if (gemfile) {
     // `.ruby-version` wins over the Gemfile directive: it is the more specific declaration
     // and it carries a FULL version, which is what the interpreter catalog is keyed on,
     // while a Gemfile commonly says `ruby "3.1"`. It also covers the modern
     // `ruby file: ".ruby-version"` form, which the regex below correctly captures nothing
     // from (VERIFIED — it does not mis-capture, it simply yields null).
-    const rubyVersionFile = await readTextIfExists(path.join(repoPath, '.ruby-version'));
+    const rubyVersionFile = await readTextIfExists(repoPath, '.ruby-version');
     const pinned = rubyVersionFile
       ?.trim()
       .split(/\r?\n/)[0]
@@ -1212,8 +1211,8 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
   }
 
   const ddev = await readDdevConfig(repoPath);
-  const dockerCompose = await fileExists(path.join(repoPath, 'docker-compose.yml'));
-  const dockerComposeAlt = await fileExists(path.join(repoPath, 'compose.yml'));
+  const dockerCompose = await fileExists(repoPath, 'docker-compose.yml');
+  const dockerComposeAlt = await fileExists(repoPath, 'compose.yml');
 
   const containerTool: ContainerTool = ddev.present
     ? 'ddev'
@@ -1263,8 +1262,10 @@ interface DdevInfo {
 }
 
 async function readDdevConfig(repoPath: string): Promise<DdevInfo> {
-  const cfgPath = path.join(repoPath, '.ddev', 'config.yaml');
-  const text = await readTextIfExists(cfgPath);
+  // The FIFTH reader of this one file, and it now agrees with the other four (01c-ddev-env,
+  // 07c-ddev-reconcile, classifyRuntime, _browser-runtime): a config reached through a link is
+  // not this project's config, so it reads as absent and DDEV is reported not present.
+  const text = await readTextIfExists(repoPath, '.ddev/config.yaml');
   if (!text) {
     return {
       present: false,
@@ -1312,7 +1313,7 @@ async function inferDatabaseFromCompose(
 ): Promise<{ kind: DatabaseKind; version: string | null }> {
   const candidates = ['docker-compose.yml', 'compose.yml'];
   for (const file of candidates) {
-    const text = await readTextIfExists(path.join(repoPath, file));
+    const text = await readTextIfExists(repoPath, file);
     if (!text) continue;
     if (/image:\s*postgres(?::|\s)/i.test(text)) {
       const version = text.match(/image:\s*postgres:(\S+)/i)?.[1] ?? null;
@@ -1349,22 +1350,22 @@ function normalizeJavaVersion(raw: string | null): string | null {
 }
 
 async function detectNodePackageManager(repoPath: string): Promise<PackageManager> {
-  if (await fileExists(path.join(repoPath, 'bun.lockb'))) return 'bun';
-  if (await fileExists(path.join(repoPath, 'pnpm-lock.yaml'))) return 'pnpm';
-  if (await fileExists(path.join(repoPath, 'yarn.lock'))) return 'yarn';
+  if (await fileExists(repoPath, 'bun.lockb')) return 'bun';
+  if (await fileExists(repoPath, 'pnpm-lock.yaml')) return 'pnpm';
+  if (await fileExists(repoPath, 'yarn.lock')) return 'yarn';
   return 'npm';
 }
 
 async function detectPythonPackageManager(repoPath: string): Promise<PackageManager> {
-  if (await fileExists(path.join(repoPath, 'uv.lock'))) return 'uv';
-  if (await fileExists(path.join(repoPath, 'poetry.lock'))) return 'poetry';
-  if (await fileExists(path.join(repoPath, 'pdm.lock'))) return 'pdm';
-  if (await fileExists(path.join(repoPath, 'Pipfile.lock'))) return 'pipenv';
+  if (await fileExists(repoPath, 'uv.lock')) return 'uv';
+  if (await fileExists(repoPath, 'poetry.lock')) return 'poetry';
+  if (await fileExists(repoPath, 'pdm.lock')) return 'pdm';
+  if (await fileExists(repoPath, 'Pipfile.lock')) return 'pipenv';
   return 'pip';
 }
 
-async function readJsonIfExists(filePath: string): Promise<unknown | null> {
-  const text = await readTextIfExists(filePath);
+async function readJsonIfExists(repoPath: string, rel: string): Promise<unknown | null> {
+  const text = await readTextIfExists(repoPath, rel);
   if (!text) return null;
   try {
     return JSON.parse(text);
@@ -1373,19 +1374,19 @@ async function readJsonIfExists(filePath: string): Promise<unknown | null> {
   }
 }
 
-async function readTextIfExists(filePath: string): Promise<string | null> {
-  try {
-    return await readFile(filePath, 'utf8');
-  } catch {
-    return null;
-  }
+/** `repoPath` is `ctx.repoPath`, which `resolveTaskContext` sets to the repository's
+ *  `storagePath ?? localPath` — the root, never a worktree — so it is a valid anchor and every
+ *  marker below is a rel walked one component at a time.
+ *
+ *  Lenient: null already covers absent, unreadable AND refused, which is exactly what the
+ *  `catch` these replaced folded together. Under-detection is the safe direction here — a
+ *  marker reached through a link is not this project's marker. */
+async function readTextIfExists(repoPath: string, rel: string): Promise<string | null> {
+  return readTextNoFollow(repoPath, rel);
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await stat(filePath);
-    return true;
-  } catch {
-    return false;
-  }
+async function fileExists(repoPath: string, rel: string): Promise<boolean> {
+  // Every caller probes a FILE — lock files, manifests, compose files, `.htaccess` — so a
+  // directory of that name was never a marker, and `stat` would have followed a link here.
+  return (await lstatNoFollow(repoPath, rel))?.kind === 'file';
 }
