@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
 import {
   deriveRequiredDomains,
@@ -57,8 +60,15 @@ describe('deriveRequiredDomains', () => {
 });
 
 describe('skill-generation chunked loop apply', () => {
+  // A REAL directory, not a fixed `/tmp` name. The anchor has to exist: these writes go through
+  // `writeFileNoFollow`, whose `createParents` creates parents UNDER the anchor and cannot conjure
+  // the anchor itself — where the `mkdir -p` it replaced created the whole chain, repo root
+  // included. The hardcoded path passed on a developer machine only because an earlier run had
+  // left it behind, and failed on a clean runner.
+  const repoRoot = mkdtempSync(path.join(os.tmpdir(), 'haive-skill-floor-'));
+  afterAll(() => rmSync(repoRoot, { recursive: true, force: true }));
   const fakeCtx = {
-    repoPath: '/tmp/haive-skill-floor',
+    repoPath: repoRoot,
     logger: logger.child({ test: 'skill-floor' }),
     db: undefined as never,
   } as unknown as StepContext;
@@ -229,8 +239,10 @@ describe('skill-generation truncation shrink', () => {
 });
 
 describe('skill-generation parallel deterministic', () => {
+  const repoRoot = mkdtempSync(path.join(os.tmpdir(), 'haive-skill-parallel-'));
+  afterAll(() => rmSync(repoRoot, { recursive: true, force: true }));
   const fakeCtx = {
-    repoPath: '/tmp/haive-skill-parallel',
+    repoPath: repoRoot,
     logger: logger.child({ test: 'skill-parallel' }),
     db: undefined as never,
   } as unknown as StepContext;
