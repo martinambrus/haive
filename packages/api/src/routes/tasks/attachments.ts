@@ -139,7 +139,9 @@ function safeAttachmentPath(raw: string): string {
 async function ensureDirTree(anchor: string, uploadsRel: string, relDir: string): Promise<void> {
   if (relDir === '') return;
   const owner = { uid: NODE_UID, gid: NODE_GID };
-  await ensureDirNoFollow(anchor, `${uploadsRel}/${relDir}`, { owner, mode: 0o755 });
+  // The owner is applied by the best-effort pass below, not by the primitive: it is fatal there, and
+  // an api that is not root cannot chown to the sandbox uid — 0755 is world-traversable regardless.
+  await ensureDirNoFollow(anchor, `${uploadsRel}/${relDir}`, { mode: 0o755 });
   // `ensureDirNoFollow` applies owner and mode only to what IT created, on purpose — walking to a
   // deep path must not rewrite an existing directory's permissions. But a level an earlier upload
   // left root-owned still has to be handed over, so the existing ones are repaired explicitly.
@@ -179,8 +181,14 @@ async function createUniqueAttachment(
         anchor,
         `${uploadsRel}/${rel(candidate)}`,
         'create-exclusive',
-        { fileMode: 0o644, owner: { uid: NODE_UID, gid: NODE_GID } },
+        { fileMode: 0o644 },
       );
+      // Best-effort, as the chown here has always been: an api that is not root cannot hand the
+      // file to the sandbox uid, and 0644 is world-readable, so the upload must not fail over it.
+      await chownNoFollow(anchor, `${uploadsRel}/${rel(candidate)}`, {
+        uid: NODE_UID,
+        gid: NODE_GID,
+      }).catch(() => {});
       return { rel: rel(candidate), fh };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
@@ -259,17 +267,15 @@ async function regenerateManifest(
   }
   // Replace-atomic: every agent is told to read this file unconditionally, so a reader must see the
   // old index or the new one, never a half-written one.
-  await writeFileNoFollow(anchor, manifestRel, body, {
-    fileMode: 0o644,
-    owner: { uid: NODE_UID, gid: NODE_GID },
-  });
+  await writeFileNoFollow(anchor, manifestRel, body, { fileMode: 0o644 });
+  await chownNoFollow(anchor, manifestRel, { uid: NODE_UID, gid: NODE_GID }).catch(() => {});
 }
 
 /** Make a freshly-created dir traversable + owned by the sandbox user. Best-effort
  *  (the api is root; failures are non-fatal since 0755/0644 are world-readable). */
 async function ensureUploadsDir(anchor: string, uploadsRel: string): Promise<void> {
   const owner = { uid: NODE_UID, gid: NODE_GID };
-  await ensureDirNoFollow(anchor, uploadsRel, { owner, mode: 0o755 });
+  await ensureDirNoFollow(anchor, uploadsRel, { mode: 0o755 });
   // `.haive/task-uploads/` and the task dir both, because either can predate this upload and be
   // root-owned — an unwritable parent defeats a writable child.
   const parentRel = uploadsRel.slice(0, uploadsRel.lastIndexOf('/'));

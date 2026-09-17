@@ -1184,12 +1184,18 @@ export async function writeFileNoFollow(
 
   // Dotted and pid/uuid-suffixed so two writers cannot collide and a leftover is recognisable.
   const tmpRel = [...segs, `.${leaf}.haive-tmp-${process.pid}-${randomUUID()}`].join('/');
+  const inherited = existing ? { uid: existing.stats.uid, gid: existing.stats.gid } : null;
   const fh = await createExclusive(anchor, tmpRel, {
     createParents: opts.createParents,
-    owner:
-      opts.owner ?? (existing ? { uid: existing.stats.uid, gid: existing.stats.gid } : undefined),
+    owner: opts.owner,
     fileMode: opts.fileMode ?? (existing ? existing.stats.mode & 0o777 : 0o644),
   });
+  // An INHERITED owner is a courtesy — it keeps a uid-1000 file out of root's hands across a
+  // rewrite — so a writer that cannot set it proceeds instead of failing. An owner the CALLER asked
+  // for stays strict, because there the hand-over is the whole point of passing it.
+  if (!opts.owner && inherited) {
+    await fh.chown(inherited.uid, inherited.gid).catch(() => undefined);
+  }
   let renamed = false;
   try {
     await writeAll(fh, bytes);

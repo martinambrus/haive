@@ -162,10 +162,8 @@ async function rewriteManifest(
   }
   // Replace-atomic, and owned by the sandbox uid: every agent is told to read this index, so a
   // reader must see the old one or the new one and never a partial write.
-  await writeFileNoFollow(anchor, manifestRel, body, {
-    fileMode: 0o644,
-    owner: { uid: NODE_UID, gid: NODE_GID },
-  });
+  await writeFileNoFollow(anchor, manifestRel, body, { fileMode: 0o644 });
+  await harmonize(anchor, manifestRel, 0o644);
 }
 
 /** Move one extracted file to its place under the uploads dir, creating the
@@ -178,10 +176,11 @@ async function placeFile(
 ): Promise<string> {
   const destRel = `${uploadsRel}/${relPath}`;
   // `createParents` does the `mkdir -p`, refusing a link in the chain rather than creating below it.
-  await renameNoFollow(anchor, fromRel, destRel, {
-    createParents: true,
-    owner: { uid: NODE_UID, gid: NODE_GID },
-  });
+  // Ownership is NOT passed here: it is best-effort in this module (the `harmonize` calls below), and
+  // handing it to the primitive makes it strict — which is EPERM for any worker that is not root,
+  // as CI is. Chowning to uid 1000 is a courtesy for the sandbox, never a precondition for placing
+  // the file.
+  await renameNoFollow(anchor, fromRel, destRel, { createParents: true });
   const dirRel = destRel.slice(0, destRel.lastIndexOf('/'));
   await harmonize(anchor, dirRel, 0o755);
   await harmonize(anchor, destRel, 0o644);

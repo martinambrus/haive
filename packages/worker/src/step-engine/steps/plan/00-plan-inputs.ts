@@ -334,10 +334,9 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
             result.markdown.length > 0
               ? `# ${attachment.filename}\n\n${result.markdown}\n`
               : `# ${attachment.filename}\n\n_(no text could be read from this file)_\n`;
-          await writeFileNoFollow(ctx.repoPath, sidecarRel, body, {
-            fileMode: 0o644,
-            owner: { uid: NODE_UID, gid: NODE_GID },
-          });
+          // Ownership stays with `harmonizeOwnership`, which catches: it is best-effort here, and
+          // passing it to the primitive would make a non-root worker fail the whole step.
+          await writeFileNoFollow(ctx.repoPath, sidecarRel, body, { fileMode: 0o644 });
           await harmonizeOwnership(ctx.repoPath, sidecarRel);
           row.sidecar = name;
           // The extractor's own verdict on its INPUT, never a test on the string
@@ -360,10 +359,7 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
         ctx.repoPath,
         indexRel,
         renderIndex(ctx.taskId, inputs, archiveNotes),
-        {
-          fileMode: 0o644,
-          owner: { uid: NODE_UID, gid: NODE_GID },
-        },
+        { fileMode: 0o644 },
       );
       await harmonizeOwnership(ctx.repoPath, indexRel);
       indexPath = `${SANDBOX_WORKDIR}/.haive/task-uploads/${ctx.taskId}/${PLAN_INPUTS_INDEX}`;
