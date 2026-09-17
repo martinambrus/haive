@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
-import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, type ArchiveFormat, type BundleJobPayload } from '@haive/shared';
@@ -13,6 +13,13 @@ import { getDecryptedCredentials } from './credentials.js';
  *  sits next to it as `<root>/<userId>/<bundleId>/source.<ext>`. */
 function bundleExtractedDir(bundleStorageRoot: string, userId: string, bundleId: string): string {
   return path.join(bundleStorageRoot, userId, bundleId, 'extracted');
+}
+
+/** The same layout as a rel under the bundle volume, for the anchored primitives. The volume root is
+ *  the trusted end; `<userId>/<bundleId>/extracted` is walked one component at a time, because that
+ *  leaf holds whatever the author's archive or clone put there. */
+function bundleDirRel(userId: string, bundleId: string): string {
+  return `${userId}/${bundleId}`;
 }
 
 export function gitRevParseHead(cwd: string): Promise<string> {
@@ -130,7 +137,7 @@ export async function handleIngestZip(
       .update(schema.customBundles)
       .set({ storageRoot: dest, updatedAt: new Date() })
       .where(eq(schema.customBundles.id, bundle.id));
-    const parsed = await parseBundle(bundle.id, db, logger);
+    const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);
     const counts = await persistBundleItems(db, bundle.id, parsed);
     await setBundleActive(db, bundle.id, {
       storageRoot: dest,
@@ -167,8 +174,9 @@ export async function handleIngestGit(
   if (!bundle.gitUrl) throw new Error('git-source bundle missing gitUrl');
 
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
-  await mkdir(path.dirname(dest), { recursive: true });
-  await rm(dest, { recursive: true, force: true });
+  const dirRel = bundleDirRel(payload.userId, bundle.id);
+  await ensureDirNoFollow(bundleStorageRoot, dirRel, { mode: 0o755 });
+  await removeNoFollow(bundleStorageRoot, `${dirRel}/extracted`, { recursive: true });
 
   let cloneUrl = bundle.gitUrl;
   if (bundle.gitCredentialsId) {
@@ -183,7 +191,7 @@ export async function handleIngestGit(
       .update(schema.customBundles)
       .set({ storageRoot: dest, updatedAt: new Date() })
       .where(eq(schema.customBundles.id, bundle.id));
-    const parsed = await parseBundle(bundle.id, db, logger);
+    const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);
     const counts = await persistBundleItems(db, bundle.id, parsed);
     await setBundleActive(db, bundle.id, {
       storageRoot: dest,
@@ -221,13 +229,19 @@ export async function handleResyncGit(
   if (!bundle.gitUrl) throw new Error('git-source bundle missing gitUrl');
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
 
-  const exists = await rm(path.join(dest, '.git'), { recursive: false }).then(
-    () => true,
-    () => false,
-  );
+  // Whether the working tree is really there — which is what this check has always MEANT, and
+  // never did. It was `rm(<dest>/.git, { recursive: false })` read as a probe, and that cannot
+  // answer correctly in either direction: for a real `.git` DIRECTORY `rm` rejects with EISDIR, so
+  // `exists` was false and EVERY resync fell through to a full re-clone; for a `.git` GITFILE it
+  // SUCCEEDED and deleted it, then fetched against the checkout it had just broken. The comment it
+  // replaces ("rm above silently failed") recorded the symptom without naming the cause.
+  //
+  // An `lstat` answers the question the name asks, so a healthy clone now takes the FETCH path —
+  // which is what this function's own contract says it does.
+  const dirRel = bundleDirRel(payload.userId, bundle.id);
+  const exists = (await lstatNoFollow(bundleStorageRoot, `${dirRel}/extracted/.git`)) !== null;
   if (!exists) {
-    // Working tree missing — re-clone instead of pull. rm above silently failed
-    // so dest may or may not exist; let handleIngestGit own the dir wipe.
+    // Working tree missing — re-clone instead of pull; handleIngestGit owns the dir wipe.
     await handleIngestGit(payload, db, bundleStorageRoot);
     return;
   }
@@ -235,7 +249,7 @@ export async function handleResyncGit(
   try {
     await gitFetchAndCheckout(dest, bundle.gitBranch ?? undefined);
     const head = await gitRevParseHead(dest);
-    const parsed = await parseBundle(bundle.id, db, logger);
+    const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);
     const counts = await persistBundleItems(db, bundle.id, parsed);
     await setBundleActive(db, bundle.id, {
       lastSyncAt: new Date(),

@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -98,14 +99,16 @@ describe('bundle ingest → expansion pipeline', () => {
   it('classifies, decodes, and expands a mixed-format fixture bundle', async () => {
     await stageFixture();
 
-    const classified = await classifyBundle(bundleRoot);
+    const classified = await classifyBundle(bundleRoot, '');
     expect(classified.agents).toHaveLength(2);
     expect(classified.skills).toHaveLength(1);
 
-    // Decode each into IR (mirrors what parseBundle does).
+    // Decode each into IR (mirrors what parseBundle does) — including reading each item back
+    // through the SAME anchor it was classified under, since an item carries only its
+    // bundle-relative `sourcePath` now.
     const decodedAgents = await Promise.all(
       classified.agents.map(async (a) => {
-        const content = await readFile(a.absPath, 'utf8');
+        const content = (await readTextNoFollow(bundleRoot, a.sourcePath))!;
         const spec =
           a.sourceFormat === 'codex-toml'
             ? decodeCodexAgent(content, a.sourcePath)
@@ -116,11 +119,11 @@ describe('bundle ingest → expansion pipeline', () => {
     expect(decodedAgents.map((a) => a.id).sort()).toEqual(['planner', 'reviewer']);
 
     const skillFolder = classified.skills[0]!;
-    const skillContent = await readFile(skillFolder.absPath, 'utf8');
+    const skillContent = (await readTextNoFollow(bundleRoot, skillFolder.sourcePath))!;
     const subSkillContents = await Promise.all(
       skillFolder.subSkillFiles.map(async (s) => ({
         sourcePath: s.sourcePath,
-        content: await readFile(s.absPath, 'utf8'),
+        content: (await readTextNoFollow(bundleRoot, s.sourcePath))!,
       })),
     );
     const decodedSkill =

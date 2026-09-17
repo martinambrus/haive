@@ -1,5 +1,5 @@
-import { readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { readdirNoFollow } from '@haive/shared/fs-safe';
 import type { CustomBundleItemSourceFormat } from '@haive/shared';
 
 const SKIP_DIRS = new Set([
@@ -12,11 +12,15 @@ const SKIP_DIRS = new Set([
   '.next',
 ]);
 
+// Every item carries its BUNDLE-RELATIVE `sourcePath` and nothing absolute. An `absPath` beside it
+// would be a path built by name, which is exactly the redirect the anchored reads exist to remove:
+// the next caller reaches for it with a plain `readFile` and the containment is gone. Consumers pass
+// `sourcePath` back through the same (anchor, rootRel) pair they classified with.
+
 export interface AgentFile {
   kind: 'agent';
   sourceFormat: CustomBundleItemSourceFormat;
   sourcePath: string;
-  absPath: string;
 }
 
 export interface SkillFolder {
@@ -24,15 +28,13 @@ export interface SkillFolder {
   sourceFormat: CustomBundleItemSourceFormat;
   /** Path of the SKILL.md file relative to the bundle root. */
   sourcePath: string;
-  absPath: string;
   /** Sibling sub-skill files inside `<skillDir>/sub-skills/`. Empty when none. */
-  subSkillFiles: { sourcePath: string; absPath: string }[];
+  subSkillFiles: { sourcePath: string }[];
 }
 
 export interface UnknownFile {
   kind: 'unknown';
   sourcePath: string;
-  absPath: string;
   reason: string;
 }
 
@@ -44,37 +46,43 @@ export interface ClassifiedBundle {
 
 interface FoundFile {
   rel: string;
-  abs: string;
 }
 
 interface FoundDir {
   rel: string;
-  abs: string;
 }
 
-async function walk(root: string): Promise<{ files: FoundFile[]; dirs: FoundDir[] }> {
+/** Walk the tree at `<anchor>/<rootRel>`, collecting paths relative to THAT root.
+ *
+ *  Two rels are tracked because they answer different questions: `anchorRel` is what the primitives
+ *  walk, and `rel` is what the bundle calls the file — the value stored in
+ *  `custom_bundle_items.source_path`, which must stay bundle-relative however deep the anchor sits. */
+async function walk(
+  anchor: string,
+  rootRel: string,
+): Promise<{ files: FoundFile[]; dirs: FoundDir[] }> {
   const files: FoundFile[] = [];
   const dirs: FoundDir[] = [];
-  async function visit(currentAbs: string, currentRel: string): Promise<void> {
-    let entries;
-    try {
-      entries = await readdir(currentAbs, { withFileTypes: true });
-    } catch {
-      return;
-    }
+  async function visit(anchorRel: string, rel: string): Promise<void> {
+    // Lenient: a directory that cannot be listed — absent, unreadable, or a link standing where a
+    // directory should be — contributes nothing, which is exactly what the `catch` here did.
+    const entries = await readdirNoFollow(anchor, anchorRel);
+    if (entries === null) return;
     for (const entry of entries) {
-      const abs = path.join(currentAbs, entry.name);
-      const rel = currentRel === '' ? entry.name : `${currentRel}/${entry.name}`;
+      const childAnchorRel = anchorRel === '' ? entry.name : `${anchorRel}/${entry.name}`;
+      const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`;
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name)) continue;
-        dirs.push({ rel, abs });
-        await visit(abs, rel);
+        dirs.push({ rel: childRel });
+        await visit(childAnchorRel, childRel);
       } else if (entry.isFile()) {
-        files.push({ rel, abs });
+        // A link is LISTED by readdir but is neither `isDirectory` nor `isFile`, so it falls through
+        // both branches and is skipped — that was already true and is not a change.
+        files.push({ rel: childRel });
       }
     }
   }
-  await visit(root, '');
+  await visit(rootRel, '');
   return { files, dirs };
 }
 
@@ -115,8 +123,8 @@ function detectSkillFormat(skillRel: string): CustomBundleItemSourceFormat | nul
  *  and unrecognised leftovers. Skill grouping treats `<dir>/SKILL.md` as the
  *  anchor and pulls in every `<dir>/sub-skills/*.md` sibling so the parser
  *  can decode the parent + leaves in one pass. */
-export async function classifyBundle(extractedRoot: string): Promise<ClassifiedBundle> {
-  const { files } = await walk(extractedRoot);
+export async function classifyBundle(anchor: string, rootRel: string): Promise<ClassifiedBundle> {
+  const { files } = await walk(anchor, rootRel);
 
   const agents: AgentFile[] = [];
   const skills: SkillFolder[] = [];
@@ -132,7 +140,6 @@ export async function classifyBundle(extractedRoot: string): Promise<ClassifiedB
       unknown.push({
         kind: 'unknown',
         sourcePath: file.rel,
-        absPath: file.abs,
         reason: 'SKILL.md outside any recognised skills dir',
       });
       claimed.add(file.rel);
@@ -142,12 +149,11 @@ export async function classifyBundle(extractedRoot: string): Promise<ClassifiedB
     const subSkillPrefix = `${skillDir}/sub-skills/`;
     const subSkillFiles = files
       .filter((f) => f.rel.startsWith(subSkillPrefix) && f.rel.toLowerCase().endsWith('.md'))
-      .map((f) => ({ sourcePath: f.rel, absPath: f.abs }));
+      .map((f) => ({ sourcePath: f.rel }));
     skills.push({
       kind: 'skill',
       sourceFormat: skillFormat,
       sourcePath: file.rel,
-      absPath: file.abs,
       subSkillFiles,
     });
     claimed.add(file.rel);
@@ -164,7 +170,7 @@ export async function classifyBundle(extractedRoot: string): Promise<ClassifiedB
     }
     const fmt = detectAgentFormat(file.rel);
     if (fmt) {
-      agents.push({ kind: 'agent', sourceFormat: fmt, sourcePath: file.rel, absPath: file.abs });
+      agents.push({ kind: 'agent', sourceFormat: fmt, sourcePath: file.rel });
       claimed.add(file.rel);
       continue;
     }
@@ -179,7 +185,6 @@ export async function classifyBundle(extractedRoot: string): Promise<ClassifiedB
       unknown.push({
         kind: 'unknown',
         sourcePath: file.rel,
-        absPath: file.abs,
         reason: 'unrecognised location',
       });
     }
