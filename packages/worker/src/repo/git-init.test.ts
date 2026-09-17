@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -81,5 +81,24 @@ describe('ensureGitExcludeEntry', () => {
     const content = await excludeFile(repo);
     expect(content).toContain('custom-thing');
     expect(content).toContain('.haive/');
+  });
+
+  // The exclude file sits inside `.git`, which is not repository CONTENT — but the walk still
+  // refuses a link at any component, and that is the point: the write it replaced followed the
+  // link and appended the marker to whatever sat on the other end.
+  it('refuses to write through an exclude file that is a link', async () => {
+    const repo = await tmp('gi-link-');
+    const outside = await tmp('gi-link-out-');
+    await initGitWorkspace(repo, 'main');
+
+    const target = path.join(outside, 'their-exclude');
+    await writeFile(target, 'theirs\n', 'utf8');
+    const p = path.join(repo, '.git', 'info', 'exclude');
+    await rm(p, { force: true });
+    await symlink(target, p);
+
+    await expect(ensureGitExcludeEntry(repo)).rejects.toMatchObject({ reason: 'link' });
+    // The file the link named is untouched.
+    expect(await readFile(target, 'utf8')).toBe('theirs\n');
   });
 });

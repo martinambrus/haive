@@ -1,7 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { relUnder, removeNoFollow } from '@haive/shared/fs-safe';
+import { readTextNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -157,16 +154,10 @@ async function writePlanMirrorLocked(
 
   const written: string[] = [];
   const write = async (rel: string, content: string): Promise<void> => {
-    const abs = path.join(repoPath, rel);
-    await mkdir(path.dirname(abs), { recursive: true });
-    const temporary = `${abs}.tmp-${process.pid}-${randomUUID()}`;
-    try {
-      await writeFile(temporary, content, 'utf8');
-      await rename(temporary, abs);
-    } catch (err) {
-      await removeNoFollow(repoPath, relUnder(repoPath, temporary)).catch(() => undefined);
-      throw err;
-    }
+    // `replace-atomic` is the DEFAULT mode and is exactly what this hand-rolled dance did — write a
+    // temp beside the target, rename over it, unlink the temp on failure — so a concurrent reader
+    // still sees either the old bytes or the new ones, never a half-written mirror.
+    await writeFileNoFollow(repoPath, rel, content, { createParents: true });
     written.push(rel);
   };
 
@@ -211,7 +202,10 @@ export async function importPlanMirror(
 ): Promise<{ imported: boolean; reason?: string }> {
   let rawPayload: unknown;
   try {
-    const raw = await readFile(path.join(storagePath, HAIVE_DATA_FILES.plan), 'utf8');
+    // null is absence OR a refusal — a link, a non-regular file — and both mean there is no mirror
+    // to import, which is exactly what the `catch` concluded for an unreadable path.
+    const raw = await readTextNoFollow(storagePath, HAIVE_DATA_FILES.plan);
+    if (raw === null) return { imported: false, reason: 'no plan mirror' };
     rawPayload = JSON.parse(raw) as unknown;
   } catch {
     return { imported: false, reason: 'no plan mirror' };
@@ -457,9 +451,9 @@ export async function reconcilePlanMirror(
 
   let rawPayload: unknown;
   try {
-    rawPayload = JSON.parse(
-      await readFile(path.join(storagePath, HAIVE_DATA_FILES.plan), 'utf8'),
-    ) as unknown;
+    const raw = await readTextNoFollow(storagePath, HAIVE_DATA_FILES.plan);
+    if (raw === null) return empty('this repository has no committed plan snapshot');
+    rawPayload = JSON.parse(raw) as unknown;
   } catch {
     return empty('this repository has no committed plan snapshot');
   }
