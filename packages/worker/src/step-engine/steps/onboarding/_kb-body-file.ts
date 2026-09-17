@@ -1,8 +1,9 @@
-import { lstat, readFile, realpath } from 'node:fs/promises';
 import {
   chownNoFollow,
   ensureDirNoFollow,
+  isPathContainmentError,
   lstatNoFollow,
+  readTextNoFollow,
   relUnder,
   removeNoFollow,
 } from '@haive/shared/fs-safe';
@@ -93,25 +94,38 @@ export function resolveKbBodyPath(repoPath: string, declared: string): string {
  *  actual stale body carries. */
 const STALE_BODY_GRACE_MS = 2_000;
 
-async function resolveStagedFile(
+async function resolveStagedRel(
   repoPath: string,
   declared: string,
   notBefore?: Date,
 ): Promise<string> {
-  const lexical = resolveKbBodyPath(repoPath, declared);
-  let real: string;
-  let root: string;
+  // The lexical gate runs FIRST and unchanged: it rejects an absolute path and any `.`/`..` segment
+  // and throws this module's own error, which every caller reports per item.
+  const rel = relUnder(repoPath, resolveKbBodyPath(repoPath, declared));
+
+  // The walk refuses a link at ANY component, which is what the `realpath` pair was reaching for
+  // and could not do safely — it resolved the whole chain and then acted on the resolved string.
+  //
+  // A containment refusal is translated into THIS module's error type on purpose: `resolveBodies`,
+  // 08 and 09_2 all catch `KbBodyPathError` per item, so a raw `PathContainmentError` would escape
+  // those handlers and fail the whole step over one bad body. Same rule as #135.
+  let info;
   try {
-    real = await realpath(lexical);
-    root = await realpath(path.resolve(repoPath, KB_DRAFT_DIR));
-  } catch {
-    throw new KbBodyPathError(`bodyPath declared but not written: ${declared}`);
-  }
-  if (real !== root && !real.startsWith(root + path.sep)) {
+    info = await lstatNoFollow(repoPath, rel, { strict: true });
+  } catch (err) {
+    if (!isPathContainmentError(err)) throw err;
     throw new KbBodyPathError(`bodyPath resolves outside ${KB_DRAFT_DIR}: ${declared}`);
   }
-  const st = await lstat(real);
-  if (!st.isFile()) throw new KbBodyPathError(`bodyPath is not a regular file: ${declared}`);
+  if (info === null) throw new KbBodyPathError(`bodyPath declared but not written: ${declared}`);
+  // A link at the LEAF is reported as `symlink` rather than refused by the walk, so it lands here —
+  // and it is the containment case, not a "wrong file type" one, so it keeps that message.
+  if (info.kind === 'symlink') {
+    throw new KbBodyPathError(`bodyPath resolves outside ${KB_DRAFT_DIR}: ${declared}`);
+  }
+  if (info.kind !== 'file') {
+    throw new KbBodyPathError(`bodyPath is not a regular file: ${declared}`);
+  }
+  const st = info.stats;
   // A body older than the run that declared it is not that run's work. Body paths are
   // deterministic, so an attempt that declares a path and fails to write it would otherwise
   // publish whatever an EARLIER attempt left at the same name. `prepareAgentWritableDir` now
@@ -127,7 +141,7 @@ async function resolveStagedFile(
       `bodyPath predates this run — left by an earlier attempt: ${declared}`,
     );
   }
-  return real;
+  return rel;
 }
 
 /** Read one staged body and return its sections.
@@ -141,11 +155,9 @@ export async function readKbBodyFile(
   declared: string,
   notBefore?: Date,
 ): Promise<KbSection[]> {
-  const abs = await resolveStagedFile(repoPath, declared, notBefore);
-  let text: string;
-  try {
-    text = await readFile(abs, 'utf8');
-  } catch {
+  const rel = await resolveStagedRel(repoPath, declared, notBefore);
+  const text = await readTextNoFollow(repoPath, rel);
+  if (text === null) {
     throw new KbBodyPathError(`bodyPath declared but not written: ${declared}`);
   }
   const sections = parseSectionsFromMarkdown(text);
@@ -169,11 +181,9 @@ export async function readKbBodyText(
   declared: string,
   notBefore?: Date,
 ): Promise<string> {
-  const abs = await resolveStagedFile(repoPath, declared, notBefore);
-  let text: string;
-  try {
-    text = await readFile(abs, 'utf8');
-  } catch {
+  const rel = await resolveStagedRel(repoPath, declared, notBefore);
+  const text = await readTextNoFollow(repoPath, rel);
+  if (text === null) {
     throw new KbBodyPathError(`contentPath declared but not written: ${declared}`);
   }
   const trimmed = text.trim();

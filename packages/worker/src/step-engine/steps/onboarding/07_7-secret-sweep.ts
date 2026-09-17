@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { FRAMEWORK_PATTERNS, type FormSchema } from '@haive/shared';
 import { coerceReviewSeverity, normalizeCweId } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
@@ -321,12 +321,10 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
   async detect(ctx: StepContext): Promise<SecretSweepDetect> {
     // A root that is not a readable directory means there is no tree to sweep, which is
     // a different statement from "no secrets found" and must not be reported as one.
-    let scannable = false;
-    try {
-      scannable = (await stat(ctx.repoPath)).isDirectory();
-    } catch {
-      scannable = false;
-    }
+    // `rel: ''` addresses the anchor itself, which `lstat` allows. A root that is a LINK now reads
+    // as unscannable rather than being followed — and "not a readable directory" is the statement
+    // this flag already carried.
+    const scannable = (await lstatNoFollow(ctx.repoPath, ''))?.kind === 'directory';
     if (!scannable) {
       ctx.logger.warn({ repoPath: ctx.repoPath }, 'secret sweep has no readable repository root');
     }

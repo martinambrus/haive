@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 
 /** A quoted path literal carrying a segment that looks generated rather than named. */
 export interface OpaquePathHit {
@@ -128,12 +127,10 @@ export async function scanForOpaquePaths(
 ): Promise<OpaquePathScanResult> {
   const hits: OpaquePathHit[] = [];
   for (const rel of files) {
-    let content: string;
-    try {
-      content = await readFile(path.join(repoPath, rel), 'utf8');
-    } catch {
-      continue; // unreadable or binary — nothing to judge
-    }
+    // `null` covers unreadable, absent and refused alike — all three are "nothing to judge",
+    // which is exactly what the `catch` this replaces treated them as.
+    const content = await readTextNoFollow(repoPath, rel);
+    if (content === null) continue;
     hits.push(...scanTextForOpaquePaths(rel, content));
     if (hits.length > cap * 4) break; // enough to report a cap; stop paying for more
   }

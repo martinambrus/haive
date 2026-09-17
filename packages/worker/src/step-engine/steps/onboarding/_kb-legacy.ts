@@ -1,7 +1,11 @@
-import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { LEGACY_KNOWLEDGE_MIGRATIONS } from '@haive/shared/knowledge-paths';
-import { relUnder, removeNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
+import {
+  lstatNoFollow,
+  readdirNoFollow,
+  removeNoFollow,
+  renameNoFollow,
+} from '@haive/shared/fs-safe';
 
 /** Where a legacy file lands when its canonical slot is already taken. Inside the knowledge
  *  base on purpose: `scanExistingKb` recurses, so the reuse prompt lists it alongside the
@@ -54,26 +58,27 @@ export async function migrateLegacyKnowledge(
 ): Promise<LegacyKnowledgeMigration> {
   const result: LegacyKnowledgeMigration = { moved: [], pendingMerge: [], skipped: [] };
   for (const { from, to } of LEGACY_KNOWLEDGE_MIGRATIONS) {
-    const fromAbs = path.resolve(repoPath, from);
-    if (!(await isDirectory(fromAbs))) continue;
+    // Rels throughout: `from` and `to` are already repo-relative, and the absolutes they used to be
+    // resolved into existed only to be handed to `fs`. Building the rel directly also retires the
+    // `relUnder` round-trips the rename below used to need.
+    if (!(await isDirectory(repoPath, from))) continue;
     let left = 0;
-    for (const rel of await listFiles(fromAbs)) {
-      const src = path.join(fromAbs, rel);
-      const dest = path.resolve(repoPath, to, rel);
-      const relPosix = rel.split(path.sep).join('/');
-      let target = dest;
+    for (const relPosix of await listFiles(repoPath, from)) {
+      const srcRel = `${from}/${relPosix}`;
+      const destRel = `${to}/${relPosix}`;
+      let targetRel = destRel;
       let bucket = result.moved;
-      if (await exists(dest)) {
+      if (await exists(repoPath, destRel)) {
         // A generated root INDEX.md is not knowledge; 08 rewrites it from the final KB.
         if (relPosix === 'INDEX.md') {
           result.skipped.push(path.posix.join(from, relPosix));
           left++;
           continue;
         }
-        target = path.resolve(repoPath, to, LEGACY_IMPORT_SUBDIR, rel);
+        targetRel = `${to}/${LEGACY_IMPORT_SUBDIR}/${relPosix}`;
         bucket = result.pendingMerge;
         // Already imported by an earlier run — leave the source rather than clobber it.
-        if (await exists(target)) {
+        if (await exists(repoPath, targetRel)) {
           result.skipped.push(path.posix.join(from, relPosix));
           left++;
           continue;
@@ -83,7 +88,7 @@ export async function migrateLegacyKnowledge(
         // `createParents` does the `mkdir -p`, and `noReplace` closes the window the `exists`
         // check above leaves open — a name taken between the probe and the move is EEXIST here
         // rather than a silent clobber, and a planted link at the destination counts as taken.
-        await renameNoFollow(repoPath, relUnder(repoPath, src), relUnder(repoPath, target), {
+        await renameNoFollow(repoPath, srcRel, targetRel, {
           noReplace: true,
           createParents: true,
         });
@@ -92,8 +97,8 @@ export async function migrateLegacyKnowledge(
         );
       } catch (err) {
         // Best-effort per file: one unmovable file must not abandon the other forty.
-        logger?.warn({ err, src }, 'kb: could not migrate a legacy knowledge file');
-        result.skipped.push(path.posix.join(from, rel.split(path.sep).join('/')));
+        logger?.warn({ err, src: srcRel }, 'kb: could not migrate a legacy knowledge file');
+        result.skipped.push(path.posix.join(from, relPosix));
         left++;
       }
     }
@@ -115,29 +120,27 @@ export async function migrateLegacyKnowledge(
   return result;
 }
 
-async function isDirectory(abs: string): Promise<boolean> {
-  try {
-    return (await stat(abs)).isDirectory();
-  } catch {
-    return false;
-  }
+async function isDirectory(root: string, rel: string): Promise<boolean> {
+  return (await lstatNoFollow(root, rel))?.kind === 'directory';
 }
 
-async function exists(abs: string): Promise<boolean> {
-  try {
-    await stat(abs);
-    return true;
-  } catch {
-    return false;
-  }
+/** Whether ANYTHING occupies `rel` — a link included, which is the point: a planted link at a
+ *  destination counts as taken rather than as free space to move onto. */
+async function exists(root: string, rel: string): Promise<boolean> {
+  return (await lstatNoFollow(root, rel)) !== null;
 }
 
-/** Every file under `root`, repo-relative to it, recursing into subdirectories. */
-async function listFiles(root: string, prefix = ''): Promise<string[]> {
+/** Every file under `<root>/<prefix>`, relative to `prefix`, recursing into subdirectories.
+ *
+ *  A directory that cannot be listed contributes nothing, where the bare `readdir` it replaces
+ *  would have thrown out of the caller's loop. */
+async function listFiles(root: string, prefix: string, sub = ''): Promise<string[]> {
   const out: string[] = [];
-  for (const entry of await readdir(path.join(root, prefix), { withFileTypes: true })) {
-    const rel = prefix ? path.join(prefix, entry.name) : entry.name;
-    if (entry.isDirectory()) out.push(...(await listFiles(root, rel)));
+  const entries = await readdirNoFollow(root, sub === '' ? prefix : `${prefix}/${sub}`);
+  if (entries === null) return out;
+  for (const entry of entries) {
+    const rel = sub === '' ? entry.name : `${sub}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...(await listFiles(root, prefix, rel)));
     else if (entry.isFile()) out.push(rel);
   }
   return out;
