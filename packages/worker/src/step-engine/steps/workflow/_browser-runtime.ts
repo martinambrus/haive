@@ -1,8 +1,7 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
-import { pathExists } from '../onboarding/_helpers.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import { ddevUrlFromConfigText } from '../_ddev-config.js';
 import { ddevPrimaryUrl, runnerHandleForTask } from '../../../sandbox/ddev-runner.js';
@@ -30,8 +29,12 @@ export interface BrowserRuntimeInfo {
   workspace: string | null;
 }
 
-function ddevConfigPath(workspace: string): string {
-  return path.join(workspace, '.ddev', 'config.yaml');
+/** The project's `.ddev/config.yaml`, split for the anchored walk. The workspace is a WORKTREE —
+ *  under `.haive/`, which the sandbox mounts read-write — so it is never the anchor itself. Same
+ *  split `01c-ddev-env`, `07c-ddev-reconcile` and `classifyRuntime` make for this same file. */
+function ddevConfigRef(workspace: string): { anchor: string; rel: string } {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  return { anchor, rel: `${prefix}.ddev/config.yaml` };
 }
 
 export async function resolveBrowserRuntime(ctx: StepContext): Promise<BrowserRuntimeInfo> {
@@ -59,11 +62,16 @@ export async function resolveBrowserRuntime(ctx: StepContext): Promise<BrowserRu
   // live primary_url; else derive https://<name>.ddev.site from the booted config
   // so callers get a real URL, never the meaningless http://localhost.
   const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-  if (ws && (await pathExists(ddevConfigPath(ws.workspace)))) {
+  // The probe and the fallback read collapse into one: the config is only needed when there is no
+  // live URL, and "no readable config" is the same answer the probe gave. A linked config no longer
+  // selects the ddev branch, matching 01c, 07c and classifyRuntime.
+  const cfgRef = ws ? ddevConfigRef(ws.workspace) : null;
+  const configured = cfgRef
+    ? (await lstatNoFollow(cfgRef.anchor, cfgRef.rel))?.kind === 'file'
+    : false;
+  if (ws && cfgRef && configured) {
     const liveUrl = await ddevPrimaryUrl(runnerHandleForTask(ctx.taskId, ws.repoSubpath));
-    const cfgText = liveUrl
-      ? null
-      : await readFile(ddevConfigPath(ws.workspace), 'utf8').catch(() => null);
+    const cfgText = liveUrl ? null : await readTextNoFollow(cfgRef.anchor, cfgRef.rel);
     const url = liveUrl ?? (cfgText ? ddevUrlFromConfigText(cfgText) : null);
     return {
       browserTesting: true,

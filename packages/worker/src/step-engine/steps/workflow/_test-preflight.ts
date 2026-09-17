@@ -1,5 +1,6 @@
-import { readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { readdirNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { FormSchema } from '@haive/shared';
 import { pathExists } from '../onboarding/_helpers.js';
 
@@ -104,10 +105,12 @@ export async function findMissingEnvFiles(
  * `Dirent.isDirectory()` is false for a symlink, so no link can be followed into a cycle.
  */
 export async function hasExistingSpecFile(workspace: string, root: string): Promise<boolean> {
+  const { anchor, prefix } = workspaceAnchor(workspace);
   const walk = async (rel: string): Promise<boolean> => {
-    const entries = await readdir(path.join(workspace, rel), { withFileTypes: true }).catch(
-      () => [],
-    );
+    // `null` contributes nothing, exactly as the `.catch(() => [])` it replaces did — and the
+    // symlink note above stays true rather than becoming a fix: `Dirent.isDirectory()` was already
+    // false for a link, so no link was ever descended into.
+    const entries = (await readdirNoFollow(anchor, `${prefix}${rel}`)) ?? [];
     for (const entry of entries) {
       if (SPEC_SEARCH_SKIP.has(entry.name)) continue;
       const childRel = rel ? path.posix.join(rel, entry.name) : entry.name;

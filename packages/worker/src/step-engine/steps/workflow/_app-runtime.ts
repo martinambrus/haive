@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { splitRepoSubpath, workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { eq } from 'drizzle-orm';
 import {
   logger,
@@ -11,7 +12,6 @@ import {
 import { schema, type Database } from '@haive/database';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
-import { pathExists } from '../onboarding/_helpers.js';
 import { ddevUrlFromConfigText, parseDdevConfig } from '../_ddev-config.js';
 import {
   ensureDdevStarted,
@@ -93,8 +93,12 @@ function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '');
 }
 
-function ddevConfigPath(workspace: string): string {
-  return path.join(workspace, '.ddev', 'config.yaml');
+/** The project's `.ddev/config.yaml`, split for the anchored walk. The workspace is a WORKTREE — the
+ *  tree the sandbox mounts read-write — so it can never be the anchor; same split `01c-ddev-env` and
+ *  `07c-ddev-reconcile` make for this very file. */
+function ddevConfigRef(workspace: string): { anchor: string; rel: string } {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  return { anchor, rel: `${prefix}.ddev/config.yaml` };
 }
 
 /** Classify the task's runtime from persisted state, without starting anything.
@@ -113,8 +117,13 @@ export async function classifyRuntime(ctx: AppRuntimeCtx): Promise<RuntimeSpec> 
   };
 
   const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-  if (ws && (await pathExists(ddevConfigPath(ws.workspace)))) {
-    const text = await readFile(ddevConfigPath(ws.workspace), 'utf8').catch(() => null);
+  // One read decides both questions the probe-then-read pair asked: a config that is absent,
+  // unreadable or refused answers `null`, and only a config that was READ puts the task in ddev mode.
+  // A linked `.ddev/config.yaml` therefore no longer selects that mode, matching 01c and 07c.
+  const cfgRef = ws ? ddevConfigRef(ws.workspace) : null;
+  const cfgText = cfgRef ? await readTextNoFollow(cfgRef.anchor, cfgRef.rel) : null;
+  if (ws && cfgText !== null) {
+    const text = cfgText;
     return {
       ...base,
       mode: 'ddev',
@@ -373,8 +382,13 @@ const REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos
  *  `database:` block (Haive-generated configs do), so a null/absent type means mariadb —
  *  NOT "no database". Actual reachability is self-gated downstream (getent hosts db). */
 async function resolveTaskDbEngine(repoSubpath: string): Promise<string> {
-  const cfgPath = path.join(REPO_STORAGE_ROOT, repoSubpath, '.ddev', 'config.yaml');
-  const text = await readFile(cfgPath, 'utf8').catch(() => null);
+  // A repoSubpath, not a workspace path: the repository root is the anchor and any worktree tail is
+  // walked — the same split `ddev-runner` makes from the same constant.
+  const { anchor, rel } = splitRepoSubpath(REPO_STORAGE_ROOT, repoSubpath);
+  const text = await readTextNoFollow(
+    anchor,
+    rel === '' ? '.ddev/config.yaml' : `${rel}/.ddev/config.yaml`,
+  );
   return (text ? parseDdevConfig(text).dbType : null) ?? 'mariadb';
 }
 
