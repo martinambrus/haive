@@ -1,8 +1,11 @@
 import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { lstatNoFollow, readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import {
+  lstatNoFollow,
+  readTextNoFollow,
+  removeNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
-import path from 'node:path';
 import { promisify } from 'node:util';
 import type { DetectResult, SkillEntry } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
@@ -261,25 +264,21 @@ async function writeSkillTree(
   const subs = sanitizeSubSkills(entry);
   for (const dir of targetDirs) {
     const parts = dir.split('/').filter((p) => p.length > 0);
-    const skillDir = path.join(worktree, ...parts, entry.id);
     // The anchor is the REPOSITORY ROOT, never the worktree: a worktree sits under `.haive/`, which
     // the sandbox mounts read-write, so its own components are the ones an agent can redirect.
     const wa = workspaceAnchor(worktree);
-    await removeNoFollow(wa.anchor, `${wa.prefix}${[...parts, entry.id].join('/')}`, {
-      recursive: true,
-    });
-    await mkdir(skillDir, { recursive: true });
-    await writeFile(path.join(skillDir, 'SKILL.md'), skillMd, 'utf8');
-    if (subs.length > 0) {
-      const subDir = path.join(skillDir, 'sub-skills');
-      await mkdir(subDir, { recursive: true });
-      for (const sub of subs) {
-        await writeFile(
-          path.join(subDir, `${sub.slug}.md`),
-          subSkillToMarkdown(entry.id, sub),
-          'utf8',
-        );
-      }
+    const skillRel = `${wa.prefix}${[...parts, entry.id].join('/')}`;
+    await removeNoFollow(wa.anchor, skillRel, { recursive: true });
+    // `createParents` replaces both `mkdir`s, which is also why the sub-skill loop no longer needs
+    // its own length guard — that existed only to avoid creating an empty `sub-skills/`.
+    await writeFileNoFollow(wa.anchor, `${skillRel}/SKILL.md`, skillMd, { createParents: true });
+    for (const sub of subs) {
+      await writeFileNoFollow(
+        wa.anchor,
+        `${skillRel}/sub-skills/${sub.slug}.md`,
+        subSkillToMarkdown(entry.id, sub),
+        { createParents: true },
+      );
     }
   }
 }
@@ -493,14 +492,15 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
       for (const dir of targetDirs) {
         const summaries = await readDiskSkillSummaries(worktree, dir);
         const parts = dir.split('/').filter((p) => p.length > 0);
-        const readmePath = path.join(worktree, ...parts, 'README.md');
+        const wa = workspaceAnchor(worktree);
+        const readmeRel = `${wa.prefix}${[...parts, 'README.md'].join('/')}`;
         if (summaries.length === 0) {
-          const wa = workspaceAnchor(worktree);
-          await removeNoFollow(wa.anchor, `${wa.prefix}${[...parts, 'README.md'].join('/')}`);
+          await removeNoFollow(wa.anchor, readmeRel);
           continue;
         }
-        await mkdir(path.dirname(readmePath), { recursive: true });
-        await writeFile(readmePath, skillsReadmeMarkdown(summaries, dir), 'utf8');
+        await writeFileNoFollow(wa.anchor, readmeRel, skillsReadmeMarkdown(summaries, dir), {
+          createParents: true,
+        });
       }
     }
 

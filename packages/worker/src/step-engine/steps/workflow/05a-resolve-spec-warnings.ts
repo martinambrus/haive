@@ -1,5 +1,4 @@
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -99,10 +98,6 @@ async function loadDraftSpec(ctx: StepContext): Promise<string> {
   return out.spec ?? out.summary ?? '';
 }
 
-function specReviewFsPath(ctx: StepContext): string {
-  return path.join(ctx.repoPath, SPEC_REVIEW_REL);
-}
-
 const FIX_RULES = [
   'You are fixing the remaining findings on a tech spec before it goes to a human approval',
   'gate. A reviewer produced the findings below against the spec.',
@@ -156,12 +151,17 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
       ];
       // Materialize the spec to a workspace file for hand-editing, but only if
       // absent so a re-detect (e.g. CLI-provider change) doesn't clobber edits.
-      const fsPath = specReviewFsPath(ctx);
+      // `create-exclusive` IS the "only if absent" rule, without a separate probe: EEXIST covers any
+      // existing entry, a DANGLING link included, which `access` reported as absent before the write
+      // followed it to wherever it pointed. A re-detect still must not clobber hand edits.
       try {
-        await access(fsPath);
-      } catch {
-        await mkdir(path.dirname(fsPath), { recursive: true });
-        await writeFile(fsPath, spec, 'utf8');
+        await writeFileNoFollow(ctx.repoPath, SPEC_REVIEW_REL, spec, {
+          mode: 'create-exclusive',
+          createParents: true,
+        });
+      } catch (err) {
+        // Already materialized — the file the reviewer has been editing. Anything else is real.
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       }
       const severities = findings.map((f) => coerceReviewSeverity(f.severity, 'low'));
       return {
@@ -271,7 +271,10 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
       if (action === 'manual') {
         let spec = detected.spec;
         try {
-          const edited = await readFile(specReviewFsPath(ctx), 'utf8');
+          const edited = await readTextNoFollow(ctx.repoPath, SPEC_REVIEW_REL);
+          // Routed into the existing catch so the warn below still fires: `null` is absence OR a
+          // refusal, and both mean there are no terminal edits to prefer over the 05 spec.
+          if (edited === null) throw new Error('spec-review.md is absent or not a regular file');
           if (edited.trim().length > 0) spec = edited;
         } catch (err) {
           ctx.logger.warn(

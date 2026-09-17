@@ -1,8 +1,13 @@
-import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
-import { ensureDirNoFollow, relUnder } from '@haive/shared/fs-safe';
+import {
+  ensureDirNoFollow,
+  readdirNoFollow,
+  relUnder,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
 import { resolveTaskWorktreePath } from './_spec-artifact.js';
 
@@ -158,13 +163,15 @@ export async function buildScreenshotManifest(
   workspacePath: string,
   reported: ReportedScreenshot[],
 ): Promise<ScreenshotManifestResult> {
+  // The anchor is the repository ROOT, never the workspace: a worktree sits under `.haive/`, which
+  // the sandbox mounts read-write. `workspaceAnchor` derives the root and falls back to the path
+  // itself in root mode, so no caller has to pass one.
+  const wa = workspaceAnchor(workspacePath);
   const dir = path.join(workspacePath, SCREENSHOTS_DIR_REL);
-  let names: string[] = [];
-  try {
-    names = await readdir(dir);
-  } catch {
-    names = [];
-  }
+  // null covers absence AND a directory reached through a link; both mean no screenshots, which is
+  // what the `catch` this replaces already concluded.
+  const entries = await readdirNoFollow(wa.anchor, `${wa.prefix}${SCREENSHOTS_DIR_REL}`);
+  const names = entries === null ? [] : entries.map((e) => e.name);
   const files = names
     .filter((name) => IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase()))
     .sort((a, b) => a.localeCompare(b));
@@ -177,8 +184,12 @@ export async function buildScreenshotManifest(
   };
 
   const artifactPath = path.join(workspacePath, '.haive', SCREENSHOT_MANIFEST_NAME);
-  await mkdir(path.dirname(artifactPath), { recursive: true });
-  await writeFile(artifactPath, JSON.stringify(manifest), 'utf8');
+  await writeFileNoFollow(
+    wa.anchor,
+    `${wa.prefix}.haive/${SCREENSHOT_MANIFEST_NAME}`,
+    JSON.stringify(manifest),
+    { createParents: true },
+  );
 
   return { artifactPath, count: files.length };
 }

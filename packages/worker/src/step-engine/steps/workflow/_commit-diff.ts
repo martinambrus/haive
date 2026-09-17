@@ -1,6 +1,6 @@
-import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { readFileNoFollow } from '@haive/shared/fs-safe';
+import { readFileNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Runs git in `cwd` and returns stdout/stderr/exit code. Matches the gitRun
  *  helper in 10-gate-3-commit.ts so the builder can reuse it. */
@@ -213,9 +213,15 @@ export async function buildCommitDiffArtifact(
     files,
   };
 
+  // Anchored at the repository root, not the worktree this is handed — see `workspaceAnchor`.
+  const wa = workspaceAnchor(workspacePath);
   const artifactPath = path.join(workspacePath, '.haive', COMMIT_DIFF_ARTIFACT_NAME);
-  await mkdir(path.dirname(artifactPath), { recursive: true });
-  await writeFile(artifactPath, JSON.stringify(artifact), 'utf8');
+  await writeFileNoFollow(
+    wa.anchor,
+    `${wa.prefix}.haive/${COMMIT_DIFF_ARTIFACT_NAME}`,
+    JSON.stringify(artifact),
+    { createParents: true },
+  );
 
   return {
     artifactPath,

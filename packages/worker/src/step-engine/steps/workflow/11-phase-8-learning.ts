@@ -1,8 +1,11 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readdirNoFollow, readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import {
+  readdirNoFollow,
+  readTextNoFollow,
+  removeNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
 import { desc, eq } from 'drizzle-orm';
@@ -688,17 +691,24 @@ export async function stageLearningDrafts(
   plan: PlannedLearningOp[],
   investigationContent: string | null,
 ): Promise<void> {
-  const dir = path.join(worktree, LEARNING_DRAFTS_DIR);
   // Anchored at the repository root rather than the worktree, which is sandbox-writable.
   const wa = workspaceAnchor(worktree);
   await removeNoFollow(wa.anchor, `${wa.prefix}${LEARNING_DRAFTS_DIR}`, { recursive: true });
-  await mkdir(path.join(dir, LEARNING_DRAFT_SUBDIR), { recursive: true });
+  // `createParents` replaces the `mkdir`, and the rel builders that already sit beside the absolute
+  // ones are exactly what an anchored write needs.
   for (const p of plan) {
     if (p.op === 'delete') continue;
-    await writeFile(learningDraftPath(worktree, p.id), p.newBody, 'utf8');
+    await writeFileNoFollow(wa.anchor, `${wa.prefix}${learningDraftRel(p.id)}`, p.newBody, {
+      createParents: true,
+    });
   }
   if (investigationContent !== null) {
-    await writeFile(investigationDraftPath(worktree), investigationContent, 'utf8');
+    await writeFileNoFollow(
+      wa.anchor,
+      `${wa.prefix}${investigationDraftRel()}`,
+      investigationContent,
+      { createParents: true },
+    );
   }
 }
 
@@ -760,19 +770,22 @@ export async function applyLearningOps(
   worktree: string,
   plan: PlannedLearningOp[],
 ): Promise<{ written: string[]; deleted: string[] }> {
-  const dir = path.join(worktree, LEARNINGS_DIR);
-  await mkdir(dir, { recursive: true });
+  // Hoisted out of the delete branch: both sides anchor at the repository root, and the `mkdir` is
+  // now `createParents`. `rel` is exactly what `path.relative(worktree, file)` returned, so the
+  // reported paths are unchanged.
+  const wa = workspaceAnchor(worktree);
   const written: string[] = [];
   const deleted: string[] = [];
   for (const p of plan) {
-    const file = path.join(dir, `${p.id}.md`);
+    const rel = `${LEARNINGS_DIR}/${p.id}.md`;
     if (p.op === 'delete') {
-      const wa = workspaceAnchor(worktree);
-      await removeNoFollow(wa.anchor, `${wa.prefix}${LEARNINGS_DIR}/${p.id}.md`);
-      deleted.push(path.relative(worktree, file));
+      await removeNoFollow(wa.anchor, `${wa.prefix}${rel}`);
+      deleted.push(rel);
     } else {
-      await writeFile(file, `${p.newBody}\n`, 'utf8');
-      written.push(path.relative(worktree, file));
+      await writeFileNoFollow(wa.anchor, `${wa.prefix}${rel}`, `${p.newBody}\n`, {
+        createParents: true,
+      });
+      written.push(rel);
     }
   }
   return { written, deleted };
@@ -836,14 +849,15 @@ export async function writeInvestigation(
   affectedClients: string[],
   content?: string,
 ): Promise<string> {
-  const file = path.join(workspace, investigationRelPath(inv));
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(
-    file,
+  const rel = investigationRelPath(inv);
+  const wa = workspaceAnchor(workspace);
+  await writeFileNoFollow(
+    wa.anchor,
+    `${wa.prefix}${rel}`,
     content ?? renderInvestigation(inv, taskTitle, nowIso, feature, affectedClients),
-    'utf8',
+    { createParents: true },
   );
-  return path.relative(workspace, file);
+  return rel;
 }
 
 /** The staged investigation as a diff file for the gate's viewer. Shown against
