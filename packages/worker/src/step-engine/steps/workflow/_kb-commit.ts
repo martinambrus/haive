@@ -1,9 +1,8 @@
 import { execFile } from 'node:child_process';
-import path from 'node:path';
 import { promisify } from 'node:util';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { Database } from '@haive/database';
-import { pathExists } from '../onboarding/_helpers.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 
 const exec = promisify(execFile);
@@ -74,7 +73,7 @@ export async function commitKnowledgeTrees(opts: {
   const { workspace, message } = opts;
   const present: string[] = [];
   for (const spec of KB_PATHSPECS) {
-    if (await pathExists(path.join(workspace, spec))) present.push(spec);
+    if (await hasWorkspaceEntry(workspace, spec)) present.push(spec);
   }
   if (present.length === 0) {
     return { committed: false, commitSha: null, message: 'nothing to commit' };

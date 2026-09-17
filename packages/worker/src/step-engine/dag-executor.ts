@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
@@ -17,7 +16,8 @@ import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
-import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
+import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
+import { hasWorkspaceEntry } from './workspace-probe.js';
 import {
   resolveSpecView,
   SPEC_ARTIFACT_RELPATH,
@@ -172,7 +172,10 @@ async function createIssueWorktree(
   const registered =
     list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
   if (!registered) {
-    if (await pathExists(worktreePath)) {
+    // Anchored on the repository root with the worktree walked below it — the same split the
+    // `ensureSandboxWritableTree` call below already makes. A LINK planted at that path still
+    // answers true and is still removed: a name taken is not free space.
+    if (await hasWorkspaceEntry(ctx.repoPath, relUnder(ctx.repoPath, worktreePath))) {
       await gitRun(ctx.repoPath, ['worktree', 'remove', '--force', worktreePath]);
     }
     const branchExists = await gitRun(ctx.repoPath, [
@@ -260,7 +263,7 @@ export async function issueSpecText(
   issue: DagIssueRow,
 ): Promise<{ text: string; condensed: boolean }> {
   if (!view.condensed) return { text: view.text, condensed: false };
-  if (issue.worktreePath && (await pathExists(join(issue.worktreePath, SPEC_ARTIFACT_RELPATH)))) {
+  if (issue.worktreePath && (await hasWorkspaceEntry(issue.worktreePath, SPEC_ARTIFACT_RELPATH))) {
     return { text: view.text, condensed: true };
   }
   return { text: view.spec, condensed: false };

@@ -4,7 +4,8 @@ import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { FormSchema, StatusSummaryItem } from '@haive/shared';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { isOutOfScope } from '../_scope-fence.js';
 import { loadFindingRecurrence, recurrenceKey } from './_review-findings.js';
@@ -624,7 +625,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         // but the implementation added `.ddev`) brings up the DDEV runner here
         // too, matching where 08a started the desktop.
         const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-        const isDdev = !!ws && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')));
+        const isDdev = !!ws && (await hasWorkspaceEntry(ws.workspace, '.ddev/config.yaml'));
         if (isDdev && ws) {
           const handle = await ensureDdevWithProgress(ctx, ws.repoSubpath);
           await startBrowserDesktop(handle);
@@ -699,12 +700,12 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // Point at 08a's gallery manifest when it wrote one. Checked on disk rather than read
     // out of 08a's step output, because that column is not durable (_step-reset nulls it)
     // while the artifact lives in the worktree for as long as the shots themselves do.
-    const screenshotsManifest = path.join(
-      await resolveScreenshotRoot(ctx),
-      '.haive',
-      SCREENSHOT_MANIFEST_NAME,
-    );
-    const screenshotsArtifactPath = (await pathExists(screenshotsManifest))
+    // The root is a WORKTREE with a repo-root fallback (`resolveScreenshotRoot`), so the probe is
+    // split while the absolute path stays: it is what the caller hands to the files route.
+    const screenshotRoot = await resolveScreenshotRoot(ctx);
+    const manifestRel = `.haive/${SCREENSHOT_MANIFEST_NAME}`;
+    const screenshotsManifest = path.join(screenshotRoot, manifestRel);
+    const screenshotsArtifactPath = (await hasWorkspaceEntry(screenshotRoot, manifestRel))
       ? screenshotsManifest
       : null;
 

@@ -1,10 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const loadPreviousStepOutput = vi.fn();
-const pathExists = vi.fn();
+const hasWorkspaceEntry = vi.fn();
 vi.mock('../onboarding/_helpers.js', () => ({
   loadPreviousStepOutput: (...args: unknown[]) => loadPreviousStepOutput(...args),
-  pathExists: (...args: unknown[]) => pathExists(...args),
+}));
+// The artifact probe moved off the `stat`-based `pathExists` onto the anchored walk, so the mock
+// follows it: the fixture worktree does not exist on disk, and an unmocked probe would answer false
+// for every case rather than only the one that asks for it.
+vi.mock('../../workspace-probe.js', () => ({
+  hasWorkspaceEntry: (...args: unknown[]) => hasWorkspaceEntry(...args),
 }));
 
 vi.mock('@haive/database', () => ({ schema: { tasks: { id: 'id' } } }));
@@ -52,9 +57,9 @@ function ctx(): Ctx {
 
 beforeEach(() => {
   loadPreviousStepOutput.mockReset();
-  pathExists.mockReset();
+  hasWorkspaceEntry.mockReset();
   configGet.mockReset();
-  pathExists.mockResolvedValue(true);
+  hasWorkspaceEntry.mockResolvedValue(true);
   configGet.mockResolvedValue('toc');
 });
 
@@ -87,7 +92,7 @@ describe('resolveSpecView', () => {
   });
 
   it('never points at an artifact that is not on disk', async () => {
-    pathExists.mockResolvedValue(false);
+    hasWorkspaceEntry.mockResolvedValue(false);
     wireSteps(LONG_SPEC, '/repo/.haive/worktrees/feat');
     const view = await resolveSpecView(ctx());
     expect(view.condensed).toBe(false);
