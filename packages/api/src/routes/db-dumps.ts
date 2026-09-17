@@ -1,5 +1,3 @@
-import { createWriteStream } from 'node:fs';
-import { mkdir, open, rm, stat, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -7,9 +5,24 @@ import { Hono } from 'hono';
 import { eq, and } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { initDbUploadRequestSchema, type DbDumpFormat } from '@haive/shared';
+import {
+  lstatNoFollow,
+  openFileNoFollow,
+  removeNoFollow,
+  renameNoFollow,
+} from '@haive/shared/fs-safe';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { containmentHttpError } from '../lib/fs-http.js';
+import {
+  ensureUploadsDir,
+  truncateUploadFile,
+  uploadFileRel,
+  uploadFileRelOrThrow,
+  uploadsRel,
+  uploadsStorageRoot,
+} from '../lib/uploads.js';
 
 // Shared with the repo upload: same 2 GiB default + storage volume.
 function maxUploadBytes(): number {
@@ -18,10 +31,6 @@ function maxUploadBytes(): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return 2 * 1024 * 1024 * 1024;
   return parsed;
-}
-
-function repoStorageRoot(): string {
-  return process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
 }
 
 /** Best-effort DB dump format label by extension. `.sql.gz` is checked before
@@ -88,8 +97,7 @@ dbDumpRoutes.post('/upload/init', async (c) => {
   }
   const format = detectDumpFormat(body.filename);
 
-  const uploadDir = path.join(repoStorageRoot(), '_uploads', userId);
-  await mkdir(uploadDir, { recursive: true });
+  const anchor = await ensureUploadsDir(userId);
 
   const inserted = await db
     .insert(schema.dbUploads)
@@ -106,8 +114,11 @@ dbDumpRoutes.post('/upload/init', async (c) => {
   const session = inserted[0]!;
 
   const ext = dumpDiskExtension(body.filename);
-  const dumpPath = path.join(uploadDir, `db-${session.id}.${ext}.partial`);
-  const fh = await open(dumpPath, 'w');
+  const dumpRel = `${uploadsRel(userId)}/db-${session.id}.${ext}.partial`;
+  const dumpPath = path.join(anchor, dumpRel);
+  // `open(path, 'w')` truncated whatever stood at the name, a link included. The name embeds a
+  // fresh session id, so exclusive creation is the same outcome for every legitimate call.
+  const fh = await openFileNoFollow(anchor, dumpRel, 'create-exclusive', { fileMode: 0o644 });
   await fh.close();
 
   const updated = await db
@@ -179,30 +190,28 @@ dbDumpRoutes.put('/upload/:id/chunk', async (c) => {
 
   const rawBody = c.req.raw.body;
   if (!rawBody) throw new HttpError(400, 'request body is empty');
+  const anchor = uploadsStorageRoot();
+  const dumpRel = uploadFileRelOrThrow(userId, row.dumpPath, 'Dump path');
   const nodeStream = Readable.fromWeb(rawBody as never);
-  const writeStream = createWriteStream(row.dumpPath, { flags: 'a' });
+  // Written at the session's OWN offset instead of with `flags: 'a'`: the offset is the fact the
+  // row already tracks and the claim above just verified, where appending trusted the file's
+  // current length. MEASURED on node v26.7.0, `createWriteStream({ start })` positions the write.
+  const fh = await openFileNoFollow(anchor, dumpRel, 'read-write', { strict: true }).catch(
+    (err: unknown) => containmentHttpError(err, 'Dump path is outside the uploads directory'),
+  );
+  if (!fh) throw new HttpError(409, 'Dump is missing on disk');
   let written = 0;
   nodeStream.on('data', (buf: Buffer) => {
     written += buf.length;
   });
   try {
-    await pipeline(nodeStream, writeStream);
+    await pipeline(nodeStream, fh.createWriteStream({ start }));
   } catch (err) {
-    const fh = await open(row.dumpPath, 'r+');
-    try {
-      await fh.truncate(Number(row.bytesReceived));
-    } finally {
-      await fh.close();
-    }
+    await truncateUploadFile(anchor, dumpRel, Number(row.bytesReceived));
     throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
   }
   if (written !== expectedLen) {
-    const fh = await open(row.dumpPath, 'r+');
-    try {
-      await fh.truncate(Number(row.bytesReceived));
-    } finally {
-      await fh.close();
-    }
+    await truncateUploadFile(anchor, dumpRel, Number(row.bytesReceived));
     throw new HttpError(400, `chunk body length ${written} != expected ${expectedLen}`);
   }
 
@@ -231,16 +240,20 @@ dbDumpRoutes.post('/upload/:id/complete', async (c) => {
     throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
   }
 
-  const onDisk = await stat(row.dumpPath).catch(() => null);
-  if (!onDisk || onDisk.size !== Number(row.totalSize)) {
+  const anchor = uploadsStorageRoot();
+  const dumpRel = uploadFileRelOrThrow(userId, row.dumpPath, 'Dump path');
+  // A link at that name now fails this check rather than reporting its target's size.
+  const onDisk = await lstatNoFollow(anchor, dumpRel);
+  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
     throw new HttpError(409, 'dump size mismatch on disk');
   }
 
-  const finalPath = row.dumpPath.replace(/\.partial$/, '');
-  if (finalPath === row.dumpPath) {
+  const finalRel = dumpRel.replace(/\.partial$/, '');
+  if (finalRel === dumpRel) {
     throw new HttpError(500, 'dump path missing .partial suffix');
   }
-  await rename(row.dumpPath, finalPath);
+  const finalPath = path.join(anchor, finalRel);
+  await renameNoFollow(anchor, dumpRel, finalRel);
 
   // No import job here — the dump waits to be loaded by the task's env-boot /
   // import step, which deletes it immediately after `ddev import-db`.
@@ -258,7 +271,11 @@ dbDumpRoutes.delete('/upload/:id', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
-  await rm(row.dumpPath, { force: true }).catch(() => {});
+  // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
+  // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem rather
+  // than a reason to refuse the cancel.
+  const dumpRel = uploadFileRel(userId, row.dumpPath);
+  if (dumpRel) await removeNoFollow(uploadsStorageRoot(), dumpRel).catch(() => {});
   await db
     .update(schema.dbUploads)
     .set({ status: 'cancelled', updatedAt: new Date() })

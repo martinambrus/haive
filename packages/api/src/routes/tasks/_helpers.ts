@@ -21,6 +21,7 @@ import {
 import { relUnder } from '@haive/shared/fs-safe';
 import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
+import { uploadsStorageRoot } from '../../lib/uploads.js';
 
 export const MAX_FILE_CONTENT_BYTES = 512 * 1024;
 export const TEXT_EXTENSIONS = new Set([
@@ -1137,12 +1138,6 @@ export async function buildUpcomingCliSteps(
   return enrichStepsWithCliPreferences(db, userId, upcoming, taskId, ignoreSaved);
 }
 
-/** Where repositories and the per-task scratch workspaces live, read the same way every other
- *  api consumer reads it (`routes/repos.ts`, `routes/db-dumps.ts`). */
-function repoStorageRoot(): string {
-  return process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
-}
-
 async function directoryExists(p: string): Promise<boolean> {
   try {
     return (await stat(p)).isDirectory();
@@ -1202,7 +1197,7 @@ export async function resolveWorkspaceRoot(
     // @haive/shared rather than copied, which is what makes "one authority" true here instead of
     // approximated. A task that has not started has no directory and still answers 409: there is
     // nothing to edit.
-    const scratch = resolve(repoStorageRoot(), taskScratchSubpath(task.userId, task.id));
+    const scratch = resolve(uploadsStorageRoot(), taskScratchSubpath(task.userId, task.id));
     if (taskMayRunWithoutRepository(task) && (await directoryExists(scratch))) root = scratch;
   }
   if (!root) {
