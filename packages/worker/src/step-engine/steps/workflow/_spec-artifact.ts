@@ -1,4 +1,3 @@
-import { join } from 'node:path';
 import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { eq } from 'drizzle-orm';
@@ -6,7 +5,8 @@ import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, SPEC_VIEW_MODES, type SpecViewMode } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { condenseDocument } from '../_doc-view.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 
 /** Where the approved spec is materialized, relative to the worktree root. Under
  *  `.haive/` because 01-worktree-setup git-excludes that dir, so the artifact never
@@ -113,7 +113,7 @@ export async function resolveSpecView(
   // The pointer must name a file that actually exists, so check the artifact gate 1
   // wrote before promising the agent it can read the omitted sections.
   const worktreePath = await resolveTaskWorktreePath(ctx);
-  if (!worktreePath || !(await pathExists(join(worktreePath, SPEC_ARTIFACT_RELPATH)))) {
+  if (!worktreePath || !(await hasWorkspaceEntry(worktreePath, SPEC_ARTIFACT_RELPATH))) {
     return whole;
   }
 

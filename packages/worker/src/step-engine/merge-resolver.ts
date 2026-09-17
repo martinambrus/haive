@@ -12,7 +12,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import { completeMergeHostSide, mergeCommitted, squashMergeCommit } from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
-import { pathExists } from './steps/onboarding/_helpers.js';
+import { hasWorkspaceEntry } from './workspace-probe.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
@@ -204,7 +204,8 @@ async function ensureBaseWorktree(
   const registered =
     list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
   if (!registered) {
-    if (await pathExists(worktreePath)) {
+    // Split on the repository root, as the `ensureSandboxWritableTree` call below already does.
+    if (await hasWorkspaceEntry(ctx.repoPath, relUnder(ctx.repoPath, worktreePath))) {
       await gitRun(ctx.repoPath, ['worktree', 'remove', '--force', worktreePath]);
     }
     const res = await gitRun(ctx.repoPath, ['worktree', 'add', worktreePath, base]);

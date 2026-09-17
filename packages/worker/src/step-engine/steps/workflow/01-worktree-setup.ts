@@ -5,7 +5,8 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { relUnder, removeNoFollow } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
@@ -200,8 +201,10 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     const syncPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '00a-sync-base');
     const syncedBase = (syncPrev?.output as { base?: string | null } | null)?.base ?? null;
 
-    const gitDir = path.join(ctx.repoPath, '.git');
-    const hasGit = await pathExists(gitDir);
+    // The repository's OWN `.git`, walked from the root rather than joined: a repo can ship a
+    // `.git` that is a link, and a link there is not this checkout's git dir — the same verdict
+    // `git-workspace`'s probe reached.
+    const hasGit = await hasWorkspaceEntry(ctx.repoPath, '.git');
     if (!hasGit) {
       return {
         hasGit: false,
@@ -359,7 +362,8 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     if (isRegistered) {
       ctx.logger.info({ worktreePath, branchName }, 'reusing existing worktree');
     } else {
-      if (await pathExists(worktreePath)) {
+      // The rel this probe needs is the one the `removeNoFollow` below already builds.
+      if (await hasWorkspaceEntry(ctx.repoPath, relUnder(ctx.repoPath, worktreePath))) {
         await gitRun(ctx.repoPath, ['worktree', 'prune']);
         await removeNoFollow(ctx.repoPath, relUnder(ctx.repoPath, worktreePath), {
           recursive: true,
