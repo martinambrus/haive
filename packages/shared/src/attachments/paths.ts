@@ -105,3 +105,32 @@ export function attachmentUploadsRoot(row: { storedPath: string; filename: strin
   const cut = row.storedPath.lastIndexOf('/');
   return cut === -1 ? row.storedPath : row.storedPath.slice(0, cut);
 }
+
+/** Repo-relative location of a task's uploads dir. */
+export function taskUploadsRel(taskId: string): string {
+  return `.haive/task-uploads/${taskId}`;
+}
+
+/**
+ * The CONTAINMENT anchor for a row's bytes, plus the rel that reaches them.
+ *
+ * Distinct from {@link attachmentUploadsRoot}, and not interchangeable with it: that returns the
+ * uploads DIRECTORY, which sits inside `.haive/` — a tree the cli-exec sandbox mounts read-write —
+ * so it can never be an anchor. Only the repository root can, and it is recovered by removing the
+ * whole suffix the api wrote: `/.haive/task-uploads/<taskId>/<filename>`.
+ *
+ * Returns null rather than guessing when the stored path does not have that shape — a legacy row,
+ * or one written by something else. A caller that cannot derive an anchor must refuse, because the
+ * alternative is picking a directory and hoping.
+ */
+export function splitAttachmentStoredPath(
+  row: { storedPath: string; filename: string },
+  taskId: string,
+): { anchor: string; uploadsRel: string; rel: string } | null {
+  const uploadsRel = taskUploadsRel(taskId);
+  const suffix = `/${uploadsRel}/${row.filename}`;
+  if (!row.storedPath.endsWith(suffix)) return null;
+  const anchor = row.storedPath.slice(0, -suffix.length);
+  if (anchor === '') return null;
+  return { anchor, uploadsRel, rel: `${uploadsRel}/${row.filename}` };
+}

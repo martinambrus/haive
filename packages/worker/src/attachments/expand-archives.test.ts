@@ -40,9 +40,20 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
+/** The uploads dir in the layout the api actually writes:
+ *  `<repoRoot>/.haive/task-uploads/<taskId>`.
+ *
+ *  The shape is load-bearing, not decoration. `splitAttachmentStoredPath` recovers the containment
+ *  ANCHOR — the repository root — by removing exactly that suffix from a row's `storedPath`, and
+ *  answers null for anything else, because the uploads dir itself sits under `.haive/` and is
+ *  mounted read-write into the sandbox, so it can never be an anchor. A flat temp dir here (what
+ *  this fixture used to build) is a layout the api never produces, and it made every row unreadable
+ *  to that helper. The tracked path stays the OUTERMOST directory so the cleanup removes the lot. */
 async function uploadsDir(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'haive-attach-'));
-  dirs.push(dir);
+  const root = await mkdtemp(path.join(tmpdir(), 'haive-attach-'));
+  dirs.push(root);
+  const dir = path.join(root, 'repo', '.haive', 'task-uploads', 'task-1');
+  await mkdir(dir, { recursive: true });
   return dir;
 }
 

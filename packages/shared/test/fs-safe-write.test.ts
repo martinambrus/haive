@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -21,8 +22,10 @@ import {
   copyFileNoFollow,
   ensureDirNoFollow,
   isPathContainmentError,
+  openFileNoFollow,
   removeNoFollow,
   renameNoFollow,
+  writeFileNoFollow,
 } from '../src/fs-safe.js';
 
 const run = promisify(execFile);
@@ -439,6 +442,98 @@ describe('fs-safe write primitives', () => {
         reason: 'invalid-path',
       });
       await expect(renameNoFollow(root, 'src/a.txt', '')).rejects.toMatchObject({
+        reason: 'invalid-path',
+      });
+    });
+  });
+
+  describe('openFileNoFollow create-exclusive', () => {
+    it('creates a file with the asked-for mode and never returns null', async () => {
+      const fh = await openFileNoFollow(root, 'made.txt', 'create-exclusive', { fileMode: 0o640 });
+      try {
+        await fh.write(Buffer.from('hi', 'utf8'), 0, 2, 0);
+      } finally {
+        await fh.close();
+      }
+      expect(await readFile(path.join(root, 'made.txt'), 'utf8')).toBe('hi');
+      expect((await stat(path.join(root, 'made.txt'))).mode & 0o777).toBe(0o640);
+    });
+
+    it('refuses an existing file, and a DANGLING link an access probe calls free', async () => {
+      await expect(openFileNoFollow(root, 'src/a.txt', 'create-exclusive')).rejects.toMatchObject({
+        code: 'EEXIST',
+      });
+
+      await symlink(path.join(outside, 'planted.txt'), path.join(root, 'dangling.txt'));
+      await expect(
+        openFileNoFollow(root, 'dangling.txt', 'create-exclusive'),
+      ).rejects.toMatchObject({ code: 'EEXIST' });
+      // Nothing was created through the link.
+      await expect(stat(path.join(outside, 'planted.txt'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
+    it('refuses a linked ancestor and creates parents only when asked', async () => {
+      await symlink(outside, path.join(root, 'linkdir'));
+      await expect(
+        openFileNoFollow(root, 'linkdir/made.txt', 'create-exclusive'),
+      ).rejects.toMatchObject({ reason: 'link' });
+      await expect(
+        openFileNoFollow(root, 'deep/made.txt', 'create-exclusive'),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      const fh = await openFileNoFollow(root, 'deep/made.txt', 'create-exclusive', {
+        createParents: true,
+      });
+      await fh.close();
+      expect((await stat(path.join(root, 'deep', 'made.txt'))).isFile()).toBe(true);
+    });
+  });
+
+  describe('writeFileNoFollow', () => {
+    it('replaces atomically, inheriting the replaced file’s mode', async () => {
+      expect(await writeFileNoFollow(root, 'src/a.txt', 'next')).toBe('overwritten');
+      expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('next');
+      // 0600 came from the fixture, not from the default.
+      expect((await stat(path.join(root, 'src', 'a.txt'))).mode & 0o777).toBe(0o600);
+      // No temp left beside it.
+      expect((await readdir(path.join(root, 'src'))).sort()).toEqual(['a.txt']);
+    });
+
+    it('creates a missing file and reports which it did', async () => {
+      expect(await writeFileNoFollow(root, 'fresh.txt', 'x', { fileMode: 0o600 })).toBe('created');
+      expect((await stat(path.join(root, 'fresh.txt'))).mode & 0o777).toBe(0o600);
+    });
+
+    it('overwrite-in-place keeps the inode, so a holder sees the new bytes', async () => {
+      const before = await stat(path.join(root, 'src', 'a.txt'));
+      expect(
+        await writeFileNoFollow(root, 'src/a.txt', 'inplace', { mode: 'overwrite-in-place' }),
+      ).toBe('overwritten');
+      const after = await stat(path.join(root, 'src', 'a.txt'));
+      expect(after.ino).toBe(before.ino);
+      expect(after.mode & 0o777).toBe(0o600);
+      expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('inplace');
+    });
+
+    it('refuses a link at the leaf in every mode, target untouched', async () => {
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'live.txt'));
+      for (const mode of ['replace-atomic', 'overwrite-in-place'] as const) {
+        await expect(writeFileNoFollow(root, 'live.txt', 'x', { mode })).rejects.toMatchObject({
+          reason: 'link',
+        });
+      }
+      await expect(
+        writeFileNoFollow(root, 'live.txt', 'x', { mode: 'create-exclusive' }),
+      ).rejects.toMatchObject({ code: 'EEXIST' });
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+    });
+
+    it('refuses a directory at the leaf and an empty rel', async () => {
+      await expect(writeFileNoFollow(root, 'src', 'x')).rejects.toMatchObject({
+        reason: 'not-regular-file',
+      });
+      await expect(writeFileNoFollow(root, '', 'x')).rejects.toMatchObject({
         reason: 'invalid-path',
       });
     });

@@ -1,4 +1,6 @@
-import { chmod, chown, stat, writeFile } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
+import { chmodNoFollow, chownNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { taskUploadsRel } from '@haive/shared';
 import path from 'node:path';
 import { asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -9,7 +11,6 @@ import {
   classifyPlanInput,
   extractPlanInput,
   needsExtraction,
-  resolveInside,
   sidecarName,
   type PlanInputKind,
 } from './_plan-inputs.js';
@@ -117,9 +118,9 @@ export interface PlanInputsApply {
 
 /** Best-effort: the api chowns what it writes for the same reason, and a failure
  *  there is non-fatal because 0644 is world-readable anyway. */
-async function harmonizeOwnership(filePath: string): Promise<void> {
-  await chmod(filePath, 0o644).catch(() => {});
-  await chown(filePath, NODE_UID, NODE_GID).catch(() => {});
+async function harmonizeOwnership(anchor: string, rel: string): Promise<void> {
+  await chownNoFollow(anchor, rel, { uid: NODE_UID, gid: NODE_GID }).catch(() => {});
+  await chmodNoFollow(anchor, rel, 0o644).catch(() => {});
 }
 
 function renderIndex(
@@ -320,18 +321,23 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
           // row's stored path, and rejected unless it lands inside — the name is
           // a database column, and a sidecar written outside the tree is an
           // arbitrary file write.
-          const dest = uploadsDir === null ? null : resolveInside(uploadsDir, name);
-          if (dest === null) {
+          if (uploadsDir === null) {
             throw new Error(
-              `Refusing to write a sidecar for "${attachment.filename}": the name does not resolve inside the task's uploads directory.`,
+              `Refusing to write a sidecar for "${attachment.filename}": the task has no uploads directory.`,
             );
           }
+          // The name is a DATABASE column, so it is walked under the repository root rather than
+          // joined and then checked: `resolveInside`'s resolve-then-startsWith could not tell a
+          // linked component from a real one, and the walk refuses it outright.
+          const sidecarRel = `${taskUploadsRel(ctx.taskId)}/${name}`;
           const body =
             result.markdown.length > 0
               ? `# ${attachment.filename}\n\n${result.markdown}\n`
               : `# ${attachment.filename}\n\n_(no text could be read from this file)_\n`;
-          await writeFile(dest, body, 'utf8');
-          await harmonizeOwnership(dest);
+          // Ownership stays with `harmonizeOwnership`, which catches: it is best-effort here, and
+          // passing it to the primitive would make a non-root worker fail the whole step.
+          await writeFileNoFollow(ctx.repoPath, sidecarRel, body, { fileMode: 0o644 });
+          await harmonizeOwnership(ctx.repoPath, sidecarRel);
           row.sidecar = name;
           // The extractor's own verdict on its INPUT, never a test on the string
           // it rendered — that string carries page rules and sheet headings this
@@ -348,9 +354,14 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
 
     let indexPath: string | null = null;
     if (inputs.length > 0 && uploadsDir) {
-      const dest = path.join(uploadsDir, PLAN_INPUTS_INDEX);
-      await writeFile(dest, renderIndex(ctx.taskId, inputs, archiveNotes), 'utf8');
-      await harmonizeOwnership(dest);
+      const indexRel = `${taskUploadsRel(ctx.taskId)}/${PLAN_INPUTS_INDEX}`;
+      await writeFileNoFollow(
+        ctx.repoPath,
+        indexRel,
+        renderIndex(ctx.taskId, inputs, archiveNotes),
+        { fileMode: 0o644 },
+      );
+      await harmonizeOwnership(ctx.repoPath, indexRel);
       indexPath = `${SANDBOX_WORKDIR}/.haive/task-uploads/${ctx.taskId}/${PLAN_INPUTS_INDEX}`;
     }
 
