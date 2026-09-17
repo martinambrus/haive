@@ -237,8 +237,15 @@ export async function ensureArchivesExpanded(
 
   for (const archive of archives) {
     const format = detectAttachmentArchiveFormat(archive.filename)!;
-    // A leading dot, so it can never collide with an attachment: the path
-    // sanitiser strips leading dots from every segment.
+    // A leading dot, so it can never collide with an attachment: the path sanitiser strips leading
+    // dots from every segment.
+    //
+    // This stays INSIDE the uploads dir on purpose, even though the plan proposed moving it to the
+    // extraction stage. `extractArchive` now stages privately beside its own destination and swaps
+    // the finished tree in, so this directory is no longer where untrusted members are unpacked —
+    // it only ever receives an already-validated tree. Moving it out would buy nothing and would
+    // put the expansion's working set on a different filesystem from the attachments it feeds,
+    // turning every `placeFile` rename into a cross-device copy.
     const tmp = path.join(uploadsDir, `.expanding-${archive.id}`);
     let note: string | null = null;
     let added = 0;
@@ -247,8 +254,13 @@ export async function ensureArchivesExpanded(
       if (!onDisk?.isFile()) {
         note = 'the archive file is missing from the task workspace';
       } else {
-        await extractArchive(archive.storedPath, format, tmp);
+        // The report is the extraction's own account of what it would not write — symlinks, device
+        // nodes, setuid files. It MUST be folded into the note below: those members used to be
+        // counted by `walkRegularFiles` as `skipped`, and now they are gone before that walk runs,
+        // so without this the drop would happen with nothing said about it.
+        const report = await extractArchive(archive.storedPath, format, tmp);
         const { files, skipped } = await walkRegularFiles(tmp);
+        const dropNote = report.note;
         const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
 
         // Measured AFTER extraction, deliberately. The alternative is to trust the
@@ -296,9 +308,14 @@ export async function ensureArchivesExpanded(
             });
             added += 1;
           }
-          if (skipped > 0) {
-            note = `${skipped} entr(y/ies) were skipped: only regular files are extracted (no symlinks or devices)`;
-          }
+          // Both halves are reported: what extraction dropped, and anything the walk still skipped
+          // (an entry that vanished between the two, say). Joined rather than one overwriting the
+          // other, because they describe different sets.
+          const walkNote =
+            skipped > 0
+              ? `${skipped} entr(y/ies) were skipped: only regular files are extracted (no symlinks or devices)`
+              : null;
+          note = [dropNote, walkNote].filter((n) => n !== null).join('; ') || null;
         }
       }
     } catch (err) {

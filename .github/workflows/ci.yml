@@ -346,6 +346,16 @@ jobs:
             sleep 2
           done
 
+      # Extraction is the one path whose behaviour differs between this runner and production, so it
+      # is the one test file that runs in BOTH. The host job above runs it against GNU tar as a
+      # non-root user; here it runs inside the worker image as root, which is the combination that
+      # actually ships — and the only place the unprivileged-spawn branch (uid 65534) executes at all,
+      # since a non-root process cannot setuid and silently keeps its own identity instead.
+      - name: Extraction tests inside the worker image
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T worker \
+            sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts'
+
       - name: Dump service status
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml ps

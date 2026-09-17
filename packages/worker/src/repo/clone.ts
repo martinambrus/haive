@@ -1,6 +1,17 @@
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import {
+  applyTreeNoFollow,
+  chownNoFollow,
+  ensureDirNoFollow,
+  lstatNoFollow,
+  readdirNoFollow,
+  removeNoFollow,
+  renameNoFollow,
+  type EntryInfo,
+} from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -168,6 +179,9 @@ async function persistDetection(
   db: Database,
   repositoryId: string,
   storagePath: string,
+  /** Carried into `status_message` beside `status: 'ready'`. The repository IS ready — this is the
+   *  "ready, with caveats" case, and the column exists for exactly that. */
+  statusMessage?: string | null,
 ): Promise<void> {
   const detection = await detectFromDirectory(storagePath);
   await db
@@ -179,7 +193,9 @@ async function persistDetection(
       sizeBytes: detection.sizeBytes,
       storagePath,
       status: 'ready',
-      statusMessage: null,
+      // `null` when this import dropped nothing, so a clean re-import CLEARS a previous run's note
+      // rather than leaving the repository labelled with a caveat that no longer applies.
+      statusMessage: statusMessage ?? null,
       updatedAt: new Date(),
     })
     .where(eq(schema.repositories.id, repositoryId));
@@ -262,9 +278,27 @@ export async function handleCopyLocal(
   logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo copy complete');
 }
 
+/** uid/gid the extraction tool runs as. NOT 1000: that uid owns every repository on the volume, so a
+ *  tool escaping its destination would be writing as the owner of everything it could reach. 65534
+ *  (nobody) owns nothing. A worker that is not root cannot setuid at all — CI, and any non-root
+ *  deployment — so there it stays the current user, which is no worse than today. */
+const EXTRACT_UID = 65534;
+
+/** Spawn an extraction tool with the narrowest environment and identity available.
+ *
+ *  Two things this fixes, and the env is the bigger one. `spawn(cmd, args)` passes NO `env` option,
+ *  so the child inherited the worker's entire environment — which holds `CONFIG_ENCRYPTION_KEY`,
+ *  `DATABASE_URL` and `JWT_SECRET` — and it also meant `TAR_OPTIONS`, `UNZIP` and
+ *  `EXTRACT_UNSAFE_SYMLINKS` would be honoured if anything ever set them. `PATH` and `LANG` are all
+ *  either tool needs. And it ran as root, which is what let a tar archive restore header owners and
+ *  setuid bits into storage. */
 function runExtract(cmd: string, args: string[], okExits: number[] = [0]): Promise<void> {
+  const asRoot = process.getuid?.() === 0;
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args);
+    const proc = spawn(cmd, args, {
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C' },
+      ...(asRoot ? { uid: EXTRACT_UID, gid: EXTRACT_UID } : {}),
+    });
     let stderr = '';
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
@@ -286,46 +320,211 @@ function runExtract(cmd: string, args: string[], okExits: number[] = [0]): Promi
   });
 }
 
-/** `spec.zip` holding a single `spec/` directory becomes that directory's contents.
- *
- *  `lstat`, not `stat`: the lone entry comes out of an untrusted archive, and a LINK there used to
- *  be followed — `readdir` then listed the target's children and each `rename` moved one of them
- *  into the destination. With `x -> ..` those children are the user's other repositories, and with
- *  an absolute link they are whatever it points at on the same volume. Only a real directory is
- *  flattened now. */
-async function flattenSingleTopLevel(dest: string): Promise<void> {
-  const entries = await readdir(dest);
-  if (entries.length !== 1) return;
-  const only = path.join(dest, entries[0]!);
-  const st = await lstat(only);
-  if (!st.isDirectory()) return;
-  const inner = await readdir(only);
-  for (const name of inner) {
-    await rename(path.join(only, name), path.join(dest, name));
-  }
-  await rm(only, { recursive: true, force: true });
+/** Feed the archive on STDIN, so the parent opens it and the child never resolves a path. Also the
+ *  only way tar can read an archive the unprivileged extraction uid cannot open itself. */
+function runExtractStdin(cmd: string, args: string[], archivePath: string): Promise<void> {
+  const asRoot = process.getuid?.() === 0;
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cmd, args, {
+      stdio: ['pipe', 'ignore', 'pipe'],
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C' },
+      ...(asRoot ? { uid: EXTRACT_UID, gid: EXTRACT_UID } : {}),
+    });
+    let stderr = '';
+    proc.stderr?.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
+    proc.on('error', reject);
+    proc.on('exit', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`${cmd} failed (exit ${code}): ${stderr.trim()}`));
+    });
+    open(archivePath, 'r')
+      .then((fh) => {
+        const stream = fh.createReadStream({ autoClose: true });
+        stream.on('error', reject);
+        stream.pipe(proc.stdin!);
+      })
+      .catch(reject);
+  });
 }
 
+export type DroppedReason = 'symlink' | 'special-file' | 'setuid' | 'hard-link' | 'foreign-owner';
+
+export interface DroppedMember {
+  /** Path relative to the extracted root. */
+  rel: string;
+  reason: DroppedReason;
+}
+
+export interface ExtractReport {
+  dropped: DroppedMember[];
+  /** One line naming what was dropped, or null when nothing was. Callers SURFACE this: a drop that
+   *  only reaches a log is a silent change to what the user uploaded. */
+  note: string | null;
+}
+
+const DROP_LABEL: Record<DroppedReason, string> = {
+  symlink: 'symlink(s)',
+  'special-file': 'device/socket/FIFO entr(y/ies)',
+  setuid: 'setuid/setgid file(s)',
+  'hard-link': 'hard link(s)',
+  'foreign-owner': 'entr(y/ies) with an unexpected owner',
+};
+
+function describeDrops(dropped: DroppedMember[]): string | null {
+  if (dropped.length === 0) return null;
+  const counts = new Map<DroppedReason, number>();
+  for (const d of dropped) counts.set(d.reason, (counts.get(d.reason) ?? 0) + 1);
+  const summary = [...counts].map(([reason, n]) => `${n} ${DROP_LABEL[reason]}`).join(', ');
+  const shown = dropped.slice(0, 5).map((d) => d.rel);
+  const more = dropped.length > shown.length ? ` and ${dropped.length - shown.length} more` : '';
+  return `${dropped.length} archive member(s) were not extracted (${summary}): ${shown.join(', ')}${more}`;
+}
+
+/** What an extracted entry must not be. Everything here is dropped and NAMED rather than refusing
+ *  the whole archive — the user gets their upload, minus the parts that cannot safely live in a
+ *  repository tree, and is told which. */
+function classifyMember(info: EntryInfo, expectedUid: number | null): DroppedReason | null {
+  if (info.kind === 'symlink') return 'symlink';
+  // FIFOs, sockets and device nodes. Root tar restores device nodes verbatim, and a FIFO makes any
+  // later path-based read of the tree block forever.
+  if (info.kind === 'other') return 'special-file';
+  if (info.kind === 'file') {
+    if ((info.stats.mode & 0o6000) !== 0) return 'setuid';
+    // A hard link to a file outside the tree is indistinguishable from one inside it after the
+    // fact, so extra links are dropped rather than reasoned about.
+    if (info.stats.nlink > 1) return 'hard-link';
+  }
+  if (expectedUid !== null && info.stats.uid !== expectedUid) return 'foreign-owner';
+  return null;
+}
+
+/** Walk the staged tree, unlinking what must not survive. Anchored, so every component is resolved
+ *  inside a descriptor this process holds — the tree being walked is untrusted by construction. */
+async function validateStagedTree(
+  anchor: string,
+  rootRel: string,
+  expectedUid: number | null,
+): Promise<DroppedMember[]> {
+  const dropped: DroppedMember[] = [];
+  const pending: string[] = [''];
+  while (pending.length > 0) {
+    const dirRel = pending.pop()!;
+    const entries = await readdirNoFollow(anchor, dirRel === '' ? rootRel : `${rootRel}/${dirRel}`);
+    if (entries === null) continue;
+    for (const entry of entries) {
+      const childRel = dirRel === '' ? entry.name : `${dirRel}/${entry.name}`;
+      const info = await lstatNoFollow(anchor, `${rootRel}/${childRel}`);
+      if (info === null) continue;
+      const reason = classifyMember(info, expectedUid);
+      if (reason !== null) {
+        await removeNoFollow(anchor, `${rootRel}/${childRel}`, { recursive: true });
+        dropped.push({ rel: childRel, reason });
+        continue;
+      }
+      if (info.kind === 'directory') pending.push(childRel);
+    }
+  }
+  return dropped;
+}
+
+/**
+ * Extract an archive into `dest`, via a private stage, dropping what must not land in a repository
+ * tree and reporting it.
+ *
+ * The old shape extracted STRAIGHT into `dest` after `rm -rf`ing it, as root, with the worker's whole
+ * environment inherited. So a malformed archive was unpacked over live repository storage by a root
+ * process that also held `CONFIG_ENCRYPTION_KEY` and `DATABASE_URL`. Now:
+ *
+ * 1. A stage is created as a SIBLING of `dest` — `dirname(dest)` is the trusted directory for all
+ *    three callers (`<storage>/<userId>` for a repository, `<root>/<userId>/<bundleId>` for a bundle,
+ *    the uploads dir for an attachment), and a sibling is guaranteed to be on the same filesystem, so
+ *    the final rename cannot fail EXDEV.
+ * 2. The tool runs unprivileged (uid 65534 where the worker is root) with only PATH and LANG, and tar
+ *    reads the archive from stdin so the child resolves no path at all.
+ * 3. The staged tree is walked and offending members are unlinked and named.
+ * 4. Only then is it swapped into place: the old `dest` is moved aside inside the stage, the new tree
+ *    renamed in, and the stage removed — so `dest` is never a half-extracted tree, and a failure
+ *    anywhere above leaves the previous contents untouched.
+ *
+ * A cap breach is deliberately NOT handled here: `expand-archives` measures its own limits after this
+ * returns and inserts nothing when they are exceeded, because half a specification is worse than none.
+ */
 export async function extractArchive(
   archivePath: string,
   format: ArchiveFormat,
   dest: string,
-): Promise<void> {
-  await mkdir(path.dirname(dest), { recursive: true });
-  await rm(dest, { recursive: true, force: true });
-  await mkdir(dest, { recursive: true });
-  if (format === 'zip') {
-    // unzip exit 1 = warnings only (e.g. non-ASCII filename header mismatch);
-    // files are still extracted, so treat it as success and log the stderr.
-    await runExtract('unzip', ['-q', '-o', archivePath, '-d', dest], [0, 1]);
-  } else if (format === 'tar') {
-    await runExtract('tar', ['-xf', archivePath, '-C', dest]);
-  } else if (format === 'tar.gz') {
-    await runExtract('tar', ['-xzf', archivePath, '-C', dest]);
-  } else {
+): Promise<ExtractReport> {
+  if (format !== 'zip' && format !== 'tar' && format !== 'tar.gz') {
     throw new Error(`unsupported archive format: ${format as string}`);
   }
-  await flattenSingleTopLevel(dest);
+  const anchor = path.dirname(dest);
+  const leaf = path.basename(dest);
+  await mkdir(anchor, { recursive: true });
+
+  const selfUid = process.getuid?.() ?? null;
+  const asRoot = selfUid === 0;
+  // What every extracted entry should be owned by: the tool's own uid, since a non-root tar cannot
+  // restore header owners. An entry owned by anything else did not come from the extraction.
+  const expectedUid = asRoot ? EXTRACT_UID : selfUid;
+
+  const stageLeaf = `.haive-extract-${process.pid}-${randomUUID()}`;
+  await ensureDirNoFollow(anchor, stageLeaf, { mode: 0o700 });
+  try {
+    const innerRel = `${stageLeaf}/x`;
+    await ensureDirNoFollow(anchor, innerRel, { mode: 0o755 });
+    if (asRoot) {
+      await chownNoFollow(anchor, innerRel, { uid: EXTRACT_UID, gid: EXTRACT_UID });
+    }
+    const innerAbs = path.join(anchor, innerRel);
+
+    if (format === 'zip') {
+      // unzip needs a seekable file, so it gets the path — and the archive has to be readable by the
+      // extraction uid. Best-effort: it is our own upload, and 0644 is what the api already writes.
+      await chmod(archivePath, 0o644).catch(() => {});
+      // exit 1 = warnings only (a non-ASCII filename header mismatch); files are still extracted.
+      await runExtract('unzip', ['-q', '-o', archivePath, '-d', innerAbs], [0, 1]);
+    } else {
+      const flags = format === 'tar.gz' ? ['-xz'] : ['-x'];
+      await runExtractStdin('tar', [...flags, '-f', '-', '-C', innerAbs], archivePath);
+    }
+
+    const dropped = await validateStagedTree(anchor, innerRel, expectedUid);
+
+    // `spec.zip` holding a single `spec/` becomes that directory's contents. Only a REAL directory is
+    // flattened, and the flatten is now a choice of rename SOURCE rather than a move of each child.
+    let sourceRel = innerRel;
+    const top = (await readdirNoFollow(anchor, innerRel)) ?? [];
+    if (top.length === 1) {
+      const only = top[0]!.name;
+      const info = await lstatNoFollow(anchor, `${innerRel}/${only}`);
+      if (info?.kind === 'directory') sourceRel = `${innerRel}/${only}`;
+    }
+
+    // Hand the tree back to the worker's identity while it is still private, so the swapped result
+    // is owned exactly as it was before this change. Best-effort: a non-root worker cannot, and the
+    // sandbox ownership repair runs later anyway.
+    if (asRoot) {
+      await applyTreeNoFollow(anchor, sourceRel, { owner: { uid: 0, gid: 0 } }).catch(
+        () => undefined,
+      );
+    }
+
+    if ((await lstatNoFollow(anchor, leaf)) !== null) {
+      await renameNoFollow(anchor, leaf, `${stageLeaf}/old`);
+    }
+    await renameNoFollow(anchor, sourceRel, leaf);
+    return { dropped, note: describeDrops(dropped) };
+  } finally {
+    await removeNoFollow(anchor, stageLeaf, {
+      recursive: true,
+      repairPermissions: true,
+    }).catch(() => undefined);
+  }
 }
 
 export async function handleExtract(
@@ -337,8 +536,11 @@ export async function handleExtract(
   if (!payload.archiveFormat) throw new Error('archiveFormat required for extract job');
 
   const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
-  await extractArchive(payload.archivePath, payload.archiveFormat, dest);
-  await persistDetection(db, payload.repositoryId, dest);
+  const report = await extractArchive(payload.archivePath, payload.archiveFormat, dest);
+  if (report.note) {
+    logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
+  }
+  await persistDetection(db, payload.repositoryId, dest, report.note);
   // Only remove the archive after successful extract + detection. Leaving it
   // in place on failure lets the user (or a retry) look at what actually
   // arrived on disk instead of silently masking the error.
