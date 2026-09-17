@@ -157,6 +157,77 @@ describe('extractArchive', () => {
     expect(report.note).toBeNull();
   });
 
+  it('drops every link a zip carries and names each one, however deep', async () => {
+    // Every other link case here is a TAR. Production reads a .zip with Info-ZIP, which restores
+    // link entries of its own accord (MEASURED against the image's unzip 6.00), so the staged-tree
+    // walk — not the tool — is what has to catch them. `platform: 'UNIX'` is load-bearing: without
+    // it JSZip writes a DOS "version made by", unzip ignores the mode bits, and both entries land
+    // as ordinary files holding the target text, leaving this asserting a drop that never happened.
+    const archivePath = path.join(tmpRoot, 'links.zip');
+    const zip = new JSZip();
+    zip.file('README.md', '# fixture\n');
+    zip.file('src/index.js', 'export const x = 1;\n');
+    zip.file('config-ref', '../outside/config.json', { unixPermissions: 0o120777 });
+    zip.file('docs/readme-link', '../README.md', { unixPermissions: 0o120777 });
+    await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+
+    const dest = path.join(tmpRoot, 'out-zip-links');
+    const report = await extractArchive(archivePath, 'zip', dest);
+
+    // Named by their path relative to the extracted root, so a member nested below the top level is
+    // distinguishable from one beside it — a walk that only checked depth 1 would pass every other
+    // case in this file and fail here. Sorted, because the walk is a LIFO stack over an unsorted
+    // `readdir` and the order of `dropped` is not part of the contract.
+    expect([...report.dropped].sort((a, b) => a.rel.localeCompare(b.rel))).toEqual([
+      { rel: 'config-ref', reason: 'symlink' },
+      { rel: 'docs/readme-link', reason: 'symlink' },
+    ]);
+    expect(report.note).toContain('not extracted');
+    expect(report.note).toContain('config-ref');
+    expect(report.note).toContain('docs/readme-link');
+
+    // The ordinary members survive, and the directory that held a link is kept rather than removed
+    // with it.
+    expect((await readdir(dest)).sort()).toEqual(['README.md', 'docs', 'src']);
+    expect(await readdir(path.join(dest, 'docs'))).toEqual([]);
+    expect(await readFile(path.join(dest, 'README.md'), 'utf8')).toBe('# fixture\n');
+  });
+
+  it('drops a link even when its target sits inside the same tree', async () => {
+    // Deliberate, and nothing else pins it: an in-tree target is still extracted at its own path,
+    // so refusing the link loses no content, and an in-tree link is how a tree names a file that is
+    // otherwise masked or private. A change that starts keeping these should fail right here.
+    const archivePath = path.join(tmpRoot, 'intree.zip');
+    const zip = new JSZip();
+    zip.file('README.md', '# real\n');
+    zip.file('keep.txt', 'ordinary\n');
+    zip.file('alias.md', 'README.md', { unixPermissions: 0o120777 });
+    await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+
+    const dest = path.join(tmpRoot, 'out-intree');
+    const report = await extractArchive(archivePath, 'zip', dest);
+
+    expect(report.dropped).toEqual([{ rel: 'alias.md', reason: 'symlink' }]);
+    expect((await readdir(dest)).sort()).toEqual(['README.md', 'keep.txt']);
+    expect(await readFile(path.join(dest, 'README.md'), 'utf8')).toBe('# real\n');
+  });
+
+  it('does not flatten a zip with several top-level entries', async () => {
+    // The tar path has this case; the zip path reaches the flatten through a different branch
+    // (`unzip -d`, rather than tar reading the archive on stdin) and had none.
+    const archivePath = path.join(tmpRoot, 'multi.zip');
+    const zip = new JSZip();
+    zip.file('dirA/a.txt', '1');
+    zip.file('dirB/b.txt', '2');
+    await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer' }));
+
+    const dest = path.join(tmpRoot, 'out-zip-multi');
+    const report = await extractArchive(archivePath, 'zip', dest);
+
+    expect((await readdir(dest)).sort()).toEqual(['dirA', 'dirB']);
+    expect(report.dropped).toEqual([]);
+  });
+
   it('replaces an existing destination only once the new tree is ready', async () => {
     // The swap is the reason extraction stages: the old shape `rm -rf`'d the destination BEFORE
     // unpacking, so a failure left the repository empty. Here the previous contents survive until a
