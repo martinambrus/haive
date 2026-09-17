@@ -1,5 +1,5 @@
-import { rm } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
+import { removeNoFollow } from '@haive/shared/fs-safe';
 import { Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
 import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
@@ -2574,7 +2574,12 @@ async function handleCleanupRepoResources(
   if (payload.storagePath) {
     const resolved = resolve(payload.storagePath);
     if (resolved.startsWith(WORKER_REPO_STORAGE_ROOT + '/')) {
-      await rm(resolved, { recursive: true, force: true }).catch((err) =>
+      // The USER directory is the anchor: it and the storage root above it are the worker's own,
+      // while the repository directory below it is a tree sandboxed agents write.
+      await removeNoFollow(dirname(resolved), basename(resolved), {
+        recursive: true,
+        repairPermissions: true,
+      }).catch((err: unknown) =>
         logger.warn({ err, path: resolved }, 'repo-cleanup: workspace rm failed'),
       );
     }

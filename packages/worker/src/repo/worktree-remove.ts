@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
-import { rm } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { findWorktreePathClaimant } from './worktree-claims.js';
+import { splitWorktreePath, WORKTREE_SUBDIR } from './worktree-paths.js';
 
 const exec = promisify(execFile);
 
@@ -122,50 +123,51 @@ export async function removeTaskWorktree(
   return { ...removal, branch, branchDeleted };
 }
 
-/** Recursive delete that survives read-only directories. Drupal ships
- *  `sites/default` at mode 0555, so nothing may unlink inside it and both
- *  `git worktree remove --force` and a plain rm fail with EACCES/EPERM. */
-async function forceRemoveDir(dir: string): Promise<void> {
-  try {
-    await rm(dir, { recursive: true, force: true });
-    return;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== 'EACCES' && code !== 'EPERM') throw err;
-  }
-  await exec('chmod', ['-R', 'u+w', dir]);
-  await rm(dir, { recursive: true, force: true });
-}
-
-/** The IO half of {@link removeTaskWorktree}, split out so the git-vs-rmdir
- *  branching is unit-testable against a real temp repo without stubbing the db.
+/** The IO half of {@link removeTaskWorktree}, split out so the branching is unit-testable against a
+ *  real temp repo without stubbing the db.
  *
- *  Repairs the worktree's gitfile first: a CLI agent that rewrote it to a
- *  container-side path (its host gitdir does not resolve inside the sandbox) leaves
- *  `git worktree remove` failing with "is not a .git file". Then prefers
- *  `git worktree remove --force` (clears the parent's .git/worktrees admin entry
- *  too); falls back to a recursive rm + best-effort prune when there is no reachable
- *  parent .git (repoRoot null, or the parent repo was reset). */
+ *  `git worktree remove --force` is deliberately no longer used: it is a root subprocess performing
+ *  a path-based recursive delete inside a tree that sandboxed agents write, which is exactly the
+ *  operation being retired here. The delete goes through the anchored walk instead, and
+ *  `git worktree prune` clears the parent's `.git/worktrees` admin entry afterwards — the one thing
+ *  `remove` did for us beyond deleting. `repairPermissions` replaces `forceRemoveDir`'s
+ *  `chmod -R u+w` for read-only trees (Drupal ships `sites/default` at 0555). */
 export async function removeWorktreeDir(
   repoRoot: string | null,
   worktreePath: string,
 ): Promise<WorktreeRemovalResult> {
+  const split = splitWorktreePath(worktreePath);
+  if (!split) {
+    return {
+      removed: false,
+      worktreePath,
+      method: null,
+      error: `${worktreePath} does not name a worktree under ${WORKTREE_SUBDIR}/`,
+    };
+  }
+
   if (repoRoot) {
-    // Best effort: a no-op when the gitfile is already sane.
-    await exec('git', ['-C', repoRoot, 'worktree', 'repair', worktreePath]).catch(() => undefined);
-    try {
-      await exec('git', ['-C', repoRoot, 'worktree', 'remove', '--force', worktreePath]);
-      return { removed: true, worktreePath, method: 'git' };
-    } catch (err) {
-      logger.warn({ err, worktreePath }, 'git worktree remove failed; falling back to rm');
+    // A CLI agent can repoint the gitfile at a container-side path, which leaves git unable to
+    // resolve the worktree. Repair it — but only when it IS a regular file: cli-exec masks it
+    // read-only while the terminal and IDE containers do not, so a link or a directory can sit
+    // there, and `git worktree repair` would then act on whatever that names.
+    const gitfile = await lstatNoFollow(split.anchor, `${split.rel}/.git`);
+    if (gitfile?.kind === 'file') {
+      await exec('git', ['-C', repoRoot, 'worktree', 'repair', worktreePath]).catch(
+        () => undefined,
+      );
     }
   }
 
   try {
-    await forceRemoveDir(worktreePath);
+    // The return value is deliberately ignored: absence is the desired END STATE, so a worktree that
+    // was already gone is a success. Steps 12 and 13 both treat `removed: false` as loud failure.
+    await removeNoFollow(split.anchor, split.rel, { recursive: true, repairPermissions: true });
     if (repoRoot) {
       await exec('git', ['-C', repoRoot, 'worktree', 'prune']).catch(() => undefined);
     }
+    // Only ever 'rmdir' now; the 'git' variant stays in the type because step outputs written before
+    // this change carry it and are replayed.
     return { removed: true, worktreePath, method: 'rmdir' };
   } catch (err) {
     return {

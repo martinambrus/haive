@@ -1,8 +1,9 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import { readdirNoFollow, readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -688,7 +689,9 @@ export async function stageLearningDrafts(
   investigationContent: string | null,
 ): Promise<void> {
   const dir = path.join(worktree, LEARNING_DRAFTS_DIR);
-  await rm(dir, { recursive: true, force: true });
+  // Anchored at the repository root rather than the worktree, which is sandbox-writable.
+  const wa = workspaceAnchor(worktree);
+  await removeNoFollow(wa.anchor, `${wa.prefix}${LEARNING_DRAFTS_DIR}`, { recursive: true });
   await mkdir(path.join(dir, LEARNING_DRAFT_SUBDIR), { recursive: true });
   for (const p of plan) {
     if (p.op === 'delete') continue;
@@ -764,7 +767,8 @@ export async function applyLearningOps(
   for (const p of plan) {
     const file = path.join(dir, `${p.id}.md`);
     if (p.op === 'delete') {
-      await rm(file, { force: true });
+      const wa = workspaceAnchor(worktree);
+      await removeNoFollow(wa.anchor, `${wa.prefix}${LEARNINGS_DIR}/${p.id}.md`);
       deleted.push(path.relative(worktree, file));
     } else {
       await writeFile(file, `${p.newBody}\n`, 'utf8');

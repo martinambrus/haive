@@ -21,6 +21,8 @@ import {
   copyFileNoFollow,
   ensureDirNoFollow,
   isPathContainmentError,
+  removeNoFollow,
+  renameNoFollow,
 } from '../src/fs-safe.js';
 
 const run = promisify(execFile);
@@ -290,6 +292,154 @@ describe('fs-safe write primitives', () => {
       await symlink(outside, path.join(root, 'linkdir'));
       await expect(applyTreeNoFollow(root, 'linkdir', { mode: uPlusRwX })).rejects.toMatchObject({
         reason: 'link',
+      });
+    });
+  });
+
+  describe('removeNoFollow', () => {
+    it('reports an absent path rather than failing', async () => {
+      expect(await removeNoFollow(root, 'nope')).toBe(false);
+      expect(await removeNoFollow(root, 'nope/deeper')).toBe(false);
+    });
+
+    it('deletes a file, and a tree only when asked', async () => {
+      expect(await removeNoFollow(root, 'src/a.txt')).toBe(true);
+      await expect(stat(path.join(root, 'src', 'a.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+      await mkdir(path.join(root, 'tree', 'sub'), { recursive: true });
+      await writeFile(path.join(root, 'tree', 'sub', 'f.txt'), 'x', 'utf8');
+      await expect(removeNoFollow(root, 'tree')).rejects.toMatchObject({ code: 'ENOTEMPTY' });
+      expect(await removeNoFollow(root, 'tree', { recursive: true })).toBe(true);
+      await expect(stat(path.join(root, 'tree'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('unlinks a link AS a link, leaving its target alone', async () => {
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'live.txt'));
+      expect(await removeNoFollow(root, 'live.txt')).toBe(true);
+      await expect(lstat(path.join(root, 'live.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+      // The whole point: what it pointed at is still there.
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+    });
+
+    it('unlinks a link found INSIDE a tree rather than descending through it', async () => {
+      await mkdir(path.join(root, 'holder'));
+      await symlink(outside, path.join(root, 'holder', 'out'));
+      expect(await removeNoFollow(root, 'holder', { recursive: true })).toBe(true);
+      // The linked-to directory and its contents survive.
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+    });
+
+    it('refuses a linked ancestor, and refuses the anchor itself', async () => {
+      await symlink(outside, path.join(root, 'linkdir'));
+      await expect(removeNoFollow(root, 'linkdir/secret.txt')).rejects.toMatchObject({
+        reason: 'link',
+        at: 'linkdir',
+      });
+      await expect(removeNoFollow(root, '')).rejects.toMatchObject({ reason: 'invalid-path' });
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+    });
+
+    // Drupal ships sites/default at 0555, where nothing may unlink inside it. Root ignores DAC.
+    it.skipIf(process.getuid?.() === 0)(
+      'removes a 0555 directory only with repairPermissions',
+      async () => {
+        await mkdir(path.join(root, 'locked', 'inner'), { recursive: true });
+        await writeFile(path.join(root, 'locked', 'inner', 'settings.php'), '<?php\n', 'utf8');
+        await chmod(path.join(root, 'locked', 'inner'), 0o555);
+        await chmod(path.join(root, 'locked'), 0o555);
+        try {
+          await expect(removeNoFollow(root, 'locked', { recursive: true })).rejects.toMatchObject({
+            code: 'EACCES',
+          });
+          expect(
+            await removeNoFollow(root, 'locked', { recursive: true, repairPermissions: true }),
+          ).toBe(true);
+          await expect(stat(path.join(root, 'locked'))).rejects.toMatchObject({ code: 'ENOENT' });
+        } finally {
+          await chmod(path.join(root, 'locked'), 0o700).catch(() => undefined);
+          await chmod(path.join(root, 'locked', 'inner'), 0o700).catch(() => undefined);
+        }
+      },
+    );
+  });
+
+  describe('renameNoFollow', () => {
+    it('moves within an anchor and between two anchors', async () => {
+      await renameNoFollow(root, 'src/a.txt', 'moved.txt');
+      expect(await readFile(path.join(root, 'moved.txt'), 'utf8')).toBe('hello');
+      await renameNoFollow(root, 'moved.txt', 'landed.txt', { toAnchor: outside });
+      expect(await readFile(path.join(outside, 'landed.txt'), 'utf8')).toBe('hello');
+    });
+
+    it('creates the destination parents only when asked', async () => {
+      await expect(renameNoFollow(root, 'src/a.txt', 'x/y/a.txt')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await renameNoFollow(root, 'src/a.txt', 'x/y/a.txt', { createParents: true, mode: 0o750 });
+      expect(await readFile(path.join(root, 'x', 'y', 'a.txt'), 'utf8')).toBe('hello');
+      expect((await stat(path.join(root, 'x'))).mode & 0o777).toBe(0o750);
+    });
+
+    it('refuses a linked source leaf and a linked ancestor on either side', async () => {
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'srclink.txt'));
+      await symlink(outside, path.join(root, 'linkdir'));
+      await expect(renameNoFollow(root, 'srclink.txt', 'out.txt')).rejects.toMatchObject({
+        reason: 'link',
+      });
+      await expect(renameNoFollow(root, 'linkdir/secret.txt', 'out.txt')).rejects.toMatchObject({
+        reason: 'link',
+      });
+      await expect(renameNoFollow(root, 'src/a.txt', 'linkdir/out.txt')).rejects.toMatchObject({
+        reason: 'link',
+      });
+      // Nothing moved through any of them.
+      expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+      expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('hello');
+    });
+
+    it('replaces an existing destination by default', async () => {
+      await writeFile(path.join(root, 'taken.txt'), 'mine', 'utf8');
+      await renameNoFollow(root, 'src/a.txt', 'taken.txt');
+      expect(await readFile(path.join(root, 'taken.txt'), 'utf8')).toBe('hello');
+    });
+
+    it('noReplace refuses an existing destination, and a DANGLING link at it', async () => {
+      await writeFile(path.join(root, 'taken.txt'), 'mine', 'utf8');
+      await expect(
+        renameNoFollow(root, 'src/a.txt', 'taken.txt', { noReplace: true }),
+      ).rejects.toMatchObject({ code: 'EEXIST' });
+      expect(await readFile(path.join(root, 'taken.txt'), 'utf8')).toBe('mine');
+
+      // A stat would call this destination free, and the move would land on its target.
+      await symlink(path.join(outside, 'planted.txt'), path.join(root, 'dangling.txt'));
+      await expect(
+        renameNoFollow(root, 'src/a.txt', 'dangling.txt', { noReplace: true }),
+      ).rejects.toMatchObject({ code: 'EEXIST' });
+      await expect(stat(path.join(outside, 'planted.txt'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('hello');
+    });
+
+    it('noReplace moves a directory and refuses a taken name', async () => {
+      await mkdir(path.join(root, 'from', 'inner'), { recursive: true });
+      await writeFile(path.join(root, 'from', 'inner', 'f.txt'), 'x', 'utf8');
+      await renameNoFollow(root, 'from', 'to', { noReplace: true });
+      expect(await readFile(path.join(root, 'to', 'inner', 'f.txt'), 'utf8')).toBe('x');
+
+      await mkdir(path.join(root, 'again'));
+      await expect(renameNoFollow(root, 'to', 'again', { noReplace: true })).rejects.toMatchObject({
+        code: 'EEXIST',
+      });
+      expect((await stat(path.join(root, 'to'))).isDirectory()).toBe(true);
+    });
+
+    it('refuses an empty rel on either side', async () => {
+      await expect(renameNoFollow(root, '', 'x.txt')).rejects.toMatchObject({
+        reason: 'invalid-path',
+      });
+      await expect(renameNoFollow(root, 'src/a.txt', '')).rejects.toMatchObject({
+        reason: 'invalid-path',
       });
     });
   });

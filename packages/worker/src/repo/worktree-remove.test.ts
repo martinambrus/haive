@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect } from 'vitest';
 import type { Database } from '@haive/database';
+import { WORKTREE_SUBDIR } from './worktree-paths.js';
 import { removeTaskWorktree, removeWorktreeDir } from './worktree-remove.js';
 
 const exec = promisify(execFile);
@@ -42,12 +43,14 @@ async function setupRepoWithWorktree(): Promise<{ root: string; wt: string }> {
 }
 
 describe('removeWorktreeDir', () => {
-  it('removes a live worktree via git and clears the admin entry', async () => {
+  it('removes a live worktree and clears the admin entry', async () => {
     const { root, wt } = await setupRepoWithWorktree();
     try {
       expect((await git(root, ['worktree', 'list'])).trim().split('\n')).toHaveLength(2);
       const res = await removeWorktreeDir(root, wt);
-      expect(res).toEqual({ removed: true, worktreePath: wt, method: 'git' });
+      // `git worktree remove --force` is no longer used: the anchored walk deletes the tree and
+      // `git worktree prune` clears the admin entry, which is the only thing `remove` added.
+      expect(res).toEqual({ removed: true, worktreePath: wt, method: 'rmdir' });
       expect(await exists(wt)).toBe(false);
       // The parent's .git/worktrees admin entry is gone too (back to one worktree).
       expect((await git(root, ['worktree', 'list'])).trim().split('\n')).toHaveLength(1);
@@ -85,7 +88,7 @@ describe('removeWorktreeDir', () => {
 
   // Task 82949225: a sandbox agent rewrote the gitfile to its container-side path, so
   // `git worktree remove` died with "is not a .git file" and the worktree survived.
-  it('repairs a gitfile poisoned with a container path, then removes via git', async () => {
+  it('repairs a gitfile poisoned with a container path, then removes it', async () => {
     const { root, wt } = await setupRepoWithWorktree();
     try {
       await writeFile(
@@ -95,7 +98,7 @@ describe('removeWorktreeDir', () => {
       );
       const res = await removeWorktreeDir(root, wt);
       expect(res.removed).toBe(true);
-      expect(res.method).toBe('git');
+      expect(res.method).toBe('rmdir');
       expect(await exists(wt)).toBe(false);
       expect((await git(root, ['worktree', 'list'])).trim().split('\n')).toHaveLength(1);
     } finally {
@@ -103,22 +106,37 @@ describe('removeWorktreeDir', () => {
     }
   });
 
-  // Step 12 keys its (loud) failure on removed === false, so an unremovable worktree
-  // must report failure rather than claim success. Unprivileged only: root ignores DAC.
+  // Step 12 keys its (loud) failure on removed === false, so an unremovable worktree must report
+  // failure rather than claim success. The path validation is what produces that now — and it is
+  // also what stops a `tasks.worktree_path` row aiming a RECURSIVE DELETE at the repository root.
+  it('reports removed:false with an error for a path that is not a worktree', async () => {
+    const { root } = await setupRepoWithWorktree();
+    try {
+      const res = await removeWorktreeDir(root, root);
+      expect(res.removed).toBe(false);
+      expect(res.method).toBeNull();
+      expect(res.error).toContain(WORKTREE_SUBDIR);
+      // The repository root and its contents are untouched.
+      expect(await exists(path.join(root, 'f.txt'))).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // This case used to assert FAILURE: `chmod -R u+w` on the worktree could not fix a read-only
+  // PARENT, so unlinking the worktree's own directory entry stayed impossible. `repairPermissions`
+  // grants u+rwx on whichever directory refuses the operation — parents included — so it succeeds
+  // now. Unprivileged only: root ignores DAC.
   it.skipIf(process.getuid?.() === 0)(
-    'reports removed:false with an error when the tree cannot be deleted',
+    'repairs a read-only parent directory and still removes the worktree',
     async () => {
       const { root, wt } = await setupRepoWithWorktree();
       const parentOfWt = path.dirname(wt);
       try {
-        // Read-only PARENT: chmod -R u+w on the worktree itself cannot fix this, so
-        // unlinking the worktree's own directory entry stays impossible.
         await chmod(parentOfWt, 0o555);
         const res = await removeWorktreeDir(root, wt);
-        expect(res.removed).toBe(false);
-        expect(res.method).toBeNull();
-        expect(res.error).toBeTruthy();
-        expect(await exists(wt)).toBe(true);
+        expect(res.removed).toBe(true);
+        expect(await exists(wt)).toBe(false);
       } finally {
         await chmod(parentOfWt, 0o755).catch(() => undefined);
         await rm(root, { recursive: true, force: true });

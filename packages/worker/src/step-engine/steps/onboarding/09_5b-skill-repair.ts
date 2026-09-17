@@ -1,5 +1,5 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -454,7 +454,9 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
         const skillDir = path.join(ctx.repoPath, ...parts, failing.skillId);
         // Clear the dir before rewriting so stale/broken leaf files from the truncated
         // generation don't survive and re-fail verification.
-        await rm(skillDir, { recursive: true, force: true });
+        await removeNoFollow(ctx.repoPath, [...parts, failing.skillId].join('/'), {
+          recursive: true,
+        });
         await mkdir(skillDir, { recursive: true });
         await writeFile(path.join(skillDir, 'SKILL.md'), skillMd, 'utf8');
         if (subs.length > 0) {

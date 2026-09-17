@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { execFile } from 'node:child_process';
-import { access, rm } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
+import { removeNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { and, asc, desc, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
@@ -916,7 +917,7 @@ planRoutes.delete('/:id/plan', async (c) => {
   try {
     const repoRoot = await resolveRepoRoot(db, userId, repositoryId);
     for (const rel of [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown]) {
-      await rm(path.join(repoRoot, rel), { force: true });
+      await removeNoFollow(repoRoot, rel);
     }
   } catch (err) {
     mirrorRemoved = false;

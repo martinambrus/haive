@@ -1,6 +1,7 @@
-import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { LEGACY_KNOWLEDGE_MIGRATIONS } from '@haive/shared/knowledge-paths';
+import { relUnder, removeNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
 
 /** Where a legacy file lands when its canonical slot is already taken. Inside the knowledge
  *  base on purpose: `scanExistingKb` recurses, so the reuse prompt lists it alongside the
@@ -79,8 +80,13 @@ export async function migrateLegacyKnowledge(
         }
       }
       try {
-        await mkdir(path.dirname(target), { recursive: true });
-        await rename(src, target);
+        // `createParents` does the `mkdir -p`, and `noReplace` closes the window the `exists`
+        // check above leaves open — a name taken between the probe and the move is EEXIST here
+        // rather than a silent clobber, and a planted link at the destination counts as taken.
+        await renameNoFollow(repoPath, relUnder(repoPath, src), relUnder(repoPath, target), {
+          noReplace: true,
+          createParents: true,
+        });
         bucket.push(
           path.posix.join(to, bucket === result.pendingMerge ? LEGACY_IMPORT_SUBDIR : '', relPosix),
         );
@@ -94,7 +100,7 @@ export async function migrateLegacyKnowledge(
     // ONLY when nothing was left behind. A blanket remove here would delete the very files
     // this function declined to move — tracked knowledge, destroyed by the step that was
     // supposed to rescue it.
-    if (left === 0) await rm(fromAbs, { recursive: true, force: true }).catch(() => {});
+    if (left === 0) await removeNoFollow(repoPath, from, { recursive: true }).catch(() => {});
   }
   if (result.moved.length + result.pendingMerge.length + result.skipped.length > 0) {
     logger?.info(

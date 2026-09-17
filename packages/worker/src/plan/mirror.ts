@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { relUnder, removeNoFollow } from '@haive/shared/fs-safe';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -101,7 +102,7 @@ async function writePlanMirrorLocked(
   if (nodes.length === 0) {
     await Promise.all(
       [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown].map((rel) =>
-        rm(path.join(repoPath, rel), { force: true }),
+        removeNoFollow(repoPath, rel),
       ),
     );
     await db
@@ -163,7 +164,7 @@ async function writePlanMirrorLocked(
       await writeFile(temporary, content, 'utf8');
       await rename(temporary, abs);
     } catch (err) {
-      await rm(temporary, { force: true }).catch(() => undefined);
+      await removeNoFollow(repoPath, relUnder(repoPath, temporary)).catch(() => undefined);
       throw err;
     }
     written.push(rel);
