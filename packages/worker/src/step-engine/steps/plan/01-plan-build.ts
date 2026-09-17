@@ -17,8 +17,7 @@ import {
 } from '@haive/shared/plan';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readdir } from 'node:fs/promises';
-import path from 'node:path';
+import { readdirNoFollow } from '@haive/shared/fs-safe';
 
 const exec = promisify(execFile);
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -297,13 +296,10 @@ export function planAgentCapabilities(d: PlanBuildDetect): StepCapability[] {
 }
 
 async function listKbFiles(ctx: StepContext): Promise<string[]> {
-  try {
-    const dir = path.join(ctx.repoPath, KB_DIR);
-    const entries = await readdir(dir, { withFileTypes: true });
-    return entries.filter((e) => e.isFile()).map((e) => e.name);
-  } catch {
-    return [];
-  }
+  // Lenient: null folds absent, unreadable and a linked `KB_DIR` into the empty
+  // list the `catch` here already produced.
+  const entries = await readdirNoFollow(ctx.repoPath, KB_DIR);
+  return (entries ?? []).filter((e) => e.isFile()).map((e) => e.name);
 }
 
 function sourceGuidance(d: PlanBuildDetect): string {

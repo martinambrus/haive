@@ -29,8 +29,5 @@
   "packages/worker/src/step-engine/steps/env-replicate/01-declare-deps.ts": 2,
   "packages/worker/src/step-engine/steps/env-replicate/03-build-image.ts": 3,
   "packages/worker/src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.ts": 1,
-  "packages/worker/src/step-engine/steps/onboarding/_helpers.ts": 1,
-  "packages/worker/src/step-engine/steps/plan/00-plan-inputs.ts": 2,
-  "packages/worker/src/step-engine/steps/plan/01-plan-build.ts": 1,
-  "packages/worker/src/step-engine/steps/plan/02-plan-coverage.ts": 1
+  "packages/worker/src/step-engine/steps/onboarding/_helpers.ts": 1
 }

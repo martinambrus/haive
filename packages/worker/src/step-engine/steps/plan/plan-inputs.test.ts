@@ -12,7 +12,7 @@ import {
   parseSharedStrings,
   sidecarName,
   xlsxSheetToMarkdown,
-  resolveInside,
+  uploadsInputRel,
 } from './_plan-inputs.js';
 import { planInputsStep, type PlanInputsDetect } from './00-plan-inputs.js';
 import { planAgentCapabilities, type PlanBuildDetect } from './01-plan-build.js';
@@ -421,29 +421,49 @@ describe('keeping a database-supplied name inside the uploads directory', () => 
   // cannot see that sanitiser and cannot prove it ran on an older row — and what
   // is built from it is a file this step writes and a file coverage reads into a
   // prompt, so an unchecked `../` is an arbitrary write and an arbitrary read.
-  const dir = '/var/lib/haive/repos/u/r/.haive/task-uploads/t1';
+  // A REL, not an absolute path: the uploads dir is under `.haive/`, which the
+  // sandbox mounts read-write, so it is walked from the repository root rather
+  // than trusted as a prefix.
+  const rel = '.haive/task-uploads/t1';
 
   it('accepts an ordinary name', () => {
-    expect(resolveInside(dir, 'spec.docx.extracted.md')).toBe(`${dir}/spec.docx.extracted.md`);
+    expect(uploadsInputRel('t1', 'spec.docx.extracted.md')).toBe(`${rel}/spec.docx.extracted.md`);
   });
 
   it('refuses a traversal', () => {
-    expect(resolveInside(dir, '../../../../../../etc/passwd')).toBeNull();
-    expect(resolveInside(dir, '..')).toBeNull();
-    expect(resolveInside(dir, 'a/../../b')).toBeNull();
+    expect(uploadsInputRel('t1', '../../../../../../etc/passwd')).toBeNull();
+    expect(uploadsInputRel('t1', '..')).toBeNull();
+    expect(uploadsInputRel('t1', 'a/../../b')).toBeNull();
   });
 
-  it('refuses an absolute path, which join would not even keep', () => {
-    expect(resolveInside(dir, '/etc/passwd')).toBeNull();
+  it('refuses an absolute path', () => {
+    expect(uploadsInputRel('t1', '/etc/passwd')).toBeNull();
   });
 
   it('refuses a sibling directory that merely shares the prefix', () => {
-    // The reason the check appends a separator: without it `<dir>-evil` starts
-    // with `<dir>` and would pass.
-    expect(resolveInside(dir, '../t1-evil/x')).toBeNull();
+    // The check this replaced compared RESOLVED STRINGS and had to append a
+    // separator, or `<dir>-evil` would have passed on a prefix match. Refusing
+    // `..` a segment at a time means a sibling is never expressible at all.
+    expect(uploadsInputRel('t1', '../t1-evil/x')).toBeNull();
   });
 
-  it('allows a nested path that stays inside', () => {
-    expect(resolveInside(dir, 'sub/file.md')).toBe(`${dir}/sub/file.md`);
+  it('allows a nested path, which a folder upload and an expanded archive both produce', () => {
+    expect(uploadsInputRel('t1', 'sub/file.md')).toBe(`${rel}/sub/file.md`);
+  });
+
+  it('refuses names that address the directory itself rather than a file in it', () => {
+    // `toSafeRel('')` answers `''`, which addresses the ANCHOR — legitimate for
+    // reading a directory and never a file to write or scan.
+    expect(uploadsInputRel('t1', '')).toBeNull();
+    expect(uploadsInputRel('t1', '.')).toBeNull();
+    expect(uploadsInputRel('t1', 'a//b')).toBeNull();
+  });
+
+  it('refuses a NUL byte here rather than leaving the primitive to throw on it', () => {
+    // Built at runtime: a literal escape in this source does not survive prettier.
+    // The shape check has to reject whatever `toSafeRel` would answer
+    // `invalid-path` for, because both callers sit in a loop that records a skip
+    // and a throw there would discard the attachments beside it.
+    expect(uploadsInputRel('t1', `spec${String.fromCharCode(0)}.md`)).toBeNull();
   });
 });

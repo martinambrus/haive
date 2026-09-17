@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
@@ -33,7 +32,7 @@ import {
   type StructuralGap,
 } from './plan-coverage-scan.js';
 import type { PlanInputsApply } from './00-plan-inputs.js';
-import { resolveInside } from './_plan-inputs.js';
+import { uploadsInputRel } from './_plan-inputs.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
@@ -341,27 +340,30 @@ async function loadInputSections(
   const prepared = (row?.output ?? null) as PlanInputsApply | null;
   if (!prepared || prepared.inputs.length === 0) return { sections: [], hasVisualInputs: false };
 
-  const dir = path.join(ctx.repoPath, '.haive', 'task-uploads', ctx.taskId);
   const out: DocSection[] = [];
   for (const input of prepared.inputs) {
     // `sidecar` is set exactly when the original is not readable as text, so it
     // doubles as the "is there anything to scan" test.
     const readable = input.sidecar ?? (input.kind === 'text' ? input.filename : null);
     if (!readable) continue;
-    // The name is a database column and this read feeds a prompt, so a path that
-    // escapes the uploads dir would put an arbitrary file in front of an agent.
-    const source = resolveInside(dir, readable);
-    if (source === null) {
+    // The name is a database column and this read feeds a prompt, so it is walked from
+    // the repository root a component at a time. The uploads dir is neither the anchor
+    // nor a trusted prefix: it sits under `.haive/`, which the sandbox mounts read-write.
+    const rel = uploadsInputRel(ctx.taskId, readable);
+    if (rel === null) {
       ctx.logger.warn(
         { file: readable },
-        'coverage: refusing a prepared input whose name escapes the uploads directory',
+        'coverage: refusing a prepared input whose name cannot address a file in the uploads directory',
       );
       continue;
     }
-    const text = await readFile(source, 'utf8').catch((err: unknown) => {
-      ctx.logger.warn({ err, file: readable }, 'coverage: could not read a prepared plan input');
-      return null;
-    });
+    // Lenient: absent, unreadable and refused all mean the same thing to a scan, which
+    // is what the `catch` this replaced already folded them into.
+    const text = await readTextNoFollow(ctx.repoPath, rel);
+    if (text === null) {
+      ctx.logger.warn({ file: readable }, 'coverage: could not read a prepared plan input');
+      continue;
+    }
     // Attributed to the ORIGINAL, never the sidecar: the reader is going to open
     // `requirements.docx`, not `requirements.docx.extracted.md`.
     if (text) out.push(...parseDocSections(text, input.filename));
