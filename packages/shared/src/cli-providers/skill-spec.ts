@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { bundleIdSchema } from './bundle-id.js';
 
 export const skillKeyConceptSchema = z.object({
   term: z.string(),
@@ -30,7 +31,8 @@ const skillIdentificationRowSchema = z.object({
 });
 
 export const skillSubSkillSchema = z.object({
-  slug: z.string().min(1),
+  /** A directory name under the skill, so it takes the same grammar as an id. */
+  slug: bundleIdSchema,
   name: z.string().min(1),
   title: z.string().min(1),
   description: z.string().min(1),
@@ -53,7 +55,8 @@ export type SkillRelated = z.infer<typeof skillRelatedSchema>;
  *  `subSkillToMarkdown` renderers are the source of truth for the on-disk
  *  format. */
 export const skillEntrySchema = z.object({
-  id: z.string().min(1),
+  /** Becomes a path segment in `template-manifest.ts`, so it is grammar-checked, not just non-empty. */
+  id: bundleIdSchema,
   title: z.string().min(1),
   description: z.string().min(1),
   instructions: z.string().optional(),

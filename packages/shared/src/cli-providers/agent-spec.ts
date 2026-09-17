@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { bundleIdSchema } from './bundle-id.js';
 
 export const agentColorSchema = z.enum(['blue', 'purple', 'green', 'gold', 'red', 'orange']);
 export type AgentColor = z.infer<typeof agentColorSchema>;
@@ -27,7 +28,8 @@ const agentExecutionStepSchema = z.object({
  *  shape. The renderer in the worker (`buildAgentFileMarkdown` /
  *  `buildAgentFileToml`) is the source of truth for how this maps to disk. */
 export const agentSpecSchema = z.object({
-  id: z.string().min(1),
+  /** Becomes a path segment in `template-manifest.ts`, so it is grammar-checked, not just non-empty. */
+  id: bundleIdSchema,
   title: z.string().min(1),
   description: z.string().min(1),
   color: agentColorSchema,

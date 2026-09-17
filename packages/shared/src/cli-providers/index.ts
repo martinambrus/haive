@@ -3,6 +3,7 @@ export * from './install-metadata.js';
 export * from './auth-volume.js';
 export * from './auth-banner-parser.js';
 export * from './agent-spec.js';
+export * from './bundle-id.js';
 export * from './skill-spec.js';
 export * from './ollama.js';
 export * from './ollama-pricing.js';

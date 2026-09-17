@@ -1209,3 +1209,121 @@ export async function writeFileNoFollow(
   }
   return existing === null ? 'created' : 'overwritten';
 }
+
+export interface UpdateFileOptions {
+  /** Create the file when it is absent, handing `update` a `null` current. Without this an absent
+   *  file rethrows ENOENT, because a read-modify-write of a file nobody wrote is a caller bug. */
+  create?: boolean;
+  /** Only applied to a file this call CREATES; an existing file keeps its own mode and owner, which
+   *  is the whole point of updating in place. */
+  fileMode?: number;
+  owner?: Owner;
+  createParents?: boolean;
+  /** Refuse a file larger than this rather than read part of it: `update` receives the WHOLE
+   *  content and writes back what it returns, so a truncated read would delete the remainder. */
+  maxBytes?: number;
+}
+
+/**
+ * Read-modify-write `<anchor>/<rel>` over ONE descriptor, following nothing. A mutation: a link
+ * anywhere throws.
+ *
+ * One descriptor is the point. Reading a path and then writing it are two resolutions, and between
+ * them the file can become a link — so the read and the write here are the same open, verified once.
+ * For the AGENTS.md marker upserts and the KB appends, which is what this exists for.
+ *
+ * NEVER `fh.writeFile` after `fh.readFile`: that writes at the handle's CURRENT offset, which the
+ * read left at the old EOF, and `truncate` does not move it — so the file comes back with a hole in
+ * front of the new content. `writeAll` writes at explicit positions from 0.
+ *
+ * Not crash-atomic, unlike `replace-atomic`: a crash mid-write leaves a truncated file. That is the
+ * trade for keeping the inode, the owner and the mode, and it is why `replace-atomic` stays the
+ * default for anything a machine parses. Node has no `flock`, so two concurrent updaters are
+ * serialized at step level or not at all.
+ *
+ * `unchanged` is returned — and nothing written — when `update` returns `null` or the identical
+ * string, so a re-run that has nothing to add does not touch the file's mtime.
+ */
+export async function updateFileNoFollow(
+  anchor: string,
+  rel: string,
+  update: (current: string | null) => string | null | Promise<string | null>,
+  opts: UpdateFileOptions = {},
+): Promise<'created' | 'updated' | 'unchanged'> {
+  const safe = toSafeRel(rel);
+
+  let fh: FileHandle;
+  try {
+    fh = await openVerified(anchor, safe, 'read-write');
+  } catch (err) {
+    // A containment refusal is never softened: this is a mutation, so a link or an out-of-tree
+    // component throws. Absence is the one case with another answer, and only when asked for.
+    if (isPathContainmentError(err) || !ABSENT.has(errno(err) ?? '')) throw err;
+    if (!opts.create) throw err;
+    const next = await update(null);
+    if (next === null) return 'unchanged';
+    const created = await createExclusive(anchor, safe, {
+      createParents: opts.createParents,
+      fileMode: opts.fileMode,
+      owner: opts.owner,
+    });
+    try {
+      await writeAll(created, Buffer.from(next, 'utf8'));
+    } finally {
+      await closeQuietly(created);
+    }
+    return 'created';
+  }
+
+  try {
+    const size = (await fh.stat()).size;
+    if (opts.maxBytes !== undefined && size > opts.maxBytes) {
+      throw new Error(`${rel} is ${size} bytes, over the ${opts.maxBytes} byte update cap`);
+    }
+    const buf = Buffer.allocUnsafe(size);
+    let filled = 0;
+    while (filled < size) {
+      const { bytesRead } = await fh.read(buf, filled, size - filled, filled);
+      if (bytesRead === 0) break;
+      filled += bytesRead;
+    }
+    const current = buf.subarray(0, filled).toString('utf8');
+    const next = await update(current);
+    if (next === null || next === current) return 'unchanged';
+    await fh.truncate(0);
+    await writeAll(fh, Buffer.from(next, 'utf8'));
+    return 'updated';
+  } finally {
+    await closeQuietly(fh);
+  }
+}
+
+/**
+ * The link's own TARGET TEXT, or `null` when the entry is absent or is not a link.
+ *
+ * Reading a link is not following one. `readlink(2)` never resolves its last component, and the
+ * parents are walked exactly as every other primitive walks them, so nothing here resolves a name
+ * the caller did not hold. What it exists for is a convention check: onboarding may SKIP a
+ * `CLAUDE.md` that is merely a link to `AGENTS.md`, because the target is handled at its own path,
+ * while any other link stays refused by whatever mutation would have touched it.
+ */
+export async function readLinkNoFollow(
+  anchor: string,
+  rel: string,
+  opts: StrictOption = {},
+): Promise<string | null> {
+  const safe = toSafeRel(rel);
+  return readResult(opts.strict, async () => {
+    const segs = segments(safe);
+    const leaf = segs.pop();
+    if (leaf === undefined) throw new PathContainmentError('not-regular-file', anchor, rel, '');
+    const dir = await walkDir(anchor, safe, segs);
+    try {
+      const st = await lstat(at(dir.fh.fd, leaf));
+      if (!st.isSymbolicLink()) return null;
+      return await readlink(at(dir.fh.fd, leaf));
+    } finally {
+      await closeQuietly(dir.fh);
+    }
+  });
+}
