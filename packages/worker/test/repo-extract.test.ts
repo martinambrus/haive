@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
@@ -34,6 +34,13 @@ let tmpRoot: string;
 
 beforeEach(async () => {
   tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-extract-'));
+  // mkdtemp is ALWAYS 0700, which the unprivileged extraction uid cannot traverse — so when these
+  // run as root (the in-image CI job) every case fails on the fixture rather than on the code, and
+  // both the stage and the archive `unzip` has to open sit under here. MEASURED in the running
+  // worker: every level of every real anchor chain — the storage and bundle roots, each `<userId>`
+  // and `<repoId>`, `.haive` and the uploads dir — is 0755. So this matches production rather than
+  // relaxing anything: extraction requires the destination's parents to be traversable.
+  await chmod(tmpRoot, 0o711);
 });
 
 afterEach(async () => {
@@ -120,13 +127,54 @@ describe('extractArchive', () => {
     await run('tar', ['-czf', archivePath, '-C', staging, 'escape']);
 
     const dest = path.join(tmpRoot, 'out-link');
+    const report = await extractArchive(archivePath, 'tar.gz', dest);
+
+    // The link is DROPPED now, not merely left unfollowed — a symlink cannot safely live in an
+    // extracted repository tree, and the flatten is no longer the only thing standing between
+    // `escape -> ..` and every sibling repository under the staging parent.
+    const entries = await readdir(dest);
+    expect(entries).toEqual([]);
+    expect(entries).not.toContain('sibling-repo');
+
+    // And the drop is REPORTED. A member silently removed from someone's upload is the one outcome
+    // worse than refusing the archive outright.
+    expect(report.dropped).toEqual([{ rel: 'escape', reason: 'symlink' }]);
+    expect(report.note).toContain('not extracted');
+    expect(report.note).toContain('escape');
+
+    // The sibling it pointed at is untouched.
+    const siblingFile = await readFile(path.join(sibling, 'their-file.txt'), 'utf8');
+    expect(siblingFile).toBe('another repo\n');
+  });
+
+  it('reports nothing when every member is ordinary', async () => {
+    await buildFixtureSource(tmpRoot, 'clean');
+    const archivePath = path.join(tmpRoot, 'clean.tar.gz');
+    await run('tar', ['-czf', archivePath, '-C', tmpRoot, 'clean']);
+
+    const report = await extractArchive(archivePath, 'tar.gz', path.join(tmpRoot, 'out-clean'));
+    expect(report.dropped).toEqual([]);
+    expect(report.note).toBeNull();
+  });
+
+  it('replaces an existing destination only once the new tree is ready', async () => {
+    // The swap is the reason extraction stages: the old shape `rm -rf`'d the destination BEFORE
+    // unpacking, so a failure left the repository empty. Here the previous contents survive until a
+    // validated tree is ready to take their place.
+    const dest = path.join(tmpRoot, 'out-replace');
+    await mkdir(dest, { recursive: true });
+    await writeFile(path.join(dest, 'previous.txt'), 'old\n');
+
+    await buildFixtureSource(tmpRoot, 'fresh');
+    const archivePath = path.join(tmpRoot, 'fresh.tar.gz');
+    await run('tar', ['-czf', archivePath, '-C', tmpRoot, 'fresh']);
     await extractArchive(archivePath, 'tar.gz', dest);
 
-    // The link is still the only entry. Had the flatten followed it, `dest/escape -> ..` would have
-    // resolved to the staging parent and every sibling there would have been renamed in.
     const entries = await readdir(dest);
-    expect(entries).toEqual(['escape']);
-    expect(entries).not.toContain('sibling-repo');
+    expect(entries).toContain('README.md');
+    expect(entries).not.toContain('previous.txt');
+    // No stage left beside it.
+    expect((await readdir(tmpRoot)).filter((n) => n.startsWith('.haive-extract-'))).toEqual([]);
   });
 
   it('rejects unsupported format', async () => {

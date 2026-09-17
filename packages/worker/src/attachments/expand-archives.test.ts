@@ -135,8 +135,12 @@ describe('ensureArchivesExpanded', () => {
     const result = await ensureArchivesExpanded(db, 'task-1');
 
     expect(inserted.map((r) => r.filename)).toEqual(['evil/real.md']);
-    expect(result.notes[0]?.note).toContain('skipped');
-    expect(updated[0]?.expansionNote).toContain('only regular files');
+    // The note now comes from EXTRACTION's own report rather than from the walk's skip count: the
+    // symlink is removed inside the staged tree, so `walkRegularFiles` never sees it to count. What
+    // must not change is that the drop is still stated.
+    expect(result.notes[0]?.note).toContain('not extracted');
+    expect(result.notes[0]?.note).toContain('symlink');
+    expect(updated[0]?.expansionNote).toContain('not extracted');
   });
 
   it('keeps a traversing member inside the uploads directory', async () => {

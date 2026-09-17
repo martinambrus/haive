@@ -24,7 +24,7 @@
   "packages/worker/src/queues/cli-exec/secret-mask.ts": 1,
   "packages/worker/src/repo/blank-scaffold.ts": 2,
   "packages/worker/src/repo/bundle-ingest.ts": 3,
-  "packages/worker/src/repo/clone.ts": 19,
+  "packages/worker/src/repo/clone.ts": 14,
   "packages/worker/src/repo/git-init.ts": 3,
   "packages/worker/src/repo/git-workspace.ts": 1,
   "packages/worker/src/repo/scratch-workspace.ts": 3,

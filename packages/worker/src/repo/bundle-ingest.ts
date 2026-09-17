@@ -111,7 +111,19 @@ export async function handleIngestZip(
   }
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
   try {
-    await extractArchive(bundle.archivePath, bundle.archiveFormat as ArchiveFormat, dest);
+    const report = await extractArchive(
+      bundle.archivePath,
+      bundle.archiveFormat as ArchiveFormat,
+      dest,
+    );
+    if (report.note) {
+      // LOGGED ONLY, and that is a known gap rather than a choice: `custom_bundles` has no non-fatal
+      // column, and `last_sync_error` cannot be borrowed — 06_3-custom-bundles renders it as
+      // "bundle <name> failed:" and the api clears it at sync start, so a drop report there would
+      // display a working bundle as a broken one. Giving this a durable, visible home needs a
+      // `last_sync_note` column; until then the drop is recorded here and in the bundle's own tree.
+      logger.warn({ bundleId: bundle.id, dropped: report.dropped }, report.note);
+    }
     // Update storageRoot before parsing so the parser reads from the freshly
     // extracted tree.
     await db

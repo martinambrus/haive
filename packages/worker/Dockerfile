@@ -4,9 +4,15 @@ FROM node:26-alpine AS base
 # poppler-utils is `pdftotext`, used by the plan step to give a PDF attachment a
 # text form beside the original — no CLI-agnostic way exists to make a model read
 # a PDF, and nothing in the pnpm store parses one.
+# GNU tar is installed DELIBERATELY, over BusyBox's applet. MEASURED in the shipped image before
+# this line: `tar (busybox) 1.37.0` at /bin/tar, while CI runs GNU tar — so no test on CI could say
+# what production did with an archive. The two differ on exactly the members that matter: GNU tar
+# delays a link whose target is absolute or contains `..` until every regular member is written, and
+# replaces a link-to-directory with a real directory member; BusyBox does neither. The apk package
+# installs at /usr/bin/tar, which precedes /bin on PATH, so the applet stays but is shadowed.
 RUN apk add --no-cache \
       python3 make g++ libc6-compat \
-      git unzip curl ca-certificates poppler-utils \
+      git tar unzip curl ca-certificates poppler-utils \
       docker-cli docker-cli-buildx
 # Host-mounted repos have a different UID than the worker process; bypass git's
 # safe.directory ownership check so repo ops don't fail with "dubious ownership".
