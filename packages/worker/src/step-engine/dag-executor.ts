@@ -1,6 +1,5 @@
 import { execFile } from 'node:child_process';
-import { copyFile, mkdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
@@ -42,8 +41,13 @@ import { loadPlanImpactContext, planImpactBlock } from './steps/workflow/_plan-i
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
-import { worktreeDirName, worktreeDirPaths, WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
-import { relUnder } from '@haive/shared/fs-safe';
+import {
+  workspaceAnchor,
+  worktreeDirName,
+  worktreeDirPaths,
+  WORKTREE_SUBDIR,
+} from '../repo/worktree-paths.js';
+import { copyFileNoFollow, lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { carryUntrackedForTask } from '../repo/carry-untracked.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
@@ -200,11 +204,21 @@ async function createIssueWorktree(
   // Copy it in so each agent can Read the spec its prompt points at. Best-effort: a
   // missing copy makes `issueSpecText` hand that issue the full spec instead.
   try {
-    const src = join(integration.path, SPEC_ARTIFACT_RELPATH);
-    if (await pathExists(src)) {
-      const dest = join(worktreePath, SPEC_ARTIFACT_RELPATH);
-      await mkdir(dirname(dest), { recursive: true });
-      await copyFile(src, dest);
+    // BOTH sides are worktrees, so both anchor at the repository root: a worktree sits under
+    // `.haive/`, which the sandbox mounts read-write, so its own components are the ones an agent
+    // can redirect. The probe stays (as an `lstat`, not a `stat`) so an absent artifact is still a
+    // SILENT skip — the surrounding catch is for real failures, not the ordinary case.
+    const from = workspaceAnchor(integration.path);
+    const fromRel = `${from.prefix}${SPEC_ARTIFACT_RELPATH}`;
+    if ((await lstatNoFollow(from.anchor, fromRel)) !== null) {
+      const to = workspaceAnchor(worktreePath);
+      await copyFileNoFollow(
+        from.anchor,
+        fromRel,
+        to.anchor,
+        `${to.prefix}${SPEC_ARTIFACT_RELPATH}`,
+        { createParents: true },
+      );
     }
   } catch (err) {
     ctx.logger.warn(

@@ -1,6 +1,6 @@
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { promisify } from 'node:util';
-import { access, writeFile } from 'node:fs/promises';
+import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { join } from 'node:path';
 import { logger } from '@haive/shared';
 import type { MountSpec, RunContainerOptions } from '@haive/shared';
@@ -108,11 +108,21 @@ export class ClawkerClient {
   ): Promise<{ created: boolean; configPath: string }> {
     const project = opts.projectName ?? this.project;
     const configPath = join(repoPath, '.clawker.yaml');
-    const exists = await pathExists(configPath);
-    if (exists && !opts.overwrite) {
-      return { created: false, configPath };
+    if (opts.overwrite) {
+      await writeFileNoFollow(repoPath, '.clawker.yaml', defaultClawkerYaml(project));
+    } else {
+      // `create-exclusive` IS the "do not clobber an existing config" rule, without a separate
+      // probe: EEXIST covers any existing entry, a DANGLING link included, which `access` reported
+      // as absent before the write followed it to wherever it pointed.
+      try {
+        await writeFileNoFollow(repoPath, '.clawker.yaml', defaultClawkerYaml(project), {
+          mode: 'create-exclusive',
+        });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') return { created: false, configPath };
+        throw err;
+      }
     }
-    await writeFile(configPath, defaultClawkerYaml(project), 'utf8');
     log.info({ repoPath, project }, 'wrote default .clawker.yaml');
     return { created: true, configPath };
   }
@@ -271,15 +281,6 @@ export class ClawkerClient {
         err,
       );
     }
-  }
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
   }
 }
 
