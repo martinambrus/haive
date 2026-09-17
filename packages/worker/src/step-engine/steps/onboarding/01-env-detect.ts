@@ -1,9 +1,13 @@
-import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { FRAMEWORK_PATTERNS, type FrameworkName, type DetectResult } from '@haive/shared';
-import { lstatNoFollow, readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import {
+  ensureDirNoFollow,
+  lstatNoFollow,
+  readdirNoFollow,
+  readTextNoFollow,
+} from '@haive/shared/fs-safe';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition, LlmBuildArgs } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
@@ -695,17 +699,23 @@ async function wpExtensionHeader(repoPath: string, rel: string): Promise<string>
  *  `Stable tag` on its OWN was tried first and rejected on measurement: a real custom plugin
  *  ships one (`Stable tag: 1.0.0`), so as a sole marker it excluded exactly the code this
  *  guard protects. As the second half of an AND it is harmless — that plugin declares no URI. */
-async function hasDistributionMarker(dir: string | null, header: string): Promise<boolean> {
+async function hasDistributionMarker(
+  repoPath: string,
+  dir: string | null,
+  header: string,
+): Promise<boolean> {
   if (/^\s*\*?\s*(?:Text Domain|License)\s*:\s*\S+/im.test(header)) return true;
   // A single-file plugin has no directory of its own, so the header is all there is.
   if (!dir) return false;
+  // `dir` IS REPO-RELATIVE — `looksDistributed` hands over the same `rel` it scanned — and the read
+  // this replaces was `readFile(path.join(dir, name))`, a relative path, which Node resolves against
+  // the WORKER'S CWD rather than the repository. So the `Stable tag` half of this guard was looking
+  // for the file somewhere it could never be, and only the header half was doing any work. Anchored,
+  // it reads the file the caller meant; `null` still means "absent or unreadable — try the other
+  // casing", which is what the `catch` it replaces meant.
   for (const name of ['readme.txt', 'README.txt']) {
-    try {
-      const text = await readFile(path.join(dir, name), 'utf8');
-      if (/^\s*Stable tag\s*:\s*\S+/im.test(text)) return true;
-    } catch {
-      /* absent or unreadable — try the other casing */
-    }
+    const text = await readTextNoFollow(repoPath, `${dir}/${name}`);
+    if (text !== null && /^\s*Stable tag\s*:\s*\S+/im.test(text)) return true;
   }
   return false;
 }
@@ -739,14 +749,15 @@ async function hasDistributionMarker(dir: string | null, header: string): Promis
  *  independent of this verdict — though its 4,000-file cap means a large WordPress repo can
  *  exhaust it before reaching a bespoke plugin. */
 async function isDistributedHeader(
+  repoPath: string,
   header: string,
-  /** The extension's own directory, or null for a single-file plugin. */
+  /** The extension's own directory RELATIVE TO THE REPOSITORY, or null for a single-file plugin. */
   dir: string | null,
   kind: 'themes' | 'plugins',
 ): Promise<boolean> {
   if (!/^\s*\*?\s*(?:Plugin|Theme) URI\s*:\s*https?:\/\/\S+/im.test(header)) return false;
   if (kind === 'themes' && /^\s*\*?\s*Template\s*:\s*\S+/im.test(header)) return false;
-  return hasDistributionMarker(dir, header);
+  return hasDistributionMarker(repoPath, dir, header);
 }
 
 async function looksDistributed(
@@ -754,7 +765,7 @@ async function looksDistributed(
   rel: string,
   kind: 'themes' | 'plugins',
 ): Promise<boolean> {
-  return isDistributedHeader(await wpExtensionHeader(repoPath, rel), rel, kind);
+  return isDistributedHeader(repoPath, await wpExtensionHeader(repoPath, rel), rel, kind);
 }
 
 /** What one framework-specific scan concluded about a repo's own code.
@@ -804,7 +815,7 @@ async function detectWordPressCustomPaths(repoPath: string): Promise<CustomPathS
         if (kind !== 'plugins' || !entry.isFile() || !entry.name.endsWith('.php')) continue;
         const header = await wpFileHeader(repoPath, `${rel}/${entry.name}`);
         if (!header) continue;
-        if (await isDistributedHeader(header, null, kind)) continue;
+        if (await isDistributedHeader(repoPath, header, null, kind)) continue;
         found.push(`${rel}/${entry.name}`);
       }
     }
@@ -1513,8 +1524,11 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
 
     const created: string[] = [];
     for (const dir of ['.claude', KB_DIR]) {
-      const full = path.join(ctx.repoPath, dir);
-      await mkdir(full, { recursive: true });
+      // `mkdir -p` created the whole chain INCLUDING the repository root; `createParents` walks the
+      // parents UNDER an anchor and the anchor must already exist — which it does, `ctx.repoPath`
+      // being a real clone. Inventing a repository root as a side effect of a detect step is
+      // precisely what this series forbids.
+      await ensureDirNoFollow(ctx.repoPath, dir, { mode: 0o755 });
       created.push(dir);
     }
     ctx.logger.info(

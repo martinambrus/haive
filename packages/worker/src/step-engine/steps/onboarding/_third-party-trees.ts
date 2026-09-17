@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 
 /** Appended by the drupal.org packaging script to every `.info` / `.info.yml` it ships. */
 const DRUPAL_PACKAGING_NOTE = 'Information added by Drupal.org packaging script';
@@ -49,8 +49,9 @@ export async function detectThirdPartyTrees(
   files: readonly string[],
 ): Promise<string[]> {
   const trees = new Set<string>();
-  const read = (rel: string): Promise<string | null> =>
-    readFile(path.join(repoPath, rel), 'utf8').catch(() => null);
+  // Lenient by design, as the `.catch(() => null)` it replaces was: an unreadable marker, an absent
+  // one and one refused by the walk all contribute nothing.
+  const read = (rel: string): Promise<string | null> => readTextNoFollow(repoPath, rel);
   const hasFilesUnder = (dir: string): boolean => files.some((f) => f.startsWith(`${dir}/`));
   // The docroot a marker sits in, with a trailing slash, or null when `rel` is not that marker.
   const docrootOf = (rel: string, marker: string): string | null => {
