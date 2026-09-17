@@ -1,5 +1,3 @@
-import { createWriteStream } from 'node:fs';
-import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -17,10 +15,25 @@ import {
   type CustomBundleItemKind,
   type CustomBundleSourceType,
 } from '@haive/shared';
+import {
+  lstatNoFollow,
+  openFileNoFollow,
+  readdirNoFollow,
+  removeNoFollow,
+  renameNoFollow,
+} from '@haive/shared/fs-safe';
 import { getDb } from '../db.js';
 import { getBundleQueue } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { containmentHttpError } from '../lib/fs-http.js';
+import {
+  ensureUploadsDir,
+  truncateUploadFile,
+  uploadFileRel,
+  uploadFileRelOrThrow,
+  uploadsRel,
+} from '../lib/uploads.js';
 
 const ARCHIVE_FORMATS = new Set<ArchiveFormat>(['zip', 'tar', 'tar.gz']);
 
@@ -48,8 +61,35 @@ function bundleDirFor(userId: string, bundleId: string): string {
   return path.join(bundleStorageRoot(), userId, bundleId);
 }
 
-function uploadStagingDirFor(userId: string): string {
-  return path.join(bundleStorageRoot(), '_uploads', userId);
+/**
+ * Everything this route touches sits under `bundleStorageRoot()`, in two rel families: the staging
+ * dir `_uploads/<userId>/<name>` (the same shape the repo routes use, which is why
+ * `lib/uploads.ts` takes the root as a parameter) and the bundle's own `<userId>/<bundleId>/…`.
+ *
+ * One anchor for both is what makes the archive move a plain `renameNoFollow` with two rels: the
+ * staged archive and its destination are on the same volume, so EXDEV cannot arise.
+ */
+function bundleRel(userId: string, bundleId: string, ...tail: string[]): string {
+  return [userId, bundleId, ...tail].join('/');
+}
+
+/**
+ * A bundle's extracted tree as a rel, or null when the stored root is not one this route can place.
+ *
+ * `custom_bundles.storage_root` is an ABSOLUTE path that the WORKER rewrites — `bundle-ingest` sets
+ * it to the extraction destination and a git bundle's is a clone path — so it is a column this
+ * route reads rather than a path it derives. Anything not under `<root>/<userId>/<bundleId>/`
+ * answers null and the caller reports an empty tree, which is the answer it already gave for a
+ * directory that was not there.
+ */
+function bundleContentRel(userId: string, bundleId: string, stored: string | null): string | null {
+  const base = bundleRel(userId, bundleId);
+  if (!stored || stored.length === 0) return `${base}/extracted`;
+  const prefix = `${bundleStorageRoot()}/${base}/`;
+  if (!stored.startsWith(prefix)) return null;
+  const tail = stored.slice(prefix.length).replace(/\/+$/, '');
+  if (tail === '' || tail.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
+  return `${base}/${tail}`;
 }
 
 function archiveExt(format: ArchiveFormat): string {
@@ -285,8 +325,7 @@ bundleRoutes.post('/uploads/init', async (c) => {
     throw new HttpError(400, 'unsupported archive format (allowed: .zip, .tar, .tar.gz, .tgz)');
   }
 
-  const stagingDir = uploadStagingDirFor(userId);
-  await mkdir(stagingDir, { recursive: true });
+  const anchor = await ensureUploadsDir(userId, bundleStorageRoot());
 
   const inserted = await db
     .insert(schema.customBundleUploads)
@@ -306,8 +345,11 @@ bundleRoutes.post('/uploads/init', async (c) => {
     .returning();
   const session = inserted[0]!;
 
-  const archivePath = path.join(stagingDir, `${session.id}.${archiveExt(format)}.partial`);
-  const fh = await open(archivePath, 'w');
+  const archiveRel = `${uploadsRel(userId)}/${session.id}.${archiveExt(format)}.partial`;
+  const archivePath = path.join(anchor, archiveRel);
+  // `open(path, 'w')` truncated whatever stood at the name, a link included. The name embeds a
+  // fresh session id, so exclusive creation is the same outcome for every legitimate call.
+  const fh = await openFileNoFollow(anchor, archiveRel, 'create-exclusive', { fileMode: 0o644 });
   await fh.close();
 
   const updated = await db
@@ -376,30 +418,28 @@ bundleRoutes.put('/uploads/:id/chunk', async (c) => {
 
   const rawBody = c.req.raw.body;
   if (!rawBody) throw new HttpError(400, 'request body is empty');
+  const anchor = bundleStorageRoot();
+  const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
   const nodeStream = Readable.fromWeb(rawBody as never);
-  const writeStream = createWriteStream(row.archivePath, { flags: 'a' });
+  // Written at the session's OWN offset instead of with `flags: 'a'`: the offset is the fact the
+  // row already tracks and the claim above just verified, where appending trusted the file's
+  // current length. MEASURED on node v26.7.0, `createWriteStream({ start })` positions the write.
+  const fh = await openFileNoFollow(anchor, archiveRel, 'read-write', { strict: true }).catch(
+    (err: unknown) => containmentHttpError(err, 'Bundle archive is outside the uploads directory'),
+  );
+  if (!fh) throw new HttpError(409, 'Bundle archive is missing on disk');
   let written = 0;
   nodeStream.on('data', (buf: Buffer) => {
     written += buf.length;
   });
   try {
-    await pipeline(nodeStream, writeStream);
+    await pipeline(nodeStream, fh.createWriteStream({ start }));
   } catch (err) {
-    const fh = await open(row.archivePath, 'r+');
-    try {
-      await fh.truncate(Number(row.bytesReceived));
-    } finally {
-      await fh.close();
-    }
+    await truncateUploadFile(anchor, archiveRel, Number(row.bytesReceived));
     throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
   }
   if (written !== expectedLen) {
-    const fh = await open(row.archivePath, 'r+');
-    try {
-      await fh.truncate(Number(row.bytesReceived));
-    } finally {
-      await fh.close();
-    }
+    await truncateUploadFile(anchor, archiveRel, Number(row.bytesReceived));
     throw new HttpError(400, `chunk body length ${written} != expected ${expectedLen}`);
   }
 
@@ -428,8 +468,11 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
     throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
   }
 
-  const onDisk = await stat(row.archivePath).catch(() => null);
-  if (!onDisk || onDisk.size !== Number(row.totalSize)) {
+  const anchor = bundleStorageRoot();
+  const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
+  // A link at that name now fails this check rather than reporting its target's size.
+  const onDisk = await lstatNoFollow(anchor, archiveRel);
+  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
     throw new HttpError(409, 'archive size mismatch on disk');
   }
 
@@ -452,15 +495,18 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
   const bundle = inserted[0]!;
 
   const bundleDir = bundleDirFor(userId, bundle.id);
-  await mkdir(bundleDir, { recursive: true });
-  const finalArchive = path.join(
-    bundleDir,
+  const finalRel = bundleRel(
+    userId,
+    bundle.id,
     `source.${archiveExt(row.archiveFormat as ArchiveFormat)}`,
   );
+  const finalArchive = path.join(anchor, finalRel);
   const storageRoot = path.join(bundleDir, 'extracted');
 
   try {
-    await rename(row.archivePath, finalArchive);
+    // `createParents` walks the bundle directory into place, which is what the separate `mkdir`
+    // did — and both rels sit under the same anchor, so this move cannot cross a filesystem.
+    await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
   } catch (err) {
     await db.delete(schema.customBundles).where(eq(schema.customBundles.id, bundle.id));
     throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
@@ -514,7 +560,11 @@ bundleRoutes.delete('/uploads/:id', async (c) => {
 
   const row = await loadUploadSession(userId, uploadId);
   if (row.archivePath) {
-    await rm(row.archivePath, { force: true }).catch(() => {});
+    // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
+    // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem.
+    const anchor = bundleStorageRoot();
+    const archiveRel = uploadFileRel(userId, row.archivePath, anchor);
+    if (archiveRel) await removeNoFollow(anchor, archiveRel).catch(() => {});
   }
   await db
     .update(schema.customBundleUploads)
@@ -560,8 +610,7 @@ bundleRoutes.post('/:id/replace/init', async (c) => {
     throw new HttpError(400, 'unsupported archive format (allowed: .zip, .tar, .tar.gz, .tgz)');
   }
 
-  const stagingDir = uploadStagingDirFor(userId);
-  await mkdir(stagingDir, { recursive: true });
+  const anchor = await ensureUploadsDir(userId, bundleStorageRoot());
 
   const inserted = await db
     .insert(schema.customBundleUploads)
@@ -581,8 +630,11 @@ bundleRoutes.post('/:id/replace/init', async (c) => {
     })
     .returning();
   const session = inserted[0]!;
-  const archivePath = path.join(stagingDir, `${session.id}.${archiveExt(format)}.partial`);
-  const fh = await open(archivePath, 'w');
+  const archiveRel = `${uploadsRel(userId)}/${session.id}.${archiveExt(format)}.partial`;
+  const archivePath = path.join(anchor, archiveRel);
+  // `open(path, 'w')` truncated whatever stood at the name, a link included. The name embeds a
+  // fresh session id, so exclusive creation is the same outcome for every legitimate call.
+  const fh = await openFileNoFollow(anchor, archiveRel, 'create-exclusive', { fileMode: 0o644 });
   await fh.close();
   const updated = await db
     .update(schema.customBundleUploads)
@@ -615,22 +667,29 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {
     throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
   }
-  const onDisk = await stat(row.archivePath).catch(() => null);
-  if (!onDisk || onDisk.size !== Number(row.totalSize)) {
+  const anchor = bundleStorageRoot();
+  const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
+  const onDisk = await lstatNoFollow(anchor, archiveRel);
+  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
     throw new HttpError(409, 'archive size mismatch on disk');
   }
 
   const dir = bundleDirFor(userId, bundleId);
-  await mkdir(dir, { recursive: true });
-  const finalArchive = path.join(dir, `source.${archiveExt(row.archiveFormat as ArchiveFormat)}`);
+  const finalRel = bundleRel(
+    userId,
+    bundleId,
+    `source.${archiveExt(row.archiveFormat as ArchiveFormat)}`,
+  );
+  const extractedRel = bundleRel(userId, bundleId, 'extracted');
+  const finalArchive = path.join(anchor, finalRel);
   const newExtracted = path.join(dir, 'extracted');
 
   // Wipe the prior extracted/ tree and overwrite source.<ext>. Keeping the
   // bundle row + items table intact during the swap means the UI can keep
   // displaying the previous state until the worker re-parses.
-  await rm(newExtracted, { recursive: true, force: true });
-  await rm(finalArchive, { force: true }).catch(() => {});
-  await rename(row.archivePath, finalArchive);
+  await removeNoFollow(anchor, extractedRel, { recursive: true });
+  await removeNoFollow(anchor, finalRel).catch(() => {});
+  await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
 
   await db
     .update(schema.customBundles)
@@ -707,23 +766,24 @@ bundleRoutes.post('/:id/sync', async (c) => {
  *  keep the response bounded; truncated flag tells the UI to warn the user. */
 const FILES_LIST_CAP = 5000;
 
-async function listExtractedFiles(rootDir: string): Promise<{
+async function listExtractedFiles(
+  anchor: string,
+  rootRel: string,
+): Promise<{
   files: Array<{ path: string; size: number }>;
   truncated: boolean;
 }> {
   const out: Array<{ path: string; size: number }> = [];
   let truncated = false;
-  const walk = async (abs: string, rel: string): Promise<void> => {
+  const walk = async (relDir: string, rel: string): Promise<void> => {
     if (out.length >= FILES_LIST_CAP) {
       truncated = true;
       return;
     }
-    let entries;
-    try {
-      entries = await readdir(abs, { withFileTypes: true });
-    } catch {
-      return;
-    }
+    // Lenient: a directory that cannot be listed — absent, unreadable, or a link standing where a
+    // directory should be — contributes nothing, which is exactly what the `catch` here did.
+    const entries = await readdirNoFollow(anchor, relDir);
+    if (entries === null) return;
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (out.length >= FILES_LIST_CAP) {
@@ -732,22 +792,21 @@ async function listExtractedFiles(rootDir: string): Promise<{
       }
       if (entry.name === '.git') continue;
       if (entry.name === '.DS_Store') continue;
-      const childAbs = path.join(abs, entry.name);
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
-        await walk(childAbs, childRel);
+        await walk(`${relDir}/${entry.name}`, childRel);
         continue;
       }
+      // `readdir` LISTS a link, and the `stat` this replaced then followed it — so a link in the
+      // extracted tree was reported as a file of the target's size, which is not a file this
+      // bundle holds. The lstat answers for the entry itself.
       if (!entry.isFile()) continue;
-      try {
-        const s = await stat(childAbs);
-        out.push({ path: childRel, size: Number(s.size) });
-      } catch {
-        // Skip unreadable entries silently.
-      }
+      const info = await lstatNoFollow(anchor, `${relDir}/${entry.name}`);
+      if (info?.kind !== 'file') continue;
+      out.push({ path: childRel, size: Number(info.stats.size) });
     }
   };
-  await walk(rootDir, '');
+  await walk(rootRel, '');
   return { files: out, truncated };
 }
 
@@ -755,15 +814,16 @@ bundleRoutes.get('/:id/files', async (c) => {
   const userId = c.get('userId');
   const bundleId = c.req.param('id');
   const row = await loadBundle(userId, bundleId);
-  const root =
-    row.storageRoot && row.storageRoot.length > 0
-      ? row.storageRoot
-      : path.join(bundleDirFor(userId, bundleId), 'extracted');
-  const exists = await stat(root).catch(() => null);
-  if (!exists || !exists.isDirectory()) {
+  const anchor = bundleStorageRoot();
+  const rootRel = bundleContentRel(userId, bundleId, row.storageRoot);
+  // A stored root this route cannot place reads as an empty tree, the same answer a missing
+  // directory already gave — the listing is a convenience, not a contract about what exists.
+  if (rootRel === null) return c.json({ files: [], truncated: false });
+  const exists = await lstatNoFollow(anchor, rootRel);
+  if (exists?.kind !== 'directory') {
     return c.json({ files: [], truncated: false });
   }
-  const result = await listExtractedFiles(root);
+  const result = await listExtractedFiles(anchor, rootRel);
   return c.json(result);
 });
 
@@ -775,8 +835,10 @@ bundleRoutes.delete('/:id', async (c) => {
 
   // Wipe on-disk artefacts before dropping the row so a partial cleanup can
   // be retried by the user via the same DELETE.
-  const dir = bundleDirFor(userId, bundleId);
-  await rm(dir, { recursive: true, force: true }).catch(() => {});
+  await removeNoFollow(bundleStorageRoot(), bundleRel(userId, bundleId), {
+    recursive: true,
+    repairPermissions: true,
+  }).catch(() => {});
 
   await db.delete(schema.customBundles).where(eq(schema.customBundles.id, row.id));
   return c.json({ ok: true });

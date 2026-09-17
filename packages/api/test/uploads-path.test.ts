@@ -62,4 +62,19 @@ describe('uploadFileRel', () => {
     process.env.REPO_STORAGE_ROOT = '/srv/moved';
     expect(uploadFileRel('u1', `/srv/moved/${uploadsRel('u1')}/db.sql`)).toBe('_uploads/u1/db.sql');
   });
+
+  it('splits against an explicit root, for a caller on another volume', () => {
+    // The bundle routes stage into the same `_uploads/<userId>` shape under BUNDLE_STORAGE_ROOT,
+    // which is why the root is a parameter at all.
+    const bundles = '/var/lib/haive/bundles';
+    expect(uploadFileRel('u1', `${bundles}/_uploads/u1/abc.zip.partial`, bundles)).toBe(
+      '_uploads/u1/abc.zip.partial',
+    );
+  });
+
+  it('does not accept the default root when an explicit one is given', () => {
+    // The two volumes are siblings under /var/lib/haive, so a caller passing the bundle root must
+    // not be handed a path that lives in the repo volume.
+    expect(uploadFileRel('u1', `${ROOT}/_uploads/u1/abc.zip`, '/var/lib/haive/bundles')).toBeNull();
+  });
 });
