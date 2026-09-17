@@ -20,7 +20,6 @@
   "packages/worker/src/sandbox/sandbox-runner.ts": 11,
   "packages/worker/src/sandbox/task-auth-volume.ts": 2,
   "packages/worker/src/step-engine/git-merge.ts": 1,
-  "packages/worker/src/step-engine/steps/env-replicate/01-declare-deps.ts": 2,
   "packages/worker/src/step-engine/steps/env-replicate/03-build-image.ts": 3,
   "packages/worker/src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.ts": 1,
   "packages/worker/src/step-engine/steps/onboarding/_helpers.ts": 1
