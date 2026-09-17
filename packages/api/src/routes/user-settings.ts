@@ -1,5 +1,3 @@
-import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -19,18 +17,25 @@ import {
 import { hashPassword, verifyPassword } from '../auth/password.js';
 import { signAccessToken, signRefreshToken, hashRefreshToken } from '../auth/jwt.js';
 import { setAuthCookies } from '../auth/cookies.js';
+import { lstatNoFollow, openFileNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { requireAuth } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { containmentHttpError } from '../lib/fs-http.js';
+import { ensureUploadsDir, uploadFileRel, uploadsRel, uploadsStorageRoot } from '../lib/uploads.js';
 
 /** Notification sounds are short clips — cap well below the archive upload
  *  limit (MAX_UPLOAD_BYTES in repos.ts is 2 GiB; deliberately not reused). */
 const MAX_SOUND_BYTES = 2 * 1024 * 1024;
 
-// Same uploads volume as repo archives and db dumps. repos.ts and db-dumps.ts
-// each keep their own local copy of this helper — house style, no shared constant.
-function repoStorageRoot(): string {
-  return process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+/** Remove a sound file a row names, when the row's path is one this api wrote.
+ *
+ *  A refused shape is skipped rather than fatal: the row is being cleared either way, and a
+ *  leftover file is not a reason to fail the request the user made. */
+async function removeSoundFile(userId: string, stored: string): Promise<void> {
+  const rel = uploadFileRel(userId, stored);
+  if (!rel) return;
+  await removeNoFollow(uploadsStorageRoot(), rel).catch(() => {});
 }
 
 const SOUND_EXT_BY_MIME: Record<string, string> = {
@@ -362,21 +367,37 @@ userSettingsRoutes.post('/notifications/sound', async (c) => {
     columns: { soundPath: true },
   });
 
-  const uploadDir = path.join(repoStorageRoot(), '_uploads', userId);
-  await mkdir(uploadDir, { recursive: true });
-  const soundPath = path.join(uploadDir, `notification-sound.${resolved.ext}`);
+  const anchor = await ensureUploadsDir(userId);
+  const soundRel = `${uploadsRel(userId)}/notification-sound.${resolved.ext}`;
+  const soundPath = path.join(anchor, soundRel);
 
+  // The name is FIXED per extension, so unlike every other upload here a re-upload legitimately
+  // replaces an existing file — hence replace-atomic rather than create-exclusive. Streamed through
+  // the descriptor that mode opens, so the bytes cannot land anywhere but that inode, and a link at
+  // the name is refused instead of written through.
   try {
     const body = soundField.stream() as unknown as ReadableStream<Uint8Array>;
-    await pipeline(Readable.fromWeb(body as never), createWriteStream(soundPath));
+    const fh = await openFileNoFollow(anchor, soundRel, 'create-exclusive', {
+      fileMode: 0o644,
+    }).catch(async (err: unknown) => {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      await removeNoFollow(anchor, soundRel);
+      return openFileNoFollow(anchor, soundRel, 'create-exclusive', { fileMode: 0o644 });
+    });
+    try {
+      await pipeline(Readable.fromWeb(body as never), fh.createWriteStream());
+    } finally {
+      await fh.close().catch(() => {});
+    }
   } catch (err) {
-    await rm(soundPath, { force: true }).catch(() => {});
+    await removeNoFollow(anchor, soundRel).catch(() => {});
+    if (err instanceof HttpError) throw err;
     throw new HttpError(500, `failed to write sound: ${(err as Error).message}`);
   }
 
   // Replacing e.g. an .mp3 with a .wav leaves the old file behind — remove it.
   if (existing?.soundPath && existing.soundPath !== soundPath) {
-    await rm(existing.soundPath, { force: true }).catch(() => {});
+    await removeSoundFile(userId, existing.soundPath);
   }
 
   const soundFilename = soundField.name.slice(0, 255);
@@ -410,7 +431,7 @@ userSettingsRoutes.delete('/notifications/sound', async (c) => {
     where: eq(schema.userNotificationSettings.userId, userId),
     columns: { soundPath: true },
   });
-  if (row?.soundPath) await rm(row.soundPath, { force: true }).catch(() => {});
+  if (row?.soundPath) await removeSoundFile(userId, row.soundPath);
   await db
     .update(schema.userNotificationSettings)
     .set({ soundPath: null, soundMime: null, soundFilename: null, updatedAt: new Date() })
@@ -426,14 +447,21 @@ userSettingsRoutes.get('/notifications/sound', async (c) => {
     columns: { soundPath: true, soundMime: true },
   });
   if (!row?.soundPath) throw new HttpError(404, 'No custom notification sound');
-  let st;
-  try {
-    st = await stat(row.soundPath);
-  } catch {
-    throw new HttpError(404, 'Sound file missing on disk');
-  }
+  const anchor = uploadsStorageRoot();
+  const soundRel = uploadFileRel(userId, row.soundPath);
+  if (!soundRel) throw new HttpError(404, 'Sound file missing on disk');
+  const info = await lstatNoFollow(anchor, soundRel);
+  if (!info || info.kind !== 'file') throw new HttpError(404, 'Sound file missing on disk');
+  const fh = await openFileNoFollow(anchor, soundRel, 'read', { strict: true }).catch(
+    (err: unknown) => containmentHttpError(err, 'Sound path is outside the uploads directory'),
+  );
+  if (!fh) throw new HttpError(404, 'Sound file missing on disk');
   c.header('Content-Type', row.soundMime ?? 'application/octet-stream');
-  c.header('Content-Length', String(st.size));
+  c.header('Content-Length', String(info.stats.size));
   c.header('Cache-Control', 'no-store');
-  return c.body(Readable.toWeb(createReadStream(row.soundPath)) as ReadableStream);
+  // Streamed from the verified descriptor, and NOT closed here: the stream is the response body, so
+  // closing behind Hono would truncate it. MEASURED on node v26.7.0 for PR 8 — such a stream closes
+  // its own handle on normal end, on destroy and on `toWeb` cancel, and leaks only when created and
+  // then neither read nor destroyed, which a response body never is.
+  return c.body(Readable.toWeb(fh.createReadStream()) as ReadableStream);
 });

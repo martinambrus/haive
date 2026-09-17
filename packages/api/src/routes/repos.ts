@@ -6,7 +6,6 @@ import { Hono } from 'hono';
 import { eq, and, desc, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
-  ensureDirNoFollow,
   isPathContainmentError,
   lstatNoFollow,
   openFileNoFollow,
@@ -19,6 +18,14 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { containmentHttpError } from '../lib/fs-http.js';
+import {
+  ensureUploadsDir,
+  truncateUploadFile,
+  uploadFileRel,
+  uploadFileRelOrThrow,
+  uploadsRel,
+  uploadsStorageRoot,
+} from '../lib/uploads.js';
 import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -74,54 +81,6 @@ function detectArchiveFormat(filename: string): ArchiveFormat | null {
   if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) return 'tar.gz';
   if (lower.endsWith('.tar')) return 'tar';
   return null;
-}
-
-function repoStorageRoot(): string {
-  return process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
-}
-
-/**
- * The uploads staging directory, split for the anchored walk.
- *
- * That directory cannot itself be the anchor: it lives in the `haive_repos` named volume, which
- * `ddev-runner.ts` and `app-runner.ts` both mount WHOLE at `/repos`, so a project's own runtime
- * can write into it. The storage root is the trusted end of the path, and every component below
- * it is walked rather than resolved by name.
- */
-function uploadsRel(userId: string): string {
-  return `_uploads/${userId}`;
-}
-
-/**
- * The rel of an archive this route wrote, recovered from the session row.
- *
- * A row carries an ABSOLUTE path, which is a path this code did not build, so the SHAPE is the
- * validation — the rule `splitAttachmentStoredPath` already applies to an attachment. Anything
- * that is not exactly `<storage root>/_uploads/<userId>/<name>` is refused rather than repaired,
- * since every path the two init routes write has that shape.
- */
-function uploadArchiveRel(userId: string, stored: string): string {
-  const prefix = `${path.join(repoStorageRoot(), '_uploads', userId)}/`;
-  const name = stored.startsWith(prefix) ? stored.slice(prefix.length) : '';
-  if (name === '' || name.includes('/')) {
-    throw new HttpError(409, 'Upload session archive is not in this user uploads directory');
-  }
-  return `${uploadsRel(userId)}/${name}`;
-}
-
-/** Roll a partial upload back to the byte count the session row still claims.
- *
- *  A second verified open rather than the write stream's own handle: MEASURED on node v26.7.0, a
- *  FileHandle write stream CLOSES the handle at `finish`, so after a failed chunk the name has to
- *  be resolved again anyway — and resolving it again re-checks it. */
-async function truncateUploadArchive(anchor: string, rel: string, size: number): Promise<void> {
-  const fh = await openFileNoFollow(anchor, rel, 'read-write');
-  if (!fh) return;
-  try {
-    await fh.truncate(size);
-  } finally {
-    await fh.close();
-  }
 }
 
 function deriveRepoName(opts: {
@@ -391,8 +350,7 @@ repoRoutes.post('/upload', async (c) => {
     .returning();
   const repo = inserted[0]!;
 
-  const storageRoot = repoStorageRoot();
-  await ensureDirNoFollow(storageRoot, uploadsRel(userId), { mode: 0o755 });
+  const storageRoot = await ensureUploadsDir(userId);
   const ext = format === 'tar.gz' ? 'tar.gz' : format;
   const archiveRel = `${uploadsRel(userId)}/${repo.id}.${ext}`;
   const archivePath = path.join(storageRoot, archiveRel);
@@ -483,8 +441,7 @@ repoRoutes.post('/upload/init', async (c) => {
     throw new HttpError(400, 'unsupported archive format (allowed: .zip, .tar, .tar.gz, .tgz)');
   }
 
-  const storageRoot = repoStorageRoot();
-  await ensureDirNoFollow(storageRoot, uploadsRel(userId), { mode: 0o755 });
+  const storageRoot = await ensureUploadsDir(userId);
 
   const inserted = await db
     .insert(schema.repoUploads)
@@ -581,8 +538,8 @@ repoRoutes.put('/upload/:id/chunk', async (c) => {
 
   const rawBody = c.req.raw.body;
   if (!rawBody) throw new HttpError(400, 'request body is empty');
-  const storageRoot = repoStorageRoot();
-  const archiveRel = uploadArchiveRel(userId, row.archivePath);
+  const storageRoot = uploadsStorageRoot();
+  const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Upload session archive');
   const nodeStream = Readable.fromWeb(rawBody as never);
   // Written at the session's OWN offset instead of with `flags: 'a'`: the offset is the fact the
   // row already tracks and the claim above just verified, where appending trusted the file's
@@ -598,11 +555,11 @@ repoRoutes.put('/upload/:id/chunk', async (c) => {
   try {
     await pipeline(nodeStream, fh.createWriteStream({ start }));
   } catch (err) {
-    await truncateUploadArchive(storageRoot, archiveRel, Number(row.bytesReceived));
+    await truncateUploadFile(storageRoot, archiveRel, Number(row.bytesReceived));
     throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
   }
   if (written !== expectedLen) {
-    await truncateUploadArchive(storageRoot, archiveRel, Number(row.bytesReceived));
+    await truncateUploadFile(storageRoot, archiveRel, Number(row.bytesReceived));
     throw new HttpError(400, `chunk body length ${written} != expected ${expectedLen}`);
   }
 
@@ -631,8 +588,8 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
     throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
   }
 
-  const storageRoot = repoStorageRoot();
-  const archiveRel = uploadArchiveRel(userId, row.archivePath);
+  const storageRoot = uploadsStorageRoot();
+  const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Upload session archive');
   // A link at that name now fails this check rather than reporting its target's size.
   const onDisk = await lstatNoFollow(storageRoot, archiveRel);
   if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
@@ -703,7 +660,8 @@ repoRoutes.delete('/upload/:id', async (c) => {
   // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem rather
   // than a reason to refuse the cancel.
   try {
-    await removeNoFollow(repoStorageRoot(), uploadArchiveRel(userId, row.archivePath));
+    const archiveRel = uploadFileRel(userId, row.archivePath);
+    if (archiveRel) await removeNoFollow(uploadsStorageRoot(), archiveRel);
   } catch {
     // absent, refused, or a path this api never wrote
   }
