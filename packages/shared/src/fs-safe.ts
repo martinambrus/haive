@@ -2,11 +2,14 @@ import { constants, type Dirent, type Stats } from 'node:fs';
 import {
   chmod,
   chown,
+  link,
   lstat,
   mkdir,
   open,
   readdir,
   readlink,
+  rename,
+  rmdir,
   unlink,
   type FileHandle,
 } from 'node:fs/promises';
@@ -800,4 +803,218 @@ export async function applyTreeNoFollow(
     await closeQuietly(dir.fh);
   }
   return acc;
+}
+
+export interface RemoveOptions {
+  /** Delete a directory's contents as well. Without it a non-empty directory fails ENOTEMPTY, as
+   *  `rmdir` does. */
+  recursive?: boolean;
+  /** On EACCES/EPERM, grant the blocking DIRECTORY `u+rwx` once and retry. Drupal ships
+   *  `sites/default` at 0555, where nothing may unlink inside it; this replaces the `chmod -R u+w`
+   *  that a removal used to shell out to. */
+  repairPermissions?: boolean;
+}
+
+/** Retry one operation after granting `u+rwx` on the directory that refused it. The chmod goes
+ *  through the held descriptor, so it lands on the inode this call is working in rather than on
+ *  whatever the name resolves to by the time the retry runs. */
+async function withRepair<T>(
+  dirFh: FileHandle,
+  opts: RemoveOptions,
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const code = errno(err);
+    if (!opts.repairPermissions || (code !== 'EACCES' && code !== 'EPERM')) throw err;
+    const st = await dirFh.stat();
+    await chmod(fdPath(dirFh.fd), (st.mode & 0o7777) | 0o700);
+    return await fn();
+  }
+}
+
+/** Empty the directory `dirFh` holds. ENOTEMPTY is re-scanned rather than trusted: a concurrent
+ *  writer can add an entry between the listing and the `rmdir`, and three passes is enough for that
+ *  while still terminating on a directory something is actively filling. */
+async function removeDirContents(dirFh: FileHandle, opts: RemoveOptions): Promise<void> {
+  for (let pass = 0; pass < 3; pass += 1) {
+    const names = await withRepair(dirFh, opts, () => readdir(fdPath(dirFh.fd)));
+    if (names.length === 0) return;
+    for (const name of names) {
+      await removeChild(dirFh, name, opts);
+    }
+  }
+}
+
+/** Remove one entry of the directory `dirFh` holds, by name, inside that held inode. A symlink is
+ *  UNLINKED rather than followed — the link itself is what has to go — and a directory is recursed
+ *  into only through a descriptor opened `O_NOFOLLOW`, so an entry swapped for a link mid-walk is
+ *  unlinked instead of descended. */
+async function removeChild(dirFh: FileHandle, name: string, opts: RemoveOptions): Promise<void> {
+  const st = await lstat(at(dirFh.fd, name)).catch((err: unknown) => {
+    if (ABSENT.has(errno(err) ?? '')) return null;
+    throw err;
+  });
+  if (st === null) return;
+
+  if (!st.isDirectory()) {
+    await withRepair(dirFh, opts, () => unlink(at(dirFh.fd, name))).catch((err: unknown) => {
+      // Raced into a directory since the lstat; EISDIR re-dispatches rather than failing.
+      if (errno(err) === 'EISDIR') return removeChild(dirFh, name, opts);
+      if (ABSENT.has(errno(err) ?? '')) return undefined;
+      throw err;
+    });
+    return;
+  }
+
+  let child: FileHandle;
+  try {
+    child = await open(at(dirFh.fd, name), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  } catch (err) {
+    const code = errno(err);
+    if (ABSENT.has(code ?? '')) return;
+    // Swapped for a link or a file since the lstat: unlink the name, never follow it.
+    if (code === 'ELOOP' || code === 'ENOTDIR') {
+      await withRepair(dirFh, opts, () => unlink(at(dirFh.fd, name)));
+      return;
+    }
+    if (code === 'EACCES' || code === 'EPERM') {
+      if (!opts.repairPermissions) throw err;
+      const st2 = await dirFh.stat();
+      await chmod(fdPath(dirFh.fd), (st2.mode & 0o7777) | 0o700);
+      child = await open(at(dirFh.fd, name), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    } else {
+      throw err;
+    }
+  }
+  try {
+    await removeDirContents(child, opts);
+  } finally {
+    await closeQuietly(child);
+  }
+  await withRepair(dirFh, opts, () => rmdir(at(dirFh.fd, name))).catch((err: unknown) => {
+    if (ABSENT.has(errno(err) ?? '')) return undefined;
+    throw err;
+  });
+}
+
+/**
+ * Delete `<anchor>/<rel>`, following nothing. `false` means it was already absent.
+ *
+ * A MUTATION, so a link on the way to `rel` throws. The leaf itself may be a link — a link is
+ * deleted as a link, which is the one correct thing to do with one. What this does NOT do is what
+ * `fs.rm({ recursive: true })` does: resolve intermediate components by name, so a directory
+ * swapped for a link mid-walk sends the deletion somewhere else entirely. Every child here is
+ * looked up inside a descriptor this call holds open.
+ *
+ * `rel === ''` is refused: the anchor is a trusted directory and deleting it is never what a caller
+ * means, so asking for it is a bug rather than a request.
+ */
+export async function removeNoFollow(
+  anchor: string,
+  rel: string,
+  opts: RemoveOptions = {},
+): Promise<boolean> {
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (leaf === undefined) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  let dir: HeldDir;
+  try {
+    dir = await walkDir(anchor, safe, segs);
+  } catch (err) {
+    // A missing INTERMEDIATE component means the leaf is absent too, and absence is a value here
+    // rather than a failure — the same rule the reads follow. A containment refusal still throws.
+    if (!isPathContainmentError(err) && ABSENT.has(errno(err) ?? '')) return false;
+    throw err;
+  }
+  try {
+    const st = await lstat(at(dir.fh.fd, leaf)).catch((err: unknown) => {
+      if (ABSENT.has(errno(err) ?? '')) return null;
+      throw err;
+    });
+    if (st === null) return false;
+    if (st.isDirectory() && !opts.recursive) {
+      await withRepair(dir.fh, opts, () => rmdir(at(dir.fh.fd, leaf)));
+      return true;
+    }
+    await removeChild(dir.fh, leaf, opts);
+    return true;
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+}
+
+export interface RenameOptions extends EnsureDirOptions {
+  /** Anchor for the destination; defaults to the source's. */
+  toAnchor?: string;
+  /** Refuse an existing destination instead of replacing it. Node exposes no `RENAME_NOREPLACE`, so
+   *  the name is CLAIMED first — `link` for a non-directory, `mkdir` for a directory — both of which
+   *  answer EEXIST for any existing entry, a dangling link included. */
+  noReplace?: boolean;
+  /** Create the destination's missing parents, refusing a link in the chain rather than following it. */
+  createParents?: boolean;
+}
+
+/**
+ * Move `<anchor>/<fromRel>` to `<toAnchor ?? anchor>/<toRel>`, following nothing.
+ *
+ * `rename(2)` never follows the last component of either side, so the containment that matters here
+ * is the PATH to each: both are walked one held descriptor at a time and both parents are verified.
+ * A link at either leaf is refused rather than moved, because a caller moving `a` to `b` means the
+ * files, and silently relocating a link is a different operation.
+ *
+ * EXDEV propagates: a caller staging across a filesystem boundary has to stage on the destination's
+ * filesystem, which is a real constraint rather than something to paper over with a copy.
+ */
+export async function renameNoFollow(
+  anchor: string,
+  fromRel: string,
+  toRel: string,
+  opts: RenameOptions = {},
+): Promise<void> {
+  const safeFrom = toSafeRel(fromRel);
+  const safeTo = toSafeRel(toRel);
+  const toAnchor = opts.toAnchor ?? anchor;
+  const fromSegs = segments(safeFrom);
+  const fromLeaf = fromSegs.pop();
+  const toSegs = segments(safeTo);
+  const toLeaf = toSegs.pop();
+  if (fromLeaf === undefined) {
+    throw new PathContainmentError('invalid-path', anchor, fromRel, fromRel);
+  }
+  if (toLeaf === undefined) throw new PathContainmentError('invalid-path', toAnchor, toRel, toRel);
+
+  const fromDir = await walkDir(anchor, safeFrom, fromSegs);
+  try {
+    const src = await lstat(at(fromDir.fh.fd, fromLeaf));
+    if (src.isSymbolicLink()) {
+      throw new PathContainmentError('link', anchor, fromRel, safeFrom);
+    }
+    const toDir = await walkDir(
+      toAnchor,
+      safeTo,
+      toSegs,
+      opts.createParents ? { mode: opts.mode, owner: opts.owner } : undefined,
+    );
+    try {
+      if (opts.noReplace) {
+        // Claim the name first so the refusal is race-free. `link` fails EEXIST on any existing
+        // destination including a dangling link, which an `lstat` check would read as free.
+        if (src.isDirectory()) {
+          await mkdir(at(toDir.fh.fd, toLeaf), 0o700);
+        } else {
+          await link(at(fromDir.fh.fd, fromLeaf), at(toDir.fh.fd, toLeaf));
+          await unlink(at(fromDir.fh.fd, fromLeaf));
+          return;
+        }
+      }
+      await rename(at(fromDir.fh.fd, fromLeaf), at(toDir.fh.fd, toLeaf));
+    } finally {
+      await closeQuietly(toDir.fh);
+    }
+  } finally {
+    await closeQuietly(fromDir.fh);
+  }
 }

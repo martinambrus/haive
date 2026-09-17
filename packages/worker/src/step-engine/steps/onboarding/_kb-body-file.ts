@@ -1,5 +1,11 @@
-import { lstat, readFile, realpath, rm } from 'node:fs/promises';
-import { chownNoFollow, ensureDirNoFollow, lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
+import { lstat, readFile, realpath } from 'node:fs/promises';
+import {
+  chownNoFollow,
+  ensureDirNoFollow,
+  lstatNoFollow,
+  relUnder,
+  removeNoFollow,
+} from '@haive/shared/fs-safe';
 import path from 'node:path';
 
 /** Where a KB miner stages an entry's body before the step files it. Inside the
@@ -246,7 +252,7 @@ export async function prepareAgentWritableDir(
   // after a successful apply is what makes every attempt start from nothing; it also discards
   // drafts a failed run left for diagnosis, which is the right trade — by the time anyone
   // retries, they have looked.
-  await rm(abs, { recursive: true, force: true });
+  await removeNoFollow(repoPath, relDir, { recursive: true });
   await ensureDirNoFollow(repoPath, relDir);
   try {
     const owner = await lstatNoFollow(repoPath, '', { strict: true });
@@ -277,7 +283,7 @@ export async function discardKbDrafts(
   logger?: { warn: (obj: unknown, msg?: string) => void },
 ): Promise<void> {
   try {
-    await rm(path.resolve(repoPath, KB_DRAFT_DIR), { recursive: true, force: true });
+    await removeNoFollow(repoPath, KB_DRAFT_DIR, { recursive: true });
   } catch (err) {
     logger?.warn({ err }, 'could not remove the kb draft dir');
   }

@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq, and, desc, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { removeNoFollow } from '@haive/shared/fs-safe';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
 import { execFile } from 'node:child_process';
@@ -832,7 +833,11 @@ const HAIVE_MARKER_PAIRS: Array<[string, string]> = [
   ['<!-- haive:cli-rules -->', '<!-- /haive:cli-rules -->'],
 ];
 
-async function stripHaiveContent(full: string): Promise<{ changed: boolean; deleted: boolean }> {
+async function stripHaiveContent(
+  root: string,
+  rel: string,
+): Promise<{ changed: boolean; deleted: boolean }> {
+  const full = path.join(root, rel);
   const content = await readFile(full, 'utf8');
   let next = content;
   for (const [start, end] of HAIVE_MARKER_PAIRS) {
@@ -848,7 +853,7 @@ async function stripHaiveContent(full: string): Promise<{ changed: boolean; dele
   const cleaned = next.replace(/\n{3,}/g, '\n\n').trim();
   if (cleaned === content.trim()) return { changed: false, deleted: false };
   if (cleaned.length === 0) {
-    await rm(full, { force: true });
+    await removeNoFollow(root, rel);
     return { changed: true, deleted: true };
   }
   await writeFile(full, cleaned + '\n', 'utf8');
@@ -1066,23 +1071,19 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   const cleaned: string[] = [];
 
   for (const rel of ONBOARDING_RESET_DIRS) {
-    const full = path.join(root, rel);
-    if (await pathExists(full)) {
-      await rm(full, { recursive: true, force: true });
+    // The return value replaces the `pathExists` probe, and is strictly better evidence: the probe
+    // could pass and the entry be gone — or replaced by a link — before the delete ran.
+    if (await removeNoFollow(root, rel, { recursive: true, repairPermissions: true })) {
       removed.push(rel);
     }
   }
   for (const rel of ONBOARDING_RESET_FILES) {
-    const full = path.join(root, rel);
-    if (await pathExists(full)) {
-      await rm(full, { force: true });
-      removed.push(rel);
-    }
+    if (await removeNoFollow(root, rel)) removed.push(rel);
   }
   for (const rel of ONBOARDING_RULES_FILES) {
     const full = path.join(root, rel);
     if (!(await pathExists(full))) continue;
-    const result = await stripHaiveContent(full);
+    const result = await stripHaiveContent(root, rel);
     if (result.deleted) removed.push(rel);
     else if (result.changed) cleaned.push(rel);
   }

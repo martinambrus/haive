@@ -1,9 +1,10 @@
 import type { Dirent } from 'node:fs';
-import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
+import { isPathContainmentError, renameNoFollow } from '@haive/shared/fs-safe';
 import {
   buildCliRulesBlock,
   CLI_RULES_START,
@@ -865,15 +866,25 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         for (const name of group.files) {
           const from = `${group.dir}/${name}`;
           const to = `${destDir}/${name}`;
-          const fullTo = path.join(ctx.repoPath, to);
-          // Never clobber: a name already quarantined is an earlier run's file, and
-          // which of the two a person wants is not ours to decide.
-          if (await pathExists(fullTo)) {
-            skippedFiles.push(from);
-            continue;
+          // Never clobber: a name already quarantined is an earlier run's file, and which of the
+          // two a person wants is not ours to decide. `noReplace` makes that decision RACE-FREE,
+          // where the `pathExists` check it replaces could pass and the name be taken before the
+          // move landed — and it treats a planted link at the destination as taken rather than
+          // moving the file through it.
+          try {
+            await renameNoFollow(ctx.repoPath, from, to, {
+              noReplace: true,
+              createParents: true,
+            });
+          } catch (err) {
+            // Already quarantined, or a source that became a link between detect() and apply():
+            // reported per file, because one unmovable definition must not discard the rest.
+            if ((err as NodeJS.ErrnoException).code === 'EEXIST' || isPathContainmentError(err)) {
+              skippedFiles.push(from);
+              continue;
+            }
+            throw err;
           }
-          await mkdir(path.dirname(fullTo), { recursive: true });
-          await rename(path.join(ctx.repoPath, from), fullTo);
           quarantinedAgentFiles.push({ from, to });
         }
         if (quarantinedAgentFiles.some((q) => q.to.startsWith(`${destDir}/`))) {

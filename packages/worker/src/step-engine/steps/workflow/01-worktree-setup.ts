@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
@@ -8,7 +7,7 @@ import type { FormField, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
-import { relUnder } from '@haive/shared/fs-safe';
+import { relUnder, removeNoFollow } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
 import { ensureGitExcludeEntry, initGitWorkspace } from '../../../repo/git-init.js';
 import { findBranchClaimant } from '../../../repo/worktree-claims.js';
@@ -362,7 +361,10 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     } else {
       if (await pathExists(worktreePath)) {
         await gitRun(ctx.repoPath, ['worktree', 'prune']);
-        await rm(worktreePath, { recursive: true, force: true });
+        await removeNoFollow(ctx.repoPath, relUnder(ctx.repoPath, worktreePath), {
+          recursive: true,
+          repairPermissions: true,
+        });
         ctx.logger.warn({ worktreePath }, 'removed orphan worktree directory before re-add');
       }
       const addArgs =

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { lstatNoFollow, readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { DetectResult, SkillEntry } from '@haive/shared';
@@ -261,7 +262,12 @@ async function writeSkillTree(
   for (const dir of targetDirs) {
     const parts = dir.split('/').filter((p) => p.length > 0);
     const skillDir = path.join(worktree, ...parts, entry.id);
-    await rm(skillDir, { recursive: true, force: true });
+    // The anchor is the REPOSITORY ROOT, never the worktree: a worktree sits under `.haive/`, which
+    // the sandbox mounts read-write, so its own components are the ones an agent can redirect.
+    const wa = workspaceAnchor(worktree);
+    await removeNoFollow(wa.anchor, `${wa.prefix}${[...parts, entry.id].join('/')}`, {
+      recursive: true,
+    });
     await mkdir(skillDir, { recursive: true });
     await writeFile(path.join(skillDir, 'SKILL.md'), skillMd, 'utf8');
     if (subs.length > 0) {
@@ -474,7 +480,10 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     for (const skillId of detected.removals) {
       for (const dir of targetDirs) {
         const parts = dir.split('/').filter((p) => p.length > 0);
-        await rm(path.join(worktree, ...parts, skillId), { recursive: true, force: true });
+        const wa = workspaceAnchor(worktree);
+        await removeNoFollow(wa.anchor, `${wa.prefix}${[...parts, skillId].join('/')}`, {
+          recursive: true,
+        });
       }
       removed.push(skillId);
     }
@@ -486,7 +495,8 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
         const parts = dir.split('/').filter((p) => p.length > 0);
         const readmePath = path.join(worktree, ...parts, 'README.md');
         if (summaries.length === 0) {
-          await rm(readmePath, { force: true });
+          const wa = workspaceAnchor(worktree);
+          await removeNoFollow(wa.anchor, `${wa.prefix}${[...parts, 'README.md'].join('/')}`);
           continue;
         }
         await mkdir(path.dirname(readmePath), { recursive: true });
