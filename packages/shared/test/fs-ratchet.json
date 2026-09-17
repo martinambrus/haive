@@ -9,7 +9,6 @@
   "packages/shared/src/utils/host-resources.ts": 2,
   "packages/worker/src/attachments/expand-archives.ts": 4,
   "packages/worker/src/bootstrap.ts": 2,
-  "packages/worker/src/plan/merge.ts": 1,
   "packages/worker/src/queues/cli-exec/handlers.ts": 3,
   "packages/worker/src/repo/clone.ts": 14,
   "packages/worker/src/sandbox/composed-image-cache.ts": 3,
@@ -19,8 +18,6 @@
   "packages/worker/src/sandbox/ide-runner.ts": 1,
   "packages/worker/src/sandbox/sandbox-runner.ts": 11,
   "packages/worker/src/sandbox/task-auth-volume.ts": 2,
-  "packages/worker/src/step-engine/git-merge.ts": 1,
   "packages/worker/src/step-engine/steps/env-replicate/03-build-image.ts": 3,
-  "packages/worker/src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.ts": 1,
   "packages/worker/src/step-engine/steps/onboarding/_helpers.ts": 1
 }

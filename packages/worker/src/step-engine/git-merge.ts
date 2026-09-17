@@ -1,6 +1,6 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { isPathContainmentError, readTextNoFollow } from '@haive/shared/fs-safe';
 import { gitRun } from '../repo/git-push.js';
+import { workspaceAnchor } from '../repo/worktree-paths.js';
 
 // Shared git-merge / conflict-resolution core. Extracted from dag-executor.ts so
 // both the DAG executor (issue branches -> integration branch) and the
@@ -57,8 +57,21 @@ export async function completeMergeHostSide(
     .split('\n')
     .map((s) => s.trim())
     .filter(Boolean);
+  // The worktree is under `.haive/`, which the sandbox mounts read-write, so it is SPLIT rather
+  // than used as the anchor: every path git reported is walked a component at a time.
+  const { anchor, prefix } = workspaceAnchor(worktreePath);
   for (const f of files) {
-    const content = await readFile(path.join(worktreePath, f), 'utf8').catch(() => null);
+    let content: string | null;
+    try {
+      content = await readTextNoFollow(anchor, `${prefix}${f}`, { strict: true });
+    } catch (err) {
+      // A REFUSAL must not collapse into the `null` below, which means "deleted as part of the
+      // resolution" and lets the commit proceed: a path we cannot read is one whose conflict
+      // markers we cannot check, so the merge stays incomplete instead. Every other read failure
+      // keeps its old meaning, since `.catch(() => null)` treated those as resolved-by-deletion.
+      if (isPathContainmentError(err)) return false;
+      content = null;
+    }
     if (content === null) continue; // deleted as part of the resolution
     if (/^(<{7}|>{7})( |$)/m.test(content)) return false; // markers remain
   }
