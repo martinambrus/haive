@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -19,44 +19,54 @@ function tarHeader(member: string): Buffer {
   return block;
 }
 
-async function dumpWith(bytes: Buffer): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'haive-dump-'));
-  const file = path.join(dir, 'db.backup');
-  await writeFile(file, bytes);
-  return file;
+/** A dump laid out the way the api writes one — `<storage root>/_uploads/<userId>/<name>` — since
+ *  that shape is what the sniffer's anchor split requires. `mkdtemp` per call: the walk opens the
+ *  anchor itself and will not create it, so a fixed name would pass off a leftover directory. */
+async function dumpWith(bytes: Buffer): Promise<{ anchor: string; rel: string }> {
+  const anchor = await mkdtemp(path.join(tmpdir(), 'haive-dump-'));
+  const rel = '_uploads/u1/db.backup';
+  await mkdir(path.join(anchor, '_uploads', 'u1'), { recursive: true });
+  await writeFile(path.join(anchor, rel), bytes);
+  return { anchor, rel };
+}
+
+/** Build a dump from `bytes` and classify it. */
+async function sniffOf(bytes: Buffer) {
+  const { anchor, rel } = await dumpWith(bytes);
+  return sniffDumpFormat(anchor, rel);
 }
 
 describe('sniffDumpFormat', () => {
   it('recognises a pg_dump custom-format archive by its PGDMP magic', async () => {
-    expect(await sniffDumpFormat(await dumpWith(CUSTOM_HEAD))).toEqual({
+    expect(await sniffOf(CUSTOM_HEAD)).toEqual({
       pgRestore: true,
       gzipped: false,
     });
   });
 
   it('recognises a pg_dump tar-format archive by its leading toc.dat member', async () => {
-    expect(await sniffDumpFormat(await dumpWith(tarHeader('toc.dat')))).toEqual({
+    expect(await sniffOf(tarHeader('toc.dat'))).toEqual({
       pgRestore: true,
       gzipped: false,
     });
   });
 
   it('leaves a plain tarball wrapped around a .sql to ddev import-db', async () => {
-    expect(await sniffDumpFormat(await dumpWith(tarHeader('dump.sql')))).toEqual({
+    expect(await sniffOf(tarHeader('dump.sql'))).toEqual({
       pgRestore: false,
       gzipped: false,
     });
   });
 
   it('sees through gzip to a custom-format archive', async () => {
-    expect(await sniffDumpFormat(await dumpWith(gzipSync(CUSTOM_HEAD)))).toEqual({
+    expect(await sniffOf(gzipSync(CUSTOM_HEAD))).toEqual({
       pgRestore: true,
       gzipped: true,
     });
   });
 
   it('sees through gzip to a tar-format archive', async () => {
-    expect(await sniffDumpFormat(await dumpWith(gzipSync(tarHeader('toc.dat'))))).toEqual({
+    expect(await sniffOf(gzipSync(tarHeader('toc.dat')))).toEqual({
       pgRestore: true,
       gzipped: true,
     });
@@ -64,19 +74,19 @@ describe('sniffDumpFormat', () => {
 
   it('leaves gzipped plain SQL to ddev import-db', async () => {
     const sql = gzipSync(Buffer.from('-- PostgreSQL database dump\nCREATE TABLE t (id int);\n'));
-    expect(await sniffDumpFormat(await dumpWith(sql))).toEqual({
+    expect(await sniffOf(sql)).toEqual({
       pgRestore: false,
       gzipped: true,
     });
   });
 
   it('does not flag a plain SQL dump', async () => {
-    const file = await dumpWith(Buffer.from('-- PostgreSQL database dump\n'));
-    expect(await sniffDumpFormat(file)).toEqual({ pgRestore: false, gzipped: false });
+    const { anchor, rel } = await dumpWith(Buffer.from('-- PostgreSQL database dump\n'));
+    expect(await sniffDumpFormat(anchor, rel)).toEqual({ pgRestore: false, gzipped: false });
   });
 
   it('does not flag a file too short to carry the magic', async () => {
-    expect(await sniffDumpFormat(await dumpWith(Buffer.from('PGD')))).toEqual({
+    expect(await sniffOf(Buffer.from('PGD'))).toEqual({
       pgRestore: false,
       gzipped: false,
     });
@@ -84,14 +94,31 @@ describe('sniffDumpFormat', () => {
 
   it('reports a corrupt gzip as plain rather than throwing', async () => {
     const truncated = gzipSync(CUSTOM_HEAD).subarray(0, 6);
-    expect(await sniffDumpFormat(await dumpWith(truncated))).toEqual({
+    expect(await sniffOf(truncated)).toEqual({
       pgRestore: false,
       gzipped: true,
     });
   });
 
   it('is plain for an unreadable path rather than throwing', async () => {
-    expect(await sniffDumpFormat('/nonexistent/db.backup')).toEqual({
+    expect(await sniffDumpFormat('/nonexistent', '_uploads/u1/db.backup')).toEqual({
+      pgRestore: false,
+      gzipped: false,
+    });
+  });
+
+  it('does not read through a dump that is a link', async () => {
+    // The target IS a valid pg archive, so following the link would report pgRestore. The dump
+    // lives in the volume the DDEV and app runners mount whole, so the file at that name is not
+    // necessarily the file the api wrote — and a refusal here is plain, which sends the import
+    // down the `ddev import-db` path where the real problem is reported.
+    const anchor = await mkdtemp(path.join(tmpdir(), 'haive-dump-link-'));
+    await mkdir(path.join(anchor, '_uploads', 'u1'), { recursive: true });
+    const target = path.join(anchor, 'real.backup');
+    await writeFile(target, CUSTOM_HEAD);
+    await symlink(target, path.join(anchor, '_uploads', 'u1', 'db.backup'));
+
+    expect(await sniffDumpFormat(anchor, '_uploads/u1/db.backup')).toEqual({
       pgRestore: false,
       gzipped: false,
     });

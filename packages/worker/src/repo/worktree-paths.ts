@@ -52,6 +52,37 @@ export function splitRepoSubpath(
 }
 
 /**
+ * Split an absolute path to an uploaded archive or DB dump into the storage root and the rel below
+ * it, refusing anything that is not `<storageRoot>/_uploads/<owner>/<name>`.
+ *
+ * `_uploads/<userId>` cannot itself be an anchor: it lives in the `haive_repos` volume, which
+ * `ddev-runner` and `app-runner` both mount WHOLE at `/repos`, so a project's own runtime can write
+ * into it. The storage root is the trusted end, and both segments below it are walked.
+ *
+ * Null rather than a guess when the shape does not match — a legacy row, or a path written by
+ * something else — as `splitWorktreePath` and `splitAttachmentStoredPath` both do. The api applies
+ * the same rule with the userId in hand (`uploadArchiveRel`, `routes/repos.ts`); a row reaching the
+ * worker carries no userId, so the SHAPE is the whole check.
+ */
+export function splitUploadPath(
+  storageRoot: string,
+  stored: string,
+): { anchor: string; rel: string } | null {
+  const prefix = `${storageRoot}/_uploads/`;
+  if (!stored.startsWith(prefix)) return null;
+  const segs = stored.slice(prefix.length).split('/');
+  if (segs.length !== 2) return null;
+  const [owner, name] = segs;
+  if (!owner || !name) return null;
+  // A traversal segment is refused HERE rather than left to the primitive. `toSafeRel` would throw
+  // `invalid-path` on it, which the refusal rule defines as a caller bug — and both callers wrap
+  // their primitive in a `.catch`, so the throw would be swallowed and read as "nothing to do".
+  // A guard that answers null is the honest shape, as `safeDiskRel` concluded in #137.
+  if (owner === '.' || owner === '..' || name === '.' || name === '..') return null;
+  return { anchor: storageRoot, rel: `_uploads/${owner}/${name}` };
+}
+
+/**
  * Split a worktree path into the repository root and the rel below it, refusing anything that is not
  * `<repoRoot>/.haive/worktrees/<dir>`.
  *
