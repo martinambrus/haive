@@ -56,7 +56,9 @@ describe('classifier', () => {
     );
     await writeFile(path.join(root, 'README.md'), '# bundle root readme\n');
 
-    const result = await classifyBundle(root);
+    // `rel: ''` addresses the anchor itself, which the walk allows for a listing — the fixture root
+    // IS the bundle root here, where production passes `<userId>/<bundleId>/extracted`.
+    const result = await classifyBundle(root, '');
 
     expect(result.agents.map((a) => a.sourcePath).sort()).toEqual(
       ['.claude/agents/reviewer.md', '.codex/agents/reviewer.toml', 'agents/planner.md'].sort(),

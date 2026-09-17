@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, isNotNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -96,39 +96,38 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-async function readFrontmatterName(absPath: string): Promise<string | null> {
-  try {
-    const raw = await readFile(absPath, 'utf8');
-    const { frontmatter } = splitFrontmatter(raw);
-    const name = frontmatter.name?.trim();
-    return name && name.length > 0 ? name : null;
-  } catch {
-    return null;
-  }
+async function readFrontmatterName(anchor: string, rel: string): Promise<string | null> {
+  const raw = await readTextNoFollow(anchor, rel);
+  if (raw === null) return null;
+  const { frontmatter } = splitFrontmatter(raw);
+  const name = frontmatter.name?.trim();
+  return name && name.length > 0 ? name : null;
 }
 
-async function readTomlNameField(absPath: string): Promise<string | null> {
-  try {
-    const raw = await readFile(absPath, 'utf8');
-    const match = raw.match(/^\s*name\s*=\s*"([^"]+)"\s*$/m);
-    return match ? match[1]! : null;
-  } catch {
-    return null;
-  }
+async function readTomlNameField(anchor: string, rel: string): Promise<string | null> {
+  const raw = await readTextNoFollow(anchor, rel);
+  if (raw === null) return null;
+  const match = raw.match(/^\s*name\s*=\s*"([^"]+)"\s*$/m);
+  return match ? match[1]! : null;
 }
 
-async function canonicalAgentId(file: AgentFile): Promise<string> {
+async function canonicalAgentId(anchor: string, rootRel: string, file: AgentFile): Promise<string> {
+  const rel = `${rootRel}/${file.sourcePath}`;
   const fromFile =
     file.sourceFormat === 'codex-toml'
-      ? await readTomlNameField(file.absPath)
-      : await readFrontmatterName(file.absPath);
+      ? await readTomlNameField(anchor, rel)
+      : await readFrontmatterName(anchor, rel);
   if (fromFile) return fromFile;
   const base = file.sourcePath.split('/').pop() ?? 'item';
   return base.replace(/\.(md|toml)$/i, '').toLowerCase();
 }
 
-async function canonicalSkillId(file: SkillFolder): Promise<string> {
-  const fromFile = await readFrontmatterName(file.absPath);
+async function canonicalSkillId(
+  anchor: string,
+  rootRel: string,
+  file: SkillFolder,
+): Promise<string> {
+  const fromFile = await readFrontmatterName(anchor, `${rootRel}/${file.sourcePath}`);
   if (fromFile) return fromFile;
   // SKILL.md sits inside a directory whose name is conventionally the skill id.
   const parts = file.sourcePath.split('/');
@@ -190,6 +189,28 @@ function pickPreferredSkill(
   return { keep: files[0]!, dropped: files.slice(1) };
 }
 
+/** The extracted tree a bundle row names, as a rel under the bundle volume.
+ *
+ *  `custom_bundles.storage_root` is an ABSOLUTE path this module did not build — `bundle-ingest`
+ *  writes it as `<root>/<userId>/<bundleId>/extracted` and rewrites it on every re-ingest — so the
+ *  SHAPE is the validation, the same rule the api's `bundleContentRel` applies from the other side.
+ *
+ *  THROWS rather than answering null, unlike its api counterpart, because the two checks above it
+ *  already throw and `bundle-ingest` wraps this whole call in a `try` that records the message on the
+ *  bundle row. A parse that cannot place its own tree must fail visibly, not read a tree it guessed. */
+function splitBundleTree(bundleStorageRoot: string, storageRoot: string): string {
+  const prefix = `${bundleStorageRoot}/`;
+  if (!storageRoot.startsWith(prefix)) {
+    throw new Error(`bundle storageRoot is outside the bundle volume: ${storageRoot}`);
+  }
+  const rel = storageRoot.slice(prefix.length).replace(/\/+$/, '');
+  const segs = rel.split('/');
+  if (segs.length < 2 || segs.some((s) => s === '' || s === '.' || s === '..')) {
+    throw new Error(`bundle storageRoot is not <userId>/<bundleId>/…: ${storageRoot}`);
+  }
+  return rel;
+}
+
 /** Walk a bundle's extracted dir, decode its agents/skills into canonical
  *  IR, and dedupe multi-format duplicates by deferring to the repository's
  *  active CLI. The returned `items` are ready to be persisted into
@@ -199,6 +220,7 @@ export async function parseBundle(
   bundleId: string,
   db: Database,
   logger: ParserLogger,
+  bundleStorageRoot: string,
 ): Promise<ParseBundleResult> {
   const bundle = await db.query.customBundles.findFirst({
     where: eq(schema.customBundles.id, bundleId),
@@ -206,13 +228,18 @@ export async function parseBundle(
   if (!bundle) throw new Error(`bundle not found: ${bundleId}`);
   if (!bundle.storageRoot) throw new Error(`bundle has no storageRoot: ${bundleId}`);
 
-  const classified = await classifyBundle(bundle.storageRoot);
+  // The bundle volume root is the anchor; every component of the tree below it is walked. The
+  // extracted dir itself cannot be the anchor — it holds whatever the bundle author's archive or
+  // clone put there, which is exactly the tree this parser must not be redirected out of.
+  const anchor = bundleStorageRoot;
+  const rootRel = splitBundleTree(bundleStorageRoot, bundle.storageRoot);
+  const classified = await classifyBundle(anchor, rootRel);
   const preferred = await resolveActiveCliFormat(db, bundle.repositoryId);
 
   // Group agents by canonical id, apply tie-breaker per group.
   const agentGroups = new Map<string, AgentFile[]>();
   for (const file of classified.agents) {
-    const id = await canonicalAgentId(file);
+    const id = await canonicalAgentId(anchor, rootRel, file);
     const existing = agentGroups.get(id) ?? [];
     existing.push(file);
     agentGroups.set(id, existing);
@@ -229,11 +256,11 @@ export async function parseBundle(
         reason: `duplicate of ${id} — kept ${keep.sourceFormat} (${keep.sourcePath})`,
       });
     }
-    let content: string;
-    try {
-      content = await readFile(keep.absPath, 'utf8');
-    } catch (err) {
-      logger.warn({ err, file: keep.sourcePath }, 'bundle-parser: failed to read agent file');
+    // `null` covers absent, unreadable and refused alike — the same three outcomes the `catch` it
+    // replaces folded together, which is why the warn no longer carries an `err`.
+    const content = await readTextNoFollow(anchor, `${rootRel}/${keep.sourcePath}`);
+    if (content === null) {
+      logger.warn({ file: keep.sourcePath }, 'bundle-parser: failed to read agent file');
       dropped.push({ sourcePath: keep.sourcePath, reason: 'read failed' });
       continue;
     }
@@ -259,7 +286,7 @@ export async function parseBundle(
   // Skills.
   const skillGroups = new Map<string, SkillFolder[]>();
   for (const folder of classified.skills) {
-    const id = await canonicalSkillId(folder);
+    const id = await canonicalSkillId(anchor, rootRel, folder);
     const existing = skillGroups.get(id) ?? [];
     existing.push(folder);
     skillGroups.set(id, existing);
@@ -273,22 +300,20 @@ export async function parseBundle(
         reason: `duplicate skill ${id} — kept ${keep.sourceFormat} (${keep.sourcePath})`,
       });
     }
-    let content: string;
-    try {
-      content = await readFile(keep.absPath, 'utf8');
-    } catch (err) {
-      logger.warn({ err, file: keep.sourcePath }, 'bundle-parser: failed to read SKILL.md');
+    const content = await readTextNoFollow(anchor, `${rootRel}/${keep.sourcePath}`);
+    if (content === null) {
+      logger.warn({ file: keep.sourcePath }, 'bundle-parser: failed to read SKILL.md');
       dropped.push({ sourcePath: keep.sourcePath, reason: 'read failed' });
       continue;
     }
     const subSkillContents: { sourcePath: string; content: string }[] = [];
     for (const sub of keep.subSkillFiles) {
-      try {
-        const subContent = await readFile(sub.absPath, 'utf8');
-        subSkillContents.push({ sourcePath: sub.sourcePath, content: subContent });
-      } catch (err) {
-        logger.warn({ err, file: sub.sourcePath }, 'bundle-parser: failed to read sub-skill');
+      const subContent = await readTextNoFollow(anchor, `${rootRel}/${sub.sourcePath}`);
+      if (subContent === null) {
+        logger.warn({ file: sub.sourcePath }, 'bundle-parser: failed to read sub-skill');
+        continue;
       }
+      subSkillContents.push({ sourcePath: sub.sourcePath, content: subContent });
     }
     const spec = decodeSkillByFormat(keep.sourceFormat, content, keep.sourcePath, subSkillContents);
     const parsed = skillEntrySchema.safeParse(spec);
