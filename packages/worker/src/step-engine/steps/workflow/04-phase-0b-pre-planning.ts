@@ -1,12 +1,11 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow, toSafeRel } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import { INVESTIGATIONS_DIR, KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
@@ -266,21 +265,34 @@ function kbHeading(text: string): string | null {
   return m?.[1]?.trim() ?? null;
 }
 
+/** The KB page an id names, or null when the id is not a name this may be joined onto a path.
+ *
+ *  These ids come from the MODEL, so `../../etc/passwd` is a shape that has to be refused rather
+ *  than resolved. `toSafeRel` throws on it — `invalid-path` is always a throw, by the refusal rule
+ *  — so the guard answers null instead and the caller records the id as not found, which is the
+ *  per-item outcome its loop already had. Same shape as `safeDiskRel`. */
+function kbReferenceRel(id: string): string | null {
+  try {
+    const rel = toSafeRel(`${KB_DIR}/${id}.md`);
+    return rel === '' ? null : rel;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveKbReferences(repoPath: string, ids: string[]): Promise<KbReference[]> {
-  const dir = path.join(repoPath, KB_DIR);
   const out: KbReference[] = [];
   for (const id of ids) {
-    const full = path.join(dir, `${id}.md`);
-    if (!(await pathExists(full))) {
+    const rel = kbReferenceRel(id);
+    // One lenient read replaces the `pathExists` probe AND the read: `null` already means "no page
+    // under that name", which is exactly the `exists: false` this loop reported — and the probe was
+    // `stat`-based, so it followed a link and read a dangling one as absent.
+    const text = rel === null ? null : await readTextNoFollow(repoPath, rel);
+    if (text === null) {
       out.push({ id, title: id, exists: false });
       continue;
     }
-    try {
-      const text = await readFile(full, 'utf8');
-      out.push({ id, title: kbHeading(text) ?? id, exists: true });
-    } catch {
-      out.push({ id, title: id, exists: false });
-    }
+    out.push({ id, title: kbHeading(text) ?? id, exists: true });
   }
   return out;
 }

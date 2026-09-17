@@ -278,6 +278,29 @@ describe('collectExtraManifestDeps (pnpm monorepo)', () => {
     expect(await collectExtraManifestDeps(tmp)).toEqual([]);
   });
 
+  it('skips a workspace glob that names a directory outside the repository', async () => {
+    // The globs are REPOSITORY CONTENT — a `packages:` list in the repo's own
+    // pnpm-workspace.yaml — so one naming `../<sibling>` used to join straight onto the repo
+    // path, and the loop then read a package.json from outside the tree. Both shapes are
+    // covered: an exact path and a wildcard whose literal prefix escapes.
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'haive-manifest-out-'));
+    try {
+      await writeFile(
+        path.join(outside, 'package.json'),
+        JSON.stringify({ dependencies: { 'should-not-appear': '^1.0.0' } }),
+      );
+      await writeFile(path.join(tmp, 'package.json'), JSON.stringify({ name: 'root' }));
+      await writeFile(
+        path.join(tmp, 'pnpm-workspace.yaml'),
+        `packages:\n  - "../${path.basename(outside)}"\n  - "../${path.basename(outside)}/*"\n`,
+      );
+
+      expect(manifestPackages(await collectExtraManifestDeps(tmp))).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('detectLanguageRuntimes reads go/rust/python/ruby versions from disk', async () => {
     await writeFile(path.join(tmp, 'go.mod'), 'module x\n\ngo 1.22\n');
     await writeFile(path.join(tmp, 'Cargo.toml'), '[package]\nrust-version = "1.75"\n');

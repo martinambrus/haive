@@ -1,6 +1,5 @@
-import path from 'node:path';
+import { lstatNoFollow, toSafeRel } from '@haive/shared/fs-safe';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
-import { pathExists } from '../onboarding/_helpers.js';
 
 /** What was taken out of an article, and why. Surfaced on the step output so the removal is
  *  visible at review rather than silently shrinking the draft. */
@@ -258,19 +257,27 @@ export function citationCandidates(block: string): string[] {
   return [...out];
 }
 
-/** The absolute path a candidate names inside the anchor repo, or null if it escapes.
+/** Whether the anchor repo really holds what a candidate names.
  *
- *  A citation is by definition something IN the repository, so a token that resolves outside it
- *  is not one — and probing it anyway turns any article that shows a traversal example into a
- *  false positive: `../../../../../../etc/passwd` joins to `/etc/passwd`, which exists on the
- *  worker, so a block warning about path traversal was deleted for naming the attack it warns
- *  about. Compared against the root plus a separator, so a sibling `<root>-backup` cannot pass
- *  as a prefix match. */
-export function resolveInsideRepo(repoPath: string, candidate: string): string | null {
-  const root = path.resolve(repoPath);
-  const target = path.resolve(root, candidate);
-  if (target !== root && !target.startsWith(root + path.sep)) return null;
-  return target;
+ *  A citation is by definition something IN the repository, so a token that leaves it is not one —
+ *  and probing it anyway turns any article that shows a traversal example into a false positive:
+ *  `../../../../../../etc/passwd` resolves to `/etc/passwd`, which exists on the worker, so a block
+ *  warning about path traversal was deleted for naming the thing it warns about.
+ *
+ *  This replaced a resolve-then-`startsWith` pair whose verdict was lexical: it compared the
+ *  RESOLVED string against the root, which cannot tell a real directory from a link standing where
+ *  one should be. The walk refuses a link at any component instead, and `toSafeRel` rejects the
+ *  traversal before a descriptor is opened at all. A refused candidate is simply not a citation,
+ *  which is the same answer the old null carried. */
+export async function repoHoldsCitation(repoPath: string, candidate: string): Promise<boolean> {
+  let rel: string;
+  try {
+    rel = toSafeRel(candidate);
+  } catch {
+    return false;
+  }
+  if (rel === '') return false;
+  return (await lstatNoFollow(repoPath, rel)) !== null;
 }
 
 /**
@@ -344,7 +351,7 @@ export async function scrubCitations(
         reason = hit.token;
         break;
       }
-      if (opts.repoPath && (await pathExists(path.join(opts.repoPath, hit.filePath)))) {
+      if (opts.repoPath && (await repoHoldsCitation(opts.repoPath, hit.filePath))) {
         reason = hit.token;
         break;
       }
@@ -352,8 +359,7 @@ export async function scrubCitations(
 
     if (!reason && opts.repoPath) {
       for (const candidate of citationCandidates(block)) {
-        const target = resolveInsideRepo(opts.repoPath, candidate);
-        if (target && (await pathExists(target))) {
+        if (await repoHoldsCitation(opts.repoPath, candidate)) {
           reason = candidate;
           break;
         }
@@ -370,8 +376,7 @@ export async function scrubCitations(
       // `invoice-processor.ts` under `src/` are caught; `index.php` under `web/` is not.
       if (!reason) {
         for (const name of bareFilenameCandidates(block)) {
-          const target = resolveInsideRepo(opts.repoPath, name);
-          if (target && (await pathExists(target))) {
+          if (await repoHoldsCitation(opts.repoPath, name)) {
             reason = name;
             break;
           }
