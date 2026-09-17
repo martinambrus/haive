@@ -6,7 +6,8 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import {
@@ -341,9 +342,11 @@ async function readJson(workspace: string, rel: string): Promise<Record<string, 
   }
 }
 
-async function anyExists(dir: string, names: string[]): Promise<boolean> {
+/** `subRel` is `''` at the workspace root and a subdirectory name one level down, so the walk gets
+ *  a rel rather than a second absolute path to join. */
+async function anyExists(workspace: string, subRel: string, names: string[]): Promise<boolean> {
   for (const n of names) {
-    if (await pathExists(path.join(dir, n))) return true;
+    if (await hasWorkspaceEntry(workspace, subRel === '' ? n : `${subRel}/${n}`)) return true;
   }
   return false;
 }
@@ -380,7 +383,7 @@ const ROOT_SEARCH_SKIP = new Set(['node_modules', 'vendor', 'dist', 'build', 'co
  */
 async function resolveFrameworkRoot(workspace: string, configs: string[]): Promise<string | null> {
   if (configs.length === 0) return '';
-  if (await anyExists(workspace, configs)) return '';
+  if (await anyExists(workspace, '', configs)) return '';
   const { anchor, prefix } = workspaceAnchor(workspace);
   const entries = (await readdirNoFollow(anchor, prefix === '' ? '' : prefix.slice(0, -1))) ?? [];
   const dirs = entries
@@ -388,7 +391,7 @@ async function resolveFrameworkRoot(workspace: string, configs: string[]): Promi
     .map((e) => e.name)
     .sort();
   for (const dir of dirs) {
-    if (await anyExists(path.join(workspace, dir), configs)) return dir;
+    if (await anyExists(workspace, dir, configs)) return dir;
   }
   return null;
 }
@@ -410,27 +413,27 @@ export async function scanTestInfra(workspace: string): Promise<InfraScan> {
   // runs on today; the conservative failure is to still write the tests and decline to claim we
   // ran them (see the null-command branch in apply).
   if (
-    (await anyExists(workspace, FRAMEWORK_CONFIGS.playwright)) ||
-    (await pathExists(path.join(workspace, 'test-playwright')))
+    (await anyExists(workspace, '', FRAMEWORK_CONFIGS.playwright)) ||
+    (await hasWorkspaceEntry(workspace, 'test-playwright'))
   ) {
     frameworks.push('playwright');
   }
   if (
-    (await anyExists(workspace, FRAMEWORK_CONFIGS.cypress)) ||
-    (await pathExists(path.join(workspace, 'cypress')))
+    (await anyExists(workspace, '', FRAMEWORK_CONFIGS.cypress)) ||
+    (await hasWorkspaceEntry(workspace, 'cypress'))
   ) {
     frameworks.push('cypress');
   }
-  if (await anyExists(workspace, FRAMEWORK_CONFIGS.vitest)) {
+  if (await anyExists(workspace, '', FRAMEWORK_CONFIGS.vitest)) {
     frameworks.push('vitest');
   }
-  if (await anyExists(workspace, FRAMEWORK_CONFIGS.jest)) {
+  if (await anyExists(workspace, '', FRAMEWORK_CONFIGS.jest)) {
     frameworks.push('jest');
   }
-  if (await anyExists(workspace, FRAMEWORK_CONFIGS.phpunit)) {
+  if (await anyExists(workspace, '', FRAMEWORK_CONFIGS.phpunit)) {
     frameworks.push('phpunit');
   }
-  if (await anyExists(workspace, FRAMEWORK_CONFIGS.pytest)) {
+  if (await anyExists(workspace, '', FRAMEWORK_CONFIGS.pytest)) {
     frameworks.push('pytest');
   }
 
@@ -446,7 +449,7 @@ export async function scanTestInfra(workspace: string): Promise<InfraScan> {
   }
 
   for (const dir of ['test-playwright', 'cypress', 'e2e', 'tests', 'test']) {
-    if (await pathExists(path.join(workspace, dir))) testDirs.push(dir);
+    if (await hasWorkspaceEntry(workspace, dir)) testDirs.push(dir);
   }
 
   const roots: Record<string, string | null> = {};
@@ -744,11 +747,11 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
     const { workspace, sandbox } = await resolveWorkspace(ctx);
     const infra = await scanTestInfra(workspace);
 
-    const ddev = await pathExists(path.join(workspace, '.ddev', 'config.yaml'));
+    const ddev = await hasWorkspaceEntry(workspace, '.ddev/config.yaml');
     const ddevPlaywrightAddon =
       ddev &&
-      ((await pathExists(path.join(workspace, '.ddev', 'addon-metadata', 'ddev-playwright'))) ||
-        (await pathExists(path.join(workspace, '.ddev', 'commands', 'web', 'playwright'))));
+      ((await hasWorkspaceEntry(workspace, '.ddev/addon-metadata/ddev-playwright')) ||
+        (await hasWorkspaceEntry(workspace, '.ddev/commands/web/playwright')));
     const ws = ddev ? await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath) : null;
 
     const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');

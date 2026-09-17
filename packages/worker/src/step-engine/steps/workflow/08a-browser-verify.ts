@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { STEP_CLI_ROLES } from '@haive/shared';
@@ -7,7 +6,8 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
@@ -426,10 +426,6 @@ async function run() {
 run().catch(err => { console.error(err.message); process.exit(1); });
 `;
 
-function ddevConfigPath(workspace: string): string {
-  return path.join(workspace, '.ddev', 'config.yaml');
-}
-
 /** Pull the single-line JSON report the browser check prints, ignoring any
  *  surrounding noise (ddev/docker exec banners, stderr). */
 function extractReport(output: string): BrowserReport | null {
@@ -615,7 +611,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     // DDEV-enabled projects run in the per-task runner. `.ddev` lives in the
     // worktree — the implementation may have just written it (add-ddev task).
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-    if (ws && (await pathExists(ddevConfigPath(ws.workspace)))) return true;
+    if (ws && (await hasWorkspaceEntry(ws.workspace, '.ddev/config.yaml'))) return true;
     // Otherwise rely on the legacy 01a-app-boot path.
     const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
     return boot !== null && boot.booted && !boot.skipped;

@@ -1,12 +1,12 @@
 import { execFile } from 'node:child_process';
-import path from 'node:path';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
@@ -223,10 +223,10 @@ async function readJsonScripts(workspace: string, file: string): Promise<Record<
 }
 
 async function detectPackageManager(workspace: string): Promise<PackageManager> {
-  if (await pathExists(path.join(workspace, 'pnpm-lock.yaml'))) return 'pnpm';
-  if (await pathExists(path.join(workspace, 'yarn.lock'))) return 'yarn';
-  if (await pathExists(path.join(workspace, 'package-lock.json'))) return 'npm';
-  if (await pathExists(path.join(workspace, 'package.json'))) return 'npm';
+  if (await hasWorkspaceEntry(workspace, 'pnpm-lock.yaml')) return 'pnpm';
+  if (await hasWorkspaceEntry(workspace, 'yarn.lock')) return 'yarn';
+  if (await hasWorkspaceEntry(workspace, 'package-lock.json')) return 'npm';
+  if (await hasWorkspaceEntry(workspace, 'package.json')) return 'npm';
   return 'none';
 }
 
@@ -247,7 +247,7 @@ async function resolveSlots(
   const composerScripts = await readJsonScripts(workspace, 'composer.json');
   const pm = await detectPackageManager(workspace);
   const has = async (...names: string[]) => {
-    for (const n of names) if (await pathExists(path.join(workspace, n))) return true;
+    for (const n of names) if (await hasWorkspaceEntry(workspace, n)) return true;
     return false;
   };
   const hasPhpunit = await has('phpunit.xml', 'phpunit.xml.dist');
@@ -516,7 +516,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     let repoSubpath: string | null = null;
     let ddevMode = false;
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-    if (ws && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')))) {
+    if (ws && (await hasWorkspaceEntry(ws.workspace, '.ddev/config.yaml'))) {
       ddevMode = true;
       repoSubpath = ws.repoSubpath;
       workspace = ws.workspace;
