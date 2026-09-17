@@ -556,8 +556,9 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   const { anchor, uploadsRel } = split;
   // Recursive on purpose: the tree also holds the worker's extracted sidecars,
   // which carry no row of their own and are meaningless once the originals go.
-  // The prefix is walked under the repository root, so no `resolveInside` check is needed — a
-  // component that is a link is refused by the walk rather than resolved and then trusted.
+  // The prefix is walked under the repository root, so no resolve-then-compare check is
+  // needed — a component that is a link is refused by the walk rather than resolved and
+  // then trusted.
   await removeNoFollow(anchor, `${uploadsRel}/${prefix}`, { recursive: true }).catch(() => {});
   await db.delete(schema.taskAttachments).where(
     inArray(

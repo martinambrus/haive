@@ -1,6 +1,10 @@
-import { stat } from 'node:fs/promises';
-import { chmodNoFollow, chownNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
-import { taskUploadsRel } from '@haive/shared';
+import {
+  chmodNoFollow,
+  chownNoFollow,
+  lstatNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
+import { splitAttachmentStoredPath, taskUploadsRel } from '@haive/shared';
 import path from 'node:path';
 import { asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -12,6 +16,7 @@ import {
   extractPlanInput,
   needsExtraction,
   sidecarName,
+  uploadsInputRel,
   type PlanInputKind,
 } from './_plan-inputs.js';
 
@@ -240,10 +245,25 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
 
     const missing: string[] = [];
     for (const row of rows) {
-      const ok = await stat(row.storedPath)
-        .then((s) => s.isFile())
-        .catch(() => false);
-      if (!ok) missing.push(row.filename);
+      // The repository root is RECOVERED from the row rather than trusted: the stored
+      // path names the uploads dir, which is under `.haive/` and mounted read-write into
+      // the sandbox, so it can be neither the anchor nor a prefix. A row that is not
+      // where the api writes cannot be checked and counts as missing — re-attaching it,
+      // which is what the apply-side error asks for, is the fix for both.
+      const split = splitAttachmentStoredPath(row, ctx.taskId);
+      if (split === null) {
+        ctx.logger.warn(
+          { file: row.filename },
+          'plan inputs: attachment row is not stored under the task uploads directory',
+        );
+        missing.push(row.filename);
+        continue;
+      }
+      // Lenient: absent and refused both mean there is nothing to plan from, which is
+      // what the `catch` this replaced folded them into. A link now reads as a link
+      // rather than as whatever it points at.
+      const info = await lstatNoFollow(split.anchor, split.rel);
+      if (info?.kind !== 'file') missing.push(row.filename);
     }
 
     return {
@@ -288,11 +308,20 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
 
     for (const attachment of d.attachments) {
       const kind = classifyPlanInput(attachment.filename, attachment.contentType);
-      const { size } = await stat(attachment.storedPath);
+      // detect() proved every row had a real file; one that cannot be split or read now
+      // changed between the two phases, which is the same fact — and the same fix — as a
+      // row that was missing then.
+      const split = splitAttachmentStoredPath(attachment, ctx.taskId);
+      const info = split === null ? null : await lstatNoFollow(split.anchor, split.rel);
+      if (info === null || info.kind !== 'file') {
+        throw new Error(
+          `Attached file "${attachment.filename}" is no longer readable in the task workspace. Re-attach it and retry this step.`,
+        );
+      }
       const row: PlanInputRow = {
         filename: attachment.filename,
         kind,
-        bytes: size,
+        bytes: info.stats.size,
         description: attachment.description,
         sidecar: null,
         // A text kind is readable as it stands; everything else has to earn it.
@@ -305,6 +334,9 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
         row.note = `not extracted: this plan already has ${PLAN_INPUT_EXTRACTION_LIMIT} extracted documents`;
       } else if (needsExtraction(kind)) {
         await ctx.emitProgress(`Extracting text from ${attachment.filename}...`);
+        // Still the absolute path: the extractors are `unzip`/`pdftotext` subprocesses,
+        // which resolve a path of their own by name, so containing them is a separate
+        // change from anchoring this module's own reads.
         const result = await extractPlanInput(kind, attachment.storedPath);
         if (result.error) {
           // Reported, not thrown. The original is still mounted, so an agent that
@@ -317,36 +349,46 @@ export const planInputsStep: StepDefinition<PlanInputsDetect, PlanInputsApply> =
           );
         } else {
           const name = sidecarName(attachment.filename);
-          // Built from the uploads dir this step already resolved, NOT from the
-          // row's stored path, and rejected unless it lands inside — the name is
-          // a database column, and a sidecar written outside the tree is an
-          // arbitrary file write.
+          // A task with no uploads dir has nowhere to put a sidecar, and detect()
+          // is what knows whether it has one. The PATH is not taken from this
+          // value, nor from the row's stored path — it is built below as a rel.
           if (uploadsDir === null) {
             throw new Error(
               `Refusing to write a sidecar for "${attachment.filename}": the task has no uploads directory.`,
             );
           }
-          // The name is a DATABASE column, so it is walked under the repository root rather than
-          // joined and then checked: `resolveInside`'s resolve-then-startsWith could not tell a
-          // linked component from a real one, and the walk refuses it outright.
-          const sidecarRel = `${taskUploadsRel(ctx.taskId)}/${name}`;
-          const body =
-            result.markdown.length > 0
-              ? `# ${attachment.filename}\n\n${result.markdown}\n`
-              : `# ${attachment.filename}\n\n_(no text could be read from this file)_\n`;
-          // Ownership stays with `harmonizeOwnership`, which catches: it is best-effort here, and
-          // passing it to the primitive would make a non-root worker fail the whole step.
-          await writeFileNoFollow(ctx.repoPath, sidecarRel, body, { fileMode: 0o644 });
-          await harmonizeOwnership(ctx.repoPath, sidecarRel);
-          row.sidecar = name;
-          // The extractor's own verdict on its INPUT, never a test on the string
-          // it rendered — that string carries page rules and sheet headings this
-          // module added, and a document that says nothing still produces them.
-          row.hasText = result.hasContent;
-          // An empty extraction is a fact about the DOCUMENT, not a failure of
-          // the extractor, and the two must not read the same downstream.
-          if (!row.hasText) row.note = 'contains no readable text';
-          extracted += 1;
+          // The name is a DATABASE column, so it becomes a rel walked under the repository
+          // root a component at a time rather than a path joined onto the uploads dir and
+          // checked afterwards. A name that cannot address a file inside it is a per-item
+          // skip, like an extraction that failed: one bad row must not discard the sidecars
+          // written beside it.
+          const sidecarRel = uploadsInputRel(ctx.taskId, name);
+          if (sidecarRel === null) {
+            row.note = `extracted text could not be stored: "${name}" does not name a file inside the uploads directory`;
+            unreadable.push(attachment.filename);
+            ctx.logger.warn(
+              { file: attachment.filename, sidecar: name },
+              'plan inputs: refusing a sidecar name that leaves the uploads directory',
+            );
+          } else {
+            const body =
+              result.markdown.length > 0
+                ? `# ${attachment.filename}\n\n${result.markdown}\n`
+                : `# ${attachment.filename}\n\n_(no text could be read from this file)_\n`;
+            // Ownership stays with `harmonizeOwnership`, which catches: it is best-effort here,
+            // and passing it to the primitive would make a non-root worker fail the whole step.
+            await writeFileNoFollow(ctx.repoPath, sidecarRel, body, { fileMode: 0o644 });
+            await harmonizeOwnership(ctx.repoPath, sidecarRel);
+            row.sidecar = name;
+            // The extractor's own verdict on its INPUT, never a test on the string
+            // it rendered — that string carries page rules and sheet headings this
+            // module added, and a document that says nothing still produces them.
+            row.hasText = result.hasContent;
+            // An empty extraction is a fact about the DOCUMENT, not a failure of
+            // the extractor, and the two must not read the same downstream.
+            if (!row.hasText) row.note = 'contains no readable text';
+            extracted += 1;
+          }
         }
       }
       inputs.push(row);

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { taskUploadsRel } from '@haive/shared';
 
 const exec = promisify(execFile);
 
@@ -455,23 +456,35 @@ export function sidecarName(filename: string): string {
 }
 
 /**
- * `dir/name`, but only when the result is still inside `dir`. Null otherwise.
+ * Repo-relative location of one of a task's uploaded input files, or null when
+ * the name cannot address a file inside the uploads dir.
  *
  * `name` comes from `task_attachments.filename` — a column, not a literal. The
  * api sanitises it on upload today, but this package cannot see that sanitiser
  * and cannot be sure it ran: a row written before it existed, or by any future
  * writer, arrives here unchecked. The two things built from that column are a
- * file this step WRITES and a file coverage READS straight into a prompt, so an
- * unchecked `../` is an arbitrary write and an arbitrary read.
+ * file `00-plan-inputs` WRITES and a file `02-plan-coverage` READS straight into
+ * a prompt, so an unchecked `../` is an arbitrary write and an arbitrary read.
  *
- * Checked on the RESOLVED path rather than by scanning the string for `..`,
- * which is the test that actually holds: it survives encoding tricks, a
- * separator this platform accepts and the pattern does not, and an absolute path
- * (which `join` would not even keep). The trailing separator matters too —
- * without it `/uploads/<id>` would admit `/uploads/<id>-evil`.
+ * A REL rather than an absolute path, because the uploads dir cannot be what
+ * containment rests on: it lives under `.haive/`, which the sandbox mounts
+ * read-write, so every component has to be walked from the repository root
+ * instead of trusted as a prefix. That is what this replaced — a `path.resolve`
+ * plus `startsWith` pair, which compares strings and so cannot tell a real
+ * directory from a link standing where one should be.
+ *
+ * Separators are KEPT: a filename here is a relative path rather than a
+ * basename, since a folder upload and an expanded archive both produce
+ * `docs/spec.md`. What is refused is any segment that would leave the directory.
+ *
+ * NULL rather than a throw, and that is the point of having it: everything it
+ * passes is a valid `toSafeRel` input, so the primitive's `invalid-path` throw
+ * stays unreachable for these names — and both callers sit in a per-item loop
+ * that records a skipped input, where a throw would discard the attachments
+ * beside it.
  */
-export function resolveInside(dir: string, name: string): string | null {
-  const base = path.resolve(dir);
-  const candidate = path.resolve(base, name);
-  return candidate === base || candidate.startsWith(base + path.sep) ? candidate : null;
+export function uploadsInputRel(taskId: string, name: string): string | null {
+  if (name === '' || name.startsWith('/') || name.includes('\0')) return null;
+  if (name.split('/').some((seg) => seg === '' || seg === '.' || seg === '..')) return null;
+  return `${taskUploadsRel(taskId)}/${name}`;
 }
