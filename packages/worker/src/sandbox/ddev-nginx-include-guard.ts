@@ -1,5 +1,5 @@
-import { readdir, readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../repo/worktree-paths.js';
 
 /**
  * Pre-flight check that the project's nginx configs do not declare the same `location`
@@ -123,12 +123,16 @@ export function findDdevNginxIncludeCollisions(input: {
  *  unreadable. `*.conf` only, matching what nginx's own glob loads — `Dockerfile.example`
  *  style samples and READMEs sit in these directories and are never active. */
 async function readConfDir(workspace: string, dir: string): Promise<NginxConfFile[]> {
-  const abs = path.join(workspace, '.ddev', dir);
-  const names = await readdir(abs).catch(() => null);
-  if (names === null) return [];
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const relDir = `${prefix}.ddev/${dir}`;
+  const entries = await readdirNoFollow(anchor, relDir);
+  if (entries === null) return [];
   const files: NginxConfFile[] = [];
-  for (const name of names.filter((n) => n.endsWith('.conf')).sort()) {
-    const content = await readFile(path.join(abs, name), 'utf8').catch(() => null);
+  for (const name of entries
+    .map((e) => e.name)
+    .filter((n) => n.endsWith('.conf'))
+    .sort()) {
+    const content = await readTextNoFollow(anchor, `${relDir}/${name}`);
     if (content !== null) files.push({ name, content });
   }
   return files;

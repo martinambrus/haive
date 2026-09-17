@@ -1,5 +1,5 @@
-import { readdir, readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { parseDocument } from 'yaml';
 
 /**
@@ -112,13 +112,17 @@ export function findDdevYamlBreakage(files: DdevYamlFile[]): string | null {
  * read — an unreadable workspace is the boot's problem to report, not this check's.
  */
 export async function checkDdevConfigYaml(workspace: string): Promise<string | null> {
-  const dir = path.join(workspace, '.ddev');
-  const names = await readdir(dir).catch(() => null);
-  if (names === null) return null;
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const relDir = `${prefix}.ddev`;
+  const entries = await readdirNoFollow(anchor, relDir);
+  if (entries === null) return null;
 
   const files: DdevYamlFile[] = [];
-  for (const name of names.filter(isDdevParsedYaml).sort()) {
-    const content = await readFile(path.join(dir, name), 'utf8').catch(() => null);
+  for (const name of entries
+    .map((e) => e.name)
+    .filter(isDdevParsedYaml)
+    .sort()) {
+    const content = await readTextNoFollow(anchor, `${relDir}/${name}`);
     if (content !== null) files.push({ name, content });
   }
   return findDdevYamlBreakage(files);

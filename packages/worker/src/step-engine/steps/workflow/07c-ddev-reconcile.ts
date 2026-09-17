@@ -1,11 +1,11 @@
-import path from 'node:path';
 import { and, desc, eq, isNotNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { matchYamlField, parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
 import { hashDdevInputs } from '../_ddev-inputs-hash.js';
@@ -65,8 +65,13 @@ interface ReconcileApply {
   appliedBaseline?: DdevBaseline;
 }
 
-function ddevConfigPath(workspace: string): string {
-  return path.join(workspace, '.ddev', 'config.yaml');
+/** The project's `.ddev/config.yaml`, split for the anchored walk.
+ *
+ *  The workspace is a WORKTREE, which sits under `.haive/` — the tree the sandbox mounts
+ *  read-write — so it can never be the anchor itself. Same split `01c-ddev-env` makes. */
+function ddevConfigRef(workspace: string): { anchor: string; rel: string } {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  return { anchor, rel: `${prefix}.ddev/config.yaml` };
 }
 
 /** Classify config drift between the booted baseline and the on-disk target.
@@ -168,7 +173,8 @@ async function loadReconcileState(ctx: StepContext): Promise<{
   let target: DdevConfigFields | null = null;
   let targetHash: string | null = null;
   if (workspace) {
-    const text = await readFile(ddevConfigPath(workspace), 'utf8').catch(() => null);
+    const cfg = ddevConfigRef(workspace);
+    const text = await readTextNoFollow(cfg.anchor, cfg.rel);
     if (text !== null) {
       target = parseDdevConfig(text);
       // Hash the whole authored `.ddev/` tree (php ini, web-build Dockerfile, extra
@@ -236,7 +242,12 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
     // add-ddev where 01c skipped, and legacy tasks with no baseline).
     if (!apply01c?.started || !apply01c.baseline) return false;
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-    return ws ? pathExists(ddevConfigPath(ws.workspace)) : false;
+    if (!ws) return false;
+    // `pathExists` was `stat`-based: it followed a link and read a dangling one as absent. A linked
+    // config now reads as ABSENT, so this step skips rather than reconciling against a file outside
+    // the tree — the same verdict `01c-ddev-env` reaches for the same file.
+    const cfg = ddevConfigRef(ws.workspace);
+    return (await lstatNoFollow(cfg.anchor, cfg.rel))?.kind === 'file';
   },
 
   async detect(ctx: StepContext): Promise<ReconcileDetect> {
@@ -426,7 +437,7 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
     // instead of restarting into the conflict.
     const registeredName = await ddevRegisteredProjectName(handle);
     const configText = workspace
-      ? await readFile(ddevConfigPath(workspace), 'utf8').catch(() => null)
+      ? await readTextNoFollow(ddevConfigRef(workspace).anchor, ddevConfigRef(workspace).rel)
       : null;
     const configName = configText ? matchYamlField(configText, 'name') : null;
     if (registeredName && configName && registeredName !== configName) {

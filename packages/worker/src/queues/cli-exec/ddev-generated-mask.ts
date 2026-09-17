@@ -1,5 +1,6 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
 import { posix } from 'node:path';
+import { lstatNoFollow, readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../repo/worktree-paths.js';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
@@ -111,32 +112,37 @@ export async function computeDdevGeneratedMasks(
   workerRoot: string,
   containerWorkdir: string = SANDBOX_WORKDIR,
 ): Promise<SandboxExtraFile[]> {
-  const ddevRoot = posix.join(workerRoot, '.ddev');
-  const rootStat = await stat(ddevRoot).catch(() => null);
-  if (!rootStat?.isDirectory()) return [];
+  // The mount root can be a worktree (`.haive/worktrees/<dir>`), which is never an anchor — the
+  // sandbox mounts it read-write. `workspaceAnchor` splits it at the repository root and falls back
+  // to the path itself in root mode, which is also what keeps a fixture tree working unchanged.
+  const { anchor, prefix } = workspaceAnchor(workerRoot);
+  const ddevRel = `${prefix}.ddev`;
+  const rootInfo = await lstatNoFollow(anchor, ddevRel);
+  if (rootInfo?.kind !== 'directory') return [];
 
   const masks: SandboxExtraFile[] = [];
-  const walk = async (dir: string, rel: string): Promise<void> => {
+  const walk = async (relDir: string, rel: string): Promise<void> => {
     if (masks.length >= MAX_MASKS) return;
-    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    const entries = (await readdirNoFollow(anchor, relDir)) ?? [];
     for (const entry of entries) {
       if (masks.length >= MAX_MASKS) return;
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name)) continue;
-        await walk(posix.join(dir, entry.name), childRel);
+        await walk(`${relDir}/${entry.name}`, childRel);
         continue;
       }
       // Symlinks are skipped rather than followed: masking through one would bind a file
-      // outside the tree we were asked to scan.
+      // outside the tree we were asked to scan. The `lstat` below answers for the ENTRY, where
+      // the `stat` it replaces reported the target's kind and size.
       if (!entry.isFile()) continue;
       if (isInertDoc(entry.name)) continue;
 
-      const abs = posix.join(dir, entry.name);
-      const info = await stat(abs).catch(() => null);
-      if (!info?.isFile() || info.size > MAX_MASK_FILE_BYTES) continue;
+      const childRelPath = `${relDir}/${entry.name}`;
+      const info = await lstatNoFollow(anchor, childRelPath);
+      if (info?.kind !== 'file' || info.stats.size > MAX_MASK_FILE_BYTES) continue;
 
-      const content = await readFile(abs, 'utf8').catch(() => null);
+      const content = await readTextNoFollow(anchor, childRelPath);
       if (content === null) continue;
       if (!content.slice(0, MARKER_PROBE_BYTES).includes(DDEV_GENERATED_MARKER)) continue;
 
@@ -146,7 +152,7 @@ export async function computeDdevGeneratedMasks(
       });
     }
   };
-  await walk(ddevRoot, '');
+  await walk(ddevRel, '');
 
   if (masks.length >= MAX_MASKS) {
     log.warn({ workerRoot, count: masks.length }, 'ddev-generated mask hit its cap');
