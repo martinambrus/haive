@@ -140,6 +140,11 @@ export interface CliCommandSpec {
     effort: string | null;
     execArgs: string[];
   };
+  /** The persona ids Haive assigned to this run: every `[[HAIVE_AGENT_DEFINITION:<id>]]`
+   *  marker the dispatch prompt carried BEFORE the rewrite, unioned with the ids a mining
+   *  dispatch names explicitly (`AgentMiningDispatch.personaIds`). Read at the completion write
+   *  into `tool_usage.agents.assigned`; never sent to the CLI. Absent when none. */
+  assignedAgentIds?: string[];
 }
 
 export interface SubAgent {
@@ -166,6 +171,9 @@ export interface SubAgentInvocation {
   mode: SubAgentInvocationMode;
   steps: SubAgentInvocationStep[];
   synthesis: SubAgentInvocationStep;
+  /** Same meaning as `CliCommandSpec.assignedAgentIds`: the union over every sub-agent prompt
+   *  and the synthesis prompt, read before the rewrite. Absent when none. */
+  assignedAgentIds?: string[];
 }
 
 export interface EnvInjection {

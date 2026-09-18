@@ -12,9 +12,11 @@ import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
  * event at a time and exec-core persists `finalize()` beside tokenUsage and modelIdentity.
  *
  * "Used" means three different things, each with its own evidence:
- *   assigned  Haive pasted a persona into the prompt. The CLI never reports this; it is stamped
- *             at dispatch (a follow-up behind the per-call agent isolation refactor), so
- *             `agents.assigned` is always empty here.
+ *   assigned  Haive gave the run a persona. The CLI never reports this: the dispatcher reads
+ *             the marker ids off the prompt before rewriting it (`agentGuidanceIds`), a mining
+ *             step names a persona it runs as (`AgentMiningDispatch.personaIds`), and the
+ *             completion write stamps the union (`withAssignedAgents`). The tally's own
+ *             `finalize` leaves it empty, so a collector can never claim one.
  *   called    the CLI invoked something natively: a tool, an MCP tool, a sub-agent, a skill.
  *   read      the agent opened a definition file itself, which only shows up as a PATH inside
  *             a shell command or a read tool's input.
@@ -491,4 +493,23 @@ export function applyProviderObservability(
     ...unobservedToolUsage(usage.source, usage.loaded),
     agents: { assigned: usage.agents.assigned, read: [] },
   };
+}
+
+/** Stamp the personas Haive assigned. The tally never learns them — no CLI reports an
+ *  assignment — so the completion write applies the ids the dispatch put on the spec, on every
+ *  path alike: a collector's record, an unobservable one, a failed run's. Unique and in
+ *  code-unit order, so the record serialises identically wherever it is written. */
+export function withAssignedAgents(
+  usage: InvocationToolUsage,
+  ids: readonly string[],
+): InvocationToolUsage {
+  const assigned = [...new Set(ids)].sort(compareStrings);
+  return { ...usage, agents: { ...usage.agents, assigned } };
+}
+
+/** The ids off a queued invocation's spec, whichever shape it has (`CliCommandSpec` or
+ *  `SubAgentInvocation`), read defensively because the payload crossed the queue as JSON. */
+export function assignedAgentIdsOf(spec: unknown): string[] {
+  if (!isRecord(spec) || !Array.isArray(spec.assignedAgentIds)) return [];
+  return spec.assignedAgentIds.filter((id): id is string => typeof id === 'string');
 }

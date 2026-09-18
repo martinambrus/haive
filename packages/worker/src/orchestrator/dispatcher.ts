@@ -22,7 +22,10 @@ import type {
   SubAgentSpec,
 } from '../cli-adapters/types.js';
 import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
-import { adaptPromptForCliCapabilities } from '../step-engine/steps/_retrieval-guidance.js';
+import {
+  adaptPromptForCliCapabilities,
+  agentGuidanceIds,
+} from '../step-engine/steps/_retrieval-guidance.js';
 import {
   resolveGlobalKbDigest,
   withGlobalKbDigest,
@@ -103,6 +106,10 @@ export interface DispatchRequest {
    *  agent_mining / subagent dispatches. ANDed with adapter.supportsSteering and
    *  applied only to a kind:'prompt' invocation. */
   steeringRequested?: boolean;
+  /** Persona ids the caller assigns beyond what the prompt's markers say: a mining dispatch
+   *  whose agent IS a persona (03's roster) names it here, since its prompt carries no marker.
+   *  Unioned with `agentGuidanceIds(prompt)` onto the spec's `assignedAgentIds`. */
+  assignedAgentIds?: string[];
   /** Whether this task has at least one configured language server with a
    *  bridge implemented by Haive. Fail-closed when omitted so a provider's
    *  coarse capability alone never advertises tools that are not configured. */
@@ -398,11 +405,15 @@ function buildCliSidePlan(
       (req.steeringRequested ?? false) &&
       adapter.supportsSteering &&
       adapter.steeringTransportReady(provider, { codexAppServer: req.codexAppServer ?? null });
+    // Read off the ORIGINAL prompt: adaptPrompt rewrites every marker away, and the stored
+    // prompt is the rewritten one.
+    const assignedAgentIds = assignedPersonaIds(req, [req.input.prompt]);
     const effectivePrompt = adaptPrompt(req.input.prompt);
     const spec = adapter.buildCliInvocation(provider, effectivePrompt, {
       ...invokeOpts,
       steeringMode,
     });
+    if (assignedAgentIds.length > 0) spec.assignedAgentIds = assignedAgentIds;
     return {
       mode: 'cli',
       providerId: provider.id,
@@ -425,17 +436,35 @@ function buildCliSidePlan(
     })),
     synthesisPrompt: adaptPrompt(req.input.spec.synthesisPrompt),
   };
+  const assignedAgentIds = assignedPersonaIds(req, [
+    ...req.input.spec.subAgents.map((subAgent) => subAgent.prompt),
+    req.input.spec.synthesisPrompt,
+  ]);
   const split = splitSubAgentForProvider(adapter, provider, subAgentSpec, invokeOpts);
+  const invocation =
+    assignedAgentIds.length > 0 ? { ...split.invocation, assignedAgentIds } : split.invocation;
   return {
     mode: split.mode === 'native' ? 'cli' : 'subagent_emulated',
     providerId: provider.id,
     providerName: provider.name,
     adapter,
     provider,
-    invocation: { kind: 'subagent', spec: split.invocation },
+    invocation: { kind: 'subagent', spec: invocation },
     effort: adapter.effortDecision(provider, invokeOpts),
     reason: split.reason,
   };
+}
+
+/** The caller's explicit ids plus every marker id in the given prompts, unique and in code-unit
+ *  order. The marker half must come from the prompts BEFORE `adaptPrompt`: the rewrite turns each
+ *  marker into the pointer sentence or its fallback line, and the stored prompt is the rewritten
+ *  one, so this is the only moment the assignment can be read. */
+function assignedPersonaIds(req: DispatchRequest, prompts: string[]): string[] {
+  const ids = new Set(req.assignedAgentIds ?? []);
+  for (const prompt of prompts) {
+    for (const id of agentGuidanceIds(prompt)) ids.add(id);
+  }
+  return [...ids].sort();
 }
 
 function skipPlan(reason: string): DispatchPlan {

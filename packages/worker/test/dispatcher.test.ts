@@ -68,6 +68,68 @@ describe('resolveDispatch', () => {
     expect(plan.reason).toBe('no enabled cli providers');
   });
 
+  it('stamps the personas a prompt carries as markers onto the spec, read before the rewrite', () => {
+    const provider = makeProvider({ id: 'prov-claude', name: 'claude-code' });
+    const prompt = [
+      agentDefinitionGuidance('test-writer', 'Read .claude/agents/test-writer.md first.'),
+      'do the work',
+      agentDefinitionGuidance('code-reviewer', 'See .claude/agents/code-reviewer.md.'),
+    ].join('\n');
+    const plan = resolveDispatch({
+      providers: [provider],
+      input: { kind: 'prompt', prompt, capabilities: [] },
+      invokeOpts: {},
+      // An explicit id (a mining persona) unions with the markers; a duplicate collapses.
+      assignedAgentIds: ['drupal7-developer', 'test-writer'],
+    });
+    expect(plan.invocation?.kind).toBe('cli');
+    const spec = plan.invocation?.kind === 'cli' ? plan.invocation.spec : null;
+    expect(spec?.assignedAgentIds).toEqual(['code-reviewer', 'drupal7-developer', 'test-writer']);
+    // The stored prompt is the rewritten one and carries no marker to recover them from.
+    expect(plan.effectivePrompt).not.toContain('HAIVE_AGENT_DEFINITION');
+  });
+
+  it('leaves assignedAgentIds absent when nothing was assigned', () => {
+    const provider = makeProvider({ id: 'prov-claude', name: 'claude-code' });
+    const plan = resolveDispatch({
+      providers: [provider],
+      input: { kind: 'prompt', prompt: 'plain work', capabilities: [] },
+      invokeOpts: {},
+    });
+    const spec = plan.invocation?.kind === 'cli' ? plan.invocation.spec : null;
+    expect(spec).not.toBeNull();
+    expect('assignedAgentIds' in (spec ?? {})).toBe(false);
+  });
+
+  it('carries the union of every sub-agent prompt on a sub-agent invocation', () => {
+    const provider = makeProvider({
+      id: 'prov-claude',
+      name: 'claude-code',
+      supportsSubagents: true,
+    });
+    const spec: SubAgentSpec = {
+      subAgents: [
+        {
+          name: 'writer',
+          prompt: agentDefinitionGuidance('test-writer', 'Read .claude/agents/test-writer.md.'),
+          outputKey: 'writer',
+        },
+        { name: 'plain', prompt: 'no persona', outputKey: 'plain' },
+      ],
+      synthesisPrompt: agentDefinitionGuidance(
+        'code-reviewer',
+        'See .claude/agents/code-reviewer.md.',
+      ),
+    };
+    const plan = resolveDispatch({
+      providers: [provider],
+      input: { kind: 'subagent', spec, capabilities: ['subagents'] },
+      invokeOpts: {},
+    });
+    const invocation = plan.invocation?.kind === 'subagent' ? plan.invocation.spec : null;
+    expect(invocation?.assignedAgentIds).toEqual(['code-reviewer', 'test-writer']);
+  });
+
   it('picks the preferred provider first when set', () => {
     const claude = makeProvider({
       id: 'prov-claude',

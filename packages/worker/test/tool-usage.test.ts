@@ -2,12 +2,56 @@ import { describe, expect, it } from 'vitest';
 import { CLI_PROVIDER_LIST } from '@haive/shared';
 import {
   applyProviderObservability,
+  assignedAgentIdsOf,
   classifyReadPath,
   commandPathTokens,
   createToolUsageTally,
   parseMcpToolName,
   unobservedToolUsage,
+  withAssignedAgents,
 } from '../src/cli-executor/tool-usage.js';
+
+describe('withAssignedAgents', () => {
+  it('stamps unique ids in code-unit order and leaves the rest of the record alone', () => {
+    const usage = unobservedToolUsage('stream', {
+      agents: [],
+      skills: [],
+      mcpServers: [],
+      toolCount: 2,
+    });
+    const stamped = withAssignedAgents(usage, ['test-writer', 'code-reviewer', 'test-writer']);
+    expect(stamped.agents).toEqual({ assigned: ['code-reviewer', 'test-writer'], read: [] });
+    expect(stamped.loaded).toEqual(usage.loaded);
+    expect(stamped.coverage).toBe('none');
+    expect(usage.agents.assigned).toEqual([]);
+  });
+
+  it('survives the provider observability rule, which empties every counter but this one', () => {
+    const tally = createToolUsageTally({ workdir: null });
+    tally.claudeInit({ type: 'system', subtype: 'init', tools: ['Bash'], mcp_servers: [] });
+    const stamped = withAssignedAgents(tally.finalize('stream'), ['peer-reviewer']);
+    expect(applyProviderObservability(stamped, 'amp')).toMatchObject({
+      coverage: 'none',
+      agents: { assigned: ['peer-reviewer'], read: [] },
+    });
+  });
+});
+
+describe('assignedAgentIdsOf', () => {
+  it('reads the ids off either spec shape and nothing else', () => {
+    expect(
+      assignedAgentIdsOf({ command: 'claude', args: [], env: {}, assignedAgentIds: ['b', 'a'] }),
+    ).toEqual(['b', 'a']);
+    expect(assignedAgentIdsOf({ mode: 'sequential', steps: [], assignedAgentIds: ['x'] })).toEqual([
+      'x',
+    ]);
+    expect(assignedAgentIdsOf({ command: 'claude', args: [], env: {} })).toEqual([]);
+    // A payload that crossed the queue as JSON is read defensively.
+    expect(assignedAgentIdsOf({ assignedAgentIds: ['ok', 3, null] })).toEqual(['ok']);
+    expect(assignedAgentIdsOf({ assignedAgentIds: 'ok' })).toEqual([]);
+    expect(assignedAgentIdsOf(null)).toEqual([]);
+  });
+});
 
 // Every event below is a real shape MEASURED on the dev install's stored
 // cli_invocations.stream_log rows on 2026-09-15 (claude-code 2.1.270, grok 1.0.31, codex

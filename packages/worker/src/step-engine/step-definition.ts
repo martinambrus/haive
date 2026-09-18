@@ -166,6 +166,12 @@ export interface AgentMiningDispatch {
    *  extracted text — seeing it is better and not seeing it is still workable, so
    *  the hard `vision` capability would refuse a provider that can do the job. */
   preferVision?: boolean;
+  /** The repository personas this agent RUNS AS, for `tool_usage.agents.assigned`. Set only
+   *  where the prompt carries no `agentDefinitionGuidance` marker to read the assignment
+   *  from — 03's roster, whose prompt names the persona by title — and never inferred from
+   *  `agentId`, which is content-derived on most steps (`plan-expand-<node>`, `refute-<key>`).
+   *  Unioned with the marker ids at dispatch. */
+  personaIds?: string[];
 }
 
 export interface AgentMiningResult {
