@@ -68,6 +68,12 @@ export const customBundles = pgTable(
     status: customBundleStatusEnum('status').notNull().default('active'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    /** Non-fatal report about the CURRENT extracted tree: the archive members that were dropped
+     *  because they cannot safely live in a repository tree. NOT `lastSyncError`, which means the
+     *  sync FAILED — a bundle carrying a note is `active` and usable, minus those members.
+     *  Declared LAST because `ALTER TABLE ADD COLUMN` appends while `drizzle-kit push` builds in
+     *  declaration order, and `schema-parity` compares the two. */
+    lastSyncNote: text('last_sync_note'),
   },
   (table) => [
     index('custom_bundles_repository_id_idx').on(table.repositoryId),

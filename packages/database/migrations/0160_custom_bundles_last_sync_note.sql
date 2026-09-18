@@ -1,0 +1,15 @@
+-- A non-fatal report about the CURRENT extracted tree of a ZIP/TAR bundle: the archive members
+-- dropped because they cannot safely live in a repository tree (symlinks, device/socket/FIFO
+-- entries, setuid bits, hard links, entries with an unexpected owner). `extractArchive` has
+-- always returned that report and its own contract requires callers to SURFACE it — "a drop that
+-- only reaches a log is a silent change to what the user uploaded" — but the bundle path had
+-- nowhere to put it, so it logged and nothing else. Repositories use `status_message` and
+-- attachments use their expansion notes; this is the bundle equivalent.
+--
+-- NOT last_sync_error, which means the sync FAILED: 06_3-custom-bundles renders that as
+-- "bundle <name> failed:" and the api clears it at sync start, so borrowing it would display a
+-- working bundle as a broken one.
+--
+-- NULL on every existing row, which reads exactly as "nothing was dropped", so no backfill is
+-- needed: handleIngestZip writes the column on each bundle's next ingest.
+ALTER TABLE custom_bundles ADD COLUMN IF NOT EXISTS last_sync_note text;
