@@ -49,10 +49,16 @@ evidence its verdict rests on rather than asserting a state. A fifteenth went to
 record. MEASURED 2026-09-18 by counting blockquote lines in every plan file, so that list is
 complete rather than sampled.
 
-**Two of those verdicts are "landed differently", which is not the same as shipped.**
-`plan-document-import` and `plan-patch-partial-refs` describe mechanisms that are NOT what reached
-the tree, so their bodies must not be implemented as written; the blockquote in each says what
-shipped instead and, for the second, that the original defect has not been re-measured.
+**One verdict is "landed differently", which is not the same as shipped.** `plan-document-import`
+describes a mechanism that is NOT what reached the tree, so its body must not be implemented as
+written; its blockquote says what shipped instead.
+
+**`plan-patch-partial-refs` was corrected from that same verdict to shipped on 2026-09-18**, after
+being re-measured against the applier rather than read off two throw sites. Its remedy is its own —
+`dropUnresolvableOps`, a pre-flight inside `apply-patch.ts` that every agent path reaches — and the
+only thing still unmeasured is whether the reply-loss rate fell in the field. The lesson generalises:
+a verdict read from the PRESENCE of an error path can be exactly backwards, because the path may be
+unreachable for the input the plan was about.
 
 | Plan | Subject | Status |
 |---|---|---|
@@ -102,7 +108,7 @@ shipped instead and, for the second, that the original defect has not been re-me
 | `plan-delete` | Delete a plan | **Shipped.** `web/src/components/plan/plan-delete-dialog.tsx` behind a type-the-name confirmation, `deletePlan` in `lib/api-client.ts`. Its stated recovery path still holds — `.haive-data/plan.json` is committed and `importPlanMirror` restores the nodes with their original ids |
 | `plan-document-import` | Import a plan document, or describe one | **Landed differently.** `from_md` is RETIRED from `planBuildModeSchema`, now `['from_repo', 'greenfield']` (`shared/src/schemas/plan.ts:443`), and a greenfield build must carry a brief or `deferStart` (`:461`). The plan's subject — reaching document import from the UI — was met by greenfield plus attachments, not by wiring `build('from_md')` |
 | `plan-mined-status` | A plan mined from existing code should not read as a to-do list | **Shipped.** `01-plan-build.ts` decides the status a mined node arrives with and returns `status: 'done'` (`:218`), with `minedByThisBuild` at `:174` and `plan-mined-status.test.ts` beside the step |
-| `plan-patch-partial-refs` | One bad reference must not cost a whole reply | **Landed differently — verify before acting.** `apply-patch.ts` still THROWS `PlanPatchError('not_found')` at `:356` and `:692`, so the plan's own mechanism is not what shipped; `shared/src/plan/drop-unresolvable.ts`, with its test, addresses the same defect at a different layer. Whether any case still costs a whole reply has not been re-measured |
+| `plan-patch-partial-refs` | One bad reference must not cost a whole reply | **Shipped; only the field outcome is unconfirmed.** Re-measured 2026-09-18, correcting this row: the remedy is this plan's own, `dropUnresolvableOps` (`apply-patch.ts:233`) as a PRE-FLIGHT at `:709`, and every agent path passes `onUnresolvableRef: 'drop'` through `applyAgentPatch` — `01-plan-build.ts:707`, `02-plan-coverage.ts:572`, `01-plan-chat.ts:259`, `03-plan-sequence.ts:508`. `fail` remains the default for human edits and for the deterministic writers, by design. The throws at `:356`/`:692` are reachable only under `fail`, and `:692` is a different rule — it refuses to resurrect a stale uuid as a NEW node. NOT measured: whether the 27% reply-loss rate fell, since the figures in `ApplyPlanPatchOptions` are the pre-fix measurement plus a counterfactual. Covered by `drop-unresolvable.test.ts` and `plan-canvas-smoke.ts:307`. This row previously claimed a `drop-unresolvable.ts` module, which does not exist |
 | `prancing-metering-quokka` | Ollama Cloud is not free local compute | **Shipped** 2026-08-23. `isOllamaCloudModel` (`shared/src/cli-providers/catalog.ts`) keys on BOTH `-cloud` and `:cloud`, and `cli-versions/ollama-model-prices.ts` scrapes configured CLOUD models only, since a stored rate on a local-basis run would be summed as real spend. Its cited migration is `pre-baseline/0126_ollama_price_feed.sql` — the never-run record folded into the frozen `0000_baseline.sql`, so do not look for `0126` among the live migrations |
 | `smooth-sleeping-flute` | Honour a declared Ruby version; give the Ruby block its own compiler | **Shipped** 2026-08-23 (`39af246` toolchain, `72ebac5` versioning), verified by BUILDING the rendered Dockerfiles rather than by unit test alone. Ruby handling spans all three env-replicate steps — `01-declare-deps`, `02-generate-dockerfile`, `04-verify-environment` |
 
