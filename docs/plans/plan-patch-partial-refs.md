@@ -1,10 +1,38 @@
 # One bad reference must not cost a whole reply
 
-> **LANDED DIFFERENTLY, and not re-measured — verify before acting.** `apply-patch.ts` still THROWS
-> `PlanPatchError('not_found')` at `:356` and `:692`, so the mechanism this plan proposes is not
-> what shipped; `shared/src/plan/drop-unresolvable.ts`, with its own test, addresses the same defect
-> at a different layer. Whether any case still costs a whole reply is unmeasured. Checked
-> 2026-09-18.
+> **SHIPPED — and the remedy is this plan's own, not a substitute.** Re-measured 2026-09-18.
+> `dropUnresolvableOps` (`shared/src/plan/apply-patch.ts:233`) runs as a PRE-FLIGHT at `:709`
+> whenever a caller passes `onUnresolvableRef: 'drop'`, removing the ops that cannot resolve rather
+> than letting the first of them abort the transaction and take the rest with it. Every AGENT path
+> passes it, through `applyAgentPatch` (`_plan-prompt.ts:303`): the expansion fan-out
+> (`01-plan-build.ts:707`), `02-plan-coverage.ts:572`, `01-plan-chat.ts:259` and
+> `03-plan-sequence.ts:508`.
+>
+> **`fail` stays the default, and that is deliberate rather than an oversight** — a person who typed
+> a bad id should be told, not silently trimmed. So the api's UI edits keep it, and so do the
+> deterministic writers: `03-plan-sequence.ts:259` (a chunked ordinal projection its own comment
+> calls "a projection being brought up to date, not a unit of intent"), `:794` (`origin: 'user'`),
+> `02-advisory-decision.ts:170` (a form the person submitted) and `plan/task-link.ts:68` (recording a
+> fact that already happened).
+>
+> Three details are load-bearing. The drop is a PRE-FLIGHT, so nothing half-applies and the
+> transaction's all-or-nothing guarantee is untouched. Refs are normalised ONCE, feeding both the
+> pre-flight and the op loop, because a `node:<uuid>` prefix was itself a measured cause — 11 of 13
+> unknown-reference drops carried one. And the drop ITERATES to a fixed point, so a dropped upsert
+> cascades to the ops naming its temp id; one pass would have kept a link and re-broken the patch.
+>
+> **What is NOT measured is whether the 27% loss rate below actually fell.** The figures in
+> `ApplyPlanPatchOptions` are this plan's own PRE-fix measurement plus a counterfactual ("dropping
+> just those links would have landed 191 nodes"), not a post-fix observation; confirming it needs a
+> large plan build on a live install. Coverage exists at both levels meanwhile —
+> `drop-unresolvable.test.ts` pins the helper (the cascade, a temp-ref chain, the `self` alias, the
+> prefixed-ref composition) and `plan-canvas-smoke.ts:307` drives `applyPlanPatch` with the mode.
+>
+> **Corrected 2026-09-18:** an earlier version of this blockquote called the fix a separate
+> `drop-unresolvable.ts` module "at a different layer", and read the throws at `:356`/`:692` as proof
+> the plan's mechanism had not shipped. There is no such module — only its test file — and those
+> throws are reachable only under `fail`. `:692` is a different rule again: it refuses to resurrect a
+> stale uuid as a NEW node, which is correct and is not this plan's defect.
 
 ## Context
 
