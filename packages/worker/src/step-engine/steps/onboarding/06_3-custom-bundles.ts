@@ -19,6 +19,8 @@ export interface CustomBundleSummary {
   agentCount: number;
   skillCount: number;
   lastSyncError: string | null;
+  /** Non-fatal: archive members the extraction dropped. An `active` bundle can carry one. */
+  lastSyncNote: string | null;
 }
 
 export interface CustomBundlesDetect {
@@ -31,6 +33,10 @@ export interface CustomBundlesApply {
   bundles: CustomBundleSummary[];
   bundleIds: string[];
   warnings: string[];
+  /** Set when a bundle extracted with members dropped. Lifted verbatim by computeDegradedNote,
+   *  which honours a STATED note even from a step that runs no CLI. Optional: apply outputs are
+   *  persisted, so a payload written before this existed must still parse. */
+  degradedNote?: string;
 }
 
 async function loadRepositoryId(ctx: StepContext): Promise<string | null> {
@@ -133,6 +139,7 @@ async function summarizeBundle(
     agentCount,
     skillCount,
     lastSyncError: row.lastSyncError ?? null,
+    lastSyncNote: row.lastSyncNote ?? null,
   };
 }
 
@@ -202,6 +209,9 @@ export const customBundlesStep: StepDefinition<CustomBundlesDetect, CustomBundle
     }
     const ids = extractBundleIdsFromValues(args.formValues, BUNDLES_FIELD_ID);
     const warnings: string[] = [];
+    // Kept apart from `warnings` because only these reach `degradedNote`. Scoping that to the drop
+    // report rather than every warning keeps this change to the one channel that had no home.
+    const dropNotes: string[] = [];
     const bundles: CustomBundleSummary[] = [];
     for (const id of ids) {
       const summary = await summarizeBundle(ctx, repositoryId, id);
@@ -218,6 +228,14 @@ export const customBundlesStep: StepDefinition<CustomBundlesDetect, CustomBundle
           `bundle ${summary.name} (${summary.id}) failed: ${summary.lastSyncError ?? 'unknown'}`,
         );
       }
+      // NOT an `else if`: a bundle whose extraction dropped members is `active` and usable, so its
+      // note is orthogonal to status. That is the case this surface exists for — the drop used to
+      // reach a worker log and nothing else.
+      if (summary.lastSyncNote) {
+        const line = `bundle ${summary.name} (${summary.id}): ${summary.lastSyncNote}`;
+        warnings.push(line);
+        dropNotes.push(line);
+      }
       bundles.push(summary);
     }
     ctx.logger.info(
@@ -230,6 +248,11 @@ export const customBundlesStep: StepDefinition<CustomBundlesDetect, CustomBundle
       },
       '06_3-custom-bundles apply complete',
     );
-    return { bundles, bundleIds: ids, warnings };
+    // `warnings` has no reader in api or web, so a drop reported only there would be exactly as
+    // invisible as the log it replaces — the reading this repo already applied to
+    // `task_attachments.expansion_note`. `degradedNote` is the column step-runner persists for
+    // "succeeded, with caveats" and renders to the person.
+    const degradedNote = dropNotes.length > 0 ? dropNotes.join('; ') : null;
+    return { bundles, bundleIds: ids, warnings, ...(degradedNote ? { degradedNote } : {}) };
   },
 };
