@@ -34,8 +34,12 @@ export interface McpServerSpec {
  *   codex keeps user settings. Merge it with the CLI's own `mcp add` / `mcp remove`.
  * - `volume-merge`: same nesting, but the CLI has no `mcp add` subcommand (gemini), so the merge
  *   is performed on the file itself.
- * - `volume-write`: nested too, but the file holds NOTHING except MCP servers (antigravity), so
- *   Haive owns it outright and writes it whole — into the volume, still never over it.
+ * - `volume-write`: nested too, but the file holds NOTHING except MCP servers, so Haive owns it
+ *   outright and writes it whole — into the volume, still never over it. NO PROVIDER USES THIS
+ *   TODAY: antigravity was its only one and moved to `bind` when agy's real read path was measured
+ *   to sit outside its auth mount. The mode and `writeMcpFileIntoTaskVolume` are kept because both
+ *   are correct and tested, and a CLI whose MCP file genuinely nests inside its auth mount would
+ *   need them again; retiring them is a separate change, not a rider on a defect fix.
  *
  * Bind-mounting a path nested inside a named-volume mount is what this field exists to prevent.
  * Docker materialises the missing mount target INSIDE the volume as a root-owned stub that
@@ -428,17 +432,27 @@ export function buildMcpConfigForCli(
       return null;
 
     case 'antigravity':
-      // Antigravity reads MCP servers from a dedicated file (separate from its
-      // auth token), per docs at ~/.gemini/antigravity-cli/mcp_config.json.
-      // NOTE: a real agy run also created ~/.gemini/config/mcp_config.json —
-      // confirm the actual read path during MCP testing. The path sits inside the
-      // antigravity-cli auth mount, so it is written INTO the volume rather than
-      // bind-mounted over it; the file holds nothing but MCP servers, so Haive
-      // owns it whole and no merge is needed.
+      // MEASURED 2026-09-18 against agy in its own sandbox image, settling the NOTE that used to
+      // sit here ("confirm the actual read path during MCP testing"). `agy mcp add probe /bin/true`
+      // creates ~/.gemini/config/mcp_config.json (docker diff) and `agy mcp list` reads it straight
+      // back; a `find` of ~/.gemini after a real add shows NO antigravity-cli/ directory at all.
+      // The decisive test — a well-formed server placed ONLY at the old
+      // ~/.gemini/antigravity-cli path — answers "No MCP servers configured.", so that path was
+      // never read and every antigravity run has been getting no MCP servers whatever. A
+      // path-only fix would not have worked either: writeMcpFileIntoTaskVolume SKIPS a path
+      // outside the auth mount with a warn and reports success, so it would have gone silently
+      // inert.
+      //
+      // `bind`, not `volume-write`: ~/.gemini/config sits OUTSIDE antigravity's only auth mount
+      // (`authConfigPaths: ['~/.gemini/antigravity-cli']`), which is exactly the condition `bind`
+      // exists for, and it makes the config per-invocation — so a `toolProfile: 'none'` run clears
+      // it by absence instead of racing one shared file. No cliArgs: agy discovers the file
+      // itself. The content shape needs no change either — agy accepts `{command, args}` and
+      // treats a missing `disabled` as enabled (measured at the real read path).
       return {
-        path: `${targetHome}/.gemini/antigravity-cli/mcp_config.json`,
+        path: `${targetHome}/.gemini/config/mcp_config.json`,
         format: 'json',
-        delivery: 'volume-write',
+        delivery: 'bind',
         content: JSON.stringify({ mcpServers: serversToJsonObject(servers, userServers) }, null, 2),
       };
 
