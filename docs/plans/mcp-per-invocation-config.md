@@ -1,15 +1,28 @@
 # Per-invocation MCP configuration
 
-> **Not started — and BLOCKED: the cheap mechanism this plan assumed does not exist.** Planned
-> 2026-09-18 against `main` at `54bca265`; the levers were re-probed exhaustively the same day and
-> every one of them is closed except home relocation, which is destructive. Read "The levers, as
-> finally measured" before anything else here — the Decisions below are preserved as written so the
-> reasoning is auditable, but Decision 1's mechanism is REFUTED and Decision 2's cost is now the
-> only route rather than a caveat on a cheaper one.
+> **Not started, SHELVED 2026-09-18, and BLOCKED on mechanism.** Planned 2026-09-18 against `main`
+> at `54bca265`; the levers were re-probed exhaustively the same day and every one of them is closed
+> except home relocation, which is destructive. Read "The levers, as finally measured" before
+> anything else here — the Decisions below are preserved as written so the reasoning is auditable,
+> but Decision 1's mechanism is REFUTED and Decision 2's cost is now the only route rather than a
+> caveat on a cheaper one.
 >
 > This plan still exists for a good reason: the alternative on the table was a choice between two
 > wrong behaviours (see "Why not either half-measure"), and that analysis is unaffected. What is
-> unresolved is the mechanism, and therefore whether the work is worth its cost at all.
+> unresolved is the mechanism, and therefore whether the work is worth its cost at all. The user's
+> call, taken once the refutation was in, was to shelve rather than accept relocation's cost or
+> re-scope the work: the race stays documented rather than fixed.
+>
+> **Reopening condition, checkable rather than a judgement.** This comes off the shelf when codex or
+> grok ships any ONE of — a per-invocation config-FILE pointer (a `--config-file` or `--mcp-config`
+> equivalent to what the claude family already has), any flag that scopes MCP servers for a single
+> run, or REPLACE rather than MERGE semantics for `mcp_servers` on `-c` / `-p`. Until one of those
+> appears, relocating the config home is the only mechanism and it discards cross-invocation state.
+>
+> **Do not re-probe the closed levers.** Read "The levers, as finally measured" and test only the one
+> thing a new release would have changed. Three successive verdicts were recorded on the `-c`
+> override alone, and the first two were wrong because the probe ran against an EMPTY home, where an
+> override can only demonstrate addition.
 
 ## Context
 
