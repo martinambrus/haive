@@ -1,5 +1,11 @@
 # Import a plan document, or describe one
 
+> **LANDED DIFFERENTLY — do not implement this as written.** `from_md` is RETIRED from
+> `planBuildModeSchema`, which is now `['from_repo', 'greenfield']`
+> (`shared/src/schemas/plan.ts:443`), and a greenfield build must carry a brief or `deferStart`
+> (`:461`). This plan's subject — reaching document import from the UI — was met by greenfield plus
+> attachments rather than by wiring `build('from_md')`. Verified against the tree 2026-09-18.
+
 ## Context
 
 The plan builder has three server-side entry points and the UI exposes one.

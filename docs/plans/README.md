@@ -17,19 +17,42 @@ after 30 days.
 - **A shipped plan stays here as a record.** It is marked below and in a status blockquote under its
   own H1. Do not re-implement from a plan marked shipped.
 
-## Status — 2026-08-21
+## Status — rows verified 2026-08-21, table completed 2026-09-18
 
-Verified against the tree on this date, not taken from the plan bodies.
+Verified against the tree, not taken from the plan bodies.
 
-**This table is NOT a complete backlog, and two of its rows were found wrong.** MEASURED 2026-09-18:
-`docs/plans/` holds 48 plan files while this table has 29 rows, so ~19 plans have no status row at
-all — and of ten of those sampled, seven carry no status blockquote under their own H1 either
-(`blank-repo-scaffold`, `cli-prompt-delivery`, `curious-drifting-lantern`, `glistening-jumping-bee`,
-`impact-view-readable-radius`, `plan-delete`, `smooth-sleeping-flute`), so their state is recorded
-nowhere at all. Establishing each one needs its own verification against the tree, which is not
-done. Until it is: read an ABSENT row as **unknown**, never as "not started", and re-verify any row
-present here before acting on it — the `parsed-churning-yeti` and `replicated-zooming-beacon` rows
-were both stale when checked on that date.
+**This table is COMPLETE as of 2026-09-18 — every plan file has a row.** MEASURED that day:
+`docs/plans/` holds 49 plan files and this table has 49 rows, the last 19 added after verifying each
+against the tree. The reverse check is empty too, so no row names a file that does not exist. The
+earlier wording here said 48 files against 29 rows; both counts were stale. Rows are in historical
+order rather than alphabetical, and the 19 added on that date sit together at the end.
+
+**A plan's own status line is NOT evidence, in either direction.** `amber-provider-verdict-heron`
+read "IN PROGRESS, started 2026-08-24" with its checklist still unchecked while every part of the
+work was in the tree — and it shipped at `StepTerminal.tsx`, not the `CliStreamViewer.tsx` its
+checklist names, so a grep for the planned component reports the feature missing. Two rows were
+found stale in the other direction on the same date (`parsed-churning-yeti`,
+`replicated-zooming-beacon`). Re-verify any row here before acting on it.
+
+**Every plan this pass touched now carries a status blockquote.** Fourteen were written on
+2026-09-18 — twelve that had none at all (`blank-repo-scaffold`, `cli-prompt-delivery`,
+`curious-drifting-lantern`, `curious-drifting-lantern-RESUME`, `glistening-jumping-bee`,
+`impact-view-readable-radius`, `plan-build-lost-subtree`, `plan-coverage-check`, `plan-delete`,
+`plan-document-import`, `plan-mined-status`, `plan-patch-partial-refs`) and two that recorded theirs
+as a bare `STATUS:` line (`plan-chat-unread-badges`, `smooth-sleeping-flute`) — each naming the
+evidence its verdict rests on rather than asserting a state. A fifteenth went to
+`parsed-churning-yeti`, which is shipped and so wants one under the convention above.
+
+**Five plans carry no blockquote, and that is deliberate rather than an omission:**
+`kind-riding-dream`, `patient-pinning-kernighan`, `purring-marinating-peacock`,
+`serialized-chasing-thacker` and `translator-module` are all not started, so this table is the whole
+record. MEASURED 2026-09-18 by counting blockquote lines in every plan file, so that list is
+complete rather than sampled.
+
+**Two of those verdicts are "landed differently", which is not the same as shipped.**
+`plan-document-import` and `plan-patch-partial-refs` describe mechanisms that are NOT what reached
+the tree, so their bodies must not be implemented as written; the blockquote in each says what
+shipped instead and, for the second, that the original defect has not been re-measured.
 
 | Plan | Subject | Status |
 |---|---|---|
@@ -63,6 +86,25 @@ were both stale when checked on that date.
 | `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | **SHIPPED** 2026-09-08, all five slices. Exercised for real: a published v0.1.0 install was upgraded to v0.1.2, and a deliberately failed health gate rolled back to v0.1.0 with service restored. Four defects were found by running it that reading it did not surface |
 | `toasty-percolating-kernighan` | Per-call agent isolation | Not started; planned 2026-09-14 and reviewed against the code the same day. Read-only CLI invocations stop loading every repository agent definition and get the assigned persona pasted instead; `rippling-wibbling-puffin` Phase 3.1 builds on it |
 | `translator-module` | Translator — resellable module | Not started |
+| `amber-provider-verdict-heron` | Persistent provider-verdict banner below the CLI terminal | **Shipped**, and its own status line said otherwise — corrected 2026-09-18. `failure-class.ts:215` carries `content_filter: 'Provider refused the prompt (content filter)'` with the refusal pattern at `:295` anchored on refusal-specific wording rather than generic words; `describeInvocationStatus` (`web/src/components/terminal/cli-stream-status.ts`) has its own unit test; `StepTerminal.tsx:536-544` renders the persistent amber block, reading the invocation row rather than the stream so it survives the CLI ending and the 600s stream expiry. It landed at `StepTerminal.tsx`, NOT the `CliStreamViewer.tsx` its checklist names |
+| `anointing-gatekeeping-ibex` | First-admin onboarding + registration gating | **Shipped in full** 2026-09-09, verified 2026-09-18: `registration-status` in `api/src/routes/auth.ts`, `CONFIG_KEYS.REGISTRATION_MODE` (`config.service.ts:129`) with `REGISTRATION_MODES` at `:619`, migration `0153_user_invites.sql`, and `/admin/users` |
+| `blank-repo-scaffold` | A blank repo arrives ready, and stops asking to be onboarded | **Shipped.** `'blank'` is a first-class repository `source` (`schema/repos.ts:30`) and `repo/clone.ts` scaffolds it; the repo-queue INIT job creates the storage dir, `git init`s it and lands one commit, which is what makes worktrees and the `.haive-data/` mirror work on a project that does not exist yet |
+| `calibrating-adversarial-mongoose` | QA reviewer-CLI benchmark: the persona x CLI matrix | **Findings record (part 1); part 2 shipped.** Verifier attribution is in the tree — 08d carries the per-lens verifier panel and `verificationTiers`, and 08d2 folds only findings a verifier actually executed and could not reproduce (`filteredCount`). The xhigh re-run it defers to ~2026-09-01 was never recorded as run |
+| `cli-prompt-delivery` | A large prompt must not crash the CLI that receives it | **Shipped.** `cli-adapters/prompt-delivery.ts` holds `MAX_ARG_BYTES = 131_072` (Linux `MAX_ARG_STRLEN`) and the measured failure it exists for — a Codex plan build losing 26 of 47 agents to `E2BIG`, 12 of 12 in two consecutive waves — with oversized prompts routed to stdin |
+| `curious-drifting-lantern` | Follow-ups from the agent-memory / spec-handoff verification run | **Not a single-status plan: a findings register, F1-F9, with per-item status inline.** Six fixed (`6e72b08`, `d5162d5`, `1243213`, `53aa478`); F2 NARROWED (`d73bb55`) with one sub-item still open whose fix was attempted and REVERTED (`3ac59bd`) under an explicit do-not-retry note; F3 a coverage gap needing no code change; F5 a process note; F8 root-caused and not fixed. Read the per-item headings, never a whole-plan verdict |
+| `curious-drifting-lantern-RESUME` | Resume note for a paused DAG verification run | **Not a plan.** An operational note from a 2026-08-21 power cut recording that global pause was left ON and how to resume. Kept as a record; nothing to implement |
+| `dag-timeout-ladder-gap` | DAG executor cannot climb the timeout ladder | **Shipped** 2026-08-24. `overrideOrLearned` and `escalatedTimeoutMs` live in `step-engine/dispatch-timeout.ts` with `dispatch-timeout.test.ts` beside it, consumed by `dag-executor.ts`. The escalation is written to the STEP rather than the issue, so a fan-out's wall-clock ceiling stays computable |
+| `glistening-jumping-bee` | Per-agent browser tabs, and reclaiming the tabs agents leave | **Shipped.** `BROWSER_TAB_DISCIPLINE` in `sandbox/mcp-surface.ts`; `closeExtraBrowserTabs` called from `step-runner.ts`, `app-runner.ts` and `ddev-runner.ts`. The tab it keeps is the one RECORDED as the human's, because three separate inference attempts were measured lying |
+| `impact-view-readable-radius` | Impact view: a readable radius, and a diagram that fits | **Shipped.** `IMPACT_DIAGRAM_MAX_NODES = 40` at `shared/src/plan/impact.ts:78`, `reversed` threaded through the walk (`:41`, `:157`, `:166`) with `viaNodeId` on each hop; rendered by `plan-impact-section.tsx`, `plan-impact-groups.ts` and `plan-impact-list.tsx` |
+| `plan-build-lost-subtree` | A plan build must not lose a subtree in silence | **Shipped.** `01-plan-build.ts` states the fix as an invariant — nodes beyond the cap "are not dropped — they stay on the frontier for the next wave" — with waves riding `MiningWaveError` rather than `loop`, and the reason `loop` cannot work recorded beside it |
+| `plan-chat-unread-badges` | Plan chat: unread replies, badges, notification routing | **Shipped** across `2e421548` (read table), `e5e36165` (feed exclusion + unread endpoint) and `6355ae84` (badges, divider, filter). Both tests it names exist: `api/test/plan-chat-surfaces-smoke.ts` and `web/src/components/plan/plan-chat-turn.test.ts` |
+| `plan-coverage-check` | Coverage check: what the document says that the plan does not | **Shipped.** `steps/plan/02-plan-coverage.ts` plus `plan-coverage-scan.ts`, with `plan-coverage-scan.test.ts` and `plan-coverage-step.test.ts` beside them. The plan's own warning stands: two of the three "missing identifiers" that prompted it were not gaps |
+| `plan-delete` | Delete a plan | **Shipped.** `web/src/components/plan/plan-delete-dialog.tsx` behind a type-the-name confirmation, `deletePlan` in `lib/api-client.ts`. Its stated recovery path still holds — `.haive-data/plan.json` is committed and `importPlanMirror` restores the nodes with their original ids |
+| `plan-document-import` | Import a plan document, or describe one | **Landed differently.** `from_md` is RETIRED from `planBuildModeSchema`, now `['from_repo', 'greenfield']` (`shared/src/schemas/plan.ts:443`), and a greenfield build must carry a brief or `deferStart` (`:461`). The plan's subject — reaching document import from the UI — was met by greenfield plus attachments, not by wiring `build('from_md')` |
+| `plan-mined-status` | A plan mined from existing code should not read as a to-do list | **Shipped.** `01-plan-build.ts` decides the status a mined node arrives with and returns `status: 'done'` (`:218`), with `minedByThisBuild` at `:174` and `plan-mined-status.test.ts` beside the step |
+| `plan-patch-partial-refs` | One bad reference must not cost a whole reply | **Landed differently — verify before acting.** `apply-patch.ts` still THROWS `PlanPatchError('not_found')` at `:356` and `:692`, so the plan's own mechanism is not what shipped; `shared/src/plan/drop-unresolvable.ts`, with its test, addresses the same defect at a different layer. Whether any case still costs a whole reply has not been re-measured |
+| `prancing-metering-quokka` | Ollama Cloud is not free local compute | **Shipped** 2026-08-23. `isOllamaCloudModel` (`shared/src/cli-providers/catalog.ts`) keys on BOTH `-cloud` and `:cloud`, and `cli-versions/ollama-model-prices.ts` scrapes configured CLOUD models only, since a stored rate on a local-basis run would be summed as real spend. Its cited migration is `pre-baseline/0126_ollama_price_feed.sql` — the never-run record folded into the frozen `0000_baseline.sql`, so do not look for `0126` among the live migrations |
+| `smooth-sleeping-flute` | Honour a declared Ruby version; give the Ruby block its own compiler | **Shipped** 2026-08-23 (`39af246` toolchain, `72ebac5` versioning), verified by BUILDING the rendered Dockerfiles rather than by unit test alone. Ruby handling spans all three env-replicate steps — `01-declare-deps`, `02-generate-dockerfile`, `04-verify-environment` |
 
 ## Cross-plan dependencies
 

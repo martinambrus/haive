@@ -1,5 +1,10 @@
 # Impact view: a readable radius, and a diagram that fits
 
+> **SHIPPED.** `IMPACT_DIAGRAM_MAX_NODES = 40` at `shared/src/plan/impact.ts:78`, with `reversed`
+> threaded through the walk (`:41`, `:157`, `:166`) and `viaNodeId` on every hop; the browser renders
+> it through `plan-impact-section.tsx`, `plan-impact-groups.ts` and `plan-impact-list.tsx`. Verified
+> against the tree 2026-09-18.
+
 ## Context
 
 The Impact tab answers "if I change this, what else must change?" by walking the

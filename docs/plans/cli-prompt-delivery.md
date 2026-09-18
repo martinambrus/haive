@@ -1,5 +1,10 @@
 # A large prompt must not crash the CLI that receives it
 
+> **SHIPPED.** `cli-adapters/prompt-delivery.ts` holds `MAX_ARG_BYTES = 131_072` — Linux
+> `MAX_ARG_STRLEN`, not configurable and not per-distro — and records the measured failure it exists
+> for: a Codex plan build lost 26 of 47 agents to `E2BIG`, 12 of 12 in two consecutive waves.
+> Oversized prompts are delivered over stdin. Verified against the tree 2026-09-18.
+
 ## Context
 
 A Codex plan build failed 26 of its 47 finished agents, all with the same error:

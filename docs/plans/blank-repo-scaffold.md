@@ -1,5 +1,10 @@
 # A blank repo arrives ready, and stops asking to be onboarded
 
+> **SHIPPED.** `'blank'` is a first-class repository `source` (`schema/repos.ts:30`) and
+> `repo/clone.ts` scaffolds it: the repo-queue INIT job creates the storage dir, `git init`s it and
+> lands one commit, which is what makes worktrees, task attachments and the `.haive-data/` mirror
+> work on a project that does not exist yet. Verified against the tree 2026-09-18.
+
 ## Context
 
 Creating an empty repository leaves it with a "not onboarded yet" badge and an

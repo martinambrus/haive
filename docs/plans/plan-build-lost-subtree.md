@@ -1,5 +1,10 @@
 # A plan build must not lose a subtree in silence
 
+> **SHIPPED.** `01-plan-build.ts` states the fix as an invariant — nodes beyond the cap "are not
+> dropped — they stay on the frontier for the next wave" — with waves riding `MiningWaveError`
+> rather than `loop`, and the reason `loop` cannot work recorded beside it. Verified against the
+> tree 2026-09-18.
+
 ## Context
 
 An audit of the `vareska` plan against the 1,919-line document it was built from

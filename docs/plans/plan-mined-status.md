@@ -1,5 +1,9 @@
 # A plan mined from existing code should not read as a to-do list
 
+> **SHIPPED.** `01-plan-build.ts` decides the status a mined node arrives with and returns
+> `status: 'done'` (`:218`), with `minedByThisBuild` at `:174` and `plan-mined-status.test.ts`
+> beside the step. Verified against the tree 2026-09-18.
+
 ## Context
 
 Building a plan from a repository's knowledge base produces a map of code that

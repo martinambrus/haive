@@ -1,5 +1,11 @@
 # One bad reference must not cost a whole reply
 
+> **LANDED DIFFERENTLY, and not re-measured — verify before acting.** `apply-patch.ts` still THROWS
+> `PlanPatchError('not_found')` at `:356` and `:692`, so the mechanism this plan proposes is not
+> what shipped; `shared/src/plan/drop-unresolvable.ts`, with its own test, addresses the same defect
+> at a different layer. Whether any case still costs a whole reply is unmeasured. Checked
+> 2026-09-18.
+
 ## Context
 
 The previous fixes made plan-build failures visible for the first time. What
