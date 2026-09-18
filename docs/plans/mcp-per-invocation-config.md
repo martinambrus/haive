@@ -1,9 +1,15 @@
 # Per-invocation MCP configuration
 
-> **Not started** — planned 2026-09-18 against `main` at `54bca265`, with every lever below probed
-> against the live binaries in their own sandbox images and every provider fact taken from the dev
-> install the same day. This plan exists because the alternative on the table was a choice between
-> two wrong behaviours; see "Why not either half-measure".
+> **Not started — and BLOCKED: the cheap mechanism this plan assumed does not exist.** Planned
+> 2026-09-18 against `main` at `54bca265`; the levers were re-probed exhaustively the same day and
+> every one of them is closed except home relocation, which is destructive. Read "The levers, as
+> finally measured" before anything else here — the Decisions below are preserved as written so the
+> reasoning is auditable, but Decision 1's mechanism is REFUTED and Decision 2's cost is now the
+> only route rather than a caveat on a cheaper one.
+>
+> This plan still exists for a good reason: the alternative on the table was a choice between two
+> wrong behaviours (see "Why not either half-measure"), and that analysis is unaffected. What is
+> unresolved is the mechanism, and therefore whether the work is worth its cost at all.
 
 ## Context
 
@@ -43,9 +49,33 @@ Per-scope serialization (`37231660`) removed interleaved writes but cannot choos
 | **grok** | `cli-merge` | **`GROK_HOME`** — `grok inspect` prints `User: /root/.grok/config.toml` by default and `User: (none)` with it set; `XDG_CONFIG_HOME` is ignored |
 | gemini | `volume-merge` | **unmeasurable here** — no sandbox image and no `cli_providers` row exist on this install |
 
-Neither shape previously proposed is the answer: not an argv suppression (`-c mcp_servers={}` was a
-guess) and not a wholesale auth-volume copy. It is a config-home environment variable — but that is
-**not free**, see Decision 2.
+## The levers, as finally measured
+
+Re-probed 2026-09-18 against the live binaries. **Everything except home relocation is closed**, and
+the table above should be read through this one:
+
+| Lever | Verdict |
+|---|---|
+| `-c mcp_servers={}` | **MERGES — cannot narrow.** A `config.toml` holding `[mcp_servers.fromfile]` still reports `MCP servers 1` under the empty override |
+| `-c mcp_servers={other={…}}` | **MERGES.** File's server plus the override's gives `MCP servers 2` |
+| `-p/--profile <name>` | **MERGES.** `codex mcp list -p narrow` lists the base file's server AND the profile's. (`--profile` is rejected by `codex doctor` — it applies only to runtime commands and `codex mcp`, so probe it through one of those) |
+| `--tools` / `--disallowed-tools` | **grok only, and "Built-in tools" only** per its own help, so neither reaches MCP servers. codex has neither flag |
+| codex feature flags | 140 of them; **none gates MCP loading** (`enable_mcp_apps`, `mcp_2026_07_28`, `non_prefixed_mcp_tool_names` are unrelated) |
+| grok config override | **none exists.** Its `-c` is `--continue`; full flag list enumerated |
+| `CODEX_HOME` / `GROK_HOME` | **the only thing that works** — and it relocates the whole state tree, see Decision 2 |
+
+An earlier revision of this plan named `-c mcp_servers={}` as "a guess" and the config-home variable
+as the answer. Both judgements were wrong in the same way: the argv override was first tested
+against an EMPTY home, where an override can only ever demonstrate ADDITION. The experiment that
+mattered was against a POPULATED file, and it shows the override unions rather than replaces.
+
+**So there is no cheap per-invocation mechanism on either provider.** What remains is home
+relocation, whose cost Decision 2 describes and which the volume inspection argues against: a codex
+task volume holds `auth.json`, `config.toml` AND five live SQLite databases with `-wal`/`-shm`
+sidecars, `thread_history_1.sqlite`, `thread-writer-locks/`, `session_index.jsonl`, `sessions/`,
+`shell_snapshots/` and `installation_id`. A fresh home gives an invocation none of that state, and
+copying it means cloning hot SQLite while a sibling invocation may be mid-write. grok is the same
+shape, with `.lock` files that say concurrent access to that home is expected.
 
 ## THE CONSTRAINT THAT SHAPES EVERYTHING
 
@@ -100,8 +130,13 @@ per-invocation config, exactly as `bind` already does, and clears nothing shared
 
 ## Decisions
 
-1. **Per-invocation config for codex and grok via their config-home env var.** Not argv suppression
-   — probed and rejected.
+1. ~~**Per-invocation config for codex and grok via their config-home env var.** Not argv
+   suppression — probed and rejected.~~ **REFUTED — see "The levers, as finally measured".** The
+   config-home variable is the only mechanism that works, and argv suppression was rejected on a
+   flawed experiment; re-probed, the argv route merges rather than replaces, so it cannot narrow a
+   surface either. Both halves of this decision were wrong. Whether to accept home relocation's
+   cost, re-scope to stopping the destructive clear, or shelve the work is an open decision, not
+   something this plan should presume.
 2. **The per-invocation home must be SEEDED with auth**, because the credentials live under the same
    root (`codex doctor` reports config.toml, sqlite home and every state DB under `CODEX_HOME`;
    `catalog.ts` lists `authConfigPaths: ['~/.codex']`). `task-auth-volume.ts:485-497` performs the
