@@ -1,9 +1,15 @@
 # Agent memory + spec handoff optimization
 
-> **Not started**, re-verified 2026-08-21: no `task-ledger.ts`, `_doc-view.ts` or
-> `_spec-artifact.ts` exists, and all three defects below were re-checked and still hold. The
-> anchors in this file were corrected on that date; treat any line number as a hint and resolve
-> by symbol name.
+> **Not started** as of 2026-08-21 — but the grounds recorded then are now WRONG, and the verdict is
+> unverified. That entry read "no `task-ledger.ts`, `_doc-view.ts` or `_spec-artifact.ts` exists";
+> **all three exist today** (`step-engine/task-ledger.ts`, `step-engine/steps/_doc-view.ts`,
+> `step-engine/steps/workflow/_spec-artifact.ts`). And `REVIEW_FANOUT_DISTILL` /
+> `condenseSpecForReview` — the mechanism defect 1 below is written against — are absent from the
+> entire `packages/` tree. Neither fact settles the verdict: a vanished mechanism could mean fixed,
+> refactored or removed. RE-CHECKED 2026-09-18 to that depth ONLY, so before implementing anything
+> here, re-verify each of the three defects below against the tree by symbol name rather than
+> trusting this header. The anchors in this file were corrected on 2026-08-21; treat any line number
+> as a hint and resolve by symbol name.
 
 ## Context
 

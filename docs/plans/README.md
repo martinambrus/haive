@@ -21,6 +21,16 @@ after 30 days.
 
 Verified against the tree on this date, not taken from the plan bodies.
 
+**This table is NOT a complete backlog, and two of its rows were found wrong.** MEASURED 2026-09-18:
+`docs/plans/` holds 48 plan files while this table has 29 rows, so ~19 plans have no status row at
+all — and of ten of those sampled, seven carry no status blockquote under their own H1 either
+(`blank-repo-scaffold`, `cli-prompt-delivery`, `curious-drifting-lantern`, `glistening-jumping-bee`,
+`impact-view-readable-radius`, `plan-delete`, `smooth-sleeping-flute`), so their state is recorded
+nowhere at all. Establishing each one needs its own verification against the tree, which is not
+done. Until it is: read an ABSENT row as **unknown**, never as "not started", and re-verify any row
+present here before acting on it — the `parsed-churning-yeti` and `replicated-zooming-beacon` rows
+were both stale when checked on that date.
+
 | Plan | Subject | Status |
 |---|---|---|
 | `amber-fencing-hopper` | Onboarding scope + LSP + mirror + retrieval | **In progress.** Slices 1-2 done (`e0bee51`); slice 3 partial (`5ca82ac`, 3b/3d open); slice 4 not started. Per-slice status is in its header blockquote. |
@@ -39,12 +49,12 @@ Verified against the tree on this date, not taken from the plan bodies.
 | `frictionless-bootstrapping-otter` | One-line install (RUN-IT) | Not started; extended 2026-09-07 with the install-time channel, macOS as a first-class RUN-IT target, and a Docker Desktop Extension as the no-terminal path |
 | `kind-riding-dream` | Deep project analysis — resellable module | Not started; depends optionally on `purring-marinating-peacock` phase 2b |
 | `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | Not started |
-| `parsed-churning-yeti` | Project plan canvas | Not started |
+| `parsed-churning-yeti` | Project plan canvas | **Shipped** `7a217e57` (2026-08-25, persistence layer + blank repositories). Corrected 2026-09-18: this row still read "Not started" while `packages/database/src/schema/plan.ts` exists and `AGENTS.md` documents the canvas in depth — the row predated the work |
 | `patient-pinning-kernighan` | Runtime versions the generator ignores (Go/Rust/Ruby, DDEV node) | Not started; three different failures — Go is frozen, Rust/Ruby drift, DDEV node is detected then dropped — so one blanket fix would trade one for another |
 | `nimble-browsing-lovelace` | User-selectable browser type + version | **Shipped** `dde9c36` / `bc1b209` / `abb5609` for Chrome + Edge, each gated on a verified CDP handshake. Opera REJECTED on evidence — release builds do not expose CDP. Firefox excluded as a COST decision, not an impossibility — @playwright/mcp drives firefox and webkit |
 | `purring-marinating-peacock` | Multi-model per step (fan-out + consolidator) | Not started; Phases 1-2 BACKLOGGED on a hand-merge measurement that failed its reopening condition. The fan-out unpin is carved out as the one piece worth building |
 | `quiet-reaping-ritchie` | DevTools egress hardening follow-ups | **Shipped** `c094102` (item 1, runner `--init`) and `e066d26` (item 2, MCP body diversion), both verified against real traffic. Two browser defects found while verifying, plus a poisoned-npx-cache defect found with them, are fixed in `b7884e6` / `0580c51` / `507cb84`. Both bandwidth caveats are retired: nothing here passes `--no-cache`, and the apt cost is once per host, not once per template |
-| `replicated-zooming-beacon` | Agent memory + spec handoff optimisation | Not started; all three defects re-verified as still real |
+| `replicated-zooming-beacon` | Agent memory + spec handoff optimisation | Not started, but its EVIDENCE is stale and its verdict is unverified. Corrected 2026-09-18: the header's grounds were "no `task-ledger.ts`, `_doc-view.ts` or `_spec-artifact.ts` exists" and all three DO exist, while `REVIEW_FANOUT_DISTILL` and `condenseSpecForReview` — the mechanism its first defect describes — are absent from the whole tree. Whether the three defects still hold needs its own pass; do not read this row either way |
 | `rippling-wibbling-puffin` | Modular (user-definable) task types | Not started |
 | `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; companion to the above, neither supersedes the other |
 | `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started. Delivery to a published-image install DECIDED 2026-09-07: per-customer api+worker images built by the vendor; `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` inherit it |
