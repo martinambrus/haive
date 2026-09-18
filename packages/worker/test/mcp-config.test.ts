@@ -343,10 +343,15 @@ describe('buildMcpConfigForCli', () => {
     expect(parsed.mcpServers.filesystem).toBeDefined();
   });
 
-  it('emits antigravity JSON to ~/.gemini/antigravity-cli/mcp_config.json with no cliArgs', () => {
+  // MEASURED against agy itself: it writes and reads ~/.gemini/config/mcp_config.json, and a
+  // server placed only at the old ~/.gemini/antigravity-cli path is not seen at all. That path
+  // also sits outside antigravity's auth mount, so the delivery is `bind` (per-invocation) rather
+  // than `volume-write`, whose writer skips an out-of-mount path silently.
+  it('emits antigravity JSON to ~/.gemini/config/mcp_config.json as a bind, with no cliArgs', () => {
     const config = buildMcpConfigForCli('antigravity', sampleServers);
-    expect(config?.path).toBe('/home/claude/.gemini/antigravity-cli/mcp_config.json');
+    expect(config?.path).toBe('/home/claude/.gemini/config/mcp_config.json');
     expect(config?.format).toBe('json');
+    expect(config?.delivery).toBe('bind');
     expect(config?.cliArgs).toBeUndefined();
     const parsed = JSON.parse(config!.content);
     expect(parsed.mcpServers.filesystem).toBeDefined();
@@ -439,7 +444,7 @@ describe('buildMcpConfigForCli', () => {
     ['gemini', 'volume-merge'],
     ['codex', 'cli-merge'],
     ['grok', 'cli-merge'],
-    ['antigravity', 'volume-write'],
+    ['antigravity', 'bind'],
   ] as const)('%s delivers its mcp config as %s', (cli, delivery) => {
     expect(buildMcpConfigForCli(cli, sampleServers, '/home/node')?.delivery).toBe(delivery);
   });

@@ -54,12 +54,13 @@ describe('toolProfile: none', () => {
   });
 });
 
-// Wiring nothing is not the same as leaving nothing wired. Only the claude-family `bind`
-// delivery is self-clearing, because its file is written per invocation; gemini, codex, grok
-// and antigravity write INTO the per-task auth volume, which dies with the TASK. So an earlier
-// full-surface dispatch in the same task — and `00-model-health` is index 0, so that is the
-// normal case — leaves its servers on disk for a `none` invocation whose prompt says none are
-// wired.
+// Wiring nothing is not the same as leaving nothing wired. A `bind` delivery is self-clearing,
+// because its file is written per invocation; gemini, codex and grok write INTO the per-task auth
+// volume, which dies with the TASK. So an earlier full-surface dispatch in the same task — and
+// `00-model-health` is index 0, so that is the normal case — leaves its servers on disk for a
+// `none` invocation whose prompt says none are wired. Antigravity USED to be in that list: it
+// moved to `bind` once agy's real read path was measured to sit outside its auth mount, so it is
+// now self-clearing too.
 describe('toolProfile: none clears a volume-backed surface', () => {
   const clear = (provider: string) =>
     resolveMcpExtraFiles(
@@ -95,15 +96,14 @@ describe('toolProfile: none clears a volume-backed surface', () => {
     });
   }
 
-  it('writes an empty config file for antigravity', async () => {
+  // Antigravity is `bind` now, so it clears by ABSENCE like the claude family rather than having
+  // an empty file written into the auth volume. Writing one there was never effective anyway: the
+  // path was outside the auth mount, where the volume writer skips with a warn and reports success.
+  it('touches no volume for antigravity, which clears by absence', async () => {
     await clear('antigravity');
-    expect(writeMcpFileIntoTaskVolume).toHaveBeenCalledTimes(1);
-    const [taskId, provider, filePath, content] = vi.mocked(writeMcpFileIntoTaskVolume).mock
-      .calls[0]!;
-    expect(taskId).toBe('task-1');
-    expect(provider).toBe('antigravity');
-    expect(filePath).toContain('mcp_config.json');
-    expect(JSON.parse(content as string)).toEqual({ mcpServers: {} });
+    expect(mergeGeminiMcpIntoSettings).not.toHaveBeenCalled();
+    expect(mergeCliMcpIntoTaskVolume).not.toHaveBeenCalled();
+    expect(writeMcpFileIntoTaskVolume).not.toHaveBeenCalled();
   });
 
   it('does nothing for a provider that wires no MCP at all', async () => {
