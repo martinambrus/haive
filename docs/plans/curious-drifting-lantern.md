@@ -1,5 +1,12 @@
 # Follow-ups from the agent-memory / spec-handoff verification run
 
+> **NOT a single-status plan — a findings register (F1-F9) whose status is PER ITEM, inline below.**
+> Six are fixed (`6e72b08`, `d5162d5`, `1243213`, `53aa478`); F2 is NARROWED (`d73bb55`) with one
+> sub-item still open whose fix was attempted and REVERTED (`3ac59bd`) under an explicit
+> do-not-retry note; F3 is a coverage gap needing no code change; F5 is a process note; F8 is
+> root-caused and not fixed. Read the per-item headings rather than looking for a whole-plan
+> verdict. Checked 2026-09-18.
+
 ## Context
 
 Findings collected while verifying `replicated-zooming-beacon.md` (commits `c06cefe`,

@@ -1,5 +1,10 @@
 # Coverage check: what the document says that the plan does not
 
+> **SHIPPED.** `steps/plan/02-plan-coverage.ts` plus `plan-coverage-scan.ts`, with
+> `plan-coverage-scan.test.ts` and `plan-coverage-step.test.ts` beside them. The warning in the
+> Context below still stands: two of the three "missing identifiers" that prompted this were not
+> gaps at all. Verified against the tree 2026-09-18.
+
 ## Context
 
 A `from_md` plan is built from an authoritative document, and nothing verifies

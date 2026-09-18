@@ -1,5 +1,9 @@
 # Resume note — DAG verification run
 
+> **NOT a plan — an operational resume note**, written when a storm cut power on 2026-08-21 with
+> global pause left ON. Kept as the record of that run; there is nothing here to implement, and the
+> pause it describes is long since lifted. Checked 2026-09-18.
+
 Paused 2026-08-21 ~21:35Z (storm / power). Global pause is ON
 (`config:orchestrator:globalPause` = true). Nothing will be picked up until it is
 turned off.

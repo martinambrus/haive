@@ -1,5 +1,11 @@
 # Per-agent browser tabs: stop concurrent agents sharing one tab, and reclaim the tabs they leave
 
+> **SHIPPED.** `BROWSER_TAB_DISCIPLINE` rides the MCP surface block (`sandbox/mcp-surface.ts`), and
+> `closeExtraBrowserTabs` is called from `step-runner.ts`, `app-runner.ts` and `ddev-runner.ts` at
+> the mining and DAG barriers only, never at browser bring-up. The tab the sweep keeps is the one
+> RECORDED as the human's rather than an inferred one — three separate inference attempts were
+> measured lying. Verified against the tree 2026-09-18.
+
 ## Context
 
 Every sandboxed CLI of a task attaches `chrome-devtools` to the SAME headed Chromium on the

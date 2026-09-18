@@ -1,5 +1,10 @@
 # Delete a plan
 
+> **SHIPPED.** `web/src/components/plan/plan-delete-dialog.tsx` behind the type-the-name
+> confirmation, with `deletePlan` in `lib/api-client.ts`. The recovery path stated below still
+> holds: `.haive-data/plan.json` is committed and `importPlanMirror` restores the nodes with their
+> original ids. Verified against the tree 2026-09-18.
+
 ## Context
 
 A plan is built by an LLM across many waves. When it does a poor job there is

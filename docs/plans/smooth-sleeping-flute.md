@@ -1,10 +1,13 @@
 # smooth-sleeping-flute — honour a declared Ruby version, and give the Ruby block its own compiler
 
-Status: IMPLEMENTED 2026-08-23 — shipped as two commits, 39af246 (toolchain) and 72ebac5
-(versioning). Verified by BUILDING the rendered Dockerfiles, not only by unit test:
-
-    3.4.6: ruby 3.4.6 from /opt/hostedtoolcache, solargraph 0.60.3, native gem EXIT=0
-    2.7.8: ruby 2.7.8p225, openssl 1.1.1w, native gem EXIT=0, solargraph absent by design
+> **Status: IMPLEMENTED 2026-08-23** — shipped as two commits, 39af246 (toolchain) and 72ebac5
+> (versioning). Verified by BUILDING the rendered Dockerfiles, not only by unit test:
+>
+>     3.4.6: ruby 3.4.6 from /opt/hostedtoolcache, solargraph 0.60.3, native gem EXIT=0
+>     2.7.8: ruby 2.7.8p225, openssl 1.1.1w, native gem EXIT=0, solargraph absent by design
+>
+> Re-verified against the tree 2026-09-18: ruby handling spans all three env-replicate steps —
+> `01-declare-deps`, `02-generate-dockerfile` and `04-verify-environment`.
 
 Three deviations from the plan below, each forced by something measured during
 implementation:

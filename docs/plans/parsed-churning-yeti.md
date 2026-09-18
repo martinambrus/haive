@@ -1,5 +1,12 @@
 # Project Plan Canvas — implementation plan
 
+> **SHIPPED** `7a217e57` (2026-08-25) — the persistence layer plus blank repositories. Written into
+> this file 2026-09-18, because the archive index had carried "Not started" for it while
+> `packages/database/src/schema/plan.ts` already existed and `AGENTS.md` documented the canvas in
+> depth: the row predated the work. Later canvas slices — the `.haive-data/` mirror, impact,
+> ready/next-up and plan chat — landed separately and are documented in `AGENTS.md` under
+> "Plan canvas".
+
 ## Context
 
 Haive can execute a task end-to-end but has no durable, project-level picture of *what the

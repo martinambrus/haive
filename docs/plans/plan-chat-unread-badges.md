@@ -1,7 +1,8 @@
 # Plan chat: unread replies, badges, and notification routing
 
-STATUS: SHIPPED. Every item below is implemented; this file is kept as the
-rationale record, not as outstanding work.
+> **STATUS: SHIPPED.** Every item below is implemented; this file is kept as the rationale record,
+> not as outstanding work. Re-verified against the tree 2026-09-18 — both tests it names exist:
+> `api/test/plan-chat-surfaces-smoke.ts` and `web/src/components/plan/plan-chat-turn.test.ts`.
 
 Raised while building the self-contained Chat tab and kept separate because it
 touches notifications, the tree, the tiles and the panel at once. Implemented

@@ -1,6 +1,18 @@
 # Persistent provider-verdict banner below the CLI terminal
 
-> Status: IN PROGRESS, started 2026-08-24. Approved.
+> **SHIPPED — verified against the tree 2026-09-18, and this line used to deny it.** It read
+> "IN PROGRESS, started 2026-08-24. Approved." with the checklist below still unchecked, while every
+> part of the work is in the tree: `failure-class.ts:215` carries `content_filter: 'Provider refused
+> the prompt (content filter)'` with the refusal pattern at `:295` anchored on wording specific to a
+> refusal rather than on generic words, `describeInvocationStatus`
+> (`web/src/components/terminal/cli-stream-status.ts`) has its own unit test covering the refusal
+> row and the null cases, and `StepTerminal.tsx:536-544` renders the persistent amber block below
+> the terminal — read from the invocation row rather than the stream, so it survives the CLI ending
+> and the 600s stream expiry.
+>
+> **It landed at `StepTerminal.tsx`, not the `CliStreamViewer.tsx` this checklist names.** So a grep
+> for the planned component reports the feature missing. The unchecked boxes below are the plan as
+> written and are kept as the record; do not work from them.
 
 ## Why
 
