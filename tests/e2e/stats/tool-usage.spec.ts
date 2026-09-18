@@ -41,7 +41,7 @@ const OBSERVED = {
   mcp: [{ server: 'haive-rag', tool: 'rag_search', calls: 3 }],
   subagents: [{ type: 'Explore', calls: 1 }],
   skills: { invoked: [{ id: 'dataviz', calls: 1 }], read: [] },
-  agents: { assigned: [], read: [{ id: 'code-reviewer', reads: 2 }] },
+  agents: { assigned: ['technical-spec-writer'], read: [{ id: 'code-reviewer', reads: 2 }] },
   loaded: {
     agents: ['claude', 'code-reviewer'],
     skills: ['dataviz'],
@@ -88,7 +88,7 @@ interface ToolUsageStats {
     assignedRecordedSince: string | null;
   };
   personas: {
-    assigned: Capped<{ id: string }>;
+    assigned: Capped<{ id: string; runs: number; tasks: number }>;
     read: Capped<{ id: string; reads: number; runs: number }>;
   };
   skills: { invoked: Capped<{ id: string; calls: number }> };
@@ -114,6 +114,7 @@ interface TaskToolUsage {
       runs: number;
       observable: number;
       toolCalls: number;
+      personasAssigned: Array<{ id: string; n: number }>;
       personasRead: Array<{ id: string; n: number }>;
     };
   }>;
@@ -123,6 +124,7 @@ interface TaskToolUsage {
     unobservable: number;
     unrecorded: number;
     toolCalls: number;
+    personasAssigned: Array<{ id: string; n: number }>;
     mcp: Array<{ server: string; tool: string; calls: number }>;
   };
   coverage: { total: number; observable: number; unobservable: number; unrecorded: number };
@@ -175,8 +177,9 @@ test.describe('tool-usage statistics', () => {
         unobservable: 2,
         unrecorded: 1,
         withLoaded: 1,
-        assignedRecordedSince: null,
       });
+      // An assignment is a dispatch fact on any RECORDED row; the first such row dates the field.
+      expect(body.coverage.assignedRecordedSince).not.toBeNull();
       const byProvider = Object.fromEntries(body.coverage.byProvider.map((p) => [p.provider, p]));
       expect(byProvider['claude-code']).toMatchObject({
         total: 3,
@@ -190,7 +193,9 @@ test.describe('tool-usage statistics', () => {
         unobservable: 1,
         unrecorded: 0,
       });
-      expect(body.personas.assigned.rows).toEqual([]);
+      expect(body.personas.assigned.rows).toMatchObject([
+        { id: 'technical-spec-writer', runs: 1, tasks: 1 },
+      ]);
       expect(body.personas.read.rows).toMatchObject([{ id: 'code-reviewer', reads: 2, runs: 1 }]);
       expect(body.skills.invoked.rows).toMatchObject([{ id: 'dataviz', calls: 1 }]);
       expect(body.mcp.tools.rows).toMatchObject([
@@ -248,6 +253,7 @@ test.describe('tool-usage statistics', () => {
       // per-task rollup folds by step regardless of provider.
       expect(seededStep?.usage).toMatchObject({ runs: 4, observable: 1, toolCalls: 7 });
       expect(seededStep?.usage?.personasRead).toEqual([{ id: 'code-reviewer', n: 2 }]);
+      expect(seededStep?.usage?.personasAssigned).toEqual([{ id: 'technical-spec-writer', n: 1 }]);
       // A step with no attributed run is a dash, never a row of zeros.
       expect(
         task.steps.some((s) => s.stepRowId !== fixture!.failedStepId && s.usage === null),

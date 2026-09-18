@@ -139,6 +139,20 @@ const AGENT_GUIDANCE_END = '[[HAIVE_AGENT_DEFINITION_END]]';
 const AGENT_GUIDANCE_PATTERN =
   /\[\[HAIVE_AGENT_DEFINITION:([a-z0-9-]+)\]\]\n([\s\S]*?)\n\[\[HAIVE_AGENT_DEFINITION_END\]\]/g;
 
+/** The persona ids a prompt carries as marker blocks — unique, in code-unit order. Read at
+ *  DISPATCH, before `adaptPromptForCliCapabilities` rewrites every marker into the pointer
+ *  sentence or its fallback line: the stored `cli_invocations.prompt` is the rewritten one, and
+ *  MEASURED on the dev install 0 of 3,476 stored prompts hold a marker, so nothing downstream
+ *  can recover them. The ids land on the spec as `assignedAgentIds` and are written to
+ *  `tool_usage.agents.assigned`, the one record that Haive assigned a persona to a run. */
+export function agentGuidanceIds(prompt: string): string[] {
+  const ids = new Set<string>();
+  for (const match of prompt.matchAll(AGENT_GUIDANCE_PATTERN)) {
+    if (match[1]) ids.add(match[1]);
+  }
+  return [...ids].sort();
+}
+
 /** The two axes the protocol renders against. Both are resolved at DISPATCH: the LSP one
  *  from the adapter plus a ready bridge, the rag one from the adapter's MCP support plus
  *  the task's resolved surface. */

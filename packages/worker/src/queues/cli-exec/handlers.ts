@@ -57,7 +57,12 @@ import { resolveGitEnv } from '../../secrets/user-git-identity.js';
 import { createSandboxLoginContainer } from '../../sandbox/login-container.js';
 import { buildSetupTokenCommand } from '../../cli-adapters/setup-token-command.js';
 import { learnModelLimitFromFailure } from '../../cli-adapters/model-capabilities.js';
-import { applyProviderObservability } from '../../cli-executor/tool-usage.js';
+import {
+  applyProviderObservability,
+  assignedAgentIdsOf,
+  unobservedToolUsage,
+  withAssignedAgents,
+} from '../../cli-executor/tool-usage.js';
 import { getDb } from '../../db.js';
 import { getBullRedis } from '../../redis.js';
 import { publishCliExit } from '../cli-stream-publisher.js';
@@ -173,6 +178,9 @@ export async function handleCliExecJob(
     : {};
   const gitEnv = await resolveGitEnv(db, { userId: payload.userId, taskId: payload.taskId });
   const secrets: Record<string, string> = { ...gitEnv, ...providerSecrets };
+  // Decided at dispatch and carried on the spec, so it is known before the run and written on
+  // the success and the failure path alike: an assignment is a dispatch fact, not a run fact.
+  const assignedAgentIds = assignedAgentIdsOf(payload.spec);
 
   const startedAt = Date.now();
   try {
@@ -270,8 +278,12 @@ export async function handleCliExecJob(
         modelIdentity: result.modelIdentity ?? null,
         compaction: result.compaction ?? null,
         // A provider whose stream carries no tool events (amp) would otherwise record "used
-        // nothing"; the rule lives beside the tally so the backfill applies the same one.
-        toolUsage: applyProviderObservability(result.toolUsage ?? null, providerName),
+        // nothing"; the rule lives beside the tally so the backfill applies the same one. The
+        // assigned personas ride every path: the observability rule keeps them on purpose.
+        toolUsage: applyProviderObservability(
+          withAssignedAgents(result.toolUsage ?? unobservedToolUsage('stream'), assignedAgentIds),
+          providerName,
+        ),
         cost,
         durationMs,
         errorMessage: finalErrorMessage,
@@ -372,6 +384,10 @@ export async function handleCliExecJob(
         exitCode: -1,
         errorMessage: message,
         durationMs,
+        // No transcript reaches this path, so this is exactly the record the boot backfill
+        // would have written from a null stream_log — plus the assignment, which only the
+        // dispatch knows and the backfill never could.
+        toolUsage: withAssignedAgents(unobservedToolUsage('stream'), assignedAgentIds),
         endedAt: new Date(),
       })
       .where(eq(schema.cliInvocations.id, row.id));

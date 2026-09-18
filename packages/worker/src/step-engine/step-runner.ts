@@ -1514,6 +1514,9 @@ async function dispatchMiningAgents(
         capabilities: dispatch.capabilities ?? spec.requiredCapabilities,
       },
       preferVision: dispatch.preferVision === true,
+      // A mining agent that IS a persona (03's roster) is an assignment its prompt never
+      // marks; the dispatch names it and the dispatcher unions it with the marker ids.
+      assignedAgentIds: dispatch.personaIds,
       toolProfile: spec.toolProfile,
       invokeOpts: {
         cwd: params.workspacePath,

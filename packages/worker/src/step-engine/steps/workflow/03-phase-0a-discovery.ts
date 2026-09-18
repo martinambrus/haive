@@ -398,6 +398,9 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
           agentId: persona.id,
           agentTitle: persona.title,
           prompt: buildAgentMiningPrompt(persona, detect, values.extraContext ?? ''),
+          // The prompt names the persona by title, never through a marker, so the
+          // assignment is stated here for the usage record.
+          personaIds: [persona.id],
         });
       }
       return dispatches;

@@ -1,12 +1,48 @@
 import { describe, expect, it } from 'vitest';
 import {
+  adaptPromptForCliCapabilities,
   adaptRetrievalProtocol,
+  agentDefinitionGuidance,
+  agentGuidanceIds,
   ddevConfigGuidanceLines,
   buildRetrievalGuidance,
   retrievalGuidanceLines,
   retrievalGuidanceLinesFor,
   type RetrievalAxes,
 } from './_retrieval-guidance.js';
+
+describe('agentGuidanceIds', () => {
+  it('reads every marker id once, in code-unit order, and nothing from prose', () => {
+    const prompt = [
+      'intro',
+      agentDefinitionGuidance('test-writer', 'Read .claude/agents/test-writer.md first.'),
+      'prose that mentions .claude/agents/peer-reviewer.md is not an assignment',
+      agentDefinitionGuidance('code-reviewer', 'See .claude/agents/code-reviewer.md.'),
+      agentDefinitionGuidance('test-writer', 'Again .claude/agents/test-writer.md.'),
+    ].join('\n');
+    expect(agentGuidanceIds(prompt)).toEqual(['code-reviewer', 'test-writer']);
+    expect(agentGuidanceIds('no marker here')).toEqual([]);
+  });
+
+  it('finds nothing in a prompt the rewrite has already processed, on either arm', () => {
+    const prompt = agentDefinitionGuidance('test-writer', 'Read .claude/agents/test-writer.md.');
+    const fallback = adaptPromptForCliCapabilities(prompt, {
+      supportsLsp: false,
+      ragWired: false,
+      projectAgentsDir: null,
+      agentFileFormat: null,
+    });
+    const pointer = adaptPromptForCliCapabilities(prompt, {
+      supportsLsp: true,
+      ragWired: true,
+      projectAgentsDir: '.grok/agents',
+      agentFileFormat: 'markdown',
+    });
+    expect(agentGuidanceIds(fallback)).toEqual([]);
+    expect(pointer).toContain('.grok/agents/test-writer.md');
+    expect(agentGuidanceIds(pointer)).toEqual([]);
+  });
+});
 
 const AXES: RetrievalAxes[] = [
   { supportsLsp: true, ragWired: true },
