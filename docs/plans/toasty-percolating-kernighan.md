@@ -2,7 +2,29 @@
 
 > **Not started** — planned 2026-09-14 against `main` at `3c0a93f6` and reviewed against the code the
 > same day. Built-in steps only; custom task types reach the same rule through
-> `rippling-wibbling-puffin` Phase 3.1, whose companion edits are listed below.
+> `rippling-wibbling-puffin` Phase 3.1, whose companion edits are listed below and are ALREADY
+> FOLDED INTO that plan — its prompt-template entry shape carries `agentPool?`, its `{{agent:<id>}}`
+> section is written, and its dangling-reference rule already covers personas — so nothing is owed
+> there.
+>
+> **RE-VERIFIED 2026-09-18 against `main` at `47d5fd2a`.** Still not started: no
+> `agent-definition-mask.ts`, no `agentIsolationApplies`, no `promptNamesAgentPath`, no
+> `agentPool`, no `maskAgentDefinitions`/`pastedPersonaPaths`, and no
+> `CONFIG_KEYS.AGENT_ISOLATION_ENABLED`. Every other file and symbol this plan names still exists,
+> `dispatcher.ts` is untouched by the containment series, and Rollback still holds. Two bodies of
+> work landed in between and both SHRINK what is left to build:
+>
+> - **The symlink-containment series (#115-#160)** put `@haive/shared/fs-safe` in the tree, and
+>   `_agent-loader.ts` already reads through it. At `3c0a93f6` that file opened with
+>   `readdir`/`readFile`/`pathExists`; today it is `readdirNoFollow`/`readRegularFileNoFollow`. So
+>   the hand-rolled no-follow reader Decision 1 specified is one primitive call, and the link, FIFO
+>   and pseudo-file cases Verification listed are already pinned in
+>   `packages/shared/test/fs-safe.test.ts`.
+> - **#161 (tool usage)** BUILT `agentGuidanceIds` (exported from `_retrieval-guidance.ts`),
+>   `assignedPersonaIds` (`dispatcher.ts:462`, called in `buildCliSidePlan` before the rewrite) and
+>   an `assignedAgentIds` field on `DispatchRequest`, `CliCommandSpec` and `SubAgentInvocation`,
+>   plus `AgentMiningDispatch.personaIds`. This plan's spec fields now join an established pattern
+>   instead of introducing one, and its pre-rewrite marker read already has a call site.
 
 ## Context
 
@@ -65,25 +87,27 @@ type — inherits it without anyone maintaining a list of special steps.
    the pointer names today. Outside it (codex, amp, gemini, antigravity, or a capable provider
    whose bridge is not ready) nothing about the prompt changes. The body is read by FILENAME,
    `<projectAgentsDir>/<id>.md` — the exact file today's pointer names — and never looked up by the
-   frontmatter `name` that `loadAgentPersonas` keys on (`steps/workflow/_agent-loader.ts:36-37`).
+   frontmatter `name` that `loadAgentPersonas` keys on (`steps/workflow/_agent-loader.ts:31-33`).
    The two can differ, and a lookup by `name` would silently drop the customisation that outranks
-   the inline persona. The reader never follows a repository-controlled link: the worker is
-   privileged, and an untrusted repository can plant `.claude/agents/peer-reviewer.md` as a symlink
-   to `/proc/self/environ` or a host secret, whose bytes would be pasted into a prompt sent to the
-   provider. So it opens `<id>.md` with `O_NOFOLLOW | O_NONBLOCK`, so a symlinked final
-   component fails the open and a FIFO cannot block the dispatch waiting for a writer. It then
-   checks the file it actually opened, not the path it asked for: it reads the descriptor's real
-   path from `/proc/self/fd/<fd>` (the worker runs on Linux) and refuses it unless it is exactly
-   `<invocation tree realpath>/<projectAgentsDir>/<id>.md`: a symlink in any component (`.claude`,
-   `agents` or the file itself) changes the resolved path, so the file counts as absent even when the
-   link points somewhere else inside the tree. No concurrent swap of `.claude/agents` for a symlink can race
-   that check, because it describes the open descriptor rather than a later re-walk of the path.
-   Finally it `fstat`s the handle, accepts only a regular file, and reads at most the remaining size
-   budget (dispatch side, item 3) plus one byte from it, so a size that lies (a pseudo-file reports
-   0) cannot slip past the budget. That is the regular-files-only rule `ensureArchivesExpanded` already applies with
-   `lstat`, and a refused file is treated as missing — as is one `parseAgentFile` cannot parse (an
-   unclosed frontmatter) or whose body is empty after the frontmatter, since pasting an empty persona
-   is the same silent failure as a missing one. Before any read, the reader also applies the
+   the inline persona. **AS BUILT — this is no longer this plan's code to write.** The reader never
+   follows a repository-controlled link: the worker is privileged, and an untrusted repository
+   can plant `.claude/agents/peer-reviewer.md` as a symlink to `/proc/self/environ` or a host
+   secret, whose bytes would be pasted into a prompt sent to the provider. When this was planned the
+   reader had to close that by hand — an `O_NOFOLLOW | O_NONBLOCK` open, an exact-path check on the
+   opened descriptor's `/proc/self/fd` path, an `fstat` regular-file check, and a capped read so a
+   size that lies (a pseudo-file reports 0) could not slip past the budget. The symlink-containment
+   series (#115-#160) has since put every one of those into `@haive/shared/fs-safe`, and
+   `_agent-loader.ts` ALREADY reads through it (`readdirNoFollow`, `readRegularFileNoFollow`,
+   against `readdir`/`readFile`/`pathExists` at `3c0a93f6`). So the single-file reader is
+   `readTextNoFollow(<invocation tree>, '<projectAgentsDir>/<id>.md', { maxBytes })` — re-exported
+   as `readRegularFileNoFollow` from `steps/onboarding/_helpers.ts` — whose contract is that the
+   ANCHOR may be followed while no component of the rel ever is, that a refused or absent file
+   answers `null`, and that a FIFO or device is never opened. Those properties are the primitive's
+   documented guarantee and are pinned in `packages/shared/test/fs-safe.test.ts`, so this plan
+   neither restates nor re-proves them. What remains its own is the SHAPE and the POLICY: reading
+   one file by filename rather than the directory, and treating a refused file as missing — as is
+   one `parseAgentFile` cannot parse (an unclosed frontmatter) or whose body is empty after the
+   frontmatter, since pasting an empty persona is the same silent failure as a missing one. Before any read, the reader also applies the
    invocation's effective secret-mask policy to that path — the kill switch, `secret_mask_enabled`,
    the deny globs plus `secret_mask_deny_extend`, minus the carve-outs and `secret_mask_allow`,
    untracked files only (`queues/cli-exec/secret-mask.ts`) — and a file the sandbox would mask counts
@@ -164,9 +188,14 @@ type — inherits it without anyone maintaining a list of special steps.
   the tree it edits. A Docker tmpfs is writable (mode 1777), so a coder, fix round or merge fixer
   editing `.claude/agents/x.md` under a writable mask would lose the edit when the container
   exits. Every dispatch that edits the project's tree declares it: 07, 07a, 07b, 08a, 08b, 06c's
-  coders, 09_5, 09_5b, 11d, the DAG merge fix, the retry_ai fix agent, and every `mergeResolve`
+  coders, 09_5, 09_5b, 11d, `00a-sync-base`, `08e-insights-triage`, `13-onboarding-push`,
+  `plan/01-plan-merge`, the DAG merge fix, the retry_ai fix agent, and every `mergeResolve`
   spec (`merge-resolver.ts` dispatches with `stepDef.mergeResolve.requiredCapabilities`, and
-  `12-worktree-cleanup` declares it). These write WITHOUT declaring it, each only into a
+  `12-worktree-cleanup` declares it). The four named after 11d were MISSING from this list as first
+  written, and all four already existed at `3c0a93f6` — so that was an incomplete enumeration
+  rather than later drift. No behaviour was wrong, because the rule keys on the capability and never
+  on this list; but the list is what the safety argument in the next sentence rests on, which is why
+  it is corrected here. These write WITHOUT declaring it, each only into a
   Haive-owned path, found by auditing every prompt that tells an agent to edit or write files:
   `01e-external-kb-sync` and `11-phase-8-learning` edit `KB_DIR` in place, `09_3-qa-review` writes
   the knowledge-base files its corrected answers cite (under `KB_DIR`), and
@@ -438,12 +467,18 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **Dispatch:** `packages/worker/src/orchestrator/dispatcher.ts` (`agentIsolationApplies` with its
   prompt path scan, the switch read, the post-selection project-instruction scan and body read, the
   spec flag), `step-engine/steps/_retrieval-guidance.ts`
-  (`agentGuidanceIds`, the positive arm, the exported pasted-persona label pattern),
+  (the positive arm and the exported pasted-persona label pattern — `agentGuidanceIds` is ALREADY
+  BUILT and exported there by #161, which also added `assignedPersonaIds` at `dispatcher.ts:462`,
+  called from `buildCliSidePlan` BEFORE the rewrite with the comment this plan's marker read needs;
+  reuse both rather than adding a second pre-rewrite read),
   `step-engine/steps/workflow/_agent-loader.ts` (export
-  `parseAgentFile`; a filename-keyed single-file reader: the secret-mask policy check first, then an
-  `O_NOFOLLOW | O_NONBLOCK` open, an exact-path check on the opened descriptor's `/proc/self/fd`
-  path, an `fstat` regular-file check and a capped read), `queues/cli-exec/secret-mask.ts` (its
-  effective policy extracted as a dependency-free single-path predicate), `step-engine/step-definition.ts` (`LlmInvocationSpec.agentPool`),
+  `parseAgentFile`, still private at `:54`; a filename-keyed single-file reader, which is now one
+  `readTextNoFollow` call plus the secret-mask policy check — see Decision 1, AS BUILT),
+  `queues/cli-exec/secret-mask.ts` (its
+  effective policy extracted as a dependency-free single-path predicate; it exports only
+  `SecretMaskError`, `resolveSecretMasks`, `computeSecretMasks` and `listTrackedFiles` today, so the
+  predicate is still to be carved out), `step-engine/step-definition.ts`
+  (`LlmInvocationSpec.agentPool`, beside `AgentMiningDispatch.personaIds` that #161 added),
   `step-engine/step-runner.ts` (`resolveLlmPhase` passes `agentPool`; `retryMiningAgents` skips a
   recovered prompt carrying the pasted-persona label; the retry_ai `toolProfile` fix is its own
   commit).
@@ -453,7 +488,11 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **Tree resolution:** `repo/worktree-git-boundary.ts` (`invocationRepoSubpath`,
   `resolveInvocationWorkerTree`, and the moved `resolveInvocationWorkerRoot` /
   `WORKER_REPO_STORAGE_ROOT`), `queues/cli-exec/resolvers.ts` (re-exports; `resolveInvocationRepoMount`
-  calls `invocationRepoSubpath`).
+  — `resolvers.ts:503` — calls `invocationRepoSubpath`). **That move is WIDER than planned.**
+  `resolveInvocationWorkerRoot` still sits at `resolvers.ts:648` and has three callers
+  that did not exist then — `secret-mask.ts`, `ddev-generated-mask.ts` and `ripgrep-config.ts`, the
+  last two created or converted by the containment series — and `WORKER_REPO_STORAGE_ROOT` is read
+  in four source files plus a test, so the re-export has to keep every one of them compiling.
 - **Exec:** `queues/cli-exec/agent-definition-mask.ts` (NEW), `queues/cli-exec/exec-core.ts`
   (append to `authMounts`; fail before the CLI starts when the policy predicate then denies a pasted
   persona path, whether or not the file still exists; remove a race's mount stubs in a `finally`
@@ -522,7 +561,7 @@ scratch.
    `docs/.claude/agents/x.md` and `.claude/agents-old/x.md` do not; among built-in prompt builders,
    with persona markers removed the way `agentIsolationApplies` removes them, only 06_5 and 09_5 match, so a new match fails the test and
    becomes a conscious decision), marker ids, the persona path
-   (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a persona pasted before a deny rule appeared fails the invocation at exec, including one whose file was deleted before exec / a symlinked or out-of-tree `<id>.md` refused, including an agent directory swapped for a symlink before the open or linked to another in-tree directory / a FIFO rejected without blocking / a pseudo-file reporting size 0 still capped by the read / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / a body containing `$&`, `` $` `` or `$'` pasted literally / template-less id / grok's directory / a provider outside the gate keeps
+   (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a persona pasted before a deny rule appeared fails the invocation at exec, including one whose file was deleted before exec / the link, FIFO, pseudo-file and out-of-tree cases DELEGATED to `packages/shared/test/fs-safe.test.ts`, which already pins them for the primitive this reader now calls — a symlinked or out-of-tree `<id>.md`, an agent directory swapped for a symlink, a FIFO that does not block, a pseudo-file reporting size 0 — so they are asserted once, where the guarantee lives / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / a body containing `$&`, `` $` `` or `$'` pasted literally / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
    branch, `retryMiningAgents` skipping a recovered prompt that carries the pasted-persona label while
@@ -662,7 +701,10 @@ bullet: `rippling-wibbling-puffin` Phase 3.1 builds on this plan's per-invocatio
   multi_agent`, `-c features.multi_agent=false`, collaboration modes off, or a different model
   removed the tool on 0.154.0, and `agents.max_threads=0` is rejected. Separate investigation.
 - **Usage telemetry and the unused-agent report** (`cli_invocations.tool_usage`, backfill, stats
-  tab). Separate plan; this one only makes the decision exist for it to record.
+  tab). Separate plan; this one only makes the decision exist for it to record. **SHIPPED as #161:**
+  `cli-executor/tool-usage.ts` carries `agents.assigned` and `assignedAgentIdsOf(spec)` (`:512`),
+  fed by the `assignedAgentIds` spec field, so the record this plan defers to already exists and is
+  waiting on the isolation decision to describe.
 - **Skills listing** (16 skills bundled in the claude binary load on every run;
   `--disable-slash-commands` also hides repo skills). Separate.
 - **Per-CLI rendered AGENTS.md overlay** (rules per CLI instead of the merged block). Optional,
