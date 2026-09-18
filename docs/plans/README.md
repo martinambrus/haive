@@ -22,10 +22,14 @@ after 30 days.
 Verified against the tree, not taken from the plan bodies.
 
 **This table is COMPLETE as of 2026-09-18 — every plan file has a row.** MEASURED that day:
-`docs/plans/` holds 49 plan files and this table has 49 rows, the last 19 added after verifying each
-against the tree. The reverse check is empty too, so no row names a file that does not exist. The
-earlier wording here said 48 files against 29 rows; both counts were stale. Rows are in historical
-order rather than alphabetical, and the 19 added on that date sit together at the end.
+`docs/plans/` holds 50 plan files and this table has 50 rows. Nineteen were added that day after
+verifying each against the tree, and the fiftieth is `plan-patch-drop-measurement`, written the same
+day as a not-started follow-up. The reverse check is empty too, so no row names a file that does not
+exist. The earlier wording here said 48 files against 29 rows; both counts were stale, which is the
+reason for the rule that follows: **a plan added to this directory adds its row in the same change.**
+Nothing else keeps the two in step, and a missing row reads as "unknown" rather than as an oversight.
+Rows are in historical order rather than alphabetical, with those nineteen together ahead of any
+later addition.
 
 **A plan's own status line is NOT evidence, in either direction.** `amber-provider-verdict-heron`
 read "IN PROGRESS, started 2026-08-24" with its checklist still unchecked while every part of the
@@ -111,6 +115,7 @@ unreachable for the input the plan was about.
 | `plan-patch-partial-refs` | One bad reference must not cost a whole reply | **Shipped; only the field outcome is unconfirmed.** Re-measured 2026-09-18, correcting this row: the remedy is this plan's own, `dropUnresolvableOps` (`apply-patch.ts:233`) as a PRE-FLIGHT at `:709`, and every agent path passes `onUnresolvableRef: 'drop'` through `applyAgentPatch` — `01-plan-build.ts:707`, `02-plan-coverage.ts:572`, `01-plan-chat.ts:259`, `03-plan-sequence.ts:508`. `fail` remains the default for human edits and for the deterministic writers, by design. The throws at `:356`/`:692` are reachable only under `fail`, and `:692` is a different rule — it refuses to resurrect a stale uuid as a NEW node. NOT measured: whether the 27% reply-loss rate fell, since the figures in `ApplyPlanPatchOptions` are the pre-fix measurement plus a counterfactual. Covered by `drop-unresolvable.test.ts` and `plan-canvas-smoke.ts:307`. This row previously claimed a `drop-unresolvable.ts` module, which does not exist |
 | `prancing-metering-quokka` | Ollama Cloud is not free local compute | **Shipped** 2026-08-23. `isOllamaCloudModel` (`shared/src/cli-providers/catalog.ts`) keys on BOTH `-cloud` and `:cloud`, and `cli-versions/ollama-model-prices.ts` scrapes configured CLOUD models only, since a stored rate on a local-basis run would be summed as real spend. Its cited migration is `pre-baseline/0126_ollama_price_feed.sql` — the never-run record folded into the frozen `0000_baseline.sql`, so do not look for `0126` among the live migrations |
 | `smooth-sleeping-flute` | Honour a declared Ruby version; give the Ruby block its own compiler | **Shipped** 2026-08-23 (`39af246` toolchain, `72ebac5` versioning), verified by BUILDING the rendered Dockerfiles rather than by unit test alone. Ruby handling spans all three env-replicate steps — `01-declare-deps`, `02-generate-dockerfile`, `04-verify-environment` |
+| `plan-patch-drop-measurement` | Measure what the unresolvable-ref drop actually saved | **Not started**, written 2026-09-18 as the follow-up #169 named. **Part A needs no dev stack:** a code-verified hypothesis that an upsert naming a DEAD uuid still costs the whole reply even under `drop`, because `refsOf` checks only `parentRef` while the upsert's own uuid is queried for liveness but never filtered on, and nothing catches the deliberate `not_found` throw at `apply-patch.ts:692` (zero `try`/`catch` in that file). Testable in `plan-canvas-smoke.ts`, which already drives the mode at `:307`; `drop-unresolvable.test.ts` cannot reach it, since its stub `tx` never gets to `applyUpsert`. **Part B is the rate**, and needs a live install: `01-plan-build.ts:719-740` and `02-plan-coverage.ts:585` already persist the dropped report to `task_step_agent_minings.error_message` behind `plan patch partially applied:`, so it is read-only SQL plus one large plan build. Two scope facts: `01-plan-chat` only logs its drops and has no mining rows, and `03-plan-sequence.ts:502` writes the FAILURE prefix for remit filtering, which would overcount losses |
 
 ## Cross-plan dependencies
 
