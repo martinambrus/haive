@@ -137,6 +137,8 @@ describe('generateFilesStep.apply — quarantine', () => {
   it('moves nothing when the box is left unticked', async () => {
     await seed('.claude/agents/drupal7-developer.md', 'legacy body');
     const out = await generateFilesStep.apply(ctx(), {
+      iteration: 0,
+      previousIterations: [],
       detected: detectWith(unmanaged),
       formValues: {},
     });
@@ -149,6 +151,8 @@ describe('generateFilesStep.apply — quarantine', () => {
   it('moves the file to the sibling dir verbatim and leaves a README that says how to undo', async () => {
     await seed('.claude/agents/drupal7-developer.md', 'legacy body');
     const out = await generateFilesStep.apply(ctx(), {
+      iteration: 0,
+      previousIterations: [],
       detected: detectWith(unmanaged),
       formValues: { quarantineUnmanagedAgents: true },
     });
@@ -172,6 +176,8 @@ describe('generateFilesStep.apply — quarantine', () => {
     await seed('.claude/agents/drupal7-developer.md', 'newer');
     await seed('.claude/agents-legacy/drupal7-developer.md', 'older');
     const out = await generateFilesStep.apply(ctx(), {
+      iteration: 0,
+      previousIterations: [],
       detected: detectWith(unmanaged),
       formValues: { quarantineUnmanagedAgents: true },
     });

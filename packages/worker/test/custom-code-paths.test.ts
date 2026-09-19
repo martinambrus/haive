@@ -127,7 +127,7 @@ describe('detectPaths: a Drupal site that ignores the custom/ convention', () =>
     await mk('sites/all/modules/shared_helper', 'name = Shared Helper\n');
 
     const paths = await detectPathsForTest(repo, 'drupal7');
-    expect(paths.customCodePaths.include.sort()).toEqual([
+    expect([...paths.customCodePaths.include].sort()).toEqual([
       'sites/all/modules/shared_helper/',
       'sites/default/modules/site_private/',
       'sites/example.com/themes/client_theme/',

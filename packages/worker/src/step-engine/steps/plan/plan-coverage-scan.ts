@@ -238,11 +238,7 @@ export function latestExpansionAttempts<T extends ExpansionAttemptRow>(
 
 export function findStructuralGaps(
   nodes: { id: string; title: string; kind: string; parentId: string | null }[],
-  agents: {
-    agentId: string;
-    status: 'pending' | 'running' | 'done' | 'failed';
-    errorMessage: string | null;
-  }[],
+  agents: ExpansionAttemptRow[],
   prefixes: { failure: string; partial: string },
 ): StructuralGap[] {
   const hasChild = new Set(nodes.map((n) => n.parentId).filter((p): p is string => !!p));

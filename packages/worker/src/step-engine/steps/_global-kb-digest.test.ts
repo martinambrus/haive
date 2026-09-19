@@ -23,7 +23,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
 });
 
 function projectFacets(overrides: Partial<ProjectFacetSet> = {}): ProjectFacetSet {
-  return { ...emptyProjectFacetSet(), ...overrides };
+  return Object.assign(emptyProjectFacetSet(), overrides);
 }
 
 describe('facetsMatchProject', () => {

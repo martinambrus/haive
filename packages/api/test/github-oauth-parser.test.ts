@@ -17,7 +17,7 @@ function mockFetch(responses: Array<{ status?: number; body: unknown }>): {
 } {
   const calls: RecordedCall[] = [];
   let idx = 0;
-  const fetchFn: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const fetchFn: typeof fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     calls.push({ url: input.toString(), init });
     const entry = responses[idx] ?? responses[responses.length - 1]!;
     idx += 1;

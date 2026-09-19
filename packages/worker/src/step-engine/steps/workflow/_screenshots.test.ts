@@ -60,9 +60,9 @@ describe('joinScreenshots', () => {
 
   it('captions an unreported file from its slug and defaults its result to info', () => {
     const shots = joinScreenshots(['02-cart-empty-state.webp'], [], '/w/.haive/screenshots');
-    expect(shots[0].caption).toBe('Cart empty state');
-    expect(shots[0].result).toBe('info');
-    expect(shots[0].testCase).toBeNull();
+    expect(shots[0]?.caption).toBe('Cart empty state');
+    expect(shots[0]?.result).toBe('info');
+    expect(shots[0]?.testCase).toBeNull();
   });
 
   it('lets a later pass replace an earlier caption for the same file', () => {
@@ -74,8 +74,8 @@ describe('joinScreenshots', () => {
       ],
       '/w/.haive/screenshots',
     );
-    expect(shots[0].caption).toBe('after fix');
-    expect(shots[0].result).toBe('pass');
+    expect(shots[0]?.caption).toBe('after fix');
+    expect(shots[0]?.result).toBe('pass');
   });
 
   it('matches a reported path against the file basename', () => {
@@ -84,7 +84,7 @@ describe('joinScreenshots', () => {
       [{ file: '/haive/workdir/.haive/screenshots/01-login.webp', caption: 'Login' }],
       '/w/.haive/screenshots',
     );
-    expect(shots[0].caption).toBe('Login');
+    expect(shots[0]?.caption).toBe('Login');
   });
 
   it('normalizes an unknown result to info', () => {
@@ -93,7 +93,7 @@ describe('joinScreenshots', () => {
       [{ file: '01-login.webp', result: 'PASSED' }],
       '/w/.haive/screenshots',
     );
-    expect(shots[0].result).toBe('info');
+    expect(shots[0]?.result).toBe('info');
   });
 });
 

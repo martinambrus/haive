@@ -61,7 +61,7 @@ describe('06a-db-migrate apply', () => {
     expect(out).toMatchObject({ ran: false, skipped: true, passed: true });
     // Only the probe ran; the opaque-failing `drush updatedb` was never invoked.
     expect(ddevExec).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(ddevExec).mock.calls[0][1]).toBe(DRUSH_PROBE);
+    expect(vi.mocked(ddevExec).mock.calls[0]?.[1]).toBe(DRUSH_PROBE);
   });
 
   it('runs the migration when Drupal reports a live DB connection', async () => {
@@ -76,7 +76,7 @@ describe('06a-db-migrate apply', () => {
     );
 
     expect(out).toMatchObject({ ran: true, skipped: false, passed: true });
-    expect(vi.mocked(ddevExec).mock.calls[1][1]).toBe('exec drush updatedb -y');
+    expect(vi.mocked(ddevExec).mock.calls[1]?.[1]).toBe('exec drush updatedb -y');
   });
 
   it('does not probe for non-Drupal frameworks', async () => {

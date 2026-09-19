@@ -63,7 +63,7 @@ async function seedRepo(): Promise<string> {
 describe('10-gate-3-commit detect', () => {
   it('reports no git when the workspace has no .git entry', async () => {
     const plain = await tmp('gate3-plain-');
-    const detected = await gate3CommitStep.detect(mkCtx(plain));
+    const detected = await gate3CommitStep.detect!(mkCtx(plain));
     expect(detected.hasGit).toBe(false);
     expect(detected.dirtyFiles).toBe(0);
   });
@@ -71,7 +71,7 @@ describe('10-gate-3-commit detect', () => {
   it('counts dirty files in a healthy repo', async () => {
     const repo = await seedRepo();
     await writeFile(path.join(repo, 'b.txt'), '2\n', 'utf8');
-    const detected = await gate3CommitStep.detect(mkCtx(repo));
+    const detected = await gate3CommitStep.detect!(mkCtx(repo));
     expect(detected.hasGit).toBe(true);
     expect(detected.dirtyFiles).toBe(1);
   });
@@ -89,7 +89,7 @@ describe('10-gate-3-commit detect', () => {
       'utf8',
     );
 
-    await expect(gate3CommitStep.detect(mkCtx(wt))).rejects.toThrow(/git cannot use it/);
+    await expect(gate3CommitStep.detect!(mkCtx(wt))).rejects.toThrow(/git cannot use it/);
   });
 
   // Guards the probe order: with .git absent, git's upward discovery would find the
@@ -100,7 +100,7 @@ describe('10-gate-3-commit detect', () => {
     await mkdir(nested, { recursive: true });
     await writeFile(path.join(repo, 'dirty.txt'), 'x\n', 'utf8');
 
-    const detected = await gate3CommitStep.detect(mkCtx(nested));
+    const detected = await gate3CommitStep.detect!(mkCtx(nested));
     expect(detected.hasGit).toBe(false);
     expect(detected.dirtyFiles).toBe(0);
   });

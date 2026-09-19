@@ -107,6 +107,9 @@ function detectedStub() {
     qualityVerdict: 'PASS',
     qualityFindings: [],
     iterationHistory: [],
+    // No plan: the affected-components section is simply absent.
+    affectedComponents: null,
+    repositoryId: null,
     exhaustedBudget: false,
   };
 }

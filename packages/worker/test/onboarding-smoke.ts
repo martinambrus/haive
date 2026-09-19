@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Queue } from 'bullmq';
-import { and, asc, eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   configService,

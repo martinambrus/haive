@@ -10,7 +10,7 @@ const detect = (candidates: AgentDiscoveryDetect['candidates']): AgentDiscoveryD
   ({ candidates }) as AgentDiscoveryDetect;
 
 const optionFor = (id: string, candidates: AgentDiscoveryDetect['candidates']) => {
-  const schema = agentDiscoveryStep.form!({} as never, detect(candidates), undefined);
+  const schema = agentDiscoveryStep.form!({} as never, detect(candidates), undefined)!;
   const field = schema.fields[0] as {
     options: { value: string; description?: string }[];
     defaults?: string[];

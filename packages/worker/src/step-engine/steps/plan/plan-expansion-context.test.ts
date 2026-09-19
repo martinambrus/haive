@@ -20,6 +20,7 @@ function node(id: string, title: string, parentId: string | null, path: string):
     version: 1,
     createdBy: 'llm',
     sourceTaskId: 'task-1',
+    lastReviewedAt: null,
     createdAt: new Date(0),
     updatedAt: new Date(0),
   };

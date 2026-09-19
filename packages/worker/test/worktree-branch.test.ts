@@ -65,6 +65,7 @@ describe('worktreeSetupStep form (base comes from 00a-sync-base)', () => {
     currentBranch: 'main',
     isClean: true,
     proposedBranch: 'feature/x',
+    proposalBumpedFrom: null,
   };
 
   it('shows the synced base read-only and drops the editable base field', () => {

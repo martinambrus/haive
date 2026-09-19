@@ -308,6 +308,7 @@ async function main(): Promise<void> {
 
     const controller = new AbortController();
     const ctx: StepContext = {
+      round: 0,
       taskId: task!.id,
       taskStepId: execStep!.id,
       userId,

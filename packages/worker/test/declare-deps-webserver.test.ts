@@ -60,7 +60,7 @@ function makeCtx(template: { name: string; declaredDeps: Record<string, unknown>
 
 describe('01-declare-deps detect webserver precedence', () => {
   it('offers the webserver confirmed at onboarding for a markerless repo', async () => {
-    const detected = await declareDepsStep.detect(makeCtx(null));
+    const detected = await declareDepsStep.detect!(makeCtx(null));
     expect(detected.webserver).toBe('apache-fpm');
   });
 
@@ -68,13 +68,13 @@ describe('01-declare-deps detect webserver precedence', () => {
     // 02-generate-dockerfile relinks tasks onto each other's rows, so the linked row
     // can carry a choice made by (and for) a different task.
     const ctx = makeCtx({ name: 'task-73852f1b', declaredDeps: { webserver: 'nginx-fpm' } });
-    const detected = await declareDepsStep.detect(ctx);
+    const detected = await declareDepsStep.detect!(ctx);
     expect(detected.webserver).toBe('apache-fpm');
   });
 
   it("keeps this task's own previously declared webserver", async () => {
     const ctx = makeCtx({ name: OWN_TEMPLATE_NAME, declaredDeps: { webserver: 'nginx-fpm' } });
-    const detected = await declareDepsStep.detect(ctx);
+    const detected = await declareDepsStep.detect!(ctx);
     expect(detected.webserver).toBe('nginx-fpm');
   });
 });

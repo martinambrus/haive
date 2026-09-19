@@ -84,7 +84,12 @@ describe('generateFilesStep.apply — rules files that are links', () => {
   it('skips a CLAUDE.md that merely points at AGENTS.md, leaving the link intact', async () => {
     await symlink('AGENTS.md', path.join(repo, 'CLAUDE.md'));
 
-    const out = await generateFilesStep.apply(ctx(), { detected: detect(), formValues: {} });
+    const out = await generateFilesStep.apply(ctx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected: detect(),
+      formValues: {},
+    });
 
     // The link is left exactly as the repo had it — the content it names is written at its own path.
     expect(await readlink(path.join(repo, 'CLAUDE.md'))).toBe('AGENTS.md');
@@ -96,7 +101,12 @@ describe('generateFilesStep.apply — rules files that are links', () => {
   it('accepts the ./AGENTS.md spelling of the same convention', async () => {
     await symlink('./AGENTS.md', path.join(repo, 'CLAUDE.md'));
 
-    const out = await generateFilesStep.apply(ctx(), { detected: detect(), formValues: {} });
+    const out = await generateFilesStep.apply(ctx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected: detect(),
+      formValues: {},
+    });
 
     expect(await readlink(path.join(repo, 'CLAUDE.md'))).toBe('./AGENTS.md');
     expect(out.skippedFiles).toContain('CLAUDE.md');
@@ -106,7 +116,12 @@ describe('generateFilesStep.apply — rules files that are links', () => {
     await symlink(path.join(outside, 'elsewhere.md'), path.join(repo, 'CLAUDE.md'));
 
     await expect(
-      generateFilesStep.apply(ctx(), { detected: detect(), formValues: {} }),
+      generateFilesStep.apply(ctx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected: detect(),
+        formValues: {},
+      }),
     ).rejects.toMatchObject({ reason: 'link' });
 
     // The point of the refusal: the file the link named is untouched.
@@ -114,7 +129,12 @@ describe('generateFilesStep.apply — rules files that are links', () => {
   });
 
   it('writes CLAUDE.md normally when it is a real file', async () => {
-    const out = await generateFilesStep.apply(ctx(), { detected: detect(), formValues: {} });
+    const out = await generateFilesStep.apply(ctx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected: detect(),
+      formValues: {},
+    });
 
     expect(await readFile(path.join(repo, 'CLAUDE.md'), 'utf8')).toContain('@AGENTS.md');
     expect(out.skippedFiles ?? []).not.toContain('CLAUDE.md');

@@ -10,7 +10,6 @@ import {
   collectRefutable,
   isRefuted,
   refuterTitle,
-  lensAgentId,
   codeReviewStep,
 } from './08c-code-review.js';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';

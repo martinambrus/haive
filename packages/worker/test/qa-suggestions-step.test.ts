@@ -165,6 +165,7 @@ describe('knowledgeQaSuggestionsStep llm hooks', () => {
 describe('knowledgeQaSuggestionsStep.apply', () => {
   function makeCtx(): Parameters<typeof knowledgeQaSuggestionsStep.apply>[0] {
     return {
+      round: 0,
       taskId: 't',
       taskStepId: 's',
       userId: 'u',

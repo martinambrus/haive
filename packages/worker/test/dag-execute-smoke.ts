@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   configService,
@@ -270,6 +270,7 @@ async function main(): Promise<void> {
 
     const controller = new AbortController();
     const ctx: StepContext = {
+      round: 0,
       taskId: task.id,
       taskStepId: execStep.id,
       userId,

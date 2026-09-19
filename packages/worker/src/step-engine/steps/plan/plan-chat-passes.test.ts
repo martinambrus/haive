@@ -96,13 +96,13 @@ describe('plan chat revise loop', () => {
   const evaluate = planChatStep.reviseLoop!.evaluate;
 
   it('goes round again on the same card, never a new step per turn', () => {
-    expect(evaluate({ continueRequested: true } as never, {} as never)).toEqual({
+    expect(evaluate({ continueRequested: true } as never)).toEqual({
       targetStepId: '01-plan-chat',
     });
   });
 
   it('ends when the user submits nothing', () => {
-    expect(evaluate({ continueRequested: false } as never, {} as never)).toBeNull();
+    expect(evaluate({ continueRequested: false } as never)).toBeNull();
   });
 });
 

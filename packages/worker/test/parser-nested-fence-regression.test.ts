@@ -50,7 +50,7 @@ describe('nested-fence regression across HIGH parsers', () => {
       wrap({ entries: [{ id: 'lesson-one', title: 'Lesson', body: fencedBody }] }),
     );
     expect(result).toHaveLength(1);
-    expect(result?.[0].body).toBe(fencedBody);
+    expect(result?.[0]?.body).toBe(fencedBody);
   });
 
   it('parseLearningOutput preserves a top-level array whole (array-aware matcher)', () => {
@@ -61,8 +61,8 @@ describe('nested-fence regression across HIGH parsers', () => {
       ]),
     );
     expect(result).toHaveLength(2);
-    expect(result?.[0].body).toBe(fencedBody);
-    expect(result?.[1].id).toBe('b');
+    expect(result?.[0]?.body).toBe(fencedBody);
+    expect(result?.[1]?.id).toBe('b');
   });
 
   it('parseQaResolveOutput keeps answers[].proposedWrite.content with nested fences', () => {
@@ -80,6 +80,6 @@ describe('nested-fence regression across HIGH parsers', () => {
       }),
     );
     expect(result.answers).toHaveLength(1);
-    expect(result.answers[0].proposedWrite?.content).toBe(fencedBody);
+    expect(result.answers[0]?.proposedWrite?.content).toBe(fencedBody);
   });
 });

@@ -61,10 +61,11 @@ describe('estimateStep.form', () => {
     anchors: [],
     heuristicHours: 6,
     heuristicReason: 'baseline',
+    biasFactor: null,
   } as Parameters<NonNullable<typeof estimateStep.form>>[1];
 
   it('defaults the number field to the AI estimate when no manual estimate is set', () => {
-    const schema = estimateStep.form!(null as never, baseDetect, { estimatedHours: 4 });
+    const schema = estimateStep.form!(null as never, baseDetect, { estimatedHours: 4 })!;
     const num = schema.fields.find((f) => f.id === 'estimatedHours') as { default?: number };
     expect(num.default).toBe(4);
     // No prior-estimate note when the user never set one.
@@ -76,7 +77,7 @@ describe('estimateStep.form', () => {
       null as never,
       { ...baseDetect, manualEstimateHours: 3 },
       { estimatedHours: 4 },
-    );
+    )!;
     const num = schema.fields.find((f) => f.id === 'estimatedHours') as { default?: number };
     expect(num.default).toBe(3);
     expect(schema.fields.some((f) => f.id === 'priorEstimateNote')).toBe(true);

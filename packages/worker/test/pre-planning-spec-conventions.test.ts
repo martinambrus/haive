@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import {
   parsePrePlanningOutput,
   phase0bPrePlanningStep,
@@ -15,6 +16,13 @@ const detect: Detect = {
   relevantKbIds: [],
   kbReferences: [],
   priorRejectionFeedback: '',
+  isBugFix: false,
+  // What detect returns for a repository with no plan.
+  planIndex: '',
+  seededNodes: '',
+  planRepositoryId: null,
+  // What detect returns when the repository narrows nothing.
+  reviewDimensionIds: [...ALL_REVIEW_DIMENSION_IDS],
 };
 
 describe('pre-planning presentation conventions', () => {

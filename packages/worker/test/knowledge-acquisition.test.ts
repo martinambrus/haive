@@ -12,6 +12,25 @@ import {
   parseKbUpdates,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 
+type KnowledgeDetect = Parameters<typeof knowledgeAcquisitionStep.apply>[1]['detected'];
+
+/** The detect payload apply() is handed. These cases vary only the stack; the rest is
+ *  what detect reports for a repository it could learn nothing more about. */
+function detectedStack(framework: string | null, language: string | null): KnowledgeDetect {
+  return {
+    framework,
+    frameworkMajor: null,
+    language,
+    projectName: null,
+    phpMajor: null,
+    nodeMajor: null,
+    database: null,
+    dbMajor: null,
+    packages: [],
+    customCode: { include: [], exclude: [] },
+  };
+}
+
 let tmpRoot: string;
 
 beforeEach(async () => {
@@ -33,6 +52,10 @@ function makeCtx(repo: string): StepContext {
     db: noRowsDb(),
     logger: logger.child({ test: 'knowledge-acquisition' }),
     emitProgress: async () => {},
+    sandboxWorkdir: '/haive/workdir',
+    round: 0,
+    signal: new AbortController().signal,
+    throwIfCancelled: () => {},
   };
 }
 
@@ -210,7 +233,9 @@ describe('knowledgeAcquisitionStep.apply', () => {
       '```',
     ].join('\n');
     const result = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: 'nodejs', language: 'typescript' },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack('nodejs', 'typescript'),
       formValues: { selectedTopics: ['architecture'] },
       llmOutput: raw,
     });
@@ -231,7 +256,9 @@ describe('knowledgeAcquisitionStep.apply', () => {
   it('writes stub files from manual topics when LLM unavailable', async () => {
     const ctx = makeCtx(tmpRoot);
     const result = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: { manualTopics: 'Testing strategy\nDeployment' },
       llmOutput: null,
     });
@@ -249,7 +276,9 @@ describe('knowledgeAcquisitionStep.apply', () => {
   it('writes nothing when no topics selected or entered', async () => {
     const ctx = makeCtx(tmpRoot);
     const result = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: {},
       llmOutput: null,
     });
@@ -264,7 +293,9 @@ describe('knowledgeAcquisitionStep.apply', () => {
       { id: 'c', title: 'C', sections: [{ heading: 'x', body: 'y' }] },
     ];
     const result = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: { selectedTopics: ['a', 'c'] },
       llmOutput: entries,
     });
@@ -288,7 +319,9 @@ describe('knowledgeAcquisitionStep.apply — a page whose name is a link', () =>
     await linkNamed('testing-strategy.md', outside);
 
     const result = await knowledgeAcquisitionStep.apply(makeCtx(tmpRoot), {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: { manualTopics: 'Testing strategy\nDeployment' },
       llmOutput: null,
     });
@@ -319,7 +352,9 @@ describe('knowledgeAcquisitionStep.apply — a page whose name is a link', () =>
     ].join('\n');
 
     const result = await knowledgeAcquisitionStep.apply(makeCtx(tmpRoot), {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: { selectedTopics: ['architecture'] },
       llmOutput: raw,
     });
@@ -397,7 +432,9 @@ describe('knowledgeAcquisitionStep.apply — merged legacy sources', () => {
     await seedLegacy(kbDir);
 
     const out = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: { selectedTopics: [] },
       llmOutput: updateRaw(['legacy/ARCHITECTURE.md']),
     });
@@ -416,7 +453,9 @@ describe('knowledgeAcquisitionStep.apply — merged legacy sources', () => {
     await seedLegacy(kbDir);
 
     const out = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: { selectedTopics: [] },
       llmOutput: updateRaw(undefined),
     });
@@ -436,7 +475,9 @@ describe('knowledgeAcquisitionStep.apply — merged legacy sources', () => {
     await writeFile(path.join(kbDir, 'BUSINESS_LOGIC.md'), '# BL\n\nKeep me.\n', 'utf8');
 
     const out = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: { selectedTopics: [] },
       llmOutput: updateRaw(['BUSINESS_LOGIC.md', 'ARCHITECTURE.md', '../../etc/passwd']),
     });
@@ -471,7 +512,9 @@ describe('knowledgeAcquisitionStep.apply — existing KB reuse', () => {
       '```',
     ].join('\n');
     const result = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: { selectedTopics: ['deployment'] },
       llmOutput: raw,
     });
@@ -509,7 +552,9 @@ describe('knowledgeAcquisitionStep.apply — existing KB reuse', () => {
       '```',
     ].join('\n');
     await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: { selectedTopics: ['arch'] },
       llmOutput: raw,
     });
@@ -580,7 +625,9 @@ describe('knowledgeAcquisitionStep.apply — improve stale KB files', () => {
       '```',
     ].join('\n');
     const result = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: {},
       llmOutput: raw,
     });
@@ -614,7 +661,9 @@ describe('knowledgeAcquisitionStep.apply — improve stale KB files', () => {
       '```',
     ].join('\n');
     await knowledgeAcquisitionStep.apply(ctx, {
-      detected: { framework: null, language: null },
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
       formValues: {},
       llmOutput: raw,
     });

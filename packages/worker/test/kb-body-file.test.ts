@@ -12,6 +12,7 @@ import {
   prepareAgentWritableDir,
   resolveBodies,
   resolveKbBodyPath,
+  type WithOptionalBodyPath,
 } from '../src/step-engine/steps/onboarding/_kb-body-file.js';
 import {
   knowledgeAcquisitionStep,
@@ -116,7 +117,9 @@ describe('resolveBodies', () => {
   });
 
   it('fills sections from the staged file', async () => {
-    const r = await resolveBodies(dir, [{ bodyPath: `${KB_DRAFT_DIR}/arch.md` }]);
+    const r = await resolveBodies<WithOptionalBodyPath>(dir, [
+      { bodyPath: `${KB_DRAFT_DIR}/arch.md` },
+    ]);
     expect(r.failures).toEqual([]);
     expect(r.resolved[0]!.sections).toEqual([{ heading: 'Overview', body: 'Staged body.' }]);
   });

@@ -9,6 +9,7 @@ const SHARED_CTX: CliAuthMountContext = {
   userId: 'aaaa-bbbb-cccc-dddd',
   providerId: 'prov-1',
   providerName: 'gemini',
+  authMode: 'subscription',
   isolateAuth: false,
 };
 
@@ -16,6 +17,7 @@ const ISOLATED_CTX: CliAuthMountContext = {
   userId: 'aaaa-bbbb-cccc-dddd',
   providerId: 'pppp-qqqq-rrrr-ssss',
   providerName: 'gemini',
+  authMode: 'subscription',
   isolateAuth: true,
 };
 
@@ -23,15 +25,15 @@ describe('resolveCliAuthMounts', () => {
   it('shared mode emits one mount per authConfigPath using the per-user volume', () => {
     const mounts = resolveCliAuthMounts(SHARED_CTX);
     expect(mounts).toHaveLength(2);
-    expect(mounts[0].source).toBe('haive_cli_auth_aaaabbbbcccc_gemini_0');
-    expect(mounts[1].source).toBe('haive_cli_auth_aaaabbbbcccc_gemini_1');
+    expect(mounts[0]?.source).toBe('haive_cli_auth_aaaabbbbcccc_gemini_0');
+    expect(mounts[1]?.source).toBe('haive_cli_auth_aaaabbbbcccc_gemini_1');
   });
 
   it('isolated mode emits one mount per authConfigPath using the per-provider volume', () => {
     const mounts = resolveCliAuthMounts(ISOLATED_CTX);
     expect(mounts).toHaveLength(2);
-    expect(mounts[0].source).toBe('haive_cli_auth_p_ppppqqqqrrrr_gemini_0');
-    expect(mounts[1].source).toBe('haive_cli_auth_p_ppppqqqqrrrr_gemini_1');
+    expect(mounts[0]?.source).toBe('haive_cli_auth_p_ppppqqqqrrrr_gemini_0');
+    expect(mounts[1]?.source).toBe('haive_cli_auth_p_ppppqqqqrrrr_gemini_1');
   });
 
   it('isolated and shared volume names never collide for the same user/provider/idx', () => {

@@ -97,9 +97,12 @@ const formValues = {
 } as DeclareDepsFormValues;
 
 function run(h: Harness) {
-  return declareDepsStep.apply(h.ctx, { detected, formValues } as Parameters<
-    typeof declareDepsStep.apply
-  >[1]);
+  return declareDepsStep.apply(h.ctx, {
+    detected,
+    formValues,
+    iteration: 0,
+    previousIterations: [],
+  } as Parameters<typeof declareDepsStep.apply>[1]);
 }
 
 const NGINX_DEPS = { containerTool: 'ddev', webserver: 'nginx-fpm' };

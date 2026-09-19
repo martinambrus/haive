@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { logger } from '@haive/shared';
+import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import type { StepContext } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import {
@@ -16,6 +17,13 @@ const base = {
   relevantKbIds: [] as string[],
   kbReferences: [] as { id: string; title: string; exists: boolean }[],
   priorRejectionFeedback: '',
+  isBugFix: false,
+  // What detect returns for a repository with no plan.
+  planIndex: '',
+  seededNodes: '',
+  planRepositoryId: null,
+  // What detect returns when the repository narrows nothing.
+  reviewDimensionIds: [...ALL_REVIEW_DIMENSION_IDS],
 };
 const ctx = {} as unknown as StepContext;
 

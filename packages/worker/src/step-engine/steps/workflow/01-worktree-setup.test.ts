@@ -86,7 +86,7 @@ describe('01 worktree setup detect', () => {
   it('proposes the plain title-derived name when the branch is free', async () => {
     const root = await setupRepo();
     try {
-      const d = await worktreeSetupStep.detect(mkCtx(root));
+      const d = await worktreeSetupStep.detect!(mkCtx(root));
       expect(d.proposedBranch).toBe('feature/add-ddev');
       expect(d.proposalBumpedFrom).toBeNull();
     } finally {
@@ -98,10 +98,10 @@ describe('01 worktree setup detect', () => {
     const root = await setupRepo();
     try {
       await git(root, ['branch', 'feature/add-ddev']);
-      const d = await worktreeSetupStep.detect(mkCtx(root));
+      const d = await worktreeSetupStep.detect!(mkCtx(root));
       expect(d.proposedBranch).toBe('feature/add-ddev-2');
       expect(d.proposalBumpedFrom).toBe('feature/add-ddev');
-      const schema = worktreeSetupStep.form!(mkCtx(root), d);
+      const schema = worktreeSetupStep.form!(mkCtx(root), d)!;
       const note = schema.fields.find((f) => f.id === 'branchTakenNote') as { body?: string };
       expect(note?.body).toContain('feature/add-ddev-2');
       const field = schema.fields.find((f) => f.id === 'branchName') as { default?: string };
@@ -117,7 +117,7 @@ describe('01 worktree setup detect', () => {
     const root = await setupRepo();
     try {
       await git(root, ['branch', 'feature-add-ddev']);
-      const d = await worktreeSetupStep.detect(mkCtx(root));
+      const d = await worktreeSetupStep.detect!(mkCtx(root));
       expect(d.proposedBranch).toBe('feature/add-ddev-2');
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -127,7 +127,7 @@ describe('01 worktree setup detect', () => {
   it('leaves the proposal alone on a repo with no git', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'wt-nogit-'));
     try {
-      const d = await worktreeSetupStep.detect(mkCtx(root));
+      const d = await worktreeSetupStep.detect!(mkCtx(root));
       expect(d.hasGit).toBe(false);
       expect(d.proposedBranch).toBe('feature/add-ddev');
       expect(d.proposalBumpedFrom).toBeNull();

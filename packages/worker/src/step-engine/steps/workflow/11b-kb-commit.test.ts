@@ -44,7 +44,13 @@ const stubCtx = {
 } as unknown as StepContext;
 
 function applyArgs(
-  detected: { hasGit: boolean; workspacePath: string; dirtyFiles: string[]; statusSummary: string },
+  detected: {
+    hasGit: boolean;
+    workspacePath: string;
+    dirtyFiles: string[];
+    statusSummary: string;
+    knowledgeDiffArtifactPath: string | null;
+  },
   formValues: Record<string, unknown>,
 ): StepApplyArgs<typeof detected> {
   return { detected, formValues, iteration: 0, previousIterations: [] };
@@ -73,6 +79,7 @@ describe('11b form', () => {
       workspacePath: '/ws',
       dirtyFiles: ['.haive-data/knowledge_base/investigations/x.md'],
       statusSummary: '?? .haive-data/knowledge_base/investigations/x.md',
+      knowledgeDiffArtifactPath: null,
     });
     const commit = schema!.fields.find((f) => f.id === 'commit') as { default?: boolean };
     expect(commit.default).toBe(true);
@@ -84,6 +91,7 @@ describe('11b form', () => {
       workspacePath: '/ws',
       dirtyFiles: [],
       statusSummary: 'No knowledge-base changes pending.',
+      knowledgeDiffArtifactPath: null,
     });
     const commit = schema!.fields.find((f) => f.id === 'commit') as { default?: boolean };
     expect(commit.default).toBe(false);
@@ -106,6 +114,7 @@ describe('11b apply', () => {
             workspacePath: dir,
             dirtyFiles: ['.haive-data/knowledge_base/investigations/null-deref.md'],
             statusSummary: '?? .haive-data/knowledge_base/investigations/null-deref.md',
+            knowledgeDiffArtifactPath: null,
           },
           { commit: true, commitMessage: 'docs: kb' },
         ),
@@ -125,7 +134,13 @@ describe('11b apply', () => {
     const out = await kbCommitStep.apply(
       stubCtx,
       applyArgs(
-        { hasGit: true, workspacePath: '/ws', dirtyFiles: ['x'], statusSummary: 'x' },
+        {
+          hasGit: true,
+          workspacePath: '/ws',
+          dirtyFiles: ['x'],
+          statusSummary: 'x',
+          knowledgeDiffArtifactPath: null,
+        },
         { commit: false },
       ),
     );
@@ -136,7 +151,13 @@ describe('11b apply', () => {
     const out = await kbCommitStep.apply(
       stubCtx,
       applyArgs(
-        { hasGit: false, workspacePath: '/ws', dirtyFiles: [], statusSummary: '(no git)' },
+        {
+          hasGit: false,
+          workspacePath: '/ws',
+          dirtyFiles: [],
+          statusSummary: '(no git)',
+          knowledgeDiffArtifactPath: null,
+        },
         { commit: true },
       ),
     );

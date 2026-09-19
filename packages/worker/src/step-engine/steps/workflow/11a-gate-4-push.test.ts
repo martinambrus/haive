@@ -20,7 +20,7 @@ const noOriginDetect = {
 
 function buildForm(detected: typeof noOriginDetect) {
   // form() is sync and only reads `detected` on this branch.
-  return gate4PushStep.form!({} as unknown as StepContext, detected, undefined);
+  return gate4PushStep.form!({} as unknown as StepContext, detected, undefined)!;
 }
 
 describe('11a-gate-4-push — declining the push on a repo with no origin', () => {

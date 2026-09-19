@@ -210,7 +210,7 @@ describe('detect', () => {
     // then commit the parent checkout — finding nothing to commit and leaving the agent's
     // edits for 11-phase-8-learning's revertKbSync to destroy at index 11, which is the
     // exact failure this step exists to prevent.
-    const out = await externalKbSyncStep.detect(ctx(fakeDb().db));
+    const out = await externalKbSyncStep.detect!(ctx(fakeDb().db));
     expect(out.worktreePath).toBe('/sentinel/worktree');
     expect(out.worktreePath).not.toBe('/tmp');
   });

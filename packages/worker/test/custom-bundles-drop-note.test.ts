@@ -78,7 +78,7 @@ describe('06_3-custom-bundles: extraction drop report', () => {
 
     // The bundle is usable — a drop is not a failure — and the note still reaches the person.
     // `warnings` alone would not: it has no reader in api or web.
-    expect(out.bundles[0].status).toBe('active');
+    expect(out.bundles[0]?.status).toBe('active');
     expect(out.degradedNote).toContain(note);
     expect(out.warnings.some((w) => w.includes(note))).toBe(true);
   });
