@@ -7,6 +7,12 @@ import { logger } from '../logger/index.js';
 
 const log = logger.child({ module: 'rag-connection' });
 
+/** Postgres NOTICEs — the idempotent schema DDL answers "already exists, skipping"
+ *  on every sync — at debug. With no handler postgres.js `console.log`s each one
+ *  as a raw object on stdout. */
+const onnotice = (notice: postgres.Notice): void =>
+  log.debug({ code: notice.code, message: notice.message }, 'postgres notice');
+
 export const RAG_TABLE = 'ai_rag_embeddings';
 
 /** The `source_type` values that carry PROJECT KNOWLEDGE, as opposed to code.
@@ -138,7 +144,7 @@ export async function openExistingRagDatabase(
 ): Promise<RagConnection | null> {
   if (!(await ragDatabaseExists(haiveDb, dbName))) return null;
 
-  const pg = postgres(internalRagUrl(dbName), { max: 1 });
+  const pg = postgres(internalRagUrl(dbName), { max: 1, onnotice });
   return {
     mode: 'internal',
     pg,
@@ -170,7 +176,7 @@ async function resolveInternal(
     }
   }
 
-  const pg = postgres(internalRagUrl(dbName), { max: 5 });
+  const pg = postgres(internalRagUrl(dbName), { max: 5, onnotice });
   return {
     mode: 'internal',
     pg,
@@ -182,7 +188,7 @@ async function resolveInternal(
 }
 
 function resolveExternal(connectionString: string, embeddingDimensions: number): RagConnection {
-  const pg = postgres(connectionString, { max: 5 });
+  const pg = postgres(connectionString, { max: 5, onnotice });
   return {
     mode: 'external',
     pg,

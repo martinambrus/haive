@@ -9,6 +9,12 @@ import { secretsService, SECRET_KEYS } from '../config/secrets.service.js';
 
 const log = logger.child({ module: 'global-kb-connection' });
 
+/** Postgres NOTICEs — the idempotent schema DDL answers "already exists, skipping"
+ *  on every boot — at debug. With no handler postgres.js `console.log`s each one,
+ *  which dumped ~27 raw notice objects to stdout per worker and api boot. */
+const onnotice = (notice: postgres.Notice): void =>
+  log.debug({ code: notice.code, message: notice.message }, 'postgres notice');
+
 /** Provider mode for the global KB store. Deliberately NOT `RagMode` — `ddev`
  *  and `none` are per-repo-only concepts (plan §4 intro). */
 export type GlobalKbMode = 'internal' | 'external';
@@ -135,12 +141,12 @@ async function resolveInternal(
   const url = new URL(haiveUrl);
   url.pathname = `/${dbName}`;
 
-  const pg = postgres(url.toString(), { max: 5 });
+  const pg = postgres(url.toString(), { max: 5, onnotice });
   return buildConnection('internal', pg, settings);
 }
 
 function resolveExternal(settings: GlobalKbSettings, connectionString: string): GlobalKbConnection {
-  const pg = postgres(connectionString, { max: 5 });
+  const pg = postgres(connectionString, { max: 5, onnotice });
   return buildConnection('external', pg, settings);
 }
 
