@@ -46,29 +46,39 @@ const others: Array<[string, BaseCliAdapter]> = [
   ['antigravity', new AntigravityAdapter()],
 ];
 
-describe('claude family: bundled skills off', () => {
+describe('claude family: bundled skills off, descriptions kept', () => {
   // The binary charges its own bundled skills first against an 8,000-char listing budget, so
   // most repo skills reached the model as a bare name (1 of 18 described, MEASURED on 2.1.270).
+  // The switch exists from 2.1.169; the budget covers the offered builds before it.
   for (const [name, adapter, over] of claudeFamily) {
-    it(`${name} disables the bundled skills`, () => {
+    it(`${name} disables the bundled skills and widens the listing budget`, () => {
       const spec = adapter.buildCliInvocation(provider(over), 'do x', {});
       expect(spec.env.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBe('1');
+      expect(spec.env.SLASH_COMMAND_TOOL_CHAR_BUDGET).toBe('40000');
     });
 
-    it(`${name} lets a provider env var turn them back on`, () => {
+    it(`${name} lets a provider env var override either`, () => {
       const spec = adapter.buildCliInvocation(
-        provider({ ...over, envVars: { CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: '0' } }),
+        provider({
+          ...over,
+          envVars: {
+            CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: '0',
+            SLASH_COMMAND_TOOL_CHAR_BUDGET: '9000',
+          },
+        }),
         'do x',
         {},
       );
       expect(spec.env.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBe('0');
+      expect(spec.env.SLASH_COMMAND_TOOL_CHAR_BUDGET).toBe('9000');
     });
   }
 
   for (const [name, adapter] of others) {
-    it(`${name} does not carry the claude switch`, () => {
+    it(`${name} does not carry the claude switches`, () => {
       const spec = adapter.buildCliInvocation(provider(), 'do x', {});
       expect(spec.env.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBeUndefined();
+      expect(spec.env.SLASH_COMMAND_TOOL_CHAR_BUDGET).toBeUndefined();
     });
   }
 });
