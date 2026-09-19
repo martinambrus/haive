@@ -14,7 +14,6 @@ import {
   detectAuthResult,
   envelopeEncrypt,
   extractDeviceCode,
-  extractGeminiAuthUrl,
   extractWrappedUrl,
   logger,
   secretsService,
@@ -515,12 +514,6 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       }
       if (session.providerName === 'claude-code') {
         startCaptureWatchdog(session);
-      } else if (session.providerName === 'gemini') {
-        // Gemini reads the authorization code from stdin via readline; after
-        // the write, poll the container filesystem for the creds file it
-        // writes on success (either legacy oauth_creds.json or the current
-        // encrypted gemini-credentials.json).
-        startGeminiCredsPoller(session);
       } else if (session.providerName === 'antigravity') {
         // agy reads the pasted authorization code on stdin and writes its OAuth
         // token to ~/.gemini/antigravity-cli/antigravity-oauth-token on success.
@@ -630,13 +623,8 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
   }
 
   if (!session.authUrlSent) {
-    let url: string | null = null;
-    if (session.providerName === 'gemini') {
-      url = extractGeminiAuthUrl(session.rawBuffer);
-    } else {
-      const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
-      url = extractWrappedUrl(session.rawBuffer, prefixes);
-    }
+    const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
+    const url = extractWrappedUrl(session.rawBuffer, prefixes);
     if (url) {
       session.authUrlSent = true;
       if (session.providerName === 'amp') {
@@ -701,10 +689,10 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     return;
   }
 
-  // Gemini and Antigravity success arrives via the creds-file poller started
-  // after the user pastes the authorization code. The post-paste stdout (gemini
-  // REPL / agy TUI) is unreliable, so we deliberately skip detectAuthResult here.
-  if (session.providerName === 'gemini' || session.providerName === 'antigravity') return;
+  // Antigravity success arrives via the creds-file poller started after the user
+  // pastes the authorization code. The post-paste agy TUI output is unreliable,
+  // so we deliberately skip detectAuthResult here.
+  if (session.providerName === 'antigravity') return;
 
   // What reaches here is codex, grok and amp. The first two announce the grant
   // on stdout ("Signed in as ..."), which detectAuthResult matches. amp's
@@ -725,16 +713,6 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     wsSend(session.ws, { type: 'error', message: signal.message });
   }
 }
-
-const GEMINI_POLL_INTERVAL_MS = 500;
-const GEMINI_POLL_MAX_TRIES = 20;
-const GEMINI_CREDS_CHECK = [
-  'sh',
-  '-c',
-  'test -s "$HOME/.gemini/oauth_creds.json" ' +
-    '|| test -s "$HOME/.gemini/gemini-credentials.json" ' +
-    '|| test -s "$HOME/.gemini/tokens.json"',
-];
 
 const AMP_POLL_INTERVAL_MS = 1000;
 // The poller starts with the URL, so its window has to cover a person reading
@@ -776,61 +754,6 @@ const ANTIGRAVITY_CREDS_SIGNATURE = [
   '-c',
   'md5sum "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" 2>/dev/null | cut -d" " -f1',
 ];
-
-/** Polls the login container for gemini's creds file after the user pastes
- *  the authorization code. Fires auth-success + runProbeAndSave when the
- *  file appears; errors out after GEMINI_POLL_MAX_TRIES × interval.
- *  Idempotent: repeated calls while the poller is running are no-ops.
- */
-function startGeminiCredsPoller(session: BannerSession): void {
-  if (session.cleanedUp) return;
-  if (session.credsPoller) return;
-  if (session.authSuccessSent) return;
-  let tries = 0;
-  const poller = setInterval(() => {
-    tries += 1;
-    if (session.cleanedUp) {
-      clearInterval(poller);
-      return;
-    }
-    void execInContainer(session.docker, session.dockerContainerId, GEMINI_CREDS_CHECK)
-      .then((result) => {
-        if (session.cleanedUp || session.authSuccessSent) {
-          clearInterval(poller);
-          session.credsPoller = null;
-          return;
-        }
-        if (result.exitCode === 0) {
-          clearInterval(poller);
-          session.credsPoller = null;
-          session.authSuccessSent = true;
-          session.probePending = true;
-          log.info({ providerId: session.providerId }, 'gemini creds file detected');
-          wsSend(session.ws, { type: 'auth-success' });
-          void runProbeAndSave(session);
-          return;
-        }
-        if (tries >= GEMINI_POLL_MAX_TRIES) {
-          clearInterval(poller);
-          session.credsPoller = null;
-          log.warn(
-            { providerId: session.providerId, tries },
-            'gemini creds file not found before poll timeout',
-          );
-          wsSend(session.ws, {
-            type: 'error',
-            message:
-              'Gemini did not write credentials after the code paste. The code may be wrong or expired — retry the login.',
-          });
-        }
-      })
-      .catch((err) => {
-        log.warn({ err, providerId: session.providerId }, 'gemini creds poll exec failed');
-      });
-  }, GEMINI_POLL_INTERVAL_MS);
-  session.credsPoller = poller;
-  log.info({ providerId: session.providerId }, 'gemini creds poller started');
-}
 
 /** Polls the login container for a change in amp's auth dirs. amp writes its
  *  credential the moment the login lands — on the browser approval in the device

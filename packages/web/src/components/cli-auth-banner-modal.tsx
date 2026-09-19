@@ -37,15 +37,15 @@ type Phase =
 // from the URL the CLI printed and sends the answer as `tokenPaste`.
 const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
-  'gemini',
   'antigravity',
 ]);
 
-// Some CLIs (notably gemini in folder-trust mode) can swallow stdin before
-// they print the OAuth URL, leaving the modal stuck on "Waiting for sign-in
-// URL...". If the URL hasn't arrived after URL_WAIT_TIMEOUT_MS, we tear the
-// WS down and reconnect, up to MAX_URL_WAIT_ATTEMPTS times. After that we
-// surface a hard error with a manual retry button.
+// A CLI can swallow stdin before it prints the OAuth URL (gemini did in
+// folder-trust mode, back when it had a login here), leaving the modal stuck on
+// "Waiting for sign-in URL...". If the URL hasn't arrived after
+// URL_WAIT_TIMEOUT_MS, we tear the WS down and reconnect, up to
+// MAX_URL_WAIT_ATTEMPTS times. After that we surface a hard error with a manual
+// retry button.
 const MAX_URL_WAIT_ATTEMPTS = 3;
 const URL_WAIT_TIMEOUT_MS = 30_000;
 
@@ -434,8 +434,7 @@ export function CliAuthBannerModal({
   // without it now that the server sizes the PTY itself; flip to true to debug.
   const showTerminal = providerName === 'antigravity' && ANTIGRAVITY_DEBUG_TERMINAL;
   // amp reaches this only on an older pinned CLI, where what it reads is a code.
-  const pastesCode =
-    providerName === 'gemini' || providerName === 'antigravity' || providerName === 'amp';
+  const pastesCode = providerName === 'antigravity' || providerName === 'amp';
   const pasteItemLabel = pastesCode ? 'code' : 'token';
   const pasteInputPlaceholder = pastesCode ? 'Paste code here' : 'Paste token here';
 

@@ -43,7 +43,6 @@ export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
     'https://login.openai.com/',
     'https://chatgpt.com/',
   ],
-  gemini: ['https://accounts.google.com/o/oauth2/'],
   // MEASURED against real `amp login` runs on both shapes: 0.0.1789200043-gdb3b35
   // retired the paste-back cli-login page for an OAuth DEVICE flow and prints
   // `https://auth.ampcode.com/device?user_code=XXXX-XXXX`, while 0.0.1786896116
@@ -52,7 +51,7 @@ export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
   // them so a device-path change still resolves to a usable URL. Which flow a
   // session is in is read off the URL — see AMP_PASTE_LOGIN_URL_PREFIX.
   amp: ['https://auth.ampcode.com/device', 'https://auth.ampcode.com/', AMP_PASTE_LOGIN_URL_PREFIX],
-  // Antigravity (agy) prints the same Google OAuth endpoint as gemini.
+  // Antigravity (agy) prints Google's OAuth endpoint.
   antigravity: ['https://accounts.google.com/o/oauth2/'],
   // MEASURED from a real `grok login --device-auth`, not from xAI's docs, which
   // talk about auth.x.ai: the device flow prints
@@ -72,7 +71,6 @@ export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
  *  current CLI. */
 export const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
-  'gemini',
   'antigravity',
 ]);
 
@@ -106,17 +104,6 @@ export function extractDeviceCode(raw: string): string | undefined {
   const spaced = ansiToSpaces(raw);
   const match = spaced.match(DEVICE_CODE_PATTERN);
   return match?.[1];
-}
-
-const GEMINI_URL_PREAMBLE = /please\s+visit\s+the\s+following\s+url\s+to\s+authorize/i;
-
-export function extractGeminiAuthUrl(raw: string): string | null {
-  const clean = stripAnsi(raw);
-  const match = clean.match(GEMINI_URL_PREAMBLE);
-  if (!match || match.index === undefined) return null;
-  const tail = clean.slice(match.index + match[0].length);
-  const prefixes = AUTH_URL_PREFIXES.gemini ?? [];
-  return extractWrappedUrl(tail, prefixes);
 }
 
 export interface AuthResultSignal {
