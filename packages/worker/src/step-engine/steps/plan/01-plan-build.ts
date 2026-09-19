@@ -663,6 +663,9 @@ export function createPlanBuildStep(
       // children under new ids.
       const fold = args.newAgentMiningResults ?? cumulative;
       const failures: string[] = [];
+      // Agents whose reply wrote NOTHING. Not `failures.length`: that also reports
+      // a partial apply, whose nodes are already in the plan.
+      let notApplied = 0;
 
       // HEAD as the agents saw it, stamped on the code links they emit so a stale
       // one can be dated. Best-effort: a repo with no commits yet (a brand-new
@@ -673,6 +676,7 @@ export function createPlanBuildStep(
 
       for (const result of fold) {
         if (result.status !== 'done') {
+          notApplied += 1;
           failures.push(
             `${result.agentTitle ?? result.agentId}: ${result.errorMessage ?? 'failed'}`,
           );
@@ -680,6 +684,7 @@ export function createPlanBuildStep(
         }
         const patch = parsePlanPatch(result.output ?? result.rawOutput);
         if (!patch) {
+          notApplied += 1;
           failures.push(`${result.agentTitle ?? result.agentId}: no patch in reply`);
           continue;
         }
@@ -748,6 +753,7 @@ export function createPlanBuildStep(
             );
           }
         } catch (err) {
+          notApplied += 1;
           const message = err instanceof Error ? err.message : String(err);
           failures.push(`${result.agentTitle ?? result.agentId}: ${message}`);
           // Durable, on the agent's OWN row. `failures` is local to this apply
@@ -776,8 +782,11 @@ export function createPlanBuildStep(
 
       // Every agent of THIS wave failing leaves the wave with nothing written,
       // which is worth a re-roll; a partial failure is not, because the survivors'
-      // nodes are already in the plan and re-running would duplicate them.
-      if (fold.length > 0 && failures.length === fold.length && !args.isFinalMiningAttempt) {
+      // nodes are already in the plan and re-running would duplicate them. That
+      // holds for a reply that landed PARTLY too, so the count is of agents that
+      // wrote nothing; counting `failures` would re-roll a one-agent wave over a
+      // single dropped op and fold its reply twice.
+      if (fold.length > 0 && notApplied === fold.length && !args.isFinalMiningAttempt) {
         throw new MiningRetryError(
           fold.map((r) => r.agentId),
           `every plan agent in the wave failed: ${failures.join('; ')}`,
