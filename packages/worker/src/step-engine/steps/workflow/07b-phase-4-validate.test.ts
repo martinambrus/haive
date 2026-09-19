@@ -122,9 +122,9 @@ describe('churnHotspots', () => {
   it('flags a file re-flagged in >= 3 validator passes (line numbers ignored)', () => {
     expect(
       churnHotspots([
-        [{ description: 'x', file: '.ddev/Dockerfile:10' }],
-        [{ description: 'x', file: '.ddev/Dockerfile:12' }],
-        [{ description: 'x', file: '.ddev/Dockerfile:99' }],
+        [{ severity: 'low', description: 'x', file: '.ddev/Dockerfile:10' }],
+        [{ severity: 'low', description: 'x', file: '.ddev/Dockerfile:12' }],
+        [{ severity: 'low', description: 'x', file: '.ddev/Dockerfile:99' }],
       ]),
     ).toEqual(['.ddev/Dockerfile']);
   });
@@ -132,8 +132,8 @@ describe('churnHotspots', () => {
   it('does not flag a file seen in only 2 passes', () => {
     expect(
       churnHotspots([
-        [{ description: 'x', file: 'a.ts:10' }],
-        [{ description: 'x', file: 'a.ts:12' }],
+        [{ severity: 'low', description: 'x', file: 'a.ts:10' }],
+        [{ severity: 'low', description: 'x', file: 'a.ts:12' }],
       ]),
     ).toEqual([]);
   });
@@ -142,17 +142,21 @@ describe('churnHotspots', () => {
     expect(
       churnHotspots([
         [
-          { description: 'x', file: 'a.ts:10' },
-          { description: 'y', file: 'a.ts:20' },
+          { severity: 'low', description: 'x', file: 'a.ts:10' },
+          { severity: 'low', description: 'y', file: 'a.ts:20' },
         ],
-        [{ description: 'x', file: 'a.ts:12' }],
+        [{ severity: 'low', description: 'x', file: 'a.ts:12' }],
       ]),
     ).toEqual([]); // two distinct passes only -> below threshold
   });
 
   it('ignores issues without a file', () => {
     expect(
-      churnHotspots([[{ description: 'x' }], [{ description: 'y' }], [{ description: 'z' }]]),
+      churnHotspots([
+        [{ severity: 'low', description: 'x' }],
+        [{ severity: 'low', description: 'y' }],
+        [{ severity: 'low', description: 'z' }],
+      ]),
     ).toEqual([]);
   });
 });

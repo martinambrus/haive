@@ -18,6 +18,7 @@ function mkDb(
     repositoryId: string | null;
     worktreeBranch: string | null;
     type?: string;
+    metadata?: Record<string, unknown> | null;
   } | null,
   repo: { source?: string; storagePath?: string | null; localPath?: string | null } | null,
 ): Database {

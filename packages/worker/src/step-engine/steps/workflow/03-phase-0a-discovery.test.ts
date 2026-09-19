@@ -61,6 +61,8 @@ describe('phase0aDiscoveryStep terminal retry policy', () => {
         },
       ],
       isFinalMiningAttempt: true,
+      iteration: 0,
+      previousIterations: [],
     });
 
     expect(output.source).toBe('agents');
@@ -103,6 +105,8 @@ describe('phase0aDiscoveryStep terminal retry policy', () => {
         },
       ],
       isFinalMiningAttempt: true,
+      iteration: 0,
+      previousIterations: [],
     });
 
     expect(output.degradedNote).toContain('no parseable mining JSON');
@@ -125,6 +129,8 @@ describe('phase0aDiscoveryStep terminal retry policy', () => {
         },
       ],
       isFinalMiningAttempt: true,
+      iteration: 0,
+      previousIterations: [],
     });
 
     expect(output.degradedNote).toBeUndefined();
@@ -140,6 +146,8 @@ describe('phase0aDiscoveryStep terminal retry policy', () => {
         failed('API Error: Connection closed mid-response. The response above may be incomplete.'),
       ],
       isFinalMiningAttempt: true,
+      iteration: 0,
+      previousIterations: [],
     });
 
     expect(output.source).toBe('stub');

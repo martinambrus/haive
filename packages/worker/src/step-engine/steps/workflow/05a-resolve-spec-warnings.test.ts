@@ -9,6 +9,7 @@ const base = {
   advisoryCount: 1,
   spec: 'SPEC',
   specFilePath: '/workspace/.haive/spec-review.md',
+  hasAuditFindings: false,
 };
 
 describe('05a form auto-submit on a spec revise', () => {

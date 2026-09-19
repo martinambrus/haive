@@ -91,10 +91,12 @@ describe('triageStep.form', () => {
     description: 'desc',
     heuristicPath: 'plan_tasklist' as const,
     heuristicReason: 'because',
+    repositoryId: null,
+    fromPlanChat: false,
   };
 
   function buildForm(llmOutput: unknown) {
-    const schema = triageStep.form!(null as never, detected, llmOutput);
+    const schema = triageStep.form!(null as never, detected, llmOutput)!;
     const field = schema.fields[0] as {
       type: string;
       options: Array<{ value: string; label: string; description?: string; info?: string }>;

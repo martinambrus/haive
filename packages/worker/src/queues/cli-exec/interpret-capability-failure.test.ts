@@ -87,7 +87,7 @@ const killed = (errorMessage: string | undefined) => ({
   exitCode: 137,
   rawOutput: '',
   parsedOutput: null,
-  errorMessage,
+  errorMessage: errorMessage ?? null,
 });
 
 describe('interpretCliFailure: self-identified kills keep their headline', () => {

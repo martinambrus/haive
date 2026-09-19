@@ -166,7 +166,11 @@ describe('issuePaths', () => {
     } as StepContext;
     const p = issuePaths(
       ctx,
-      { path: '/var/lib/haive/repos/u/r/.haive/worktrees/feat-x', branch: 'feat-x' },
+      {
+        path: '/var/lib/haive/repos/u/r/.haive/worktrees/feat-x',
+        branch: 'feat-x',
+        sandboxPath: '/haive/workdir/.haive/worktrees/feat-x',
+      },
       'ISSUE-001',
     );
     expect(p.worktreePath).toBe('/var/lib/haive/repos/u/r/.haive/worktrees/feat-x--ISSUE-001');
@@ -181,7 +185,11 @@ describe('issuePaths', () => {
     } as StepContext;
     const p = issuePaths(
       ctx,
-      { path: '/var/lib/haive/repos/u/r/.haive/worktrees/feature-foo', branch: 'feature/foo' },
+      {
+        path: '/var/lib/haive/repos/u/r/.haive/worktrees/feature-foo',
+        branch: 'feature/foo',
+        sandboxPath: '/haive/workdir/.haive/worktrees/feature-foo',
+      },
       'ISSUE-001',
     );
     // dir stays one level under worktrees (slash flattened)…
@@ -318,6 +326,7 @@ describe('06c buildCoderPrompt spec directive', () => {
     acceptanceCriteria: ['it works'],
     provides: 'the thing',
     sandboxWorktreePath: '/haive/workdir',
+    planImpact: '',
     ...over,
   });
   const DIRECTIVE = 'Read them IN FULL from the spec file named above';

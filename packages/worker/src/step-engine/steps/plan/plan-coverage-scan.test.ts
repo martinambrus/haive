@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { findCoverageGaps, headingTerms, parseDocSections } from './plan-coverage-scan.js';
 
-const section = (title: string, line = 1) => ({ title, level: 2, line, body: '' });
+const section = (title: string, line = 1) => ({
+  title,
+  level: 2,
+  line,
+  body: '',
+  source: 'spec.md',
+});
 
 describe('headingTerms', () => {
   it('drops the numbering and the filler', () => {

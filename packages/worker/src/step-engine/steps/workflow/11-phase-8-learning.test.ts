@@ -404,7 +404,7 @@ describe('parseLearningOutput op/targetId', () => {
     });
     expect(entries).toHaveLength(1);
     expect(entries![0]).toMatchObject({ id: 'a', op: 'insert' });
-    expect(entries![0].targetId).toBeUndefined();
+    expect(entries![0]?.targetId).toBeUndefined();
   });
 
   it('parses an update op + targetId', () => {
@@ -422,7 +422,7 @@ describe('parseLearningOutput op/targetId', () => {
 
   it('falls back to insert for an unknown op and drops a bodyless insert', () => {
     expect(
-      parseLearningOutput({ entries: [{ op: 'frob', title: 'A', body: 'b src/a.ts:1' }] })![0].op,
+      parseLearningOutput({ entries: [{ op: 'frob', title: 'A', body: 'b src/a.ts:1' }] })![0]?.op,
     ).toBe('insert');
     expect(parseLearningOutput({ entries: [{ op: 'insert', title: 'A' }] })).toHaveLength(0);
   });

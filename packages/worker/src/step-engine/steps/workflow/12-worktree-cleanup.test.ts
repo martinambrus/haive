@@ -80,18 +80,9 @@ async function advanceOrigin(bare: string, file: string, content: string): Promi
   }
 }
 
-type Det = {
-  mode: 'worktree' | 'inplace' | 'no-git' | 'unknown';
-  worktreePath: string | null;
-  branchName: string | null;
-  baseBranch: string | null;
-  parentBranch: string | null;
-  repositoryId: string | null;
-  hasOrigin: boolean;
-  originUrl: string | null;
-  boundCredentialId: string | null;
-  credentials: { id: string; label: string; host: string }[];
-};
+// Derived from the step rather than copied: a hand-written copy of this shape went
+// stale as the step grew PR-workflow fields, and nothing type-checked the test.
+type Det = Parameters<NonNullable<typeof worktreeCleanupStep.form>>[1];
 function det(wt: string, over: Partial<Det> = {}): Det {
   return {
     mode: 'worktree',
@@ -104,9 +95,17 @@ function det(wt: string, over: Partial<Det> = {}): Det {
     originUrl: null,
     boundCredentialId: null,
     credentials: [],
+    prWorkflowAvailable: false,
+    taskTitle: '',
+    taskDescription: '',
     ...over,
   };
 }
+
+// The form is nullable by contract; every case that reads one expects one, so a null
+// fails at its first read instead of each line asserting it.
+const formOf = (...args: Parameters<NonNullable<typeof worktreeCleanupStep.form>>) =>
+  worktreeCleanupStep.form!(...args)!;
 
 const logger = { info: () => {}, warn: () => {}, error: () => {} };
 
@@ -604,7 +603,7 @@ describe('12 worktree cleanup form', () => {
     ({ repoPath: parent, userId: 'u1', db: {}, logger }) as unknown as StepContext;
 
   it('defaults to merge_remove and offers branch-delete + the remove-only terminal note', () => {
-    const schema = worktreeCleanupStep.form!(stubCtx(''), det('/ws/.haive/worktrees/feature-x'));
+    const schema = formOf(stubCtx(''), det('/ws/.haive/worktrees/feature-x'));
     const action = schema.fields.find((f) => f.id === 'action') as { default?: string };
     expect(action.default).toBe('merge_remove');
     const note = schema.fields.find((f) => f.id === 'removeOnlyNote') as { body?: string };
@@ -614,7 +613,7 @@ describe('12 worktree cleanup form', () => {
   });
 
   it('offers the squash checkbox ticked by default, scoped to merge_remove', () => {
-    const schema = worktreeCleanupStep.form!(stubCtx(''), det('/ws/.haive/worktrees/feature-x'));
+    const schema = formOf(stubCtx(''), det('/ws/.haive/worktrees/feature-x'));
     const squash = schema.fields.find((f) => f.id === 'squashMerge') as {
       default?: boolean;
       visibleWhen?: { field: string; equals: unknown };
@@ -624,10 +623,7 @@ describe('12 worktree cleanup form', () => {
   });
 
   it('passes straight through (auto-submit, no fields) when there is no worktree', () => {
-    const schema = worktreeCleanupStep.form!(
-      stubCtx(''),
-      det('', { mode: 'inplace', worktreePath: null }),
-    );
+    const schema = formOf(stubCtx(''), det('', { mode: 'inplace', worktreePath: null }));
     expect(schema.autoSubmit).toBe(true);
     expect(schema.fields).toHaveLength(0);
   });
@@ -637,19 +633,19 @@ describe('12 worktree cleanup form (push gating)', () => {
   const fctx = { repoPath: '', userId: 'u1', db: {}, logger } as unknown as StepContext;
 
   it('hides the push fields when there is no origin', () => {
-    const schema = worktreeCleanupStep.form!(fctx, det('/ws/wt', { hasOrigin: false }));
+    const schema = formOf(fctx, det('/ws/wt', { hasOrigin: false }));
     expect(schema.fields.some((f) => f.id === 'pushBase')).toBe(false);
     expect(schema.fields.some((f) => f.id === 'credentialId')).toBe(false);
     expect(schema.fields.some((f) => f.id === 'setUpstream')).toBe(false);
   });
 
   it('offers the push fields (with the credential picker) when an origin exists', () => {
-    const schema = worktreeCleanupStep.form!(
+    const schema = formOf(
       fctx,
       det('/ws/wt', {
         hasOrigin: true,
         originUrl: 'https://x/y.git',
-        credentials: [{ id: 'c1', label: 'gh', host: 'github.com' }],
+        credentials: [{ id: 'c1', label: 'gh', host: 'github.com', provider: null }],
       }),
     );
     expect(schema.fields.some((f) => f.id === 'pushBase')).toBe(true);
@@ -660,10 +656,7 @@ describe('12 worktree cleanup form (push gating)', () => {
   });
 
   it('cross-branch + no origin warns that the merge stays local', () => {
-    const schema = worktreeCleanupStep.form!(
-      fctx,
-      det('/ws/wt', { parentBranch: 'develop', hasOrigin: false }),
-    );
+    const schema = formOf(fctx, det('/ws/wt', { parentBranch: 'develop', hasOrigin: false }));
     const note = schema.fields.find((f) => f.id === 'branchMismatchNote') as {
       body?: string;
       variant?: string;
@@ -673,10 +666,7 @@ describe('12 worktree cleanup form (push gating)', () => {
   });
 
   it('cross-branch + origin shows the cross-branch info note', () => {
-    const schema = worktreeCleanupStep.form!(
-      fctx,
-      det('/ws/wt', { parentBranch: 'develop', hasOrigin: true }),
-    );
+    const schema = formOf(fctx, det('/ws/wt', { parentBranch: 'develop', hasOrigin: true }));
     const note = schema.fields.find((f) => f.id === 'branchMismatchNote') as { variant?: string };
     expect(note.variant).toBe('info');
   });

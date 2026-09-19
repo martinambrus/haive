@@ -7,29 +7,28 @@ const e = (rel: string, content: string): DdevInputEntry => ({
 });
 
 describe('hashDdevEntries', () => {
-  const base: DdevInputEntry[] = [
-    e('.ddev/config.yaml', 'php_version: "8.3"\n'),
-    e('.ddev/php/extra.ini', 'memory_limit = 512M\n'),
-    e('.ddev/web-build/Dockerfile', 'RUN echo hi\n'),
-  ];
+  const config = e('.ddev/config.yaml', 'php_version: "8.3"\n');
+  const extra = e('.ddev/php/extra.ini', 'memory_limit = 512M\n');
+  const dockerfile = e('.ddev/web-build/Dockerfile', 'RUN echo hi\n');
+  const base: DdevInputEntry[] = [config, extra, dockerfile];
 
   it('is order-independent (sorts before hashing)', () => {
-    const shuffled = [base[2], base[0], base[1]];
+    const shuffled = [dockerfile, config, extra];
     expect(hashDdevEntries(shuffled)).toBe(hashDdevEntries(base));
   });
 
   it('changes when a file content changes', () => {
-    const changed = [base[0], e('.ddev/php/extra.ini', 'memory_limit = 1024M\n'), base[2]];
+    const changed = [config, e('.ddev/php/extra.ini', 'memory_limit = 1024M\n'), dockerfile];
     expect(hashDdevEntries(changed)).not.toBe(hashDdevEntries(base));
   });
 
   it('changes when a file is renamed (path folded into the hash)', () => {
-    const renamed = [base[0], e('.ddev/php/renamed.ini', 'memory_limit = 512M\n'), base[2]];
+    const renamed = [config, e('.ddev/php/renamed.ini', 'memory_limit = 512M\n'), dockerfile];
     expect(hashDdevEntries(renamed)).not.toBe(hashDdevEntries(base));
   });
 
   it('changes when a file is added or removed', () => {
-    const withoutDockerfile = [base[0], base[1]];
+    const withoutDockerfile = [config, extra];
     expect(hashDdevEntries(withoutDockerfile)).not.toBe(hashDdevEntries(base));
   });
 

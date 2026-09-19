@@ -8,16 +8,18 @@ import {
 } from './08d2-adversarial-qa-review.js';
 import type { StepContext, StepApplyArgs } from '../../step-definition.js';
 
-const detected = {
+const detected: Parameters<NonNullable<typeof adversarialQaReviewStep.form>>[1] = {
   ran: true,
   level: 'standard',
   blocking: true,
   counts: { critical: 1, high: 1, total: 3 },
+  filteredCount: 0,
   findings: [
     {
       key: '0',
       severity: 'critical',
       fingerprints: ['fp-sqli-bandit', 'fp-sqli-infector'],
+      folded: false,
       label: '[critical] sqli @ q.php:5',
       line: '- [critical] sqli @ q.php:5: dump — fix: param',
     },
@@ -25,6 +27,7 @@ const detected = {
       key: '1',
       severity: 'high',
       fingerprints: ['fp-xss'],
+      folded: false,
       label: '[high] xss @ v.tsx:10',
       line: '- [high] xss @ v.tsx:10: steal',
     },
@@ -32,6 +35,7 @@ const detected = {
       key: '2',
       severity: 'low',
       fingerprints: ['fp-nit'],
+      folded: false,
       label: '[low] nit @ a.ts:1',
       line: '- [low] nit @ a.ts:1: style',
     },
@@ -89,7 +93,7 @@ describe('formatQaFixDiagnosis', () => {
 
 describe('08d2 form', () => {
   it('offers fix/accept (defaulting to fix when blocking) and a multi-select of findings', () => {
-    const schema = adversarialQaReviewStep.form!(stubCtx, detected);
+    const schema = adversarialQaReviewStep.form!(stubCtx, detected)!;
     const decision = schema.fields.find((f) => f.id === 'decision') as {
       type?: string;
       default?: string;
@@ -296,7 +300,7 @@ describe('08d2 form — filtered count', () => {
   const withFiltered = (filteredCount: number) => ({ ...detected, filteredCount });
 
   it('states the filtered count and why, rather than dropping findings silently', () => {
-    const schema = adversarialQaReviewStep.form!(stubCtx, withFiltered(14) as never);
+    const schema = adversarialQaReviewStep.form!(stubCtx, withFiltered(14) as never)!;
     const body = JSON.stringify(schema);
     expect(body).toContain('14 further finding(s) are hidden');
     expect(body).toContain('could not reproduce');
@@ -306,7 +310,7 @@ describe('08d2 form — filtered count', () => {
   });
 
   it('says nothing about filtering when nothing was filtered', () => {
-    const schema = adversarialQaReviewStep.form!(stubCtx, withFiltered(0) as never);
+    const schema = adversarialQaReviewStep.form!(stubCtx, withFiltered(0) as never)!;
     const body = JSON.stringify(schema);
     expect(body).not.toContain('are hidden');
     expect(body).not.toContain('filtered');

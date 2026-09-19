@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import {
   phase0b5SpecQualityStep,
   resolveReviewResult,
@@ -107,7 +108,14 @@ describe('parseSpecQualityOutput', () => {
 
 describe('apply review pass (stub on parse failure)', () => {
   it('yields source=stub with EMPTY findings so the corrector is not poisoned', async () => {
-    const detected = { specSummary: '', spec: 'SPEC BODY', specLength: 9, currentBudget: 5 };
+    const detected = {
+      specSummary: '',
+      spec: 'SPEC BODY',
+      specLength: 9,
+      currentBudget: 5,
+      revising: false,
+      reviewDimensionIds: [...ALL_REVIEW_DIMENSION_IDS],
+    };
     const args = {
       detected,
       formValues: {},
@@ -124,7 +132,14 @@ describe('apply review pass (stub on parse failure)', () => {
 });
 
 describe('corrector prompt (review-to-corrector handoff)', () => {
-  const detected = { specSummary: '', spec: 'ORIG SPEC', specLength: 9, currentBudget: 5 };
+  const detected = {
+    specSummary: '',
+    spec: 'ORIG SPEC',
+    specLength: 9,
+    currentBudget: 5,
+    revising: false,
+    reviewDimensionIds: [...ALL_REVIEW_DIMENSION_IDS],
+  };
   const buildIterationPrompt = phase0b5SpecQualityStep.loop!.buildIterationPrompt!;
 
   it('falls back to self-review when the preceding review was a lost stub', () => {
@@ -149,7 +164,7 @@ describe('corrector prompt (review-to-corrector handoff)', () => {
             source: 'review',
             score: 6,
             findings: [
-              { dimension: 'acceptance_criteria', severity: 'error', comment: 'AC4 fails' },
+              { dimension: 'acceptance_criteria', severity: 'high', comment: 'AC4 fails' },
             ],
             spec: 'S',
           }),
@@ -157,7 +172,7 @@ describe('corrector prompt (review-to-corrector handoff)', () => {
       ],
     });
     expect(prompt).toContain('=== Findings from iteration 1 ===');
-    expect(prompt).toContain('[error] acceptance_criteria: AC4 fails');
+    expect(prompt).toContain('[high] acceptance_criteria: AC4 fails');
     expect(prompt).not.toContain('No usable reviewer findings');
   });
 });
@@ -165,7 +180,14 @@ describe('corrector prompt (review-to-corrector handoff)', () => {
 describe('REVIEW prompt hardening', () => {
   it('re-review prompt forbids YAML and demands a single JSON object', () => {
     const prompt = phase0b5SpecQualityStep.loop!.buildIterationPrompt!({
-      detected: { specSummary: '', spec: 'SPEC', specLength: 4, currentBudget: 5 },
+      detected: {
+        specSummary: '',
+        spec: 'SPEC',
+        specLength: 4,
+        currentBudget: 5,
+        revising: false,
+        reviewDimensionIds: [...ALL_REVIEW_DIMENSION_IDS],
+      },
       formValues: { focusAreas: '' },
       iteration: 2, // even = reviewer
       previousIterations: [],
@@ -176,7 +198,14 @@ describe('REVIEW prompt hardening', () => {
 });
 
 describe('05 form auto-submit on a spec revise', () => {
-  const base = { specSummary: '', spec: 'SPEC', specLength: 4, currentBudget: 5 };
+  const base = {
+    specSummary: '',
+    spec: 'SPEC',
+    specLength: 4,
+    currentBudget: 5,
+    revising: false,
+    reviewDimensionIds: [...ALL_REVIEW_DIMENSION_IDS],
+  };
 
   it('auto-submits when revising, carrying the durable budget default', () => {
     const schema = phase0b5SpecQualityStep.form!(ctx, { ...base, revising: true })!;
