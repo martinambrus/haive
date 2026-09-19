@@ -1,7 +1,5 @@
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { join as pathJoin } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -328,18 +326,6 @@ export const RTK_HELPER_MISSING_BINARY_EXIT = 2;
  *  flag combination rtk rejects outright survived unnoticed. Exported for the test. */
 export const RTK_HELPER_INIT_FAILED_EXIT = 3;
 
-// Worker bind-mounts user HOME read-only at /host-fs. HOST_REPO_ROOT_REAL is
-// the same directory as seen by the docker daemon (i.e. the absolute host path)
-// — required when emitting bind mounts back out to per-task sandbox containers.
-const HOST_FS_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
-const HOST_REAL_ROOT = process.env.HOST_REPO_ROOT_REAL ?? process.env.HOME ?? '/';
-
-function hostRelativeOfTilde(p: string): string | null {
-  if (p === '~') return '';
-  if (p.startsWith('~/')) return p.slice(2);
-  return null;
-}
-
 export function ensureTaskAuthVolumes(
   ctx: ProviderAuthCtx,
   taskId: string,
@@ -651,44 +637,6 @@ export function resolveTaskAuthMounts(
     readOnly: false,
     kind: 'auth' as const,
   }));
-}
-
-/**
- * Build per-CLI bind mounts for user-level skills dirs, with a host-side
- * fallback chain. For each `userSkillsPaths` entry the canonical host path is
- * checked first; if absent and a `fallbackHost` is configured (e.g. codex
- * falling back to `~/.claude/skills`), the fallback is bound at the same
- * container path. Missing on both = no mount emitted, which is correct — the
- * container simply has no pre-existing user skills and onboarding will seed
- * the repo-level dir.
- *
- * Read-only is enforced: the task sandbox must never write back into the
- * user's host skills directory.
- */
-export function resolveTaskSkillMounts(providerName: CliProviderName): DockerVolumeMount[] {
-  const meta = getCliProviderMetadata(providerName);
-  const mounts: DockerVolumeMount[] = [];
-  for (const spec of meta.userSkillsPaths) {
-    const primaryRel = hostRelativeOfTilde(spec.host);
-    if (primaryRel !== null && existsSync(pathJoin(HOST_FS_ROOT, primaryRel))) {
-      mounts.push({
-        source: pathJoin(HOST_REAL_ROOT, primaryRel),
-        target: spec.containerPath,
-        readOnly: true,
-      });
-      continue;
-    }
-    if (!spec.fallbackHost) continue;
-    const fallbackRel = hostRelativeOfTilde(spec.fallbackHost);
-    if (fallbackRel !== null && existsSync(pathJoin(HOST_FS_ROOT, fallbackRel))) {
-      mounts.push({
-        source: pathJoin(HOST_REAL_ROOT, fallbackRel),
-        target: spec.containerPath,
-        readOnly: true,
-      });
-    }
-  }
-  return mounts;
 }
 
 /**

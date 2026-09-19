@@ -1,6 +1,18 @@
 import { BaseCliAdapter } from './base-adapter.js';
-import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
+import type { CliCommandSpec, CliProviderRecord, InvokeOpts } from './types.js';
 import { deliverPrompt } from './prompt-delivery.js';
+
+/** A headless gemini run has to be told the workspace is trusted AND that its tools are
+ *  pre-approved. MEASURED on 0.60.0 against a zero-token recorder: without the env var every run
+ *  exits 55 before its first request ("Gemini CLI is not running in a trusted directory"); with it
+ *  but no approval flag, non-interactive mode drops every tool that needs one, leaving 8 read-only
+ *  tools — no `activate_skill`, `write_file`, `replace` or `run_shell_command`. `--yolo` (the flag
+ *  the auth probe already passes) brings all of them back. Across the builds that can run
+ *  (0.6.0-0.60.0): the trust gate exists from 0.39.1, skills reach the model from 0.26.0, and no
+ *  build measured from 0.18.4 on declares the write tools without `--yolo`. */
+const GEMINI_HEADLESS_ENV: Readonly<Record<string, string>> = {
+  GEMINI_CLI_TRUST_WORKSPACE: 'true',
+};
 
 export class GeminiAdapter extends BaseCliAdapter {
   readonly providerName = 'gemini' as const;
@@ -54,22 +66,11 @@ export class GeminiAdapter extends BaseCliAdapter {
         ...deliverPrompt(prompt, { adapter: 'gemini', stdin: false }).argv,
         '--output-format',
         'json',
+        '--yolo',
       ]),
-      env: this.mergedEnv(provider, opts),
+      env: { ...GEMINI_HEADLESS_ENV, ...this.mergedEnv(provider, opts) },
       cwd: opts.cwd,
       outputFormat: 'gemini-json',
-    };
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      // GEMINI_CLI_TRUST_WORKSPACE bypasses the folder-trust prompt for the
-      // current session, ensuring step exec doesn't get downgraded to default
-      // approval mode when running in the sandbox workdir. Belt-and-braces
-      // alongside folderTrust.enabled=false in settings.json — the env var
-      // covers users whose ~/.gemini/settings.json predates that change.
-      envVars: { GEMINI_CLI_TRUST_WORKSPACE: 'true' },
-      extraArgs: [],
     };
   }
 }

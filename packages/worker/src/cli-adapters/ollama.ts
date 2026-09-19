@@ -1,13 +1,12 @@
 import { isOllamaCloudModel, IN_STACK_OLLAMA_URL } from '@haive/shared';
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
-import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
+import { CLAUDE_FAMILY_SKILLS_ENV, claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import { OLLAMA_CLOUD_URL, resolveOllamaBaseUrl } from './ollama-thinking-proxy.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
-  EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
@@ -110,7 +109,11 @@ export class OllamaAdapter extends BaseCliAdapter {
     // No declared output-token ceiling: the claude binary's own 32000 default applies
     // until an overflow teaches us the model can do more (model-capabilities.ts). The
     // provider's envVars still win — mergedEnv spreads last.
-    const env = { ...claudeFamilyOutputTokenEnv(provider), ...this.mergedEnv(provider, opts) };
+    const env = {
+      ...CLAUDE_FAMILY_SKILLS_ENV,
+      ...claudeFamilyOutputTokenEnv(provider),
+      ...this.mergedEnv(provider, opts),
+    };
     const model = provider.model ?? this.defaultModel;
     if (!model) {
       throw new Error('ollama provider requires a model (set the provider model field)');
@@ -179,10 +182,6 @@ export class OllamaAdapter extends BaseCliAdapter {
     env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
     if (provider.model) env.ANTHROPIC_MODEL = provider.model;
     return env;
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return { envVars: {}, extraArgs: [] };
   }
 
   override buildPluginInstallCommands(

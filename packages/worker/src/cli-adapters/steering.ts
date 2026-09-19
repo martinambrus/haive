@@ -106,3 +106,23 @@ export function claudeFamilyArgs(opts: {
     stdinPrompt: delivery.stdinPrompt,
   };
 }
+
+/** Env every claude-family run carries. Spread BEFORE the provider's own envVars, so a provider
+ *  can override either value.
+ *
+ *  The binary lists skills to the model under a character budget of context window x 4 x 1%
+ *  (8,000 chars on a 200K model) and charges its OWN bundled skills first: they always keep
+ *  their full descriptions, while project skills share what is left and the rest arrive as a
+ *  bare name. MEASURED with Haive's argv on the offered builds (2.1.41-2.1.278):
+ *  - `CLAUDE_CODE_DISABLE_BUNDLED_SKILLS` exists from 2.1.169. On 2.1.270, 1 of 18 repo skills
+ *    kept its description with bundled skills on and 18 of 18 with them off. The switch leaves
+ *    `.claude/skills`, `.claude/commands` and plugins alone.
+ *  - 2.1.105-2.1.168 already cut repo skills (2.1.150: 10 of 18) and have no switch. A budget of
+ *    40000 (`SLASH_COMMAND_TOOL_CHAR_BUDGET`, read back to 2.1.41) restores all 18 there. It is
+ *    the default of a 1M-context model, so it never shrinks a budget, and with bundled skills off
+ *    the listing stays far below it.
+ *  Both are version-bound vendor behaviour: re-measure after a CLI bump. */
+export const CLAUDE_FAMILY_SKILLS_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: '1',
+  SLASH_COMMAND_TOOL_CHAR_BUDGET: '40000',
+};

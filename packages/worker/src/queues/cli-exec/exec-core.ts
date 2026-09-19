@@ -1499,12 +1499,17 @@ export function createSandboxSpawner(
         // appReach's CA vars go BEFORE spec.env so a provider that sets its own bundle wins.
         env: { ...NPM_CACHE_ENV, ...(appReach?.env ?? {}), ...spec.env },
         wrapperContent: wrapperContent ?? undefined,
-        // A prompt too large for argv can arrive as a file instead (grok).
-        // Appended to whatever masking already contributed rather than
+        // The adapter's config files and a prompt too large for argv (both grok)
+        // are appended to whatever masking already contributed rather than
         // replacing it — the mask list is a security control and must not be
-        // displaced by an unrelated feature.
+        // displaced by an unrelated feature, and the runner keeps the FIRST
+        // claim on a container path.
         extraFiles: (() => {
-          const all = spec.promptFile ? [...extraFiles, spec.promptFile] : extraFiles;
+          const all = [
+            ...extraFiles,
+            ...(spec.configFiles ?? []),
+            ...(spec.promptFile ? [spec.promptFile] : []),
+          ];
           return all.length > 0 ? all : undefined;
         })(),
         timeoutMs: opts.timeoutMs,

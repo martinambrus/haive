@@ -1,5 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
-import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
+import type { CliCommandSpec, CliProviderRecord, InvokeOpts } from './types.js';
 
 // agy reports provider-fatal errors (quota 429 / auth / 5xx) ONLY to its log file
 // while exiting 0 with empty stdout, so Haive redirects that log via `--log-file` to
@@ -115,13 +115,6 @@ export class AntigravityAdapter extends BaseCliAdapter {
       outputFormat: 'antigravity-stream-json',
       stdinPrompt: antigravityStdinPrompt(prompt),
       captureFile: { containerDir: AGY_LOG_DIR, fileName: AGY_LOG_FILE },
-    };
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
     };
   }
 }

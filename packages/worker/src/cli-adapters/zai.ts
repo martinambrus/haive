@@ -1,11 +1,10 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
-import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
+import { CLAUDE_FAMILY_SKILLS_ENV, claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
-  EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
@@ -68,7 +67,11 @@ export class ZaiAdapter extends BaseCliAdapter {
     // No declared output-token ceiling: the claude binary's own 32000 default applies
     // until an overflow teaches us the model can do more (model-capabilities.ts). The
     // provider's envVars still win — mergedEnv spreads last.
-    const env = { ...claudeFamilyOutputTokenEnv(provider), ...this.mergedEnv(provider, opts) };
+    const env = {
+      ...CLAUDE_FAMILY_SKILLS_ENV,
+      ...claudeFamilyOutputTokenEnv(provider),
+      ...this.mergedEnv(provider, opts),
+    };
     const baseUrl = env.Z_AI_API_URL ?? env.ANTHROPIC_BASE_URL ?? ZAI_DEFAULT_BASE_URL;
     env.ANTHROPIC_BASE_URL = baseUrl;
     const token = env.Z_AI_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;
@@ -124,13 +127,6 @@ export class ZaiAdapter extends BaseCliAdapter {
     delete env.ANTHROPIC_API_KEY;
     if (env.Z_AI_MODEL) env.CLAUDE_MODEL = env.Z_AI_MODEL;
     return env;
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
-    };
   }
 
   override buildPluginInstallCommands(

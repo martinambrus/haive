@@ -121,6 +121,10 @@ export interface CliCommandSpec {
   /** Written into the sandbox before the run, for a CLI whose prompt arrives by
    *  PATH rather than argv or stdin. */
   promptFile?: { containerPath: string; content: string };
+  /** CLI configuration the adapter needs in place for this run, mounted read-only at a path
+   *  OUTSIDE the auth volume, so nothing is merged into a config file the CLI also writes
+   *  (grok: `/etc/grok/managed_config.toml`). */
+  configFiles?: Array<{ containerPath: string; content: string }>;
   /** When set, the sandbox runner mounts a WRITABLE directory at
    *  `captureFile.containerDir` and, after the run, reads `<containerDir>/<fileName>`
    *  back out as `CliExecutionResult.capturedLog`. Used to recover a CLI's own log
@@ -174,11 +178,6 @@ export interface SubAgentInvocation {
   /** Same meaning as `CliCommandSpec.assignedAgentIds`: the union over every sub-agent prompt
    *  and the synthesis prompt, read before the rewrite. Absent when none. */
   assignedAgentIds?: string[];
-}
-
-export interface EnvInjection {
-  envVars: Record<string, string>;
-  extraArgs: string[];
 }
 
 export interface ProbeResult {

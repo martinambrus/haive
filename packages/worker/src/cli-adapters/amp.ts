@@ -1,5 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
-import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
+import type { CliCommandSpec, CliProviderRecord, InvokeOpts } from './types.js';
 import { deliverPrompt } from './prompt-delivery.js';
 import { steeringUserMessageLine } from './steering.js';
 
@@ -108,13 +108,6 @@ export class AmpAdapter extends BaseCliAdapter {
       // Set only when the prompt was too large for argv; `-x` then carries no
       // value and amp reads the message from stdin, which its --help documents.
       ...(delivery.stdinPrompt ? { stdinPrompt: delivery.stdinPrompt } : {}),
-    };
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
     };
   }
 }

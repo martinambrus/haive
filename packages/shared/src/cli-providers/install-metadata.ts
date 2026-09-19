@@ -35,6 +35,9 @@ export interface CliInstallMetadata {
   autoUpdateDisable: AutoUpdateDisableKnob[];
   versionPinnable: boolean;
   minWorkingLoginVersion?: string;
+  /** Oldest build that can run Haive's command line at all. The API neither offers nor saves an
+   *  older one (isRunnableCliVersion): a pin below it fails every run. */
+  minRunnableVersion?: string;
 }
 
 export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> = {
@@ -59,11 +62,21 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
   gemini: {
     install: { kind: 'npm', package: '@google/gemini-cli', binary: 'gemini' },
     versionSource: { kind: 'npm', package: '@google/gemini-cli' },
+    // gemini's SYSTEM settings file, and its ONLY writer: codegen `printf >`s it, so a second
+    // writer in the base image was overwritten in every gemini image (the base image's
+    // enableAgents:false never survived). It outranks the user's ~/.gemini volume and the repo's
+    // .gemini/settings.json, and gemini reads it only while it is ROOT-owned, which a build-time
+    // write is (MEASURED: 0.60.0 skips a uid-1000-owned one with a security warning).
+    // - experimental.enableAgents:false: Haive owns fan-out (supportsSubagents=false).
+    // - skills.disabled: gemini's built-in skills, which have no group switch. MEASURED on 0.26.0,
+    //   0.35.3, 0.39.1, 0.45.3 and 0.60.0: both gone, repo skills intact. Builds from before
+    //   skills existed accept the key and ignore it.
     autoUpdateDisable: [
       {
         kind: 'config-file',
         path: '/etc/gemini-cli/settings.json',
-        content: '{"general":{"enableAutoUpdate":false,"enableAutoUpdateNotification":false}}\n',
+        content:
+          '{"experimental":{"enableAgents":false},"general":{"enableAutoUpdate":false,"enableAutoUpdateNotification":false},"skills":{"disabled":["skill-creator","antigravity-support"]}}\n',
       },
     ],
     versionPinnable: true,
@@ -71,6 +84,9 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     // stdout. Versions 0.18.0..0.18.3 suppress it (google-gemini/gemini-cli#13853).
     // Fixed in 0.18.4.
     minWorkingLoginVersion: '0.18.4',
+    // `--output-format json` shipped in v0.6.0. MEASURED with Haive's argv: 0.1.22 and 0.5.5 exit 1
+    // on "Unknown arguments: output-format", while 0.6.0 through 0.60.0 reach the model.
+    minRunnableVersion: '0.6.0',
   },
   amp: {
     install: { kind: 'npm', package: '@sourcegraph/amp', binary: 'amp' },
@@ -159,6 +175,9 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
       },
     ],
     versionPinnable: true,
+    // `--output-format streaming-messages-json`, which the adapter depends on, arrived in 0.2.116.
+    // MEASURED with Haive's argv: every build from 0.1.202 to 0.2.115 exits 2 on it.
+    minRunnableVersion: '0.2.116',
   },
   openrouter: {
     // OpenRouter reuses the Claude binary against its Anthropic-compatible endpoint
@@ -171,3 +190,23 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     versionPinnable: true,
   },
 };
+
+function versionTriple(version: string): [number, number, number] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** False only for a version KNOWN to be older than the CLI's minRunnableVersion. A shape that does
+ *  not parse counts as runnable: refusing what cannot be read would block a legitimate build,
+ *  while a broken one still fails loudly at its first run. */
+export function isRunnableCliVersion(name: CliProviderName, version: string): boolean {
+  const floor = CLI_INSTALL_METADATA[name]?.minRunnableVersion;
+  if (!floor) return true;
+  const v = versionTriple(version);
+  const f = versionTriple(floor);
+  if (!v || !f) return true;
+  for (let i = 0; i < 3; i++) {
+    if (v[i] !== f[i]) return v[i]! > f[i]!;
+  }
+  return true;
+}

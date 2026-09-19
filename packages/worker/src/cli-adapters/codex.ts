@@ -3,7 +3,6 @@ import type {
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
-  EnvInjection,
   InvokeOpts,
   SteeringTransportContext,
 } from './types.js';
@@ -35,10 +34,25 @@ const CODEX_EFFORT_SCALE: EffortScale = {
  *  this pins it. */
 const CODEX_MULTI_AGENT_OFF: readonly string[] = ['-c', 'features.multi_agent_v2=false'];
 
-/** `codex app-server` takes the same override as `codex exec` (see execBaseArgs). Approvals,
+/** Codex's own bundled "system" skills stay out of every run. On start codex installs imagegen,
+ *  openai-docs, plugin-creator, skill-creator and skill-installer into `$CODEX_HOME/skills/.system`
+ *  and lists them beside the repo's `.agents/skills`. MEASURED on 0.154.0: 2,083 chars of every
+ *  request, and `skill-creator` was pulled into 30 runs of `09_5-skill-generation` and 3 of
+ *  `09_5b-skill-repair`, where its file-writing workflow competes with the JSON-only contract.
+ *  With this override the catalog holds the repo's skills alone (4,557 -> 2,430 chars) and
+ *  `.system` is never installed. A `-c` override like CODEX_MULTI_AGENT_OFF, not a validated
+ *  flag: honoured from 0.114.0 (openai/codex#13792), accepted and ignored by older builds, and
+ *  verified on every offered build (0.149.1-0.155.1), exec and app-server alike. */
+const CODEX_BUNDLED_SKILLS_OFF: readonly string[] = ['-c', 'skills.bundled.enabled=false'];
+
+/** `codex app-server` takes the same overrides as `codex exec` (see execBaseArgs). Approvals,
  *  sandbox, model, effort and the prompt are NOT flags here: they travel in the JSON-RPC requests
  *  (cli-executor/codex-app-server.ts). */
-const CODEX_APP_SERVER_ARGS: readonly string[] = ['app-server', ...CODEX_MULTI_AGENT_OFF];
+const CODEX_APP_SERVER_ARGS: readonly string[] = [
+  'app-server',
+  ...CODEX_MULTI_AGENT_OFF,
+  ...CODEX_BUNDLED_SKILLS_OFF,
+];
 
 export class CodexAdapter extends BaseCliAdapter {
   readonly providerName = 'codex' as const;
@@ -134,17 +148,11 @@ export class CodexAdapter extends BaseCliAdapter {
       '--json',
       '--dangerously-bypass-approvals-and-sandbox',
       ...CODEX_MULTI_AGENT_OFF,
+      ...CODEX_BUNDLED_SKILLS_OFF,
       ...reasoningArgs,
       ...modelArgs,
       '--skip-git-repo-check',
     ];
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
-    };
   }
 }
 

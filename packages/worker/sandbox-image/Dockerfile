@@ -107,18 +107,6 @@ RUN printf '%s\n' '{"amp.permissions":[{"tool":"Task","action":"reject"},{"tool"
       > /etc/haive-amp-settings.json \
  && chmod 0644 /etc/haive-amp-settings.json
 
-# Disable Gemini CLI's autonomous subagents (experimental.enableAgents, default
-# true — the main agent otherwise proactively calls invoke_agent to delegate).
-# Baked as gemini's SYSTEM settings file, which per gemini-cli docs OVERRIDES all
-# user/project settings (highest precedence): the per-user ~/.gemini volume and
-# the repo's own .gemini/settings.json cannot re-enable it. Haive never uses
-# gemini's native subagents (supportsSubagents=false), so a global disable is safe
-# and keeps a mining agent from fanning out and burning tokens. Default Linux path
-# /etc/gemini-cli/settings.json (overridable via GEMINI_CLI_SYSTEM_SETTINGS_PATH).
-RUN mkdir -p /etc/gemini-cli \
- && printf '%s\n' '{"experimental":{"enableAgents":false}}' > /etc/gemini-cli/settings.json \
- && chmod 0644 /etc/gemini-cli/settings.json
-
 # Entrypoint shim restores ~/.claude.json from the .claude/ named-volume copy
 # on every container start. Required because claude-code stores OAuth tokens
 # in a single ~/.claude.json file and named volumes mount dirs only.
