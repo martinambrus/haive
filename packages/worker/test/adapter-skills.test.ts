@@ -4,7 +4,7 @@ import { ZaiAdapter } from '../src/cli-adapters/zai.js';
 import { OllamaAdapter } from '../src/cli-adapters/ollama.js';
 import { MuseAdapter } from '../src/cli-adapters/muse.js';
 import { OpenRouterAdapter } from '../src/cli-adapters/openrouter.js';
-import { CodexAdapter } from '../src/cli-adapters/codex.js';
+import { CodexAdapter, codexExecFallbackSpec } from '../src/cli-adapters/codex.js';
 import { GeminiAdapter } from '../src/cli-adapters/gemini.js';
 import { GrokAdapter } from '../src/cli-adapters/grok.js';
 import { AmpAdapter } from '../src/cli-adapters/amp.js';
@@ -70,4 +70,28 @@ describe('claude family: bundled skills off', () => {
       expect(spec.env.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBeUndefined();
     });
   }
+});
+
+describe('codex: system skills off', () => {
+  // codex installs and lists five `.system` skills of its own, and `skill-creator` was pulled into
+  // 33 runs of Haive's own skill-generation steps (MEASURED on 0.154.0). Every transport has to
+  // carry the override, the exec fallback of an app-server run included.
+  const codexProvider = provider({ model: 'gpt-5.6-sol' });
+  const hasOverride = (args: string[]): boolean => {
+    const i = args.indexOf('skills.bundled.enabled=false');
+    return i > 0 && args[i - 1] === '-c';
+  };
+
+  it('on the one-shot exec run', () => {
+    const spec = new CodexAdapter().buildCliInvocation(codexProvider, 'do x', {});
+    expect(hasOverride(spec.args)).toBe(true);
+  });
+
+  it('on the app-server run and on its exec fallback', () => {
+    const spec = new CodexAdapter().buildCliInvocation(codexProvider, 'do x', {
+      steeringMode: true,
+    });
+    expect(hasOverride(spec.args)).toBe(true);
+    expect(hasOverride(codexExecFallbackSpec(spec)!.args)).toBe(true);
+  });
 });
