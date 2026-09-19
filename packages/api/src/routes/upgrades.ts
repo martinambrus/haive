@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import {
   TASK_JOB_NAMES,
   buildCliRulesBlockFromProviders,
+  bundleAgentTemplateHash,
   CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_TEMPLATE_ID,
   computeSetHash,
@@ -64,6 +65,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     .select({
       itemId: schema.customBundleItems.id,
       bundleId: schema.customBundleItems.bundleId,
+      kind: schema.customBundleItems.kind,
       schemaVersion: schema.customBundleItems.schemaVersion,
       contentHash: schema.customBundleItems.contentHash,
     })
@@ -73,7 +75,8 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const customCurrent = bundleItems.map((b) => ({
     templateId: `custom.${b.bundleId}.${b.itemId}`,
     schemaVersion: b.schemaVersion,
-    contentHash: b.contentHash,
+    // The hash the worker records on an agent's artifact rows (expandCustomBundlesFor).
+    contentHash: b.kind === 'agent' ? bundleAgentTemplateHash(b.contentHash) : b.contentHash,
   }));
 
   // The AGENTS.md cli-rules region is per-repo content (the repo owner's merged
