@@ -62,11 +62,21 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
   gemini: {
     install: { kind: 'npm', package: '@google/gemini-cli', binary: 'gemini' },
     versionSource: { kind: 'npm', package: '@google/gemini-cli' },
+    // gemini's SYSTEM settings file, and its ONLY writer: codegen `printf >`s it, so a second
+    // writer in the base image was overwritten in every gemini image (the base image's
+    // enableAgents:false never survived). It outranks the user's ~/.gemini volume and the repo's
+    // .gemini/settings.json, and gemini reads it only while it is ROOT-owned, which a build-time
+    // write is (MEASURED: 0.60.0 skips a uid-1000-owned one with a security warning).
+    // - experimental.enableAgents:false: Haive owns fan-out (supportsSubagents=false).
+    // - skills.disabled: gemini's built-in skills, which have no group switch. MEASURED on 0.26.0,
+    //   0.35.3, 0.39.1, 0.45.3 and 0.60.0: both gone, repo skills intact. Builds from before
+    //   skills existed accept the key and ignore it.
     autoUpdateDisable: [
       {
         kind: 'config-file',
         path: '/etc/gemini-cli/settings.json',
-        content: '{"general":{"enableAutoUpdate":false,"enableAutoUpdateNotification":false}}\n',
+        content:
+          '{"experimental":{"enableAgents":false},"general":{"enableAutoUpdate":false,"enableAutoUpdateNotification":false},"skills":{"disabled":["skill-creator","antigravity-support"]}}\n',
       },
     ],
     versionPinnable: true,

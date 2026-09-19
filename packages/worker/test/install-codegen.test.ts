@@ -91,4 +91,15 @@ describe('config-file auto-update codegen', () => {
       "RUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml",
     );
   });
+
+  it("writes gemini's whole system settings file in one place", () => {
+    // `printf >` replaces the file, so every setting gemini needs has to be in this one write:
+    // a second writer (the base image once was one) loses everything this line does not carry.
+    const lines = buildProviderInstallLines('gemini', null).lines.filter((l) =>
+      l.includes('/etc/gemini-cli/settings.json'),
+    );
+    expect(lines).toEqual([
+      'RUN mkdir -p /etc/gemini-cli && printf \'%s\\n\' \'{"experimental":{"enableAgents":false},"general":{"enableAutoUpdate":false,"enableAutoUpdateNotification":false},"skills":{"disabled":["skill-creator","antigravity-support"]}}\' > /etc/gemini-cli/settings.json',
+    ]);
+  });
 });
