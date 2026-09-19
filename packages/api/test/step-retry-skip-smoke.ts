@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { configService, secretsService, userSecretsService, logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
@@ -122,18 +122,21 @@ async function main(): Promise<void> {
               llmOutput: null,
               applyOutput: { source: 'stub' },
               continueRequested: true,
+              recordedAt: now.toISOString(),
             },
             {
               iteration: 1,
               llmOutput: null,
               applyOutput: { source: 'stub' },
               continueRequested: true,
+              recordedAt: now.toISOString(),
             },
             {
               iteration: 2,
               llmOutput: null,
               applyOutput: { source: 'stub' },
               continueRequested: true,
+              recordedAt: now.toISOString(),
             },
           ],
           endedAt: now,

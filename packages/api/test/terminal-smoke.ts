@@ -119,7 +119,7 @@ async function main() {
     const app = new Hono<AppEnv>();
     app.onError(errorHandler);
     const httpServer = createServer((req, res) => {
-      void app.fetch(toWebRequest(req)).then(async (resp) => {
+      void Promise.resolve(app.fetch(toWebRequest(req))).then(async (resp) => {
         res.statusCode = resp.status;
         resp.headers.forEach((v, k) => res.setHeader(k, v));
         if (resp.body) {

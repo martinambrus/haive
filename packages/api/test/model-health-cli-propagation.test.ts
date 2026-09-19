@@ -44,9 +44,9 @@ describe('propagateModelHealthCliToTaskDefault', () => {
 
     expect(did).toBe(true);
     expect(recorded.updateCalls).toHaveLength(1);
-    expect(recorded.updateCalls[0].table).toBe(schema.tasks);
-    expect(recorded.updateCalls[0].set.cliProviderId).toBe('provider-good');
-    expect(recorded.updateCalls[0].set.updatedAt).toBeInstanceOf(Date);
+    expect(recorded.updateCalls[0]?.table).toBe(schema.tasks);
+    expect(recorded.updateCalls[0]?.set.cliProviderId).toBe('provider-good');
+    expect(recorded.updateCalls[0]?.set.updatedAt).toBeInstanceOf(Date);
   });
 
   it('records a task.cli_provider_changed event naming the originating step', async () => {
@@ -60,8 +60,8 @@ describe('propagateModelHealthCliToTaskDefault', () => {
     });
 
     expect(recorded.insertCalls).toHaveLength(1);
-    expect(recorded.insertCalls[0].table).toBe(schema.taskEvents);
-    expect(recorded.insertCalls[0].values).toMatchObject({
+    expect(recorded.insertCalls[0]?.table).toBe(schema.taskEvents);
+    expect(recorded.insertCalls[0]?.values).toMatchObject({
       taskId: 'task-1',
       taskStepId: 'step-row-1',
       eventType: 'task.cli_provider_changed',
@@ -81,7 +81,7 @@ describe('propagateModelHealthCliToTaskDefault', () => {
 
     expect(did).toBe(true);
     expect(recorded.updateCalls).toHaveLength(1);
-    expect(recorded.updateCalls[0].set.cliProviderId).toBe('provider-good');
+    expect(recorded.updateCalls[0]?.set.cliProviderId).toBe('provider-good');
   });
 
   it('is a no-op on a non-canary step (per-step change must not touch the task default)', async () => {

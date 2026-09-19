@@ -111,16 +111,16 @@ describe('cancelTaskRow', () => {
     await cancelTaskRow(tx, 'task-1', { by: 'user-1' });
 
     expect(recorded.updateCalls).toHaveLength(2);
-    expect(recorded.updateCalls[0].table).toBe(schema.tasks);
-    expect(recorded.updateCalls[0].set).toMatchObject({
+    expect(recorded.updateCalls[0]?.table).toBe(schema.tasks);
+    expect(recorded.updateCalls[0]?.set).toMatchObject({
       status: 'cancelled',
       completedAt: fixedNow,
       updatedAt: fixedNow,
     });
     // Non-terminal step rows are also flipped to failed so a cancelled task never
     // shows a live step (e.g. a run_app hold parked at waiting_form).
-    expect(recorded.updateCalls[1].table).toBe(schema.taskSteps);
-    expect(recorded.updateCalls[1].set).toMatchObject({
+    expect(recorded.updateCalls[1]?.table).toBe(schema.taskSteps);
+    expect(recorded.updateCalls[1]?.set).toMatchObject({
       status: 'failed',
       errorMessage: 'Task cancelled',
     });
@@ -131,8 +131,8 @@ describe('cancelTaskRow', () => {
     await cancelTaskRow(tx, 'task-1', { by: 'user-1' });
 
     expect(recorded.insertCalls).toHaveLength(1);
-    expect(recorded.insertCalls[0].table).toBe(schema.taskEvents);
-    expect(recorded.insertCalls[0].values).toMatchObject({
+    expect(recorded.insertCalls[0]?.table).toBe(schema.taskEvents);
+    expect(recorded.insertCalls[0]?.values).toMatchObject({
       taskId: 'task-1',
       taskStepId: null,
       eventType: 'task.cancelled',
@@ -144,7 +144,7 @@ describe('cancelTaskRow', () => {
     const { tx, recorded } = makeFakeTx();
     await cancelTaskRow(tx, 'task-1', { by: 'user-1', reason: 'repository_deleted' });
 
-    expect(recorded.insertCalls[0].values.payload).toEqual({
+    expect(recorded.insertCalls[0]?.values.payload).toEqual({
       by: 'user-1',
       reason: 'repository_deleted',
     });
