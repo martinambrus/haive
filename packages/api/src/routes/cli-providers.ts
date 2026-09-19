@@ -12,6 +12,7 @@ import {
   DEFAULT_AGENT_RULES,
   envelopeEncrypt,
   isOllamaCloudModel,
+  isRunnableCliVersion,
   normalizeCliArgsArray,
   secretsService,
   setCliProviderSecretRequestSchema,
@@ -117,6 +118,23 @@ export async function nextAvailableCloneLabel(
   throw new HttpError(409, 'too many clones of this provider', 'clone_limit_reached');
 }
 
+// A pin below a CLI's minRunnableVersion fails every run it is ever given, so it is refused here
+// rather than discovered at the first task.
+export function assertCliVersionRunnable(name: CliProviderName, version: string): void {
+  if (isRunnableCliVersion(name, version)) return;
+  throw new HttpError(
+    400,
+    `${CLI_PROVIDER_CATALOG[name].displayName} ${version} cannot run Haive's command line; pick ${CLI_INSTALL_METADATA[name].minRunnableVersion} or newer`,
+    'cli_version_unsupported',
+  );
+}
+
+// The picker offers only versions a run can use; the cached list stays raw, so a floor takes
+// effect without waiting for the next refresh.
+function runnableVersionsOf(name: string, versions: string[] | null): string[] {
+  return (versions ?? []).filter((v) => isRunnableCliVersion(name as CliProviderName, v));
+}
+
 async function resolveCliVersionForSave(
   db: Database,
   name: CliProviderName,
@@ -124,7 +142,10 @@ async function resolveCliVersionForSave(
 ): Promise<string | null> {
   const meta = CLI_INSTALL_METADATA[name];
   if (!meta.versionPinnable) return null;
-  if (requested) return requested;
+  if (requested) {
+    assertCliVersionRunnable(name, requested);
+    return requested;
+  }
   const row = await db.query.cliPackageVersions.findFirst({
     where: eq(schema.cliPackageVersions.name, name),
   });
@@ -221,7 +242,7 @@ cliProviderRoutes.get('/catalog', async (c) => {
   for (const row of versionRows) {
     versionMap.set(row.name, {
       name: row.name,
-      versions: row.versions ?? [],
+      versions: runnableVersionsOf(row.name, row.versions),
       latestVersion: row.latestVersion,
       fetchedAt: row.fetchedAt ? row.fetchedAt.toISOString() : null,
       fetchError: row.fetchError,
@@ -276,7 +297,7 @@ cliProviderRoutes.get('/catalog/:name/refresh-versions/:jobId', async (c) => {
   const entry: CliPackageVersionsEntry = row
     ? {
         name: row.name,
-        versions: row.versions ?? [],
+        versions: runnableVersionsOf(row.name, row.versions),
         latestVersion: row.latestVersion,
         fetchedAt: row.fetchedAt ? row.fetchedAt.toISOString() : null,
         fetchError: row.fetchError,

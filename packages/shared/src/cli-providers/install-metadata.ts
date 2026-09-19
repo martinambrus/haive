@@ -35,6 +35,9 @@ export interface CliInstallMetadata {
   autoUpdateDisable: AutoUpdateDisableKnob[];
   versionPinnable: boolean;
   minWorkingLoginVersion?: string;
+  /** Oldest build that can run Haive's command line at all. The API neither offers nor saves an
+   *  older one (isRunnableCliVersion): a pin below it fails every run. */
+  minRunnableVersion?: string;
 }
 
 export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> = {
@@ -71,6 +74,9 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     // stdout. Versions 0.18.0..0.18.3 suppress it (google-gemini/gemini-cli#13853).
     // Fixed in 0.18.4.
     minWorkingLoginVersion: '0.18.4',
+    // `--output-format json` shipped in v0.6.0. MEASURED with Haive's argv: 0.1.22 and 0.5.5 exit 1
+    // on "Unknown arguments: output-format", while 0.6.0 through 0.60.0 reach the model.
+    minRunnableVersion: '0.6.0',
   },
   amp: {
     install: { kind: 'npm', package: '@sourcegraph/amp', binary: 'amp' },
@@ -159,6 +165,9 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
       },
     ],
     versionPinnable: true,
+    // `--output-format streaming-messages-json`, which the adapter depends on, arrived in 0.2.116.
+    // MEASURED with Haive's argv: every build from 0.1.202 to 0.2.115 exits 2 on it.
+    minRunnableVersion: '0.2.116',
   },
   openrouter: {
     // OpenRouter reuses the Claude binary against its Anthropic-compatible endpoint
@@ -171,3 +180,23 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     versionPinnable: true,
   },
 };
+
+function versionTriple(version: string): [number, number, number] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** False only for a version KNOWN to be older than the CLI's minRunnableVersion. A shape that does
+ *  not parse counts as runnable: refusing what cannot be read would block a legitimate build,
+ *  while a broken one still fails loudly at its first run. */
+export function isRunnableCliVersion(name: CliProviderName, version: string): boolean {
+  const floor = CLI_INSTALL_METADATA[name]?.minRunnableVersion;
+  if (!floor) return true;
+  const v = versionTriple(version);
+  const f = versionTriple(floor);
+  if (!v || !f) return true;
+  for (let i = 0; i < 3; i++) {
+    if (v[i] !== f[i]) return v[i]! > f[i]!;
+  }
+  return true;
+}
