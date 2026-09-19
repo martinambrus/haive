@@ -382,6 +382,40 @@ The dispatcher (`resolveDispatch`) filters to enabled providers, orders the reso
 
 The sub-agent emulator splits a single sub-agent specification into either a native `Task()` call (Claude Code) or a sequential prompt script (everything else). A sequential script runs inside a single `cli-exec-queue` job — the runner is an in-memory for-loop over the sub-steps, with no per-sub-step DB writes. A crash mid-script therefore fails the whole invocation; restart re-runs from sub-step 0. (Mid-script resume would require persisting each sub-step's parsed output to `cli_invocations` before moving on — not implemented.)
 
+### Skills per CLI
+
+**Every CLI with a skills mechanism needed its own lever, and each was MEASURED on the wire**:
+the CLI in its own sandbox image, Haive's exact argv, and the API base URL pointed at a local
+server that records the request and answers 400, so no tokens are spent. What the model receives
+is only visible there — an `init` event lists skill NAMES, never the listing text.
+
+- **claude family** reads `.claude/skills`, and `Skill` is one of its 11 eager tools. The listing
+  is capped at context window x 4 x 1% (8,000 chars on a 200K model) and the binary charges its
+  OWN bundled skills first: on 2.1.270, 1 of 18 repo skills kept its description.
+  `CLAUDE_FAMILY_SKILLS_ENV` (`CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1`, steering.ts) gives 18 of 18.
+  A SKILL.md without frontmatter is listed with its H1 as the description.
+- **codex** reads only `<root>/.agents/skills` (walk-up) and its home, REJECTS a SKILL.md without
+  frontmatter, and has no skill tool: it lists name, description and path and the model reads the
+  file — its intended lazy load, which 63 of 95 observable workflow runs used unprompted. Its five
+  `.system` skills are off (`-c skills.bundled.enabled=false`): `skill-creator` had been pulled
+  into 33 runs of `09_5`/`09_5b`.
+- **grok** skips project skills AND AGENTS.md in an untrusted folder, and a headless run is never
+  trusted: every grok run listed 0 repo skills until `GROK_FOLDER_TRUST=0`, which also ungates the
+  repo's Claude-compat hooks, held off with `GROK_CLAUDE_HOOKS_ENABLED=0`. Its 23 bundled skills
+  are hidden by `[skills] ignore` in `/etc/grok/managed_config.toml`, grok's managed layer, read
+  from outside the auth volume and mounted read-only through `CliCommandSpec.configFiles`, so
+  Haive never merges into the `config.toml` grok writes itself.
+- **gemini** (0.60.0) exits 55 before its first request without `GEMINI_CLI_TRUST_WORKSPACE`, and
+  without `--yolo` non-interactive mode drops every tool that needs approval, `activate_skill` and
+  the write tools included.
+- **amp** builds its prompt server-side and **agy** needs Google OAuth, so neither is capturable
+  offline; agy's system prompt lists skills with a path to read, as codex does.
+
+`resolveSkillTargetDirs` writes one mirror per ENABLED provider's `projectSkillsDir`, so a provider
+enabled after onboarding has no generated skills until something rewrites them — generated skills
+are outside onboarding-upgrade scope. Every lever above is version-bound vendor behaviour:
+re-capture after a CLI bump before trusting it.
+
 ## Retrieval protocol
 
 `_retrieval-guidance.ts` owns the one block that tells every agent how to find code and
