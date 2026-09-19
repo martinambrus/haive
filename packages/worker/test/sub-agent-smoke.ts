@@ -249,7 +249,7 @@ async function main(): Promise<void> {
     console.log(
       JSON.stringify({
         smoke: 'SUBAGENT_OK',
-        mode: split.mode,
+        mode: subAgentInvocation.mode,
         collected: parsed.collected,
         synthesis: parsed.synthesis,
       }),
