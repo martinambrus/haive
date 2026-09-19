@@ -1,7 +1,9 @@
 import { eq, notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  AGENT_RENDERER_VERSION,
   buildManifest,
+  bundleAgentTemplateHash,
   computeSetHash,
   hashRenderings,
   normalizeContent,
@@ -15,7 +17,6 @@ import {
 import {
   type AgentSpec,
   type AgentRenderTarget,
-  AGENT_RENDERER_VERSION,
   BASELINE_AGENT_SPECS,
   buildAgentFileForTarget,
   FRAMEWORK_AGENT_SPECS,
@@ -396,9 +397,7 @@ export function expandCustomBundlesFor(
       const templateId = `custom.${bundle.id}.${item.id}`;
       if (item.kind === 'agent') {
         if (agentTargets.length === 0) continue;
-        const rendererAwareContentHash = sha256Hex(
-          `${item.contentHash}\nhaive-agent-renderer:${AGENT_RENDERER_VERSION}`,
-        );
+        const rendererAwareContentHash = bundleAgentTemplateHash(item.contentHash);
         for (const target of agentTargets) {
           const ext = target.format === 'toml' ? 'toml' : 'md';
           const content = buildAgentFileForTarget(item.spec, target);

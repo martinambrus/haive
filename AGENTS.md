@@ -413,8 +413,14 @@ is only visible there — an `init` event lists skill NAMES, never the listing t
   `activate_skill` and the write tools included. Skills reach the model from 0.26.0; its two
   built-ins are switched off by name (`skills.disabled`) in the system settings file, the only
   place gemini honours it, and only while that file is ROOT-owned.
-- **amp** builds its prompt server-side and **agy** needs Google OAuth, so neither is capturable
-  offline; agy's system prompt lists skills with a path to read, as codex does.
+- **amp** builds its prompt server-side, so it is not capturable offline.
+- **agy** (antigravity) loads NO repo skill or agent. MEASURED on 1.2.2 with Haive's argv and a
+  throwaway copy of a real login: a headless run lists only its built-in skills
+  (`agy-customizations`, `antigravity-guide`) and subagents (`self`, `research`). A skill in
+  `.agents/skills` is ignored, and `--agent <name>` answers `Agent "<name>" not found` for
+  `.agents/agents`. The same files under `~/.gemini/config/skills/<name>/SKILL.md` and
+  `~/.gemini/config/agents/<name>/agent.md` DO load, so only the workspace discovery is skipped. An
+  agy agent is also a directory holding `agent.md`, not Haive's flat `<id>.md`.
 
 Every version range above was measured per downloaded build, zero-token, across the versions the
 picker offers. Two feeds reach back past Haive's command line, so `minRunnableVersion`

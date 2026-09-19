@@ -52,3 +52,62 @@ export function unquoteYamlScalar(raw: string): string {
   }
   return raw;
 }
+
+/** `|` or `>`, with an optional chomping indicator and indentation digit in either order. */
+const BLOCK_SCALAR_HEADER = /^[|>](?:[+-]?[1-9]?|[1-9][+-])$/;
+
+/**
+ * The `key: value` fields of a frontmatter block, read by line so a file a YAML parser rejects
+ * (a plain value holding `: `, written before `yamlScalar` existed) still yields its fields.
+ * Values are unquoted; a block scalar (`>` folded, `|` literal) is read from the indented lines
+ * under its key — MEASURED, 269 of the agent and skill files on this install carry
+ * `description: >`, which a per-line split read as the literal ">"; a key with no value followed
+ * by indented `k: v` lines yields dotted `key.k` fields.
+ */
+export function readFrontmatterFields(block: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  const lines = block.split(/\r?\n/);
+  let parent: string | null = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const colon = line.indexOf(':');
+    if (colon < 0) continue;
+    const key = line.slice(0, colon).trim();
+    const raw = line.slice(colon + 1).trim();
+    if (!key) continue;
+    if (/^\s/.test(line)) {
+      if (parent !== null) fields[`${parent}.${key}`] = unquoteYamlScalar(raw);
+      continue;
+    }
+    parent = null;
+    if (BLOCK_SCALAR_HEADER.test(raw)) {
+      const body: string[] = [];
+      while (i + 1 < lines.length && (/^\s/.test(lines[i + 1]!) || !lines[i + 1]!.trim())) {
+        i += 1;
+        body.push(lines[i]!);
+      }
+      fields[key] = blockScalarText(body, raw.startsWith('>'));
+      continue;
+    }
+    fields[key] = unquoteYamlScalar(raw);
+    if (raw === '') parent = key;
+  }
+  return fields;
+}
+
+/** A block scalar's content: de-indented, a folded one joined into paragraphs, trailing
+ *  newlines dropped (every reader trims a field). */
+function blockScalarText(body: string[], folded: boolean): string {
+  const content = body.filter((l) => l.trim());
+  if (content.length === 0) return '';
+  const indent = Math.min(...content.map((l) => l.length - l.trimStart().length));
+  const text = body.map((l) => l.slice(indent).trimEnd()).join('\n');
+  if (!folded) return text.trim();
+  return text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.split('\n').join(' ').trim())
+    .filter(Boolean)
+    .join('\n');
+}

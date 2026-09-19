@@ -277,9 +277,9 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     authConfigPaths: ['~/.gemini/antigravity-cli'],
     docsUrl: 'https://antigravity.google/docs/cli-getting-started',
     effortScale: null,
-    // Workspace skills/agents dirs confirmed against the agy binary
-    // (.agents/skills, .agents/agents); agy reads AGENTS.md and imports
-    // claude/gemini-style markdown agent definitions.
+    // agy's workspace skills/agents dirs (.agents/skills, .agents/agents) — but
+    // MEASURED on 1.2.2 a headless run loads neither, and an agy agent is a
+    // `<name>/agent.md` directory. See AGENTS.md "Skills per CLI".
     projectSkillsDir: '.agents/skills',
     projectAgentsDir: '.agents/agents',
     agentFileFormat: 'markdown',

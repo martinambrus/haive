@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentSpec, SkillEntry } from '@haive/shared';
+import { bundleAgentTemplateHash, type AgentSpec, type SkillEntry } from '@haive/shared';
 import {
   expandCustomBundlesFor,
   type BundleForExpansion,
@@ -74,6 +74,9 @@ describe('expandCustomBundlesFor', () => {
     // the uploaded AgentSpec itself did not change.
     expect(md?.templateContentHash).toBe(toml?.templateContentHash);
     expect(md?.templateContentHash).not.toBe('agent-hash');
+    // The api's upgrade status compares against the same function, so a repo whose bundle
+    // agents are current does not read as changed.
+    expect(md?.templateContentHash).toBe(bundleAgentTemplateHash('agent-hash'));
     expect(md?.writtenHash).not.toBe(toml?.writtenHash);
   });
 

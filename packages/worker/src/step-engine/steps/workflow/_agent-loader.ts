@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
-import { unquoteYamlScalar } from '../_yaml-scalar.js';
+import { readFrontmatterFields, unquoteYamlScalar } from '../_yaml-scalar.js';
 
 export interface AgentPersona {
   id: string;
@@ -60,18 +60,7 @@ function parseAgentFile(raw: string): ParsedAgentFile | null {
   if (closing === -1) return null;
   const fmText = raw.slice(3, closing).trim();
   const body = raw.slice(closing + 4).replace(/^\r?\n/, '');
-  const frontmatter: Record<string, string> = {};
-  for (const rawLine of fmText.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const colon = line.indexOf(':');
-    if (colon === -1) continue;
-    const key = line.slice(0, colon).trim();
-    const value = line.slice(colon + 1).trim();
-    if (!key) continue;
-    frontmatter[key] = unquoteYamlScalar(value);
-  }
-  return { frontmatter, body };
+  return { frontmatter: readFrontmatterFields(fmText), body };
 }
 
 function titleFromBody(body: string): string | null {
