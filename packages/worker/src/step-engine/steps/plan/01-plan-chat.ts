@@ -253,6 +253,7 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       // Ops the applier skipped because a ref did not resolve. The rest landed, so
       // the reply must say which did not or it reads as having done all of it.
       let dropped: string[] = [];
+      let strippedCodeLinks: string[] = [];
       // How many of the sent ops landed. Null until an apply has returned, so an
       // apply that threw records 0 rather than a count it never achieved.
       let landed: number | null = null;
@@ -269,6 +270,7 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
             });
             result.applied = true;
             dropped = res.dropped;
+            strippedCodeLinks = res.strippedCodeLinks;
             landed = patch.ops.length - res.dropped.length;
             result.created = res.created.length;
             result.updated = res.updated.length;
@@ -305,6 +307,16 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       // and reads like one ("Answered the question; no plan changes."). Fall
       // back to it only when the agent sent nothing else.
       const spoken = patch?.reply?.trim() || spokenOnly || result.summary;
+      const notes = [
+        ...(dropped.length > 0
+          ? [`${dropped.length} change(s) not applied: ${dropped.join('; ')}`]
+          : []),
+        ...(strippedCodeLinks.length > 0
+          ? [
+              `${strippedCodeLinks.length} code link(s) not recorded: ${strippedCodeLinks.join('; ')}`,
+            ]
+          : []),
+      ];
       await ctx.db.insert(schema.planNodeMessages).values({
         nodeId: d.nodeId,
         taskId: ctx.taskId,
@@ -315,8 +327,8 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
         body:
           result.error !== null
             ? `${spoken || 'Could not apply that.'}\n\n_${result.error}_`
-            : dropped.length > 0
-              ? `${spoken || 'Done.'}\n\n_${dropped.length} change(s) not applied: ${dropped.join('; ')}_`
+            : notes.length > 0
+              ? `${spoken || 'Done.'}\n\n${notes.map((note) => `_${note}_`).join('\n\n')}`
               : spoken || 'Done.',
         // The proposal rides the turn's own patch record rather than the step
         // output, for the same reason the transcript does: a revise cycle resets

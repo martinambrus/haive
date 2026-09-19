@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { loadPlanSkeletons, type PlanNodeSkeleton } from '@haive/shared/plan';
 import {
   AUTO_CONVERGENCE_AGENTS_PER_PASS,
   continuationDispatchCount,
@@ -12,6 +13,14 @@ import { findStructuralGaps } from './plan-coverage-scan.js';
 import type { FormSchema } from '@haive/shared';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { MiningWaveError } from '../../step-definition.js';
+
+// A structural repair reads its node's live neighbourhood when it is dispatched.
+// Empty unless a case supplies one, which leaves every repair on the listing it
+// always had.
+vi.mock('@haive/shared/plan', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/plan')>();
+  return { ...actual, loadPlanSkeletons: vi.fn(async () => []) };
+});
 
 type Detected = Parameters<NonNullable<typeof planCoverageStep.form>>[1];
 
@@ -303,6 +312,24 @@ describe('bounded coverage recovery', () => {
     ]);
   });
 
+  it('counts a node:-prefixed parent against the children it already has', () => {
+    // The applier strips the prefix later, so the guard used to see a parent of
+    // its own with nothing under it.
+    const ops = [create('tmp-a', `node:${TARGET}`), create('tmp-b', `node:${TARGET}`)];
+    expect(
+      findPatchBreadthViolations(ops, 12, { existingChildren: new Map([[TARGET, 11]]) }),
+    ).toEqual([{ parentRef: TARGET, existingChildren: 11, newChildren: 2, totalChildren: 13 }]);
+  });
+
+  it('does not count an existing node as a new child because it carries the prefix', () => {
+    // A uuid names a node that already exists, so it takes no new slot — and
+    // neither does the same uuid quoted as `node:<uuid>`.
+    const EXISTING = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const ops = Array.from({ length: 12 }, (_, index) => create(`tmp-${index}`, 'self'));
+    ops.push(create(`node:${EXISTING}`, 'self'));
+    expect(findPatchBreadthViolations(ops, 12, { selfNodeId: TARGET })).toEqual([]);
+  });
+
   it('allows a wide subject when the patch groups it into bounded parents', () => {
     const groups = [create('tmp-group-a', 'self'), create('tmp-group-b', 'self')];
     const leaves = Array.from({ length: 12 }, (_, index) =>
@@ -311,6 +338,113 @@ describe('bounded coverage recovery', () => {
     expect(findPatchBreadthViolations([...groups, ...leaves], 6, { selfNodeId: TARGET })).toEqual(
       [],
     );
+  });
+});
+
+describe('the structural repair prompt', () => {
+  const TARGET = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const node = (id: string, title: string, parentId: string | null, path: string) =>
+    ({
+      id,
+      parentId,
+      path,
+      ordinal: 0,
+      title,
+      kind: 'component',
+      status: 'todo',
+      taskable: false,
+      version: 1,
+      createdBy: 'llm',
+      sourceTaskId: null,
+      lastReviewedAt: null,
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+    }) satisfies PlanNodeSkeleton;
+  const root = node('root', 'Product', null, '/root/');
+  const plan = (children: number) => [
+    root,
+    node(TARGET, 'Privacy', 'root', `/root/${TARGET}/`),
+    ...Array.from({ length: children }, (_, index) =>
+      node(`child-${index}`, `Existing part ${index}`, TARGET, `/root/${TARGET}/child-${index}/`),
+    ),
+  ];
+
+  const promptFor = async (items: string[], over: Partial<Detected> = {}) => {
+    const error = await planCoverageStep.apply!(
+      {} as never,
+      {
+        detected: detected({
+          structural: [{ nodeId: TARGET, title: 'Privacy', reason: 'lost' }],
+          ...over,
+        }),
+        formValues: { decision: 'redecompose', items },
+      } as never,
+    ).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MiningWaveError);
+    return (error as MiningWaveError).dispatches[0]!.prompt;
+  };
+  const repairOf = async (children: number, over: Partial<Detected> = {}) => {
+    vi.mocked(loadPlanSkeletons).mockResolvedValueOnce(plan(children));
+    return promptFor([`node:${TARGET}`], over);
+  };
+
+  it('tells the repair of a childless node that it has no children', async () => {
+    expect(await repairOf(0)).toContain('it currently has no children');
+  });
+
+  it('shows a thinned node its existing children and the room left under the cap', async () => {
+    // MEASURED: every repair refused over the cap was told "no children" while
+    // its node had 7-19, and re-added the same subtree.
+    const prompt = await repairOf(8);
+    expect(prompt).not.toContain('currently has no children');
+    expect(prompt).toContain('It already has 8 direct child(ren)');
+    expect(prompt).toContain('At most 4 more direct child(ren) fit under it (the limit is 12)');
+    for (let index = 0; index < 8; index += 1) {
+      expect(prompt).toContain(`Existing child: Existing part ${index}`);
+    }
+    // The head of the whole-plan listing showed the node to 1 of those 9 repairs.
+    expect(prompt).not.toContain('The plan as it stands (titles only):');
+  });
+
+  it('tells a node already past the cap to add nothing directly under it', async () => {
+    const prompt = await repairOf(19);
+    expect(prompt).toContain('add nothing directly under it');
+    expect(prompt).not.toContain('fit under it (the limit');
+  });
+
+  it('quotes what the previous attempt lost', async () => {
+    const lost = `breadth cap 12 exceeded (${TARGET}: 0 existing + 13 new = 13)`;
+    const prompt = await repairOf(0, {
+      structural: [{ nodeId: TARGET, title: 'Privacy', reason: 'lost', detail: lost }],
+    });
+    expect(prompt).toContain(`What the previous attempt lost: ${lost}`);
+  });
+
+  it('keeps the plan listing for a node deleted since detect', async () => {
+    vi.mocked(loadPlanSkeletons).mockResolvedValueOnce([root]);
+    const prompt = await promptFor([`node:${TARGET}`]);
+    expect(prompt).toContain('The plan as it stands (titles only):');
+    expect(prompt).toContain('it currently has no children');
+  });
+
+  it('keeps the plan listing for a document section, which names no node', async () => {
+    vi.mocked(loadPlanSkeletons).mockClear();
+    const prompt = await promptFor(['doc:spec.md:12'], {
+      structural: [],
+      sections: [
+        {
+          source: 'spec.md',
+          line: 12,
+          title: 'Billing',
+          score: 0,
+          matchedNodes: 0,
+          missingTerms: ['x'],
+        },
+      ],
+    });
+    expect(prompt).toContain('The plan as it stands (titles only):');
+    // No structural item was picked, so the plan is not read at all.
+    expect(loadPlanSkeletons).not.toHaveBeenCalled();
   });
 });
 
@@ -476,6 +610,71 @@ describe('findStructuralGaps', () => {
       P,
     );
     expect(gaps[0]?.reason).toContain('dropped');
+    expect(gaps[0]?.detail).toBe('link dropped: x');
+  });
+
+  it('carries what a rejected expansion lost, without the stamp prefix', () => {
+    const gaps = findStructuralGaps(
+      nodes,
+      [
+        {
+          agentId: `plan-expand-${A}-p1`,
+          status: 'done',
+          errorMessage: 'plan patch not applied: breadth cap 12 exceeded (x)',
+        },
+      ],
+      P,
+    );
+    expect(gaps[0]?.detail).toBe('breadth cap 12 exceeded (x)');
+  });
+
+  it('offers again a node with children whose latest repair was refused', () => {
+    // The measured case: a repair of a thinned node, refused over the breadth
+    // cap. The childless rule cannot see it, so it used to drop off the gate.
+    const refusal = `breadth cap 12 exceeded (${A}: 8 existing + 8 new = 16)`;
+    const withKids = [...nodes, { id: 'c', title: 'Child', kind: 'component', parentId: A }];
+    const gaps = findStructuralGaps(
+      withKids,
+      [
+        {
+          agentId: `plan-expand-${A}-p1`,
+          status: 'done',
+          errorMessage: 'plan patch partially applied: link dropped: x',
+        },
+        {
+          agentId: `cover-node-${A}-r1`,
+          status: 'done',
+          errorMessage: `plan patch not applied: ${refusal}`,
+        },
+      ],
+      P,
+    );
+    expect(gaps).toEqual([
+      {
+        nodeId: A,
+        title: 'Alpha',
+        reason: 'its latest decomposition attempt was rejected',
+        detail: refusal,
+      },
+    ]);
+  });
+
+  it('does not offer a node with children once its latest repair landed', () => {
+    const withKids = [...nodes, { id: 'c', title: 'Child', kind: 'component', parentId: A }];
+    expect(
+      findStructuralGaps(
+        withKids,
+        [
+          {
+            agentId: `plan-expand-${A}-p1`,
+            status: 'done',
+            errorMessage: 'plan patch not applied: x',
+          },
+          { agentId: `cover-node-${A}-r1`, status: 'done', errorMessage: null },
+        ],
+        P,
+      ),
+    ).toEqual([]);
   });
 
   it('does not report the same node twice', () => {

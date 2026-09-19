@@ -9,7 +9,13 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { markPlanCodeLinksStaleForPaths } from '../../../plan/code-link-staleness.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
-import { MAX_PROPOSED_OPS, describeDropped, describePlanOp, proposedOps } from './_plan-ops.js';
+import {
+  MAX_PROPOSED_OPS,
+  describeDropped,
+  describePlanOp,
+  describeStrippedLinks,
+  proposedOps,
+} from './_plan-ops.js';
 import {
   externalCommitBlock,
   resolveExternalDrift,
@@ -346,10 +352,18 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
         sourceTaskId: ctx.taskId,
         derivedAtCommit: d.branchPoint,
         onUnresolvableRef: 'drop',
+        // The agent wrote the links, and the form never showed one it could not read.
+        onInvalidCodeLink: 'strip',
       },
     );
     if (applied.dropped.length > 0) {
       ctx.logger.warn({ dropped: applied.dropped }, 'external plan sync dropped stale ops');
+    }
+    if (applied.strippedCodeLinks.length > 0) {
+      ctx.logger.warn(
+        { strippedCodeLinks: applied.strippedCodeLinks },
+        'external plan sync stripped invalid code links',
+      );
     }
     try {
       await writePlanMirror(ctx.db, d.repositoryId, ctx.repoPath);
@@ -376,7 +390,8 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
         `Applied ${landed} of ${ops.length} proposed plan change(s) from ` +
         `${d.commits.length} external commit(s): ${applied.created.length} node(s) created, ` +
         `${applied.updated.length} updated, ${applied.codeLinked} code link(s) written.` +
-        describeDropped(applied.dropped),
+        describeDropped(applied.dropped) +
+        describeStrippedLinks(applied.strippedCodeLinks),
     };
   },
 };

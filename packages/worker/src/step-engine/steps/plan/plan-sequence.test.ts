@@ -318,6 +318,7 @@ describe('foldSequenceResults', () => {
     codeLinked: 0,
     refs: {},
     dropped: [],
+    strippedCodeLinks: [],
     ...over,
   });
 

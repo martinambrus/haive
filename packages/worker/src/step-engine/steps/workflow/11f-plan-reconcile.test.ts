@@ -48,7 +48,11 @@ const apply = (args: Partial<StepApplyArgs<PlanReconcileDetect>>) =>
     ...args,
   } as StepApplyArgs<PlanReconcileDetect>);
 
-const outcome = (over: { updated?: string[]; dropped?: string[] }) => ({
+const outcome = (over: {
+  updated?: string[];
+  dropped?: string[];
+  strippedCodeLinks?: string[];
+}) => ({
   created: [],
   updated: [],
   deleted: [],
@@ -57,6 +61,7 @@ const outcome = (over: { updated?: string[]; dropped?: string[] }) => ({
   codeLinked: 0,
   refs: {},
   dropped: [],
+  strippedCodeLinks: [],
   ...over,
 });
 
@@ -77,6 +82,23 @@ describe('11f plan reconcile apply', () => {
     expect(out.summary).toBe(
       'Applied 1 of 2 proposed plan change(s): 0 node(s) created, 1 updated, ' +
         `0 code link(s) written. 1 approved change(s) could not be applied: ${gone}.`,
+    );
+  });
+
+  it('names a code link it could not record, and still counts its change as landed', async () => {
+    const bad = `code link dropped from '${NODE}': repoPath: Invalid input: expected string, received undefined`;
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(
+      outcome({ updated: [NODE], strippedCodeLinks: [bad] }),
+    );
+    const out = await apply({ llmOutput: OPS, formValues: { applyOps: ['0'] } });
+    expect(vi.mocked(applyPlanPatch).mock.lastCall?.[2]).toMatchObject({
+      onInvalidCodeLink: 'strip',
+    });
+    expect(out.applied).toBe(1);
+    expect(out).not.toHaveProperty('dropped');
+    expect(out.summary).toBe(
+      'Applied 1 of 2 proposed plan change(s): 0 node(s) created, 1 updated, ' +
+        `0 code link(s) written. 1 code link(s) could not be recorded: ${bad}.`,
     );
   });
 

@@ -10,7 +10,13 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
-import { MAX_PROPOSED_OPS, describeDropped, describePlanOp, proposedOps } from './_plan-ops.js';
+import {
+  MAX_PROPOSED_OPS,
+  describeDropped,
+  describePlanOp,
+  describeStrippedLinks,
+  proposedOps,
+} from './_plan-ops.js';
 import { resolveApprovedSpec, resolveTaskWorktreePath } from './_spec-artifact.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 
@@ -300,6 +306,8 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     // `onUnresolvableRef: 'drop'` because the proposal was made before the form
     // parked, and a node can be deleted by a plan chat while it sits there — one
     // stale id must lose its own op, not the developer's whole approved set.
+    // `onInvalidCodeLink: 'strip'` for the same reason: the agent wrote the links,
+    // and the form never showed one it could not read.
     const applied = await applyPlanPatch(
       ctx.db,
       { ops: chosen, summary: 'plan reconcile after task implementation' },
@@ -308,6 +316,7 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
         origin: 'user',
         sourceTaskId: ctx.taskId,
         onUnresolvableRef: 'drop',
+        onInvalidCodeLink: 'strip',
       },
     );
     // Counts what LANDED: a count that included a dropped op would tell the
@@ -321,11 +330,18 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
       result.dropped = applied.dropped;
       ctx.logger.warn({ dropped: applied.dropped }, 'plan reconcile dropped stale ops');
     }
+    if (applied.strippedCodeLinks.length > 0) {
+      ctx.logger.warn(
+        { strippedCodeLinks: applied.strippedCodeLinks },
+        'plan reconcile stripped invalid code links',
+      );
+    }
     result.summary =
       `Applied ${result.applied} of ${ops.length} proposed plan change(s): ` +
       `${result.created} node(s) created, ${result.updated} updated, ` +
       `${result.codeLinked} code link(s) written.` +
-      describeDropped(applied.dropped);
+      describeDropped(applied.dropped) +
+      describeStrippedLinks(applied.strippedCodeLinks);
 
     try {
       await writePlanMirror(ctx.db, d.repositoryId, ctx.repoPath);

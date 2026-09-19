@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
+import { stripNodeRefPrefix } from '@haive/shared/plan';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -16,6 +17,12 @@ export interface PatchBreadthViolation {
  * database. Existing-node updates carry UUID refs and do not consume another
  * child slot; temporary refs are creations. `self` is normalised to the real
  * focus id so its already-persisted children can be included in the limit.
+ *
+ * Refs go through the applier's own `stripNodeRefPrefix` first. This runs on the
+ * raw reply, before the applier normalises it, so a `node:<uuid>` parent used to
+ * key a bucket of its own with no existing children counted, and a `node:<uuid>`
+ * update counted as a new child. MEASURED: 4 of 231 coverage replies parented
+ * with the prefix.
  */
 function newPatchChildrenByParent(ops: unknown[], selfNodeId: string | null): Map<string, number> {
   const counts = new Map<string, number>();
@@ -25,14 +32,14 @@ function newPatchChildrenByParent(ops: unknown[], selfNodeId: string | null): Ma
     if (
       candidate.op !== 'upsert' ||
       typeof candidate.nodeRef !== 'string' ||
-      candidate.nodeRef === 'self' ||
-      UUID_RE.test(candidate.nodeRef) ||
       typeof candidate.parentRef !== 'string'
     ) {
       continue;
     }
-    const parentRef =
-      candidate.parentRef === 'self' && selfNodeId ? selfNodeId : candidate.parentRef;
+    const nodeRef = stripNodeRefPrefix(candidate.nodeRef);
+    if (nodeRef === 'self' || UUID_RE.test(nodeRef)) continue;
+    const bareParent = stripNodeRefPrefix(candidate.parentRef);
+    const parentRef = bareParent === 'self' && selfNodeId ? selfNodeId : bareParent;
     counts.set(parentRef, (counts.get(parentRef) ?? 0) + 1);
   }
   return counts;

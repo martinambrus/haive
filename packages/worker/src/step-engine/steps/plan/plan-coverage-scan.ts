@@ -140,6 +140,11 @@ export interface StructuralGap {
   title: string;
   /** Why it is suspect, in the words the gate will show. */
   reason: string;
+  /** What the latest attempt lost, in its stamp's own words minus the prefix, so
+   *  a repair can be told exactly that. Only for a loss apply() recorded — a
+   *  terminal that failed left nothing to quote. Optional: a detect payload
+   *  persisted before this existed has none. */
+  detail?: string;
 }
 
 /**
@@ -245,6 +250,10 @@ export function findStructuralGaps(
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const latestAttempts = latestExpansionAttempts(agents);
   const out: StructuralGap[] = [];
+  const detailOf = (message: string | null, prefix: string): { detail?: string } => {
+    const detail = message?.startsWith(prefix) ? message.slice(prefix.length).trim() : '';
+    return detail ? { detail } : {};
+  };
 
   for (const n of nodes) {
     if (n.kind !== 'component' || hasChild.has(n.id) || n.parentId === null) continue;
@@ -260,8 +269,25 @@ export function findStructuralGaps(
           agent.status === 'failed'
             ? 'its decomposition terminal failed before producing children'
             : 'its decomposition was rejected and lost',
+        ...(agent.status === 'failed' ? {} : detailOf(agent.errorMessage, prefixes.failure)),
       });
     }
+  }
+
+  // A node WITH children whose latest attempt was rejected outright. The rule
+  // above only sees childless nodes, so a refused repair of a node that already
+  // had children dropped off the gate for good. MEASURED: 9 of the 10 coverage
+  // repairs refused over the breadth cap were of nodes with 7-19 children.
+  for (const [id, a] of latestAttempts) {
+    if (a.status === 'failed' || !a.errorMessage?.startsWith(prefixes.failure)) continue;
+    const node = byId.get(id);
+    if (!node || node.kind !== 'component' || !hasChild.has(id)) continue;
+    out.push({
+      nodeId: node.id,
+      title: node.title,
+      reason: 'its latest decomposition attempt was rejected',
+      ...detailOf(a.errorMessage, prefixes.failure),
+    });
   }
 
   // Losses that did not leave a childless node: a wave that was thinned rather
@@ -276,6 +302,7 @@ export function findStructuralGaps(
       nodeId: node.id,
       title: node.title,
       reason: `${dropped} operation(s) were dropped from its decomposition`,
+      ...detailOf(a.errorMessage, prefixes.partial),
     });
   }
   return out;
