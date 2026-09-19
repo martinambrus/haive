@@ -1,9 +1,20 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import { applyPlanPatch } from '@haive/shared/plan';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 import { externalPlanSyncStep, type ExternalPlanSyncDetect } from './01f-external-plan-sync.js';
 
+vi.mock('@haive/shared/plan', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/plan')>();
+  return { ...actual, applyPlanPatch: vi.fn() };
+});
+vi.mock('../../../plan/mirror.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../plan/mirror.js')>();
+  return { ...actual, writePlanMirror: vi.fn(async () => {}) };
+});
+
 const NODE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const GONE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const POINT = 'cccccccccccccccccccccccccccccccccccccccc';
 
 function fakeDb(): { db: Database; stamps: Record<string, unknown>[] } {
@@ -153,5 +164,54 @@ describe('apply', () => {
     // Flagged in detect, unconditionally: staleness is a fact about the code, so a decline
     // does not undo it.
     expect(out.linksMarkedStale).toBe(5);
+  });
+});
+
+describe('apply — approved changes', () => {
+  const outcome = (over: { updated?: string[]; dropped?: string[] }) => ({
+    created: [],
+    updated: [],
+    deleted: [],
+    linked: 0,
+    unlinked: 0,
+    codeLinked: 0,
+    refs: {},
+    dropped: [],
+    ...over,
+  });
+
+  const TWO = { ops: [...OPS.ops, { op: 'upsert', nodeRef: GONE, status: 'done' }] };
+
+  it('counts only the approved changes that landed, and names the one that did not', async () => {
+    // A plan chat deleted GONE while the form sat parked, so the applier dropped it.
+    // The summary used to count it as applied.
+    const gone = `upsert dropped: unknown node reference '${GONE}'`;
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({ updated: [NODE], dropped: [gone] }));
+    const out = await apply(
+      detect(),
+      { llmOutput: TWO, formValues: { applyOps: ['0', '1'] } },
+      fakeDb().db,
+    );
+    expect(out.applied).toBe(1);
+    expect(out.dropped).toEqual([gone]);
+    expect(out.summary).toBe(
+      'Applied 1 of 2 proposed plan change(s) from 1 external commit(s): 0 node(s) created, ' +
+        `1 updated, 0 code link(s) written. 1 approved change(s) could not be applied: ${gone}.`,
+    );
+  });
+
+  it('reads exactly as before when everything approved landed', async () => {
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(outcome({ updated: [NODE] }));
+    const out = await apply(
+      detect(),
+      { llmOutput: OPS, formValues: { applyOps: ['0'] } },
+      fakeDb().db,
+    );
+    expect(out.applied).toBe(1);
+    expect(out).not.toHaveProperty('dropped');
+    expect(out.summary).toBe(
+      'Applied 1 of 1 proposed plan change(s) from 1 external commit(s): 0 node(s) created, ' +
+        '1 updated, 0 code link(s) written.',
+    );
   });
 });

@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { PlanMessage } from '@/lib/api-client';
-import { firstUnreadMessageId, opCount, startedLabel, stamp, taskProposal } from './plan-chat-turn';
+import {
+  appliedCount,
+  changeBadge,
+  firstUnreadMessageId,
+  opCount,
+  startedLabel,
+  stamp,
+  taskProposal,
+} from './plan-chat-turn';
 
 function msg(id: string, role: PlanMessage['role']): PlanMessage {
   return {
@@ -139,5 +147,56 @@ describe('taskProposal', () => {
   it('tolerates a missing reason rather than dropping the whole offer', () => {
     const { reason: _reason, ...noReason } = good;
     expect(taskProposal({ taskProposal: noReason })?.reason).toBe('');
+  });
+});
+
+describe('appliedCount', () => {
+  it('reads what the worker recorded as landed', () => {
+    expect(appliedCount({ ops: [{}, {}], outcome: { applied: 1 } })).toBe(1);
+  });
+
+  it('has no count for a turn recorded before the worker wrote one', () => {
+    expect(appliedCount({ ops: [{}, {}] })).toBeNull();
+  });
+
+  it('refuses a record that is not a whole, non-negative count', () => {
+    expect(appliedCount({ ops: [{}], outcome: { applied: 'all' } })).toBeNull();
+    expect(appliedCount({ ops: [{}], outcome: { applied: -1 } })).toBeNull();
+    expect(appliedCount({ ops: [{}], outcome: { applied: 0.5 } })).toBeNull();
+    expect(appliedCount({ ops: [{}], outcome: null })).toBeNull();
+  });
+});
+
+describe('changeBadge', () => {
+  it('says nothing for a prose reply that carried no patch', () => {
+    expect(changeBadge(null)).toBeNull();
+  });
+
+  it('keeps "plan unchanged" for a turn that sent no ops', () => {
+    expect(changeBadge({ ops: [] })).toEqual({ text: 'plan unchanged', tone: 'unchanged' });
+  });
+
+  it('counts a turn that landed whole the way it always did', () => {
+    expect(changeBadge({ ops: [{}, {}], outcome: { applied: 2 } })).toEqual({
+      text: '2 plan changes',
+      tone: 'changed',
+    });
+    expect(changeBadge({ ops: [{}] })).toEqual({ text: '1 plan change', tone: 'changed' });
+  });
+
+  it('says how many of the sent ops landed when some did not', () => {
+    // The case this exists for: "4 plan changes" beside a reply whose note says two
+    // of them were not applied.
+    expect(changeBadge({ ops: [{}, {}, {}, {}], outcome: { applied: 2 } })).toEqual({
+      text: '2 of 4 plan changes applied',
+      tone: 'partial',
+    });
+  });
+
+  it('reads a refused patch as none of its ops landing', () => {
+    expect(changeBadge({ ops: [{}, {}], outcome: { applied: 0 } })).toEqual({
+      text: '0 of 2 plan changes applied',
+      tone: 'partial',
+    });
   });
 });

@@ -139,6 +139,20 @@ function bareNodeRef(ref: string): string {
   return UUID_RE.test(bare) ? bare : lower;
 }
 
+/** True for an upsert whose ref can name no existing node: not a string, or neither
+ *  a uuid once any `node:` prefix is stripped nor the seeded `self`.
+ *
+ *  The applier reads such a ref as a temp id, so as a CREATE. An ordering pass can
+ *  never create — `keepOrderingOps` strips every field but `ordinal` — so the op could
+ *  only fail "needs a title", and with `retryable: false` that took the whole reply.
+ *  MEASURED: one ordering reply lost that way to a garbled id. */
+function namesNoNode(op: unknown): boolean {
+  const candidate = op as { op?: unknown; nodeRef?: unknown };
+  if (candidate?.op !== 'upsert') return false;
+  if (typeof candidate.nodeRef !== 'string') return true;
+  return candidate.nodeRef !== 'self' && !UUID_RE.test(bareNodeRef(candidate.nodeRef));
+}
+
 /** The one step, under the id each workflow registers it as. Declared here rather
  *  than inline in `metadata` because the repo-wide asked-set below has to name
  *  BOTH — a literal there would silently read nothing for whichever id it is not,
@@ -499,12 +513,26 @@ export async function foldSequenceResults(
       await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} no patch in reply`);
       continue;
     }
-    const { ops, discarded } = keepOrderingOps(patch.ops);
-    const remitNote = `${discarded} op(s) outside this step's remit were dropped`;
-    if (discarded > 0) {
-      await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} ${remitNote}`);
+    const kept = keepOrderingOps(patch.ops);
+    const notes =
+      kept.discarded > 0 ? [`${kept.discarded} op(s) outside this step's remit were dropped`] : [];
+    const ops: unknown[] = [];
+    for (const op of kept.ops) {
+      if (namesNoNode(op)) {
+        const ref = String((op as { nodeRef?: unknown }).nodeRef);
+        notes.push(`upsert dropped: unknown node reference '${ref}'`);
+      } else {
+        ops.push(op);
+      }
     }
-    if (ops.length === 0) continue;
+    // ONE stamp per reply, written once the outcome is known: a reply that landed
+    // must not read "not applied" because part of it was set aside on the way in.
+    if (ops.length === 0) {
+      if (notes.length > 0) {
+        await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} ${notes.join('; ')}`);
+      }
+      continue;
+    }
     const self = sequenceSelfNodeId(result.agentId);
     try {
       const outcome = await applyAgentPatch(
@@ -518,10 +546,9 @@ export async function foldSequenceResults(
         },
       );
       applied += outcome.updated.length;
-      if (outcome.dropped.length > 0) {
-        // The partial prefix 01 and 02 record, so a thinner reply stays visible. It
-        // replaces the remit stamp above on the same row, so that note rides along.
-        const notes = discarded > 0 ? [remitNote, ...outcome.dropped] : outcome.dropped;
+      notes.push(...outcome.dropped);
+      if (notes.length > 0) {
+        // The partial prefix 01 and 02 record, so a thinner reply stays visible.
         await stampMiningError(ctx, result.agentId, `${PARTIAL_APPLY_PREFIX} ${notes.join('; ')}`);
       }
     } catch (err) {

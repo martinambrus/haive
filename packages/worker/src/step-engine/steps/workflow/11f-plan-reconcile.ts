@@ -10,7 +10,7 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
-import { MAX_PROPOSED_OPS, describePlanOp, proposedOps } from './_plan-ops.js';
+import { MAX_PROPOSED_OPS, describeDropped, describePlanOp, proposedOps } from './_plan-ops.js';
 import { resolveApprovedSpec, resolveTaskWorktreePath } from './_spec-artifact.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 
@@ -49,11 +49,17 @@ export interface PlanReconcileDetect {
 
 export interface PlanReconcileApply {
   proposed: number;
+  /** Approved ops that LANDED — the ticks minus any the applier dropped. */
   applied: number;
   created: number;
   updated: number;
   codeLinked: number;
   decision: 'applied' | 'declined' | 'nothing_to_do';
+  /** Approved ops the applier dropped, in its own words. Optional: an output
+   *  persisted before this existed has none. */
+  dropped?: string[];
+  /** Lifted verbatim into the step's summary panel by `resolveCuratedSummary`. */
+  summary: string;
 }
 
 async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
@@ -261,12 +267,16 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
       updated: 0,
       codeLinked: 0,
       decision: 'nothing_to_do',
+      summary: 'No plan to reconcile.',
     };
     if (!d.repositoryId) return result;
 
     const ops = proposedOps(args.llmOutput);
     result.proposed = ops.length;
-    if (ops.length === 0) return result;
+    if (ops.length === 0) {
+      result.summary = 'The plan already describes what this task changed.';
+      return result;
+    }
 
     const values = (args.formValues ?? {}) as FormValues;
     const ticked = new Set(
@@ -275,9 +285,9 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
         : [],
     );
     const chosen = ops.filter((_, i) => ticked.has(String(i)));
-    result.applied = chosen.length;
     if (chosen.length === 0) {
       result.decision = 'declined';
+      result.summary = `Declined all ${ops.length} proposed plan change(s).`;
       return result;
     }
 
@@ -300,13 +310,22 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
         onUnresolvableRef: 'drop',
       },
     );
+    // Counts what LANDED: a count that included a dropped op would tell the
+    // developer a change they approved is in the plan when it is not.
+    result.applied = chosen.length - applied.dropped.length;
     result.created = applied.created.length;
     result.updated = applied.updated.length;
     result.codeLinked = applied.codeLinked;
     result.decision = 'applied';
     if (applied.dropped.length > 0) {
+      result.dropped = applied.dropped;
       ctx.logger.warn({ dropped: applied.dropped }, 'plan reconcile dropped stale ops');
     }
+    result.summary =
+      `Applied ${result.applied} of ${ops.length} proposed plan change(s): ` +
+      `${result.created} node(s) created, ${result.updated} updated, ` +
+      `${result.codeLinked} code link(s) written.` +
+      describeDropped(applied.dropped);
 
     try {
       await writePlanMirror(ctx.db, d.repositoryId, ctx.repoPath);

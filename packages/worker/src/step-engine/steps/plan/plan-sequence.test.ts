@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
 import { SEQUENCE_AGENTS_PER_PASS } from '@haive/shared/plan';
@@ -326,6 +326,10 @@ describe('foldSequenceResults', () => {
     { op: 'upsert', nodeRef: B, ordinal: 1 },
   ];
 
+  beforeEach(() => {
+    vi.mocked(applyAgentPatch).mockReset();
+  });
+
   it('records a reply that lost ops under the partial prefix, not as a failure', async () => {
     // One mistyped id used to throw away the whole ordering; now the applier
     // skips that op, and the row must still say the reply came back thinner.
@@ -336,16 +340,67 @@ describe('foldSequenceResults', () => {
     expect(stamps).toEqual([{ errorMessage: `plan patch partially applied: ${gone}` }]);
   });
 
-  it('keeps the remit note when the partial stamp replaces it', async () => {
+  it('writes remit discards and drops in ONE partial stamp', async () => {
     const gone = `upsert dropped: unknown node reference '${C}'`;
     vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome({ updated: [A], dropped: [gone] }));
     const { db, stamps } = fakeDb();
     await foldSequenceResults(ctx(db), 'r', [
       agentReply([...ORDER, { op: 'link', fromRef: A, toRef: B, kind: 'affects' }]),
     ]);
-    expect(stamps.at(-1)).toEqual({
-      errorMessage: `plan patch partially applied: 1 op(s) outside this step's remit were dropped; ${gone}`,
-    });
+    expect(stamps).toEqual([
+      {
+        errorMessage: `plan patch partially applied: 1 op(s) outside this step's remit were dropped; ${gone}`,
+      },
+    ]);
+  });
+
+  it('records a landed reply that only lost remit ops as partial, not as not applied', async () => {
+    // Its ordinals landed, so a failure prefix here counted a working reply as a loss.
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome({ updated: [A, B] }));
+    const { db, stamps } = fakeDb();
+    await foldSequenceResults(ctx(db), 'r', [
+      agentReply([...ORDER, { op: 'link', fromRef: A, toRef: B, kind: 'affects' }]),
+    ]);
+    expect(stamps).toEqual([
+      {
+        errorMessage:
+          "plan patch partially applied: 1 op(s) outside this step's remit were dropped",
+      },
+    ]);
+  });
+
+  it('drops an upsert whose ref can name no node and applies the rest', async () => {
+    // The measured shape: a uuid garbled into something no longer uuid-shaped, which
+    // the applier would read as a CREATE and fail for want of a title.
+    const garbled = `${A.slice(0, 30)}" == null`;
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome({ updated: [A, B] }));
+    const { db, stamps } = fakeDb();
+    await foldSequenceResults(ctx(db), 'r', [
+      agentReply([
+        { op: 'upsert', nodeRef: A, ordinal: 0 },
+        { op: 'upsert', nodeRef: garbled, ordinal: 1 },
+        { op: 'upsert', nodeRef: `node:${B}`, ordinal: 2 },
+        { op: 'upsert', nodeRef: 'self', ordinal: 3 },
+      ]),
+    ]);
+    const sent = vi.mocked(applyAgentPatch).mock.lastCall![1].ops as { nodeRef: string }[];
+    expect(sent.map((op) => op.nodeRef)).toEqual([A, `node:${B}`, 'self']);
+    expect(stamps).toEqual([
+      {
+        errorMessage: `plan patch partially applied: upsert dropped: unknown node reference '${garbled}'`,
+      },
+    ]);
+  });
+
+  it('records a reply with nothing left to apply as not applied', async () => {
+    const { db, stamps } = fakeDb();
+    await foldSequenceResults(ctx(db), 'r', [
+      agentReply([{ op: 'upsert', nodeRef: 42, ordinal: 0 }]),
+    ]);
+    expect(vi.mocked(applyAgentPatch)).not.toHaveBeenCalled();
+    expect(stamps).toEqual([
+      { errorMessage: "plan patch not applied: upsert dropped: unknown node reference '42'" },
+    ]);
   });
 
   it('stamps nothing on a reply that landed whole', async () => {

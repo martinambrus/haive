@@ -22,6 +22,9 @@
 > The plan's assumption that "the `dropped` report makes the loss visible" was true for 01 and 02
 > only. Plan chat never read the report and 03 never recorded it, so without `0c70ac1b` the
 > fix would have turned a visible failure into a silent drop in exactly the two places it bites.
+> `11f-plan-reconcile` and `01f-external-plan-sync`, which only logged it, followed on 2026-09-19
+> in `744ce132` — see `plan-patch-gap-sweep`, which also closed the sequencing class and the
+> remit-prefix trap this plan left open.
 
 ## Why the code-level answer is not enough
 
@@ -143,7 +146,10 @@ makes for a ref that resolves nowhere. No field row shows the old path firing.
 - **A trap that will overcount losses:** `03-plan-sequence.ts:502` writes the FAILURE prefix for ops
   "outside this step's remit" — remit filtering, not an unresolvable ref. Exclude that step or read
   the messages. **Read, not excluded** — 03 is where Part A lives. Note also that 03 never wrote the
-  PARTIAL prefix at all, which is why it reads `partial = 0` below; as built it does.
+  PARTIAL prefix at all, which is why it reads `partial = 0` below; as built it does. **As built
+  2026-09-19 (`066c42f7`):** the trap is gone for new rows — 03 writes ONE stamp per reply once the
+  outcome is known, so a reply whose ordinals landed reads partial whatever was set aside, and only a
+  reply with nothing left to apply reads "not applied".
 
 ```sql
 -- Partial applies (reply survived, ops dropped) against outright losses, per step.
@@ -188,7 +194,9 @@ agent has to quote, and it is clean.
 The seventh sequencing loss is a third class, not fixed here: `new plan node '9237ecad-…" == null'
 needs a title` — a uuid garbled into something that is not uuid-shaped, which the applier reads as a
 temp id and therefore as a CREATE. That is a contract refusal (`invalid`), not an unresolvable ref,
-and it would need a remit rule in 03 rather than an applier change. One row.
+and it would need a remit rule in 03 rather than an applier change. One row. **Fixed 2026-09-19 in
+`066c42f7`, as exactly that remit rule:** an ordering pass can never create, so 03 drops an upsert
+whose ref names no node before the apply and reports it in the applier's own wording.
 
 **Fresh data, if the stored rows are too few to read.** The pre-fix figure came from a rebuild of the
 687-node `vareska` plan with 82 expansion agents. A comparable build is what makes the numbers

@@ -22,6 +22,14 @@ export function proposedOps(llmOutput: unknown): ProposedOp[] {
   return patch.ops.slice(0, MAX_PROPOSED_OPS) as ProposedOp[];
 }
 
+/** What a summary says about approved ops the applier dropped — usually because a
+ *  plan chat deleted their node while the form sat parked. Empty when none were, so
+ *  a clean apply's summary reads exactly as it always has. */
+export function describeDropped(dropped: readonly string[]): string {
+  if (dropped.length === 0) return '';
+  return ` ${dropped.length} approved change(s) could not be applied: ${dropped.join('; ')}.`;
+}
+
 /**
  * One proposed op as a line a person can judge without reading JSON.
  *

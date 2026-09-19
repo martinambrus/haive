@@ -9,7 +9,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { markPlanCodeLinksStaleForPaths } from '../../../plan/code-link-staleness.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
-import { MAX_PROPOSED_OPS, describePlanOp, proposedOps } from './_plan-ops.js';
+import { MAX_PROPOSED_OPS, describeDropped, describePlanOp, proposedOps } from './_plan-ops.js';
 import {
   externalCommitBlock,
   resolveExternalDrift,
@@ -67,6 +67,9 @@ export interface ExternalPlanSyncApply {
   updated: number;
   codeLinked: number;
   linksMarkedStale: number;
+  /** Approved ops the applier dropped, in its own words. Optional: an output
+   *  persisted before this existed has none. */
+  dropped?: string[];
   /** Lifted verbatim into the step's summary panel by `resolveCuratedSummary`. */
   summary: string;
 }
@@ -355,20 +358,25 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     }
 
     await stamp();
+    // Counts what LANDED: a count that included a dropped op would tell the
+    // developer a change they approved is in the plan when it is not.
+    const landed = chosen.length - applied.dropped.length;
     return {
       decision: 'applied',
       commitsReviewed: d.commits.length,
       reviewedThrough: d.branchPoint,
       proposed: ops.length,
-      applied: chosen.length,
+      applied: landed,
       created: applied.created.length,
       updated: applied.updated.length,
       codeLinked: applied.codeLinked,
       linksMarkedStale: d.linksMarkedStale,
+      ...(applied.dropped.length > 0 ? { dropped: applied.dropped } : {}),
       summary:
-        `Applied ${chosen.length} of ${ops.length} proposed plan change(s) from ` +
+        `Applied ${landed} of ${ops.length} proposed plan change(s) from ` +
         `${d.commits.length} external commit(s): ${applied.created.length} node(s) created, ` +
-        `${applied.updated.length} updated, ${applied.codeLinked} code link(s) written.`,
+        `${applied.updated.length} updated, ${applied.codeLinked} code link(s) written.` +
+        describeDropped(applied.dropped),
     };
   },
 };
