@@ -29,9 +29,10 @@ import type {
   DockerRunResult,
   DockerRunner,
 } from '../src/sandbox/docker-runner.js';
+import { fakeDockerRunner } from './fake-docker-runner.js';
 
 function createFakeRunner(): DockerRunner {
-  return {
+  return fakeDockerRunner({
     async build(opts: DockerBuildOpts): Promise<DockerBuildResult> {
       return {
         exitCode: 0,
@@ -51,7 +52,7 @@ function createFakeRunner(): DockerRunner {
         timedOut: false,
       };
     },
-  };
+  });
 }
 
 process.env.HAIVE_TEST_BYPASS_LLM = '1';

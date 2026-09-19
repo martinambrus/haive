@@ -31,6 +31,7 @@ function ctx(
     userId,
     providerId: opts.providerId ?? 'prov-default',
     providerName,
+    authMode: 'subscription',
     isolateAuth: opts.isolateAuth ?? false,
   };
 }

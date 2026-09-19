@@ -231,7 +231,7 @@ function miningStep(unreadable: string[], applyCalls: StepApplyArgs[]): StepDefi
       }
       return { reviewIncomplete: unreadable.length > 0 };
     },
-  } as unknown as StepDefinition;
+  };
 }
 
 /** A mining step that retries only a known transient terminal failure before
@@ -270,7 +270,7 @@ function terminalFailureRetryStep(applyCalls: StepApplyArgs[]): StepDefinition {
       applyCalls.push(args);
       return { settled: true };
     },
-  } as unknown as StepDefinition;
+  };
 }
 
 /** A mining step whose apply() asks for a SECOND wave (one refuter per finding) the
@@ -317,7 +317,7 @@ function waveStep(
       }
       return { refuted: missing.length === 0, waveExhausted: args.miningWaveExhausted === true };
     },
-  } as unknown as StepDefinition;
+  };
 }
 
 /** A mining step with 08c's round-9 shape: it re-rolls an unreadable reviewer while any
@@ -371,7 +371,7 @@ function degradeThenWaveStep(
       }
       return { refuted: missing.length === 0, reviewIncomplete: unreadable.length > 0 };
     },
-  } as unknown as StepDefinition;
+  };
 }
 
 function run(db: Database, stepDef: StepDefinition, enqueued: CliExecJobPayload[]) {
@@ -426,7 +426,7 @@ function noRetryMiningStep(applyCalls: StepApplyArgs[]): StepDefinition {
       applyCalls.push(args);
       return { settled: true };
     },
-  } as unknown as StepDefinition;
+  };
 }
 
 function reopeningFormStep(): StepDefinition {

@@ -10,6 +10,7 @@ import {
   type SmokeCheck,
 } from '../src/step-engine/steps/env-replicate/04-verify-environment.js';
 import type { DockerBuildOpts, DockerRunner } from '../src/sandbox/docker-runner.js';
+import { fakeDockerRunner } from './fake-docker-runner.js';
 
 function makeStubCtx(): { ctx: StepContext; updates: Record<string, unknown>[] } {
   const updates: Record<string, unknown>[] = [];
@@ -33,6 +34,10 @@ function makeStubCtx(): { ctx: StepContext; updates: Record<string, unknown>[] }
       db,
       logger: logger.child({ test: 'env-replicate-build' }),
       emitProgress: async () => {},
+      sandboxWorkdir: '/haive/workdir',
+      round: 0,
+      signal: new AbortController().signal,
+      throwIfCancelled: () => {},
     },
     updates,
   };
@@ -40,17 +45,19 @@ function makeStubCtx(): { ctx: StepContext; updates: Record<string, unknown>[] }
 
 describe('createBuildImageStep.apply', () => {
   it('skips build when image exists and forceRebuild is false', async () => {
-    const stubRunner: DockerRunner = {
+    const stubRunner = fakeDockerRunner({
       build: async () => {
         throw new Error('runner.build should not be called on skip');
       },
       run: async () => {
         throw new Error('runner.run should not be called');
       },
-    };
+    });
     const step = createBuildImageStep(stubRunner);
     const { ctx, updates } = makeStubCtx();
     const result = await step.apply(ctx, {
+      iteration: 0,
+      previousIterations: [],
       detected: {
         envTemplateId: 'env-1',
         name: 'task-abcdef01',
@@ -68,7 +75,7 @@ describe('createBuildImageStep.apply', () => {
 
   it('builds the image and updates status to ready on success', async () => {
     const calls: DockerBuildOpts[] = [];
-    const stubRunner: DockerRunner = {
+    const stubRunner = fakeDockerRunner({
       build: async (opts) => {
         calls.push(opts);
         const contents = await readFile(opts.dockerfilePath!, 'utf8');
@@ -89,10 +96,12 @@ describe('createBuildImageStep.apply', () => {
         durationMs: 0,
         timedOut: false,
       }),
-    };
+    });
     const step = createBuildImageStep(stubRunner);
     const { ctx, updates } = makeStubCtx();
     const result = await step.apply(ctx, {
+      iteration: 0,
+      previousIterations: [],
       detected: {
         envTemplateId: 'env-2',
         name: 'task-deadbeef',
@@ -115,7 +124,7 @@ describe('createBuildImageStep.apply', () => {
   });
 
   it('throws and marks status failed when build exits non-zero', async () => {
-    const stubRunner: DockerRunner = {
+    const stubRunner = fakeDockerRunner({
       build: async () => ({
         exitCode: 1,
         imageTag: 'haive-env:bad',
@@ -127,11 +136,13 @@ describe('createBuildImageStep.apply', () => {
       run: async () => {
         throw new Error('no');
       },
-    };
+    });
     const step = createBuildImageStep(stubRunner);
     const { ctx, updates } = makeStubCtx();
     await expect(
       step.apply(ctx, {
+        iteration: 0,
+        previousIterations: [],
         detected: {
           envTemplateId: 'env-3',
           name: 'task-abc12345',
@@ -167,6 +178,10 @@ describe('createBuildImageStep.detect', () => {
       db,
       logger: logger.child({ test: 'env-replicate-detect' }),
       emitProgress: async () => {},
+      sandboxWorkdir: '/haive/workdir',
+      round: 0,
+      signal: new AbortController().signal,
+      throwIfCancelled: () => {},
     };
   }
 
@@ -181,7 +196,7 @@ describe('createBuildImageStep.detect', () => {
 
   it('rebuilds a ready row whose image vanished (inspect reports missing)', async () => {
     const inspected: string[] = [];
-    const runner: DockerRunner = {
+    const runner = fakeDockerRunner({
       build: async () => {
         throw new Error('detect must not build');
       },
@@ -192,9 +207,9 @@ describe('createBuildImageStep.detect', () => {
         inspected.push(ref);
         return { exists: false, imageId: null };
       },
-    } as unknown as DockerRunner;
+    }) as unknown as DockerRunner;
     const step = createBuildImageStep(runner);
-    const detected = await step.detect(makeDetectCtx(readyRow));
+    const detected = await step.detect!(makeDetectCtx(readyRow));
     expect(inspected).toEqual(['sha256:abc']);
     // image gone → treat as not built so apply() rebuilds and self-heals the row
     expect(detected.currentImageId).toBeNull();
@@ -203,7 +218,7 @@ describe('createBuildImageStep.detect', () => {
 
   it('reuses a ready row whose image still exists', async () => {
     const inspected: string[] = [];
-    const runner: DockerRunner = {
+    const runner = fakeDockerRunner({
       build: async () => {
         throw new Error('detect must not build');
       },
@@ -214,9 +229,9 @@ describe('createBuildImageStep.detect', () => {
         inspected.push(ref);
         return { exists: true, imageId: ref };
       },
-    } as unknown as DockerRunner;
+    }) as unknown as DockerRunner;
     const step = createBuildImageStep(runner);
-    const detected = await step.detect(makeDetectCtx(readyRow));
+    const detected = await step.detect!(makeDetectCtx(readyRow));
     expect(inspected).toEqual(['sha256:abc']);
     expect(detected.currentImageId).toBe('sha256:abc');
     expect(detected.status).toBe('ready');
@@ -224,7 +239,7 @@ describe('createBuildImageStep.detect', () => {
 
   it('does not inspect a not-yet-built (pending) row', async () => {
     let inspectCalls = 0;
-    const runner: DockerRunner = {
+    const runner = fakeDockerRunner({
       build: async () => {
         throw new Error('detect must not build');
       },
@@ -235,9 +250,9 @@ describe('createBuildImageStep.detect', () => {
         inspectCalls += 1;
         return { exists: true, imageId: null };
       },
-    } as unknown as DockerRunner;
+    }) as unknown as DockerRunner;
     const step = createBuildImageStep(runner);
-    const detected = await step.detect(
+    const detected = await step.detect!(
       makeDetectCtx({ ...readyRow, builtImageId: null, status: 'pending' }),
     );
     expect(inspectCalls).toBe(0);
@@ -247,14 +262,14 @@ describe('createBuildImageStep.detect', () => {
 });
 
 describe('createBuildImageStep.form', () => {
-  const inertRunner: DockerRunner = {
+  const inertRunner = fakeDockerRunner({
     build: async () => {
       throw new Error('form() must not build');
     },
     run: async () => {
       throw new Error('form() must not run');
     },
-  };
+  });
 
   it('omits the rebuild checkbox on the first build and opts into autoSubmitDefaults', () => {
     const step = createBuildImageStep(inertRunner);
@@ -359,7 +374,7 @@ describe('buildSmokeChecks', () => {
 describe('createVerifyEnvironmentStep.apply', () => {
   it('runs each selected check and splits into passed and failed', async () => {
     const calls: string[] = [];
-    const stubRunner: DockerRunner = {
+    const stubRunner = fakeDockerRunner({
       build: async () => {
         throw new Error('no');
       },
@@ -375,7 +390,7 @@ describe('createVerifyEnvironmentStep.apply', () => {
           timedOut: false,
         };
       },
-    };
+    });
     const step = createVerifyEnvironmentStep(stubRunner);
     const { ctx } = makeStubCtx();
     const checks: SmokeCheck[] = [
@@ -383,6 +398,8 @@ describe('createVerifyEnvironmentStep.apply', () => {
       { id: 'php', label: 'PHP', cmd: ['php', '--version'] },
     ];
     const result = await step.apply(ctx, {
+      iteration: 0,
+      previousIterations: [],
       detected: {
         envTemplateId: 'env-9',
         imageRef: 'haive-env-foo:latest',
@@ -399,14 +416,14 @@ describe('createVerifyEnvironmentStep.apply', () => {
   });
 
   it('opts into auto-submit so Auto-continue runs every check unattended', () => {
-    const inert: DockerRunner = {
+    const inert = fakeDockerRunner({
       build: async () => {
         throw new Error('no');
       },
       run: async () => {
         throw new Error('no');
       },
-    };
+    });
     const step = createVerifyEnvironmentStep(inert);
     expect(step.metadata.autoSubmitDefaults).toBe(true);
     const { ctx } = makeStubCtx();
@@ -425,7 +442,7 @@ describe('createVerifyEnvironmentStep.apply', () => {
 
   it('skips checks that are not in selectedChecks', async () => {
     const calls: string[] = [];
-    const stubRunner: DockerRunner = {
+    const stubRunner = fakeDockerRunner({
       build: async () => {
         throw new Error('no');
       },
@@ -439,7 +456,7 @@ describe('createVerifyEnvironmentStep.apply', () => {
           timedOut: false,
         };
       },
-    };
+    });
     const step = createVerifyEnvironmentStep(stubRunner);
     const { ctx } = makeStubCtx();
     const checks: SmokeCheck[] = [
@@ -448,6 +465,8 @@ describe('createVerifyEnvironmentStep.apply', () => {
       { id: 'bash', label: 'Shell', cmd: ['bash', '-c', 'echo ok'] },
     ];
     const result = await step.apply(ctx, {
+      iteration: 0,
+      previousIterations: [],
       detected: {
         envTemplateId: 'env-10',
         imageRef: 'haive-env-foo:latest',

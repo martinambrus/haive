@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
+import type { ReviewSeverity } from '@haive/shared/review';
 import {
   chooseAmendedSpec,
   specHeadingCount,
@@ -405,7 +406,7 @@ describe('phase0b5SpecQualityStep.loop', () => {
   const loop = phase0b5SpecQualityStep.loop!;
 
   function reviewOutput(
-    findings: Array<{ severity: 'info' | 'warn' | 'error' }>,
+    findings: Array<{ severity: ReviewSeverity }>,
     verdict: 'APPROVED' | 'NEEDS_REVISION' | 'BLOCKING_AMBIGUITY' = 'NEEDS_REVISION',
     spec = 'irrelevant',
   ) {
@@ -440,7 +441,7 @@ describe('phase0b5SpecQualityStep.loop', () => {
       await loop.shouldContinue({
         ...base,
         iteration: 0,
-        applyOutput: reviewOutput([{ severity: 'warn' }]),
+        applyOutput: reviewOutput([{ severity: 'medium' }]),
       }),
     ).toBe(true);
     expect(
@@ -454,7 +455,7 @@ describe('phase0b5SpecQualityStep.loop', () => {
       await loop.shouldContinue({
         ...base,
         iteration: 2,
-        applyOutput: reviewOutput([{ severity: 'error' }], 'BLOCKING_AMBIGUITY'),
+        applyOutput: reviewOutput([{ severity: 'high' }], 'BLOCKING_AMBIGUITY'),
       }),
     ).toBe(false);
   });
@@ -482,7 +483,7 @@ describe('phase0b5SpecQualityStep.loop', () => {
         iteration: 0,
         llmOutput: null,
         applyOutput: reviewOutput(
-          [{ severity: 'error' }, { severity: 'warn' }],
+          [{ severity: 'high' }, { severity: 'medium' }],
           'NEEDS_REVISION',
           'WORKING BODY',
         ),
@@ -498,7 +499,7 @@ describe('phase0b5SpecQualityStep.loop', () => {
     expect(prompt).toContain('CORRECTION phase');
     expect(prompt).toContain('blindly trust');
     expect(prompt).toContain('Findings from iteration 1');
-    expect(prompt).toContain('[error]');
+    expect(prompt).toContain('[high]');
     expect(prompt).toContain('WORKING BODY');
   });
 
@@ -507,7 +508,7 @@ describe('phase0b5SpecQualityStep.loop', () => {
       {
         iteration: 0,
         llmOutput: null,
-        applyOutput: { ...reviewOutput([{ severity: 'warn' }]), spec: '' },
+        applyOutput: { ...reviewOutput([{ severity: 'medium' }]), spec: '' },
         continueRequested: true,
       },
       {
@@ -539,7 +540,7 @@ describe('phase0b5SpecQualityStep.loop', () => {
       {
         iteration: 0,
         llmOutput: null,
-        applyOutput: { ...reviewOutput([{ severity: 'warn' }]), spec: '' },
+        applyOutput: { ...reviewOutput([{ severity: 'medium' }]), spec: '' },
         continueRequested: true,
       },
     ];

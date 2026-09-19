@@ -28,6 +28,7 @@ import type {
   DockerRunResult,
   DockerRunner,
 } from '../src/sandbox/docker-runner.js';
+import { fakeDockerRunner } from './fake-docker-runner.js';
 
 process.env.HAIVE_TEST_BYPASS_LLM = '1';
 
@@ -90,7 +91,7 @@ async function createFixtureRepo(): Promise<string> {
 }
 
 function createFakeRunner(): DockerRunner {
-  return {
+  return fakeDockerRunner({
     async build(opts: DockerBuildOpts): Promise<DockerBuildResult> {
       return {
         exitCode: 0,
@@ -111,7 +112,7 @@ function createFakeRunner(): DockerRunner {
         timedOut: false,
       };
     },
-  };
+  });
 }
 
 async function main(): Promise<void> {

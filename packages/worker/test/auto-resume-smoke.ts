@@ -80,7 +80,15 @@ async function seedTask(
     title: 'Plan coverage',
     status: 'failed',
     output: { kept: 'output from the passes that finished' },
-    iterations: [{ iteration: 0 }],
+    iterations: [
+      {
+        iteration: 0,
+        llmOutput: null,
+        applyOutput: null,
+        continueRequested: false,
+        recordedAt: new Date().toISOString(),
+      },
+    ],
     iterationCount: 1,
     detectOutput: { kept: 'detect' },
     errorMessage: RATE_LIMIT_MESSAGE,

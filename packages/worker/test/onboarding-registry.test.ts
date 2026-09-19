@@ -8,6 +8,29 @@ import {
   postOnboardingStep,
 } from '../src/step-engine/steps/onboarding/index.js';
 
+type ToolingDetect = Parameters<NonNullable<typeof toolingInfrastructureStep.form>>[1];
+
+/** A complete detect payload for the tooling form. The cases vary language, container,
+ *  database and the LSP bridge; everything else is what detect reports for a CLI with no
+ *  MCP bridge and a repository with no saved choices. */
+function toolingDetect(over: Partial<ToolingDetect>): ToolingDetect {
+  return {
+    primaryLanguage: 'php',
+    containerType: 'none',
+    databaseType: null,
+    cliDisplayName: null,
+    cliSupportsMcp: false,
+    cliSupportsLsp: false,
+    rtkEnabled: false,
+    repositoryId: null,
+    rtkVersionLabel: '',
+    chromeVersionLabel: '',
+    mcpSettingsDefault: '',
+    lspVersionByOption: {},
+    ...over,
+  };
+}
+
 describe('onboarding registry', () => {
   it('registers all onboarding steps in declared order', () => {
     const registry = new StepRegistry();
@@ -94,71 +117,61 @@ describe('onboarding registry', () => {
 
   it('tooling infrastructure step picks the right LSP default by language', () => {
     const ctx = {} as never;
-    const schema = toolingInfrastructureStep.form!(ctx, {
-      primaryLanguage: 'php',
-      framework: 'generic',
-      containerType: 'ddev',
-      databaseType: 'postgres',
-      hasPhpExtendedExtensions: false,
-      cliSupportsLsp: true,
-    });
+    const schema = toolingInfrastructureStep.form!(
+      ctx,
+      toolingDetect({
+        primaryLanguage: 'php',
+        containerType: 'ddev',
+        databaseType: 'postgres',
+        cliSupportsLsp: true,
+      }),
+    );
     const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
     expect(lsp?.type).toBe('multi-select');
     // Single PHP LSP survivor now — all PHP (generic or CMS) defaults to it.
     expect((lsp as { defaults: string[] }).defaults).toEqual(['php-extended']);
   });
 
-  it('tooling infrastructure defaults to php-extended for Drupal frameworks', () => {
+  it('tooling infrastructure defaults PHP to php-extended whatever the container or database', () => {
     const ctx = {} as never;
-    const schema = toolingInfrastructureStep.form!(ctx, {
-      primaryLanguage: 'php',
-      framework: 'drupal',
-      containerType: 'ddev',
-      databaseType: 'postgres',
-      hasPhpExtendedExtensions: false,
-      cliSupportsLsp: true,
-    });
-    const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
-    expect((lsp as { defaults: string[] }).defaults).toEqual(['php-extended']);
-  });
-
-  it('tooling infrastructure defaults to php-extended when PHP candidate extensions detected', () => {
-    const ctx = {} as never;
-    const schema = toolingInfrastructureStep.form!(ctx, {
-      primaryLanguage: 'php',
-      framework: 'generic',
-      containerType: 'none',
-      databaseType: null,
-      hasPhpExtendedExtensions: true,
-      cliSupportsLsp: true,
-    });
+    const schema = toolingInfrastructureStep.form!(
+      ctx,
+      toolingDetect({
+        primaryLanguage: 'php',
+        containerType: 'none',
+        databaseType: null,
+        cliSupportsLsp: true,
+      }),
+    );
     const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
     expect((lsp as { defaults: string[] }).defaults).toEqual(['php-extended']);
   });
 
   it('hides every LSP choice for a CLI without an LSP bridge', () => {
     const ctx = {} as never;
-    const schema = toolingInfrastructureStep.form!(ctx, {
-      primaryLanguage: 'typescript',
-      framework: 'generic',
-      containerType: 'none',
-      databaseType: null,
-      hasPhpExtendedExtensions: false,
-      cliSupportsLsp: false,
-    });
+    const schema = toolingInfrastructureStep.form!(
+      ctx,
+      toolingDetect({
+        primaryLanguage: 'typescript',
+        containerType: 'none',
+        databaseType: null,
+        cliSupportsLsp: false,
+      }),
+    );
     expect(schema!.fields.some((field) => field.id === 'lspLanguages')).toBe(false);
   });
 
   it('keeps all supported language-server choices for an LSP-capable CLI', () => {
     const ctx = {} as never;
-    const schema = toolingInfrastructureStep.form!(ctx, {
-      primaryLanguage: 'typescript',
-      framework: 'generic',
-      containerType: 'none',
-      databaseType: null,
-      hasPhpExtendedExtensions: false,
-      cliSupportsLsp: true,
-    });
+    const schema = toolingInfrastructureStep.form!(
+      ctx,
+      toolingDetect({
+        primaryLanguage: 'typescript',
+        containerType: 'none',
+        databaseType: null,
+        cliSupportsLsp: true,
+      }),
+    );
     const field = schema!.fields.find((candidate) => candidate.id === 'lspLanguages');
     expect(field?.type).toBe('multi-select');
     expect(
@@ -168,13 +181,14 @@ describe('onboarding registry', () => {
 
   it('offers the DDEV rag option only when DDEV detected, but never defaults to it', () => {
     const ctx = {} as never;
-    const withDdev = toolingInfrastructureStep.form!(ctx, {
-      primaryLanguage: 'php',
-      framework: 'drupal',
-      containerType: 'ddev',
-      databaseType: 'postgres',
-      hasPhpExtendedExtensions: false,
-    });
+    const withDdev = toolingInfrastructureStep.form!(
+      ctx,
+      toolingDetect({
+        primaryLanguage: 'php',
+        containerType: 'ddev',
+        databaseType: 'postgres',
+      }),
+    );
     const ragWithDdev = withDdev!.fields.find((f) => f.id === 'ragMode');
     expect(ragWithDdev?.type).toBe('select');
     const ddevOpts = (ragWithDdev as { options: { value: string }[] }).options;
@@ -184,13 +198,14 @@ describe('onboarding registry', () => {
     // postgres rather than the DDEV database.
     expect((ragWithDdev as { default?: string }).default).toBe('internal');
 
-    const noDdev = toolingInfrastructureStep.form!(ctx, {
-      primaryLanguage: 'javascript',
-      framework: 'generic',
-      containerType: 'none',
-      databaseType: null,
-      hasPhpExtendedExtensions: false,
-    });
+    const noDdev = toolingInfrastructureStep.form!(
+      ctx,
+      toolingDetect({
+        primaryLanguage: 'javascript',
+        containerType: 'none',
+        databaseType: null,
+      }),
+    );
     const ragNoDdev = noDdev!.fields.find((f) => f.id === 'ragMode');
     const noDdevOpts = (ragNoDdev as { options: { value: string }[] }).options;
     expect(noDdevOpts.map((o) => o.value)).not.toContain('ddev');
@@ -199,13 +214,14 @@ describe('onboarding registry', () => {
 
   it('asks for a rag connection string only for the modes that need one', () => {
     const ctx = {} as never;
-    const schema = toolingInfrastructureStep.form!(ctx, {
-      primaryLanguage: 'php',
-      framework: 'drupal',
-      containerType: 'ddev',
-      databaseType: 'postgres',
-      hasPhpExtendedExtensions: false,
-    });
+    const schema = toolingInfrastructureStep.form!(
+      ctx,
+      toolingDetect({
+        primaryLanguage: 'php',
+        containerType: 'ddev',
+        databaseType: 'postgres',
+      }),
+    );
     const conn = schema!.fields.find((f) => f.id === 'ragConnectionString');
     // `ddev` and `external` both store embeddings outside haive and have no
     // guessable address; `internal` and `none` must not be asked at all, which is
@@ -219,13 +235,14 @@ describe('onboarding registry', () => {
 
   it('tooling infrastructure includes Ollama and embedding fields', () => {
     const ctx = {} as never;
-    const schema = toolingInfrastructureStep.form!(ctx, {
-      primaryLanguage: 'php',
-      framework: 'generic',
-      containerType: 'none',
-      databaseType: null,
-      hasPhpExtendedExtensions: false,
-    });
+    const schema = toolingInfrastructureStep.form!(
+      ctx,
+      toolingDetect({
+        primaryLanguage: 'php',
+        containerType: 'none',
+        databaseType: null,
+      }),
+    );
     const fieldIds = schema!.fields.map((f) => f.id);
     expect(fieldIds).toContain('ollamaUrl');
     expect(fieldIds).toContain('embeddingModel');

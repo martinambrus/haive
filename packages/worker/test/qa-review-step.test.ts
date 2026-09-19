@@ -161,11 +161,16 @@ describe('knowledgeQaReviewStep.apply', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       logger: { info() {}, warn() {}, error() {}, debug() {} } as any,
       async emitProgress() {},
+      round: 0,
+      signal: new AbortController().signal,
+      throwIfCancelled: () => {},
     };
   }
 
   it('writes confirmed code proposals + passthrough deterministically (LLM skipped)', async () => {
     const out = await knowledgeQaReviewStep.apply(makeCtx(), {
+      iteration: 0,
+      previousIterations: [],
       detected: detect(),
       formValues: {}, // everything confirmed, no corrections
       llmOutput: undefined, // LLM was skipped
@@ -182,6 +187,8 @@ describe('knowledgeQaReviewStep.apply', () => {
 
   it('records the agent write summary for corrected answers', async () => {
     const out = await knowledgeQaReviewStep.apply(makeCtx(), {
+      iteration: 0,
+      previousIterations: [],
       detected: detect(),
       formValues: { review__0: 'Corrected.', unanswered__0: 'A new answer.' },
       llmOutput: fence({

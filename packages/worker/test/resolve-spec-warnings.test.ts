@@ -15,6 +15,8 @@ function detected(spec = 'SPEC BODY', findings = ['[MEDIUM] goal_clarity: x']) {
     advisoryCount: findings.filter((f) => f.startsWith('[MEDIUM]') || f.startsWith('[LOW]')).length,
     spec,
     specFilePath: '/haive/workdir/.haive/spec-review.md',
+    revising: false,
+    hasAuditFindings: false,
   };
 }
 
@@ -104,7 +106,7 @@ describe('resolveSpecWarningsStep form + llm gating', () => {
     const fs = resolveSpecWarningsStep.form!(
       {} as never,
       detected('S', ['[MEDIUM] d: c', '[HIGH] e: g']),
-    );
+    )!;
     const action = fs.fields.find((f) => f.id === 'action') as
       { type: string; options: { value: string }[] } | undefined;
     expect(action?.type).toBe('radio');

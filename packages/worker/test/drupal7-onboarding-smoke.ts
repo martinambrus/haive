@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { cp, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';

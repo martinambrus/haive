@@ -80,7 +80,7 @@ describe('upgradeApplyStep.form() — diff details on options', () => {
     if (!field || field.type !== 'multi-select') throw new Error('not a multi-select');
     expect(field.options).toHaveLength(1);
     const opt = field.options[0];
-    expect(opt.details).toEqual({
+    expect(opt?.details).toEqual({
       kind: 'diff',
       baseline: 'OLD_BODY',
       current: 'NEW_BODY',
@@ -99,7 +99,7 @@ describe('upgradeApplyStep.form() — diff details on options', () => {
     );
     const field = schema.fields.find((f) => 'id' in f && f.id === 'selectedNew');
     if (!field || field.type !== 'multi-select') throw new Error('not a multi-select');
-    expect(field.options[0].details).toEqual({
+    expect(field.options[0]?.details).toEqual({
       kind: 'diff',
       baseline: null,
       current: 'BRAND_NEW',
@@ -118,8 +118,8 @@ describe('upgradeApplyStep.form() — diff details on options', () => {
     );
     const field = schema.fields.find((f) => 'id' in f && f.id === 'selectedReinstate');
     if (!field || field.type !== 'multi-select') throw new Error('not a multi-select');
-    expect(field.options[0].details?.baseline).toBeNull();
-    expect(field.options[0].details?.current).toBe('WOULD_REINSTATE');
+    expect(field.options[0]?.details?.baseline).toBeNull();
+    expect(field.options[0]?.details?.current).toBe('WOULD_REINSTATE');
   });
 
   it('obsolete options omit details (no newContent → no diff to show)', () => {
@@ -133,7 +133,7 @@ describe('upgradeApplyStep.form() — diff details on options', () => {
     );
     const field = schema.fields.find((f) => 'id' in f && f.id === 'selectedObsoleteRemovals');
     if (!field || field.type !== 'multi-select') throw new Error('not a multi-select');
-    expect(field.options[0].details).toBeUndefined();
+    expect(field.options[0]?.details).toBeUndefined();
   });
 
   it('options always carry editable=false for the read-only upgrade form', () => {

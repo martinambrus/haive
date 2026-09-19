@@ -104,9 +104,16 @@ const miningResult = (agentId: string, output: unknown): AgentMiningResult => ({
 function detectStub(
   failing: { skillId: string; issues: string[] }[],
   targetDirs: string[] = DIRS,
-): unknown {
+): Parameters<typeof skillRepairStep.apply>[1]['detected'] {
   return {
-    failingSkills: failing.map((f) => ({ ...f, skillMdExcerpt: null })),
+    // detect's first-round repair size for a failure that was not a truncation.
+    failingSkills: failing.map((f) => ({
+      ...f,
+      skillMdExcerpt: null,
+      maxSub: 8,
+      bodyLen: '100-250',
+      shrunk: false,
+    })),
     skillTargetDirs: targetDirs,
     framework: null,
     language: null,

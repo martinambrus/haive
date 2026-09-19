@@ -212,7 +212,7 @@ async function main(): Promise<void> {
         { writable: true },
       );
       const spec = adapter.buildCliInvocation(provider, PROMPT, { disableTools: true });
-      const env = {
+      const env: Record<string, string> = {
         ...spec.env,
         ...secrets,
         HTTP_PROXY: proxy.url,

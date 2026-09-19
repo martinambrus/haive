@@ -40,6 +40,10 @@ function fakeCtx(): StepContext {
     db: undefined as never,
     logger: logger.child({ test: 'scope-knowledge-immunity' }),
     emitProgress: async () => {},
+    sandboxWorkdir: '/haive/workdir',
+    round: 0,
+    signal: new AbortController().signal,
+    throwIfCancelled: () => {},
   };
 }
 
@@ -50,6 +54,8 @@ const SELECTED = ['src'];
 describe('06_7-scope-selection apply', () => {
   it('denies the unticked dirs but never the knowledge dirs', async () => {
     const out = (await scopeSelectionStep.apply(fakeCtx(), {
+      iteration: 0,
+      previousIterations: [],
       detected: { framework: null, tree: TREE, seedExcludeGlobs: [], totalCodeFiles: 912 },
       formValues: { selectedDirs: SELECTED },
     })) as { excludeGlobs: string[] };
@@ -64,6 +70,8 @@ describe('06_7-scope-selection apply', () => {
 describe('09_7-rag-source-selection apply', () => {
   it('drops a .haive-data untick from the repo-level RAG deny list', async () => {
     const out = (await ragSourceSelectionStep.apply(fakeCtx(), {
+      iteration: 0,
+      previousIterations: [],
       detected: {
         framework: null,
         tree: TREE,

@@ -61,6 +61,10 @@ function fakeCtx(repoPath: string): StepContext {
     db: undefined as never,
     logger: logger.child({ test: 'env-detect' }),
     emitProgress: async () => {},
+    sandboxWorkdir: '/haive/workdir',
+    round: 0,
+    signal: new AbortController().signal,
+    throwIfCancelled: () => {},
   };
 }
 
@@ -287,6 +291,8 @@ describe('envDetectStep', () => {
 
   it('apply creates .claude and knowledge_base directories', async () => {
     const result = (await envDetectStep.apply(fakeCtx(tmpRoot), {
+      iteration: 0,
+      previousIterations: [],
       detected: { summary: '', data: {}, warnings: [] } as DetectResult,
       formValues: {},
     })) as { directoriesCreated: string[] };
@@ -422,6 +428,8 @@ describe('apply LLM enrichment merge', () => {
 
   it('honours a language+db-only enrichment and writes db to container.databaseType', async () => {
     const result = (await envDetectStep.apply(fakeCtx(tmpRoot), {
+      iteration: 0,
+      previousIterations: [],
       detected: { summary: '', data: { ...baseData }, warnings: [] } as unknown as DetectResult,
       llmOutput: '```json\n{ "primaryLanguage": "php", "databaseType": "mysql" }\n```',
       formValues: {},

@@ -19,7 +19,8 @@ vi.mock('node:child_process', async () => {
   const { EventEmitter } = await import('node:events');
   return {
     spawn: (cmd: string, args: string[], options: { stdio?: unknown[] }) => {
-      const child = new EventEmitter() as EventEmitter & Record<string, unknown>;
+      const child = new EventEmitter() as InstanceType<typeof EventEmitter> &
+        Record<string, unknown>;
       child.stdout = new EventEmitter();
       child.stderr = new EventEmitter();
       const record = { cmd, args, options, writes: [] as string[], ended: false };

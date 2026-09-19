@@ -17,6 +17,11 @@ function detectedStub(ddevMode: boolean) {
     // full-workflow run keeps both, which is the scenario these form tests assert.
     runsBrowserVerify: true,
     runsAdversarialQa: true,
+    // The DDEV db-port opt-in stays hidden unless a case turns it on.
+    dbExposeAvailable: false,
+    taskExposeDbPort: false,
+    // What detect reports when neither the task nor the repository narrows anything.
+    reviewDimensionIds: [...ALL_REVIEW_DIMENSION_IDS],
   };
 }
 

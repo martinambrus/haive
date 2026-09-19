@@ -30,7 +30,7 @@ function det(over: Partial<Detected>): Detected {
 }
 
 function fieldIds(detected: Detected): string[] {
-  return detectionConfirmationStep.form!(ctx, detected, undefined).fields.map((f) => f.id);
+  return detectionConfirmationStep.form!(ctx, detected, undefined)!.fields.map((f) => f.id);
 }
 
 describe('02 detection-confirmation conditional fields', () => {

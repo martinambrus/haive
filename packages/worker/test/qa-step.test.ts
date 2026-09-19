@@ -414,6 +414,9 @@ describe('knowledgeQaResolveStep.apply', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       logger: { info() {}, warn() {}, error() {}, debug() {} } as any,
       async emitProgress() {},
+      round: 0,
+      signal: new AbortController().signal,
+      throwIfCancelled: () => {},
     };
   }
 
@@ -435,6 +438,8 @@ describe('knowledgeQaResolveStep.apply', () => {
       unanswered: [{ question: 'Why cron?', reason: 'No scheduler found in code.' }],
     });
     const out = await knowledgeQaResolveStep.apply(makeCtx(), {
+      iteration: 0,
+      previousIterations: [],
       detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
       formValues: { userQuestions: 'q1?\nq2?' },
       llmOutput,
@@ -466,6 +471,8 @@ describe('knowledgeQaResolveStep.apply', () => {
     it('reads a staged body back into content', async () => {
       await stage('sec.md', 'Staged markdown body.\n');
       const out = await knowledgeQaResolveStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
         detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
         formValues: { userQuestions: '' },
         llmOutput: fence(
@@ -480,6 +487,8 @@ describe('knowledgeQaResolveStep.apply', () => {
     it('discards the staging dir once every body is filed', async () => {
       await stage('sec.md', 'Body.\n');
       await knowledgeQaResolveStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
         detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
         formValues: { userQuestions: '' },
         llmOutput: fence(
@@ -495,6 +504,8 @@ describe('knowledgeQaResolveStep.apply', () => {
     it('moves an unreadable body to unanswered and keeps the good answers', async () => {
       await stage('good.md', 'Good body.\n');
       const out = await knowledgeQaResolveStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
         detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
         formValues: { userQuestions: '' },
         llmOutput: fence({
@@ -531,6 +542,8 @@ describe('knowledgeQaResolveStep.apply', () => {
 
     it('keeps inline content working and needs no file', async () => {
       const out = await knowledgeQaResolveStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
         detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
         formValues: { userQuestions: '' },
         llmOutput: fence(answer({ relPath: 'X.md', section: 'Y', content: 'Inline body.' })),
@@ -540,6 +553,8 @@ describe('knowledgeQaResolveStep.apply', () => {
 
     it('refuses a contentPath that escapes the staging dir', async () => {
       const out = await knowledgeQaResolveStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
         detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
         formValues: { userQuestions: '' },
         llmOutput: fence(
@@ -558,6 +573,8 @@ describe('knowledgeQaResolveStep.apply', () => {
   it('throws when LLM output is unparseable, surfacing failure for retry', async () => {
     await expect(
       knowledgeQaResolveStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
         detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
         formValues: { userQuestions: '' },
         llmOutput: 'no fence',
