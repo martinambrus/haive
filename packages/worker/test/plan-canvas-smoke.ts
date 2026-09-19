@@ -377,6 +377,99 @@ async function main(): Promise<void> {
     ),
   );
 
+  /* --- 8.5 under drop, a ref that cannot resolve costs only its own op ---- */
+
+  // MEASURED: four ordering replies of 16-45 ops each were lost whole to one
+  // mistyped uuid apiece, every one a near-copy of an id in the agent's prompt.
+  const staleSibling = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: login!.id, title: 'Resurrected' },
+        { op: 'upsert', nodeRef: 'survivor', parentRef: api!.id, title: 'Beside a stale id' },
+        { op: 'link', fromRef: 'survivor', toRef: web!.id, kind: 'implements' },
+      ],
+    },
+    { repositoryId, origin: 'llm', onUnresolvableRef: 'drop' },
+  );
+  check(
+    'an agent upsert naming a deleted node loses its own op, not the reply',
+    staleSibling.created.length === 1 &&
+      staleSibling.linked === 1 &&
+      staleSibling.dropped.length === 1 &&
+      staleSibling.dropped[0]!.includes(login!.id) &&
+      (await byTitle('Resurrected')) === undefined,
+    staleSibling,
+  );
+
+  // The pre-flight reads a patch as a set, while the op loop resolves in order.
+  const forward = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'link', fromRef: 'late', toRef: web!.id, kind: 'affects' },
+        { op: 'upsert', nodeRef: 'late', parentRef: api!.id, title: 'Introduced after its link' },
+      ],
+    },
+    { repositoryId, origin: 'llm', onUnresolvableRef: 'drop' },
+  );
+  check(
+    'a link naming a temp id before its upsert loses the link, not the node',
+    forward.created.length === 1 && forward.linked === 0 && forward.dropped.length === 1,
+    forward,
+  );
+
+  // A delete takes its whole subtree, including a node this same patch created
+  // under it, so no pre-flight can know which ids a later op may still name.
+  const doomed = await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: 'doomed', parentRef: api!.id, title: 'Doomed' }] },
+    { repositoryId, origin: 'user' },
+  );
+  const doomedId = doomed.refs.doomed!;
+  const afterDelete = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'orphan', parentRef: doomedId, title: 'Created, then deleted' },
+        { op: 'delete', nodeRef: doomedId },
+        { op: 'link', fromRef: 'orphan', toRef: web!.id, kind: 'affects' },
+        { op: 'upsert', nodeRef: doomedId, title: 'Renamed after its delete' },
+        { op: 'upsert', nodeRef: 'orphan', parentRef: api!.id, title: 'Resurrected orphan' },
+        { op: 'upsert', nodeRef: 'bystander', parentRef: api!.id, title: 'Beside a delete' },
+      ],
+    },
+    { repositoryId, origin: 'llm', onUnresolvableRef: 'drop' },
+  );
+  const titlesAfterDelete = (await nodes()).map((n) => n.title);
+  check(
+    'ops naming a node deleted earlier in the patch are dropped, not fatal',
+    afterDelete.deleted.length === 1 &&
+      afterDelete.dropped.length === 3 &&
+      titlesAfterDelete.includes('Beside a delete') &&
+      !titlesAfterDelete.some((t) =>
+        [
+          'Doomed',
+          'Created, then deleted',
+          'Renamed after its delete',
+          'Resurrected orphan',
+        ].includes(t),
+      ),
+    { afterDelete, titlesAfterDelete },
+  );
+
+  await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'delete', nodeRef: staleSibling.refs.survivor! },
+        { op: 'delete', nodeRef: forward.refs.late! },
+        { op: 'delete', nodeRef: afterDelete.refs.bystander! },
+      ],
+    },
+    { repositoryId, origin: 'user' },
+  );
+
   /* --- 9. a patch cannot reach into another repository --------------------- */
 
   const [otherRepo] = await db

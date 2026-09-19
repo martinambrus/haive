@@ -1,5 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { Database } from '@haive/database';
 import { planChatStep } from './01-plan-chat.js';
+import { applyAgentPatch } from './_plan-prompt.js';
+
+vi.mock('./_plan-prompt.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./_plan-prompt.js')>();
+  return { ...actual, applyAgentPatch: vi.fn() };
+});
+vi.mock('../../../plan/mirror.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../plan/mirror.js')>();
+  return { ...actual, writePlanMirror: vi.fn(async () => {}) };
+});
 
 /**
  * The two-pass turn model.
@@ -92,5 +103,64 @@ describe('plan chat revise loop', () => {
 
   it('ends when the user submits nothing', () => {
     expect(evaluate({ continueRequested: false } as never, {} as never)).toBeNull();
+  });
+});
+
+describe('plan chat reply', () => {
+  function fakeDb(): { db: Database; turns: Record<string, unknown>[] } {
+    const turns: Record<string, unknown>[] = [];
+    const db = {
+      insert: () => ({
+        values: async (row: Record<string, unknown>) => {
+          turns.push(row);
+        },
+      }),
+    } as unknown as Database;
+    return { db, turns };
+  }
+
+  const answer = (db: Database) =>
+    planChatStep.apply(
+      {
+        taskId: 't',
+        cliProviderId: null,
+        repoPath: '/tmp',
+        db,
+        logger: { warn: () => {} },
+      } as never,
+      {
+        detected: detected({ pendingQuestion: 'Add a retry queue' }),
+        formValues: {},
+        llmOutput: {
+          ops: [{ op: 'upsert', nodeRef: 'q', parentRef: 'n1', title: 'Retry queue' }],
+          reply: 'Added it.',
+        },
+      } as never,
+    );
+
+  const outcome = (dropped: string[]) => ({
+    created: ['c'],
+    updated: [],
+    deleted: [],
+    linked: 0,
+    unlinked: 0,
+    codeLinked: 0,
+    refs: { q: 'c' },
+    dropped,
+  });
+
+  it('names the changes the applier skipped, so the reply does not claim them', async () => {
+    const gone = "link dropped: unknown node reference 'gone'";
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome([gone]));
+    const { db, turns } = fakeDb();
+    await answer(db);
+    expect(turns[0]?.body).toBe(`Added it.\n\n_1 change(s) not applied: ${gone}_`);
+  });
+
+  it('leaves a reply whose patch landed whole as the agent wrote it', async () => {
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome([]));
+    const { db, turns } = fakeDb();
+    await answer(db);
+    expect(turns[0]?.body).toBe('Added it.');
   });
 });

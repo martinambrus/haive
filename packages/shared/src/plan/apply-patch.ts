@@ -240,7 +240,9 @@ export async function dropUnresolvableOps(
   const refsOf = (op: PlanPatch['ops'][number]): string[] => {
     switch (op.op) {
       case 'upsert':
-        return op.parentRef ? [op.parentRef] : [];
+        // Its own nodeRef too: a uuid there that resolves to nothing is a stale id
+        // `applyUpsert` refuses. A temp nodeRef always passes — this op provides it.
+        return op.parentRef ? [op.nodeRef, op.parentRef] : [op.nodeRef];
       case 'link':
       case 'unlink':
         return [op.fromRef, op.toRef];
@@ -255,7 +257,6 @@ export async function dropUnresolvableOps(
   const wanted = new Set<string>();
   for (const op of ops) {
     for (const r of refsOf(op)) if (UUID_RE.test(r)) wanted.add(r);
-    if (op.op === 'upsert' && UUID_RE.test(op.nodeRef)) wanted.add(op.nodeRef);
   }
   const live = new Set<string>(seeded.values());
   for (const k of seeded.keys()) live.add(k);
@@ -292,6 +293,11 @@ export async function dropUnresolvableOps(
     kept = next;
   }
 }
+
+/** A reference that does not resolve where its op stands. A class of its own so
+ *  `drop` can skip exactly these without matching on message text; every other
+ *  refusal still fails the patch. */
+class UnresolvableRefError extends PlanPatchError {}
 
 async function applyOps(
   tx: DbOrTx,
@@ -339,21 +345,21 @@ async function applyOps(
     const mapped = refs.get(ref);
     const id = mapped ?? (UUID_RE.test(ref) ? ref : null);
     if (!id) {
-      throw new PlanPatchError(
+      throw new UnresolvableRefError(
         'invalid',
         `unknown node reference '${ref}' — a temporary id must be introduced by an earlier upsert`,
         opIndex,
       );
     }
     if (dead.has(id)) {
-      throw new PlanPatchError(
+      throw new UnresolvableRefError(
         'invalid',
         `node '${ref}' was deleted earlier in this patch`,
         opIndex,
       );
     }
     const row = await loadNode(id);
-    if (!row) throw new PlanPatchError('not_found', `plan node '${ref}' not found`, opIndex);
+    if (!row) throw new UnresolvableRefError('not_found', `plan node '${ref}' not found`, opIndex);
     return row;
   }
 
@@ -685,21 +691,20 @@ async function applyOps(
       await updateNode(op, existing, opIndex);
       return;
     }
-    // A uuid ref resolving to nothing is a STALE id, not a request to create a
-    // node with it: creating one would resurrect something the author believed
-    // still existed, under an id other rows may already reference.
-    if (!known && candidateId) {
-      throw new PlanPatchError('not_found', `plan node '${op.nodeRef}' not found`, opIndex);
+    // A ref that names a node — a uuid, `self`, or a temp id an earlier op of this
+    // patch introduced — and resolves to nothing is STALE, not a request to create:
+    // creating one would resurrect something the author believed still existed,
+    // under an id other rows may already reference.
+    if (candidateId) {
+      throw new UnresolvableRefError('not_found', `plan node '${op.nodeRef}' not found`, opIndex);
     }
     await createNode(op, opIndex);
   }
 
-  // Pre-flight: under `drop`, remove the ops that CANNOT resolve rather than
-  // letting the first of them abort the transaction and take the rest with it.
-  //
-  // Ops that would fail are never submitted, so the all-or-nothing guarantee of
-  // the transaction is untouched — this decides what the patch IS, not how much
-  // of it survives partway through.
+  // Pre-flight: under `drop`, remove the ops whose refs resolve NOWHERE in the
+  // patch — a uuid that is no live node here, a temp id no upsert introduces —
+  // rather than letting the first of them abort the transaction and take the rest
+  // with it. What fails only at an op's POSITION is left to the loop below.
   //
   // Refs are normalised FIRST, once, feeding both the drop pre-flight and the op
   // loop below. Normalising in only one of them would make an op's survival
@@ -710,7 +715,7 @@ async function applyOps(
       ? await dropUnresolvableOps(tx, patchOps, repositoryId, refs, result.dropped)
       : patchOps;
 
-  for (const [opIndex, op] of ops.entries()) {
+  async function applyOp(op: PlanPatch['ops'][number], opIndex: number): Promise<void> {
     switch (op.op) {
       case 'upsert':
         await applyUpsert(op, opIndex);
@@ -794,6 +799,22 @@ async function applyOps(
         result.unlinked += removed.length;
         break;
       }
+    }
+  }
+
+  // Under `drop` the loop skips what the pre-flight cannot see: a temp id only a
+  // LATER upsert introduces, a node an EARLIER op of this patch deleted. Every op
+  // resolves all its refs before its first write, so a skipped op leaves nothing
+  // half-applied and the transaction still holds whatever did apply.
+  for (const [opIndex, op] of ops.entries()) {
+    try {
+      await applyOp(op, opIndex);
+    } catch (err) {
+      if (opts.onUnresolvableRef === 'drop' && err instanceof UnresolvableRefError) {
+        result.dropped.push(`${op.op} dropped: ${err.message}`);
+        continue;
+      }
+      throw err;
     }
   }
 

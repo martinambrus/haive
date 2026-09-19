@@ -71,6 +71,25 @@ describe('dropUnresolvableOps', () => {
     expect(kept).toHaveLength(1);
   });
 
+  it('drops an update whose own node is gone', async () => {
+    // Its OWN nodeRef, not a parent: the applier refuses to create under a stale
+    // uuid, and that refusal used to cost the whole reply.
+    const { kept, report } = await run([
+      { op: 'upsert', nodeRef: GONE, title: 'X' },
+      { op: 'upsert', nodeRef: 'a', parentRef: LIVE, title: 'A' },
+    ] as PlanPatch['ops']);
+    expect(kept.map((o) => (o as { nodeRef: string }).nodeRef)).toEqual(['a']);
+    expect(report).toEqual([`upsert dropped: unknown node reference '${GONE}'`]);
+  });
+
+  it('keeps an update of a live node', async () => {
+    const { kept, report } = await run([
+      { op: 'upsert', nodeRef: LIVE, title: 'X' },
+    ] as PlanPatch['ops']);
+    expect(kept).toHaveLength(1);
+    expect(report).toEqual([]);
+  });
+
   it('drops an unlink naming a node that is gone', async () => {
     const { kept } = await run([
       { op: 'unlink', fromRef: LIVE, toRef: GONE, kind: 'depends_on' },

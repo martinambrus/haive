@@ -20,7 +20,11 @@ import type { AgentMiningResult, StepContext, StepDefinition } from '../../step-
 import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
-import { APPLY_FAILURE_PREFIX, PLAN_AGENT_TIMEOUT_MS } from './01-plan-build.js';
+import {
+  APPLY_FAILURE_PREFIX,
+  PARTIAL_APPLY_PREFIX,
+  PLAN_AGENT_TIMEOUT_MS,
+} from './01-plan-build.js';
 import { PLAN_PATCH_CONTRACT, applyAgentPatch, parsePlanPatch } from './_plan-prompt.js';
 
 /**
@@ -481,7 +485,8 @@ function keepOrderingOps(ops: unknown[]): { ops: unknown[]; discarded: number } 
   return { ops: kept, discarded };
 }
 
-async function foldSequenceResults(
+/** Exported for the unit test — `apply` is the only caller. */
+export async function foldSequenceResults(
   ctx: StepContext,
   repositoryId: string,
   results: AgentMiningResult[],
@@ -495,12 +500,9 @@ async function foldSequenceResults(
       continue;
     }
     const { ops, discarded } = keepOrderingOps(patch.ops);
+    const remitNote = `${discarded} op(s) outside this step's remit were dropped`;
     if (discarded > 0) {
-      await stampMiningError(
-        ctx,
-        result.agentId,
-        `${APPLY_FAILURE_PREFIX} ${discarded} op(s) outside this step's remit were dropped`,
-      );
+      await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} ${remitNote}`);
     }
     if (ops.length === 0) continue;
     const self = sequenceSelfNodeId(result.agentId);
@@ -516,6 +518,12 @@ async function foldSequenceResults(
         },
       );
       applied += outcome.updated.length;
+      if (outcome.dropped.length > 0) {
+        // The partial prefix 01 and 02 record, so a thinner reply stays visible. It
+        // replaces the remit stamp above on the same row, so that note rides along.
+        const notes = discarded > 0 ? [remitNote, ...outcome.dropped] : outcome.dropped;
+        await stampMiningError(ctx, result.agentId, `${PARTIAL_APPLY_PREFIX} ${notes.join('; ')}`);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       ctx.logger.warn({ err, agentId: result.agentId }, 'plan sequencing patch failed');

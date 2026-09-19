@@ -16,17 +16,26 @@
 > fact that already happened).
 >
 > Three details are load-bearing. The drop is a PRE-FLIGHT, so nothing half-applies and the
-> transaction's all-or-nothing guarantee is untouched. Refs are normalised ONCE, feeding both the
-> pre-flight and the op loop, because a `node:<uuid>` prefix was itself a measured cause — 11 of 13
-> unknown-reference drops carried one. And the drop ITERATES to a fixed point, so a dropped upsert
-> cascades to the ops naming its temp id; one pass would have kept a link and re-broken the patch.
+> transaction's all-or-nothing guarantee is untouched. **As built 2026-09-18 (`76e1d542`):** the
+> op loop now also skips, under `drop`, an op whose ref fails only at its POSITION — a temp id a later
+> upsert introduces, a node an earlier op deleted — which no pre-flight can predict. That keeps the
+> guarantee, because every op resolves all its refs before its first write. Refs are normalised
+> ONCE, feeding both the pre-flight and the op loop, because a `node:<uuid>` prefix was itself a
+> measured cause — 11 of 13 unknown-reference drops carried one. And the drop ITERATES to a fixed
+> point, so a dropped upsert cascades to the ops naming its temp id; one pass would have kept a link
+> and re-broken the patch.
 >
-> **What is NOT measured is whether the 27% loss rate below actually fell.** The figures in
-> `ApplyPlanPatchOptions` are this plan's own PRE-fix measurement plus a counterfactual ("dropping
-> just those links would have landed 191 nodes"), not a post-fix observation; confirming it needs a
-> large plan build on a live install. Coverage exists at both levels meanwhile —
-> `drop-unresolvable.test.ts` pins the helper (the cascade, a temp-ref chain, the `self` alias, the
-> prefixed-ref composition) and `plan-canvas-smoke.ts:307` drives `applyPlanPatch` with the mode.
+> **The 27% loss rate below FELL TO ZERO in the field — measured 2026-09-18 by
+> `plan-patch-drop-measurement`.** Across 393 plan-build expansion agents recorded since this
+> shipped, 0 replies were lost to an unresolvable ref; the drop engaged on 10 of them and on 10
+> coverage repairs, and the 84 agents quoting 1000+ uuids — the scale of the pre-fix build — were all
+> clean. How much of the zero is this plan's and how much is fewer bad refs at the source is not
+> separable: the `self` alias shipped in the same commit, and `b05b7112` later stripped the `node:`
+> prefix. The same measurement found this plan's one residual, an upsert whose OWN `nodeRef` is a
+> dead uuid — four ordering replies lost whole — fixed in `76e1d542`. Coverage exists at both
+> levels — `drop-unresolvable.test.ts` pins the helper (the cascade, a temp-ref chain, the `self`
+> alias, the prefixed-ref composition, an update whose own node is gone) and `plan-canvas-smoke.ts`
+> drives `applyPlanPatch` with the mode at `:307` and in section 8.5.
 >
 > **Corrected 2026-09-18:** an earlier version of this blockquote called the fix a separate
 > `drop-unresolvable.ts` module "at a different layer", and read the throws at `:356`/`:692` as proof
