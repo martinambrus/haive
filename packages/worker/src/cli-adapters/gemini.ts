@@ -7,7 +7,9 @@ import { deliverPrompt } from './prompt-delivery.js';
  *  exits 55 before its first request ("Gemini CLI is not running in a trusted directory"); with it
  *  but no approval flag, non-interactive mode drops every tool that needs one, leaving 8 read-only
  *  tools — no `activate_skill`, `write_file`, `replace` or `run_shell_command`. `--yolo` (the flag
- *  the auth probe already passes) brings all of them back. */
+ *  the auth probe already passes) brings all of them back. Across the builds that can run
+ *  (0.6.0-0.60.0): the trust gate exists from 0.39.1, skills reach the model from 0.26.0, and no
+ *  build measured from 0.18.4 on declares the write tools without `--yolo`. */
 const GEMINI_HEADLESS_ENV: Readonly<Record<string, string>> = {
   GEMINI_CLI_TRUST_WORKSPACE: 'true',
 };

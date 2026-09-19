@@ -41,7 +41,8 @@ const CODEX_MULTI_AGENT_OFF: readonly string[] = ['-c', 'features.multi_agent_v2
  *  `09_5b-skill-repair`, where its file-writing workflow competes with the JSON-only contract.
  *  With this override the catalog holds the repo's skills alone (4,557 -> 2,430 chars) and
  *  `.system` is never installed. A `-c` override like CODEX_MULTI_AGENT_OFF, not a validated
- *  flag; verified on 0.154.0 only. */
+ *  flag: honoured from 0.114.0 (openai/codex#13792), accepted and ignored by older builds, and
+ *  verified on every offered build (0.149.1-0.155.1), exec and app-server alike. */
 const CODEX_BUNDLED_SKILLS_OFF: readonly string[] = ['-c', 'skills.bundled.enabled=false'];
 
 /** `codex app-server` takes the same overrides as `codex exec` (see execBaseArgs). Approvals,

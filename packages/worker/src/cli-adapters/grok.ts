@@ -32,7 +32,8 @@ const GROK_LSP_MARKETPLACE_ID = 'claude-code-lsps';
  *  run is never trusted: MEASURED on 1.0.34, every grok run listed 0 repo skills and no AGENTS.md.
  *  Turning the gate off (worktrees included; a `--trust` grant would persist into the auth volume
  *  and skip a nested checkout) also ungates the repo's Claude-compat hooks, which stay off: Haive
- *  keeps rtk's `.claude/settings.json` hook off grok on purpose (see _rtk-templates.ts). */
+ *  keeps rtk's `.claude/settings.json` hook off grok on purpose (see _rtk-templates.ts). The gate
+ *  exists from 1.0.25; both variables are honoured on every build that can run (0.2.116+). */
 const GROK_PROJECT_CONTEXT_ENV: Readonly<Record<string, string>> = {
   GROK_FOLDER_TRUST: '0',
   GROK_CLAUDE_HOOKS_ENABLED: '0',
@@ -41,7 +42,8 @@ const GROK_PROJECT_CONTEXT_ENV: Readonly<Record<string, string>> = {
 /** grok lists its own 23 bundled skills (9,008 chars, one of them steering apps toward xAI) beside
  *  the repo's. `[skills] ignore` hides them; it lives in grok's MANAGED config layer, read from
  *  outside the auth volume, so Haive never merges into the `config.toml` grok writes itself.
- *  MEASURED: skills block 11,417 -> 2,388 chars, repo skills intact. */
+ *  MEASURED: skills block 11,417 -> 2,388 chars, repo skills intact, and honoured on every build
+ *  from 0.2.116 to 1.0.38. */
 const GROK_MANAGED_CONFIG = {
   containerPath: '/etc/grok/managed_config.toml',
   content: `[skills]\nignore = ["${SANDBOX_USER_HOME}/.grok/bundled/skills"]\n`,
