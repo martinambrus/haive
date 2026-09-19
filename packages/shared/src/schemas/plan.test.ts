@@ -168,14 +168,11 @@ describe('planPatchSchema', () => {
         { op: 'upsert', nodeRef: 'b', parentRef: null, title: 'explicit root' },
       ],
     });
-    const [absent, explicit] = parsed.ops as [
-      { parentRef?: string | null },
-      { parentRef?: string | null },
-    ];
+    const [absent, explicit] = parsed.ops;
     // "leave the parent alone" vs "this is the root" must not collapse into one
     // value — the applier branches on exactly this difference.
-    expect('parentRef' in absent).toBe(false);
-    expect(explicit.parentRef).toBeNull();
+    expect(absent && 'parentRef' in absent).toBe(false);
+    expect(explicit?.op === 'upsert' && explicit.parentRef).toBeNull();
   });
 
   it('rejects an unknown op rather than silently dropping it', () => {

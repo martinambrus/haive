@@ -78,8 +78,8 @@ describe('details on optionSchema (per-option diffs)', () => {
         },
       ],
     });
-    expect(field.options[0].details?.baseline).toBeNull();
-    expect(field.options[0].details?.current).toBe('body');
+    expect(field.options[0]?.details?.baseline).toBeNull();
+    expect(field.options[0]?.details?.current).toBe('body');
   });
 });
 

@@ -12,18 +12,22 @@ function fakeConn(opts: { vectorThrows?: boolean } = {}): {
   queries: () => string;
 } {
   const captured: string[] = [];
-  const pg = ((strings: TemplateStringsArray) => {
+  const tag = (strings: TemplateStringsArray) => {
     const q = strings.join('');
     captured.push(q);
     if (opts.vectorThrows && q.includes('CREATE EXTENSION')) {
       return Promise.reject(new Error('pgvector unavailable'));
     }
     return Promise.resolve([]);
-  }) as unknown as GlobalKbConnection['pg'] & { unsafe: (q: string) => Promise<unknown[]> };
-  pg.unsafe = (q: string) => {
-    captured.push(q);
-    return Promise.resolve([]);
   };
+  // A stand-in for the postgres.js tag: complete before the cast, so the cast is the
+  // only place the fake is told it is the real thing.
+  const pg = Object.assign(tag, {
+    unsafe: (q: string) => {
+      captured.push(q);
+      return Promise.resolve([]);
+    },
+  }) as unknown as GlobalKbConnection['pg'];
   const conn = {
     mode: 'internal',
     pg,
