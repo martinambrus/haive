@@ -1,6 +1,6 @@
 # Close the gaps PR #171 found and left alone
 
-> **PART A DONE 2026-09-19; PART B NOT STARTED.** Part A shipped as one commit per gap: `066c42f7`
+> **DONE 2026-09-19, both parts.** Part A shipped as one commit per gap (PR #172): `066c42f7`
 > (03's ref that names no node, and its truthful stamp), `744ce132` (11f/01f report what did not
 > land), `24d5245d` (the chat header counts what landed) and `14928457` (Postgres notices to the
 > logger). It followed this plan without a departure. Verified: `plan-canvas-smoke` 110/110; worker
@@ -8,8 +8,21 @@
 > plan changes applied", a version-conflict turn "0 of 2", and an old-shape turn still "3 plan
 > changes"; worker boot logs went from 21 raw notices per boot (126 over 6 boots) to 0.
 >
-> Part B — enforced type-checking of test files, 315 errors in 79 files — is the next PR. The two
-> guard losses are recorded in `plan-patch-guard-losses`.
+> Part B made test files type-checked and enforced. All 315 errors in 79 files were fixed first,
+> per package (`5c9d94b2` shared, `ff4e102c` api, `a7054af3` worker src, `025e2d4f` worker test/),
+> and `9c1e70ac` then pointed every server package's `typecheck` at a `tsconfig.typecheck.json`.
+> VERIFIED: a planted test error now fails it. **As built**, three findings were more than
+> fixture drift:
+>
+> - `findStructuralGaps` declared rows without the `createdAt` its callee reads (`3df566b0`).
+> - `sub-agent-smoke.ts` read a variable renamed away long ago. That was a ReferenceError that
+>   only stayed hidden because `smoke:ci` skips it (`ca3e2836`).
+> - One tooling-form test had become an input-for-input duplicate once detect stopped reporting
+>   the framework, so it was removed.
+>
+> The typecheck config also turns `incremental` off: every package shares `dist/.tsbuildinfo`
+> with its build, and a typecheck of a different file set must not write the build's state. The
+> two guard losses are recorded in `plan-patch-guard-losses`.
 
 ## Context
 
