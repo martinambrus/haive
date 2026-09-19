@@ -1,3 +1,5 @@
+import { unquoteYamlScalar } from '../../step-engine/steps/_yaml-scalar.js';
+
 /** Lightweight YAML frontmatter splitter — handles only the subset Haive's
  *  generators emit (no anchors, no nested objects beyond `kb-references`,
  *  no quotes-aware multi-line strings). Returns the frontmatter as a flat
@@ -30,7 +32,7 @@ export function splitFrontmatter(raw: string): {
       const key = line.slice(0, colonIdx).trim();
       const value = line.slice(colonIdx + 1).trim();
       currentKey = key;
-      frontmatter[key] = value;
+      frontmatter[key] = unquoteYamlScalar(value);
     } else if (currentKey) {
       // nested key under the previous top-level key — Haive only uses this
       // shape for `kb-references:`, so fold the nested key into a dotted form.
@@ -38,7 +40,7 @@ export function splitFrontmatter(raw: string): {
       if (colonIdx < 0) continue;
       const nestedKey = line.slice(0, colonIdx).trim();
       const nestedValue = line.slice(colonIdx + 1).trim();
-      frontmatter[`${currentKey}.${nestedKey}`] = nestedValue;
+      frontmatter[`${currentKey}.${nestedKey}`] = unquoteYamlScalar(nestedValue);
     }
   }
   return { frontmatter, body };

@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 import {
   type AgentSpec,
+  BASELINE_AGENT_SPECS,
   buildAgentFileForTarget,
   buildAgentFileMarkdown,
   buildAgentFileMarkdownGemini,
+  FRAMEWORK_AGENT_SPECS,
   shouldEmitAgentsReadme,
 } from '../src/step-engine/steps/onboarding/_agent-templates.js';
 
@@ -81,6 +84,43 @@ describe('buildAgentFileMarkdown frontmatter', () => {
   it('merges rag_search with agent-specific mcp tools', () => {
     const md = buildAgentFileMarkdown({ ...baseSpec, mcpTools: ['chrome-devtools'] });
     expect(md).toContain('mcp-tools: [rag_search, chrome-devtools]');
+  });
+});
+
+describe('agent frontmatter is YAML every CLI can read', () => {
+  const MARKDOWN_DIRS = ['.claude/agents', '.gemini/agents', '.grok/agents', '.agents/agents'];
+
+  function frontmatterOf(md: string): Record<string, unknown> {
+    const block = md.match(/^---\n([\s\S]*?)\n---\n/)?.[1];
+    expect(block).toBeDefined();
+    // YAML 1.1 is the stricter reading: it also resolves yes/no/on/off and timestamps.
+    return parse(block!, { version: '1.1' }) as Record<string, unknown>;
+  }
+
+  it('parses to the exact name and description for every shipped agent in every markdown dir', () => {
+    const specs = [...BASELINE_AGENT_SPECS, ...Object.values(FRAMEWORK_AGENT_SPECS).flat()];
+    for (const spec of specs) {
+      for (const dir of MARKDOWN_DIRS) {
+        const fm = frontmatterOf(buildAgentFileForTarget(spec, { dir, format: 'markdown' }));
+        expect({ id: spec.id, dir, name: fm.name, description: fm.description }).toEqual({
+          id: spec.id,
+          dir,
+          name: spec.id,
+          description: spec.description,
+        });
+      }
+    }
+  });
+
+  it('quotes a description a plain scalar would split at its colon', () => {
+    const description = 'Reviews a change for performance: N+1 queries, missing indexes.';
+    const spec = { ...baseSpec, description, field: 'perf: hot paths' };
+    expect(buildAgentFileMarkdownGemini(spec)).toContain(
+      `description: ${JSON.stringify(description)}\n`,
+    );
+    const fm = frontmatterOf(buildAgentFileMarkdown(spec));
+    expect(fm.description).toBe(description);
+    expect(fm.field).toBe('perf: hot paths');
   });
 });
 

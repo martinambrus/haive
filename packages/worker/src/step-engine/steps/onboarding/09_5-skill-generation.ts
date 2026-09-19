@@ -8,6 +8,7 @@ import { skillEntrySchema } from '@haive/shared';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
+import { yamlScalar } from '../_yaml-scalar.js';
 import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
@@ -601,14 +602,20 @@ function renderRelatedSkills(items: SkillRelated[]): string[] {
 
 function yamlDescription(desc: string): string {
   const clean = desc.trim();
-  if (clean.length <= 120 && !clean.includes('\n')) return `description: ${clean}`;
+  if (clean.length <= 120 && !clean.includes('\n')) return `description: ${yamlScalar(clean)}`;
   const wrapped = clean.replace(/\s+/g, ' ').match(/.{1,78}(?:\s|$)/g) ?? [clean];
   return ['description: >', ...wrapped.map((line) => `  ${line.trim()}`)].join('\n');
 }
 
 export function skillToMarkdown(entry: SkillEntry): string {
   const subs = sanitizeSubSkills(entry);
-  const fm = ['---', `name: ${entry.id}`, yamlDescription(entry.description), '---', ''].join('\n');
+  const fm = [
+    '---',
+    `name: ${yamlScalar(entry.id)}`,
+    yamlDescription(entry.description),
+    '---',
+    '',
+  ].join('\n');
   const body: string[] = [`# ${entry.title}`, ''];
 
   if (entry.quickStart && entry.quickStart.trim().length > 0) {
@@ -684,7 +691,13 @@ export function skillToMarkdown(entry: SkillEntry): string {
 }
 
 export function subSkillToMarkdown(parentId: string, sub: SkillSubSkill): string {
-  const fm = ['---', `name: ${sub.name}`, yamlDescription(sub.description), '---', ''].join('\n');
+  const fm = [
+    '---',
+    `name: ${yamlScalar(sub.name)}`,
+    yamlDescription(sub.description),
+    '---',
+    '',
+  ].join('\n');
   const ident: string[] = ['## Identification', ''];
   if (sub.identification) {
     for (const row of sub.identification) {
