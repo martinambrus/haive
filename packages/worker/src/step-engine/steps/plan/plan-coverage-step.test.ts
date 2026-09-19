@@ -303,6 +303,24 @@ describe('bounded coverage recovery', () => {
     ]);
   });
 
+  it('counts a node:-prefixed parent against the children it already has', () => {
+    // The applier strips the prefix later, so the guard used to see a parent of
+    // its own with nothing under it.
+    const ops = [create('tmp-a', `node:${TARGET}`), create('tmp-b', `node:${TARGET}`)];
+    expect(
+      findPatchBreadthViolations(ops, 12, { existingChildren: new Map([[TARGET, 11]]) }),
+    ).toEqual([{ parentRef: TARGET, existingChildren: 11, newChildren: 2, totalChildren: 13 }]);
+  });
+
+  it('does not count an existing node as a new child because it carries the prefix', () => {
+    // A uuid names a node that already exists, so it takes no new slot — and
+    // neither does the same uuid quoted as `node:<uuid>`.
+    const EXISTING = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const ops = Array.from({ length: 12 }, (_, index) => create(`tmp-${index}`, 'self'));
+    ops.push(create(`node:${EXISTING}`, 'self'));
+    expect(findPatchBreadthViolations(ops, 12, { selfNodeId: TARGET })).toEqual([]);
+  });
+
   it('allows a wide subject when the patch groups it into bounded parents', () => {
     const groups = [create('tmp-group-a', 'self'), create('tmp-group-b', 'self')];
     const leaves = Array.from({ length: 12 }, (_, index) =>
