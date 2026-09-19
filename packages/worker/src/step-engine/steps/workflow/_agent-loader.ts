@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
+import { unquoteYamlScalar } from '../_yaml-scalar.js';
 
 export interface AgentPersona {
   id: string;
@@ -68,7 +69,7 @@ function parseAgentFile(raw: string): ParsedAgentFile | null {
     const key = line.slice(0, colon).trim();
     const value = line.slice(colon + 1).trim();
     if (!key) continue;
-    frontmatter[key] = stripQuotes(value);
+    frontmatter[key] = unquoteYamlScalar(value);
   }
   return { frontmatter, body };
 }
@@ -91,17 +92,6 @@ function parseToolList(v: string | undefined): string[] {
   const inner = trimmed.startsWith('[') && trimmed.endsWith(']') ? trimmed.slice(1, -1) : trimmed;
   return inner
     .split(',')
-    .map((s) => stripQuotes(s.trim()))
+    .map((s) => unquoteYamlScalar(s.trim()))
     .filter((s) => s.length > 0);
-}
-
-function stripQuotes(s: string): string {
-  if (s.length >= 2) {
-    const first = s.charAt(0);
-    const last = s.charAt(s.length - 1);
-    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
-      return s.slice(1, -1);
-    }
-  }
-  return s;
 }

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
+import { buildAgentFileMarkdown } from '../onboarding/_agent-templates.js';
 import { loadAgentPersonas } from './_agent-loader.js';
 
 function persona(name: string): string {
@@ -49,6 +50,33 @@ describe('loadAgentPersonas', () => {
 
     expect(personas.map((p) => p.id)).toEqual(['peer-reviewer']);
     expect(personas[0]?.body).toContain('Body.');
+  });
+
+  it('reads back the description the agent renderer quoted', async () => {
+    const description = 'Owns the "Excel export" button: grids, sorting and state.';
+    await mkdir(path.join(repo, '.claude', 'agents'), { recursive: true });
+    await writeFile(
+      path.join(repo, '.claude', 'agents', 'grid-specialist.md'),
+      buildAgentFileMarkdown({
+        id: 'grid-specialist',
+        title: 'Grid Specialist',
+        description,
+        color: 'orange',
+        field: 'frontend',
+        tools: ['Read'],
+        coreMission: 'Own the grids.',
+        responsibilities: [],
+        whenInvoked: [],
+        executionSteps: [],
+        outputFormat: '',
+        qualityCriteria: [],
+        antiPatterns: [],
+      }),
+    );
+
+    const personas = await loadAgentPersonas(repo);
+
+    expect(personas.map((p) => p.description)).toEqual([description]);
   });
 
   it('reads nothing through an agents directory that links out of the repository', async () => {

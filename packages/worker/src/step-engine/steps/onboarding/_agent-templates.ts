@@ -3,6 +3,7 @@ import type { AgentColor, AgentExpertise, AgentKbRefs, AgentModel, AgentSpec } f
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { SCOPE_FENCE_INSIGHTS, SCOPE_FENCE_IN_SCOPE_FLAG } from '../_scope-fence.js';
 import { retrievalGuidanceLinesFor } from '../_retrieval-guidance.js';
+import { yamlScalar } from '../_yaml-scalar.js';
 
 // Re-export the canonical types so existing worker imports keep working without
 // touching every call site. Source of truth lives in @haive/shared.
@@ -90,9 +91,9 @@ function firstCharLower(s: string): string {
 
 function yamlKbRefs(refs: AgentKbRefs): string[] {
   const out: string[] = ['kb-references:'];
-  if (refs.patterns) out.push(`  patterns: ${refs.patterns}`);
-  if (refs.standards) out.push(`  standards: ${refs.standards}`);
-  if (refs.reference) out.push(`  reference: ${refs.reference}`);
+  if (refs.patterns) out.push(`  patterns: ${yamlScalar(refs.patterns)}`);
+  if (refs.standards) out.push(`  standards: ${yamlScalar(refs.standards)}`);
+  if (refs.reference) out.push(`  reference: ${yamlScalar(refs.reference)}`);
   return out.length === 1 ? [] : out;
 }
 
@@ -145,11 +146,11 @@ export function buildAgentFileMarkdown(
 ): string {
   const frontmatter = [
     '---',
-    `name: ${spec.id}`,
-    `description: ${spec.description}`,
+    `name: ${yamlScalar(spec.id)}`,
+    `description: ${yamlScalar(spec.description)}`,
     `model: ${spec.model ?? 'opus'}`,
     `color: ${spec.color}`,
-    `field: ${spec.field}`,
+    `field: ${yamlScalar(spec.field)}`,
     `expertise: ${spec.expertise ?? 'expert'}`,
     `allowed-tools: [${spec.tools.join(', ')}]`,
     // Every agent gets `rag_search` so the Retrieval Protocol's discovery step
@@ -177,8 +178,8 @@ export function buildAgentFileMarkdownGemini(
 ): string {
   const frontmatter = [
     '---',
-    `name: ${spec.id}`,
-    `description: ${spec.description}`,
+    `name: ${yamlScalar(spec.id)}`,
+    `description: ${yamlScalar(spec.description)}`,
     '---',
     '',
   ].join('\n');

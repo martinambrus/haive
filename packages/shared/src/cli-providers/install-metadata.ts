@@ -34,7 +34,6 @@ export interface CliInstallMetadata {
   versionSource: VersionSource;
   autoUpdateDisable: AutoUpdateDisableKnob[];
   versionPinnable: boolean;
-  minWorkingLoginVersion?: string;
   /** Oldest build that can run Haive's command line at all. The API neither offers nor saves an
    *  older one (isRunnableCliVersion): a pin below it fails every run. */
   minRunnableVersion?: string;
@@ -80,10 +79,6 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
       },
     ],
     versionPinnable: true,
-    // In-app OAuth login needs NO_BROWSER=true to print the auth URL to
-    // stdout. Versions 0.18.0..0.18.3 suppress it (google-gemini/gemini-cli#13853).
-    // Fixed in 0.18.4.
-    minWorkingLoginVersion: '0.18.4',
     // `--output-format json` shipped in v0.6.0. MEASURED with Haive's argv: 0.1.22 and 0.5.5 exit 1
     // on "Unknown arguments: output-format", while 0.6.0 through 0.60.0 reach the model.
     minRunnableVersion: '0.6.0',

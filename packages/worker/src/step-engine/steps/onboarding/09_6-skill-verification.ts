@@ -6,6 +6,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
+import { unquoteYamlScalar } from '../_yaml-scalar.js';
 import { resolveSkillTargetDirs } from './_helpers.js';
 
 /** Fallback skills dir when no enabled CLI declares one — passed explicitly to
@@ -124,10 +125,10 @@ export function parseSkillMarkdown(text: string): ParsedSkill {
   if (fm && fm[1]) {
     const fmBody = fm[1];
     const nameMatch = fmBody.match(/^name:\s*(.+)$/m);
-    if (nameMatch && nameMatch[1]) name = nameMatch[1].trim();
+    if (nameMatch && nameMatch[1]) name = unquoteYamlScalar(nameMatch[1].trim());
     const inlineDesc = fmBody.match(/^description:\s*(\S.*)$/m);
     if (inlineDesc && inlineDesc[1]) {
-      description = inlineDesc[1].trim();
+      description = unquoteYamlScalar(inlineDesc[1].trim());
     } else {
       const folded = fmBody.match(FOLDED_DESC_RE);
       if (folded && folded[1]) {

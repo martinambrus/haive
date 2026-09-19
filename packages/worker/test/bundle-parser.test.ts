@@ -103,6 +103,45 @@ describe('decoders', () => {
     expect(parsed.title).toBe('Code Reviewer');
   });
 
+  it('decodes quoted frontmatter values instead of keeping the quotes', () => {
+    const md = [
+      '---',
+      'name: "code-reviewer"',
+      'description: "Reviews diffs: logic, \\"style\\" and tests."',
+      "field: 'it''s quality'",
+      "model: 'opus'",
+      '---',
+      '',
+      '# Code Reviewer',
+      '',
+    ].join('\n');
+    const parsed = agentSpecSchema.parse(decodeClaudeAgent(md, '.claude/agents/x.md'));
+    expect(parsed.id).toBe('code-reviewer');
+    expect(parsed.description).toBe('Reviews diffs: logic, "style" and tests.');
+    expect(parsed.field).toBe("it's quality");
+    expect(parsed.model).toBe('opus');
+  });
+
+  it('decodes what the agent renderer quoted back to the same spec', () => {
+    const spec: AgentSpec = {
+      id: 'grid-specialist',
+      title: 'Grid Specialist',
+      description: 'Owns DataTables grids: column types, sorting and state.',
+      color: 'orange',
+      field: 'frontend',
+      tools: ['Read'],
+      coreMission: 'Own the grids.',
+      responsibilities: [],
+      whenInvoked: [],
+      executionSteps: [],
+      outputFormat: '',
+      qualityCriteria: [],
+      antiPatterns: [],
+    };
+    const decoded = decodeClaudeAgent(buildAgentFileMarkdown(spec), '.claude/agents/x.md');
+    expect(decoded.description).toBe(spec.description);
+  });
+
   // A `#` inside a fence is a SHELL COMMENT, not a heading. MEASURED on an imported Drupal
   // reviewer agent whose body opens a ```bash block with `# These MUST pass before
   // committing`: that became its title, so agent discovery judged a code reviewer presented

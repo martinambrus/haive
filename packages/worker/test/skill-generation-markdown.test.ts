@@ -5,6 +5,7 @@ import {
   skillToMarkdown,
   type SkillEntry,
 } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
+import { parseSkillMarkdown } from '../src/step-engine/steps/onboarding/09_6-skill-verification.js';
 
 describe('skillToMarkdown', () => {
   it('writes frontmatter and a minimal overview when only required fields present', () => {
@@ -24,6 +25,19 @@ describe('skillToMarkdown', () => {
     expect(md).not.toContain('## Quick Start');
     expect(md).not.toContain('## Key Concepts');
     expect(md).not.toContain('## Decision Tree');
+  });
+
+  it('quotes a short description a plain YAML scalar would split at its colon', () => {
+    const entry: SkillEntry = {
+      id: 'grids',
+      title: 'Grids',
+      description: 'DataTables grids: column types and sorting.',
+    };
+    expect(skillToMarkdown(entry)).toMatch(
+      /^---\nname: grids\ndescription: "DataTables grids: column types and sorting\."\n---/,
+    );
+    // The reader that verifies skills gets the text back, not the quotes.
+    expect(parseSkillMarkdown(skillToMarkdown(entry)).description).toBe(entry.description);
   });
 
   it('falls back to description text when overview missing', () => {
