@@ -1,0 +1,73 @@
+import { describe, expect, it } from 'vitest';
+import { ClaudeCodeAdapter } from '../src/cli-adapters/claude-code.js';
+import { ZaiAdapter } from '../src/cli-adapters/zai.js';
+import { OllamaAdapter } from '../src/cli-adapters/ollama.js';
+import { MuseAdapter } from '../src/cli-adapters/muse.js';
+import { OpenRouterAdapter } from '../src/cli-adapters/openrouter.js';
+import { CodexAdapter } from '../src/cli-adapters/codex.js';
+import { GeminiAdapter } from '../src/cli-adapters/gemini.js';
+import { GrokAdapter } from '../src/cli-adapters/grok.js';
+import { AmpAdapter } from '../src/cli-adapters/amp.js';
+import { AntigravityAdapter } from '../src/cli-adapters/antigravity.js';
+import type { BaseCliAdapter } from '../src/cli-adapters/base-adapter.js';
+import type { CliProviderRecord } from '../src/cli-adapters/types.js';
+
+// Each CLI's model should see the repository's skills, described, and none of the vendor's own
+// skills competing with them. What each CLI needed was MEASURED on the wire (AGENTS.md, "Skills
+// per CLI"), so every adapter is listed here, including the ones that need nothing: a CLI whose
+// row is missing is how a capability set goes stale without a test noticing.
+
+const provider = (over: Partial<CliProviderRecord> = {}): CliProviderRecord =>
+  ({
+    wrapperPath: null,
+    executablePath: null,
+    cliArgs: [],
+    envVars: {},
+    effortLevel: null,
+    model: null,
+    disableThinking: false,
+    ...over,
+  }) as unknown as CliProviderRecord;
+
+// ollama refuses to build without a model; the others do not need one.
+const claudeFamily: Array<[string, BaseCliAdapter, Partial<CliProviderRecord>]> = [
+  ['claude-code', new ClaudeCodeAdapter(), {}],
+  ['zai', new ZaiAdapter(), {}],
+  ['ollama', new OllamaAdapter(), { model: 'llama3' }],
+  ['muse', new MuseAdapter(), {}],
+  ['openrouter', new OpenRouterAdapter(), {}],
+];
+const others: Array<[string, BaseCliAdapter]> = [
+  ['codex', new CodexAdapter()],
+  ['gemini', new GeminiAdapter()],
+  ['grok', new GrokAdapter()],
+  ['amp', new AmpAdapter()],
+  ['antigravity', new AntigravityAdapter()],
+];
+
+describe('claude family: bundled skills off', () => {
+  // The binary charges its own bundled skills first against an 8,000-char listing budget, so
+  // most repo skills reached the model as a bare name (1 of 18 described, MEASURED on 2.1.270).
+  for (const [name, adapter, over] of claudeFamily) {
+    it(`${name} disables the bundled skills`, () => {
+      const spec = adapter.buildCliInvocation(provider(over), 'do x', {});
+      expect(spec.env.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBe('1');
+    });
+
+    it(`${name} lets a provider env var turn them back on`, () => {
+      const spec = adapter.buildCliInvocation(
+        provider({ ...over, envVars: { CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: '0' } }),
+        'do x',
+        {},
+      );
+      expect(spec.env.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBe('0');
+    });
+  }
+
+  for (const [name, adapter] of others) {
+    it(`${name} does not carry the claude switch`, () => {
+      const spec = adapter.buildCliInvocation(provider(), 'do x', {});
+      expect(spec.env.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBeUndefined();
+    });
+  }
+});

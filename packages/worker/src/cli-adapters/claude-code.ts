@@ -1,6 +1,6 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
-import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
+import { CLAUDE_FAMILY_SKILLS_ENV, claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
@@ -78,6 +78,7 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
         // switched to a 64K model (Sonnet 4.6 / Haiku 4.5) every request would 400;
         // drop it to 64000 via the provider's envVars then (it wins because
         // mergedEnv spreads last).
+        ...CLAUDE_FAMILY_SKILLS_ENV,
         ...claudeFamilyOutputTokenEnv(provider),
         ...this.mergedEnv(provider, opts),
       },

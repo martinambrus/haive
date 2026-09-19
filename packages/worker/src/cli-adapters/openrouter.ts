@@ -1,6 +1,6 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
-import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
+import { CLAUDE_FAMILY_SKILLS_ENV, claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import { resolveOpenRouterBaseUrl } from './openrouter-proxy.js';
 import type {
   CliCommandSpec,
@@ -90,7 +90,11 @@ export class OpenRouterAdapter extends BaseCliAdapter {
     // No declared output-token ceiling: the claude binary's own 32000 default applies
     // until an overflow teaches us the model can do more (model-capabilities.ts). The
     // provider's envVars still win — mergedEnv spreads last.
-    const env = { ...claudeFamilyOutputTokenEnv(provider), ...this.mergedEnv(provider, opts) };
+    const env = {
+      ...CLAUDE_FAMILY_SKILLS_ENV,
+      ...claudeFamilyOutputTokenEnv(provider),
+      ...this.mergedEnv(provider, opts),
+    };
     env.ANTHROPIC_BASE_URL = resolveOpenRouterBaseUrl(env);
     const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;
     if (token) {

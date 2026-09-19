@@ -106,3 +106,18 @@ export function claudeFamilyArgs(opts: {
     stdinPrompt: delivery.stdinPrompt,
   };
 }
+
+/** Env every claude-family run carries. Spread BEFORE the provider's own envVars, so a provider
+ *  can set `CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=0` to undo it.
+ *
+ *  The binary lists skills to the model under a character budget of context window x 4 x 1%
+ *  (8,000 chars on a 200K model) and charges its OWN bundled skills first: they always keep
+ *  their full descriptions, while project skills share what is left and the rest arrive as a
+ *  bare name. MEASURED on 2.1.270 with Haive's argv: 1 of 18 repo skills kept its description
+ *  (the largest set a real workflow run loaded) and 3 of 9 on another repo; with bundled skills
+ *  off, 18 of 18 and 9 of 9. The bundled set (dataviz, loop, update-config, claude-api, …) is
+ *  dead weight in a headless sandbox, and the switch leaves `.claude/skills`, `.claude/commands`
+ *  and plugins alone. The budget logic is version-bound: re-measure after a CLI bump. */
+export const CLAUDE_FAMILY_SKILLS_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: '1',
+};
