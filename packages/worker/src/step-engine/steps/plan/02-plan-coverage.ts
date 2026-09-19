@@ -521,6 +521,37 @@ function coverageSelfNodeId(agentId: string): string | null {
   return recovery ?? CONTINUATION_AGENT_RE.exec(agentId)?.[2] ?? null;
 }
 
+/**
+ * What a structural repair is told about the node it repairs, from the node's
+ * LIVE child count. The prompt used to say "it currently has no children" to
+ * every repair, which is false for a thinned decomposition: MEASURED, all 9
+ * repairs refused over the breadth cap were of nodes with 7-19 children, and 5
+ * of them re-added exactly as many as were already there — the same subtree
+ * again, which the cap was all that kept out of the plan.
+ */
+function structuralRepairInstruction(existingChildren: number, maxChildren: number): string {
+  if (existingChildren === 0) {
+    return [
+      'Its decomposition was attempted and lost, so it currently has no children.',
+      'Rebuild the missing subtree: add the children that the failed terminal should',
+      'have produced, plus any necessary descendants, until its leaves are taskable',
+      'at the same granularity as the rest of the plan.',
+    ].join(' ');
+  }
+  const room = maxChildren - existingChildren;
+  return [
+    `It already has ${existingChildren} direct child(ren), listed as "Existing child" below,`,
+    'and part of its decomposition was lost. Add ONLY what is missing, and never re-create',
+    'an existing child under the same or another name.',
+    room > 0
+      ? `At most ${room} more direct child(ren) fit under it (the limit is ${maxChildren});` +
+        ' anything beyond that belongs under the existing child it is part of.'
+      : `It is already at or over the limit of ${maxChildren} direct children, so add` +
+        ' nothing directly under it: put each missing part under the existing child it' +
+        ' belongs to, or reply with an empty ops list if nothing is missing.',
+  ].join(' ');
+}
+
 async function stampMiningError(ctx: StepContext, agentId: string, errorMessage: string) {
   await ctx.db
     .update(schema.taskStepAgentMinings)
@@ -946,9 +977,21 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       const note =
         typeof values.note === 'string' && values.note.trim() ? values.note.trim() : null;
       const maxChildren = breadthCap(d.buildFormValues);
+      // A structural repair is shown its node's neighbourhood — existing children
+      // with exact refs — rather than the head of the plan listing, which showed
+      // the node itself to only 1 of the 9 repairs refused over the breadth cap.
+      const nodes = picked.some((key) => d.structural.some((gap) => structuralKey(gap) === key))
+        ? await loadPlanSkeletons(ctx.db, d.repositoryId)
+        : [];
       const dispatches = picked.map((key) => {
         const structural = d.structural.find((gap) => structuralKey(gap) === key);
         const section = d.sections.find((candidate) => sectionKey(candidate) === key);
+        // Missing when the node was deleted since detect; that repair keeps the
+        // listing it always had.
+        const focus = structural ? nodes.find((node) => node.id === structural.nodeId) : undefined;
+        const existingChildren = focus
+          ? nodes.filter((node) => node.parentId === focus.id).length
+          : 0;
         const subject = structural
           ? `the plan node "${structural.title}" (${structural.reason})`
           : `the source document section "${section?.title ?? key}"`;
@@ -963,13 +1006,9 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
             `You are completing a project plan that is missing work under ${subject}.`,
             '',
             structural
-              ? [
-                  'Its decomposition was attempted and lost, so it currently has no children.',
-                  'Rebuild the missing subtree: add the children that the failed terminal should',
-                  'have produced, plus any necessary descendants, until its leaves are taskable',
-                  'at the same granularity as the rest of the plan.',
-                ].join(' ')
+              ? structuralRepairInstruction(existingChildren, maxChildren)
               : 'No node in the plan covers this section. Add what it describes, under whichever existing node fits best.',
+            structural?.detail ? `What the previous attempt lost: ${structural.detail}` : '',
             '',
             section
               ? `The section reads:\n\n${(d.sectionBodies[key] ?? '').slice(0, 20_000)}\n`
@@ -977,9 +1016,9 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
             note ? `The user adds: ${note}\n` : '',
             `Hard breadth limit: no parent touched by this patch may have more than ${maxChildren} direct children in total. If a subject needs more parts, group them under meaningful intermediate nodes, with at most ${maxChildren} children under each group.`,
             '',
-            'The plan as it stands (titles only):',
-            '',
-            d.planMarkdown.slice(0, 60_000),
+            ...(focus
+              ? [buildPlanExpansionContext(nodes, focus)]
+              : ['The plan as it stands (titles only):', '', d.planMarkdown.slice(0, 60_000)]),
             '',
             'Add ONLY what is missing. Do not restate nodes that already exist, and do not',
             'duplicate a sibling under a different name — the reader is looking at this plan',
