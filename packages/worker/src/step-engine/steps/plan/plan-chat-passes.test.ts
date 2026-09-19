@@ -132,7 +132,10 @@ describe('plan chat reply', () => {
         detected: detected({ pendingQuestion: 'Add a retry queue' }),
         formValues: {},
         llmOutput: {
-          ops: [{ op: 'upsert', nodeRef: 'q', parentRef: 'n1', title: 'Retry queue' }],
+          ops: [
+            { op: 'upsert', nodeRef: 'q', parentRef: 'n1', title: 'Retry queue' },
+            { op: 'link', fromRef: 'q', toRef: 'gone', kind: 'depends_on' },
+          ],
           reply: 'Added it.',
         },
       } as never,
@@ -155,6 +158,8 @@ describe('plan chat reply', () => {
     const { db, turns } = fakeDb();
     await answer(db);
     expect(turns[0]?.body).toBe(`Added it.\n\n_1 change(s) not applied: ${gone}_`);
+    // The header reads this: 1 of the 2 ops sent landed.
+    expect(turns[0]?.patchJson).toMatchObject({ outcome: { applied: 1 } });
   });
 
   it('leaves a reply whose patch landed whole as the agent wrote it', async () => {
@@ -162,5 +167,18 @@ describe('plan chat reply', () => {
     const { db, turns } = fakeDb();
     await answer(db);
     expect(turns[0]?.body).toBe('Added it.');
+    expect(turns[0]?.patchJson).toMatchObject({ outcome: { applied: 2 } });
+  });
+
+  it('records a patch the applier refused as having landed nothing', async () => {
+    // The whole patch rolled back, so a header counting the ops SENT claimed two
+    // changes on a turn that made none.
+    vi.mocked(applyAgentPatch).mockRejectedValueOnce(
+      new Error('plan node n1 was modified by someone else'),
+    );
+    const { db, turns } = fakeDb();
+    await answer(db);
+    expect(turns[0]?.body).toBe('Added it.\n\n_plan node n1 was modified by someone else_');
+    expect(turns[0]?.patchJson).toMatchObject({ outcome: { applied: 0 } });
   });
 });

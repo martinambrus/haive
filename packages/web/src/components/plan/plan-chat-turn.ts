@@ -18,6 +18,35 @@ export function opCount(patch: unknown): number | null {
   return Array.isArray(ops) ? ops.length : null;
 }
 
+/** How many of a turn's operations LANDED, or null when the record does not say —
+ *  every turn written before the worker recorded it, and any shape nobody
+ *  recognises. Kept apart from `opCount`, which stays the count SENT: an op the
+ *  applier dropped was still sent, and the difference is what the badge reports. */
+export function appliedCount(patch: unknown): number | null {
+  if (!patch || typeof patch !== 'object') return null;
+  const outcome = (patch as { outcome?: unknown }).outcome;
+  if (!outcome || typeof outcome !== 'object') return null;
+  const applied = (outcome as { applied?: unknown }).applied;
+  return Number.isInteger(applied) && (applied as number) >= 0 ? (applied as number) : null;
+}
+
+/** The badge beside an assistant turn, or null for a prose reply with no patch.
+ *  `partial` only when the record says fewer ops landed than were sent; a turn with
+ *  no record reads as it always did, because guessing it landed whole is what it
+ *  claimed before and guessing otherwise would be new, unfounded alarm. */
+export function changeBadge(
+  patch: unknown,
+): { text: string; tone: 'unchanged' | 'changed' | 'partial' } | null {
+  const sent = opCount(patch);
+  if (sent === null) return null;
+  if (sent === 0) return { text: 'plan unchanged', tone: 'unchanged' };
+  const landed = appliedCount(patch);
+  if (landed !== null && landed < sent) {
+    return { text: `${landed} of ${sent} plan changes applied`, tone: 'partial' };
+  }
+  return { text: `${sent} plan change${sent === 1 ? '' : 's'}`, tone: 'changed' };
+}
+
 /**
  * The task offer a turn carried, or null.
  *

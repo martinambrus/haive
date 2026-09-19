@@ -24,7 +24,13 @@ import { MarkdownView } from '@/components/markdown/markdown-view';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { isAwaitingFormInput } from '@/lib/submit-state';
 import { groupPlanConversations, liveConversation, type PlanChatGroup } from './plan-chat-groups';
-import { firstUnreadMessageId, opCount, startedLabel, stamp, taskProposal } from './plan-chat-turn';
+import {
+  changeBadge,
+  firstUnreadMessageId,
+  startedLabel,
+  stamp,
+  taskProposal,
+} from './plan-chat-turn';
 
 /**
  * The per-node conversation, driven entirely from this panel.
@@ -569,15 +575,7 @@ function ConversationGroup({
                   // to read than the word beside it.
                   <span className="ml-1 normal-case text-neutral-400">({stamp(m.createdAt)})</span>
                 )}
-                {m.role === 'assistant' &&
-                  opCount(m.patch) !== null &&
-                  (opCount(m.patch) === 0 ? (
-                    <span className="ml-1.5 normal-case text-neutral-500">· plan unchanged</span>
-                  ) : (
-                    <span className="ml-1.5 normal-case text-emerald-400">
-                      · {opCount(m.patch)} plan change{opCount(m.patch) === 1 ? '' : 's'}
-                    </span>
-                  ))}
+                {m.role === 'assistant' && <ChangeBadge patch={m.patch} />}
               </p>
               {/* No cap and no scroller of its own: the transcript above is
                   already scrolling, and a scrollbar inside a scrollbar makes a
@@ -595,6 +593,22 @@ function ConversationGroup({
       )}
     </div>
   );
+}
+
+/** Amber for a partial turn: some of what the agent sent did not land, which is the
+ *  needs-a-person meaning amber has everywhere else in this UI. */
+const BADGE_TONE = {
+  unchanged: 'text-neutral-500',
+  changed: 'text-emerald-400',
+  partial: 'text-amber-300',
+} as const;
+
+/** The count beside an assistant turn. The wording is `changeBadge`'s; this only
+ *  maps its tone to a colour. */
+function ChangeBadge({ patch }: { patch: unknown }) {
+  const badge = changeBadge(patch);
+  if (!badge) return null;
+  return <span className={`ml-1.5 normal-case ${BADGE_TONE[badge.tone]}`}>· {badge.text}</span>;
 }
 
 /**

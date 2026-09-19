@@ -253,6 +253,9 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       // Ops the applier skipped because a ref did not resolve. The rest landed, so
       // the reply must say which did not or it reads as having done all of it.
       let dropped: string[] = [];
+      // How many of the sent ops landed. Null until an apply has returned, so an
+      // apply that threw records 0 rather than a count it never achieved.
+      let landed: number | null = null;
       if (!patch) {
         if (!spokenOnly) result.error = 'The agent did not reply with a usable patch.';
       } else {
@@ -266,6 +269,7 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
             });
             result.applied = true;
             dropped = res.dropped;
+            landed = patch.ops.length - res.dropped.length;
             result.created = res.created.length;
             result.updated = res.updated.length;
             result.deleted = res.deleted.length;
@@ -322,6 +326,9 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
               ops: patch.ops,
               ...(patch.summary ? { summary: patch.summary } : {}),
               ...(proposal ? { taskProposal: proposal.proposal } : {}),
+              // What LANDED, so the badge can say "2 of 4" rather than count what was
+              // sent. Only on a turn that sent ops: "plan unchanged" needs no record.
+              ...(patch.ops.length > 0 ? { outcome: { applied: landed ?? 0 } } : {}),
             }
           : null,
       });
