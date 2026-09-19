@@ -30,6 +30,13 @@ export function describeDropped(dropped: readonly string[]): string {
   return ` ${dropped.length} approved change(s) could not be applied: ${dropped.join('; ')}.`;
 }
 
+/** The sentence a summary adds for code links the applier had to leave out. Not
+ *  folded into `describeDropped`: the change that carried the link still landed. */
+export function describeStrippedLinks(stripped: readonly string[]): string {
+  if (stripped.length === 0) return '';
+  return ` ${stripped.length} code link(s) could not be recorded: ${stripped.join('; ')}.`;
+}
+
 /**
  * One proposed op as a line a person can judge without reading JSON.
  *

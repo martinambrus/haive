@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  planCodeLinkSchema,
   planPatchSchema,
   type PlanNodeOrigin,
   type PlanNodeStatus,
@@ -59,6 +60,20 @@ export interface ApplyPlanPatchOptions {
    */
   onUnresolvableRef?: 'fail' | 'drop';
   /**
+   * What to do with a code link that fails its own schema.
+   *
+   * `fail` (the default) rejects the whole patch, which is right for a PERSON:
+   * the link they typed is wrong and they should be told.
+   *
+   * `strip` removes only the bad link and keeps its op. A code link is an
+   * annotation on an op, and schema validation runs over the whole patch before
+   * any op does, so one malformed link used to cost every op in an agent's
+   * reply — MEASURED, 2 of 81 plan-build agents lost their whole reply that way,
+   * one over a `symbol` past 512 characters. No caller re-prompts an agent for
+   * an invalid patch, so the reply was simply gone.
+   */
+  onInvalidCodeLink?: 'fail' | 'strip';
+  /**
    * The node this patch is ABOUT, addressable as the ref `self`.
    *
    * An expansion agent decomposes exactly one node and otherwise has to
@@ -98,6 +113,10 @@ export interface ApplyPlanPatchResult {
    *  swallowed: a silently thinner patch is how a plan loses content without
    *  anyone noticing. */
   dropped: string[];
+  /** Code links removed under `onInvalidCodeLink: 'strip'`, one entry per link.
+   *  Kept apart from `dropped` on purpose: callers compute how many ops landed
+   *  as ops minus `dropped.length`, and a stripped link costs no op. */
+  strippedCodeLinks: string[];
 }
 
 interface NodeRow {
@@ -133,11 +152,18 @@ export async function applyPlanPatch(
   patchInput: unknown,
   opts: ApplyPlanPatchOptions,
 ): Promise<ApplyPlanPatchResult> {
-  const parsed = planPatchSchema.safeParse(patchInput);
+  const strippedCodeLinks: string[] = [];
+  const input =
+    opts.onInvalidCodeLink === 'strip'
+      ? stripInvalidCodeLinks(patchInput, strippedCodeLinks)
+      : patchInput;
+  const parsed = planPatchSchema.safeParse(input);
   if (!parsed.success) {
     throw new PlanPatchError('invalid', `plan patch failed validation: ${parsed.error.message}`);
   }
-  return db.transaction(async (tx) => applyOps(tx, parsed.data, opts));
+  const result = await db.transaction(async (tx) => applyOps(tx, parsed.data, opts));
+  result.strippedCodeLinks = strippedCodeLinks;
+  return result;
 }
 
 /**
@@ -210,6 +236,47 @@ export function normalizeOpRefs(ops: PlanPatch['ops']): PlanPatch['ops'] {
         return op;
     }
   });
+}
+
+/**
+ * Remove the code links that fail their own schema, keeping the ops that carry
+ * them. Runs on the RAW patch, before the whole-patch validation that would
+ * otherwise reject every op for one link.
+ *
+ * Only an upsert's `codeLinks` is touched, so anything else invalid still fails
+ * the patch as it always did. Returns a rewritten copy, like `normalizeOpRefs`,
+ * and reports one entry per removed link. Exported for the unit test —
+ * `applyPlanPatch` is the only caller.
+ */
+export function stripInvalidCodeLinks(patchInput: unknown, report: string[]): unknown {
+  if (!patchInput || typeof patchInput !== 'object') return patchInput;
+  const patch = patchInput as { ops?: unknown };
+  if (!Array.isArray(patch.ops)) return patchInput;
+  const ops = patch.ops.map((op: unknown) => {
+    if (!op || typeof op !== 'object') return op;
+    const upsert = op as { op?: unknown; nodeRef?: unknown; codeLinks?: unknown };
+    if (upsert.op !== 'upsert' || upsert.codeLinks === undefined) return op;
+    const owner = `'${String(upsert.nodeRef)}'`;
+    if (!Array.isArray(upsert.codeLinks)) {
+      report.push(`code links dropped from ${owner}: not a list`);
+      const rest: Record<string, unknown> = { ...upsert };
+      delete rest.codeLinks;
+      return rest;
+    }
+    const kept = upsert.codeLinks.filter((link: unknown) => {
+      const parsed = planCodeLinkSchema.safeParse(link);
+      if (parsed.success) return true;
+      const issues = parsed.error.issues
+        .map(
+          (issue) => `${issue.path.length > 0 ? issue.path.join('.') : 'link'}: ${issue.message}`,
+        )
+        .join('; ');
+      report.push(`code link dropped from ${owner}: ${issues}`);
+      return false;
+    });
+    return kept.length === upsert.codeLinks.length ? op : { ...upsert, codeLinks: kept };
+  });
+  return { ...patch, ops };
 }
 
 /**
@@ -314,6 +381,7 @@ async function applyOps(
     codeLinked: 0,
     refs: {},
     dropped: [],
+    strippedCodeLinks: [],
   };
   /** patch-local ref (temp id or uuid) -> real uuid. */
   const refs = new Map<string, string>();

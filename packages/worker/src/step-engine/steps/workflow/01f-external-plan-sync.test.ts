@@ -168,7 +168,11 @@ describe('apply', () => {
 });
 
 describe('apply — approved changes', () => {
-  const outcome = (over: { updated?: string[]; dropped?: string[] }) => ({
+  const outcome = (over: {
+    updated?: string[];
+    dropped?: string[];
+    strippedCodeLinks?: string[];
+  }) => ({
     created: [],
     updated: [],
     deleted: [],
@@ -177,6 +181,7 @@ describe('apply — approved changes', () => {
     codeLinked: 0,
     refs: {},
     dropped: [],
+    strippedCodeLinks: [],
     ...over,
   });
 
@@ -197,6 +202,26 @@ describe('apply — approved changes', () => {
     expect(out.summary).toBe(
       'Applied 1 of 2 proposed plan change(s) from 1 external commit(s): 0 node(s) created, ' +
         `1 updated, 0 code link(s) written. 1 approved change(s) could not be applied: ${gone}.`,
+    );
+  });
+
+  it('names a code link it could not record, and still counts its change as landed', async () => {
+    const bad = `code link dropped from '${NODE}': repoPath: Invalid input: expected string, received undefined`;
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce(
+      outcome({ updated: [NODE], strippedCodeLinks: [bad] }),
+    );
+    const out = await apply(
+      detect(),
+      { llmOutput: OPS, formValues: { applyOps: ['0'] } },
+      fakeDb().db,
+    );
+    expect(vi.mocked(applyPlanPatch).mock.lastCall?.[2]).toMatchObject({
+      onInvalidCodeLink: 'strip',
+    });
+    expect(out.applied).toBe(1);
+    expect(out.summary).toBe(
+      'Applied 1 of 1 proposed plan change(s) from 1 external commit(s): 0 node(s) created, ' +
+        `1 updated, 0 code link(s) written. 1 code link(s) could not be recorded: ${bad}.`,
     );
   });
 

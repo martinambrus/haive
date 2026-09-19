@@ -739,6 +739,14 @@ export function createPlanBuildStep(
               )
               .catch(() => undefined);
           }
+          if (applied.strippedCodeLinks.length > 0) {
+            // Logged, not stamped: no op was lost, and a PARTIAL stamp would have
+            // coverage offer a repair agent for the node.
+            ctx.logger.warn(
+              { agentId: result.agentId, strippedCodeLinks: applied.strippedCodeLinks },
+              'plan agent code links stripped',
+            );
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           failures.push(`${result.agentTitle ?? result.agentId}: ${message}`);

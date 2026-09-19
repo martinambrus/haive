@@ -590,6 +590,14 @@ async function foldCoverageResults(
           `${PARTIAL_APPLY_PREFIX} ${applied.dropped.join('; ')}`,
         );
       }
+      if (applied.strippedCodeLinks.length > 0) {
+        // Logged, not stamped: no op was lost, and a PARTIAL stamp would list the
+        // node as a structural gap.
+        ctx.logger.warn(
+          { agentId: result.agentId, strippedCodeLinks: applied.strippedCodeLinks },
+          'coverage agent code links stripped',
+        );
+      }
     } catch (err) {
       hadFailure = true;
       const message = err instanceof Error ? err.message : String(err);

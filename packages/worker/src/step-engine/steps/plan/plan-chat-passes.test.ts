@@ -141,7 +141,7 @@ describe('plan chat reply', () => {
       } as never,
     );
 
-  const outcome = (dropped: string[]) => ({
+  const outcome = (dropped: string[], strippedCodeLinks: string[] = []) => ({
     created: ['c'],
     updated: [],
     deleted: [],
@@ -150,6 +150,7 @@ describe('plan chat reply', () => {
     codeLinked: 0,
     refs: { q: 'c' },
     dropped,
+    strippedCodeLinks,
   });
 
   it('names the changes the applier skipped, so the reply does not claim them', async () => {
@@ -159,6 +160,20 @@ describe('plan chat reply', () => {
     await answer(db);
     expect(turns[0]?.body).toBe(`Added it.\n\n_1 change(s) not applied: ${gone}_`);
     // The header reads this: 1 of the 2 ops sent landed.
+    expect(turns[0]?.patchJson).toMatchObject({ outcome: { applied: 1 } });
+  });
+
+  it('names a code link it could not record without counting a change as lost', async () => {
+    const gone = "link dropped: unknown node reference 'gone'";
+    const bad =
+      "code link dropped from 'q': symbol: Too big: expected string to have <=512 characters";
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome([gone], [bad]));
+    const { db, turns } = fakeDb();
+    await answer(db);
+    expect(turns[0]?.body).toBe(
+      `Added it.\n\n_1 change(s) not applied: ${gone}_\n\n_1 code link(s) not recorded: ${bad}_`,
+    );
+    // The link cost no op: 1 of the 2 sent still landed, exactly as without it.
     expect(turns[0]?.patchJson).toMatchObject({ outcome: { applied: 1 } });
   });
 

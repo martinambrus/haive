@@ -470,6 +470,44 @@ async function main(): Promise<void> {
     { repositoryId, origin: 'user' },
   );
 
+  /* --- 8.6 under strip, a malformed code link costs only the link ----------- */
+
+  // MEASURED: 2 of 81 plan-build agents lost a whole reply to one bad link — a
+  // path under the wrong key, a `symbol` past 512 characters.
+  const badLinks = {
+    ops: [
+      {
+        op: 'upsert',
+        nodeRef: 'linked',
+        parentRef: api!.id,
+        title: 'Carries one bad link',
+        codeLinks: [{ repoPath: 'src/api.ts' }, { path: 'src/wrong-key.ts' }],
+      },
+    ],
+  };
+  const stripped = await applyPlanPatch(db, badLinks, {
+    repositoryId,
+    origin: 'llm',
+    onUnresolvableRef: 'drop',
+    onInvalidCodeLink: 'strip',
+  });
+  check(
+    'an agent patch with a malformed code link lands its op and the valid link',
+    stripped.created.length === 1 &&
+      stripped.codeLinked === 1 &&
+      stripped.dropped.length === 0 &&
+      stripped.strippedCodeLinks.length === 1,
+    stripped,
+  );
+  await expectPatchError("the same link still rejects a person's patch whole", 'invalid', () =>
+    applyPlanPatch(db, badLinks, { repositoryId, origin: 'user' }),
+  );
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: stripped.refs.linked! }] },
+    { repositoryId, origin: 'user' },
+  );
+
   /* --- 9. a patch cannot reach into another repository --------------------- */
 
   const [otherRepo] = await db
