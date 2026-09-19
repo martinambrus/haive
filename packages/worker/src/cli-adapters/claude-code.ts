@@ -5,7 +5,6 @@ import type {
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
-  EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
@@ -97,13 +96,6 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
 
   override effortEnv(level: string): Record<string, string> {
     return { CLAUDE_CODE_EFFORT_LEVEL: level };
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
-    };
   }
 
   override buildPluginInstallCommands(

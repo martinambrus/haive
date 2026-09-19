@@ -1,5 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
-import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
+import type { CliCommandSpec, CliProviderRecord, InvokeOpts } from './types.js';
 import { deliverPrompt } from './prompt-delivery.js';
 
 /** A headless gemini run has to be told the workspace is trusted AND that its tools are
@@ -69,13 +69,6 @@ export class GeminiAdapter extends BaseCliAdapter {
       env: { ...GEMINI_HEADLESS_ENV, ...this.mergedEnv(provider, opts) },
       cwd: opts.cwd,
       outputFormat: 'gemini-json',
-    };
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
     };
   }
 }

@@ -8,7 +8,6 @@ import type {
   CliRulesFileMode,
   EffortDecision,
   EffortScale,
-  EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
@@ -110,8 +109,6 @@ export abstract class BaseCliAdapter {
       },
     };
   }
-
-  abstract envInjection(provider: CliProviderRecord): EnvInjection;
 
   buildPluginInstallCommands?(
     provider: CliProviderRecord,

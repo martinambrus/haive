@@ -7,7 +7,6 @@ import type {
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
-  EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
@@ -183,10 +182,6 @@ export class OllamaAdapter extends BaseCliAdapter {
     env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
     if (provider.model) env.ANTHROPIC_MODEL = provider.model;
     return env;
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return { envVars: {}, extraArgs: [] };
   }
 
   override buildPluginInstallCommands(

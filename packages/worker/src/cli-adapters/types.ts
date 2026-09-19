@@ -180,11 +180,6 @@ export interface SubAgentInvocation {
   assignedAgentIds?: string[];
 }
 
-export interface EnvInjection {
-  envVars: Record<string, string>;
-  extraArgs: string[];
-}
-
 export interface ProbeResult {
   ok: boolean;
   version?: string;

@@ -4,7 +4,6 @@ import { BaseCliAdapter } from './base-adapter.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
-  EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
@@ -157,13 +156,6 @@ export class GrokAdapter extends BaseCliAdapter {
       env,
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',
-    };
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
     };
   }
 

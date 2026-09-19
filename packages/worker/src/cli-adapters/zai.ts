@@ -5,7 +5,6 @@ import type {
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
-  EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
@@ -128,13 +127,6 @@ export class ZaiAdapter extends BaseCliAdapter {
     delete env.ANTHROPIC_API_KEY;
     if (env.Z_AI_MODEL) env.CLAUDE_MODEL = env.Z_AI_MODEL;
     return env;
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
-    };
   }
 
   override buildPluginInstallCommands(

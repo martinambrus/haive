@@ -6,7 +6,6 @@ import type {
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
-  EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
@@ -157,13 +156,6 @@ export class OpenRouterAdapter extends BaseCliAdapter {
     const model = provider.model ?? env.ANTHROPIC_MODEL ?? this.defaultModel;
     if (model) env.ANTHROPIC_MODEL = model;
     return env;
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
-    };
   }
 
   override buildPluginInstallCommands(

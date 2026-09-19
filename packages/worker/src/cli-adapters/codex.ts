@@ -3,7 +3,6 @@ import type {
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
-  EnvInjection,
   InvokeOpts,
   SteeringTransportContext,
 } from './types.js';
@@ -153,13 +152,6 @@ export class CodexAdapter extends BaseCliAdapter {
       ...modelArgs,
       '--skip-git-repo-check',
     ];
-  }
-
-  envInjection(_provider: CliProviderRecord): EnvInjection {
-    return {
-      envVars: {},
-      extraArgs: [],
-    };
   }
 }
 
