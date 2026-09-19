@@ -249,11 +249,11 @@ describe('adapter outputFormat declarations', () => {
     expect(withoutModel.args).not.toContain('--model');
   });
 
-  it('gemini requests JSON output mode', () => {
+  it('gemini requests JSON output mode with every tool pre-approved', () => {
     const adapter = cliAdapterRegistry.get('gemini');
     const provider = makeProvider({ id: 'p-gemini', name: 'gemini' });
     const spec = adapter.buildCliInvocation(provider, 'hello', opts);
-    expect(spec.args).toEqual(['-p', 'hello', '--output-format', 'json']);
+    expect(spec.args).toEqual(['-p', 'hello', '--output-format', 'json', '--yolo']);
   });
 });
 

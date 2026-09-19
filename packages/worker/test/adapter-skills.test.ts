@@ -137,3 +137,17 @@ describe('grok: project skills in, bundled skills out', () => {
     });
   }
 });
+
+describe('gemini: trusted workspace, tools pre-approved', () => {
+  // Without the trust env every gemini run exits 55 before its first request, and without an
+  // approval flag it gets no activate_skill and no write tools (MEASURED on 0.60.0).
+  it('trusts the workspace on every run', () => {
+    const spec = new GeminiAdapter().buildCliInvocation(provider(), 'do x', {});
+    expect(spec.env.GEMINI_CLI_TRUST_WORKSPACE).toBe('true');
+  });
+
+  it('pre-approves its tools, the skill tool included', () => {
+    const spec = new GeminiAdapter().buildCliInvocation(provider(), 'do x', {});
+    expect(spec.args).toContain('--yolo');
+  });
+});
