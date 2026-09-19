@@ -20,7 +20,7 @@
     "@tiptap/extensions": "^3.30.5",
     "@tiptap/pm": "^3.30.5",
     "@tiptap/react": "^3.30.5",
-    "@tiptap/starter-kit": "^3.30.5",
+    "@tiptap/starter-kit": "^3.31.3",
     "@xterm/addon-clipboard": "^0.2.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
