@@ -1,36 +1,67 @@
 # Whole-reply losses to two deliberate guards
 
-> **NOT STARTED — recorded 2026-09-19, no design chosen.** `plan-patch-drop-measurement`'s Part B
-> read every plan agent's mining row on the dev install and found two more classes where one flaw
-> costs a WHOLE reply, the same shape `plan-patch-partial-refs` removed for unresolvable refs. Both
-> come from a guard that is right to exist, so neither is a bug to patch. Each needs a decision about
-> what the guard should give up, which is why they were split out of `plan-patch-gap-sweep` instead
-> of fixed there. The evidence below is quoted from the rows, so the decision can be made without
-> re-measuring.
+> **DONE 2026-09-19, as built below.** `663ef973` makes a malformed code link cost the link, not
+> the reply. `38911203` makes the breadth guard count a `node:`-prefixed parent's children, and
+> `b9085ad4` makes a coverage repair see the node it repairs. `a9ec07e1` stops a partially applied
+> plan-build wave from being re-rolled; that loss was found beside these ones.
+>
+> **Both designs this plan first leaned toward rested on wrong premises.** Each section corrects its
+> own:
+> - No caller re-prompts an agent for an invalid patch, so "strip only on the final attempt" had no
+>   retry to protect.
+> - The breadth refusals came from a repair prompt that told the agent its node had no children, not
+>   from agents writing too widely.
+>
+> Verified:
+> - `plan-canvas-smoke` passes 112 of 112 checks;
+> - both recorded code-link replies now validate;
+> - a repair prompt built from a real plan lists its node's existing children;
+> - in the browser, a chat turn names the link it could not record, and the header still counts the
+>   change.
+>
+> The shared, api and worker typechecks, which now cover test files too, all pass.
 
 ## 1. A malformed code link rejects the reply it rides on
 
-**Measured:** 2 of the 81 agents of `10_8-plan-build` on the dev install, both stamped
+**Measured:** 2 of the 81 agents of `10_8-plan-build` on the dev install. Both were stamped
 `plan patch not applied: plan patch rejected: plan patch failed validation:`
 
-- `ops[0].codeLinks[0..2].repoPath` — "Invalid input: expected string, received undefined". Three
-  links on one op carried their path under some other key.
-- `ops[3].codeLinks[0].symbol` — "Too big: expected string to have <=512 characters".
+- `ops[0].codeLinks[0..2].repoPath`, with "Invalid input: expected string, received undefined".
+  That summary names only the first three links. **Replayed as built:** the reply's 18 ops carried
+  59 links, and every one put its path under `"path"`. The contract's own example uses
+  `"repoPath"` (`_plan-prompt.ts`), so this is a model deviation, not an unclear contract.
+- `ops[3].codeLinks[0].symbol`, with "Too big: expected string to have <=512 characters". Two such
+  symbols appeared in a 19-op reply.
 
 **Mechanism.** `applyPlanPatch` validates the WHOLE patch with `planPatchSchema.safeParse` before any
-op runs, and a failure is `PlanPatchError('invalid')`. `applyAgentPatch` turns `invalid` into a
-re-prompt on a non-final attempt, so both rows are FINAL attempts. By then a code link, which is an
-annotation on an op, had cost the op, its subtree and every other op in the reply.
+op runs, and a failure is a `PlanPatchError('invalid')`. A code link is an annotation on an op, yet
+it cost the op, its subtree and every other op in the reply.
 
-**What a fix has to decide:**
+**Corrected:** this section used to say the rows were FINAL attempts, because `applyAgentPatch`
+re-prompts on the earlier ones. Neither half holds:
+- The `plan patch rejected:` prefix exists only when `retryable` was true, so these were not final
+  attempts.
+- No caller re-prompts at all. plan-build's `apply()` and plan chat each catch the
+  `RetryableParseError` themselves, and coverage and sequencing pass `retryable: false`.
 
-- Whether, under `drop`, an invalid code link is stripped and its op kept, or the re-prompt stays
-  the answer. A strip gives up the retry that might have produced a well-formed link.
-- **The report channel, which is load-bearing, not cosmetic.** `ApplyPlanPatchResult.dropped` holds
-  exactly one entry per dropped OP, and two readers do arithmetic on that. Plan chat records
-  `outcome.applied = ops.length - dropped.length` (`24d5245d`); 11f and 01f compute
-  `applied = chosen.length - dropped.length` (`744ce132`). A stripped link written into `dropped`
-  would make every one of those counts wrong. It needs its own field.
+So "strip, and give up the retry" gave up nothing.
+
+**As built, `663ef973`:**
+- **Option:** `onInvalidCodeLink: 'strip'` removes only the links that fail `planCodeLinkSchema`, and
+  their ops land. The default stays `fail`, so a person editing in the UI is still told.
+- **Callers:** every agent patch opts in through `applyAgentPatch`. So do 11f and 01f: their approved
+  ops are agent-written, and their form never shows a link it cannot read.
+- **The report channel:** stripped links go in `ApplyPlanPatchResult.strippedCodeLinks`, never in
+  `dropped`. `dropped` stays one entry per op, because plan chat, 11f and 01f compute "applied" as
+  ops minus `dropped.length`. Each caller surfaces them differently:
+  - plan chat notes them in the transcript;
+  - 11f and 01f add a sentence to their summary;
+  - plan-build and coverage only log them, and stamp nothing.
+
+  A PARTIAL stamp would have coverage offer a repair agent for a lost annotation.
+
+The cost is plain in the replay: the strip recovers all 18 ops of the first reply, and none of its 59
+links.
 
 ## 2. The breadth cap rejects a coverage repair outright
 
@@ -39,25 +70,69 @@ breadth cap 12 exceeded (<node>: <existing> existing + <new> new = <total>)`. Th
 existing + new: 9+9, 0+13, 7+9, 10+6, 8+8, 11+11, 10+10, 19+3, 8+8, 9+10.
 
 **Mechanism.** `assertPlanPatchWithinBreadth` (`steps/plan/_plan-breadth.ts`) enforces the build's
-breadth choice (`breadthCap`, a form value from 2 to 12, default 6; these builds chose 12)
-"transactionally for every plan-producing agent. An over-wide reply is rejected before any operation
-lands." Coverage passes `retryable: false`, so the repair is simply lost, and the gap it was filling
-stays open until a later coverage pass lists it again.
+breadth choice: `breadthCap`, a form value from 2 to 12, default 6, and these builds chose 12. It
+rejects an over-wide reply before any operation lands, and coverage passes `retryable: false`.
 
-**Two rows the fix must not get wrong:**
+**Corrected: the agents were not writing too widely; the prompt was false.**
+- **What the prompts said:** 9 of the 10 were manual structural repairs (`cover-node-*`) of nodes
+  whose decomposition had been THINNED by a partial apply. Every one of the 9 prompts said "it
+  currently has no children. Rebuild the missing subtree", to a node with 7-19 children.
+- **What the agents could see:** a titles-only listing cut at `slice(0, 60_000)`. All 9 were cut at
+  exactly 60,002 characters, and only 1 of them contained the node at all.
+- **What they did:** five of the refused replies re-added exactly as many children as already
+  existed (8+8, 9+9, 10+10, 11+11, 9+10). That is the same subtree again: the cap was keeping
+  duplicates out.
+- **What landed:** 7 of the 10 partial repairs that DID land added 2-12 children each. Whether they
+  duplicated anything cannot be checked, because every repaired node has since been deleted (0 of
+  21 exist).
 
-- `19 existing + 3 new` — the node was already over the cap before this agent added anything. No
-  coverage reply can add even one child there, however it is worded.
-- `0 existing + 13 new` — one reply proposing 13 siblings under an empty node. This is exactly what
-  the cap exists to refuse, so here the guard is right.
+**Two more claims here were wrong:**
+- **"The gap stays open until a later pass lists it again"** was false for 9 of the 10.
+  `findStructuralGaps` reported a rejected attempt only on a CHILDLESS node, so a refused repair of a
+  thinned node dropped off the gate for good.
+- **The guard under-counted.** It read refs before the applier strips their `node:` marker, so a
+  prefixed parent counted 0 existing children. 4 of 231 coverage replies parented that way.
 
-**What a fix has to decide:** whether a coverage agent may add an intermediate grouping node, gets
-retried with the cap in its prompt, has its excess trimmed, or whether the cap should count only NEW
-children for a node already past it. The two rows above point in opposite directions, so no single
-rule is obviously right.
+**The two rows the fix had to get right:**
+- `19 existing + 3 new`. The build gave that node 8 children, and no mining reply names it as a
+  parent, so the other 11 arrived through a writer the guard never runs on (chat, a UI edit, an
+  import). A node past the cap is therefore a legitimate state. The prompt now handles it: add
+  nothing directly under the node, or reply with an empty patch.
+- `0 existing + 13 new`. The guard is right here. The refusal's own counts now reach the next
+  attempt.
+
+**As built:**
+- **`38911203`:** the guard classifies refs through the applier's own `stripNodeRefPrefix`.
+- **`b9085ad4`, the prompt:**
+  - A structural repair reads its node's live neighbourhood through `buildPlanExpansionContext`, the
+    view that plan-build and coverage's automatic wave already use. It lists the target, its
+    ancestors, its siblings and every existing child, with exact refs.
+  - The instruction follows the live child count. It names the children already there, asks only
+    for what is missing, and says how much room is left under the cap.
+- **`b9085ad4`, the gap scan:**
+  - `findStructuralGaps` carries each gap's stamp, minus its prefix, as `detail`, and the prompt
+    quotes it as what the previous attempt lost.
+  - The scan also offers again a node that has children and whose latest attempt was rejected.
+
+No retry machinery was added: the gate's existing re-offer carries the refusal to the next attempt.
+
+**Found beside it, `a9ec07e1`:** plan-build re-rolled a whole wave when `failures.length ===
+fold.length`, but `failures` also reports PARTIAL applies, whose nodes had already landed. A
+one-agent wave whose reply landed with one dropped op would therefore be re-rolled and folded twice.
+The re-roll now counts only agents that wrote nothing.
+- **Evidence:** this is a code-level finding with no instance on record. The three plan-root
+  re-rolls on the dev install followed transient CLI failures.
+- **Test:** the new test fails on the old condition.
+
+**Noted, not fixed:** `applyAgentPatch`'s `retryable` flag retries nothing in any caller. Its only
+effect is the `plan patch rejected:` wording.
 
 ## Rollback
 
-Nothing is built. Whatever is chosen should stay behind `onUnresolvableRef: 'drop'` (for code links)
-or be scoped to coverage (for breadth), so that human edits and the plan builder keep today's
-behaviour.
+Every change is code only: no schema change, no migration and no data rewrite, and each commit
+reverts on its own.
+- `onInvalidCodeLink` defaults to `fail`, so a revert restores whole-patch rejection.
+- `strippedCodeLinks` is an additive result field.
+- `StructuralGap.detail` is optional in the persisted `detect_output`, so a revert simply ignores
+  it.
+- The prompt text and the guard's normalisation apply to new dispatches and replies only.
