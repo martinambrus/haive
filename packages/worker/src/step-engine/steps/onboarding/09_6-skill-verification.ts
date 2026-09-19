@@ -6,7 +6,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
-import { unquoteYamlScalar } from '../_yaml-scalar.js';
+import { readFrontmatterFields } from '../_yaml-scalar.js';
 import { resolveSkillTargetDirs } from './_helpers.js';
 
 /** Fallback skills dir when no enabled CLI declares one — passed explicitly to
@@ -116,29 +116,15 @@ export interface ParsedSkill {
 }
 
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---/;
-const FOLDED_DESC_RE = /^description:\s*>\s*\n([\s\S]*?)(?=\n[A-Za-z][^\n]*:|\n*$)/m;
 
 export function parseSkillMarkdown(text: string): ParsedSkill {
   const fm = text.match(FRONTMATTER_RE);
   let name: string | null = null;
   let description: string | null = null;
   if (fm && fm[1]) {
-    const fmBody = fm[1];
-    const nameMatch = fmBody.match(/^name:\s*(.+)$/m);
-    if (nameMatch && nameMatch[1]) name = unquoteYamlScalar(nameMatch[1].trim());
-    const inlineDesc = fmBody.match(/^description:\s*(\S.*)$/m);
-    if (inlineDesc && inlineDesc[1]) {
-      description = unquoteYamlScalar(inlineDesc[1].trim());
-    } else {
-      const folded = fmBody.match(FOLDED_DESC_RE);
-      if (folded && folded[1]) {
-        const lines = folded[1]
-          .split('\n')
-          .map((l) => l.replace(/^\s+/, ''))
-          .filter((l) => l.length > 0);
-        if (lines.length > 0) description = lines.join(' ');
-      }
-    }
+    const fields = readFrontmatterFields(fm[1]);
+    name = fields.name?.trim() || null;
+    description = fields.description?.trim() || null;
   }
   return {
     name,

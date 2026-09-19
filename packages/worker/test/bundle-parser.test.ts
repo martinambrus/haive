@@ -122,6 +122,26 @@ describe('decoders', () => {
     expect(parsed.model).toBe('opus');
   });
 
+  it('decodes a folded block description instead of taking the literal ">"', () => {
+    const md = [
+      '---',
+      'name: merger',
+      'description: >',
+      '  Merges completed issue branches',
+      '  into the integration worktree.',
+      'color: green',
+      '---',
+      '',
+      '# Merger',
+      '',
+    ].join('\n');
+    const parsed = agentSpecSchema.parse(decodeClaudeAgent(md, '.claude/agents/merger.md'));
+    expect(parsed.description).toBe(
+      'Merges completed issue branches into the integration worktree.',
+    );
+    expect(parsed.color).toBe('green');
+  });
+
   it('decodes what the agent renderer quoted back to the same spec', () => {
     const spec: AgentSpec = {
       id: 'grid-specialist',

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
-import { unquoteYamlScalar, yamlScalar } from './_yaml-scalar.js';
+import { readFrontmatterFields, unquoteYamlScalar, yamlScalar } from './_yaml-scalar.js';
 
 // Values a description, name or field has actually held, plus every shape that changes what a
 // YAML parser reads: mapping and comment indicators, leading indicators, and scalars that would
@@ -89,5 +89,74 @@ describe('unquoteYamlScalar', () => {
     expect(unquoteYamlScalar('plain value')).toBe('plain value');
     expect(unquoteYamlScalar('"open only')).toBe('"open only');
     expect(unquoteYamlScalar('"')).toBe('"');
+  });
+});
+
+describe('readFrontmatterFields', () => {
+  it('reads a folded description the way the legacy agent files write it', () => {
+    const fields = readFrontmatterFields(
+      [
+        'name: issue-advisor',
+        'description: >',
+        '  Middle-loop recovery advisor for DAG execution. Diagnoses why an issue failed',
+        '  the inner review loop and decides the optimal recovery strategy.',
+        'model: opus',
+      ].join('\n'),
+    );
+    expect(fields).toEqual({
+      name: 'issue-advisor',
+      description:
+        'Middle-loop recovery advisor for DAG execution. Diagnoses why an issue failed the inner review loop and decides the optimal recovery strategy.',
+      model: 'opus',
+    });
+  });
+
+  it('keeps paragraph breaks in a folded scalar and newlines in a literal one', () => {
+    const fields = readFrontmatterFields(
+      [
+        'folded: >-',
+        '  one',
+        '  two',
+        '',
+        '  three',
+        'literal: |',
+        '  a',
+        '    b',
+        'after: x',
+      ].join('\n'),
+    );
+    expect(fields.folded).toBe('one two\nthree');
+    expect(fields.literal).toBe('a\n  b');
+    expect(fields.after).toBe('x');
+  });
+
+  it('still reads a plain value a YAML parser rejects, and decodes a quoted one', () => {
+    const fields = readFrontmatterFields(
+      [
+        '# comment',
+        'description: Reviews diffs: logic, style.',
+        'field: "perf: hot paths"',
+        "title: 'it''s'",
+      ].join('\n'),
+    );
+    expect(fields).toEqual({
+      description: 'Reviews diffs: logic, style.',
+      field: 'perf: hot paths',
+      title: "it's",
+    });
+  });
+
+  it('folds one nested level into dotted keys, only under a key without a value', () => {
+    const fields = readFrontmatterFields(
+      ['kb-references:', '  patterns: a/b/', '  standards: "c.md"', 'name: x', '  stray: y'].join(
+        '\n',
+      ),
+    );
+    expect(fields).toEqual({
+      'kb-references': '',
+      'kb-references.patterns': 'a/b/',
+      'kb-references.standards': 'c.md',
+      name: 'x',
+    });
   });
 });

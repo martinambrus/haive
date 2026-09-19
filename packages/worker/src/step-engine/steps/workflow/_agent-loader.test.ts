@@ -79,6 +79,32 @@ describe('loadAgentPersonas', () => {
     expect(personas.map((p) => p.description)).toEqual([description]);
   });
 
+  it('reads a folded description, the shape the legacy agent files use', async () => {
+    await mkdir(path.join(repo, '.claude', 'agents'), { recursive: true });
+    await writeFile(
+      path.join(repo, '.claude', 'agents', 'issue-advisor.md'),
+      [
+        '---',
+        'name: issue-advisor',
+        'description: >',
+        '  Middle-loop recovery advisor for DAG execution. Diagnoses why an issue failed',
+        '  the inner review loop.',
+        'model: opus',
+        'allowed-tools: [Read, Grep]',
+        '---',
+        '# Issue Advisor',
+        '',
+      ].join('\n'),
+    );
+
+    const [persona] = await loadAgentPersonas(repo);
+
+    expect(persona?.description).toBe(
+      'Middle-loop recovery advisor for DAG execution. Diagnoses why an issue failed the inner review loop.',
+    );
+    expect(persona?.allowedTools).toEqual(['Read', 'Grep']);
+  });
+
   it('reads nothing through an agents directory that links out of the repository', async () => {
     await mkdir(path.join(repo, '.claude'), { recursive: true });
     await symlink(path.join(outside, 'agents'), path.join(repo, '.claude', 'agents'));
