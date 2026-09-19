@@ -1,14 +1,23 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import type { Database } from '@haive/database';
 import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
 import { SEQUENCE_AGENTS_PER_PASS } from '@haive/shared/plan';
+import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import {
   agentOrdinals,
   collectDisagreements,
+  foldSequenceResults,
   sequenceForm,
   sequencePassComplete,
   type MiningRow,
   type PlanSequenceDetect,
 } from './03-plan-sequence.js';
+import { applyAgentPatch } from './_plan-prompt.js';
+
+vi.mock('./_plan-prompt.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./_plan-prompt.js')>();
+  return { ...actual, applyAgentPatch: vi.fn() };
+});
 
 const PARENT = '11111111-1111-4111-8111-111111111111';
 const OTHER_PARENT = '22222222-2222-4222-8222-222222222222';
@@ -276,5 +285,73 @@ describe('sequenceForm', () => {
 
   it('asks nothing when the pass ended with nothing to review', () => {
     expect(sequenceForm(detected({ agentsUsed: SEQUENCE_AGENTS_PER_PASS }))).toBeNull();
+  });
+});
+
+describe('foldSequenceResults', () => {
+  function fakeDb(): { db: Database; stamps: Record<string, unknown>[] } {
+    const stamps: Record<string, unknown>[] = [];
+    const db = {
+      update: () => ({
+        set: (values: Record<string, unknown>) => ({
+          where: async () => {
+            stamps.push(values);
+          },
+        }),
+      }),
+    } as unknown as Database;
+    return { db, stamps };
+  }
+
+  const ctx = (db: Database) =>
+    ({ taskId: 't', taskStepId: 's', db, logger: { warn: () => {} } }) as unknown as StepContext;
+
+  const agentReply = (ops: unknown[]) =>
+    ({ agentId: `plan-seq-${PARENT}-p1`, status: 'done', output: { ops } }) as AgentMiningResult;
+
+  const outcome = (over: { updated?: string[]; dropped?: string[] }) => ({
+    created: [],
+    updated: [],
+    deleted: [],
+    linked: 0,
+    unlinked: 0,
+    codeLinked: 0,
+    refs: {},
+    dropped: [],
+    ...over,
+  });
+
+  const ORDER = [
+    { op: 'upsert', nodeRef: A, ordinal: 0 },
+    { op: 'upsert', nodeRef: B, ordinal: 1 },
+  ];
+
+  it('records a reply that lost ops under the partial prefix, not as a failure', async () => {
+    // One mistyped id used to throw away the whole ordering; now the applier
+    // skips that op, and the row must still say the reply came back thinner.
+    const gone = `upsert dropped: unknown node reference '${C}'`;
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome({ updated: [A], dropped: [gone] }));
+    const { db, stamps } = fakeDb();
+    expect(await foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).toBe(1);
+    expect(stamps).toEqual([{ errorMessage: `plan patch partially applied: ${gone}` }]);
+  });
+
+  it('keeps the remit note when the partial stamp replaces it', async () => {
+    const gone = `upsert dropped: unknown node reference '${C}'`;
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome({ updated: [A], dropped: [gone] }));
+    const { db, stamps } = fakeDb();
+    await foldSequenceResults(ctx(db), 'r', [
+      agentReply([...ORDER, { op: 'link', fromRef: A, toRef: B, kind: 'affects' }]),
+    ]);
+    expect(stamps.at(-1)).toEqual({
+      errorMessage: `plan patch partially applied: 1 op(s) outside this step's remit were dropped; ${gone}`,
+    });
+  });
+
+  it('stamps nothing on a reply that landed whole', async () => {
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome({ updated: [A, B] }));
+    const { db, stamps } = fakeDb();
+    expect(await foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).toBe(2);
+    expect(stamps).toEqual([]);
   });
 });

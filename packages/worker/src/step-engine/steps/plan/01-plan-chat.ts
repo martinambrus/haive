@@ -250,6 +250,9 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
       // Resolved from the applied patch below, so a proposal naming nodes this
       // very reply created can address them by uuid.
       let proposal: ReturnType<typeof resolveTaskProposal> = null;
+      // Ops the applier skipped because a ref did not resolve. The rest landed, so
+      // the reply must say which did not or it reads as having done all of it.
+      let dropped: string[] = [];
       if (!patch) {
         if (!spokenOnly) result.error = 'The agent did not reply with a usable patch.';
       } else {
@@ -262,6 +265,7 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
               retryable: args.isFinalLlmAttempt !== true,
             });
             result.applied = true;
+            dropped = res.dropped;
             result.created = res.created.length;
             result.updated = res.updated.length;
             result.deleted = res.deleted.length;
@@ -307,7 +311,9 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
         body:
           result.error !== null
             ? `${spoken || 'Could not apply that.'}\n\n_${result.error}_`
-            : spoken || 'Done.',
+            : dropped.length > 0
+              ? `${spoken || 'Done.'}\n\n_${dropped.length} change(s) not applied: ${dropped.join('; ')}_`
+              : spoken || 'Done.',
         // The proposal rides the turn's own patch record rather than the step
         // output, for the same reason the transcript does: a revise cycle resets
         // the step row every turn and would take the button with it.
