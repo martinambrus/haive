@@ -45,7 +45,6 @@ import {
   mergeCliMcpIntoTaskVolume,
   mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
-  resolveTaskSkillMounts,
   seedRtkInTaskVolume,
   userAuthVolumeExists,
   writeMcpFileIntoTaskVolume,
@@ -829,7 +828,7 @@ export async function resolveAuthMounts(
     }
   }
 
-  return [...resolveTaskAuthMounts(providerName, taskId), ...resolveTaskSkillMounts(providerName)];
+  return resolveTaskAuthMounts(providerName, taskId);
 }
 
 /**

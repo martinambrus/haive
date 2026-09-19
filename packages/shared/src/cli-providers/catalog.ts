@@ -13,18 +13,6 @@ export interface EffortScaleMetadata {
   max: string;
 }
 
-/** Per-CLI spec for mounting user-level skills into a task container.
- *  `host` is the canonical user-home path (tilde-form). `fallbackHost` lets
- *  us seed from another CLI's skills dir when the canonical one is absent —
- *  e.g. codex falls back to `~/.claude/skills` so users migrating from
- *  Claude Code don't lose their skills. `containerPath` is the absolute
- *  mount target inside the sandbox. */
-export interface UserSkillPath {
-  host: string;
-  fallbackHost?: string;
-  containerPath: string;
-}
-
 export interface CliProviderMetadata {
   name: CliProviderName;
   displayName: string;
@@ -58,10 +46,6 @@ export interface CliProviderMetadata {
    *  path (claude-based CLIs share `.claude/skills`; codex uses `.agents/skills`;
    *  gemini uses `.gemini/skills`). */
   projectSkillsDir: string;
-  /** Host → container bind mounts for user-level skills. Empty when the
-   *  CLI's authConfigPaths already cover its skills dir (claude-code, amp,
-   *  zai all share `~/.claude` which contains `skills/`). */
-  userSkillsPaths: readonly UserSkillPath[];
   /** Repo-relative directory where this CLI auto-loads project-level custom
    *  agent definitions. Null when the CLI has no file-based custom-agent
    *  system (amp exposes only the built-in Task tool). Paths are taken from
@@ -169,7 +153,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     docsUrl: 'https://docs.anthropic.com/en/docs/claude-code',
     effortScale: CLAUDE_CODE_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
-    userSkillsPaths: [],
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
   },
@@ -196,13 +179,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     authConfigPaths: ['~/.codex'],
     effortScale: CODEX_EFFORT_SCALE,
     projectSkillsDir: '.agents/skills',
-    userSkillsPaths: [
-      {
-        host: '~/.agents/skills',
-        fallbackHost: '~/.claude/skills',
-        containerPath: '/root/.agents/skills',
-      },
-    ],
     projectAgentsDir: '.codex/agents',
     agentFileFormat: 'toml',
   },
@@ -230,13 +206,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     authConfigPaths: ['~/.config/gemini', '~/.gemini'],
     effortScale: null,
     projectSkillsDir: '.gemini/skills',
-    userSkillsPaths: [
-      {
-        host: '~/.gemini/skills',
-        fallbackHost: '~/.claude/skills',
-        containerPath: '/root/.gemini/skills',
-      },
-    ],
     projectAgentsDir: '.gemini/agents',
     agentFileFormat: 'markdown',
   },
@@ -259,7 +228,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     authConfigPaths: ['~/.local/share/amp', '~/.config/amp'],
     effortScale: null,
     projectSkillsDir: '.claude/skills',
-    userSkillsPaths: [],
     projectAgentsDir: null,
     agentFileFormat: null,
   },
@@ -281,7 +249,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     effortScale: CLAUDE_LIKE_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
-    userSkillsPaths: [],
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
   },
@@ -314,7 +281,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     // (.agents/skills, .agents/agents); agy reads AGENTS.md and imports
     // claude/gemini-style markdown agent definitions.
     projectSkillsDir: '.agents/skills',
-    userSkillsPaths: [],
     projectAgentsDir: '.agents/agents',
     agentFileFormat: 'markdown',
   },
@@ -347,7 +313,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     docsUrl: 'https://docs.ollama.com',
     effortScale: OLLAMA_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
-    userSkillsPaths: [],
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
   },
@@ -377,7 +342,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     docsUrl: 'https://dev.meta.ai/docs',
     effortScale: MUSE_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
-    userSkillsPaths: [],
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
   },
@@ -434,8 +398,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     // scale; do not restore one from xAI's docs.
     effortScale: null,
     projectSkillsDir: '.grok/skills',
-    // ~/.grok is already mounted via authConfigPaths and contains skills/.
-    userSkillsPaths: [],
     projectAgentsDir: '.grok/agents',
     agentFileFormat: 'markdown',
   },
@@ -484,7 +446,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     // cli-adapters/openrouter.ts; re-probe rather than editing against the docs page.
     effortScale: CLAUDE_CODE_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
-    userSkillsPaths: [],
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
   },
