@@ -11,6 +11,7 @@ import { AmpAdapter } from '../src/cli-adapters/amp.js';
 import { AntigravityAdapter } from '../src/cli-adapters/antigravity.js';
 import type { BaseCliAdapter } from '../src/cli-adapters/base-adapter.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
+import { SANDBOX_USER_HOME } from '../src/sandbox/sandbox-identity.js';
 
 // Each CLI's model should see the repository's skills, described, and none of the vendor's own
 // skills competing with them. What each CLI needed was MEASURED on the wire (AGENTS.md, "Skills
@@ -94,4 +95,45 @@ describe('codex: system skills off', () => {
     expect(hasOverride(spec.args)).toBe(true);
     expect(hasOverride(codexExecFallbackSpec(spec)!.args)).toBe(true);
   });
+});
+
+describe('grok: project skills in, bundled skills out', () => {
+  // A headless grok run is an untrusted folder, and grok skips project skills and AGENTS.md
+  // there: every grok run on the dev install listed 0 repo skills (MEASURED on 1.0.34).
+  it('turns folder trust off and keeps the claude-compat hooks off', () => {
+    const spec = new GrokAdapter().buildCliInvocation(provider(), 'do x', {});
+    expect(spec.env.GROK_FOLDER_TRUST).toBe('0');
+    expect(spec.env.GROK_CLAUDE_HOOKS_ENABLED).toBe('0');
+  });
+
+  it('lets a provider env var override either', () => {
+    const spec = new GrokAdapter().buildCliInvocation(
+      provider({ envVars: { GROK_CLAUDE_HOOKS_ENABLED: '1' } }),
+      'do x',
+      {},
+    );
+    expect(spec.env.GROK_CLAUDE_HOOKS_ENABLED).toBe('1');
+    expect(spec.env.GROK_FOLDER_TRUST).toBe('0');
+  });
+
+  it('hides its bundled skills through the managed config layer', () => {
+    const spec = new GrokAdapter().buildCliInvocation(provider(), 'do x', {});
+    expect(spec.configFiles).toEqual([
+      {
+        containerPath: '/etc/grok/managed_config.toml',
+        content: `[skills]\nignore = ["${SANDBOX_USER_HOME}/.grok/bundled/skills"]\n`,
+      },
+    ]);
+  });
+
+  for (const [name, adapter, over] of [
+    ...claudeFamily,
+    ...others.filter(([n]) => n !== 'grok').map(([n, a]) => [n, a, {}] as const),
+  ]) {
+    it(`${name} ships no config file and no grok switches`, () => {
+      const spec = adapter.buildCliInvocation(provider(over), 'do x', {});
+      expect(spec.configFiles).toBeUndefined();
+      expect(spec.env.GROK_FOLDER_TRUST).toBeUndefined();
+    });
+  }
 });

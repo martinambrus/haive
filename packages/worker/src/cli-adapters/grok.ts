@@ -1,4 +1,5 @@
 import { posix } from 'node:path';
+import { SANDBOX_USER_HOME } from '../sandbox/sandbox-identity.js';
 import { BaseCliAdapter } from './base-adapter.js';
 import type {
   CliCommandSpec,
@@ -27,6 +28,25 @@ const GROK_LSP_PLUGINS: Record<string, string> = {
 };
 const GROK_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
 const GROK_LSP_MARKETPLACE_ID = 'claude-code-lsps';
+
+/** grok loads project skills and project instructions only in a TRUSTED folder, and a headless
+ *  run is never trusted: MEASURED on 1.0.34, every grok run listed 0 repo skills and no AGENTS.md.
+ *  Turning the gate off (worktrees included; a `--trust` grant would persist into the auth volume
+ *  and skip a nested checkout) also ungates the repo's Claude-compat hooks, which stay off: Haive
+ *  keeps rtk's `.claude/settings.json` hook off grok on purpose (see _rtk-templates.ts). */
+const GROK_PROJECT_CONTEXT_ENV: Readonly<Record<string, string>> = {
+  GROK_FOLDER_TRUST: '0',
+  GROK_CLAUDE_HOOKS_ENABLED: '0',
+};
+
+/** grok lists its own 23 bundled skills (9,008 chars, one of them steering apps toward xAI) beside
+ *  the repo's. `[skills] ignore` hides them; it lives in grok's MANAGED config layer, read from
+ *  outside the auth volume, so Haive never merges into the `config.toml` grok writes itself.
+ *  MEASURED: skills block 11,417 -> 2,388 chars, repo skills intact. */
+const GROK_MANAGED_CONFIG = {
+  containerPath: '/etc/grok/managed_config.toml',
+  content: `[skills]\nignore = ["${SANDBOX_USER_HOME}/.grok/bundled/skills"]\n`,
+};
 
 export class GrokAdapter extends BaseCliAdapter {
   readonly providerName = 'grok' as const;
@@ -72,7 +92,7 @@ export class GrokAdapter extends BaseCliAdapter {
     prompt: string,
     opts: InvokeOpts,
   ): CliCommandSpec {
-    const env = this.mergedEnv(provider, opts);
+    const env = { ...GROK_PROJECT_CONTEXT_ENV, ...this.mergedEnv(provider, opts) };
     const args: string[] = [
       // NDJSON in the Anthropic Messages wire format — `system`/`init`,
       // `assistant` with message.content[] blocks, `user` tool_result, and a
@@ -133,6 +153,7 @@ export class GrokAdapter extends BaseCliAdapter {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(provider, args),
       ...(delivery.promptFile ? { promptFile: delivery.promptFile } : {}),
+      configFiles: [GROK_MANAGED_CONFIG],
       env,
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',

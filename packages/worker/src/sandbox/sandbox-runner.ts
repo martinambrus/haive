@@ -22,7 +22,7 @@ import { OPENROUTER_COMPAT_PROXY_HOST } from '../cli-adapters/openrouter-proxy.j
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { resolveRunnerCaps } from './runtime-caps.js';
 
-export { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
+export { SANDBOX_GID, SANDBOX_UID, SANDBOX_USER_HOME } from './sandbox-identity.js';
 
 const log = logger.child({ module: 'sandbox-runner' });
 
@@ -34,7 +34,6 @@ const DEFAULT_WRAPPER_WORKER_PATH =
 const DEFAULT_WRAPPER_SANDBOX_PATH = '/haive/wrappers';
 export const SANDBOX_WORKDIR = '/haive/workdir';
 export const SANDBOX_USER = 'node';
-export const SANDBOX_USER_HOME = '/home/node';
 const DEFAULT_WORKDIR = SANDBOX_WORKDIR;
 // uid:gid the sandbox runs as (SANDBOX_USER = node). A captured-log dir is chowned
 // to this so the CLI (running as node) can write its log into the writable mount.
