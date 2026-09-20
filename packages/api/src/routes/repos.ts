@@ -1462,6 +1462,47 @@ export function classifyResetFailure(err: unknown): { reason: string; io: boolea
 }
 
 /**
+ * Retire the artifact rows a reset invalidated, and only those.
+ *
+ * `keptPaths` is what the reset LEFT ALONE — kept files, refused links, and anything an IO error
+ * stopped it reaching. Their rows stay live, and that is the point: a partial reset used to
+ * supersede everything, which dropped the `written_hash` that was the only evidence Haive wrote
+ * the surviving file. With the epoch also excluding the old step provenance, no later reset could
+ * claim it — the file stayed on disk for good, and `writeIfAllowed` skips an existing file, so a
+ * re-onboarding never refreshed it either. A live row beside a file that is still there is simply
+ * true.
+ *
+ * Safe against the `(repository_id, disk_path) WHERE superseded_at IS NULL` unique index because
+ * `12-post-onboarding` supersedes the paths it is about to insert before inserting them, the same
+ * defensive shape `02-upgrade-apply` uses.
+ *
+ * Exported for the live-DB smoke: this is a WHERE clause, and the unit suite runs against no
+ * database, so dropping the `notInArray` fails nothing there.
+ */
+export async function supersedeResetArtifacts(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+  keptPaths: string[],
+): Promise<void> {
+  await db
+    .update(schema.onboardingArtifacts)
+    .set({ supersededAt: new Date() })
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+        isNull(schema.onboardingArtifacts.supersededAt),
+        // Spelled out rather than leaning on what `notInArray` does with an empty list. MEASURED,
+        // drizzle renders that harmlessly today and the blanket retire still happens — a mutant
+        // removing this branch kills no test — but "retire everything" is the behaviour this line
+        // is responsible for, and it should not rest on a library edge case nothing asserts.
+        ...(keptPaths.length > 0
+          ? [notInArray(schema.onboardingArtifacts.diskPath, keptPaths)]
+          : []),
+      ),
+    );
+}
+
+/**
  * May a swept directory be removed WHOLE?
  *
  * `left` counts what could not be moved to the `-legacy` sibling, so zero normally means nothing
@@ -2252,19 +2293,20 @@ async function runOnboardingArtifactReset(
   });
 
   // Rows that name deleted files must not stay live: they feed the upgrade planner and the
-  // rollback, and `12-post-onboarding` inserts without conflict handling, so a re-onboarding
-  // would collide with the (repository_id, disk_path) WHERE superseded_at IS NULL unique index.
-  // Same defensive supersede as `02-upgrade-apply`. `applicableTemplateIds` is left alone — the
-  // next apply overwrites it, and with no live rows the banner already reads "not onboarded".
-  await db
-    .update(schema.onboardingArtifacts)
-    .set({ supersededAt: new Date() })
-    .where(
-      and(
-        eq(schema.onboardingArtifacts.repositoryId, id),
-        isNull(schema.onboardingArtifacts.supersededAt),
-      ),
-    );
+  // rollback. `applicableTemplateIds` is left alone — the next apply overwrites it, and with no
+  // live rows the banner already reads "not onboarded".
+  //
+  // A row for a path the reset LEFT ALONE stays live, and that is the point. A partial reset —
+  // the KB removed, one settings file unreadable — used to supersede everything, which dropped
+  // the `written_hash` that was the only evidence Haive wrote the surviving file. With the epoch
+  // also excluding the old step provenance, no later reset could claim it: the file stayed on
+  // disk for good, and `writeIfAllowed` skips an existing file, so a re-onboarding never
+  // refreshed it either. A live row beside a file that is still there is simply true.
+  //
+  // `12-post-onboarding` supersedes the paths it is about to insert before inserting them, the
+  // same defensive shape `02-upgrade-apply` uses, so these survivors cannot collide with the
+  // (repository_id, disk_path) WHERE superseded_at IS NULL unique index on a re-onboarding.
+  await supersedeResetArtifacts(db, id, [...new Set(skipped.map((s) => s.path))]);
   // The completion stamp cannot outlive the files it vouches for: this is the "start over"
   // action, and a repo whose artifacts are gone is not onboarded however it got marked.
   await db

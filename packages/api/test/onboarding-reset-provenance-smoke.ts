@@ -16,12 +16,16 @@
  * its repository, tasks and steps with it. Nothing else in the database is read or written.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { loadOnboardingTaskFacts } from '../src/lib/onboarding-state.js';
-import { loadLiveRootWriters, loadProvenanceSteps } from '../src/routes/repos.js';
+import {
+  loadLiveRootWriters,
+  loadProvenanceSteps,
+  supersedeResetArtifacts,
+} from '../src/routes/repos.js';
 
 const log = logger.child({ module: 'onboarding-reset-provenance-smoke' });
 
@@ -342,6 +346,76 @@ async function main(): Promise<void> {
       'the reset stamp round-trips and clears the onboarded stamp',
       row?.onboardingResetAt?.getTime() === RESET_AT.getTime() && row?.onboardedAt === null,
       row,
+    );
+
+    // A partial reset must keep the evidence for what it could NOT remove. Superseding those rows
+    // drops the `written_hash` that is the only proof Haive wrote the surviving file, and with the
+    // epoch excluding the old step provenance no later reset can claim it — the file stays on disk
+    // for good, and `writeIfAllowed` skips an existing file, so a re-onboarding never refreshes it.
+    // The rows need a task to hang off; any terminal one on this repository will do.
+    const supersedeTaskId = randomUUID();
+    await db.insert(schema.tasks).values({
+      id: supersedeTaskId,
+      userId,
+      repositoryId: repoId,
+      type: 'onboarding',
+      title: 'smoke supersede anchor',
+      status: 'completed',
+      createdAt: AFTER_RESET,
+      updatedAt: AFTER_RESET,
+    });
+    const artifactRow = async (diskPath: string, hash: string): Promise<string> => {
+      const inserted = await db
+        .insert(schema.onboardingArtifacts)
+        .values({
+          userId,
+          repositoryId: repoId,
+          taskId: supersedeTaskId,
+          diskPath,
+          templateId: `agent.${diskPath}`,
+          templateKind: 'agent',
+          templateSchemaVersion: 1,
+          templateContentHash: hash,
+          writtenHash: hash,
+          sourceStepId: '07-generate-files',
+        })
+        .returning({ id: schema.onboardingArtifacts.id });
+      return inserted[0]!.id;
+    };
+    const goneId = await artifactRow('.claude/agents/removed.md', 'hash-gone');
+    const keptId = await artifactRow('.claude/settings.json', 'hash-kept');
+
+    await supersedeResetArtifacts(db, repoId, ['.claude/settings.json']);
+
+    const liveNow = await db
+      .select({ id: schema.onboardingArtifacts.id })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repoId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    const liveIds = liveNow.map((r) => r.id);
+    check('a row for a path the reset removed is retired', !liveIds.includes(goneId), liveIds);
+    check('a row for a path it could not touch stays live', liveIds.includes(keptId), liveIds);
+
+    // And with nothing kept, it must still retire everything — an empty list becoming `NOT IN ()`
+    // would match no rows and supersede none, the exact inverse of the intent.
+    await supersedeResetArtifacts(db, repoId, []);
+    const afterBlanket = await db
+      .select({ id: schema.onboardingArtifacts.id })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repoId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    check(
+      'an empty kept-list retires every remaining row',
+      afterBlanket.length === 0,
+      afterBlanket,
     );
   } finally {
     // Cascade takes the repositories, tasks and steps with it.
