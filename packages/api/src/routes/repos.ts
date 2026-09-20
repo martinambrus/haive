@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  errno,
   isPathContainmentError,
   lstatNoFollow,
   openFileNoFollow,
@@ -1436,6 +1437,53 @@ export interface OnboardingResetOutcome {
   quarantined: Array<{ from: string; to: string }>;
 }
 
+/**
+ * How a per-item failure inside the walk is dispositioned.
+ *
+ * `null` means it is NOT the walk's to absorb — a `TypeError` is a bug and must reach the caller.
+ * Everything else becomes a `skipped` entry, because a refusal is a per-item outcome and an IO
+ * failure is one for exactly the same reason: one bad entry must not discard the twenty beside it.
+ * Letting an IO error out aborts the route BEFORE the caller supersedes the artifact rows and
+ * stamps the epoch, which leaves files deleted, rows live and no epoch.
+ *
+ * Containment is tested FIRST and that order is load-bearing: `PathContainmentError.code` is the
+ * string `EPATHCONTAINMENT`, so `errno` answers for it too and a reversed order would report every
+ * refused link as an IO failure — which would then trip the empty-walk floor below.
+ *
+ * Pure and exported so the branch is unit-testable. The alternative is a fixture that chmods a
+ * directory, and that silently proves nothing wherever the tests run as root.
+ */
+export function classifyResetFailure(err: unknown): { reason: string; io: boolean } | null {
+  if (isPathContainmentError(err)) return { reason: err.reason, io: false };
+  const code = errno(err);
+  return code === undefined ? null : { reason: code, io: true };
+}
+
+/**
+ * Did this walk do nothing at all, having failed to read the tree?
+ *
+ * The caller supersedes every artifact row and stamps `onboarding_reset_at` on what the walk
+ * returns, and doing that over an INTACT tree is unrecoverable: the epoch excludes every prior
+ * step row from `loadProvenanceSteps` for good, so the next reset can claim nothing, removes
+ * nothing and keeps everything — with the repository still reading `onboarded`, because
+ * `resolveOnboardingVerdict` also ORs `hasCompleted`. Today's torn state self-heals by comparison;
+ * a live row whose file is gone simply fails `artifactMatchesDisk`.
+ *
+ * Keyed on an IO failure HAVING OCCURRED, never on "nothing was removed": a second reset over an
+ * already-clean tree also removes nothing, and must stay the no-op it has always been.
+ */
+export function resetTouchedNothing(
+  outcome: Pick<OnboardingResetOutcome, 'removed' | 'cleaned' | 'quarantined'>,
+  ioFailures: number,
+): boolean {
+  return (
+    ioFailures > 0 &&
+    outcome.removed.length === 0 &&
+    outcome.cleaned.length === 0 &&
+    outcome.quarantined.length === 0
+  );
+}
+
 /** What the caller could establish about what Haive wrote here. Every field is evidence, not
  *  policy: the reset removes what it covers and keeps what it does not. */
 export interface OnboardingResetProvenance {
@@ -1470,6 +1518,9 @@ export async function resetOnboardingArtifacts(
   const cleaned: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
   const quarantined: Array<{ from: string; to: string }> = [];
+  /** Skips caused by an IO failure rather than by policy. Only these make an empty walk a
+   *  failure — a second reset over an already-clean tree also removes nothing and is a no-op. */
+  let ioFailures = 0;
 
   // A refusal is a per-item outcome, not a floor: one linked directory must not discard the
   // removal of the twenty beside it, and the reset says what it left alone instead of reporting
@@ -1478,8 +1529,10 @@ export async function resetOnboardingArtifacts(
     try {
       await run();
     } catch (err) {
-      if (!isPathContainmentError(err)) throw err;
-      skipped.push({ path: rel, reason: err.reason });
+      const verdict = classifyResetFailure(err);
+      if (verdict === null) throw err;
+      if (verdict.io) ioFailures += 1;
+      skipped.push({ path: rel, reason: verdict.reason });
     }
   };
   // `repairPermissions` on every item, as the whole-`.claude` removal this replaced had: it fires
@@ -1757,6 +1810,15 @@ export async function resetOnboardingArtifacts(
       if (result.deleted) removed.push(rel);
       else if (result.changed) cleaned.push(rel);
     });
+  }
+
+  if (resetTouchedNothing({ removed, cleaned, quarantined }, ioFailures)) {
+    throw new HttpError(
+      500,
+      `The repository could not be read, so nothing was reset: ${skipped
+        .map((s) => `${s.path} (${s.reason})`)
+        .join(', ')}`,
+    );
   }
 
   return { removed, cleaned, skipped, quarantined };

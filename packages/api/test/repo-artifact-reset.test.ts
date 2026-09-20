@@ -3,13 +3,15 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { normalizeContent, sha256Hex } from '@haive/shared';
-import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { PathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { inventoryDirsFromCatalog } from '../src/lib/tool-inventory.js';
 import {
   checkOnboardingMarkers,
+  classifyResetFailure,
   collectWrittenCliContent,
   resetOnboardingArtifacts,
+  resetTouchedNothing,
   resolveMergedTasks,
   stripHaiveContent,
 } from '../src/routes/repos.js';
@@ -1167,5 +1169,58 @@ describe('resetOnboardingArtifacts', () => {
       '.claude/agents-legacy',
       '.claude/mcp_settings.json',
     ]);
+  });
+});
+
+describe('classifyResetFailure', () => {
+  it('absorbs a refused link as a policy skip, not an IO failure', () => {
+    const err = new PathContainmentError('link', '/anchor', 'a/b', 'a');
+    expect(classifyResetFailure(err)).toEqual({ reason: 'link', io: false });
+  });
+
+  it('absorbs a filesystem error as an IO skip carrying its errno', () => {
+    expect(classifyResetFailure(Object.assign(new Error('nope'), { code: 'EACCES' }))).toEqual({
+      reason: 'EACCES',
+      io: true,
+    });
+    // The code the KB editor actually collides with: removeChild's final rmdir rethrows it.
+    expect(classifyResetFailure(Object.assign(new Error('busy'), { code: 'ENOTEMPTY' }))).toEqual({
+      reason: 'ENOTEMPTY',
+      io: true,
+    });
+  });
+
+  it('refuses to absorb anything that is not a filesystem error', () => {
+    expect(classifyResetFailure(new TypeError('cannot read properties of undefined'))).toBeNull();
+    expect(classifyResetFailure('a bare string')).toBeNull();
+    expect(classifyResetFailure(null)).toBeNull();
+  });
+
+  it('does not count a containment refusal as IO, whatever its code reads like', () => {
+    // PathContainmentError.code is the STRING 'EPATHCONTAINMENT', so errno answers for it too.
+    // Testing containment second would report every refused link as an IO failure and trip the
+    // empty-walk floor on a tree that is merely full of symlinks.
+    const err = new PathContainmentError('out-of-tree', '/anchor', 'x', 'x');
+    expect(classifyResetFailure(err)?.io).toBe(false);
+  });
+});
+
+describe('resetTouchedNothing', () => {
+  const nothing = { removed: [], cleaned: [], quarantined: [] };
+
+  it('is false for a clean tree, which legitimately removes nothing', () => {
+    expect(resetTouchedNothing(nothing, 0)).toBe(false);
+  });
+
+  it('is true only when an IO failure left the walk with nothing done', () => {
+    expect(resetTouchedNothing(nothing, 1)).toBe(true);
+  });
+
+  it('is false whenever the walk achieved anything at all', () => {
+    expect(resetTouchedNothing({ ...nothing, removed: ['.claude/agents'] }, 3)).toBe(false);
+    expect(resetTouchedNothing({ ...nothing, cleaned: ['AGENTS.md'] }, 3)).toBe(false);
+    expect(resetTouchedNothing({ ...nothing, quarantined: [{ from: 'a', to: 'b' }] }, 3)).toBe(
+      false,
+    );
   });
 });

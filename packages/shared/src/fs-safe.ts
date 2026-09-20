@@ -125,7 +125,10 @@ const fdPath = (fd: number): string => `/proc/self/fd/${fd}`;
 const at = (dirFd: number, name: string): string => `${fdPath(dirFd)}/${name}`;
 const below = (real: string, name: string): string =>
   real === '/' ? `/${name}` : `${real}/${name}`;
-const errno = (err: unknown): string | undefined => {
+/** A Node filesystem error's `code`, or undefined for anything that is not one. Exported because
+ *  callers that turn an IO failure into a per-item outcome need the same test this module uses,
+ *  and two copies of "is this an fs error" is the disagreement that makes one of them wrong. */
+export const errno = (err: unknown): string | undefined => {
   const code = (err as { code?: unknown } | null)?.code;
   return typeof code === 'string' ? code : undefined;
 };
