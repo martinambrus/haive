@@ -84,12 +84,14 @@ function fakeDbAmbiguousRenewal(rowStamp: 'attempted' | 'stranger'): {
 } {
   const writes: Recorded[] = [];
   let attempted: Date | null = null;
+  let owner: string | null = null;
   const state = { selects: 0 };
   const db = {
     update: () => ({
-      set: (values: { rootClaimedAt: Date | null }) => ({
+      set: (values: { rootClaimedAt: Date | null; rootClaimOwner?: string | null }) => ({
         where: () => {
           const first = writes.length === 0;
+          if (first) owner = values.rootClaimOwner ?? null;
           if (!first && values.rootClaimedAt !== null) attempted = values.rootClaimedAt;
           let settle!: () => void;
           const gate = new Promise<void>((resolve) => {
@@ -112,9 +114,12 @@ function fakeDbAmbiguousRenewal(rowStamp: 'attempted' | 'stranger'): {
         where: () => ({
           limit: async () => {
             state.selects += 1;
-            const claimedAt =
-              rowStamp === 'attempted' ? attempted : new Date('2030-01-01T00:00:00Z');
-            return [{ claimedAt }];
+            // Ownership decides it now: 'stranger' is somebody ELSE'S claim, not merely another
+            // timestamp, which is the whole point of the token.
+            if (rowStamp === 'stranger') {
+              return [{ claimedAt: new Date('2030-01-01T00:00:00Z'), owner: 'somebody-else' }];
+            }
+            return [{ claimedAt: attempted, owner }];
           },
         }),
       }),
@@ -650,6 +655,7 @@ describe('acquireRootClaim', () => {
     vi.useFakeTimers();
     const writes: Recorded[] = [];
     let held: Date | null = null;
+    let heldOwner: string | null = null;
     let failures = 2; // the first two clears fail BEFORE committing
     const db = {
       update: () => ({
@@ -660,7 +666,10 @@ describe('acquireRootClaim', () => {
             const gate = new Promise<void>((resolve) => {
               settle = resolve;
             });
-            if (idx === 0) held = values.rootClaimedAt;
+            if (idx === 0) {
+              held = values.rootClaimedAt;
+              heldOwner = (values as { rootClaimOwner?: string | null }).rootClaimOwner ?? null;
+            }
             writes.push({ stamp: values.rootClaimedAt, settle });
             return {
               returning: async () => {
@@ -679,7 +688,7 @@ describe('acquireRootClaim', () => {
       }),
       select: () => ({
         from: () => ({
-          where: () => ({ limit: async () => [{ claimedAt: held }] }),
+          where: () => ({ limit: async () => [{ claimedAt: held, owner: heldOwner }] }),
         }),
       }),
     } as unknown as Database;
@@ -864,6 +873,63 @@ describe('acquireRootClaim', () => {
 
     // The release learned it, so the caller can report it.
     expect(handle!.lost()).toBe(true);
+  });
+
+  it('does not adopt a SUCCESSOR claim that shares its millisecond with our renewal', async () => {
+    // The likeliest place for a stamp collision, and the one my own reasoning missed: a takeover
+    // happens precisely WHILE the expired holder is still renewing, so the successor's claim and
+    // the old holder's renewal attempt land in the same moment. If they share a millisecond, a
+    // timestamp-only read-back reads the successor's claim as its own renewal having landed — the
+    // old reset keeps working, and its release later clears the successor's claim.
+    vi.useFakeTimers();
+    const writes: Recorded[] = [];
+    let renewAttempt: Date | null = null;
+    const db = {
+      update: () => ({
+        set: (values: { rootClaimedAt: Date | null }) => ({
+          where: () => {
+            const idx = writes.length;
+            if (idx === 1) renewAttempt = values.rootClaimedAt;
+            let settle!: () => void;
+            const gate = new Promise<void>((resolve) => {
+              settle = resolve;
+            });
+            writes.push({ stamp: values.rootClaimedAt, settle });
+            return {
+              returning: async () => {
+                await gate;
+                if (idx === 0) return [{ id: 'repo-1' }]; // our claim
+                throw new Error('renew ack lost'); // ambiguous, racing a takeover
+              },
+            };
+          },
+        }),
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            // The SUCCESSOR's claim, carrying the very millisecond our renewal tried to write.
+            limit: async () => [{ claimedAt: renewAttempt, owner: 'the-successor' }],
+          }),
+        }),
+      }),
+    } as unknown as Database;
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'rebuild');
+    writes[0]!.settle();
+    const handle = await acquiring;
+
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // An identical stamp under a different owner is a takeover, not our renewal landing.
+    expect(handle!.lost()).toBe(true);
+
+    // And a lost lease clears nothing, so the successor's claim is left alone.
+    const before = writes.length;
+    await handle!.release();
+    expect(writes.length).toBe(before);
   });
 
   it('never runs two renewals at once', async () => {

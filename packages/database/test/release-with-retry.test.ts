@@ -21,7 +21,13 @@ const STAMP = new Date('2026-09-20T12:00:00Z');
 
 /** A db whose clear behaves as `script` says, one entry per attempt, and whose read-back reports
  *  `rowHolds`. `'commit'` clears the row, `'miss'` is a clean no-match, `'throw'` fails. */
-function fakeDb(script: Array<'commit' | 'miss' | 'throw'>, rowHolds: Date | null) {
+const OWNER = 'owner-under-test';
+
+function fakeDb(
+  script: Array<'commit' | 'miss' | 'throw'>,
+  rowHolds: Date | null,
+  rowOwner: string | null = OWNER,
+) {
   const state = { attempts: 0, reads: 0, cleared: false };
   const db = {
     update: () => ({
@@ -43,7 +49,7 @@ function fakeDb(script: Array<'commit' | 'miss' | 'throw'>, rowHolds: Date | nul
         where: () => ({
           limit: async () => {
             state.reads += 1;
-            return [{ claimedAt: state.cleared ? null : rowHolds }];
+            return [{ claimedAt: state.cleared ? null : rowHolds, owner: rowOwner }];
           },
         }),
       }),
@@ -58,7 +64,7 @@ describe('releaseWithRetry', () => {
     // other candidate to fall through to — so giving up here left a finished job holding the
     // repository for the rest of the stale window.
     const { db, state } = fakeDb(['throw', 'throw', 'commit'], STAMP);
-    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('free');
+    expect(await releaseWithRetry(db, 'repo-1', STAMP, OWNER)).toBe('free');
     expect(state.attempts).toBe(3);
   });
 
@@ -66,50 +72,57 @@ describe('releaseWithRetry', () => {
     // A clean no-match over an empty row: somebody freed it, nothing left to do, and nothing was
     // taken from us.
     const { db, state } = fakeDb(['miss'], null);
-    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('free');
+    expect(await releaseWithRetry(db, 'repo-1', STAMP, OWNER)).toBe('free');
     expect(state.attempts).toBe(1);
   });
 
-  it('reports a TAKEOVER when a clean no-match finds a foreign stamp', async () => {
+  it('reports a TAKEOVER when a clean no-match finds ANOTHER OWNER', async () => {
     // The distinction the caller needs and an unmatched clear cannot give on its own. If the
     // event loop was blocked past the stale window, another writer claimed the row before the
     // renewal timer ran again, and this release is the first thing to learn it — so the outcome
     // has to say "taken over" rather than merely "not this stamp", or `lost()` answers false and
     // the only warning that two writers touched the tree is never emitted.
     const other = new Date('2030-01-01T00:00:00Z');
-    const { db, state } = fakeDb(['miss'], other);
-    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('taken-over');
+    const { db, state } = fakeDb(['miss'], other, 'somebody-else');
+    expect(await releaseWithRetry(db, 'repo-1', STAMP, OWNER)).toBe('taken-over');
     expect(state.attempts).toBe(1);
   });
 
   it('reports a takeover found by the read-back after a failed clear, without retrying', async () => {
-    // The write failed AND the row is held by a different stamp: settled, not ours to clear, and
+    // The write failed AND the row belongs to somebody else: settled, not ours to clear, and
     // established as a takeover. Retrying would be pointless at best.
     const other = new Date('2030-01-01T00:00:00Z');
-    const { db, state } = fakeDb(['throw'], other);
-    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('taken-over');
+    const { db, state } = fakeDb(['throw'], other, 'somebody-else');
+    expect(await releaseWithRetry(db, 'repo-1', STAMP, OWNER)).toBe('taken-over');
     expect(state.attempts).toBe(1);
   });
 
   it('does not call ANOTHER STAMP OF OURS a takeover', async () => {
-    // The false alarm the previous shape produced, and the direction that matters most: `lost()`
-    // is the signal that two writers touched one tree, so reporting it wrongly is worse than
-    // missing it. An ambiguous renewal leaves the row holding a CANDIDATE while `current` is the
-    // older stamp — so clearing `current` misses and finds a value that is ours, not a
-    // stranger's, and the very next candidate clear would have proved it.
+    // The false alarm an earlier shape produced, and the direction that matters most: `lost()` is
+    // the signal that two writers touched one tree, so reporting it wrongly is worse than missing
+    // it. An ambiguous renewal leaves the row holding a CANDIDATE while `current` is the older
+    // stamp, so clearing `current` misses and finds a value it does not recognise — which the
+    // OWNER settles outright, where no comparison of timestamps can.
     const ourCandidate = new Date('2026-09-20T12:00:05Z');
-    const { db } = fakeDb(['miss'], ourCandidate);
-    expect(await releaseWithRetry(db, 'repo-1', STAMP, [STAMP, ourCandidate])).toBe('not-ours');
-    // And with the same row value NOT among ours, it is a takeover again.
-    const { db: foreign } = fakeDb(['miss'], ourCandidate);
-    expect(await releaseWithRetry(foreign, 'repo-1', STAMP, [STAMP])).toBe('taken-over');
+    const ours = fakeDb(['miss'], ourCandidate, OWNER);
+    expect(await releaseWithRetry(ours.db, 'repo-1', STAMP, OWNER)).toBe('not-ours');
+
+    // The SAME row value, written by somebody else, is a takeover — so this is the token doing
+    // the work rather than the stamp.
+    const theirs = fakeDb(['miss'], ourCandidate, 'somebody-else');
+    expect(await releaseWithRetry(theirs.db, 'repo-1', STAMP, OWNER)).toBe('taken-over');
+
+    // Claimed before the owner column existed: unprovable, and a false takeover is worse than a
+    // missing one, so it is not reported as one.
+    const legacy = fakeDb(['miss'], ourCandidate, null);
+    expect(await releaseWithRetry(legacy.db, 'repo-1', STAMP, OWNER)).toBe('not-ours');
   });
 
   it('is bounded when nothing ever settles', async () => {
     // A database failing every write is not rescued by trying harder; the stale window is the
     // backstop for that, and a caller is waiting on this at the end of the work.
     const { db, state } = fakeDb(['throw', 'throw', 'throw', 'throw', 'throw'], STAMP);
-    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('still-ours');
+    expect(await releaseWithRetry(db, 'repo-1', STAMP, OWNER)).toBe('still-ours');
     expect(state.attempts).toBe(3);
   });
 
@@ -140,7 +153,7 @@ describe('releaseWithRetry', () => {
       }),
     } as unknown as Database;
 
-    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('free');
+    expect(await releaseWithRetry(db, 'repo-1', STAMP, OWNER)).toBe('free');
     expect(state.attempts).toBe(3);
   });
 });
