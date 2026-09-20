@@ -609,7 +609,6 @@ async function foldCoverageResults(
         {
           repositoryId: detected.repositoryId!,
           sourceTaskId: ctx.taskId,
-          retryable: false,
           ...(self ? { selfNodeId: self } : {}),
         },
       );

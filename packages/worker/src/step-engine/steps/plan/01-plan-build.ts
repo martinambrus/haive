@@ -716,7 +716,6 @@ export function createPlanBuildStep(
               repositoryId,
               sourceTaskId: ctx.taskId,
               derivedAtCommit,
-              retryable: args.isFinalMiningAttempt !== true,
               ...(expanding ? { selfNodeId: expanding } : {}),
             },
           );

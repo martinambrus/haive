@@ -87,7 +87,7 @@ describe('plan build wave re-roll', () => {
 
   it('still re-rolls a one-agent wave whose reply wrote nothing', async () => {
     vi.mocked(applyAgentPatch).mockRejectedValueOnce(
-      new Error('plan patch rejected: plan patch failed validation'),
+      new Error('plan patch failed validation: ops.0.title: too long'),
     );
     const err = await foldOneAgentWave();
     expect(err).toBeInstanceOf(MiningRetryError);

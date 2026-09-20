@@ -144,7 +144,7 @@ function bareNodeRef(ref: string): string {
  *
  *  The applier reads such a ref as a temp id, so as a CREATE. An ordering pass can
  *  never create — `keepOrderingOps` strips every field but `ordinal` — so the op could
- *  only fail "needs a title", and with `retryable: false` that took the whole reply.
+ *  only fail "needs a title", and that failure took the whole reply with it.
  *  MEASURED: one ordering reply lost that way to a garbled id. */
 function namesNoNode(op: unknown): boolean {
   const candidate = op as { op?: unknown; nodeRef?: unknown };
@@ -541,7 +541,6 @@ export async function foldSequenceResults(
         {
           repositoryId,
           sourceTaskId: ctx.taskId,
-          retryable: false,
           ...(self ? { selfNodeId: self } : {}),
         },
       );
