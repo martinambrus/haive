@@ -1661,6 +1661,14 @@ the fifteen-minute mark. With renewal, expiry means "the holder stopped renewing
 abandonment actually is. Use `acquireRootClaim`, not the bare `claimRepositoryRoot`, for anything
 that is not certainly shorter than the window.
 
+**Renewal ends at `release()` and NOWHERE else.** An elapsed-time cap was added here and reverted,
+so do not re-add it: any deadline eventually expires a holder that is still rewriting the tree,
+which is the catastrophe above with extra steps. The worry it answered — a handle never released,
+renewing forever — is the lesser failure by every measure: it needs a caller to skip the `finally`
+all of them have, it is visible because the repository refuses and names what holds it, and it
+ends at the next process restart since the timer is `unref`ed. `root-claim-lease.test.ts` fails if
+a cap comes back.
+
 The claim is released with the STAMP it took, and renewal is conditional on it too: a holder whose
 lease DID expire and was taken over learns it lost rather than clawing it back or clearing its
 successor's claim — silently, and exactly on the slowest trees, which are the ones that reach the

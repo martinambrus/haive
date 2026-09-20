@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ROOT_CLAIM_MAX_MS,
   ROOT_CLAIM_RENEW_MS,
   ROOT_CLAIM_STALE_MS,
   isRootClaimLive,
@@ -52,14 +51,6 @@ describe('the lease constants', () => {
     // the holder is still walking it; at a third of the window, two can be lost first.
     expect(ROOT_CLAIM_RENEW_MS).toBeLessThan(ROOT_CLAIM_STALE_MS / 2);
     expect(ROOT_CLAIM_RENEW_MS).toBeGreaterThan(0);
-  });
-
-  it('gives up renewing well after the slowest legitimate holder', () => {
-    // Renewal introduces a failure the fixed expiry could not have — a handle never released, in
-    // a process that stays alive, renewing forever and blocking the repository PERMANENTLY. The
-    // cap makes that bounded. It has to sit far above the window it is bounding, or a normal
-    // holder would hit it.
-    expect(ROOT_CLAIM_MAX_MS).toBeGreaterThan(ROOT_CLAIM_STALE_MS * 4);
   });
 });
 

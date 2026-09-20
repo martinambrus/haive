@@ -85,6 +85,38 @@ describe('acquireRootClaim', () => {
     expect(writes[2]!.stamp).toBeNull();
   });
 
+  it('keeps renewing for as long as the holder works, with no elapsed-time cap', async () => {
+    // A cap was tried and reverted under review. `gitClone` has no timeout and `copyTree` is
+    // unbounded by repository size, so ANY elapsed-time deadline eventually expires a holder that
+    // is still rewriting the tree — and a second writer then claims and replaces the same tree,
+    // which is the catastrophe this whole mechanism exists to prevent. Renewal ends at
+    // `release()` and nowhere else.
+    vi.useFakeTimers();
+    const { db, writes } = fakeDb();
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'rebuild');
+    writes[0]!.settle();
+    const handle = await acquiring;
+
+    // Four hours of work — double any cap that was ever proposed here.
+    const ticks = Math.ceil((4 * 60 * 60 * 1000) / ROOT_CLAIM_RENEW_MS);
+    for (let i = 0; i < ticks; i += 1) {
+      await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+      writes.at(-1)!.settle();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    // Still renewing: one write per tick beyond the initial claim.
+    expect(writes.length).toBe(ticks + 1);
+    expect(writes.at(-1)!.stamp).toBeInstanceOf(Date);
+
+    const releasing = handle!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    writes.at(-1)!.settle();
+    await releasing;
+    // And the release still clears, rather than stamping.
+    expect(writes.at(-1)!.stamp).toBeNull();
+  });
+
   it('never runs two renewals at once', async () => {
     vi.useFakeTimers();
     const { db, writes } = fakeDb();
