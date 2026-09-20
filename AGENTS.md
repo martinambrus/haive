@@ -1643,19 +1643,30 @@ survey that established this is worth not repeating:
    — exactly what the reset removes recursively — with no task-status check at all, because it
    exists to review knowledge gates on failed and completed tasks.
 
-**`repositories.onboarding_reset_claimed_at` is a CLAIM, not a lock, and the difference is the
-whole design.** The reset takes it with one atomic UPDATE before reading anything and releases it
-on every exit path; `refresh-tree`, the three `rm -rf` handlers and the knowledge-file editor all
-refuse while it is held. A lock must be HELD across the work it protects, and both places to hold
-one cost more than the race: the repo worker and the task worker run in ONE process on ONE
-`max: 10` pool, so a repo job holding a connection across `rm -rf` + `copyTree` at concurrency 5
-deadlocks the pool; and `repo-queue.ts` sets neither `lockDuration` nor `maxStalledCount`, so a
-handler blocked past BullMQ's 30s default is failed as STALLED without running its catch —
-stranding `status = 'cloning'` with no reconciler anywhere to clear it. (That last one is a
-PRE-EXISTING bug in its own right, and the reason this must never become a lock.) A
-`repo_status` enum value expresses the same claim and was refused because Postgres cannot drop an
-enum value: an irreversible migration for a reversible problem. The cost of a row over a lock is
-that a crashed API leaves it set, which `RESET_CLAIM_STALE_MS` bounds — generously, since expiring
+**`repositories.root_claimed_at` is a CLAIM, not a lock, and it is RECIPROCAL.** Both the reset
+and the three repo-queue handlers that `rm -rf` the root take the same claim
+(`claimRepositoryRoot`, `'reset' | 'rebuild'`), so whichever arrives second is refused in either
+direction; `refresh-tree` and the knowledge-file editor refuse while it is held. The handlers HOLD
+it across their destructive work rather than checking once before it — a one-directional check
+leaves the window where a handler has already passed it and the reset claims the row before
+`rm(dest)` runs, and both then walk the same tree. `root_claim_kind` exists only so a refusal can
+name what it is waiting for; nothing branches on it.
+
+The claim is released with the STAMP it took (`releaseRepositoryRoot(db, id, claimedAt)`): a
+holder that outran `ROOT_CLAIM_STALE_MS` has already had its claim taken over, and an
+unconditional clear would strip the protection from the job that took over — silently, and
+exactly on the slowest trees, which are the ones that reach the window at all.
+
+A lock must be HELD across the work it protects, and both places to hold one cost more than the
+race: the repo worker and the task worker run in ONE process on ONE `max: 10` pool, so a repo job
+holding a connection across `rm -rf` + `copyTree` at concurrency 5 deadlocks the pool; and
+`repo-queue.ts` sets neither `lockDuration` nor `maxStalledCount`, so a handler blocked past
+BullMQ's 30s default is failed as STALLED without running its catch — stranding
+`status = 'cloning'` with no reconciler anywhere to clear it. (That last one is a PRE-EXISTING bug
+in its own right, and the reason this must never become a lock.) A `repo_status` enum value
+expresses the same claim and was refused because Postgres cannot drop an enum value: an
+irreversible migration for a reversible problem. The cost of a row over a lock is that a writer
+killed mid-job leaves it set, which `ROOT_CLAIM_STALE_MS` bounds — generously, since expiring
 early re-admits the `rm -rf` the claim exists to exclude.
 
 **A filesystem error inside the walk is a per-item outcome, not a route failure.** It used to
@@ -1678,8 +1689,11 @@ completion NEWER than `onboarding_reset_at`, and "no run was ever started here" 
 once a reset exists — a reset IS a run started and taken back. `mark-onboarded` gets its own rule
 rather than that comparison (it has no task to compare against) and refuses while a reset is
 unanswered, because it is the documented escape hatch for a repo whose markers are on disk, which
-is precisely what a reset that could not read the tree leaves. With no epoch every term is
-byte-identical to what it was, which is why none of this needed a backfill.
+is precisely what a reset that could not read the tree leaves. Its UPDATE also CARRIES the epoch
+it validated (`IS NOT DISTINCT FROM`, so the null case is covered) and refuses under a live root
+claim: validating and then writing unconditionally is the same read-then-act shape the claim
+exists to remove, and a reset landing in between would have its work undone by hand. With no
+epoch every term is byte-identical to what it was, which is why none of this needed a backfill.
 
 Left alone deliberately: `landPlanMerge`'s `git merge --ff-only` in the root, which refuses rather
 than overwriting local changes and only touches paths differing between HEAD and target.
