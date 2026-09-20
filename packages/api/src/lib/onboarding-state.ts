@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { Database } from '../db.js';
 
@@ -18,6 +18,40 @@ export const LIVE_TASK_STATUSES = [
   'waiting_user',
   'waiting_pr',
 ] as const;
+
+/**
+ * The repositories among `repositoryIds` that still hold at least one LIVE `onboarding_artifacts`
+ * row.
+ *
+ * Only `12-post-onboarding` inserts those rows and a reset supersedes every one of them, so a
+ * live row means a run reached step 12 of 27 since the last reset. That is the evidence
+ * `mark-onboarded` needs and a completion date cannot give it: the run it exists for failed at a
+ * LATER step and therefore has no `completed_at` at all.
+ *
+ * One query for the whole page, like `loadOnboardingTaskFacts` beside it.
+ */
+export async function loadRepositoriesWithLiveArtifacts(
+  db: Database,
+  userId: string,
+  repositoryIds: string[],
+): Promise<Set<string>> {
+  const found = new Set<string>();
+  if (repositoryIds.length === 0) return found;
+
+  const rows = await db
+    .selectDistinct({ repositoryId: schema.onboardingArtifacts.repositoryId })
+    .from(schema.onboardingArtifacts)
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.userId, userId),
+        inArray(schema.onboardingArtifacts.repositoryId, repositoryIds),
+        isNull(schema.onboardingArtifacts.supersededAt),
+      ),
+    );
+
+  for (const row of rows) if (row.repositoryId) found.add(row.repositoryId);
+  return found;
+}
 
 /** What the tasks table knows about onboarding for one repository. */
 export interface OnboardingTaskFacts {
@@ -139,10 +173,16 @@ export function resolveOnboardingVerdict(input: {
   onboardedAt: Date | null;
   /** `repositories.onboarding_reset_at`. Null on every repo nobody has reset. */
   onboardingResetAt?: Date | null;
+  /** Whether any LIVE `onboarding_artifacts` row exists for this repository. A reset supersedes
+   *  every row, and only `12-post-onboarding` writes them, so a live row is proof that a run got
+   *  through step 12 of 27 SINCE the reset. Omitted defaults to false, which is exactly the
+   *  behaviour before this existed. */
+  hasLiveArtifacts?: boolean;
   facts: OnboardingTaskFacts;
 }): OnboardingVerdict {
   const { missing, onboardedAt, facts } = input;
   const onboardingResetAt = input.onboardingResetAt ?? null;
+  const hasLiveArtifacts = input.hasLiveArtifacts ?? false;
   const markersPresent = missing.length === 0;
   const inProgressTaskId = facts.liveTaskId;
 
@@ -163,10 +203,19 @@ export function resolveOnboardingVerdict(input: {
     inProgressTaskId === null &&
     (onboardedAt !== null || completedSinceReset || neverStarted);
 
-  // Marking by hand must not undo a reset. `mark-onboarded` exists for a run that did the work
-  // and failed at a late step; a repo whose newest completed run predates its epoch is the
-  // opposite case, and offering the button there hands back exactly the state the reset removed.
-  const resetUnanswered = onboardingResetAt !== null && !completedSinceReset;
+  // Marking by hand must not undo a reset — but it must still WORK for the case it exists for.
+  //
+  // Requiring a post-reset COMPLETION made this route dead on every reset repository, and in
+  // exactly its documented case: a run that "did the work and then failed at a late step"
+  // (13-onboarding-push against a repo with no remote) never writes `completed_at` at all, while
+  // a run that DID complete is already stamped by `stampRepositoryOnboarded` and needs no button.
+  // So the condition that was meant to guard the hatch closed it.
+  //
+  // A live artifact row is the evidence that separates the two. The reset supersedes every row,
+  // and only `12-post-onboarding` writes them, so a live one means a run reached step 12 of 27
+  // SINCE the reset — which is what "did the work" means here. A repo whose markers are merely
+  // leftovers the reset could not remove has no such row and is still refused.
+  const resetUnanswered = onboardingResetAt !== null && !completedSinceReset && !hasLiveArtifacts;
 
   return {
     onboarded,

@@ -71,6 +71,7 @@ import {
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
+  loadRepositoriesWithLiveArtifacts,
 } from '../lib/onboarding-state.js';
 import { createRepoArchiveStream } from '../lib/repo-archive.js';
 import { inventoryDirsFromCatalog } from '../lib/tool-inventory.js';
@@ -180,6 +181,14 @@ repoRoutes.get('/', async (c) => {
     userId,
     rows.map((r) => r.id),
   );
+  // Which repositories still hold live artifact rows, so a reset repo whose re-run failed at a
+  // late step offers the manual button here too. Without it the list and the detail page would
+  // disagree about whether the button exists.
+  const withLiveArtifacts = await loadRepositoriesWithLiveArtifacts(
+    db,
+    userId,
+    rows.map((r) => r.id),
+  );
 
   const countsByRepo = new Map<string, { open: number; active: number }>();
   for (const row of taskCounts) {
@@ -206,6 +215,7 @@ repoRoutes.get('/', async (c) => {
             missing: markers.missing,
             onboardedAt: repo.onboardedAt,
             onboardingResetAt: repo.onboardingResetAt,
+            hasLiveArtifacts: withLiveArtifacts.has(repo.id),
             facts: onboardingFacts.get(repo.id) ?? NO_ONBOARDING_TASKS,
           })
         : null;
@@ -1590,9 +1600,17 @@ export function sweepSurvivors(outcome: 'ok' | 'refused' | 'io', left: number): 
 export function resetTouchedNothing(
   outcome: Pick<OnboardingResetOutcome, 'removed' | 'cleaned' | 'quarantined'>,
   ioFailures: number,
+  /** Recursive removals that ended in an IO failure. A recursive delete unlinks descendants as
+   *  it walks, so one that threw part-way has ALREADY modified the tree while appending nothing
+   *  to `removed` — the push happens only after `removeNoFollow` returns. Reading the completed
+   *  arrays as proof the tree is intact is then wrong in the one direction that cannot be
+   *  recovered: the route would abort without superseding, leaving live rows naming deleted
+   *  files and `onboarded_at` set over a half-removed tree. */
+  partialRemovals: number,
 ): boolean {
   return (
     ioFailures > 0 &&
+    partialRemovals === 0 &&
     outcome.removed.length === 0 &&
     outcome.cleaned.length === 0 &&
     outcome.quarantined.length === 0
@@ -1636,6 +1654,9 @@ export async function resetOnboardingArtifacts(
   /** Skips caused by an IO failure rather than by policy. Only these make an empty walk a
    *  failure — a second reset over an already-clean tree also removes nothing and is a no-op. */
   let ioFailures = 0;
+  /** Recursive removals that failed part-way, and have therefore already modified the tree
+   *  without recording anything. See `resetTouchedNothing`. */
+  let partialRemovals = 0;
 
   // A refusal is a per-item outcome, not a floor: one linked directory must not discard the
   // removal of the twenty beside it, and the reset says what it left alone instead of reporting
@@ -1665,14 +1686,20 @@ export async function resetOnboardingArtifacts(
   // only on EACCES/EPERM and only adds +0700 to the parent it already holds open, and a sweep of
   // entries must not fail where a removal of the directory around them succeeded.
   /** Ignored by most callers: a refused item is simply not removed, and is already reported. */
-  const remove = (rel: string, recursive: boolean): Promise<'ok' | 'refused' | 'io'> =>
-    guard(rel, async () => {
+  const remove = async (rel: string, recursive: boolean): Promise<'ok' | 'refused' | 'io'> => {
+    const verdict = await guard(rel, async () => {
       // The return value replaces a `pathExists` probe, and is strictly better evidence: the probe
       // could pass and the entry be gone — or replaced by a link — before the delete ran.
       if (await removeNoFollow(root, rel, { recursive, repairPermissions: true })) {
         removed.push(rel);
       }
     });
+    // A recursive delete unlinks as it walks, so one that failed part-way has already changed the
+    // tree and `removed` is empty only because the call never returned. Counted here rather than
+    // inferred later: nothing downstream can tell that apart from a walk that touched nothing.
+    if (recursive && verdict === 'io') partialRemovals += 1;
+    return verdict;
+  };
 
   // Settings first, so one the sweep must keep has its verdict before the sweep reaches it, and
   // one it may take is already gone from the listing.
@@ -1941,7 +1968,7 @@ export async function resetOnboardingArtifacts(
     });
   }
 
-  if (resetTouchedNothing({ removed, cleaned, quarantined }, ioFailures)) {
+  if (resetTouchedNothing({ removed, cleaned, quarantined }, ioFailures, partialRemovals)) {
     throw new HttpError(
       500,
       `The repository could not be read, so nothing was reset: ${skipped
@@ -2089,6 +2116,7 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
     missing,
     onboardedAt: repo.onboardedAt,
     onboardingResetAt: repo.onboardingResetAt,
+    hasLiveArtifacts: (await loadRepositoriesWithLiveArtifacts(db, userId, [id])).has(id),
     facts,
   });
   return c.json({
@@ -2163,13 +2191,18 @@ async function markRepositoryOnboarded(
     columns: { onboardingResetAt: true },
   });
   const resetAt = resetRow?.onboardingResetAt ?? null;
-  if (
-    resetAt !== null &&
-    !(facts.newestCompletedAt !== null && facts.newestCompletedAt > resetAt)
-  ) {
+  const completedSinceReset =
+    facts.newestCompletedAt !== null && resetAt !== null && facts.newestCompletedAt > resetAt;
+  // The same test `resolveOnboardingVerdict` uses for `canMarkOnboarded`, or the button and the
+  // route disagree about whether this is allowed. A post-reset COMPLETION cannot be the
+  // requirement: the run this route exists for failed at a late step and has no `completed_at`,
+  // while one that completed was already stamped from `markTaskCompleted` and never gets here.
+  // A live artifact row is what says a run reached step 12 since the reset.
+  const artifactsSinceReset = (await loadRepositoriesWithLiveArtifacts(db, userId, [id])).has(id);
+  if (resetAt !== null && !completedSinceReset && !artifactsSinceReset) {
     throw new HttpError(
       409,
-      'This repository was reset and no onboarding run has completed since, so it cannot be marked onboarded. Run onboarding instead.',
+      'This repository was reset and no onboarding run has written its artifacts since, so it cannot be marked onboarded. Run onboarding instead.',
     );
   }
 

@@ -1296,18 +1296,27 @@ describe('resetTouchedNothing', () => {
   const nothing = { removed: [], cleaned: [], quarantined: [] };
 
   it('is false for a clean tree, which legitimately removes nothing', () => {
-    expect(resetTouchedNothing(nothing, 0)).toBe(false);
+    expect(resetTouchedNothing(nothing, 0, 0)).toBe(false);
   });
 
   it('is true only when an IO failure left the walk with nothing done', () => {
-    expect(resetTouchedNothing(nothing, 1)).toBe(true);
+    expect(resetTouchedNothing(nothing, 1, 0)).toBe(true);
   });
 
   it('is false whenever the walk achieved anything at all', () => {
-    expect(resetTouchedNothing({ ...nothing, removed: ['.claude/agents'] }, 3)).toBe(false);
-    expect(resetTouchedNothing({ ...nothing, cleaned: ['AGENTS.md'] }, 3)).toBe(false);
-    expect(resetTouchedNothing({ ...nothing, quarantined: [{ from: 'a', to: 'b' }] }, 3)).toBe(
+    expect(resetTouchedNothing({ ...nothing, removed: ['.claude/agents'] }, 3, 0)).toBe(false);
+    expect(resetTouchedNothing({ ...nothing, cleaned: ['AGENTS.md'] }, 3, 0)).toBe(false);
+    expect(resetTouchedNothing({ ...nothing, quarantined: [{ from: 'a', to: 'b' }] }, 3, 0)).toBe(
       false,
     );
+  });
+
+  it('is false when a recursive removal failed part-way, though nothing was recorded', () => {
+    // The sharp case: `remove()` appends to `removed` only AFTER `removeNoFollow` returns, so a
+    // recursive delete that unlinked some descendants and then threw leaves every array empty
+    // while the tree is already half gone. Reading that as "nothing happened" aborts before the
+    // supersede, leaving live rows naming deleted files and `onboarded_at` set — the one torn
+    // state this predicate exists to prevent, reached by the path it could not see.
+    expect(resetTouchedNothing(nothing, 1, 1)).toBe(false);
   });
 });

@@ -156,6 +156,37 @@ describe('resolveOnboardingVerdict across a reset', () => {
     expect(v.canMarkOnboarded).toBe(false);
   });
 
+  it('offers the manual override to a post-reset run that wrote its artifacts and then failed', () => {
+    // THE case this route exists for, and the one a completion test can never express: the run
+    // reached 12-post-onboarding (so live artifact rows exist, which the reset had superseded)
+    // and then failed at 13-onboarding-push against a repo with no remote. It has no
+    // `completed_at` at all — a run that HAD one would already be stamped and never need the
+    // button, which is how requiring one made the hatch dead on every reset repository.
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      hasLiveArtifacts: true,
+      facts: facts({ hasAny: true }),
+    });
+    expect(v.canMarkOnboarded).toBe(true);
+    // And it must NOT read as onboarded on its own: the button is offered, not pressed.
+    expect(v.onboarded).toBe(false);
+  });
+
+  it('still refuses when the markers are leftovers a reset could not remove', () => {
+    // Same shape, minus the artifact rows. A reset supersedes every row, so their absence means
+    // nothing has re-written them since — the markers on disk are what the reset left behind.
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      hasLiveArtifacts: false,
+      facts: facts({ hasAny: true }),
+    });
+    expect(v.canMarkOnboarded).toBe(false);
+  });
+
   it('is byte-identical to the old verdict on every repo nobody has reset', () => {
     for (const over of [
       { hasAny: true, hasCompleted: true },
