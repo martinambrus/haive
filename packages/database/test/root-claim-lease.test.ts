@@ -45,6 +45,33 @@ function fakeDb(): { db: Database; writes: Recorded[] } {
   return { db, writes };
 }
 
+/** Same fake, except every write after the initial claim matches no row — which is exactly what a
+ *  takeover looks like to the holder: its conditional UPDATE finds the stamp already replaced. */
+function fakeDbLosingRenewal(): { db: Database; writes: Recorded[] } {
+  const writes: Recorded[] = [];
+  const db = {
+    update: () => ({
+      set: (values: { rootClaimedAt: Date | null }) => ({
+        where: () => {
+          let settle!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            settle = resolve;
+          });
+          const first = writes.length === 0;
+          writes.push({ stamp: values.rootClaimedAt, settle });
+          return {
+            returning: async () => {
+              await gate;
+              return first ? [{ id: 'repo-1' }] : [];
+            },
+          };
+        },
+      }),
+    }),
+  } as unknown as Database;
+  return { db, writes };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -115,6 +142,52 @@ describe('acquireRootClaim', () => {
     await releasing;
     // And the release still clears, rather than stamping.
     expect(writes.at(-1)!.stamp).toBeNull();
+  });
+
+  it('reports a lost lease from the moment the renewal loses it', async () => {
+    // The flag is set where the loss is LEARNED, not where it is noticed, so it must already be
+    // true before anyone releases — a caller that wants to stop early has nothing else to ask.
+    vi.useFakeTimers();
+    const { db, writes } = fakeDbLosingRenewal();
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'rebuild');
+    writes[0]!.settle();
+    const handle = await acquiring;
+    expect(handle!.lost()).toBe(false);
+
+    // The renewal's conditional UPDATE matches nothing: someone else holds the row now.
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handle!.lost()).toBe(true);
+
+    // And releasing a lost lease writes NOTHING — the stamp on the row is the other writer's.
+    const before = writes.length;
+    await handle!.release();
+    expect(writes).toHaveLength(before);
+    expect(handle!.lost()).toBe(true);
+  });
+
+  it('does not report a loss after an ordinary release, or after a second one', async () => {
+    // Both a normal release and a takeover end with no stamp in hand, so deriving the flag from
+    // that would make every completed job report itself taken over — and the error log that exists
+    // to find the one real case would cry wolf. The second release is the sharper version of the
+    // same mistake: the interface promises it is safe, so it must not manufacture a verdict.
+    vi.useFakeTimers();
+    const { db, writes } = fakeDb();
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'reset');
+    writes[0]!.settle();
+    const handle = await acquiring;
+
+    const releasing = handle!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    writes.at(-1)!.settle();
+    await releasing;
+    expect(handle!.lost()).toBe(false);
+
+    await handle!.release();
+    expect(handle!.lost()).toBe(false);
   });
 
   it('never runs two renewals at once', async () => {

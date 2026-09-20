@@ -162,6 +162,20 @@ export async function renewRootClaim(
 /** A held claim. `release` is idempotent and safe to call after the lease was lost. */
 export interface RootClaimHandle {
   release(): Promise<void>;
+  /**
+   * Did another writer take this lease over while we held it?
+   *
+   * Only reachable when renewals fail for a FULL stale window while the database stays healthy
+   * enough for someone else's takeover CAS — a partition that reaches us and not them, or an
+   * event loop blocked for fifteen minutes. It means two writers touched one tree.
+   *
+   * Observable rather than fatal, deliberately. The destructive work cannot be preempted: there
+   * is no cancelling a `copyTree` or an `rm -rf` mid-call, and THROWING afterwards would hand the
+   * job back to BullMQ's `attempts: 3`, which re-runs the clone and puts a third writer on the
+   * same tree. What is left is to say so, loudly, at the point where a caller would otherwise
+   * report a clean result.
+   */
+  lost(): boolean;
 }
 
 /**
@@ -192,6 +206,12 @@ export async function acquireRootClaim(
 
   let current: Date | null = first.claimedAt;
 
+  // Set where the loss is LEARNED, not where it is noticed. Deriving it from `current === null` at
+  // release time would be wrong in both directions: `lost()` would answer false for a lease
+  // already known to be gone, and a second `release()` — which the interface promises is safe —
+  // would find no stamp and report a takeover that never happened.
+  let lost = false;
+
   // The in-flight renewal, so `release` can WAIT for it. Without that, a release firing while a
   // renewal is pending captures the old stamp, its conditional UPDATE matches nothing, and it
   // returns successfully having cleared NOTHING — leaving the row claimed for a full window after
@@ -204,7 +224,10 @@ export async function acquireRootClaim(
     // null means the lease was taken over while we worked. Stop renewing and stop releasing:
     // the claim on the row is someone else's now, and clearing it would strip their protection.
     current = next;
-    if (current === null) clearInterval(timer);
+    if (current === null) {
+      lost = true;
+      clearInterval(timer);
+    }
   };
 
   const timer = setInterval(() => {
@@ -217,6 +240,7 @@ export async function acquireRootClaim(
   timer.unref?.();
 
   return {
+    lost: () => lost,
     async release() {
       clearInterval(timer);
       // Let a pending renewal land first, so the stamp below is the one actually on the row.

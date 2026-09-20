@@ -318,7 +318,10 @@ async function holdRepositoryRoot(
   repositoryId: string | null,
   writesRepositoryRoot: boolean,
 ): Promise<RootClaimHandle | null> {
-  if (!repositoryId || !writesRepositoryRoot) return { release: async () => {} };
+  // A no-op handle rather than a null: nothing was claimed, so nothing can be lost or released.
+  if (!repositoryId || !writesRepositoryRoot) {
+    return { release: async () => {}, lost: () => false };
+  }
   return acquireRootClaim(db, repositoryId, 'edit');
 }
 

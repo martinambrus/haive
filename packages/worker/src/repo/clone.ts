@@ -290,6 +290,16 @@ async function withRootClaim<T>(
     return await run();
   } finally {
     await claim.release().catch(() => undefined);
+    // Not thrown: the tree has already been rewritten, and failing here hands the job back to
+    // BullMQ's `attempts: 3`, which re-runs the clone and puts a THIRD writer on it. Logged at
+    // error so the one case where two writers touched one root is findable afterwards.
+    if (claim.lost()) {
+      logger.error(
+        { repositoryId },
+        'root claim was taken over while this job was still rewriting the tree; ' +
+          'another writer may have run against the same repository root',
+      );
+    }
   }
 }
 

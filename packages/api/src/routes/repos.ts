@@ -52,6 +52,7 @@ import {
   trimGlobSlashes,
   tagManagedKnowledgeNodes,
 } from '@haive/shared/knowledge-paths';
+import { logger } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -2255,6 +2256,16 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
     // Every exit path, the failures included: a reset that threw has stopped touching the tree
     // just as surely as one that finished, and leaving the claim would block the retry.
     await claim.release().catch(() => undefined);
+    if (claim.lost()) {
+      // Reachable only if renewals failed for a full stale window while the database stayed
+      // healthy enough for someone else's takeover. The walk cannot be preempted, so this is
+      // recorded rather than acted on — the response has already described a reset that may have
+      // been running beside another writer.
+      logger.error(
+        { repositoryId: id },
+        'root claim was taken over while the onboarding reset was still walking the tree',
+      );
+    }
   }
 });
 
