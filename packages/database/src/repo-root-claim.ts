@@ -130,6 +130,11 @@ export async function releaseRepositoryRoot(
   db: Database | DbHandle,
   repositoryId: string,
   claimedAt?: Date,
+  /** This holder's identity. The stamp alone is not an identity — a successor claiming while we
+   *  renew can share our millisecond — so without this a holder could clear somebody else's
+   *  claim. The predicate admits a NULL owner as well, so a claim taken before that column
+   *  existed still releases exactly as it did. */
+  owner?: string,
 ): Promise<boolean> {
   // Whether it actually CLEARED anything. A conditional release that matches no row returns
   // without error and looks exactly like success, which is how a holder can finish, report a
@@ -143,6 +148,14 @@ export async function releaseRepositoryRoot(
         ? and(
             eq(schema.repositories.id, repositoryId),
             eq(schema.repositories.rootClaimedAt, claimedAt),
+            ...(owner
+              ? [
+                  or(
+                    eq(schema.repositories.rootClaimOwner, owner),
+                    isNull(schema.repositories.rootClaimOwner),
+                  ),
+                ]
+              : []),
           )
         : eq(schema.repositories.id, repositoryId),
     )
@@ -168,6 +181,11 @@ export async function renewRootClaim(
    *  the row holding this value while the caller believes it holds `previous`, and every later
    *  conditional match — renewal and release alike — then silently misses. */
   next: Date = new Date(),
+  /** This holder's identity, for the same reason the release takes one: a successor claiming
+   *  while we renew can share our millisecond, and renewing somebody else's claim would extend
+   *  the protection of a writer we are not. A NULL owner is admitted, so a claim taken before
+   *  that column existed goes on renewing exactly as it did. */
+  owner?: string,
 ): Promise<Date | null> {
   const claimedAt = next;
   const renewed = await db
@@ -177,6 +195,14 @@ export async function renewRootClaim(
       and(
         eq(schema.repositories.id, repositoryId),
         eq(schema.repositories.rootClaimedAt, previous),
+        ...(owner
+          ? [
+              or(
+                eq(schema.repositories.rootClaimOwner, owner),
+                isNull(schema.repositories.rootClaimOwner),
+              ),
+            ]
+          : []),
       ),
     )
     .returning({ id: schema.repositories.id });
@@ -356,7 +382,7 @@ async function releaseReconciled(
   owner: string,
 ): Promise<ReleaseOutcome> {
   try {
-    if (await releaseRepositoryRoot(db, repositoryId, claimedAt)) return 'free';
+    if (await releaseRepositoryRoot(db, repositoryId, claimedAt, owner)) return 'free';
     return classifyUnmatchedClear(db, repositoryId, owner);
   } catch {
     try {
@@ -470,7 +496,7 @@ async function renewReconciled(
 ): Promise<{ stamp: Date | null; proven: boolean; attempted: Date }> {
   const attempted = new Date();
   try {
-    const stamp = await renewRootClaim(db, repositoryId, from, attempted);
+    const stamp = await renewRootClaim(db, repositoryId, from, attempted, owner);
     return { stamp, proven: true, attempted };
   } catch {
     const reconciled = await reconcileAmbiguousRenewal(db, repositoryId, from, attempted, owner);

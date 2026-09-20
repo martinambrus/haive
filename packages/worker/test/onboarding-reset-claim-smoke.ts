@@ -217,6 +217,37 @@ async function main(): Promise<void> {
     );
     await releaseRepositoryRoot(db, leased, successor?.claimedAt);
 
+    // ---- the owner token, against real SQL --------------------------------------------------
+    // These are WHERE clauses, so the unit suite cannot reach them: its fakes ignore the
+    // predicate entirely and would pass whatever it said. The collision they exist for is not
+    // exotic — a takeover happens precisely WHILE the expired holder is renewing, so the
+    // successor's claim and that renewal land in the same moment and can share a millisecond.
+    // Without the owner term the old holder would then renew, or clear, a claim that is not its.
+    const collide = await claimRepositoryRoot(db, leased, 'rebuild', userId);
+    check('a fresh claim carries an owner token', collide !== null && collide.owner.length > 0);
+    check(
+      'a renewal from ANOTHER owner does not match, even with the right stamp',
+      (await renewRootClaim(db, leased, collide!.claimedAt, new Date(), 'somebody-else')) === null,
+    );
+    check(
+      'a release from ANOTHER owner clears nothing, even with the right stamp',
+      (await releaseRepositoryRoot(db, leased, collide!.claimedAt, 'somebody-else')) === false,
+    );
+    check('and the claim is still held afterwards', (await readLiveRootClaim(db, leased)) !== null);
+    // The real owner still works, so the term narrows nothing it should not.
+    const renewedByOwner = await renewRootClaim(
+      db,
+      leased,
+      collide!.claimedAt,
+      new Date(),
+      collide!.owner,
+    );
+    check('the true owner can still renew', renewedByOwner !== null);
+    check(
+      'and the true owner can still release',
+      (await releaseRepositoryRoot(db, leased, renewedByOwner!, collide!.owner)) === true,
+    );
+
     // ---- stampRepositoryOnboarded -----------------------------------------------------------
     const seedTask = async (
       repositoryId: string,
