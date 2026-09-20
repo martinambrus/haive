@@ -304,14 +304,21 @@ async function assertWritableRepo(
  * hold is one file write long, so nothing waits on it meaningfully; `null` means someone else
  * holds the root and the caller must refuse.
  *
+ * Only for a write that actually lands in the REPOSITORY ROOT. Most knowledge edits do not: a
+ * workflow task has a worktree, and the reset never touches `.haive/worktrees/` — its targets are
+ * the catalog directories, `KB_DIR`, `LEARNINGS_DIR` and `.haive/install.json`. Claiming for those
+ * would refuse an ordinary edit whenever a reset ran, and refuse a reset whenever someone was
+ * editing, for a collision that cannot happen.
+ *
  * A task with no repository (a `kb_author` writing a cross-project entry) has no root to claim
  * and needs none — nothing can reset what it is not writing into.
  */
 async function holdRepositoryRoot(
   db: ReturnType<typeof getDb>,
   repositoryId: string | null,
+  writesRepositoryRoot: boolean,
 ): Promise<RootClaimHandle | null> {
-  if (!repositoryId) return { release: async () => {} };
+  if (!repositoryId || !writesRepositoryRoot) return { release: async () => {} };
   return acquireRootClaim(db, repositoryId, 'edit');
 }
 
@@ -336,7 +343,9 @@ fileRoutes.put('/:id/files/content', async (c) => {
 
   // Held for the whole write, including the open: a reset claiming between the check and the
   // write would otherwise delete the tree underneath it.
-  const held = await holdRepositoryRoot(db, task.repositoryId);
+  // `anchor` is the repository root and `root` is the worktree when the task has one, so their
+  // being equal is exactly "this write lands in the root".
+  const held = await holdRepositoryRoot(db, task.repositoryId, root === anchor);
   if (held === null) {
     const claim = await readLiveRootClaim(db, task.repositoryId!);
     throw new HttpError(409, rootClaimRefusal(claim?.kind ?? null));

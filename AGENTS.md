@@ -1671,11 +1671,16 @@ The knowledge-file editor (`PUT /tasks/:id/files/content`) HOLDS one for its wri
 write then lands in a tree being recursively removed — resurrected as an orphan, or written to an
 already-unlinked inode, which returns 200 and silently loses the edit.
 
-That claim is per-REPOSITORY, so two knowledge files being saved in the same repository at the
-same instant now refuse one another with "try again in a moment". Accepted deliberately: the hold
-is one file write long, so the collision needs two saves in the same few milliseconds, and the
-alternative — a per-file lock — would not exclude the reset, which is repo-wide by nature. A
-task with no repository takes nothing, since there is no root to protect.
+It is taken only for a write that lands in the ROOT — `root === anchor`, i.e. the task has no
+worktree. Most knowledge edits are on a workflow task, which does have one, and the reset never
+touches `.haive/worktrees/`: its targets are the catalog directories, `KB_DIR`, `LEARNINGS_DIR`
+and `.haive/install.json`. Claiming for those would refuse an ordinary edit whenever a reset ran,
+and refuse a reset whenever anyone was editing, over a collision that cannot happen.
+
+Where it IS taken the claim is per-REPOSITORY, so two root-level knowledge saves in one repository
+at the same instant refuse one another with "try again in a moment". Accepted deliberately: the
+hold is one file write long, and a per-file lock would not exclude the reset, which is repo-wide
+by nature. A task with no repository takes nothing, since there is no root to protect.
 
 A lock must be HELD across the work it protects, and both places to hold one cost more than the
 race: the repo worker and the task worker run in ONE process on ONE `max: 10` pool, so a repo job
