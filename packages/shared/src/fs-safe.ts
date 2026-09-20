@@ -832,6 +832,20 @@ export interface RemoveOptions {
    *  `sites/default` at 0555, where nothing may unlink inside it; this replaces the `chmod -R u+w`
    *  that a removal used to shell out to. */
   repairPermissions?: boolean;
+  /**
+   * Called once for each entry actually unlinked or rmdir'ed.
+   *
+   * Exists so a caller can tell a recursive removal that failed HAVING DELETED SOMETHING from one
+   * that failed before touching anything — a distinction the thrown error cannot carry and the
+   * return value never reaches, since a throw skips it. `walkDir`, the leaf `lstat` and
+   * `removeChild`'s own `open` all raise before the first unlink, so "the call threw" and "the
+   * tree changed" are independent facts. The onboarding reset needs both: superseding over an
+   * INTACT tree is unrecoverable, and reporting an untouched tree over a HALF-DELETED one is
+   * equally wrong in the other direction.
+   *
+   * Optional and unused by every other caller, so it changes nothing for them.
+   */
+  onRemoved?: () => void;
 }
 
 /** Retry one operation after granting `u+rwx` on the directory that refused it. The chmod goes
@@ -878,12 +892,21 @@ async function removeChild(dirFh: FileHandle, name: string, opts: RemoveOptions)
   if (st === null) return;
 
   if (!st.isDirectory()) {
+    let unlinked = true;
     await withRepair(dirFh, opts, () => unlink(at(dirFh.fd, name))).catch((err: unknown) => {
       // Raced into a directory since the lstat; EISDIR re-dispatches rather than failing.
-      if (errno(err) === 'EISDIR') return removeChild(dirFh, name, opts);
-      if (ABSENT.has(errno(err) ?? '')) return undefined;
+      if (errno(err) === 'EISDIR') {
+        unlinked = false;
+        return removeChild(dirFh, name, opts);
+      }
+      // Already gone: something else removed it, so THIS call changed nothing.
+      if (ABSENT.has(errno(err) ?? '')) {
+        unlinked = false;
+        return undefined;
+      }
       throw err;
     });
+    if (unlinked) opts.onRemoved?.();
     return;
   }
 
@@ -896,6 +919,7 @@ async function removeChild(dirFh: FileHandle, name: string, opts: RemoveOptions)
     // Swapped for a link or a file since the lstat: unlink the name, never follow it.
     if (code === 'ELOOP' || code === 'ENOTDIR') {
       await withRepair(dirFh, opts, () => unlink(at(dirFh.fd, name)));
+      opts.onRemoved?.();
       return;
     }
     if (code === 'EACCES' || code === 'EPERM') {
@@ -912,10 +936,15 @@ async function removeChild(dirFh: FileHandle, name: string, opts: RemoveOptions)
   } finally {
     await closeQuietly(child);
   }
+  let removed = true;
   await withRepair(dirFh, opts, () => rmdir(at(dirFh.fd, name))).catch((err: unknown) => {
-    if (ABSENT.has(errno(err) ?? '')) return undefined;
+    if (ABSENT.has(errno(err) ?? '')) {
+      removed = false;
+      return undefined;
+    }
     throw err;
   });
+  if (removed) opts.onRemoved?.();
 }
 
 /**
@@ -956,6 +985,7 @@ export async function removeNoFollow(
     if (st === null) return false;
     if (st.isDirectory() && !opts.recursive) {
       await withRepair(dir.fh, opts, () => rmdir(at(dir.fh.fd, leaf)));
+      opts.onRemoved?.();
       return true;
     }
     await removeChild(dir.fh, leaf, opts);

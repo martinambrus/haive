@@ -317,6 +317,44 @@ describe('fs-safe write primitives', () => {
       await expect(stat(path.join(root, 'tree'))).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
+    it('reports each entry it actually removes, and reports nothing when it removes nothing', async () => {
+      // `onRemoved` exists so a caller can tell a removal that FAILED HAVING DELETED SOMETHING
+      // from one that failed before touching anything — the thrown error cannot carry that, and
+      // the return value never arrives on a throw. The onboarding reset needs the distinction in
+      // both directions: superseding its provenance over an intact tree is unrecoverable, and
+      // reporting an untouched tree over a half-deleted one is equally wrong.
+      let count = 0;
+      const onRemoved = () => {
+        count += 1;
+      };
+
+      // Absent: returns false, having changed nothing, so it must report nothing.
+      expect(await removeNoFollow(root, 'nope', { recursive: true, onRemoved })).toBe(false);
+      expect(count).toBe(0);
+
+      // One file: exactly one removal.
+      await writeFile(path.join(root, 'solo.txt'), 'x', 'utf8');
+      expect(await removeNoFollow(root, 'solo.txt', { onRemoved })).toBe(true);
+      expect(count).toBe(1);
+
+      // A tree of two files and two directories: one report per entry, the directories included.
+      count = 0;
+      await mkdir(path.join(root, 'many', 'sub'), { recursive: true });
+      await writeFile(path.join(root, 'many', 'one.txt'), 'x', 'utf8');
+      await writeFile(path.join(root, 'many', 'sub', 'two.txt'), 'x', 'utf8');
+      expect(await removeNoFollow(root, 'many', { recursive: true, onRemoved })).toBe(true);
+      expect(count).toBe(4);
+
+      // A non-recursive failure on a non-empty directory removes nothing and reports nothing.
+      count = 0;
+      await mkdir(path.join(root, 'full'), { recursive: true });
+      await writeFile(path.join(root, 'full', 'x.txt'), 'x', 'utf8');
+      await expect(removeNoFollow(root, 'full', { onRemoved })).rejects.toMatchObject({
+        code: 'ENOTEMPTY',
+      });
+      expect(count).toBe(0);
+    });
+
     it('unlinks a link AS a link, leaving its target alone', async () => {
       await symlink(path.join(outside, 'secret.txt'), path.join(root, 'live.txt'));
       expect(await removeNoFollow(root, 'live.txt')).toBe(true);

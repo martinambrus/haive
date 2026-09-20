@@ -56,6 +56,12 @@ export async function loadNewestLiveArtifactAt(
         eq(schema.onboardingArtifacts.userId, userId),
         inArray(schema.onboardingArtifacts.repositoryId, repositoryIds),
         isNull(schema.onboardingArtifacts.supersededAt),
+        // ONBOARDING writes only. `02-upgrade-apply` and the rollback path write through these
+        // same rows with `source` 'upgrade'/'rollback', and an upgrade is reachable on a repo
+        // that was reset: its gate accepts a COMPLETED onboarding task, and that row outlives
+        // the reset. Such a row proves an upgrade ran, never that onboarding reached step 12 —
+        // and taking it as proof would restore the stamp with no onboarding run behind it.
+        eq(schema.onboardingArtifacts.source, 'onboarding'),
       ),
     );
 

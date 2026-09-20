@@ -1691,17 +1691,30 @@ export async function resetOnboardingArtifacts(
   // entries must not fail where a removal of the directory around them succeeded.
   /** Ignored by most callers: a refused item is simply not removed, and is already reported. */
   const remove = async (rel: string, recursive: boolean): Promise<'ok' | 'refused' | 'io'> => {
+    // Set by the primitive on each entry it actually unlinks. "The call threw" and "the tree
+    // changed" are INDEPENDENT: `walkDir`, the leaf `lstat` and `removeChild`'s own `open` all
+    // raise before the first unlink, so counting every failed recursive call as partial progress
+    // stamps the epoch over an intact tree — unrecoverable, and the mirror of the bug that made
+    // this counter necessary in the first place.
+    let unlinkedAny = false;
     const verdict = await guard(rel, async () => {
       // The return value replaces a `pathExists` probe, and is strictly better evidence: the probe
       // could pass and the entry be gone — or replaced by a link — before the delete ran.
-      if (await removeNoFollow(root, rel, { recursive, repairPermissions: true })) {
+      if (
+        await removeNoFollow(root, rel, {
+          recursive,
+          repairPermissions: true,
+          onRemoved: () => {
+            unlinkedAny = true;
+          },
+        })
+      ) {
         removed.push(rel);
       }
     });
-    // A recursive delete unlinks as it walks, so one that failed part-way has already changed the
-    // tree and `removed` is empty only because the call never returned. Counted here rather than
-    // inferred later: nothing downstream can tell that apart from a walk that touched nothing.
-    if (recursive && verdict === 'io') partialRemovals += 1;
+    // A recursive delete unlinks as it walks, so one that failed AFTER unlinking something has
+    // already changed the tree while `removed` stays empty — the push happens only on return.
+    if (recursive && verdict === 'io' && unlinkedAny) partialRemovals += 1;
     return verdict;
   };
 
