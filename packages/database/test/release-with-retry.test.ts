@@ -91,6 +91,20 @@ describe('releaseWithRetry', () => {
     expect(state.attempts).toBe(1);
   });
 
+  it('does not call ANOTHER STAMP OF OURS a takeover', async () => {
+    // The false alarm the previous shape produced, and the direction that matters most: `lost()`
+    // is the signal that two writers touched one tree, so reporting it wrongly is worse than
+    // missing it. An ambiguous renewal leaves the row holding a CANDIDATE while `current` is the
+    // older stamp — so clearing `current` misses and finds a value that is ours, not a
+    // stranger's, and the very next candidate clear would have proved it.
+    const ourCandidate = new Date('2026-09-20T12:00:05Z');
+    const { db } = fakeDb(['miss'], ourCandidate);
+    expect(await releaseWithRetry(db, 'repo-1', STAMP, [STAMP, ourCandidate])).toBe('not-ours');
+    // And with the same row value NOT among ours, it is a takeover again.
+    const { db: foreign } = fakeDb(['miss'], ourCandidate);
+    expect(await releaseWithRetry(foreign, 'repo-1', STAMP, [STAMP])).toBe('taken-over');
+  });
+
   it('is bounded when nothing ever settles', async () => {
     // A database failing every write is not rescued by trying harder; the stale window is the
     // backstop for that, and a caller is waiting on this at the end of the work.
