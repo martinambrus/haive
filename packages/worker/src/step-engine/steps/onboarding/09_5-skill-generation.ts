@@ -63,6 +63,11 @@ interface SkillGenApply {
     /** Every target dir this skill was mirrored into. */
     mirroredDirs: string[];
     subSkillCount: number;
+    /** Slugs of the `sub-skills/<slug>.md` files rendered beside SKILL.md. Recorded so the
+     *  onboarding-artifact reset can name them: without it that directory is claimed only as a
+     *  whole, and a file a person put there is deleted with it rather than moved aside.
+     *  OPTIONAL — an output persisted before this existed must still be readable. */
+    subSkillSlugs?: string[];
   }[];
   totalSubSkills: number;
   droppedFromCap: number;
@@ -1342,6 +1347,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         filePath: primaryPath,
         mirroredDirs: targetDirs,
         subSkillCount: renderedSubs.length,
+        subSkillSlugs: renderedSubs.map((rs) => rs.slug),
       });
     }
 

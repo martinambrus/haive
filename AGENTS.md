@@ -1496,6 +1496,129 @@ it vouches for. `POST /repos/:id/mark-onboarded` is the manual route, for a run 
 the work and then failed at a late step (13-onboarding-push against a repo with no remote); it
 refuses when a marker is missing or a run is live.
 
+**That reset takes back what onboarding wrote, and nothing else** (`resetOnboardingArtifacts`).
+Its directories are DERIVED from the provider catalog, the same reason `getScaffoldEntries`
+gives: the hand list it replaced was `['.claude', KB_DIR, LEARNINGS_DIR]` from when `.claude`
+was the only CLI directory, so "start over" left the previous run's agents and skills on disk
+for every other CLI and the next run wrote on top of them.
+
+**The catalog is the CANDIDATE set, never the removal set.** 07 writes agents to the ENABLED
+providers' dirs alone (`agentTargetsByDir`, from `providerRows.filter(p => p.enabled)`) and
+`resolveSkillTargetDirs` does the same for skills, so on a repo where only claude is enabled a
+`.codex/agents` or `.grok/skills` holds the user's own definitions and NOTHING of ours — and
+this action is irreversible. `collectWrittenCliContent` answers it from the RUNS' own records,
+never from the currently enabled providers: enablement is mutable global state that says nothing
+about what THIS repo's onboarding did, so a CLI enabled afterwards would make its directory
+eligible for a removal no run here ever wrote to, while one disabled since would strand the
+skills it did write. A candidate outside that union is REPORTED, not removed.
+
+**What it reads is what each step WROTE, not what it planned to.** 07's apply output carries
+`wroteFiles`; its detect payload's `agentTargets` is the wrong source twice over, because with
+the default `overwrite=false` `writeIfAllowed` SKIPS a pre-existing file — so a user's own
+`code-reviewer.toml` is one a SUCCESSFUL apply deliberately left alone, and claiming it by
+manifest id would exempt it from the quarantine and delete it with the directory — and because
+the detect payload is persisted before the form is even shown, so a run cancelled while parked
+there names directories nothing was written to (which is also why the query filters to
+`status = 'done'`). `wroteFiles` additionally covers the two cases a target list misses: the
+fallback write to `.claude/agents` when NO provider has an agents dir (amp alone, where
+`agentTargets` is empty), and the LLM-discovered custom agents, which have no manifest id at
+all. 09_5 contributes `written[].mirroredDirs`, each `written[].id` with the `SKILL.md` and
+`sub-skills` inside it, and the `README.md` index it rebuilds every pass. `.claude` itself needs
+no gate — it is Haive's own directory, and every `ONBOARDING_MARKERS` path lives in it.
+
+Provenance is scoped to runs that started after `repositories.onboarding_reset_at` (migration
+0161). A reset supersedes artifact rows but CANNOT touch `task_steps`, so an older run's
+`wroteFiles` still names paths it wrote and the reset then DELETED — and if the user recreates
+one of those names by hand and a later run SKIPS it under `overwrite=false`, that stale record
+claims their new file. Reading only the NEWEST run does not fix it: with no re-onboarding since,
+the newest run IS the pre-reset one. NULL there is every repo never reset, which reads exactly as
+it always did, so the column needs no backfill.
+
+`09_5b-skill-repair` is the third source and is read on its own terms: `repaired` (skill IDS)
+with the target dirs in its DETECT payload. It CLEARS a failing skill's tree before rewriting
+it, so 09_5's slug record for that skill is STALE — which is why the rows come back OLDEST
+FIRST and a repair RETIRES the earlier claims under that skill before re-claiming it.
+
+**A directory is claimed only when something inside it is named.** `hasDeeperClaims` is what
+makes a claimed directory be WALKED, so claiming one with nothing named inside says the
+opposite — that it is ours wholesale — and a file the user put there is deleted rather than
+moved aside. `sub-skills` is therefore claimed only when the slugs in it were recorded, which
+09_5b never does and 09_5 only does for outputs written since `subSkillSlugs` existed.
+
+`11d-skill-sync` is a source ONLY for a task whose worktree was MERGED. It writes into the
+task's WORKTREE (`resolveWorktree`), so until the merge its record describes a tree the reset is
+not looking at, and claiming from it would delete an untouched ROOT copy of a skill it only ever
+changed there. `12-worktree-cleanup` records that verdict as `merged`, set on the `merge_remove`
+path and only when the merge actually ran, so the two rows are read together — which is why
+`loadProvenanceSteps` also selects `task_id` and loads the cleanup step. Ignoring 11d wholesale
+was NOT safe either, and that is the subtler half: an 11d removal leaves 09_5's claim for that
+skill standing, so a file the user later recreates at the path is deleted as onboarding output.
+A merged sync therefore RETIRES the claims of what it removed and re-claims what it generated.
+It records no sub-skill slugs, so `sub-skills` under a skill it wrote stays unclaimed and is
+moved aside.
+
+**A claimed DIRECTORY is walked when anything claimed lives beneath it, and taken whole when
+nothing does.** That is what separates a generated skill (`<skills>/<id>`, which holds Haive's
+`SKILL.md` and `sub-skills` and may also hold a `NOTES.md` a person left there) from
+`sub-skills` itself, which Haive renders wholesale. Without the walk the recursive removal took
+the person's file along with ours; without the stop, every rendered sub-skill would be moved out
+one by one and the directory would never empty. A descendant keeps its shape under the one
+`-legacy` sibling (`<skills>-legacy/<id>/NOTES.md`) rather than growing a second quarantine
+inside the tree.
+
+**Where a row exists it OVERRIDES the path record rather than adding to it.** A path record says
+Haive wrote that file once; the row says what it wrote. When the two disagree the user has
+edited or replaced it since, and deleting it destroys their work — so `claimSatisfied` requires
+the hash to match wherever a row is present, and falls back to the path record only where none
+is. KNOWN GAP: the generators that record paths but no hashes — 07's `wroteFiles`, 09_5's
+skills and slugs, 09_5b's repairs, a merged 11d's syncs — are still claimed by PATH, so an
+edited LLM-generated skill is removed rather than moved aside. Closing it means recording a hash
+beside each of those paths at the point they are written.
+
+**A live artifact row puts a directory in scope but never claims a file on its own.**
+`recordOnboardingArtifacts` inserts one row per manifest RENDERING without consulting
+`wroteFiles`, so the file apply SKIPPED has a row too, carrying the hash of what Haive WOULD
+have written rather than what is on disk — claiming by row would hand the user's own definition
+straight to the deletion the quarantine exists to prevent. The entry-level claim for a row is
+therefore a hash check against the bytes on disk (`artifactMatchesDisk`), the same test the
+settings files use and for the same reason. Rows still put the directory in scope, which is what
+keeps an UPGRADED repo's dirs resettable: `02-upgrade-apply` writes through those rows and never
+appears in any 07 `wroteFiles`.
+
+**Inside a proven directory, what Haive cannot claim is MOVED, not deleted.** The quarantine
+checkbox at 07 defaults OFF, on the stated grounds that an agent the user wrote by hand is
+indistinguishable from one an older workflow left behind — so their own definitions legitimately
+sit beside ours, and a recursive removal would take them. The reset therefore runs 07's own
+mechanism first, to 07's own destination (`unmanagedAgentsDir`, the `-legacy` sibling a reset
+then keeps), and removes the directory once only Haive's entries are left. `noReplace`, because
+a name already quarantined is an earlier run's file and which of the two a person wants is not
+ours to decide; an entry that could not be moved is reported and its DIRECTORY then survives,
+with Haive's own entries removed individually around it. Agent ids for the claim come from the
+template manifest rather than the step payload — `acceptedAgentIds` is the user's PICK, so an
+agent they deselected would otherwise read as theirs and be quarantined out of its own
+directory.
+
+`.claude` is swept entry by entry and removes only what it can CLAIM — what 07's `wroteFiles`
+names there (`workflow-config.json`, the slash commands, the Drupal LSP files) or what a live
+row verifies by hash. Those claims keep their WHOLE path, never a head segment: the LSP plugin
+is `.claude/plugins/drupal-php-lsp/<file>`, and collapsing that to `.claude/plugins` claims a
+directory that also holds plugins the user installed. A `.claude` directory Haive wrote INTO but
+does not own is WALKED on `hasDeeperClaims`, its claimed leaves removed, and dropped only once
+nothing of the user's is left in it. A person's own `commands/`, `settings.local.json` or hooks live there too,
+and the blanket removal this replaced took them. They are LEFT and reported rather than moved:
+`.claude` survives the reset anyway, so there is nothing to move them out of the way OF, and a
+`-legacy` sibling of it would be noise. Three of its entries are kept by name for their own
+reasons:
+`mcp_settings.json` (created once, never rewritten), any `*-legacy` quarantine (the user's own
+agent definitions, which 07 MOVED there), and a `settings.json` whose bytes do not match the
+live artifact row's `written_hash` — `writeIfAllowed` SKIPS an existing file, so that row is the
+only evidence Haive wrote the one on disk. Each kept file is REPORTED through the same `skipped`
+channel a refused link uses; the reset says what it left alone rather than passing it off as
+reset. The repo's live `onboarding_artifacts` rows are superseded in the same request, after
+those provenance reads: rows naming deleted files must not stay live, and `12-post-onboarding`
+inserts without conflict handling, so a re-onboarding would otherwise collide with the
+`(repository_id, disk_path) WHERE superseded_at IS NULL` unique index.
+
 Two consequences are refusals, and only two. A SECOND onboarding task on a repo that has a live
 one is a 409 at `POST /tasks` — two runs write the same `.claude/` files, the same KB and the
 same scope list, so it is a corruption path rather than a queue. Everything else stays the

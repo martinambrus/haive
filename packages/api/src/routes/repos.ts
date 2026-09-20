@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, desc, ne, notInArray, sql } from 'drizzle-orm';
+import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   isPathContainmentError,
@@ -37,6 +37,9 @@ import {
   updateRepoExclusionsRequestSchema,
   CLI_PROVIDER_LIST,
   HAIVE_DATA_DIR,
+  normalizeContent,
+  sha256Hex,
+  unmanagedAgentsDir,
   type ArchiveFormat,
 } from '@haive/shared';
 import { buildScopeTree } from '@haive/shared/scope-tree';
@@ -61,11 +64,13 @@ import {
 } from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 import {
+  LIVE_TASK_STATUSES,
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
 } from '../lib/onboarding-state.js';
 import { createRepoArchiveStream } from '../lib/repo-archive.js';
+import { inventoryDirsFromCatalog } from '../lib/tool-inventory.js';
 
 function maxUploadBytes(): number {
   const raw = process.env.MAX_UPLOAD_BYTES;
@@ -873,8 +878,516 @@ export async function checkOnboardingMarkers(
   };
 }
 
-const ONBOARDING_RESET_DIRS = ['.claude', KB_DIR, LEARNINGS_DIR];
-const ONBOARDING_RESET_FILES = ['.ripgreprc'];
+/** Every directory onboarding fills with agents or skills, plus Haive's own knowledge dirs.
+ *
+ *  DERIVED from the provider catalog for the reason `getScaffoldEntries` gives: a hardcoded list
+ *  silently stops matching the day a CLI is added. This one HAD — it was `['.claude', KB_DIR,
+ *  LEARNINGS_DIR]` from when `.claude` was the only CLI directory, so a reset left the previous
+ *  run's agents and skills on disk for every other CLI and the next run wrote on top of them.
+ *
+ *  Exact directories, never their first segment: `.codex` and `.gemini` also hold files Haive
+ *  never wrote. `inventoryDirsFromCatalog` already excludes the `-legacy` quarantine siblings,
+ *  which is what keeps the user's own agent definitions (07 MOVES them there) out of a reset.
+ *
+ *  The catalog is the CANDIDATE set, never the removal set. 07 writes agents to the ENABLED
+ *  providers' dirs only (`agentTargetsByDir`, built from `providerRows.filter(p => p.enabled)`)
+ *  and `resolveSkillTargetDirs` does the same for skills, so on a repo where only claude is
+ *  enabled a `.codex/agents` or `.grok/skills` holds the user's own definitions and nothing of
+ *  ours — and this action is irreversible. `haiveDirs` is what the caller could PROVE, and a
+ *  candidate outside it is reported rather than removed. */
+function onboardingResetDirs(haiveDirs: ReadonlySet<string>): {
+  remove: string[];
+  candidates: string[];
+} {
+  const remove = new Set<string>([KB_DIR, LEARNINGS_DIR]);
+  const candidates: string[] = [];
+  for (const entry of inventoryDirsFromCatalog()) {
+    if (haiveDirs.has(entry.dir)) remove.add(entry.dir);
+    else candidates.push(entry.dir);
+  }
+  return { remove: [...remove], candidates };
+}
+
+/** The two onboarding steps that RECORD what they wrote. 07's apply output carries `wroteFiles`
+ *  — the paths it actually wrote, skipped ones excluded — and 09_5's carries
+ *  `written[].mirroredDirs` plus each skill's id. */
+const AGENT_TARGETS_STEP_ID = '07-generate-files';
+const SKILL_MIRROR_STEP_ID = '09_5-skill-generation';
+/** `09_5b-skill-repair` CLEARS and rebuilds a failing skill's tree in the repo root, so 09_5's
+ *  record of that skill is STALE — the rebuild may produce different sub-skill slugs, and the
+ *  rewritten files would be quarantined as foreign. Its own shape is `repaired` (skill IDS)
+ *  with the target dirs in its DETECT payload, and it records no slugs, so it retires the stale
+ *  claims and re-claims the skill without naming what is inside `sub-skills`.
+ *
+ *  `11d-skill-sync` is deliberately NOT here. It mirrors skills during a WORKFLOW run, but it
+ *  writes into that task's WORKTREE (`resolveWorktree`), so its record does not describe the
+ *  repository root unless the work was merged — and `12-worktree-cleanup` permits `keep` and
+ *  `remove_only`, so even a completed task does not prove it was. Claiming from it could delete
+ *  an untouched ROOT copy of a skill it only ever changed in a worktree. The cost of leaving it
+ *  out is that a skill a workflow generated is quarantined rather than removed: clutter, in the
+ *  direction that loses nothing. */
+const SKILL_REPAIR_STEP_ID = '09_5b-skill-repair';
+/** `11d-skill-sync` mirrors skills during a WORKFLOW run, into that task's WORKTREE — so its
+ *  record describes the repository root ONLY once the work was merged. `12-worktree-cleanup`
+ *  records that verdict as `merged`, set on the `merge_remove` path and only when the merge
+ *  actually ran, so the two are read together: 11d rows count for a task whose cleanup step
+ *  says merged, and are ignored otherwise. Without it, an 11d removal leaves 09_5's claim
+ *  standing and a file the user later recreates at that path is deleted as onboarding output. */
+const WORKFLOW_SKILL_STEP_ID = '11d-skill-sync';
+const WORKTREE_CLEANUP_STEP_ID = '12-worktree-cleanup';
+const WORKTREE_PAIR_STEP_IDS = [WORKFLOW_SKILL_STEP_ID, WORKTREE_CLEANUP_STEP_ID];
+
+/** Task types other than `onboarding` that write Haive-managed files into the repository ROOT,
+ *  and so must not be running while a reset walks it. `onboarding_upgrade` rewrites template
+ *  artifacts in place; a `workflow` merges its worktree at `12-worktree-cleanup`, which lands
+ *  11d's skills in the root — a merge that completes mid-sweep leaves that workflow without the
+ *  artifacts it just merged. `loadOnboardingTaskFacts` sees neither: it is filtered to
+ *  `onboarding` because it also answers the ONBOARDED verdict. */
+const OTHER_ROOT_WRITER_TASK_TYPES = ['onboarding_upgrade', 'workflow'] as const;
+const PROVENANCE_STEP_IDS = [
+  AGENT_TARGETS_STEP_ID,
+  SKILL_MIRROR_STEP_ID,
+  SKILL_REPAIR_STEP_ID,
+  ...WORKTREE_PAIR_STEP_IDS,
+];
+
+export interface ProvenanceStepRow {
+  taskId: string;
+  stepId: string;
+  detectOutput: unknown;
+  output: unknown;
+  endedAt: Date | null;
+  /** The merge phase's durable record, read instead of the cleanup step's apply output. */
+  mergeResolveState: unknown;
+}
+
+/**
+ * Task ids whose worktree changes reached the repository ROOT, and did so AFTER the reset.
+ *
+ * Two merge paths, and only one of them is in the cleanup step's own output. `merge_remove`
+ * merges locally and records `merged`, the merge time being when that step ended. `create_pr`
+ * leaves `merged: false` for good — the merge happens on the forge, and the PR poller records
+ * it on the TASK as `pr_state`/`pr_merged_at`. Reading only the step's flag therefore ignored
+ * every PR-based workflow.
+ *
+ * The epoch applies to the MERGE time rather than to the 11d row's own clock: 11d can finish in
+ * a worktree BEFORE a reset and merge AFTER it, in which case its files reach the root once the
+ * reset is over and its record is the only thing that names them. Merged before the reset means
+ * the reset already deleted them and the claims are stale.
+ */
+export function resolveMergedTasks(
+  rows: ReadonlyArray<{
+    taskId: string;
+    stepId: string;
+    mergeResolveState: unknown;
+    endedAt: Date | null;
+  }>,
+  epoch: Date | null,
+): Map<string, Date> {
+  const merged = new Map<string, Date>();
+  for (const row of rows) {
+    if (row.stepId !== WORKTREE_CLEANUP_STEP_ID) continue;
+    // The LOCAL merge, and only that. A PR merge never reaches this checkout: the poller records
+    // the forge verdict and `13-pr-wait` removes the worktree — nothing pulls. Claiming those
+    // paths would delete a local skill the PR changed but the checkout never received.
+    //
+    // Read from `merge_resolve_state`, NOT the cleanup step's apply output: that step throws
+    // when `removeWorktreeDir` fails AFTER the merge is committed, leaving the step `failed`
+    // while the merge is real. The merge phase wrote this before any of that could go wrong.
+    const state = row.mergeResolveState as { merged?: unknown; mergedAt?: unknown } | null;
+    if (state?.merged !== true) continue;
+    // The time the merge COMMIT landed, stamped in that state. The step's own `ended_at` is a
+    // different thing: a cleanup that failed after merging can be RETRIED, and the rerun leaves
+    // this state intact while stamping a fresh completion — which would date an old merge after
+    // the reset and replay claims for files the reset had already deleted. States written
+    // before the field existed fall back to the step clock.
+    const stamped =
+      typeof state.mergedAt === 'string' && !Number.isNaN(Date.parse(state.mergedAt))
+        ? new Date(state.mergedAt)
+        : null;
+    // A state persisted before `mergedAt` existed cannot be dated at all: the row's own clock
+    // moves when the step is RETRIED, which would place an old merge after the reset and replay
+    // claims for files the reset deleted. With an epoch in play such a state is read
+    // conservatively as pre-reset, which quarantines rather than removes; with no epoch there is
+    // no cutoff to be wrong about, so the step clock is good enough for ordering.
+    if (stamped === null && epoch !== null) continue;
+    const mergedAt = stamped ?? row.endedAt;
+    if (mergedAt === null) continue;
+    // Merged BEFORE the reset means the reset already deleted those files; the claims are stale.
+    if (epoch !== null && mergedAt <= epoch) continue;
+    merged.set(row.taskId, mergedAt);
+  }
+  return merged;
+}
+
+/**
+ * Live tasks OTHER than `onboarding` that write Haive-managed files into the repository root.
+ *
+ * Exported for `onboarding-reset-provenance-smoke`: this is a query, so the unit suite cannot
+ * reach it — dropping `workflow` from the type list fails nothing there.
+ */
+export async function loadLiveRootWriters(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  repositoryId: string,
+): Promise<Array<{ id: string }>> {
+  return db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.userId, userId),
+        eq(schema.tasks.repositoryId, repositoryId),
+        inArray(schema.tasks.type, OTHER_ROOT_WRITER_TASK_TYPES),
+        inArray(schema.tasks.status, LIVE_TASK_STATUSES),
+      ),
+    )
+    .limit(1);
+}
+
+/**
+ * The step rows whose records may be read as provenance for this repository.
+ *
+ * Two predicates, and both are load-bearing. `status = 'done'` is the proof that APPLY ran: 07
+ * persists its detect payload before the form is even shown, so a run cancelled or failed while
+ * parked there names directories nothing was written to. `epoch` is
+ * `repositories.onboarding_reset_at`: a reset supersedes artifact rows but CANNOT touch
+ * `task_steps`, so a pre-reset run's `wroteFiles` still names paths it wrote and the reset then
+ * DELETED — and if the user recreates one of those names by hand and a later run SKIPS it under
+ * `overwrite=false`, that stale record claims their new file. Reading only the NEWEST run does
+ * not fix it: with no re-onboarding since, the newest run IS the pre-reset one. A null epoch is
+ * every repo never reset, which reads every run exactly as it always did.
+ *
+ * Exported for `onboarding-reset-provenance-smoke`, which is the only thing that can exercise
+ * the predicates — they are SQL, and the unit tests run against no database.
+ */
+export async function loadProvenanceSteps(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+  epoch: Date | null,
+): Promise<ProvenanceStepRow[]> {
+  return (
+    db
+      .select({
+        taskId: schema.taskSteps.taskId,
+        stepId: schema.taskSteps.stepId,
+        detectOutput: schema.taskSteps.detectOutput,
+        output: schema.taskSteps.output,
+        endedAt: schema.taskSteps.endedAt,
+        mergeResolveState: schema.taskSteps.mergeResolveState,
+      })
+      .from(schema.taskSteps)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          inArray(schema.taskSteps.stepId, PROVENANCE_STEP_IDS),
+          // `done` is the proof that APPLY ran — except for the cleanup step, which throws
+          // when `removeWorktreeDir` fails after the merge is committed. Its verdict lives in
+          // `merge_resolve_state`, so a `failed` row still carries a real merge.
+          or(
+            and(
+              eq(schema.taskSteps.stepId, WORKTREE_CLEANUP_STEP_ID),
+              inArray(schema.taskSteps.status, ['done', 'failed']),
+            ),
+            and(
+              ne(schema.taskSteps.stepId, WORKTREE_CLEANUP_STEP_ID),
+              eq(schema.taskSteps.status, 'done'),
+            ),
+          ) ?? sql`true`,
+          // The STEP's own clock, never the task's creation time. A failed run — or a single
+          // step — can be retried after a reset, and the task keeps its original `created_at`,
+          // so keying on that excluded the rewritten 07/09_5 output for good while its files sat
+          // on disk. `ended_at` is when this step actually wrote. A `done` step missing it is
+          // excluded, which quarantines its files rather than removing them: the safe direction.
+          //
+          // The WORKTREE pair is exempt: 11d writes into a worktree and its changes reach the
+          // root when the MERGE lands, which can be after the step ended and after the reset.
+          // `resolveMergedTasks` applies the epoch to that merge time instead.
+          ...(epoch === null
+            ? []
+            : [
+                or(
+                  inArray(schema.taskSteps.stepId, WORKTREE_PAIR_STEP_IDS),
+                  gt(schema.taskSteps.endedAt, epoch),
+                ) ?? sql`true`,
+              ]),
+        ),
+      )
+      // OLDEST first, because a later run can RETIRE an earlier claim: `11d-skill-sync` deletes
+      // a skill whose id 09_5 once wrote, and replaying that in the wrong order leaves the dead
+      // claim standing — which would delete a skill of the same name the user wrote afterwards.
+      // Ordered by the same execution clock the epoch filters on, so a retried step replays in
+      // the position it actually ran rather than where its task began.
+      .orderBy(asc(schema.taskSteps.endedAt), asc(schema.taskSteps.createdAt))
+  );
+}
+
+/**
+ * Which catalog agents/skills directories Haive is KNOWN to have written to in this repository.
+ *
+ * From the RUNS, never from the currently enabled providers: enablement is mutable global state
+ * that says nothing about what this repo's onboarding did, so a CLI enabled afterwards would
+ * make its directory eligible for a removal no run here ever wrote to, while one disabled since
+ * would strand the skills it did write. The live artifact rows are the third source and the only
+ * per-file one; they also cover a repo whose step payloads predate these fields.
+ *
+ * Every claim is checked against the catalog, so a payload naming something else contributes
+ * nothing — these are stored JSON written by an older Haive, not a typed contract.
+ */
+/** When a step's writes took effect in the repository ROOT: for a worktree step the MERGE
+ *  time, for everything else when the step itself ended. Undated rows sort first. */
+function effectiveTime(
+  step: { taskId?: string; stepId: string; endedAt?: Date | null },
+  mergedTasks: ReadonlyMap<string, Date>,
+): number {
+  if (step.stepId === WORKFLOW_SKILL_STEP_ID || step.stepId === WORKTREE_CLEANUP_STEP_ID) {
+    const at = step.taskId ? mergedTasks.get(step.taskId) : undefined;
+    return at ? at.getTime() : 0;
+  }
+  return step.endedAt ? step.endedAt.getTime() : 0;
+}
+
+export function collectWrittenCliContent(
+  steps: ReadonlyArray<{
+    taskId?: string;
+    stepId: string;
+    detectOutput?: unknown;
+    output: unknown;
+    endedAt?: Date | null;
+  }>,
+  artifacts: ReadonlyArray<{ diskPath: string }>,
+  /** From `resolveMergedTasks`: task id -> when its worktree reached the root, for the tasks
+   *  that reached it after the reset. */
+  mergedTasks: ReadonlyMap<string, Date> = new Map(),
+): { dirs: Set<string>; entries: Set<string> } {
+  const catalog = inventoryDirsFromCatalog();
+  const byDir = new Map(catalog.map((entry) => [entry.dir, entry]));
+  const dirs = new Set<string>();
+  const entries = new Set<string>();
+  const claimDir = (value: unknown): string | null => {
+    if (typeof value !== 'string' || !byDir.has(value)) return null;
+    dirs.add(value);
+    return value;
+  };
+  /** Claim the entry of `dir` that contains `rel`, so a path deeper than one level (a skill's
+   *  `<dir>/<id>/SKILL.md`) claims the directory it lives in rather than nothing. */
+  const claimPath = (value: unknown): void => {
+    if (typeof value !== 'string') return;
+    for (const spec of catalog) {
+      if (!value.startsWith(`${spec.dir}/`)) continue;
+      dirs.add(spec.dir);
+      const head = value.slice(spec.dir.length + 1).split('/')[0];
+      if (head) entries.add(`${spec.dir}/${head}`);
+    }
+    // `.claude` is Haive's own directory but not a catalog one, and its SWEEP removes only what
+    // is claimed here — `workflow-config.json`, the slash commands, the Drupal LSP files. What
+    // is left is the user's and stays put.
+    //
+    // The WHOLE path, never its head segment: `.claude/plugins/drupal-php-lsp/<file>` collapsed
+    // to `.claude/plugins` claims a directory that also holds plugins the user installed, and
+    // the sweep then removes all of them. The sweep walks instead, on `hasDeeperClaims`.
+    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) entries.add(value);
+  };
+
+  // A worktree write takes effect when the MERGE lands, not when the step ended. Replaying an
+  // 11d removal at its own clock put it BEFORE a newer onboarding run that had since reinstated
+  // the claim, so the removal retired nothing and a file recreated after the merge was deleted.
+  const ordered = [...steps].sort(
+    (a, b) => effectiveTime(a, mergedTasks) - effectiveTime(b, mergedTasks),
+  );
+
+  for (const step of ordered) {
+    if (step.stepId === AGENT_TARGETS_STEP_ID) {
+      // What 07 actually WROTE, never its target list and never the manifest's agent ids. With
+      // the default `overwrite=false`, `writeIfAllowed` SKIPS a pre-existing file — so a user's
+      // own `code-reviewer.toml` is one a successful apply deliberately left alone, and claiming
+      // it by id would exempt it from the quarantine and delete it with the directory. This also
+      // covers the fallback write to `.claude/agents` when no provider has an agents dir (amp
+      // alone, where `agentTargets` is empty) and the LLM-discovered custom agents, which have
+      // no manifest id at all.
+      const wrote = (step.output as { wroteFiles?: unknown } | null)?.wroteFiles;
+      if (Array.isArray(wrote)) for (const rel of wrote) claimPath(rel);
+    } else if (step.stepId === WORKFLOW_SKILL_STEP_ID) {
+      // Only for a task whose worktree was MERGED — until then these writes live in the
+      // worktree and the repository root still holds what onboarding put there.
+      if (!step.taskId) continue;
+      const mergedAt = mergedTasks.get(step.taskId);
+      if (!mergedAt) continue;
+      // And only when that merge came AFTER this sync wrote. `resetRowsForRerun` keeps step
+      // 12's old `mergeResolveState`, so a RETRIED 11d — whose worktree was discarded — would
+      // otherwise inherit the previous run's merge and claim paths that were never merged,
+      // deleting the untouched root copy of a skill it wrote over. A sync with no clock of its
+      // own cannot be paired, and is not read.
+      if (!step.endedAt || mergedAt < step.endedAt) continue;
+      const syncDirs = (step.detectOutput as { skillTargetDirs?: unknown } | null)?.skillTargetDirs;
+      if (!Array.isArray(syncDirs)) continue;
+      const sync = step.output as {
+        generated?: unknown;
+        removed?: unknown;
+        indexRemovedDirs?: unknown;
+      } | null;
+      const generated = Array.isArray(sync?.generated) ? sync.generated : [];
+      const removed = Array.isArray(sync?.removed) ? sync.removed : [];
+      const indexRemovedDirs = (
+        Array.isArray(sync?.indexRemovedDirs) ? sync.indexRemovedDirs : []
+      ).filter((d): d is string => typeof d === 'string');
+      // Detect can filter every operation out — all bundle-owned, or naming skills that are
+      // gone — and the run then merges having written nothing. Scoping its target dirs anyway
+      // would move the user's own skills into `-legacy`, as the empty repair pass did.
+      if (generated.length === 0 && removed.length === 0 && indexRemovedDirs.length === 0) continue;
+      for (const value of syncDirs) {
+        if (typeof value !== 'string' || !byDir.has(value)) continue;
+        const dir = value;
+        // A skill it REMOVED is one 09_5 may have written, and leaving that claim standing
+        // would delete a file the user later recreates at the same path. Retiring a claim is
+        // not a write, so it does not put the directory in scope on its own.
+        for (const skillId of removed) {
+          if (typeof skillId !== 'string') continue;
+          const gone = `${dir}/${skillId}`;
+          for (const claimed of [...entries]) {
+            if (claimed === gone || claimed.startsWith(`${gone}/`)) entries.delete(claimed);
+          }
+        }
+        // A removal that emptied the directory DELETED its index, so the earlier claim on
+        // that path goes with it — left standing, an index the user writes there is deleted.
+        if (indexRemovedDirs.includes(dir)) entries.delete(`${dir}/README.md`);
+        if (generated.length === 0) continue;
+        dirs.add(dir);
+        for (const skillId of generated) {
+          if (typeof skillId !== 'string') continue;
+          const skillDir = `${dir}/${skillId}`;
+          // It rewrites the tree, so 09_5's slugs for that skill are stale.
+          for (const claimed of [...entries]) {
+            if (claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
+          }
+          entries.add(skillDir);
+          entries.add(`${skillDir}/SKILL.md`);
+          // No slugs are recorded, so `sub-skills` stays unclaimed and is moved aside.
+        }
+        entries.add(`${dir}/README.md`);
+      }
+    } else if (step.stepId === SKILL_REPAIR_STEP_ID) {
+      // 09_5b has its OWN shape — `repaired`, skill IDS, with the target dirs in its DETECT
+      // payload — and it CLEARS the skill's tree before rewriting it, so 09_5's slug record for
+      // that skill is stale and has to be RETIRED. That is why the rows are replayed oldest
+      // first. It records no slugs of its own, so `sub-skills` is deliberately NOT claimed: a
+      // directory claimed with nothing named inside it reads as wholly ours, and a file the
+      // user put there would be deleted rather than moved aside.
+      const repairDirs = (step.detectOutput as { skillTargetDirs?: unknown } | null)
+        ?.skillTargetDirs;
+      if (!Array.isArray(repairDirs)) continue;
+      const out = step.output as { repaired?: unknown; repairedSubSkillSlugs?: unknown } | null;
+      const repaired = out?.repaired;
+      // A repair pass that landed NOTHING wrote nothing — every skill it attempted is in
+      // `stillFailing`. Scoping its target dirs anyway put directories Haive never touched in
+      // reach of the reset, which would move the user's own skills into `-legacy`.
+      if (!Array.isArray(repaired) || repaired.length === 0) continue;
+      const repairedSlugs = (out?.repairedSubSkillSlugs ?? null) as Record<string, unknown> | null;
+      for (const value of repairDirs) {
+        const dir = claimDir(value);
+        if (dir === null) continue;
+        for (const skillId of repaired) {
+          if (typeof skillId !== 'string') continue;
+          const skillDir = `${dir}/${skillId}`;
+          for (const claimed of [...entries]) {
+            if (claimed === skillDir || claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
+          }
+          entries.add(skillDir);
+          entries.add(`${skillDir}/SKILL.md`);
+          // Same rule as 09_5: `sub-skills` is claimed ONLY when the slugs in it were named, or
+          // the directory reads as wholly ours and a file the user put there is deleted rather
+          // than moved aside. An output written before the field existed has it quarantined.
+          const slugs = repairedSlugs?.[skillId];
+          if (Array.isArray(slugs) && slugs.length > 0) {
+            entries.add(`${skillDir}/sub-skills`);
+            for (const slug of slugs) {
+              if (typeof slug === 'string') entries.add(`${skillDir}/sub-skills/${slug}.md`);
+            }
+          }
+        }
+        // It rebuilds the index from the on-disk set whenever it repaired anything.
+        if (repaired.length > 0) entries.add(`${dir}/README.md`);
+      }
+    } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
+      const written = (step.output as { written?: unknown } | null)?.written;
+      if (!Array.isArray(written)) continue;
+      for (const skill of written) {
+        const row = skill as {
+          id?: unknown;
+          mirroredDirs?: unknown;
+          subSkillSlugs?: unknown;
+        } | null;
+        if (!Array.isArray(row?.mirroredDirs)) continue;
+        for (const value of row.mirroredDirs) {
+          const dir = claimDir(value);
+          if (dir === null) continue;
+          // A generated skill is a DIRECTORY, so the entry is the id — and what 09_5 puts INSIDE
+          // it is claimed file by file, which is what stops the sweep treating the whole
+          // directory as ours: a `NOTES.md` a person left beside `SKILL.md` is theirs, and a
+          // claimed directory with deeper claims is walked rather than removed whole. The
+          // sub-skill SLUGS are named for the same reason one level further down; an output
+          // written before they were recorded claims the directory alone, so its contents are
+          // moved aside rather than deleted.
+          if (typeof row.id === 'string') {
+            const skillDir = `${dir}/${row.id}`;
+            entries.add(skillDir);
+            entries.add(`${skillDir}/SKILL.md`);
+            // `sub-skills` is claimed ONLY when the slugs inside it were recorded. A directory
+            // claimed with nothing named inside reads as wholly ours — `hasDeeperClaims` is
+            // false — so a file the user put there would be deleted rather than moved aside.
+            // An output written before the slugs existed therefore has it quarantined whole.
+            if (Array.isArray(row.subSkillSlugs) && row.subSkillSlugs.length > 0) {
+              entries.add(`${skillDir}/sub-skills`);
+              for (const slug of row.subSkillSlugs) {
+                if (typeof slug === 'string') entries.add(`${skillDir}/sub-skills/${slug}.md`);
+              }
+            }
+          }
+          // The index beside them is rebuilt from the cumulative set on every pass and is Haive's
+          // too — unclaimed, it would be quarantined out of the directory it describes.
+          entries.add(`${dir}/README.md`);
+        }
+      }
+    }
+  }
+
+  // The live rows put a directory IN SCOPE — an upgrade writes through them, and they are all a
+  // repo whose step payloads predate these fields has — but they never claim an entry on their
+  // own. `recordOnboardingArtifacts` inserts one row per manifest RENDERING without consulting
+  // `wroteFiles`, so a pre-existing user file that apply SKIPPED has a row too, carrying the
+  // hash of what Haive would have written rather than what is there. That is why the entry-level
+  // claim for a row is the hash check in `resetOnboardingArtifacts`, not this.
+  for (const row of artifacts) {
+    for (const spec of catalog) {
+      if (row.diskPath.startsWith(`${spec.dir}/`)) dirs.add(spec.dir);
+    }
+  }
+  return { dirs, entries };
+}
+
+/** `.haive/` is the git-excluded dir; only this one file in it is onboarding's. */
+const INSTALL_MANIFEST_PATH = '.haive/install.json';
+const ONBOARDING_RESET_FILES = ['.ripgreprc', INSTALL_MANIFEST_PATH];
+
+/** The one directory swept entry by entry rather than removed whole: `.claude` holds Haive's
+ *  workflow config, commands and review files beside things Haive must not take back. */
+const ONBOARDING_SWEEP_DIR = '.claude';
+
+/** rtk's two settings files. Haive writes them, but `writeIfAllowed` SKIPS a file that already
+ *  exists (`07-generate-files.ts:789`), so the one on disk may be the user's own — a stored
+ *  `written_hash` is the only evidence either way, so provenance decides per file. */
+const ONBOARDING_SETTINGS_FILES = ['.claude/settings.json', '.gemini/settings.json'];
+
+/** Kept by a sweep although it sits in a directory Haive otherwise owns: `mcp_settings.json` is
+ *  created once and never rewritten (`isUserOwnedAfterWrite`), and a `*-legacy` directory holds
+ *  the agent definitions the user already had, which 07 moved aside rather than deleting. */
+function keptSweepReason(name: string): string | null {
+  if (name === 'mcp_settings.json') return 'user-owned after its first write';
+  if (name.endsWith('-legacy')) return 'quarantined agents you had before onboarding';
+  return null;
+}
+
 const ONBOARDING_RULES_FILES = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
 const HAIVE_MARKER_PAIRS: Array<[string, string]> = [
   ['<!-- haive:project-info -->', '<!-- /haive:project-info -->'],
@@ -912,6 +1425,341 @@ export async function stripHaiveContent(
   }
   await writeFileNoFollow(root, rel, cleaned + '\n');
   return { changed: true, deleted: false };
+}
+
+export interface OnboardingResetOutcome {
+  removed: string[];
+  cleaned: string[];
+  /** What the reset left alone, and why. Kept files and refused links share this channel. */
+  skipped: Array<{ path: string; reason: string }>;
+  /** Moved to the `<dir>-legacy` sibling instead of being deleted with the directory. */
+  quarantined: Array<{ from: string; to: string }>;
+}
+
+/** What the caller could establish about what Haive wrote here. Every field is evidence, not
+ *  policy: the reset removes what it covers and keeps what it does not. */
+export interface OnboardingResetProvenance {
+  /** `written_hash` of every LIVE `onboarding_artifacts` row, by disk path. */
+  writtenHashes: ReadonlyMap<string, string>;
+  /** Catalog agents/skills directories Haive wrote to for this repository. */
+  haiveDirs: ReadonlySet<string>;
+  /** `<dir>/<name>` entries inside those directories that Haive wrote. Anything else in one is
+   *  the user's — the quarantine default is OFF (`07-generate-files.ts:762`), so their own
+   *  definitions legitimately sit beside ours. */
+  haiveEntries: ReadonlySet<string>;
+}
+
+/**
+ * Take back what onboarding wrote to a repository, and nothing else.
+ *
+ * `writtenHashes` is the only evidence that a file Haive CAN write is one it DID write, and it
+ * decides the settings files (see `ONBOARDING_SETTINGS_FILES`). `haiveDirs` decides which
+ * per-CLI directories are in scope at all, and `haiveEntries` which of their contents are ours;
+ * an entry in neither is MOVED to the `-legacy` sibling rather than deleted with the directory.
+ * Everything else is decided by location.
+ *
+ * Exported beside `stripHaiveContent` and `checkOnboardingMarkers` so the filesystem half is
+ * testable without a request: the route adds only the row reads and the DB writes around it.
+ */
+export async function resetOnboardingArtifacts(
+  root: string,
+  provenance: OnboardingResetProvenance,
+): Promise<OnboardingResetOutcome> {
+  const { writtenHashes, haiveDirs, haiveEntries } = provenance;
+  const removed: string[] = [];
+  const cleaned: string[] = [];
+  const skipped: Array<{ path: string; reason: string }> = [];
+  const quarantined: Array<{ from: string; to: string }> = [];
+
+  // A refusal is a per-item outcome, not a floor: one linked directory must not discard the
+  // removal of the twenty beside it, and the reset says what it left alone instead of reporting
+  // a clean run over a path it never touched.
+  const guard = async (rel: string, run: () => Promise<void>): Promise<void> => {
+    try {
+      await run();
+    } catch (err) {
+      if (!isPathContainmentError(err)) throw err;
+      skipped.push({ path: rel, reason: err.reason });
+    }
+  };
+  // `repairPermissions` on every item, as the whole-`.claude` removal this replaced had: it fires
+  // only on EACCES/EPERM and only adds +0700 to the parent it already holds open, and a sweep of
+  // entries must not fail where a removal of the directory around them succeeded.
+  const remove = (rel: string, recursive: boolean): Promise<void> =>
+    guard(rel, async () => {
+      // The return value replaces a `pathExists` probe, and is strictly better evidence: the probe
+      // could pass and the entry be gone — or replaced by a link — before the delete ran.
+      if (await removeNoFollow(root, rel, { recursive, repairPermissions: true })) {
+        removed.push(rel);
+      }
+    });
+
+  // Settings first, so one the sweep must keep has its verdict before the sweep reaches it, and
+  // one it may take is already gone from the listing.
+  for (const rel of ONBOARDING_SETTINGS_FILES) {
+    await guard(rel, async () => {
+      const content = await readTextNoFollow(root, rel, { strict: true });
+      if (content === null) return;
+      const written = writtenHashes.get(rel);
+      if (written !== undefined && written === sha256Hex(normalizeContent(content))) {
+        if (await removeNoFollow(root, rel)) removed.push(rel);
+        return;
+      }
+      skipped.push({
+        path: rel,
+        reason:
+          written === undefined
+            ? 'not recorded as written by Haive'
+            : 'edited since Haive wrote it',
+      });
+    });
+  }
+
+  /** Whether this exact path is Haive's, by the strongest evidence available for it.
+   *
+   *  A live artifact row OVERRIDES the path claim rather than adding to it: the row carries the
+   *  bytes Haive wrote, so if they no longer match, the user edited or replaced that file and it
+   *  is theirs now — claiming it by path would delete their work. Where no row exists the path
+   *  record is all there is, and it is used; see the note in AGENTS.md on which generated
+   *  outputs still lack a hash. */
+  const claimSatisfied = async (rel: string): Promise<boolean> => {
+    if (writtenHashes.has(rel)) return artifactMatchesDisk(rel);
+    return haiveEntries.has(rel) || (await artifactMatchesDisk(rel));
+  };
+
+  /** Whether a live artifact row covers this entry AND the bytes on disk are still the ones it
+   *  recorded. A row on its own is not evidence: `recordOnboardingArtifacts` inserts one per
+   *  manifest RENDERING without consulting `wroteFiles`, so a pre-existing user file that apply
+   *  SKIPPED carries a row holding the hash of what Haive would have written. The same test the
+   *  settings files use, for the same reason. A row deeper than the entry (a bundle skill's
+   *  `<dir>/<id>/SKILL.md`) verifies the directory that contains it. */
+  const artifactMatchesDisk = async (entry: string): Promise<boolean> => {
+    for (const [diskPath, hash] of writtenHashes) {
+      if (diskPath !== entry && !diskPath.startsWith(`${entry}/`)) continue;
+      const content = await readTextNoFollow(root, diskPath, { strict: true }).catch(() => null);
+      if (content !== null && sha256Hex(normalizeContent(content)) === hash) return true;
+    }
+    return false;
+  };
+
+  /** Move out what this directory holds that Haive cannot claim, so the removal after it takes
+   *  only ours. 07's own mechanism and its own destination (`unmanagedAgentsDir`), because the
+   *  quarantine checkbox defaults OFF: a definition the user wrote by hand legitimately sits in
+   *  an agents dir beside ours, and there is no way to tell it from an old leftover. `noReplace`
+   *  so a name already quarantined by an earlier run is never clobbered — which of the two a
+   *  person wants is not ours to decide. */
+  /** Whether anything claimed lives BENEATH this path, which is what decides a claimed directory
+   *  is walked rather than taken whole: `<skills>/<id>` is ours AND holds `SKILL.md` and
+   *  `sub-skills`, so a `NOTES.md` a person left beside them must still be moved out. A claimed
+   *  directory with no deeper claims (`sub-skills` itself) is Haive's wholesale.
+   *
+   *  BOTH claim sources are asked. A directory on an upgraded or legacy repo can be claimed by a
+   *  row alone (`<skills>/<id>/SKILL.md` verifying by hash), and reading only the step-recorded
+   *  entries said "nothing below" for exactly those — so the walk was skipped and the file beside
+   *  the matched artifact was deleted rather than moved. */
+  const hasDeeperClaims = (rel: string): boolean => {
+    const prefix = `${rel}/`;
+    for (const entry of haiveEntries) if (entry.startsWith(prefix)) return true;
+    for (const diskPath of writtenHashes.keys()) if (diskPath.startsWith(prefix)) return true;
+    return false;
+  };
+
+  const quarantineForeign = async (
+    dir: string,
+    /** Where a moved entry goes. Fixed at the top level, so a descendant keeps its shape under
+     *  the one `-legacy` sibling rather than growing a second one inside the tree. */
+    legacyDir: string = unmanagedAgentsDir(dir),
+  ): Promise<{ left: number; ours: Array<{ rel: string; isDir: boolean }> }> => {
+    const entries = await readdirNoFollow(root, dir, { strict: true });
+    const ours: Array<{ rel: string; isDir: boolean }> = [];
+    if (entries === null) return { left: 0, ours };
+    let left = 0;
+    for (const entry of entries) {
+      const from = `${dir}/${entry.name}`;
+      // A claim names a FILE unless something inside it is named too — that is the invariant
+      // `hasDeeperClaims` rests on. So a DIRECTORY standing where a claimed file was is not the
+      // file Haive wrote: someone replaced it, and it is moved aside rather than removed with
+      // everything in it.
+      // Only a REGULAR FILE satisfies a file claim. A directory was round 13; a SYMLINK is the
+      // same story — a person replaced the generated file with a link of their own, and
+      // removing it unlinks something Haive never wrote.
+      const claimed =
+        (await claimSatisfied(from)) &&
+        (entry.isFile() || (entry.isDirectory() && hasDeeperClaims(from)));
+      if (claimed) {
+        if (entry.isDirectory()) {
+          const inner = await quarantineForeign(from, `${legacyDir}/${entry.name}`);
+          left += inner.left;
+          // The directory is ours only once nothing of theirs is left in it.
+          if (inner.left === 0) ours.push({ rel: from, isDir: true });
+          else ours.push(...inner.ours);
+          continue;
+        }
+        ours.push({ rel: from, isDir: false });
+        continue;
+      }
+      const to = `${legacyDir}/${entry.name}`;
+      try {
+        await renameNoFollow(root, from, to, { noReplace: true, createParents: true });
+        quarantined.push({ from, to });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' && !isPathContainmentError(err)) {
+          throw err;
+        }
+        // The name is taken, or the entry became a link between the listing and the move. Either
+        // way it stays where it is, and the directory around it must then NOT be removed whole.
+        left += 1;
+        skipped.push({
+          path: from,
+          reason:
+            (err as NodeJS.ErrnoException).code === 'EEXIST'
+              ? 'already quarantined under that name'
+              : (err as { reason: string }).reason,
+        });
+      }
+    }
+    return { left, ours };
+  };
+
+  /** Remove the claimed leaves under a `.claude` directory Haive wrote INTO but does not own,
+   *  and drop the directory once nothing of the user's is left in it. Returns what stayed, so
+   *  the caller knows whether `.claude` itself may still go. Nothing is moved here — see the
+   *  sweep's note on why `.claude` leaves rather than quarantines. */
+  const sweepClaimedChildren = async (dir: string): Promise<number> => {
+    let left = 0;
+    await guard(dir, async () => {
+      const children = await readdirNoFollow(root, dir, { strict: true });
+      if (children === null) return;
+      for (const child of children) {
+        const rel = `${dir}/${child.name}`;
+        // A directory with anything claimed BELOW it is walked whether or not it is itself
+        // claimed: `artifactMatchesDisk` answers true for an ancestor of a matching row, so a
+        // row at `<dir>/<ours>/<file>` makes the directory holding it look wholly ours.
+        if (child.isDirectory() && hasDeeperClaims(rel)) {
+          left += await sweepClaimedChildren(rel);
+          continue;
+        }
+        if (child.isFile() && (await claimSatisfied(rel))) {
+          await remove(rel, false);
+          continue;
+        }
+        left += 1;
+        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+      }
+      if (left === 0 && (await removeNoFollow(root, dir, { repairPermissions: true }))) {
+        removed.push(dir);
+      }
+    });
+    return left;
+  };
+
+  const dirs = onboardingResetDirs(haiveDirs);
+  for (const rel of dirs.remove) {
+    // KB and learnings are Haive's whole and hold no user definitions, so only the per-CLI dirs
+    // are swept first.
+    if (!haiveDirs.has(rel)) {
+      await remove(rel, true);
+      continue;
+    }
+    let swept = { left: 0, ours: [] as Array<{ rel: string; isDir: boolean }> };
+    await guard(rel, async () => {
+      swept = await quarantineForeign(rel);
+    });
+    // Something of the user's could not be moved out, so the directory cannot go whole: the
+    // entries that ARE ours are removed instead and it stays, holding what was left behind.
+    if (swept.left === 0) await remove(rel, true);
+    else {
+      for (const entry of swept.ours) await remove(entry.rel, entry.isDir);
+    }
+  }
+  // A candidate Haive cannot be shown to have written is REPORTED, never removed: it is a
+  // directory for a CLI this repo never had enabled, so everything in it is the user's.
+  for (const rel of dirs.candidates) {
+    await guard(rel, async () => {
+      if ((await lstatNoFollow(root, rel, { strict: true })) === null) return;
+      skipped.push({ path: rel, reason: 'no record that Haive wrote here' });
+    });
+  }
+
+  // `.claude` is swept entry by entry rather than removed whole — see `keptSweepReason`. Strict,
+  // so a linked `.claude` is reported rather than read as an empty directory.
+  await guard(ONBOARDING_SWEEP_DIR, async () => {
+    const entries = await readdirNoFollow(root, ONBOARDING_SWEEP_DIR, { strict: true });
+    if (entries === null) return;
+    let kept = 0;
+    for (const entry of entries) {
+      const rel = `${ONBOARDING_SWEEP_DIR}/${entry.name}`;
+      const keep = keptSweepReason(entry.name);
+      if (keep !== null) {
+        kept += 1;
+        skipped.push({ path: rel, reason: keep });
+        continue;
+      }
+      // Still listed means the settings pass kept it, and reported why. The sweep must not
+      // overrule that verdict.
+      if (ONBOARDING_SETTINGS_FILES.includes(rel)) {
+        kept += 1;
+        continue;
+      }
+      // `.claude/agents` and `.claude/skills` are catalog directories: the loop above already
+      // ruled on them, so one still here was declined or holds what could not be moved out.
+      if (dirs.candidates.includes(rel) || dirs.remove.includes(rel)) {
+        kept += 1;
+        continue;
+      }
+      // Only what Haive is known to have written. `.claude` also holds things it never wrote —
+      // a person's own `commands/`, `settings.local.json`, hooks — and the removal this replaced
+      // took them, which the quarantine everywhere else exists to prevent. They are LEFT rather
+      // than moved: `.claude` survives anyway (`mcp_settings.json` is kept), so there is nothing
+      // to move them out of the way OF, and a `-legacy` sibling of it would be noise.
+      // Haive wrote something BENEATH it — `.claude/plugins/drupal-php-lsp/<file>` under a
+      // `plugins/` that also holds plugins the user installed. Removing the directory takes
+      // theirs with ours, so it is walked and only the claimed leaves go. Asked BEFORE the
+      // claim, because `artifactMatchesDisk` answers true for an ancestor of a matching row and
+      // would otherwise make that `plugins/` look wholly ours.
+      if (entry.isDirectory() && hasDeeperClaims(rel)) {
+        if ((await sweepClaimedChildren(rel)) > 0) kept += 1;
+        continue;
+      }
+      // A claim names a FILE unless something inside it is named too, so anything else standing
+      // where a claimed file was — a directory, a symlink someone put there — is not the file
+      // Haive wrote.
+      if (!entry.isFile() || !(await claimSatisfied(rel))) {
+        kept += 1;
+        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+        continue;
+      }
+      await remove(rel, false);
+    }
+    // Nothing of the user's in it: the directory goes too, as it always did.
+    if (kept === 0) await remove(ONBOARDING_SWEEP_DIR, true);
+  });
+
+  // A CLI's own dot-dir is not Haive's and is never a removal target, but one the reset has just
+  // emptied is left-over scaffolding rather than the user's — `rmdir` is used, so a directory
+  // holding anything at all (a `.codex/config.toml`, an `agents-legacy`) is untouched.
+  for (const parent of new Set(dirs.remove.map((rel) => rel.split('/')[0]!))) {
+    if (!parent.startsWith('.') || parent === ONBOARDING_SWEEP_DIR) continue;
+    await guard(parent, async () => {
+      const left = await readdirNoFollow(root, parent, { strict: true });
+      if (left !== null && left.length === 0 && (await removeNoFollow(root, parent))) {
+        removed.push(parent);
+      }
+    });
+  }
+
+  for (const rel of ONBOARDING_RESET_FILES) await remove(rel, false);
+
+  for (const rel of ONBOARDING_RULES_FILES) {
+    await guard(rel, async () => {
+      const result = await stripHaiveContent(root, rel);
+      if (result === null) return;
+      if (result.deleted) removed.push(rel);
+      else if (result.changed) cleaned.push(rel);
+    });
+  }
+
+  return { removed, cleaned, skipped, quarantined };
 }
 
 /** The repo's on-disk root, or a 404/409 explaining why there isn't one.
@@ -1119,43 +1967,89 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
+  // A live onboarding run writes into the very tree this is about to delete — and its 07/09_5
+  // steps may complete AFTER the reset, so their records would name files the reset removed
+  // while carrying a `created_at` older than the epoch, which excludes that run's provenance
+  // for good. The timestamp cannot express that; the request has to be refused. Same live-task
+  // rule the onboarded verdict uses, so the two cannot drift.
+  const facts = (await loadOnboardingTaskFacts(db, userId, [id])).get(id) ?? NO_ONBOARDING_TASKS;
+  // The OTHER task types that write into the repository root, which `loadOnboardingTaskFacts`
+  // cannot see —
+  // that helper is filtered to `type = 'onboarding'` because it also answers the ONBOARDED
+  // verdict, where a running upgrade must not make a repo read un-onboarded. `02-upgrade-apply`
+  // writes straight to the repo path and then supersedes and re-inserts the same
+  // `onboarding_artifacts` rows, so racing it deletes files it just wrote or strips rows it is
+  // still working from.
+  const liveWriters = await loadLiveRootWriters(db, userId, id);
+  if (facts.liveTaskId !== null || liveWriters.length > 0) {
+    throw new HttpError(
+      409,
+      'An onboarding run is in progress on this repository. Wait for it to finish or cancel it before resetting.',
+    );
+  }
+
+  // The epoch is taken BEFORE any reading or deleting, not when the row is finally written.
+  // Nothing serializes an onboarding task against this endpoint — `POST /tasks` refuses only a
+  // second LIVE onboarding — so a task created while this request is walking the tree would
+  // carry a `created_at` older than an end-of-request stamp, and `loadProvenanceSteps` would
+  // exclude that run for good. Its writes land after the reset, so it belongs on the new side.
+  const resetStartedAt = new Date();
+  const repoRow = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { onboardingResetAt: true },
+  });
   const root = await resolveRepoRoot(db, userId, id);
 
-  const removed: string[] = [];
-  const cleaned: string[] = [];
-  const skipped: Array<{ path: string; reason: string }> = [];
+  // Read BEFORE the reset: these rows are what says whether a file Haive can write is one it
+  // wrote, and they are superseded below.
+  const live = await db
+    .select({
+      diskPath: schema.onboardingArtifacts.diskPath,
+      writtenHash: schema.onboardingArtifacts.writtenHash,
+    })
+    .from(schema.onboardingArtifacts)
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, id),
+        isNull(schema.onboardingArtifacts.supersededAt),
+      ),
+    );
 
-  for (const rel of ONBOARDING_RESET_DIRS) {
-    // The return value replaces the `pathExists` probe, and is strictly better evidence: the probe
-    // could pass and the entry be gone — or replaced by a link — before the delete ran.
-    if (await removeNoFollow(root, rel, { recursive: true, repairPermissions: true })) {
-      removed.push(rel);
-    }
-  }
-  for (const rel of ONBOARDING_RESET_FILES) {
-    if (await removeNoFollow(root, rel)) removed.push(rel);
-  }
-  for (const rel of ONBOARDING_RULES_FILES) {
-    // A refusal is a per-item outcome, not a floor: one linked rules file must not discard the
-    // strip of the two beside it, and the reset says what it left alone instead of reporting a
-    // clean run over a file it never touched.
-    try {
-      const result = await stripHaiveContent(root, rel);
-      if (result === null) continue;
-      if (result.deleted) removed.push(rel);
-      else if (result.changed) cleaned.push(rel);
-    } catch (err) {
-      if (!isPathContainmentError(err)) throw err;
-      skipped.push({ path: rel, reason: err.reason });
-    }
-  }
+  const epoch = repoRow?.onboardingResetAt ?? null;
+  const onboardingSteps = await loadProvenanceSteps(db, id, epoch);
+  const written = collectWrittenCliContent(
+    onboardingSteps,
+    live,
+    resolveMergedTasks(onboardingSteps, epoch),
+  );
+
+  const { removed, cleaned, skipped, quarantined } = await resetOnboardingArtifacts(root, {
+    writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
+    haiveDirs: written.dirs,
+    haiveEntries: written.entries,
+  });
+
+  // Rows that name deleted files must not stay live: they feed the upgrade planner and the
+  // rollback, and `12-post-onboarding` inserts without conflict handling, so a re-onboarding
+  // would collide with the (repository_id, disk_path) WHERE superseded_at IS NULL unique index.
+  // Same defensive supersede as `02-upgrade-apply`. `applicableTemplateIds` is left alone — the
+  // next apply overwrites it, and with no live rows the banner already reads "not onboarded".
+  await db
+    .update(schema.onboardingArtifacts)
+    .set({ supersededAt: new Date() })
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, id),
+        isNull(schema.onboardingArtifacts.supersededAt),
+      ),
+    );
   // The completion stamp cannot outlive the files it vouches for: this is the "start over"
   // action, and a repo whose artifacts are gone is not onboarded however it got marked.
   await db
     .update(schema.repositories)
-    .set({ onboardedAt: null, updatedAt: new Date() })
+    .set({ onboardedAt: null, onboardingResetAt: resetStartedAt, updatedAt: new Date() })
     .where(eq(schema.repositories.id, id));
-  return c.json({ ok: true, removed, cleaned, skipped });
+  return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 });
 
 repoRoutes.delete('/:id', async (c) => {

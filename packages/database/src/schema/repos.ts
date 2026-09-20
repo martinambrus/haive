@@ -235,6 +235,12 @@ export const repositories = pgTable(
     } | null>(),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    /** When the onboarding artifacts were last reset. The reset supersedes artifact rows but
+     *  cannot touch `task_steps`, so a pre-reset run's `wroteFiles` still names paths it wrote
+     *  and the reset then deleted — provenance is read only from runs that started after this.
+     *  NULL is every repo that has never been reset, and reads exactly as it always did.
+     *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
+    onboardingResetAt: timestamp('onboarding_reset_at'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

@@ -1,0 +1,12 @@
+-- When the repository's onboarding artifacts were last reset.
+--
+-- The reset supersedes `onboarding_artifacts` rows but cannot touch `task_steps`, so an older
+-- run's `wroteFiles` keeps naming paths that run wrote and the reset then DELETED. If the user
+-- recreates one of those names by hand and a later run SKIPS it under `overwrite=false`, that
+-- stale record would claim their new file. Provenance is therefore read only from runs that
+-- started after this stamp.
+--
+-- NULL means "never reset here", which is every existing row: the provenance query then reads
+-- the runs it always did, so no backfill is needed and behaviour is unchanged until the first
+-- reset stamps it.
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS onboarding_reset_at timestamp;

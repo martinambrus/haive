@@ -659,6 +659,12 @@ export interface MergeResolveState {
   squashCommitSha?: string | null;
   /** Terminal outcome (set when phase==='done'): whether a merge commit landed. */
   merged: boolean;
+  /** ISO time the merge COMMIT landed, stamped where `merged` first becomes true.
+   *  The step's own `ended_at` is not this: a cleanup that failed after merging can be
+   *  RETRIED, and `resetRowsForRerun` leaves this state intact while giving the step a fresh
+   *  completion time — which would date an old merge after a later reset. Optional: states
+   *  persisted before this existed fall back to the step clock. */
+  mergedAt?: string;
   /** When merged is false: why the merge did not run (e.g. cross-branch skip in the
    *  same-branch-only path, or no base/branch). Null when merged. */
   skipReason: string | null;
