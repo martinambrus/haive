@@ -315,6 +315,28 @@ async function releaseReconciled(
 const RELEASE_RETRIES = 3;
 
 /**
+ * Clear one stamp, retrying while the answer is UNSETTLED.
+ *
+ * `still-ours` means that write did not commit and the row is still held by this stamp; `unknown`
+ * means nothing was established. Both are retryable and everything else is final. Shared by the
+ * primary clear and by each candidate, because an ambiguous renewal that stored a candidate makes
+ * the CANDIDATE loop the only release path there is — applying the retry to one and not the other
+ * leaves exactly the case the retry exists for uncovered.
+ */
+export async function releaseWithRetry(
+  db: Database | DbHandle,
+  repositoryId: string,
+  stamp: Date,
+): Promise<ReleaseOutcome> {
+  let outcome: ReleaseOutcome = 'still-ours';
+  for (let attempt = 0; attempt < RELEASE_RETRIES; attempt += 1) {
+    outcome = await releaseReconciled(db, repositoryId, stamp);
+    if (outcome !== 'still-ours' && outcome !== 'unknown') return outcome;
+  }
+  return outcome;
+}
+
+/**
  * One renewal attempt, with its ambiguity already resolved as far as it can be.
  *
  * EVERY conditional write to this row has the same problem — a commit whose acknowledgement is
@@ -514,12 +536,7 @@ export async function acquireRootClaim(
       // commit, and giving up there leaves a finished job holding the repository for the rest of
       // the window. `unknown` is retried too: nothing was established, and a conditional clear
       // that turns out to be unnecessary is a harmless no-op.
-      let outcome: ReleaseOutcome = 'still-ours';
-      for (let attempt = 0; attempt < RELEASE_RETRIES; attempt += 1) {
-        outcome = await releaseReconciled(db, repositoryId, current);
-        if (outcome !== 'still-ours' && outcome !== 'unknown') break;
-      }
-      const cleared = outcome === 'free';
+      const cleared = (await releaseWithRetry(db, repositoryId, current)) === 'free';
       // `current` may be a GUESS: when a renewal's acknowledgement and its read-back both failed,
       // we kept the old stamp while the row may hold the one that write left behind. A release
       // matching nothing is exactly that case, and it is the COMMON one — a job that finishes
@@ -533,7 +550,7 @@ export async function acquireRootClaim(
         // working on it. Each clear is conditional, so at most one can match and the rest are
         // no-ops against a row that has already been cleared.
         for (const candidate of candidates.list()) {
-          if ((await releaseReconciled(db, repositoryId, candidate)) === 'free') break;
+          if ((await releaseWithRetry(db, repositoryId, candidate)) === 'free') break;
         }
       }
       candidates.clear();
