@@ -84,3 +84,97 @@ describe('resolveOnboardingVerdict', () => {
     expect(v.canMarkOnboarded).toBe(false);
   });
 });
+
+describe('resolveOnboardingVerdict across a reset', () => {
+  const RESET_AT = new Date('2026-06-01T00:00:00Z');
+  const BEFORE = new Date('2026-05-01T00:00:00Z');
+  const AFTER = new Date('2026-07-01T00:00:00Z');
+
+  it('stops reading onboarded when the newest completed run predates the reset', () => {
+    // The whole point of the change: the completed task row lives forever, so `hasCompleted`
+    // alone kept answering yes across a reset and guarding the stamp changed nothing visible.
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      facts: facts({ hasAny: true, hasCompleted: true, newestCompletedAt: BEFORE }),
+    });
+    expect(v.onboarded).toBe(false);
+  });
+
+  it('reads onboarded again once a run completes after the reset', () => {
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      facts: facts({ hasAny: true, hasCompleted: true, newestCompletedAt: AFTER }),
+    });
+    expect(v.onboarded).toBe(true);
+  });
+
+  it('fails closed on a completed run that carries no completion instant', () => {
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      facts: facts({ hasAny: true, hasCompleted: true, newestCompletedAt: null }),
+    });
+    expect(v.onboarded).toBe(false);
+  });
+
+  it('does not let "no run was ever started here" survive a reset', () => {
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      facts: facts(),
+    });
+    expect(v.onboarded).toBe(false);
+  });
+
+  it('refuses the manual override while the reset is unanswered', () => {
+    // Otherwise the escape hatch hands back by hand exactly the state the reset removed —
+    // and the markers cannot catch it, since a reset that could not read the tree leaves them.
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      facts: facts({ hasAny: true, hasCompleted: true, newestCompletedAt: BEFORE }),
+    });
+    expect(v.canMarkOnboarded).toBe(false);
+  });
+
+  it('still offers the manual override for a run that failed late, after a reset was answered', () => {
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      // A later run completed, and a later one still was abandoned — the case the button is for.
+      facts: facts({ hasAny: true, hasCompleted: true, newestCompletedAt: AFTER }),
+    });
+    expect(v.onboarded).toBe(true);
+    expect(v.canMarkOnboarded).toBe(false);
+  });
+
+  it('is byte-identical to the old verdict on every repo nobody has reset', () => {
+    for (const over of [
+      { hasAny: true, hasCompleted: true },
+      { hasAny: true },
+      {},
+      { hasAny: true, hasCompleted: true, newestCompletedAt: BEFORE },
+    ]) {
+      const withColumn = resolveOnboardingVerdict({
+        missing: ALL_PRESENT,
+        onboardedAt: null,
+        onboardingResetAt: null,
+        facts: facts(over),
+      });
+      const withoutColumn = resolveOnboardingVerdict({
+        missing: ALL_PRESENT,
+        onboardedAt: null,
+        facts: facts(over),
+      });
+      expect(withColumn).toEqual(withoutColumn);
+    }
+  });
+});

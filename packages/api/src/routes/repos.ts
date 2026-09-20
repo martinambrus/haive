@@ -203,6 +203,7 @@ repoRoutes.get('/', async (c) => {
         ? resolveOnboardingVerdict({
             missing: markers.missing,
             onboardedAt: repo.onboardedAt,
+            onboardingResetAt: repo.onboardingResetAt,
             facts: onboardingFacts.get(repo.id) ?? NO_ONBOARDING_TASKS,
           })
         : null;
@@ -1942,7 +1943,13 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const db = getDb();
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
-    columns: { id: true, storagePath: true, localPath: true, onboardedAt: true },
+    columns: {
+      id: true,
+      storagePath: true,
+      localPath: true,
+      onboardedAt: true,
+      onboardingResetAt: true,
+    },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
   const root = repo.storagePath ?? repo.localPath;
@@ -1953,6 +1960,7 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const { onboarded, inProgressTaskId, canMarkOnboarded } = resolveOnboardingVerdict({
     missing,
     onboardedAt: repo.onboardedAt,
+    onboardingResetAt: repo.onboardingResetAt,
     facts,
   });
   return c.json({
@@ -1994,12 +2002,31 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
   if (facts.liveTaskId) {
     throw new HttpError(409, 'An onboarding run is still in progress for this repository');
   }
+  // This route exists for a run that did the work and then failed at a late step. A repository
+  // whose newest completed run predates its own reset is the opposite case, and stamping it here
+  // would hand back by hand exactly the state the reset took away — with no live artifact rows
+  // behind it. The markers above cannot catch it: a reset that could not read the tree leaves
+  // them all in place.
+  const resetRow = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { onboardingResetAt: true },
+  });
+  const resetAt = resetRow?.onboardingResetAt ?? null;
+  if (
+    resetAt !== null &&
+    !(facts.newestCompletedAt !== null && facts.newestCompletedAt > resetAt)
+  ) {
+    throw new HttpError(
+      409,
+      'This repository was reset and no onboarding run has completed since, so it cannot be marked onboarded. Run onboarding instead.',
+    );
+  }
 
   const onboardedAt = new Date();
   await db
     .update(schema.repositories)
     .set({ onboardedAt, updatedAt: new Date() })
-    .where(eq(schema.repositories.id, id));
+    .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
   return c.json({ ok: true, onboardedAt: onboardedAt.toISOString() });
 });
 
