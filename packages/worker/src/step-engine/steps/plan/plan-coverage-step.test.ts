@@ -19,8 +19,26 @@ import { MiningWaveError } from '../../step-definition.js';
 // always had.
 vi.mock('@haive/shared/plan', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@haive/shared/plan')>();
-  return { ...actual, loadPlanSkeletons: vi.fn(async () => []) };
+  return {
+    ...actual,
+    loadPlanSkeletons: vi.fn(async () => []),
+    // A plan whose render only fits the budget at depth 1, so the ladder in
+    // renderBoundedPlanIndex has to step down for a section repair to read it.
+    renderPlanMarkdown: vi.fn(
+      async (_db: unknown, _repositoryId: string, opts: { maxDepth?: number } = {}) =>
+        renderedPlan({ 3: 900, 2: 600, 1: 300 }[opts.maxDepth ?? 3] ?? 300),
+    ),
+  };
 });
+
+/** Shaped like `renderPlanMarkdown`'s titles-only output: a heading per node and
+ *  an attrs line carrying its ref, which is what a truncating slice used to cut. */
+function renderedPlan(nodes: number): string {
+  return Array.from({ length: nodes }, (_, index) => {
+    const id = `${index.toString(16).padStart(8, '0')}-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
+    return `## ${index + 1}. Component number ${index} with a reasonably long title\n\`node:${id}\` · \`component\` · \`todo\`\n`;
+  }).join('\n');
+}
 
 type Detected = Parameters<NonNullable<typeof planCoverageStep.form>>[1];
 
@@ -30,7 +48,6 @@ const detected = (over: Partial<Detected> = {}): Detected =>
     structural: [],
     sections: [],
     sectionBodies: {},
-    planMarkdown: '# Plan',
     nodeCount: 791,
     docNames: ['spec.md'],
     hasVisualInputs: false,
@@ -443,8 +460,33 @@ describe('the structural repair prompt', () => {
       ],
     });
     expect(prompt).toContain('The plan as it stands (titles only):');
-    // No structural item was picked, so the plan is not read at all.
+    // No structural item was picked, so no node neighbourhood is read.
     expect(loadPlanSkeletons).not.toHaveBeenCalled();
+  });
+
+  it('gives a section repair a depth-bounded index rather than a slice', async () => {
+    const prompt = await promptFor(['doc:spec.md:12'], {
+      structural: [],
+      sections: [
+        {
+          source: 'spec.md',
+          line: 12,
+          title: 'Billing',
+          score: 0,
+          matchedNodes: 0,
+          missingTerms: ['x'],
+        },
+      ],
+    });
+    // The ladder stepped down to the depth that fits, and says so rather than
+    // letting the agent read a partial plan as the whole one.
+    expect(prompt).toContain('bounded to 1 level(s) of the plan');
+    expect(prompt).toContain('do not invent an id for one you cannot see');
+    // Every ref survives whole: a character slice could leave half a uuid, which
+    // the agent would quote back as if it were a node.
+    const refs = prompt.match(/node:[0-9a-f-]+/g) ?? [];
+    expect(refs.length).toBeGreaterThan(30);
+    expect(refs.every((ref) => ref.length === 'node:'.length + 36)).toBe(true);
   });
 });
 

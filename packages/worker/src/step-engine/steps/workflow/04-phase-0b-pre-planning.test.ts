@@ -3,11 +3,8 @@ import { logger } from '@haive/shared';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import type { StepContext } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import {
-  phase0bPrePlanningStep,
-  planIndexOmissionNotice,
-  trimPlanIndexToWholeNodes,
-} from './04-phase-0b-pre-planning.js';
+import { phase0bPrePlanningStep } from './04-phase-0b-pre-planning.js';
+import { planIndexOmissionNotice, trimPlanIndexToWholeNodes } from '../plan/_plan-index.js';
 
 const base = {
   taskTitle: 'Add a logout button',

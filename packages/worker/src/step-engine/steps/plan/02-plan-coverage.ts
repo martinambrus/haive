@@ -2,7 +2,7 @@ import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
-import { loadPlanSkeletons, renderPlanMarkdown } from '@haive/shared/plan';
+import { loadPlanSkeletons } from '@haive/shared/plan';
 import type { PlanNodeSkeleton } from '@haive/shared/plan';
 import type { AgentMiningResult, StepContext, StepDefinition } from '../../step-definition.js';
 import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
@@ -35,6 +35,7 @@ import type { PlanInputsApply } from './00-plan-inputs.js';
 import { uploadsInputRel } from './_plan-inputs.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
+import { renderBoundedPlanIndex } from './_plan-index.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 
@@ -63,7 +64,6 @@ interface CoverageDetect {
   sections: CoverageCandidate[];
   /** Section bodies, so a confirmed gap can be handed to an agent as a brief. */
   sectionBodies: Record<string, string>;
-  planMarkdown: string;
   nodeCount: number;
   /** The inputs the section gaps came from, original filenames. Plural because a
    *  plan can be built from several documents at once; empty for a from_repo
@@ -127,6 +127,11 @@ export const AUTO_CONVERGENCE_AGENTS_PER_PASS = 240;
  *  attached folder of specifications must not turn the gate into a thousand of
  *  them. The cap is stated in the gate copy and the rest surface on a re-run. */
 const COVERAGE_SECTION_LIMIT = 60;
+/** What a section repair may spend on the plan index. The budget the prompt has
+ *  always had; the depth ladder is what now buys breadth inside it, because
+ *  choosing a parent needs to see the whole tree's shape rather than the first
+ *  few hundred nodes of it. */
+const COVERAGE_PLAN_INDEX_MAX_CHARS = 60_000;
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const CONTINUATION_AGENT_RE = new RegExp(`^plan-continue-b(\\d+)-(${UUID_SOURCE})-p(\\d+)$`, 'i');
 
@@ -389,7 +394,6 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     structural: [],
     sections: [],
     sectionBodies: {},
-    planMarkdown: '',
     nodeCount: 0,
     docNames: [],
     hasVisualInputs: false,
@@ -498,7 +502,6 @@ async function detectCoverage(ctx: StepContext): Promise<CoverageDetect> {
     structural,
     sections,
     sectionBodies,
-    planMarkdown: await renderPlanMarkdown(ctx.db, repositoryId, { titlesOnly: true }),
     nodeCount: skeletons.length,
     docNames,
     sectionsTotal,
@@ -982,6 +985,16 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
       const nodes = picked.some((key) => d.structural.some((gap) => structuralKey(gap) === key))
         ? await loadPlanSkeletons(ctx.db, d.repositoryId)
         : [];
+      // A section gap names no node, so its agent picks a parent out of the plan
+      // index. Bounded by DEPTH rather than sliced: `renderPlanMarkdown` spends
+      // roughly 150-250 characters per node, so the 60k slice this replaces ended
+      // around 300-400 nodes — on plans that reach thousands — and could cut a
+      // `node:<uuid>` in half for the agent to quote back as whole.
+      const planIndex = picked.some((key) =>
+        d.sections.some((candidate) => sectionKey(candidate) === key),
+      )
+        ? await renderBoundedPlanIndex(ctx.db, d.repositoryId, COVERAGE_PLAN_INDEX_MAX_CHARS)
+        : '';
       const dispatches = picked.map((key) => {
         const structural = d.structural.find((gap) => structuralKey(gap) === key);
         const section = d.sections.find((candidate) => sectionKey(candidate) === key);
@@ -1017,7 +1030,7 @@ export const planCoverageStep: StepDefinition<CoverageDetect, CoverageApply> = {
             '',
             ...(focus
               ? [buildPlanExpansionContext(nodes, focus)]
-              : ['The plan as it stands (titles only):', '', d.planMarkdown.slice(0, 60_000)]),
+              : ['The plan as it stands (titles only):', '', planIndex]),
             '',
             'Add ONLY what is missing. Do not restate nodes that already exist, and do not',
             'duplicate a sibling under a different name — the reader is looking at this plan',
