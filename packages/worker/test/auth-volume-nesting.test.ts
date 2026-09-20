@@ -58,4 +58,21 @@ describe('assertNoAuthVolumeNesting', () => {
   it('passes when no auth mounts are present at all', () => {
     expect(() => assertNoAuthVolumeNesting([file('/haive/mcp.json')], [repoMount])).not.toThrow();
   });
+
+  // Directory mounts carry the same hazard as files: Docker would leave a root-owned stub in the
+  // volume. agy's mirrors sit in ~/.gemini/config, beside its auth volume and not inside it.
+  it('rejects a directory mount inside an auth-volume mount, and allows one beside it', () => {
+    const auth = resolveTaskAuthMounts('antigravity', 'task-4');
+    const inside: DockerVolumeMount = {
+      source: 'haive_repos',
+      target: '/home/node/.gemini/antigravity-cli/skills',
+      subpath: 'u/r/.agents/skills',
+      readOnly: true,
+    };
+    const beside: DockerVolumeMount = { ...inside, target: '/home/node/.gemini/config/skills' };
+    expect(() => assertNoAuthVolumeNesting([], [...auth, inside])).toThrow(
+      'sandbox mount /home/node/.gemini/antigravity-cli/skills is inside the auth-volume mount',
+    );
+    expect(() => assertNoAuthVolumeNesting([], [...auth, beside])).not.toThrow();
+  });
 });

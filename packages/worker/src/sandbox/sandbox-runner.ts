@@ -92,7 +92,7 @@ export function dedupeExtraFilesByPath(files: SandboxExtraFile[]): SandboxExtraF
 }
 
 /**
- * Refuse to bind an extra file at a path inside a CLI auth-volume mount.
+ * Refuse to place an extra file, or any other mount, inside a CLI auth-volume mount.
  *
  * Docker materialises a missing file mount target INSIDE the volume, owned by root, and that stub
  * outlives the container — the CLI, running as uid 1000, then cannot write its own config. That is
@@ -112,11 +112,15 @@ export function assertNoAuthVolumeNesting(
   mounts: DockerVolumeMount[],
 ): void {
   const authTargets = mounts.filter((m) => m.kind === 'auth').map((m) => m.target);
-  for (const file of files) {
-    const conflict = authTargets.find((target) => file.containerPath.startsWith(`${target}/`));
+  const placed = [
+    ...files.map((f) => ({ what: 'extra file', path: f.containerPath })),
+    ...mounts.filter((m) => m.kind !== 'auth').map((m) => ({ what: 'mount', path: m.target })),
+  ];
+  for (const { what, path } of placed) {
+    const conflict = authTargets.find((target) => path.startsWith(`${target}/`));
     if (!conflict) continue;
     throw new Error(
-      `sandbox extra file ${file.containerPath} is inside the auth-volume mount ${conflict}. ` +
+      `sandbox ${what} ${path} is inside the auth-volume mount ${conflict}. ` +
         'Bind-mounting there leaves a root-owned stub in the volume that the CLI cannot write, ' +
         "and hides the real file's other contents for the length of the run. Deliver it through " +
         "the CLI's own config writer instead (see McpDelivery in sandbox/mcp-config.ts).",
@@ -262,8 +266,8 @@ export async function runInSandbox(
       resolvedCommand = wrapperSandboxPath;
     }
 
+    assertNoAuthVolumeNesting(spec.extraFiles ?? [], mounts);
     if (spec.extraFiles && spec.extraFiles.length > 0) {
-      assertNoAuthVolumeNesting(spec.extraFiles, mounts);
       // Docker rejects the WHOLE `docker run` with "Duplicate mount point" if two mounts
       // share a target, so one container path may be claimed only once. Independent mask
       // sources can legitimately pick the same file — `.ddev/traefik/certs/<project>.key`

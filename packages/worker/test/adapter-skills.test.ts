@@ -161,3 +161,28 @@ describe('gemini: trusted workspace, tools pre-approved', () => {
     expect(spec.args).toContain('--yolo');
   });
 });
+
+describe('antigravity: repo skills and agents mirrored into its global dirs', () => {
+  // A headless agy run ignores the workspace's .agents/ and loads only ~/.gemini/config/{skills,
+  // agents}, an agent only as <id>/agent.md (MEASURED on 1.2.2).
+  it('mirrors the skills dir as-is and the agents dir as <id>/agent.md', () => {
+    const spec = new AntigravityAdapter().buildCliInvocation(provider(), 'do x', {});
+    expect(spec.repoMirrors).toEqual([
+      { repoDir: '.agents/skills', containerDir: `${SANDBOX_USER_HOME}/.gemini/config/skills` },
+      {
+        repoDir: '.agents/agents',
+        containerDir: `${SANDBOX_USER_HOME}/.gemini/config/agents`,
+        layout: 'agentMdDirs',
+      },
+    ]);
+  });
+
+  for (const [name, adapter, over] of [
+    ...claudeFamily,
+    ...others.filter(([n]) => n !== 'antigravity').map(([n, a]) => [n, a, {}] as const),
+  ]) {
+    it(`${name} mirrors nothing`, () => {
+      expect(adapter.buildCliInvocation(provider(over), 'do x', {}).repoMirrors).toBeUndefined();
+    });
+  }
+});
