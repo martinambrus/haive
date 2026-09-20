@@ -10,6 +10,7 @@ import {
   checkOnboardingMarkers,
   collectWrittenCliContent,
   resetOnboardingArtifacts,
+  resolveMergedTasks,
   stripHaiveContent,
 } from '../src/routes/repos.js';
 
@@ -264,41 +265,76 @@ describe('collectWrittenCliContent', () => {
     detectOutput: { skillTargetDirs: ['.claude/skills'] },
     output: { generated: opts.generated ?? [], removed: opts.removed ?? [], skipped: [] },
   });
+  const MERGED_AT = new Date('2026-02-01T00:00:00Z');
+  /** The LOCAL merge path: `merge_remove` records `merged` and the step's end is the merge. */
   const cleanup = (taskId: string, merged: boolean) => ({
     taskId,
     stepId: '12-worktree-cleanup',
     output: { action: 'merge_remove', removed: true, merged, branchDeleted: false },
+    endedAt: MERGED_AT,
+    prState: null,
+    prMergedAt: null,
   });
+  /** The PR path: the step stays `merged: false` for good and the poller records it on the task. */
+  const prCleanup = (
+    taskId: string,
+    prState: string | null,
+    prMergedAt: Date | null = MERGED_AT,
+  ) => ({
+    taskId,
+    stepId: '12-worktree-cleanup',
+    output: { action: 'create_pr', removed: false, merged: false, branchDeleted: false },
+    endedAt: new Date('2026-01-25T00:00:00Z'),
+    prState,
+    prMergedAt,
+  });
+  /** Run the real resolver over the rows, as the route does. */
+  const collectMerged = (
+    rows: Parameters<typeof collectWrittenCliContent>[0],
+    epoch: Date | null = null,
+  ) =>
+    collectWrittenCliContent(
+      rows,
+      [],
+      resolveMergedTasks(
+        rows.map((r) => ({
+          taskId: (r as { taskId?: string }).taskId ?? '',
+          stepId: r.stepId,
+          output: r.output,
+          endedAt: (r as { endedAt?: Date | null }).endedAt ?? null,
+          prState: (r as { prState?: string | null }).prState ?? null,
+          prMergedAt: (r as { prMergedAt?: Date | null }).prMergedAt ?? null,
+        })),
+        epoch,
+      ),
+    );
 
   it('ignores a workflow skill sync whose worktree was never merged', async () => {
     // Until the merge those writes live in the worktree and the root still holds what
     // onboarding put there; claiming from it would delete an untouched root copy.
-    const { dirs, entries } = collectWrittenCliContent(
-      [skillSync('t1', { generated: ['learned-thing'] }), cleanup('t1', false)],
-      [],
-    );
+    const { dirs, entries } = collectMerged([
+      skillSync('t1', { generated: ['learned-thing'] }),
+      cleanup('t1', false),
+    ]);
 
     expect([...dirs]).toEqual([]);
     expect([...entries]).toEqual([]);
   });
 
   it('claims a merged skill sync, and retires what it removed', async () => {
-    const { dirs, entries } = collectWrittenCliContent(
-      [
-        {
-          stepId: '09_5-skill-generation',
-          output: {
-            written: [
-              { id: 'dropped', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['old'] },
-              { id: 'kept', mirroredDirs: ['.claude/skills'] },
-            ],
-          },
+    const { dirs, entries } = collectMerged([
+      {
+        stepId: '09_5-skill-generation',
+        output: {
+          written: [
+            { id: 'dropped', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['old'] },
+            { id: 'kept', mirroredDirs: ['.claude/skills'] },
+          ],
         },
-        skillSync('t1', { generated: ['learned-thing'], removed: ['dropped'] }),
-        cleanup('t1', true),
-      ],
-      [],
-    );
+      },
+      skillSync('t1', { generated: ['learned-thing'], removed: ['dropped'] }),
+      cleanup('t1', true),
+    ]);
 
     expect(dirs.has('.claude/skills')).toBe(true);
     expect(entries.has('.claude/skills/learned-thing/SKILL.md')).toBe(true);
@@ -337,13 +373,33 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.claude/skills/fine/sub-skills/kept-slug.md')).toBe(true);
   });
 
+  it('honours a PR merge, which the cleanup step never records', async () => {
+    // `create_pr` leaves `merged: false` for good — the merge happens on the forge and the
+    // poller records it on the TASK. Reading only the step's flag ignored every PR workflow.
+    const rows = [skillSync('t1', { generated: ['learned-thing'] }), prCleanup('t1', 'merged')];
+
+    expect(collectMerged(rows).entries.has('.claude/skills/learned-thing/SKILL.md')).toBe(true);
+    // Still open, or closed without merging: nothing of it reached the root.
+    const open = [skillSync('t2', { generated: ['x'] }), prCleanup('t2', 'open', null)];
+    expect([...collectMerged(open).dirs]).toEqual([]);
+  });
+
+  it('keeps a sync whose merge lands after the reset, and drops one merged before it', async () => {
+    // 11d can finish in a worktree BEFORE a reset and merge AFTER it: its files reach the root
+    // once the reset is over, and its record is the only thing that names them. The epoch
+    // therefore applies to the MERGE time, not to the 11d row's own clock.
+    const rows = [skillSync('t1', { generated: ['learned-thing'] }), cleanup('t1', true)];
+    const beforeMerge = new Date('2026-01-15T00:00:00Z'); // MERGED_AT is 2026-02-01
+    const afterMerge = new Date('2026-03-01T00:00:00Z');
+
+    expect(collectMerged(rows, beforeMerge).dirs.has('.claude/skills')).toBe(true);
+    expect([...collectMerged(rows, afterMerge).dirs]).toEqual([]);
+  });
+
   it('scopes no directory for a merged sync that did nothing', async () => {
     // Detect can filter every operation out — all bundle-owned, or naming skills that are gone —
     // and the run then merges having written nothing.
-    const { dirs, entries } = collectWrittenCliContent(
-      [skillSync('t1', {}), cleanup('t1', true)],
-      [],
-    );
+    const { dirs, entries } = collectMerged([skillSync('t1', {}), cleanup('t1', true)]);
 
     expect([...dirs]).toEqual([]);
     expect([...entries]).toEqual([]);
@@ -352,27 +408,24 @@ describe('collectWrittenCliContent', () => {
   it('retires a removed skill without scoping the directory', async () => {
     // A removal is not a write: it must retire 09_5's claim so a recreated file is not deleted,
     // but it does not put the directory in reach of the sweep on its own.
-    const { dirs, entries } = collectWrittenCliContent(
-      [
-        {
-          stepId: '09_5-skill-generation',
-          output: { written: [{ id: 'dropped', mirroredDirs: ['.claude/skills'] }] },
-        },
-        skillSync('t1', { removed: ['dropped'] }),
-        cleanup('t1', true),
-      ],
-      [],
-    );
+    const { dirs, entries } = collectMerged([
+      {
+        stepId: '09_5-skill-generation',
+        output: { written: [{ id: 'dropped', mirroredDirs: ['.claude/skills'] }] },
+      },
+      skillSync('t1', { removed: ['dropped'] }),
+      cleanup('t1', true),
+    ]);
 
     expect(entries.has('.claude/skills/dropped')).toBe(false);
     expect(entries.has('.claude/skills/dropped/SKILL.md')).toBe(false);
     // 09_5 put the directory in scope and claimed its index; the removal added neither, and on
     // its own — with no 09_5 row — it would have scoped nothing.
     expect(dirs.has('.claude/skills')).toBe(true);
-    const removalOnly = collectWrittenCliContent(
-      [skillSync('t1', { removed: ['dropped'] }), cleanup('t1', true)],
-      [],
-    );
+    const removalOnly = collectMerged([
+      skillSync('t1', { removed: ['dropped'] }),
+      cleanup('t1', true),
+    ]);
     expect([...removalOnly.dirs]).toEqual([]);
   });
 

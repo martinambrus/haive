@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   isPathContainmentError,
@@ -935,13 +935,60 @@ const SKILL_REPAIR_STEP_ID = '09_5b-skill-repair';
  *  standing and a file the user later recreates at that path is deleted as onboarding output. */
 const WORKFLOW_SKILL_STEP_ID = '11d-skill-sync';
 const WORKTREE_CLEANUP_STEP_ID = '12-worktree-cleanup';
+const WORKTREE_PAIR_STEP_IDS = [WORKFLOW_SKILL_STEP_ID, WORKTREE_CLEANUP_STEP_ID];
 const PROVENANCE_STEP_IDS = [
   AGENT_TARGETS_STEP_ID,
   SKILL_MIRROR_STEP_ID,
   SKILL_REPAIR_STEP_ID,
-  WORKFLOW_SKILL_STEP_ID,
-  WORKTREE_CLEANUP_STEP_ID,
+  ...WORKTREE_PAIR_STEP_IDS,
 ];
+
+export interface ProvenanceStepRow {
+  taskId: string;
+  stepId: string;
+  detectOutput: unknown;
+  output: unknown;
+  endedAt: Date | null;
+  prState: string | null;
+  prMergedAt: Date | null;
+}
+
+/**
+ * Task ids whose worktree changes reached the repository ROOT, and did so AFTER the reset.
+ *
+ * Two merge paths, and only one of them is in the cleanup step's own output. `merge_remove`
+ * merges locally and records `merged`, the merge time being when that step ended. `create_pr`
+ * leaves `merged: false` for good — the merge happens on the forge, and the PR poller records
+ * it on the TASK as `pr_state`/`pr_merged_at`. Reading only the step's flag therefore ignored
+ * every PR-based workflow.
+ *
+ * The epoch applies to the MERGE time rather than to the 11d row's own clock: 11d can finish in
+ * a worktree BEFORE a reset and merge AFTER it, in which case its files reach the root once the
+ * reset is over and its record is the only thing that names them. Merged before the reset means
+ * the reset already deleted them and the claims are stale.
+ */
+export function resolveMergedTasks(
+  rows: ReadonlyArray<{
+    taskId: string;
+    stepId: string;
+    output: unknown;
+    endedAt: Date | null;
+    prState: string | null;
+    prMergedAt: Date | null;
+  }>,
+  epoch: Date | null,
+): Set<string> {
+  const merged = new Set<string>();
+  for (const row of rows) {
+    if (row.stepId !== WORKTREE_CLEANUP_STEP_ID) continue;
+    const localMerge = (row.output as { merged?: unknown } | null)?.merged === true;
+    const mergedAt = localMerge ? row.endedAt : row.prState === 'merged' ? row.prMergedAt : null;
+    if (mergedAt === null) continue;
+    if (epoch !== null && mergedAt <= epoch) continue;
+    merged.add(row.taskId);
+  }
+  return merged;
+}
 
 /**
  * The step rows whose records may be read as provenance for this repository.
@@ -963,7 +1010,7 @@ export async function loadProvenanceSteps(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
   epoch: Date | null,
-): Promise<Array<{ taskId: string; stepId: string; detectOutput: unknown; output: unknown }>> {
+): Promise<ProvenanceStepRow[]> {
   return (
     db
       .select({
@@ -971,6 +1018,9 @@ export async function loadProvenanceSteps(
         stepId: schema.taskSteps.stepId,
         detectOutput: schema.taskSteps.detectOutput,
         output: schema.taskSteps.output,
+        endedAt: schema.taskSteps.endedAt,
+        prState: schema.tasks.prState,
+        prMergedAt: schema.tasks.prMergedAt,
       })
       .from(schema.taskSteps)
       .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
@@ -984,7 +1034,18 @@ export async function loadProvenanceSteps(
           // so keying on that excluded the rewritten 07/09_5 output for good while its files sat
           // on disk. `ended_at` is when this step actually wrote. A `done` step missing it is
           // excluded, which quarantines its files rather than removing them: the safe direction.
-          ...(epoch === null ? [] : [gt(schema.taskSteps.endedAt, epoch)]),
+          //
+          // The WORKTREE pair is exempt: 11d writes into a worktree and its changes reach the
+          // root when the MERGE lands, which can be after the step ended and after the reset.
+          // `resolveMergedTasks` applies the epoch to that merge time instead.
+          ...(epoch === null
+            ? []
+            : [
+                or(
+                  inArray(schema.taskSteps.stepId, WORKTREE_PAIR_STEP_IDS),
+                  gt(schema.taskSteps.endedAt, epoch),
+                ) ?? sql`true`,
+              ]),
         ),
       )
       // OLDEST first, because a later run can RETIRE an earlier claim: `11d-skill-sync` deletes
@@ -1016,17 +1077,9 @@ export function collectWrittenCliContent(
     output: unknown;
   }>,
   artifacts: ReadonlyArray<{ diskPath: string }>,
+  /** From `resolveMergedTasks`: the tasks whose worktree reached the root after the reset. */
+  mergedTasks: ReadonlySet<string> = new Set(),
 ): { dirs: Set<string>; entries: Set<string> } {
-  // Which tasks got their worktree MERGED. Read first, because a task's 11d row is replayed
-  // before its cleanup step in execution order and only the verdict says whether 11d's writes
-  // ever reached the repository root.
-  const mergedTasks = new Set<string>();
-  for (const step of steps) {
-    if (step.stepId !== WORKTREE_CLEANUP_STEP_ID) continue;
-    if ((step.output as { merged?: unknown } | null)?.merged === true && step.taskId) {
-      mergedTasks.add(step.taskId);
-    }
-  }
   const catalog = inventoryDirsFromCatalog();
   const byDir = new Map(catalog.map((entry) => [entry.dir, entry]));
   const dirs = new Set<string>();
@@ -1866,8 +1919,13 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
       ),
     );
 
-  const onboardingSteps = await loadProvenanceSteps(db, id, repoRow?.onboardingResetAt ?? null);
-  const written = collectWrittenCliContent(onboardingSteps, live);
+  const epoch = repoRow?.onboardingResetAt ?? null;
+  const onboardingSteps = await loadProvenanceSteps(db, id, epoch);
+  const written = collectWrittenCliContent(
+    onboardingSteps,
+    live,
+    resolveMergedTasks(onboardingSteps, epoch),
+  );
 
   const { removed, cleaned, skipped, quarantined } = await resetOnboardingArtifacts(root, {
     writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
