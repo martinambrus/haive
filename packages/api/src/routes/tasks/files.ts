@@ -4,7 +4,13 @@ import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
-import { isRootClaimLive, rootClaimRefusal, schema, type RootClaimKind } from '@haive/database';
+import {
+  acquireRootClaim,
+  readLiveRootClaim,
+  rootClaimRefusal,
+  schema,
+  type RootClaimHandle,
+} from '@haive/database';
 import { isReadOnlyLocalRepo } from '@haive/shared';
 import {
   isPathContainmentError,
@@ -284,9 +290,29 @@ async function assertWritableRepo(
   if (repo && isReadOnlyLocalRepo(repo)) {
     throw new HttpError(409, 'This repository is read-only');
   }
-  if (isRootClaimLive(repo?.rootClaimedAt)) {
-    throw new HttpError(409, rootClaimRefusal((repo?.rootClaimKind as RootClaimKind) ?? null));
-  }
+}
+
+/**
+ * Hold the repository root while a knowledge file is written into it.
+ *
+ * Checking that no reset is running is not enough: the SELECT can finish just before a reset
+ * claims, and the write then lands inside a tree being recursively removed. The edit is either
+ * resurrected as an orphan the reset did not intend to leave, or — if the descriptor was already
+ * open — written to an unlinked inode, which returns 200 and silently loses it.
+ *
+ * Taking the same claim the reset and the rebuild take makes the three mutually exclusive. The
+ * hold is one file write long, so nothing waits on it meaningfully; `null` means someone else
+ * holds the root and the caller must refuse.
+ *
+ * A task with no repository (a `kb_author` writing a cross-project entry) has no root to claim
+ * and needs none — nothing can reset what it is not writing into.
+ */
+async function holdRepositoryRoot(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string | null,
+): Promise<RootClaimHandle | null> {
+  if (!repositoryId) return { release: async () => {} };
+  return acquireRootClaim(db, repositoryId, 'edit');
 }
 
 fileRoutes.put('/:id/files/content', async (c) => {
@@ -308,34 +334,45 @@ fileRoutes.put('/:id/files/content', async (c) => {
     throw new HttpError(413, 'File is too large to edit here');
   }
 
-  const target = resolve(anchor, workspaceRel(anchor, root, body.path));
-  const fh = await openEditableKnowledgeFile(anchor, root, target);
-  try {
-    // Optimistic concurrency against the bytes the client actually rendered: an
-    // agent re-run or a second tab can have rewritten the file since. Reported, not
-    // resolved — a silent overwrite of either side is the wrong answer.
-    const current = await fh.readFile({ encoding: 'utf8' });
-    if (typeof body.expectedSha === 'string' && body.expectedSha !== sha256(current)) {
-      throw new HttpError(
-        409,
-        'File changed since it was loaded; reload to see the current version',
-      );
-    }
-    // Truncate first: a shorter body would otherwise leave the old tail behind.
-    await fh.truncate(0);
-    await fh.write(body.content, 0, 'utf8');
-    // This process runs as root while the sandbox user is uid 1000: without
-    // this the agent's next edit of its own file fails, and only inside a
-    // container. Through the descriptor, like every other step here.
-    await fh.chmod(0o644).catch(() => {});
-    await fh.chown(1000, 1000).catch(() => {});
-  } finally {
-    await fh.close().catch(() => {});
+  // Held for the whole write, including the open: a reset claiming between the check and the
+  // write would otherwise delete the tree underneath it.
+  const held = await holdRepositoryRoot(db, task.repositoryId);
+  if (held === null) {
+    const claim = await readLiveRootClaim(db, task.repositoryId!);
+    throw new HttpError(409, rootClaimRefusal(claim?.kind ?? null));
   }
+  try {
+    const target = resolve(anchor, workspaceRel(anchor, root, body.path));
+    const fh = await openEditableKnowledgeFile(anchor, root, target);
+    try {
+      // Optimistic concurrency against the bytes the client actually rendered: an
+      // agent re-run or a second tab can have rewritten the file since. Reported, not
+      // resolved — a silent overwrite of either side is the wrong answer.
+      const current = await fh.readFile({ encoding: 'utf8' });
+      if (typeof body.expectedSha === 'string' && body.expectedSha !== sha256(current)) {
+        throw new HttpError(
+          409,
+          'File changed since it was loaded; reload to see the current version',
+        );
+      }
+      // Truncate first: a shorter body would otherwise leave the old tail behind.
+      await fh.truncate(0);
+      await fh.write(body.content, 0, 'utf8');
+      // This process runs as root while the sandbox user is uid 1000: without
+      // this the agent's next edit of its own file fails, and only inside a
+      // container. Through the descriptor, like every other step here.
+      await fh.chmod(0o644).catch(() => {});
+      await fh.chown(1000, 1000).catch(() => {});
+    } finally {
+      await fh.close().catch(() => {});
+    }
 
-  return c.json({
-    path: target,
-    sha: sha256(body.content),
-    size: Buffer.byteLength(body.content, 'utf8'),
-  });
+    return c.json({
+      path: target,
+      sha: sha256(body.content),
+      size: Buffer.byteLength(body.content, 'utf8'),
+    });
+  } finally {
+    await held.release().catch(() => {});
+  }
 });

@@ -1652,10 +1652,24 @@ leaves the window where a handler has already passed it and the reset claims the
 `rm(dest)` runs, and both then walk the same tree. `root_claim_kind` exists only so a refusal can
 name what it is waiting for; nothing branches on it.
 
-The claim is released with the STAMP it took (`releaseRepositoryRoot(db, id, claimedAt)`): a
-holder that outran `ROOT_CLAIM_STALE_MS` has already had its claim taken over, and an
-unconditional clear would strip the protection from the job that took over — silently, and
-exactly on the slowest trees, which are the ones that reach the window at all.
+**It is a LEASE, not a deadline on the work.** `acquireRootClaim` renews while its caller works
+(`ROOT_CLAIM_RENEW_MS`, a third of the window, on an `unref`ed timer so a held claim never keeps a
+process alive). A fixed expiry cannot tell a dead holder from a slow one, and both exist here —
+`gitClone` has no timeout and `copyTree` is unbounded by repository size — so expiring a live
+holder re-admits the concurrent `rm -rf` the claim exists to exclude, i.e. the race returning at
+the fifteen-minute mark. With renewal, expiry means "the holder stopped renewing", which is what
+abandonment actually is. Use `acquireRootClaim`, not the bare `claimRepositoryRoot`, for anything
+that is not certainly shorter than the window.
+
+The claim is released with the STAMP it took, and renewal is conditional on it too: a holder whose
+lease DID expire and was taken over learns it lost rather than clawing it back or clearing its
+successor's claim — silently, and exactly on the slowest trees, which are the ones that reach the
+window at all.
+
+The knowledge-file editor (`PUT /tasks/:id/files/content`) HOLDS one for its write, as kind
+`edit`. Checking is not enough there: the SELECT can finish just before a reset claims, and the
+write then lands in a tree being recursively removed — resurrected as an orphan, or written to an
+already-unlinked inode, which returns 200 and silently loses the edit.
 
 A lock must be HELD across the work it protects, and both places to hold one cost more than the
 race: the repo worker and the task worker run in ONE process on ONE `max: 10` pool, so a repo job

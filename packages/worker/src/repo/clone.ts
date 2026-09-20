@@ -13,13 +13,7 @@ import {
   type EntryInfo,
 } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
-import {
-  claimRepositoryRoot,
-  readLiveRootClaim,
-  releaseRepositoryRoot,
-  schema,
-  type Database,
-} from '@haive/database';
+import { acquireRootClaim, readLiveRootClaim, schema, type Database } from '@haive/database';
 import {
   logger,
   HAIVE_DATA_FILES,
@@ -285,7 +279,7 @@ async function withRootClaim<T>(
   repositoryId: string,
   run: () => Promise<T>,
 ): Promise<T> {
-  const claim = await claimRepositoryRoot(db, repositoryId, 'rebuild');
+  const claim = await acquireRootClaim(db, repositoryId, 'rebuild');
   if (claim === null) {
     const held = await readLiveRootClaim(db, repositoryId);
     throw new Error(
@@ -295,7 +289,7 @@ async function withRootClaim<T>(
   try {
     return await run();
   } finally {
-    await releaseRepositoryRoot(db, repositoryId, claim.claimedAt).catch(() => undefined);
+    await claim.release().catch(() => undefined);
   }
 }
 

@@ -7,9 +7,8 @@ import { eq, and, asc, desc, gt, inArray, isNull, lt, ne, notInArray, or, sql } 
 import {
   schema,
   ROOT_CLAIM_STALE_MS,
-  claimRepositoryRoot,
+  acquireRootClaim,
   readLiveRootClaim,
-  releaseRepositoryRoot,
   rootClaimRefusal,
 } from '@haive/database';
 import {
@@ -2095,7 +2094,9 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // root — refuse while it is held, which is the half the live-task guard below cannot cover:
   // none of them is a task. A claim rather than a lock because the repo worker and the task
   // worker share one connection pool, so a lock held across the walk deadlocks it.
-  const claim = await claimRepositoryRoot(db, id, 'reset', userId);
+  // Acquired as a LEASE: a reset of a large knowledge base can outlive any fixed expiry, and a
+  // claim that expires under a still-running holder re-admits the very `rm -rf` it excludes.
+  const claim = await acquireRootClaim(db, id, 'reset', userId);
   if (claim === null) {
     // The CAS refuses for three different reasons and answering 409 to all of them would turn a
     // wrong id and someone else's repository into "already being reset". Ownership is resolved
@@ -2113,7 +2114,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   } finally {
     // Every exit path, the failures included: a reset that threw has stopped touching the tree
     // just as surely as one that finished, and leaving the claim would block the retry.
-    await releaseRepositoryRoot(db, id, claim.claimedAt).catch(() => undefined);
+    await claim.release().catch(() => undefined);
   }
 });
 

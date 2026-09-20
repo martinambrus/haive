@@ -24,6 +24,7 @@ import {
   claimRepositoryRoot,
   readLiveRootClaim,
   releaseRepositoryRoot,
+  renewRootClaim,
   schema,
 } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -177,6 +178,44 @@ async function main(): Promise<void> {
       'and the real holder’s release does clear it',
       !((await readLiveRootClaim(db, handover)) !== null),
     );
+
+    // A LEASE, not a deadline on the work: `gitClone` has no timeout and `copyTree` is unbounded
+    // by repository size, so a fixed expiry cannot tell a dead holder from a slow one — and
+    // expiring a live one re-admits the concurrent `rm -rf` the claim exists to exclude.
+    const leased = await newRepo();
+    const held = await claimRepositoryRoot(db, leased, 'rebuild');
+    check('a lease starts out held', held !== null);
+    // Age it past the window, as a long clone would.
+    await db
+      .update(schema.repositories)
+      .set({ rootClaimedAt: new Date(Date.now() - ROOT_CLAIM_STALE_MS - 60_000) })
+      .where(eq(schema.repositories.id, leased));
+    check('an un-renewed lease goes stale', (await readLiveRootClaim(db, leased)) === null);
+
+    const aged = (await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, leased),
+      columns: { rootClaimedAt: true },
+    }))!.rootClaimedAt!;
+    const renewed = await renewRootClaim(db, leased, aged);
+    check('the holder can renew it', renewed !== null);
+    check('and it is live again', (await readLiveRootClaim(db, leased)) !== null);
+    check(
+      'so a second destructive writer is refused',
+      (await claimRepositoryRoot(db, leased, 'reset', userId)) === null,
+    );
+
+    // A holder whose lease WAS taken over learns it lost, instead of clawing it back.
+    await db
+      .update(schema.repositories)
+      .set({ rootClaimedAt: new Date(Date.now() - ROOT_CLAIM_STALE_MS - 60_000) })
+      .where(eq(schema.repositories.id, leased));
+    const successor = await claimRepositoryRoot(db, leased, 'reset', userId);
+    check('a genuinely abandoned lease is taken over', successor !== null);
+    check(
+      'and the previous holder cannot renew over the successor',
+      (await renewRootClaim(db, leased, renewed!)) === null,
+    );
+    await releaseRepositoryRoot(db, leased, successor?.claimedAt);
 
     // ---- stampRepositoryOnboarded -----------------------------------------------------------
     const seedTask = async (
