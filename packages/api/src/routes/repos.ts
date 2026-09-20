@@ -1535,6 +1535,30 @@ export function resolveKeptArtifactPaths(
 }
 
 /**
+ * Drop from `kept` the paths that are CONFIDENTLY absent from disk.
+ *
+ * `resolveKeptArtifactPaths` answers from what this walk did, so it cannot see a file that was
+ * already missing before the reset ran — a generated file the user deleted by hand, whose row is
+ * still live. Preserving that row under a skipped ancestor leaves `upgrade-status`, which answers
+ * from the rows, reporting an absent file as installed.
+ *
+ * `strict: true` is load-bearing rather than tidy. Under it `lstatNoFollow` returns null ONLY for
+ * an absent errno and THROWS for anything else, so an IO failure — likely here, since the reason
+ * this path runs at all is that the walk hit one — cannot masquerade as absence and retire the
+ * row of a file that is merely unreadable. Only a confident absence drops a row; every other
+ * answer keeps it, which is the direction that loses nothing.
+ */
+export async function dropAbsentKeptPaths(root: string, kept: string[]): Promise<string[]> {
+  const present: string[] = [];
+  for (const rel of kept) {
+    const found = await lstatNoFollow(root, rel, { strict: true }).catch(() => 'unknown' as const);
+    if (found === null) continue;
+    present.push(rel);
+  }
+  return present;
+}
+
+/**
  * Retire the artifact rows a reset invalidated, and only those.
  *
  * `keptPaths` is what the reset LEFT ALONE — kept files, refused links, and anything an IO error
@@ -2462,10 +2486,13 @@ async function runOnboardingArtifactReset(
     await supersedeResetArtifacts(
       tx,
       id,
-      resolveKeptArtifactPaths(
-        live.map((row) => row.diskPath),
-        [...new Set(skipped.map((s) => s.path))],
-        vacatedPaths,
+      await dropAbsentKeptPaths(
+        root,
+        resolveKeptArtifactPaths(
+          live.map((row) => row.diskPath),
+          [...new Set(skipped.map((s) => s.path))],
+          vacatedPaths,
+        ),
       ),
     );
     // The completion stamp cannot outlive the files it vouches for: this is the "start over"

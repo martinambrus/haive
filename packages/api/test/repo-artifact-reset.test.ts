@@ -14,6 +14,7 @@ import {
   resetOnboardingArtifacts,
   resetTouchedNothing,
   resolveKeptArtifactPaths,
+  dropAbsentKeptPaths,
   resolveMergedTasks,
   sweepSurvivors,
   stripHaiveContent,
@@ -1284,6 +1285,37 @@ describe('resolveKeptArtifactPaths', () => {
     expect(resolveKeptArtifactPaths(live, ['.claude/plugins'], new Set()).sort()).toEqual(
       resolveKeptArtifactPaths(live, ['.claude/plugins']).sort(),
     );
+  });
+});
+
+describe('dropAbsentKeptPaths', () => {
+  it('drops a kept path whose file is already gone, and keeps one that is there', async () => {
+    // `resolveKeptArtifactPaths` answers from what the WALK did, so it cannot see a file that was
+    // already missing before the reset — a generated file the user deleted by hand, whose row is
+    // still live. Preserving that row under a skipped ancestor leaves `upgrade-status`, which
+    // answers from the rows, reporting an absent file as installed.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'kept-absent-'));
+    await mkdir(path.join(root, '.claude'), { recursive: true });
+    await writeFile(path.join(root, '.claude/here.md'), 'x', 'utf8');
+
+    expect(await dropAbsentKeptPaths(root, ['.claude/here.md', '.claude/gone.md'])).toEqual([
+      '.claude/here.md',
+    ]);
+  });
+
+  it('keeps a path it could not resolve at all', async () => {
+    // Only a CONFIDENT absence drops a row; anything undecidable is kept, because retiring a row
+    // on "I could not tell" loses the claim for a file that may merely be unreadable.
+    //
+    // NOTE what this does and does not cover. A `..` path is refused by `toSafeRel`, which
+    // throws `invalid-path` whether or not `strict` is set — so this pins the undecidable-is-kept
+    // rule but NOT the `strict: true` flag itself. That flag's discriminating case is a
+    // non-containment IO error (EACCES/EIO) during the stat, where non-strict folds the error
+    // into `null` and would retire the row of a file that exists. A mutant dropping `strict`
+    // survives this suite, and an IO error is not provokable from a temp directory here — see
+    // the same limitation on the reset's own IO paths.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'kept-unknown-'));
+    expect(await dropAbsentKeptPaths(root, ['../escape.md'])).toEqual(['../escape.md']);
   });
 });
 

@@ -129,6 +129,53 @@ function fakeDbAmbiguousRenewal(rowStamp: 'attempted' | 'stranger'): {
   };
 }
 
+/**
+ * The compound failure: the renewal's acknowledgement is lost AND the reconciliation read fails
+ * too, so the holder cannot learn which stamp the row carries. The row does hold the attempted
+ * one. A later renewal from the OLD stamp therefore misses — and that miss must not be read as a
+ * takeover, or renewal stops on a lease still protecting live work.
+ */
+function fakeDbUnprovenRenewal(): { db: Database; writes: Recorded[] } {
+  const writes: Recorded[] = [];
+  const db = {
+    update: () => ({
+      set: (values: { rootClaimedAt: Date | null }) => ({
+        where: () => {
+          const idx = writes.length;
+          let settle!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            settle = resolve;
+          });
+          writes.push({ stamp: values.rootClaimedAt, settle });
+          return {
+            returning: async () => {
+              await gate;
+              if (idx === 0) return [{ id: 'repo-1' }]; // the claim
+              // Commits, then loses its acknowledgement.
+              if (idx === 1) throw new Error('connection lost');
+              // The fake cannot inspect the WHERE, so it answers by POSITION: the next renewal
+              // (from the stale stamp) misses, and the recovery attempt (from the stamp that
+              // write left behind) lands.
+              if (idx === 2) return [];
+              return [{ id: 'repo-1' }];
+            },
+          };
+        },
+      }),
+    }),
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => {
+            throw new Error('read failed too');
+          },
+        }),
+      }),
+    }),
+  } as unknown as Database;
+  return { db, writes };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -298,6 +345,36 @@ describe('acquireRootClaim', () => {
     const before = fake.writes.length;
     await handle!.release();
     expect(fake.writes.length).toBe(before);
+  });
+
+  it('recovers when the renewal AND its reconciliation both fail, rather than declaring a takeover', async () => {
+    // The read-back can fail too, and then keeping the old stamp is a GUESS. If the write did
+    // land, the next healthy renewal matches nothing — and reading that miss as a takeover stops
+    // renewal on a lease that is still protecting a clone or reset in progress. After the stale
+    // window a second writer then enters the same tree, which is the one outcome this whole
+    // mechanism exists to prevent. So an unproven stamp is carried and tried before concluding.
+    vi.useFakeTimers();
+    const { db, writes } = fakeDbUnprovenRenewal();
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'rebuild');
+    writes[0]!.settle();
+    const handle = await acquiring;
+
+    // Renewal 1: commits, loses its ack, and the reconciliation read fails as well.
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handle!.lost()).toBe(false);
+
+    // Renewal 2: the stale stamp misses, the carried stamp recovers. Settle both writes.
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Still ours: the miss was reconciled, not read as somebody else's claim.
+    expect(handle!.lost()).toBe(false);
   });
 
   it('never runs two renewals at once', async () => {

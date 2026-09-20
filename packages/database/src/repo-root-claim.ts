@@ -179,7 +179,7 @@ async function reconcileAmbiguousRenewal(
   repositoryId: string,
   held: Date,
   attempted: Date,
-): Promise<Date | null> {
+): Promise<{ stamp: Date | null; proven: boolean }> {
   try {
     const rows = await db
       .select({ claimedAt: schema.repositories.rootClaimedAt })
@@ -187,14 +187,16 @@ async function reconcileAmbiguousRenewal(
       .where(eq(schema.repositories.id, repositoryId))
       .limit(1);
     const claimedAt = rows[0]?.claimedAt ?? null;
-    if (claimedAt === null) return null;
+    if (claimedAt === null) return { stamp: null, proven: true };
     const stamp = claimedAt.getTime();
-    if (stamp === attempted.getTime()) return attempted;
-    if (stamp === held.getTime()) return held;
+    if (stamp === attempted.getTime()) return { stamp: attempted, proven: true };
+    if (stamp === held.getTime()) return { stamp: held, proven: true };
     // Some third value: the lease is someone else's now.
-    return null;
+    return { stamp: null, proven: true };
   } catch {
-    return held;
+    // Not an answer. The caller keeps working from `held` but must remember that the row may
+    // instead hold what we tried to write.
+    return { stamp: held, proven: false };
   }
 }
 
@@ -250,6 +252,8 @@ export async function acquireRootClaim(
   // already known to be gone, and a second `release()` — which the interface promises is safe —
   // would find no stamp and report a takeover that never happened.
   let lost = false;
+  /** The stamp an ambiguous renewal may have written, when the read-back could not confirm it. */
+  let unproven: Date | null = null;
 
   // The in-flight renewal, so `release` can WAIT for it. Without that, a release firing while a
   // renewal is pending captures the old stamp, its conditional UPDATE matches nothing, and it
@@ -261,18 +265,37 @@ export async function acquireRootClaim(
     if (current === null) return;
     const held = current;
     const attempted = new Date();
-    const next = await renewRootClaim(db, repositoryId, held, attempted).catch(() =>
-      // AMBIGUOUS, not failed. The UPDATE may have committed and lost only its acknowledgement,
-      // in which case the row now holds `attempted` while we still believe we hold `held` — and
-      // then every later conditional match misses: the release clears nothing, the next renewal
-      // reports the lease lost, and the repository stays claimed for the rest of the window with
-      // nobody working on it. Ask the row which of the two it actually carries; a read that also
-      // fails keeps the old stamp, which is exactly the previous behaviour.
-      reconcileAmbiguousRenewal(db, repositoryId, held, attempted),
-    );
+    let next = await renewRootClaim(db, repositoryId, held, attempted)
+      .then((stamp) => ({ stamp, proven: true }))
+      .catch(() =>
+        // AMBIGUOUS, not failed. The UPDATE may have committed and lost only its
+        // acknowledgement, in which case the row now holds `attempted` while we still believe we
+        // hold `held` — and then every later conditional match misses: the release clears
+        // nothing, the next renewal reports the lease lost, and the repository stays claimed for
+        // the rest of the window with nobody working on it. Ask the row which it carries.
+        reconcileAmbiguousRenewal(db, repositoryId, held, attempted),
+      );
+    // An UNPROVEN answer is a guess, not a reading: the reconciliation read failed too, so the
+    // row may well hold `attempted`. Carrying it matters because the next healthy renewal would
+    // otherwise match nothing and report a takeover that never happened — renewal stops, the
+    // claim is never cleared, and after the stale window a second writer enters the tree this
+    // one is still rewriting, which is the catastrophe the whole mechanism exists to prevent.
+    if (!next.proven) unproven = attempted;
+    else if (next.stamp !== null) unproven = null;
+    // A miss while an unproven stamp is outstanding is not yet a takeover: try renewing FROM the
+    // stamp that write may have left behind before concluding anything.
+    if (next.stamp === null && unproven !== null) {
+      const recovered = await renewRootClaim(db, repositoryId, unproven, new Date()).catch(
+        () => null,
+      );
+      if (recovered !== null) {
+        next = { stamp: recovered, proven: true };
+        unproven = null;
+      }
+    }
     // null means the lease was taken over while we worked. Stop renewing and stop releasing:
     // the claim on the row is someone else's now, and clearing it would strip their protection.
-    current = next;
+    current = next.stamp;
     if (current === null) {
       lost = true;
       clearInterval(timer);
