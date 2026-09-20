@@ -1,3 +1,5 @@
+import { getCliProviderMetadata } from '@haive/shared';
+import { SANDBOX_USER_HOME } from '../sandbox/sandbox-identity.js';
 import { BaseCliAdapter } from './base-adapter.js';
 import type { CliCommandSpec, CliProviderRecord, InvokeOpts } from './types.js';
 
@@ -19,6 +21,22 @@ export const AGY_LOG_FILE = 'agy.log';
 // single authority — the same position every other adapter is in by having no
 // internal cap at all.
 const AGY_PRINT_TIMEOUT = '24h';
+
+/** agy reads repo customizations only from its GLOBAL dirs in a headless run. MEASURED on 1.2.2
+ *  with Haive's argv: the workspace's `.agents/skills` and `.agents/agents` are ignored (only its
+ *  built-ins are listed, and `--agent <id>` logs "not found"), while
+ *  `~/.gemini/config/skills/<id>/SKILL.md` and `~/.gemini/config/agents/<id>/agent.md` load — the
+ *  agent only with `name`/`description` left in its frontmatter. So the workspace's own mirrors
+ *  are carried there read-only at dispatch; nothing on disk changes shape. */
+const agy = getCliProviderMetadata('antigravity');
+const AGY_REPO_MIRRORS: NonNullable<CliCommandSpec['repoMirrors']> = [
+  { repoDir: agy.projectSkillsDir!, containerDir: `${SANDBOX_USER_HOME}/.gemini/config/skills` },
+  {
+    repoDir: agy.projectAgentsDir!,
+    containerDir: `${SANDBOX_USER_HOME}/.gemini/config/agents`,
+    layout: 'agentMdDirs',
+  },
+];
 
 /** One NDJSON user message, the input `--input-format stream-json` consumes.
  *  VERIFIED end-to-end against the live binary: agy answered and exited 0. */
@@ -115,6 +133,7 @@ export class AntigravityAdapter extends BaseCliAdapter {
       outputFormat: 'antigravity-stream-json',
       stdinPrompt: antigravityStdinPrompt(prompt),
       captureFile: { containerDir: AGY_LOG_DIR, fileName: AGY_LOG_FILE },
+      repoMirrors: AGY_REPO_MIRRORS,
     };
   }
 }

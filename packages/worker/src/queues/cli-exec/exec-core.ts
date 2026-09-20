@@ -77,6 +77,7 @@ import {
 } from './resolvers.js';
 import { emittedDefaultServerNames } from '../../sandbox/mcp-config.js';
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
+import { resolveRepoMirrors } from './repo-mirrors.js';
 import { resolveSecretMasks } from './secret-mask.js';
 import { resolveRipgrepConfigEnv } from './ripgrep-config.js';
 import { worktreeGitfileMask } from './gitfile-mask.js';
@@ -1479,6 +1480,9 @@ export function createSandboxSpawner(
     // server re-downloads on every invocation. See sandbox/npm-cache.ts for what that
     // silently cost browser verification.
     allMounts.push(npmCacheMount());
+    // Repo customizations a CLI reads only from its home (agy), from this invocation's own tree.
+    const mirrors = await resolveRepoMirrors(spec.repoMirrors, repoMount);
+    allMounts.push(...mirrors.mounts);
     const runnerOptions: Parameters<typeof runInSandbox>[1] = { workdir: sandboxWorkdir };
     if (sandboxImage) runnerOptions.image = sandboxImage;
     if (allMounts.length > 0) runnerOptions.extraMounts = allMounts;
@@ -1499,15 +1503,16 @@ export function createSandboxSpawner(
         // appReach's CA vars go BEFORE spec.env so a provider that sets its own bundle wins.
         env: { ...NPM_CACHE_ENV, ...(appReach?.env ?? {}), ...spec.env },
         wrapperContent: wrapperContent ?? undefined,
-        // The adapter's config files and a prompt too large for argv (both grok)
-        // are appended to whatever masking already contributed rather than
-        // replacing it — the mask list is a security control and must not be
-        // displaced by an unrelated feature, and the runner keeps the FIRST
-        // claim on a container path.
+        // The adapter's config files and a prompt too large for argv (both grok), and
+        // its mirrored agent files (agy), are appended to whatever masking already
+        // contributed rather than replacing it — the mask list is a security control
+        // and must not be displaced by an unrelated feature, and the runner keeps the
+        // FIRST claim on a container path.
         extraFiles: (() => {
           const all = [
             ...extraFiles,
             ...(spec.configFiles ?? []),
+            ...mirrors.files,
             ...(spec.promptFile ? [spec.promptFile] : []),
           ];
           return all.length > 0 ? all : undefined;

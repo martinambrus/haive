@@ -414,13 +414,17 @@ is only visible there — an `init` event lists skill NAMES, never the listing t
   built-ins are switched off by name (`skills.disabled`) in the system settings file, the only
   place gemini honours it, and only while that file is ROOT-owned.
 - **amp** builds its prompt server-side, so it is not capturable offline.
-- **agy** (antigravity) loads NO repo skill or agent. MEASURED on 1.2.2 with Haive's argv and a
-  throwaway copy of a real login: a headless run lists only its built-in skills
-  (`agy-customizations`, `antigravity-guide`) and subagents (`self`, `research`). A skill in
-  `.agents/skills` is ignored, and `--agent <name>` answers `Agent "<name>" not found` for
-  `.agents/agents`. The same files under `~/.gemini/config/skills/<name>/SKILL.md` and
-  `~/.gemini/config/agents/<name>/agent.md` DO load, so only the workspace discovery is skipped. An
-  agy agent is also a directory holding `agent.md`, not Haive's flat `<id>.md`.
+- **agy** (antigravity) ignores the workspace's `.agents/` in a headless run. MEASURED on 1.2.2 with
+  Haive's argv and a throwaway copy of a real login: it listed only its built-in skills and
+  subagents, and `--agent <name>` answered `Agent "<name>" not found`. It loads customizations
+  from `~/.gemini/config` instead, so the sandbox MIRRORS them there read-only at dispatch
+  (`CliCommandSpec.repoMirrors`, `queues/cli-exec/repo-mirrors.ts`). `.agents/skills` is mounted
+  as it is, and each `.agents/agents/<id>.md` becomes `<id>/agent.md` with only `name` and
+  `description` kept. agy loads neither a flat file nor one carrying Haive's claude keys. Both
+  come from the invocation's own tree (the worktree when there is one), and nothing on disk
+  changes shape. agy also needs `~/.gemini/config` owned by `node` (`nodeOwnedDirs`): Haive binds
+  its MCP config there, and with the dir root-owned every print run died before its first turn
+  (`failed to get/create default project`).
 
 Every version range above was measured per downloaded build, zero-token, across the versions the
 picker offers. Two feeds reach back past Haive's command line, so `minRunnableVersion`

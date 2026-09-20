@@ -105,5 +105,10 @@ export function buildProviderInstallLines(
     }
   }
 
+  if (meta.nodeOwnedDirs?.length) {
+    const dirs = meta.nodeOwnedDirs.join(' ');
+    lines.push(`RUN mkdir -p ${dirs} && chown node:node ${dirs}`);
+  }
+
   return { lines, supported: true };
 }

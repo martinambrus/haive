@@ -125,6 +125,13 @@ export interface CliCommandSpec {
    *  OUTSIDE the auth volume, so nothing is merged into a config file the CLI also writes
    *  (grok: `/etc/grok/managed_config.toml`). */
   configFiles?: Array<{ containerPath: string; content: string }>;
+  /** Repository directories this CLI reads from a fixed path under its home rather than from the
+   *  workspace, given to it READ-ONLY from the invocation's own tree (the worktree when there is
+   *  one) and only when the directory exists there. `layout: 'agentMdDirs'` re-lays flat
+   *  `<id>.md` agents as `<containerDir>/<id>/agent.md` with only `name` and `description` left in
+   *  the frontmatter. Volume-backed repositories only: a read-only local-path repo is bound from a
+   *  host path the worker cannot see. */
+  repoMirrors?: Array<{ repoDir: string; containerDir: string; layout?: 'agentMdDirs' }>;
   /** When set, the sandbox runner mounts a WRITABLE directory at
    *  `captureFile.containerDir` and, after the run, reads `<containerDir>/<fileName>`
    *  back out as `CliExecutionResult.capturedLog`. Used to recover a CLI's own log

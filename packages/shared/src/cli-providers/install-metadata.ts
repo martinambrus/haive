@@ -37,6 +37,10 @@ export interface CliInstallMetadata {
   /** Oldest build that can run Haive's command line at all. The API neither offers nor saves an
    *  older one (isRunnableCliVersion): a pin below it fails every run. */
   minRunnableVersion?: string;
+  /** Directories under the sandbox user's home that the CLI writes into and Haive mounts files
+   *  beneath. The image pre-creates them owned by `node`: Docker creates a missing mount parent
+   *  root-owned, and the CLI then cannot write beside the mount. */
+  nodeOwnedDirs?: string[];
 }
 
 export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> = {
@@ -111,6 +115,10 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     // is harmless — it just sets an unused env var).
     autoUpdateDisable: [{ kind: 'env', vars: { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' } }],
     versionPinnable: false,
+    // agy keeps its project state in ~/.gemini/config, where Haive also mounts its MCP config.
+    // MEASURED on 1.2.2: with that dir root-owned by the mount, every print run died with
+    // "failed to get/create default project: ... permission denied"; node-owned, it runs.
+    nodeOwnedDirs: ['/home/node/.gemini/config'],
   },
   ollama: {
     // Ollama reuses the Claude binary (like zai); no separate install.
