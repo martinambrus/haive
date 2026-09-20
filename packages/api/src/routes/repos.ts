@@ -1357,12 +1357,15 @@ export async function resetOnboardingArtifacts(
       if (children === null) return;
       for (const child of children) {
         const rel = `${dir}/${child.name}`;
-        if (haiveEntries.has(rel) || (await artifactMatchesDisk(rel))) {
-          await remove(rel, child.isDirectory());
-          continue;
-        }
+        // A directory with anything claimed BELOW it is walked whether or not it is itself
+        // claimed: `artifactMatchesDisk` answers true for an ancestor of a matching row, so a
+        // row at `<dir>/<ours>/<file>` makes the directory holding it look wholly ours.
         if (child.isDirectory() && hasDeeperClaims(rel)) {
           left += await sweepClaimedChildren(rel);
+          continue;
+        }
+        if (haiveEntries.has(rel) || (await artifactMatchesDisk(rel))) {
+          await remove(rel, child.isDirectory());
           continue;
         }
         left += 1;
@@ -1434,14 +1437,16 @@ export async function resetOnboardingArtifacts(
       // took them, which the quarantine everywhere else exists to prevent. They are LEFT rather
       // than moved: `.claude` survives anyway (`mcp_settings.json` is kept), so there is nothing
       // to move them out of the way OF, and a `-legacy` sibling of it would be noise.
+      // Haive wrote something BENEATH it — `.claude/plugins/drupal-php-lsp/<file>` under a
+      // `plugins/` that also holds plugins the user installed. Removing the directory takes
+      // theirs with ours, so it is walked and only the claimed leaves go. Asked BEFORE the
+      // claim, because `artifactMatchesDisk` answers true for an ancestor of a matching row and
+      // would otherwise make that `plugins/` look wholly ours.
+      if (entry.isDirectory() && hasDeeperClaims(rel)) {
+        if ((await sweepClaimedChildren(rel)) > 0) kept += 1;
+        continue;
+      }
       if (!haiveEntries.has(rel) && !(await artifactMatchesDisk(rel))) {
-        // Haive wrote something BENEATH it — `.claude/plugins/drupal-php-lsp/<file>` under a
-        // `plugins/` that also holds plugins the user installed. Removing the directory takes
-        // theirs with ours, so it is walked and only the claimed leaves go.
-        if (entry.isDirectory() && hasDeeperClaims(rel)) {
-          if ((await sweepClaimedChildren(rel)) > 0) kept += 1;
-          continue;
-        }
         kept += 1;
         skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
         continue;

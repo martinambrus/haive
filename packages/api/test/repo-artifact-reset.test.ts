@@ -582,6 +582,32 @@ describe('resetOnboardingArtifacts', () => {
     expect(skipped.map((s) => s.path)).toContain('.claude/plugins/theirs');
   });
 
+  it('walks a .claude directory an artifact row claims only through a descendant', async () => {
+    // `artifactMatchesDisk` answers true for an ANCESTOR of a matching row, so a row at
+    // `.claude/plugins/drupal-php-lsp/<file>` made `plugins/` itself look wholly ours — the
+    // full-path `haiveEntries` fix alone did not close it.
+    const root = await repo('reset-claude-plugins-row-');
+    await installArtifacts(root);
+    const ours = '.claude/plugins/drupal-php-lsp/plugin.json';
+    await mkdir(path.join(root, '.claude/plugins/drupal-php-lsp'), { recursive: true });
+    await writeFile(path.join(root, ours), '{}', 'utf8');
+    await mkdir(path.join(root, '.claude/plugins/theirs'), { recursive: true });
+    await writeFile(path.join(root, '.claude/plugins/theirs/plugin.json'), 'mine\n', 'utf8');
+
+    const { removed, skipped } = await resetOnboardingArtifacts(root, {
+      ...provenance(),
+      // Claimed ONLY by the row, with nothing in `haiveEntries` naming it.
+      writtenHashes: new Map([[ours, sha256Hex(normalizeContent('{}'))]]),
+    });
+
+    expect(await exists(root, '.claude/plugins/drupal-php-lsp')).toBe(false);
+    expect(removed).toContain(ours);
+    expect(await readFile(path.join(root, '.claude/plugins/theirs/plugin.json'), 'utf8')).toBe(
+      'mine\n',
+    );
+    expect(skipped.map((s) => s.path)).toContain('.claude/plugins/theirs');
+  });
+
   it('drops a .claude directory it wrote into once nothing of the user’s is left', async () => {
     const root = await repo('reset-claude-plugins-empty-');
     await installArtifacts(root);
