@@ -418,6 +418,32 @@ describe('resetOnboardingArtifacts', () => {
     expect(await exists(root, '.agents/skills-legacy/repo-conventions/sub-skills')).toBe(false);
   });
 
+  it('walks a directory an artifact row alone claims', async () => {
+    // On an upgraded or legacy repo the only record of a generated skill is its row. Asking just
+    // the step-recorded entries answered "nothing below" for exactly those, so the walk was
+    // skipped and the file beside the matched artifact was deleted rather than moved.
+    const root = await repo('reset-row-descendant-');
+    await installArtifacts(root);
+    const ours = 'ours\n';
+    await mkdir(path.join(root, '.agents/skills/foo'), { recursive: true });
+    await writeFile(path.join(root, '.agents/skills/foo/SKILL.md'), ours, 'utf8');
+    await writeFile(path.join(root, '.agents/skills/foo/NOTES.md'), 'mine\n', 'utf8');
+
+    const { quarantined } = await resetOnboardingArtifacts(root, {
+      ...provenance(),
+      writtenHashes: new Map([['.agents/skills/foo/SKILL.md', sha256Hex(normalizeContent(ours))]]),
+    });
+
+    expect(quarantined).toContainEqual({
+      from: '.agents/skills/foo/NOTES.md',
+      to: '.agents/skills-legacy/foo/NOTES.md',
+    });
+    expect(await readFile(path.join(root, '.agents/skills-legacy/foo/NOTES.md'), 'utf8')).toBe(
+      'mine\n',
+    );
+    expect(await exists(root, '.agents/skills')).toBe(false);
+  });
+
   it('keeps the quarantine and mcp_settings.json, and says so', async () => {
     const root = await repo('reset-keep-');
     await installArtifacts(root);

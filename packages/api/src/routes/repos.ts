@@ -1174,9 +1174,16 @@ export async function resetOnboardingArtifacts(
   /** Whether anything claimed lives BENEATH this path, which is what decides a claimed directory
    *  is walked rather than taken whole: `<skills>/<id>` is ours AND holds `SKILL.md` and
    *  `sub-skills`, so a `NOTES.md` a person left beside them must still be moved out. A claimed
-   *  directory with no deeper claims (`sub-skills` itself) is Haive's wholesale. */
+   *  directory with no deeper claims (`sub-skills` itself) is Haive's wholesale.
+   *
+   *  BOTH claim sources are asked. A directory on an upgraded or legacy repo can be claimed by a
+   *  row alone (`<skills>/<id>/SKILL.md` verifying by hash), and reading only the step-recorded
+   *  entries said "nothing below" for exactly those — so the walk was skipped and the file beside
+   *  the matched artifact was deleted rather than moved. */
   const hasDeeperClaims = (rel: string): boolean => {
-    for (const entry of haiveEntries) if (entry.startsWith(`${rel}/`)) return true;
+    const prefix = `${rel}/`;
+    for (const entry of haiveEntries) if (entry.startsWith(prefix)) return true;
+    for (const diskPath of writtenHashes.keys()) if (diskPath.startsWith(prefix)) return true;
     return false;
   };
 
