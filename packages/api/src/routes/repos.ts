@@ -1712,6 +1712,19 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
+  // A live onboarding run writes into the very tree this is about to delete — and its 07/09_5
+  // steps may complete AFTER the reset, so their records would name files the reset removed
+  // while carrying a `created_at` older than the epoch, which excludes that run's provenance
+  // for good. The timestamp cannot express that; the request has to be refused. Same live-task
+  // rule the onboarded verdict uses, so the two cannot drift.
+  const facts = (await loadOnboardingTaskFacts(db, userId, [id])).get(id) ?? NO_ONBOARDING_TASKS;
+  if (facts.liveTaskId !== null) {
+    throw new HttpError(
+      409,
+      'An onboarding run is in progress on this repository. Wait for it to finish or cancel it before resetting.',
+    );
+  }
+
   // The epoch is taken BEFORE any reading or deleting, not when the row is finally written.
   // Nothing serializes an onboarding task against this endpoint — `POST /tasks` refuses only a
   // second LIVE onboarding — so a task created while this request is walking the tree would

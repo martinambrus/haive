@@ -20,6 +20,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
+import { loadOnboardingTaskFacts } from '../src/lib/onboarding-state.js';
 import { loadProvenanceSteps } from '../src/routes/repos.js';
 
 const log = logger.child({ module: 'onboarding-reset-provenance-smoke' });
@@ -94,6 +95,9 @@ async function main(): Promise<void> {
         repositoryId: opts.repositoryId,
         type: 'onboarding',
         title: `smoke ${opts.marker}`,
+        // Terminal, so these runs do not themselves count as LIVE — the live-task check below
+        // must see only the task it plants.
+        status: 'completed',
         createdAt: opts.startedAt,
         updatedAt: opts.startedAt,
       });
@@ -224,6 +228,33 @@ async function main(): Promise<void> {
       where: eq(schema.repositories.id, repoId),
       columns: { onboardingResetAt: true, onboardedAt: true },
     });
+    // A reset must be REFUSED while an onboarding run is live: it writes into the tree the
+    // reset deletes, and its later steps would carry a `created_at` older than the epoch.
+    const liveTaskId = randomUUID();
+    await db.insert(schema.tasks).values({
+      id: liveTaskId,
+      userId,
+      repositoryId: repoId,
+      type: 'onboarding',
+      title: 'smoke live onboarding',
+      status: 'waiting_user',
+      createdAt: AFTER_RESET,
+      updatedAt: AFTER_RESET,
+    });
+    const live = (await loadOnboardingTaskFacts(db, userId, [repoId])).get(repoId);
+    check(
+      'a parked onboarding run counts as live, so the reset is refused',
+      live?.liveTaskId === liveTaskId,
+      live,
+    );
+    await db.delete(schema.tasks).where(eq(schema.tasks.id, liveTaskId));
+    const afterLive = (await loadOnboardingTaskFacts(db, userId, [repoId])).get(repoId);
+    check(
+      'completed runs alone leave nothing live, so the reset may proceed',
+      afterLive?.liveTaskId === null && afterLive?.hasCompleted === true,
+      afterLive,
+    );
+
     check(
       'the reset stamp round-trips and clears the onboarded stamp',
       row?.onboardingResetAt?.getTime() === RESET_AT.getTime() && row?.onboardedAt === null,
