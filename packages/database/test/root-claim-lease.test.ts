@@ -218,6 +218,53 @@ function fakeDbAllAmbiguous(): { db: Database; writes: Recorded[] } {
   return { db, writes };
 }
 
+/**
+ * The INITIAL claim commits and loses its acknowledgement. `rowStamp` decides what the read-back
+ * then finds: the stamp that write attempted (we own the claim after all), a stranger's (we do
+ * not), or nothing at all (the write never landed, and the failure is real).
+ */
+function fakeDbAmbiguousClaim(rowStamp: 'attempted' | 'stranger' | 'empty'): {
+  db: Database;
+  writes: Recorded[];
+} {
+  const writes: Recorded[] = [];
+  let attempted: Date | null = null;
+  const db = {
+    update: () => ({
+      set: (values: { rootClaimedAt: Date | null }) => ({
+        where: () => {
+          const first = writes.length === 0;
+          if (first) attempted = values.rootClaimedAt;
+          let settle!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            settle = resolve;
+          });
+          writes.push({ stamp: values.rootClaimedAt, settle });
+          return {
+            returning: async () => {
+              await gate;
+              if (first) throw new Error('claim ack lost');
+              return [{ id: 'repo-1' }];
+            },
+          };
+        },
+      }),
+    }),
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => {
+            if (rowStamp === 'empty') return [{ claimedAt: null }];
+            if (rowStamp === 'stranger') return [{ claimedAt: new Date('2030-01-01T00:00:00Z') }];
+            return [{ claimedAt: attempted }];
+          },
+        }),
+      }),
+    }),
+  } as unknown as Database;
+  return { db, writes };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -485,6 +532,54 @@ describe('acquireRootClaim', () => {
     // one. Both orderings leave `lost()` false here, and driving this fake to the later cycle
     // where they diverge turns the test into an exercise in timer sequencing rather than in
     // behaviour. The ordering is argued in the source comment instead.
+  });
+
+  it('adopts an INITIAL claim that committed without an acknowledgement', async () => {
+    // The one conditional write that had no reconciliation. When it throws, the caller never
+    // reaches the `try` whose `finally` releases — so a claim that DID land leaves the
+    // repository blocked for the whole stale window with nobody holding it: edits and resets
+    // refused, and a repo job burning its retries into `error`.
+    vi.useFakeTimers();
+    const { db, writes } = fakeDbAmbiguousClaim('attempted');
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'reset');
+    writes[0]!.settle();
+    const handle = await acquiring;
+
+    expect(handle).not.toBeNull();
+    expect(handle!.lost()).toBe(false);
+
+    // And it can be released, which is the entire point of getting a handle back.
+    const before = writes.length;
+    const releasing = handle!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    writes.at(-1)!.settle();
+    await releasing;
+    expect(writes.length).toBeGreaterThan(before);
+    expect(writes.at(-1)!.stamp).toBeNull();
+  });
+
+  it('refuses when the row shows the claim is someone else', async () => {
+    // A stranger's stamp means our write did not win the CAS. Returning a handle there would let
+    // the caller rewrite a tree another writer is protecting.
+    vi.useFakeTimers();
+    const { db, writes } = fakeDbAmbiguousClaim('stranger');
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'reset');
+    writes[0]!.settle();
+    expect(await acquiring).toBeNull();
+  });
+
+  it('rethrows when the row proves nothing landed, rather than reporting a refusal', async () => {
+    // An empty claim column means the write never landed, so this is a real database failure —
+    // not "someone else is resetting". Reporting a refusal would answer 409 for an outage and
+    // send the user to wait for a reset that is not running.
+    vi.useFakeTimers();
+    const { db, writes } = fakeDbAmbiguousClaim('empty');
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'reset');
+    writes[0]!.settle();
+    await expect(acquiring).rejects.toThrow('claim ack lost');
   });
 
   it('never runs two renewals at once', async () => {

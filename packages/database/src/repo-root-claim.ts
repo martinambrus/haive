@@ -83,8 +83,12 @@ export async function claimRepositoryRoot(
   repositoryId: string,
   kind: RootClaimKind,
   userId?: string,
+  /** The stamp to write. Passed in for the same reason `renewRootClaim` takes one: when this
+   *  throws, the caller must still know what was attempted, because the write may have committed
+   *  and lost only its acknowledgement. */
+  attempted: Date = new Date(),
 ): Promise<RootClaim | null> {
-  const claimedAt = new Date();
+  const claimedAt = attempted;
   const claimed = await db
     .update(schema.repositories)
     .set({ rootClaimedAt: claimedAt, rootClaimKind: kind })
@@ -323,7 +327,32 @@ export async function acquireRootClaim(
   kind: RootClaimKind,
   userId?: string,
 ): Promise<RootClaimHandle | null> {
-  const first = await claimRepositoryRoot(db, repositoryId, kind, userId);
+  // The INITIAL claim is a conditional write like any other, and it was the one exception to
+  // that rule. If it commits and loses its acknowledgement, this function throws — so the caller
+  // never reaches the `try` whose `finally` releases, and the repository stays claimed for the
+  // whole stale window with nobody holding it: edits and resets are refused, and a repo job can
+  // burn its retries and land the repository in `error`.
+  const attempted = new Date();
+  const first = await claimRepositoryRoot(db, repositoryId, kind, userId, attempted).catch(
+    async (err: unknown) => {
+      // Did that write land? Only the row can say. Holding the attempted stamp means the CAS
+      // succeeded and this caller owns the claim; anything else means it did not, and refusing
+      // is correct. A read that ALSO fails rethrows: returning a handle for a claim we cannot
+      // prove we hold would let the caller rewrite the tree with no protection at all, which is
+      // far worse than the block this is trying to avoid.
+      const rows = await db
+        .select({ claimedAt: schema.repositories.rootClaimedAt })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .limit(1);
+      const claimedAt = rows[0]?.claimedAt ?? null;
+      if (claimedAt !== null && claimedAt.getTime() === attempted.getTime()) {
+        return { claimedAt: attempted };
+      }
+      if (claimedAt === null) throw err;
+      return null;
+    },
+  );
   if (first === null) return null;
 
   let current: Date | null = first.claimedAt;
