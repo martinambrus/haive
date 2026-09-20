@@ -278,11 +278,17 @@ describe('collectWrittenCliContent', () => {
   const MERGED_AT = new Date('2026-02-01T00:00:00Z');
   /** The LOCAL merge, read from the durable `mergeResolveState` so it survives a cleanup step
    *  that then failed to remove the worktree. */
-  const cleanup = (taskId: string, merged: boolean, endedAt: Date = MERGED_AT) => ({
+  const cleanup = (
+    taskId: string,
+    merged: boolean,
+    mergedAt: Date = MERGED_AT,
+    /** The step's own completion, which a retry moves while the merge stays where it was. */
+    endedAt: Date = mergedAt,
+  ) => ({
     taskId,
     stepId: '12-worktree-cleanup',
     output: { action: 'merge_remove', removed: true, merged, branchDeleted: false },
-    mergeResolveState: { merged },
+    mergeResolveState: { merged, mergedAt: mergedAt.toISOString() },
     endedAt,
   });
   const collectMerged = (
@@ -443,6 +449,25 @@ describe('collectWrittenCliContent', () => {
 
     expect(collectMerged(rows, beforeMerge).dirs.has('.claude/skills')).toBe(true);
     expect([...collectMerged(rows, afterMerge).dirs]).toEqual([]);
+  });
+
+  it('dates a merge by when it committed, not when a retried cleanup finished', async () => {
+    // A cleanup that failed after merging can be retried: the rerun leaves `mergeResolveState`
+    // intact and stamps a fresh `ended_at`. Reading that clock dated an old merge after the
+    // reset and replayed claims for files the reset had already deleted.
+    const mergedBefore = new Date('2026-01-05T00:00:00Z');
+    const retriedAfter = new Date('2026-02-10T00:00:00Z');
+    const epoch = new Date('2026-01-10T00:00:00Z');
+    const rows = [
+      skillSync('t1', { generated: ['learned-thing'] }),
+      cleanup('t1', true, mergedBefore, retriedAfter),
+    ];
+
+    expect([...collectMerged(rows, epoch).dirs]).toEqual([]);
+    // Merged after the reset, the same rows are read.
+    expect(collectMerged(rows, new Date('2026-01-01T00:00:00Z')).dirs.has('.claude/skills')).toBe(
+      true,
+    );
   });
 
   it('scopes no directory for a merged sync that did nothing', async () => {

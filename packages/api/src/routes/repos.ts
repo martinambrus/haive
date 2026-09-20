@@ -936,6 +936,14 @@ const SKILL_REPAIR_STEP_ID = '09_5b-skill-repair';
 const WORKFLOW_SKILL_STEP_ID = '11d-skill-sync';
 const WORKTREE_CLEANUP_STEP_ID = '12-worktree-cleanup';
 const WORKTREE_PAIR_STEP_IDS = [WORKFLOW_SKILL_STEP_ID, WORKTREE_CLEANUP_STEP_ID];
+
+/** Task types other than `onboarding` that write Haive-managed files into the repository ROOT,
+ *  and so must not be running while a reset walks it. `onboarding_upgrade` rewrites template
+ *  artifacts in place; a `workflow` merges its worktree at `12-worktree-cleanup`, which lands
+ *  11d's skills in the root — a merge that completes mid-sweep leaves that workflow without the
+ *  artifacts it just merged. `loadOnboardingTaskFacts` sees neither: it is filtered to
+ *  `onboarding` because it also answers the ONBOARDED verdict. */
+const OTHER_ROOT_WRITER_TASK_TYPES = ['onboarding_upgrade', 'workflow'] as const;
 const PROVENANCE_STEP_IDS = [
   AGENT_TARGETS_STEP_ID,
   SKILL_MIRROR_STEP_ID,
@@ -986,8 +994,17 @@ export function resolveMergedTasks(
     // Read from `merge_resolve_state`, NOT the cleanup step's apply output: that step throws
     // when `removeWorktreeDir` fails AFTER the merge is committed, leaving the step `failed`
     // while the merge is real. The merge phase wrote this before any of that could go wrong.
-    if ((row.mergeResolveState as { merged?: unknown } | null)?.merged !== true) continue;
-    const mergedAt = row.endedAt;
+    const state = row.mergeResolveState as { merged?: unknown; mergedAt?: unknown } | null;
+    if (state?.merged !== true) continue;
+    // The time the merge COMMIT landed, stamped in that state. The step's own `ended_at` is a
+    // different thing: a cleanup that failed after merging can be RETRIED, and the rerun leaves
+    // this state intact while stamping a fresh completion — which would date an old merge after
+    // the reset and replay claims for files the reset had already deleted. States written
+    // before the field existed fall back to the step clock.
+    const mergedAt =
+      typeof state.mergedAt === 'string' && !Number.isNaN(Date.parse(state.mergedAt))
+        ? new Date(state.mergedAt)
+        : row.endedAt;
     if (mergedAt === null) continue;
     // Merged BEFORE the reset means the reset already deleted those files; the claims are stale.
     if (epoch !== null && mergedAt <= epoch) continue;
@@ -1916,25 +1933,26 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // for good. The timestamp cannot express that; the request has to be refused. Same live-task
   // rule the onboarded verdict uses, so the two cannot drift.
   const facts = (await loadOnboardingTaskFacts(db, userId, [id])).get(id) ?? NO_ONBOARDING_TASKS;
-  // `onboarding_upgrade` is a SECOND root writer and `loadOnboardingTaskFacts` cannot see it —
+  // The OTHER task types that write into the repository root, which `loadOnboardingTaskFacts`
+  // cannot see —
   // that helper is filtered to `type = 'onboarding'` because it also answers the ONBOARDED
   // verdict, where a running upgrade must not make a repo read un-onboarded. `02-upgrade-apply`
   // writes straight to the repo path and then supersedes and re-inserts the same
   // `onboarding_artifacts` rows, so racing it deletes files it just wrote or strips rows it is
   // still working from.
-  const liveUpgrade = await db
+  const liveWriters = await db
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
     .where(
       and(
         eq(schema.tasks.userId, userId),
         eq(schema.tasks.repositoryId, id),
-        eq(schema.tasks.type, 'onboarding_upgrade'),
+        inArray(schema.tasks.type, OTHER_ROOT_WRITER_TASK_TYPES),
         inArray(schema.tasks.status, LIVE_TASK_STATUSES),
       ),
     )
     .limit(1);
-  if (facts.liveTaskId !== null || liveUpgrade.length > 0) {
+  if (facts.liveTaskId !== null || liveWriters.length > 0) {
     throw new HttpError(
       409,
       'An onboarding run is in progress on this repository. Wait for it to finish or cancel it before resetting.',

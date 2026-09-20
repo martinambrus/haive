@@ -234,7 +234,12 @@ async function reachDone(
   // carries the new merge commit even after the worktree is removed. Idempotent on
   // re-entry: a completed push reports "up-to-date".
   if (state.pushAfterMerge && !state.pushed) {
-    const pushing: MergeResolveState = { ...state, phase: 'pushing', merged: true };
+    const pushing: MergeResolveState = {
+      ...state,
+      phase: 'pushing',
+      merged: true,
+      mergedAt: state.mergedAt ?? new Date().toISOString(),
+    };
     await saveMergeState(db, current.id, pushing);
     const fv = (current.formValues ?? {}) as { credentialId?: string; setUpstream?: boolean };
     try {
@@ -264,7 +269,12 @@ async function reachDone(
   if (state.mode === 'cross-branch') {
     await removeBaseWorktree(ctx.repoPath, state.mergeDir);
   }
-  const done: MergeResolveState = { ...state, phase: 'done', merged: true };
+  const done: MergeResolveState = {
+    ...state,
+    phase: 'done',
+    merged: true,
+    mergedAt: state.mergedAt ?? new Date().toISOString(),
+  };
   await saveMergeState(db, current.id, done);
   return { resolved: true, current: { ...current, mergeResolveState: done } };
 }
