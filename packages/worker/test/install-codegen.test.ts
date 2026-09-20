@@ -103,3 +103,18 @@ describe('config-file auto-update codegen', () => {
     ]);
   });
 });
+
+describe('node-owned home dirs codegen', () => {
+  it("pre-creates agy's config dir owned by the sandbox user", () => {
+    // A mount beneath ~/.gemini/config otherwise leaves the dir root-owned and agy cannot start.
+    expect(buildProviderInstallLines('antigravity', null).lines).toContain(
+      'RUN mkdir -p /home/node/.gemini/config && chown node:node /home/node/.gemini/config',
+    );
+  });
+
+  it('adds no such line to any other provider', () => {
+    for (const name of ['claude-code', 'codex', 'gemini', 'amp', 'grok'] as const) {
+      expect(buildProviderInstallLines(name, null).lines.join('\n')).not.toContain('chown');
+    }
+  });
+});
