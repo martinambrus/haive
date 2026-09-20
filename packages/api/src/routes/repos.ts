@@ -36,10 +36,12 @@ import {
   REPO_JOB_NAMES,
   updateRepoExclusionsRequestSchema,
   CLI_PROVIDER_LIST,
+  getCliProviderMetadata,
   HAIVE_DATA_DIR,
   normalizeContent,
   sha256Hex,
   type ArchiveFormat,
+  type CliProviderName,
 } from '@haive/shared';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import { parseScpLikeGitUrl } from '@haive/shared/schemas';
@@ -885,11 +887,25 @@ export async function checkOnboardingMarkers(
  *
  *  Exact directories, never their first segment: `.codex` and `.gemini` also hold files Haive
  *  never wrote. `inventoryDirsFromCatalog` already excludes the `-legacy` quarantine siblings,
- *  which is what keeps the user's own agent definitions (07 MOVES them there) out of a reset. */
-function onboardingResetDirs(): string[] {
-  const dirs = new Set<string>([KB_DIR, LEARNINGS_DIR]);
-  for (const entry of inventoryDirsFromCatalog()) dirs.add(entry.dir);
-  return [...dirs];
+ *  which is what keeps the user's own agent definitions (07 MOVES them there) out of a reset.
+ *
+ *  The catalog is the CANDIDATE set, never the removal set. 07 writes agents to the ENABLED
+ *  providers' dirs only (`agentTargetsByDir`, built from `providerRows.filter(p => p.enabled)`)
+ *  and `resolveSkillTargetDirs` does the same for skills, so on a repo where only claude is
+ *  enabled a `.codex/agents` or `.grok/skills` holds the user's own definitions and nothing of
+ *  ours — and this action is irreversible. `haiveDirs` is what the caller could PROVE, and a
+ *  candidate outside it is reported rather than removed. */
+function onboardingResetDirs(haiveDirs: ReadonlySet<string>): {
+  remove: string[];
+  candidates: string[];
+} {
+  const remove = new Set<string>([KB_DIR, LEARNINGS_DIR]);
+  const candidates: string[] = [];
+  for (const entry of inventoryDirsFromCatalog()) {
+    if (haiveDirs.has(entry.dir)) remove.add(entry.dir);
+    else candidates.push(entry.dir);
+  }
+  return { remove: [...remove], candidates };
 }
 
 /** `.haive/` is the git-excluded dir; only this one file in it is onboarding's. */
@@ -960,20 +976,30 @@ export interface OnboardingResetOutcome {
   skipped: Array<{ path: string; reason: string }>;
 }
 
+/** What the caller could establish about what Haive wrote here. Both halves are evidence, not
+ *  policy: the reset removes what they cover and reports what they do not. */
+export interface OnboardingResetProvenance {
+  /** `written_hash` of every LIVE `onboarding_artifacts` row, by disk path. */
+  writtenHashes: ReadonlyMap<string, string>;
+  /** Catalog agents/skills directories Haive wrote to for this repository. */
+  haiveDirs: ReadonlySet<string>;
+}
+
 /**
  * Take back what onboarding wrote to a repository, and nothing else.
  *
- * `writtenHashes` is the `written_hash` of every LIVE `onboarding_artifacts` row by disk path —
- * the only evidence that a file Haive CAN write is one it DID write. It decides the settings
- * files alone (see `ONBOARDING_SETTINGS_FILES`); everything else is decided by location.
+ * `writtenHashes` is the only evidence that a file Haive CAN write is one it DID write, and it
+ * decides the settings files (see `ONBOARDING_SETTINGS_FILES`). `haiveDirs` decides the per-CLI
+ * agents and skills directories. Everything else is decided by location.
  *
  * Exported beside `stripHaiveContent` and `checkOnboardingMarkers` so the filesystem half is
  * testable without a request: the route adds only the row reads and the DB writes around it.
  */
 export async function resetOnboardingArtifacts(
   root: string,
-  writtenHashes: ReadonlyMap<string, string>,
+  provenance: OnboardingResetProvenance,
 ): Promise<OnboardingResetOutcome> {
+  const { writtenHashes, haiveDirs } = provenance;
   const removed: string[] = [];
   const cleaned: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
@@ -1022,7 +1048,16 @@ export async function resetOnboardingArtifacts(
     });
   }
 
-  for (const rel of onboardingResetDirs()) await remove(rel, true);
+  const dirs = onboardingResetDirs(haiveDirs);
+  for (const rel of dirs.remove) await remove(rel, true);
+  // A candidate Haive cannot be shown to have written is REPORTED, never removed: it is a
+  // directory for a CLI this repo never had enabled, so everything in it is the user's.
+  for (const rel of dirs.candidates) {
+    await guard(rel, async () => {
+      if ((await lstatNoFollow(root, rel, { strict: true })) === null) return;
+      skipped.push({ path: rel, reason: 'no record that Haive wrote here' });
+    });
+  }
 
   // `.claude` is swept entry by entry rather than removed whole — see `keptSweepReason`. Strict,
   // so a linked `.claude` is reported rather than read as an empty directory.
@@ -1286,10 +1321,28 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
       ),
     );
 
-  const { removed, cleaned, skipped } = await resetOnboardingArtifacts(
-    root,
-    new Map(live.map((row) => [row.diskPath, row.writtenHash])),
-  );
+  // Which per-CLI dirs Haive wrote to, from the two things that can show it. The ENABLED
+  // providers are the set 07 and `resolveSkillTargetDirs` both target, so they cover the
+  // LLM-written skills no artifact row tracks; the live rows cover a provider that has since
+  // been disabled. A dir in neither is left alone — see `onboardingResetDirs`.
+  const providers = await db
+    .select({ name: schema.cliProviders.name })
+    .from(schema.cliProviders)
+    .where(and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)));
+  const haiveDirs = new Set<string>();
+  for (const p of providers) {
+    const meta = getCliProviderMetadata(p.name as CliProviderName);
+    if (meta.projectAgentsDir) haiveDirs.add(meta.projectAgentsDir);
+    haiveDirs.add(meta.projectSkillsDir);
+  }
+  for (const entry of inventoryDirsFromCatalog()) {
+    if (live.some((row) => row.diskPath.startsWith(`${entry.dir}/`))) haiveDirs.add(entry.dir);
+  }
+
+  const { removed, cleaned, skipped } = await resetOnboardingArtifacts(root, {
+    writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
+    haiveDirs,
+  });
 
   // Rows that name deleted files must not stay live: they feed the upgrade planner and the
   // rollback, and `12-post-onboarding` inserts without conflict handling, so a re-onboarding

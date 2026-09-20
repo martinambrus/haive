@@ -148,6 +148,18 @@ async function installUserOwned(root: string): Promise<void> {
 const exists = async (root: string, rel: string): Promise<boolean> =>
   (await lstatNoFollow(root, rel)) !== null;
 
+/** What a repository with every CLI enabled and no per-file record looks like: the catalog dirs
+ *  are all Haive's, and only the settings files carry a hash. */
+function provenance(hashes: Array<[string, string]> = []): {
+  writtenHashes: Map<string, string>;
+  haiveDirs: Set<string>;
+} {
+  return {
+    writtenHashes: new Map(hashes),
+    haiveDirs: new Set(inventoryDirsFromCatalog().map((d) => d.dir)),
+  };
+}
+
 describe('resetOnboardingArtifacts', () => {
   it('removes every CLI agents and skills directory, not just claude’s', async () => {
     // The list was `['.claude', KB_DIR, LEARNINGS_DIR]`, so the previous run's agents and skills
@@ -155,7 +167,7 @@ describe('resetOnboardingArtifacts', () => {
     const root = await repo('reset-dirs-');
     await installArtifacts(root);
 
-    const { removed } = await resetOnboardingArtifacts(root, new Map());
+    const { removed } = await resetOnboardingArtifacts(root, provenance());
 
     for (const spec of inventoryDirsFromCatalog()) {
       expect(await exists(root, spec.dir), spec.dir).toBe(false);
@@ -169,12 +181,50 @@ describe('resetOnboardingArtifacts', () => {
     expect(await exists(root, '.claude')).toBe(false);
   });
 
+  it('keeps a CLI directory Haive never wrote to, and says so', async () => {
+    // 07 writes agents to the ENABLED providers' dirs only, and `resolveSkillTargetDirs` does the
+    // same for skills, so on a repo where codex was never enabled `.codex/agents` holds the
+    // user's own definitions and nothing of ours. This action is irreversible.
+    const root = await repo('reset-unproven-');
+    await installArtifacts(root);
+    const claudeOnly = {
+      writtenHashes: new Map<string, string>(),
+      haiveDirs: new Set(['.claude/agents', '.claude/skills']),
+    };
+
+    const { removed, skipped } = await resetOnboardingArtifacts(root, claudeOnly);
+
+    expect(await exists(root, '.codex/agents/code-reviewer.toml')).toBe(true);
+    expect(skipped).toContainEqual({
+      path: '.codex/agents',
+      reason: 'no record that Haive wrote here',
+    });
+    // Haive's own dirs still go, and so does everything outside the catalog.
+    expect(await exists(root, '.claude')).toBe(false);
+    expect(removed).toContain(KB_DIR);
+  });
+
+  it('removes a disabled provider’s directory when a live artifact row names it', async () => {
+    // The enabled set is the CURRENT one; a provider enabled at onboarding and disabled since
+    // still has rows naming its files, and those files are ours.
+    const root = await repo('reset-proven-row-');
+    await installArtifacts(root);
+
+    const { removed } = await resetOnboardingArtifacts(root, {
+      writtenHashes: new Map(),
+      haiveDirs: new Set(['.codex/agents']),
+    });
+
+    expect(removed).toContain('.codex/agents');
+    expect(await exists(root, '.codex/agents')).toBe(false);
+  });
+
   it('keeps the quarantine and mcp_settings.json, and says so', async () => {
     const root = await repo('reset-keep-');
     await installArtifacts(root);
     await installUserOwned(root);
 
-    const { skipped } = await resetOnboardingArtifacts(root, new Map());
+    const { skipped } = await resetOnboardingArtifacts(root, provenance());
 
     expect(await exists(root, '.claude/agents-legacy/mine.md')).toBe(true);
     expect(await exists(root, '.claude/mcp_settings.json')).toBe(true);
@@ -197,7 +247,7 @@ describe('resetOnboardingArtifacts', () => {
 
     const { removed, skipped } = await resetOnboardingArtifacts(
       root,
-      new Map([['.claude/settings.json', sha256Hex(normalizeContent(ours))]]),
+      provenance([['.claude/settings.json', sha256Hex(normalizeContent(ours))]]),
     );
 
     expect(removed).toContain('.claude/settings.json');
@@ -215,7 +265,7 @@ describe('resetOnboardingArtifacts', () => {
 
     const { skipped } = await resetOnboardingArtifacts(
       root,
-      new Map([['.claude/settings.json', sha256Hex(normalizeContent('{"ours":1}\n'))]]),
+      provenance([['.claude/settings.json', sha256Hex(normalizeContent('{"ours":1}\n'))]]),
     );
 
     expect(await exists(root, '.claude/settings.json')).toBe(true);
@@ -233,7 +283,7 @@ describe('resetOnboardingArtifacts', () => {
     await mkdir(path.join(root, 'packages/x/.claude/agents'), { recursive: true });
     await writeFile(path.join(root, 'packages/x/.claude/agents/theirs.md'), 'theirs\n', 'utf8');
 
-    await resetOnboardingArtifacts(root, new Map());
+    await resetOnboardingArtifacts(root, provenance());
 
     expect(await exists(root, 'packages/x/.claude/agents/theirs.md')).toBe(true);
   });
@@ -249,7 +299,7 @@ describe('resetOnboardingArtifacts', () => {
     await writeFile(path.join(outside, 'agents/theirs.md'), 'theirs\n', 'utf8');
     await symlink(path.join(outside, 'agents'), path.join(root, '.codex/agents'));
 
-    const { removed } = await resetOnboardingArtifacts(root, new Map());
+    const { removed } = await resetOnboardingArtifacts(root, provenance());
 
     expect(removed).toContain('.codex/agents');
     expect(await exists(root, '.codex/agents')).toBe(false);
@@ -267,7 +317,7 @@ describe('resetOnboardingArtifacts', () => {
     await writeFile(path.join(outside, 'grok/agents/theirs.md'), 'theirs\n', 'utf8');
     await symlink(path.join(outside, 'grok'), path.join(root, '.grok'));
 
-    const { removed, skipped } = await resetOnboardingArtifacts(root, new Map());
+    const { removed, skipped } = await resetOnboardingArtifacts(root, provenance());
 
     expect(skipped).toContainEqual({ path: '.grok/agents', reason: 'link' });
     expect(await readFile(path.join(outside, 'grok/agents/theirs.md'), 'utf8')).toBe('theirs\n');
@@ -283,7 +333,7 @@ describe('resetOnboardingArtifacts', () => {
     await writeFile(path.join(outside, 'claude/workflow-config.json'), '{"theirs":1}', 'utf8');
     await symlink(path.join(outside, 'claude'), path.join(root, '.claude'));
 
-    const { skipped } = await resetOnboardingArtifacts(root, new Map());
+    const { skipped } = await resetOnboardingArtifacts(root, provenance());
 
     expect(skipped).toContainEqual({ path: '.claude', reason: 'link' });
     expect(await readFile(path.join(outside, 'claude/workflow-config.json'), 'utf8')).toBe(
@@ -297,8 +347,8 @@ describe('resetOnboardingArtifacts', () => {
     await installUserOwned(root);
     await writeFile(path.join(root, 'AGENTS.md'), '# Mine\n\nkeep me\n', 'utf8');
 
-    await resetOnboardingArtifacts(root, new Map());
-    const second = await resetOnboardingArtifacts(root, new Map());
+    await resetOnboardingArtifacts(root, provenance());
+    const second = await resetOnboardingArtifacts(root, provenance());
 
     expect(second.removed).toEqual([]);
     expect(second.cleaned).toEqual([]);

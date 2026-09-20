@@ -1500,8 +1500,21 @@ refuses when a marker is missing or a run is live.
 Its directories are DERIVED from the provider catalog, the same reason `getScaffoldEntries`
 gives: the hand list it replaced was `['.claude', KB_DIR, LEARNINGS_DIR]` from when `.claude`
 was the only CLI directory, so "start over" left the previous run's agents and skills on disk
-for every other CLI and the next run wrote on top of them. `.claude` is then swept entry by
-entry rather than removed whole, because three things in a directory Haive owns are not Haive's:
+for every other CLI and the next run wrote on top of them.
+
+**The catalog is the CANDIDATE set, never the removal set.** 07 writes agents to the ENABLED
+providers' dirs alone (`agentTargetsByDir`, from `providerRows.filter(p => p.enabled)`) and
+`resolveSkillTargetDirs` does the same for skills, so on a repo where only claude is enabled a
+`.codex/agents` or `.grok/skills` holds the user's own definitions and NOTHING of ours — and
+this action is irreversible. The route passes what it can PROVE: the currently enabled
+providers' dirs, which cover the LLM-written skills no artifact row tracks, unioned with the
+dirs the repo's live `onboarding_artifacts` rows name, which cover a provider enabled at
+onboarding and disabled since. A candidate outside that union is REPORTED, not removed.
+`.claude` needs no such gate — it is Haive's own directory, holds `workflow-config.json` and
+the fallback agents write, and every `ONBOARDING_MARKERS` path lives in it.
+
+`.claude` is swept entry by entry rather than removed whole, because three things in a
+directory Haive owns are not Haive's:
 `mcp_settings.json` (created once, never rewritten), any `*-legacy` quarantine (the user's own
 agent definitions, which 07 MOVED there), and a `settings.json` whose bytes do not match the
 live artifact row's `written_hash` — `writeIfAllowed` SKIPS an existing file, so that row is the

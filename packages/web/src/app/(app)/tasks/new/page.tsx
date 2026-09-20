@@ -405,8 +405,9 @@ export default function NewTaskPage() {
     if (!repositoryId) return;
     const confirmed = window.confirm(
       'This will permanently remove onboarding artifacts from the repository root so onboarding can run again:\n' +
-        '  • delete every CLI agents and skills directory Haive writes (.claude, .codex, .gemini, .grok, .agents)\n' +
-        '  • delete the rest of .claude/, the knowledge base and learnings, .ripgreprc and .haive/install.json\n' +
+        '  • delete the agents and skills directory of every CLI Haive wrote to here (.codex, .gemini,\n' +
+        '    .grok, .agents) — a CLI directory it has no record of writing is kept and listed instead\n' +
+        '  • delete .claude/, the knowledge base and learnings, .ripgreprc and .haive/install.json\n' +
         '  • strip haive-managed blocks from AGENTS.md, CLAUDE.md, and GEMINI.md (file removed if empty after)\n\n' +
         'Kept: .claude/mcp_settings.json, any *-legacy agents directory, and a settings.json that does not\n' +
         'match what Haive wrote. Nested directories inside subfolders are untouched, and so is user-authored\n' +
