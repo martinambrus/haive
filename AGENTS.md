@@ -1694,6 +1694,20 @@ irreversible migration for a reversible problem. The cost of a row over a lock i
 killed mid-job leaves it set, which `ROOT_CLAIM_STALE_MS` bounds — generously, since expiring
 early re-admits the `rm -rf` the claim exists to exclude.
 
+**Absorbing an error means no count taken afterwards is authoritative, and that is where the two
+worst bugs on this branch lived.** `guard` reports WHAT it absorbed, and two decisions read it.
+`mayRemoveSweptDirWhole`: a top-level directory may go whole unless the sweep hit an `io` failure
+— its `left` is then still the initial zero, and removing on that deletes the definitions the
+quarantine exists to move aside. `sweepSurvivors`: a NESTED sweep that did not complete reports a
+survivor, or the outer `.claude` sweep adds its unfinished zero to its own total and removes
+`.claude` whole, taking the user's plugins. The two differ on `refused` deliberately — at the top
+level the refused path IS the removal target and removing the LINK is right, while nested it is a
+child whose parent would be taken with it. Both are pure, exported and mutation-checked, because
+neither difference is reachable from a fixture: a containment refusal is handled inside the sweep,
+and a genuine `EIO` cannot be provoked from a temp directory. The other five guarded sites ignore
+the result safely — the settings pass leaves its file on disk, so the later sweep counts it as
+kept, and the rest only report or remove.
+
 **A filesystem error inside the walk is a per-item outcome, not a route failure.** It used to
 rethrow, which aborted the route BEFORE the supersede and BEFORE the epoch stamp — files deleted,
 rows live, no epoch. A bad disk reaches that, and so does writer 4: `removeChild`'s final rmdir
