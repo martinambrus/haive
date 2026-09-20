@@ -1575,6 +1575,19 @@ skills and slugs, 09_5b's repairs, a merged 11d's syncs — are still claimed by
 edited LLM-generated skill is removed rather than moved aside. Closing it means recording a hash
 beside each of those paths at the point they are written.
 
+**A partial reset therefore leaves a residue, and that is the accepted trade.** Where the walk
+removed something but an I/O error skipped a generated directory, the epoch still advances —
+`resetTouchedNothing` refuses only a run that touched NOTHING, since a second reset over an
+already-clean tree legitimately removes nothing. `resolveKeptArtifactPaths` then keeps the live
+artifact ROWS for the skipped paths, but the PATH-ONLY claims above are not rows: the epoch
+excludes whole step rows by `ended_at`, so a retry reads those surviving files as unowned and
+quarantines or keeps them instead of removing them. Both are reported. The two alternatives are
+worse in the direction that loses data. Not advancing the epoch re-opens the hazard it exists for
+— a stale `wroteFiles` claiming a file the user recreated by hand at a path the reset DELETED —
+and exempting the skipped paths needs a new persistent per-path record, which is that same hazard
+again with a longer life. So this is clutter, in the direction that loses nothing, the same
+bargain `11d-skill-sync`'s exclusion already strikes.
+
 **A live artifact row puts a directory in scope but never claims a file on its own.**
 `recordOnboardingArtifacts` inserts one row per manifest RENDERING without consulting
 `wroteFiles`, so the file apply SKIPPED has a row too, carrying the hash of what Haive WOULD
