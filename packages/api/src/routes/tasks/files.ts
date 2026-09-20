@@ -4,7 +4,7 @@ import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
-import { isResetClaimLive, schema } from '@haive/database';
+import { isRootClaimLive, rootClaimRefusal, schema, type RootClaimKind } from '@haive/database';
 import { isReadOnlyLocalRepo } from '@haive/shared';
 import {
   isPathContainmentError,
@@ -279,16 +279,13 @@ async function assertWritableRepo(
   if (!repositoryId) return;
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, repositoryId),
-    columns: { source: true, writable: true, onboardingResetClaimedAt: true },
+    columns: { source: true, writable: true, rootClaimedAt: true, rootClaimKind: true },
   });
   if (repo && isReadOnlyLocalRepo(repo)) {
     throw new HttpError(409, 'This repository is read-only');
   }
-  if (isResetClaimLive(repo?.onboardingResetClaimedAt)) {
-    throw new HttpError(
-      409,
-      'This repository is being reset. Wait for that to finish before editing its knowledge files.',
-    );
+  if (isRootClaimLive(repo?.rootClaimedAt)) {
+    throw new HttpError(409, rootClaimRefusal((repo?.rootClaimKind as RootClaimKind) ?? null));
   }
 }
 

@@ -6,7 +6,7 @@
  * re-asserting "onboarded" across it. Both are WHERE clauses, so the api and worker unit suites —
  * which run against no database — cannot reach either: drop a term and nothing there fails.
  *
- *   - `claimRepositoryForReset` must admit exactly ONE of two simultaneous claimants, refuse a
+ *   - `claimRepositoryRoot` must admit exactly ONE of two simultaneous claimants, refuse a
  *     claim on someone else's repository, and take over a claim old enough to be abandoned. A
  *     claim that admitted both would leave two resets walking one tree while every call still
  *     returned successfully.
@@ -20,10 +20,10 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import {
-  RESET_CLAIM_STALE_MS,
-  claimRepositoryForReset,
-  hasLiveResetClaim,
-  releaseRepositoryResetClaim,
+  ROOT_CLAIM_STALE_MS,
+  claimRepositoryRoot,
+  readLiveRootClaim,
+  releaseRepositoryRoot,
   schema,
 } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -95,57 +95,87 @@ async function main(): Promise<void> {
     const repoRow = async (id: string) => {
       const row = await db.query.repositories.findFirst({
         where: eq(schema.repositories.id, id),
-        columns: { onboardedAt: true, onboardingResetClaimedAt: true },
+        columns: { onboardedAt: true, rootClaimedAt: true },
       });
       if (!row) throw new Error(`repository ${id} vanished`);
       return row;
     };
 
-    // ---- claimRepositoryForReset ------------------------------------------------------------
+    // ---- claimRepositoryRoot ------------------------------------------------------------
     const repoA = await newRepo();
     const both = await Promise.all([
-      claimRepositoryForReset(db, repoA, userId),
-      claimRepositoryForReset(db, repoA, userId),
+      claimRepositoryRoot(db, repoA, 'reset', userId),
+      claimRepositoryRoot(db, repoA, 'reset', userId),
     ]);
-    check('exactly one of two simultaneous claims wins', both.filter(Boolean).length === 1, both);
-    check('the winning claim is visible to a writer', await hasLiveResetClaim(db, repoA));
+    check(
+      'exactly one of two simultaneous claims wins',
+      both.filter((x) => x !== null).length === 1,
+      both,
+    );
+    check(
+      'the winning claim is visible to a writer',
+      (await readLiveRootClaim(db, repoA)) !== null,
+    );
 
     // On an UNCLAIMED repository, or the staleness term refuses it regardless and this passes
     // whether or not the ownership predicate is there at all. (It did, until a mutant showed it.)
     const unclaimed = await newRepo();
     check(
       'a claim on another user’s repository is refused',
-      !(await claimRepositoryForReset(db, unclaimed, otherUserId)),
+      (await claimRepositoryRoot(db, unclaimed, 'reset', otherUserId)) === null,
     );
     check(
       'and that repository is still free for its owner',
-      await claimRepositoryForReset(db, unclaimed, userId),
+      (await claimRepositoryRoot(db, unclaimed, 'reset', userId)) !== null,
     );
-    await releaseRepositoryResetClaim(db, unclaimed);
+    await releaseRepositoryRoot(db, unclaimed);
 
-    await releaseRepositoryResetClaim(db, repoA);
-    check('releasing clears it for the next writer', !(await hasLiveResetClaim(db, repoA)));
+    await releaseRepositoryRoot(db, repoA);
+    check(
+      'releasing clears it for the next writer',
+      !((await readLiveRootClaim(db, repoA)) !== null),
+    );
     check(
       'and the repository can be claimed again',
-      await claimRepositoryForReset(db, repoA, userId),
+      (await claimRepositoryRoot(db, repoA, 'reset', userId)) !== null,
     );
-    await releaseRepositoryResetClaim(db, repoA);
+    await releaseRepositoryRoot(db, repoA);
 
     // An API killed mid-walk leaves the row set. Bounded, or a crash would disable the feature.
     const stale = await newRepo({
-      onboardingResetClaimedAt: new Date(Date.now() - RESET_CLAIM_STALE_MS - 60_000),
+      rootClaimedAt: new Date(Date.now() - ROOT_CLAIM_STALE_MS - 60_000),
     });
-    check('an abandoned claim is not honoured', !(await hasLiveResetClaim(db, stale)));
+    check('an abandoned claim is not honoured', (await readLiveRootClaim(db, stale)) === null);
     check(
       'and is taken over rather than waited on',
-      await claimRepositoryForReset(db, stale, userId),
+      (await claimRepositoryRoot(db, stale, 'reset', userId)) !== null,
     );
-    await releaseRepositoryResetClaim(db, stale);
+    await releaseRepositoryRoot(db, stale);
 
-    const fresh = await newRepo({ onboardingResetClaimedAt: new Date() });
+    const fresh = await newRepo({ rootClaimedAt: new Date() });
     check(
       'a fresh claim by someone else still blocks',
-      !(await claimRepositoryForReset(db, fresh, userId)),
+      (await claimRepositoryRoot(db, fresh, 'reset', userId)) === null,
+    );
+
+    // A reset that outran the staleness window has already had its claim taken over. Its release
+    // must not strip the protection from the walk that took over — silently, and exactly on the
+    // slowest trees, which is where the window is reached in the first place.
+    const handover = await newRepo({
+      rootClaimedAt: new Date(Date.now() - ROOT_CLAIM_STALE_MS - 60_000),
+    });
+    const abandonedStamp = new Date(Date.now() - ROOT_CLAIM_STALE_MS - 60_000);
+    const takenOver = await claimRepositoryRoot(db, handover, 'rebuild');
+    check('the abandoned claim was taken over', takenOver !== null);
+    await releaseRepositoryRoot(db, handover, abandonedStamp);
+    check(
+      'the abandoned holder’s release does not clear the new claim',
+      (await readLiveRootClaim(db, handover)) !== null,
+    );
+    await releaseRepositoryRoot(db, handover, takenOver?.claimedAt);
+    check(
+      'and the real holder’s release does clear it',
+      !((await readLiveRootClaim(db, handover)) !== null),
     );
 
     // ---- stampRepositoryOnboarded -----------------------------------------------------------

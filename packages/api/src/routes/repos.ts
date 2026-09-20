@@ -3,12 +3,14 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
+import { eq, and, asc, desc, gt, inArray, isNull, lt, ne, notInArray, or, sql } from 'drizzle-orm';
 import {
   schema,
-  claimRepositoryForReset,
-  isResetClaimLive,
-  releaseRepositoryResetClaim,
+  ROOT_CLAIM_STALE_MS,
+  claimRepositoryRoot,
+  readLiveRootClaim,
+  releaseRepositoryRoot,
+  rootClaimRefusal,
 } from '@haive/database';
 import {
   errno,
@@ -2028,12 +2030,38 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
     );
   }
 
-  const onboardedAt = new Date();
-  await db
+  // The write carries the epoch it was validated against, so a reset landing between the check
+  // above and this UPDATE cannot have its work undone by hand: it moves `onboarding_reset_at`,
+  // the predicate stops matching, and nothing is stamped. Validating and then writing
+  // unconditionally is the same read-then-act shape the reset's own claim exists to remove — and
+  // the markers cannot catch it either, since a reset is free to leave behind files it could not
+  // claim. A live root claim blocks it for the same reason.
+  const stamped = await db
     .update(schema.repositories)
-    .set({ onboardedAt, updatedAt: new Date() })
-    .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
-  return c.json({ ok: true, onboardedAt: onboardedAt.toISOString() });
+    .set({ onboardedAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.repositories.id, id),
+        eq(schema.repositories.userId, userId),
+        sql`${schema.repositories.onboardingResetAt} IS NOT DISTINCT FROM ${resetAt}`,
+        or(
+          isNull(schema.repositories.rootClaimedAt),
+          lt(
+            schema.repositories.rootClaimedAt,
+            sql`now() - ${`${ROOT_CLAIM_STALE_MS} milliseconds`}::interval`,
+          ),
+        ),
+      ),
+    )
+    .returning({ onboardedAt: schema.repositories.onboardedAt });
+  const written = stamped[0]?.onboardedAt;
+  if (!written) {
+    throw new HttpError(
+      409,
+      'This repository changed while it was being marked onboarded. Check its status and try again.',
+    );
+  }
+  return c.json({ ok: true, onboardedAt: written.toISOString() });
 });
 
 repoRoutes.get('/:id/archive', async (c) => {
@@ -2067,18 +2095,25 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // root — refuse while it is held, which is the half the live-task guard below cannot cover:
   // none of them is a task. A claim rather than a lock because the repo worker and the task
   // worker share one connection pool, so a lock held across the walk deadlocks it.
-  if (!(await claimRepositoryForReset(db, id, userId))) {
-    throw new HttpError(
-      409,
-      'This repository is already being reset. Wait for that to finish before starting another.',
-    );
+  const claim = await claimRepositoryRoot(db, id, 'reset', userId);
+  if (claim === null) {
+    // The CAS refuses for three different reasons and answering 409 to all of them would turn a
+    // wrong id and someone else's repository into "already being reset". Ownership is resolved
+    // here rather than before the claim so the claim stays the FIRST write: checking first would
+    // reintroduce the read-then-act gap this replaced.
+    const owned = await db.query.repositories.findFirst({
+      where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+      columns: { id: true },
+    });
+    if (!owned) throw new HttpError(404, 'Repository not found');
+    throw new HttpError(409, rootClaimRefusal((await readLiveRootClaim(db, id))?.kind ?? null));
   }
   try {
     return await runOnboardingArtifactReset(c, db, userId, id);
   } finally {
     // Every exit path, the failures included: a reset that threw has stopped touching the tree
     // just as surely as one that finished, and leaving the claim would block the retry.
-    await releaseRepositoryResetClaim(db, id).catch(() => undefined);
+    await releaseRepositoryRoot(db, id, claim.claimedAt).catch(() => undefined);
   }
 });
 
@@ -2280,12 +2315,11 @@ repoRoutes.post('/:id/refresh-tree', async (c) => {
   // This enqueues a job that `rm -rf`s the whole repository root and copies it again. Refusing
   // here is the cheap half — the handler checks again, because the claim can land between this
   // read and the job being picked up, and by then only the worker can stop it.
-  if (isResetClaimLive(repo.onboardingResetClaimedAt)) {
-    throw new HttpError(
-      409,
-      'This repository is being reset. Wait for that to finish before refreshing its tree.',
-    );
-  }
+  // The cheap half. The handler claims the root itself before it deletes anything, which is what
+  // actually closes the race — this only turns the common case into an immediate 409 instead of a
+  // job that starts, refuses and parks the row at `error`.
+  const held = await readLiveRootClaim(db, id);
+  if (held) throw new HttpError(409, rootClaimRefusal(held.kind));
 
   await db
     .update(schema.repositories)

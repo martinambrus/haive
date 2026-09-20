@@ -241,14 +241,19 @@ export const repositories = pgTable(
      *  NULL is every repo that has never been reset, and reads exactly as it always did.
      *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
     onboardingResetAt: timestamp('onboarding_reset_at'),
-    /** Held while an onboarding-artifact reset is walking this repository's tree, so the writers
-     *  that destroy or rewrite that tree refuse instead of racing it. A claim, not a lock: one
-     *  committed row write, no transaction spanning the filesystem walk and no pooled connection
-     *  pinned — the repo worker and the task worker share ONE `max: 10` pool, so holding a
-     *  connection across `rm -rf` + `copyTree` deadlocks it rather than merely slowing it.
-     *  A crashed API leaves this set, which `RESET_CLAIM_STALE_MS` bounds.
+    /** Held while something is rewriting this repository's ROOT exclusively — the
+     *  onboarding-artifact reset, or a repo-queue job that `rm -rf`s and rebuilds the tree.
+     *  RECIPROCAL: both take it, so whichever arrives second refuses. A one-directional check
+     *  leaves the window where a rebuild has already passed it and the reset claims before
+     *  `rm(dest)` runs. A claim, not a lock: one committed row write, no transaction spanning the
+     *  filesystem work and no pooled connection pinned — the repo worker and the task worker share
+     *  ONE `max: 10` pool, so holding a connection across `rm -rf` + `copyTree` deadlocks it.
+     *  A writer killed mid-job leaves this set, which `ROOT_CLAIM_STALE_MS` bounds.
      *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
-    onboardingResetClaimedAt: timestamp('onboarding_reset_claimed_at'),
+    rootClaimedAt: timestamp('root_claimed_at'),
+    /** Which kind of writer holds it, carried only so a refusal can name what it is waiting for.
+     *  Nothing branches on it — the exclusion is mutual either way. */
+    rootClaimKind: text('root_claim_kind'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

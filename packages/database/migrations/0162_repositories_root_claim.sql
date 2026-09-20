@@ -1,0 +1,35 @@
+-- Held while something is rewriting a repository's ROOT exclusively.
+--
+-- Four writers can touch a repository root and the reset's own guard covers one of them. Two of
+-- the others destroy the whole tree: the onboarding-artifact reset walks it deleting files, and
+-- three repo-queue handlers (copy, init, clone) `rm -rf` it and rebuild. This is what makes them
+-- refuse each other.
+--
+-- RECIPROCAL, and that is the point. A one-directional check — the rebuild reading a flag the
+-- reset sets — still leaves the window where the rebuild has passed its check and the reset
+-- claims before `rm(dest)` runs, at which point both walk the same tree and the reset's provenance
+-- reads race a recursive delete. Both sides take the same claim, so whichever arrives second
+-- refuses. `root_claim_kind` is carried only so that refusal can name what it is waiting for;
+-- nothing branches on it, because the exclusion is mutual either way.
+--
+-- A CLAIM rather than an advisory lock, deliberately. A lock must be HELD across the work it
+-- protects, and the only places to hold one here cost more than the race: the repo worker and the
+-- task worker run in ONE process on ONE `max: 10` connection pool, so a repo job holding a
+-- connection across `rm -rf` + `copyTree` at concurrency 5 deadlocks the pool, and the repo queue
+-- sets neither `lockDuration` nor `maxStalledCount`, so a handler blocked past BullMQ's 30s
+-- default is failed as stalled WITHOUT running its catch — stranding `status = 'cloning'` with no
+-- reconciler anywhere to clear it. One committed row write has none of those properties.
+--
+-- `repositories.status` is not the right column for this either: `ready` is written INSIDE
+-- `persistDetection`, which then keeps writing, so it never meant "the job finished". And a
+-- `repo_status` enum value was refused because Postgres cannot drop one — an irreversible
+-- migration for a reversible problem. These two columns revert with DROP COLUMN, and nothing
+-- depends on their contents: a live claim only ever refuses a request, so losing them restores the
+-- previous behaviour rather than corrupting anything.
+--
+-- NULL means "nobody is rewriting this root", which is every existing row, so no backfill is
+-- needed and nothing changes until the first writer claims one. A process killed mid-job leaves a
+-- claim behind; readers treat one older than ROOT_CLAIM_STALE_MS as abandoned and take it over,
+-- rather than blocking on it forever the way a stuck `cloning` does.
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS root_claimed_at timestamp;
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS root_claim_kind text;
