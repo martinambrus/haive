@@ -323,36 +323,39 @@ describe('fs-safe write primitives', () => {
       // the return value never arrives on a throw. The onboarding reset needs the distinction in
       // both directions: superseding its provenance over an intact tree is unrecoverable, and
       // reporting an untouched tree over a half-deleted one is equally wrong.
-      let count = 0;
-      const onRemoved = () => {
-        count += 1;
+      let seen: string[] = [];
+      const onRemoved = (rel: string) => {
+        seen.push(rel);
       };
 
       // Absent: returns false, having changed nothing, so it must report nothing.
       expect(await removeNoFollow(root, 'nope', { recursive: true, onRemoved })).toBe(false);
-      expect(count).toBe(0);
+      expect(seen).toEqual([]);
 
-      // One file: exactly one removal.
+      // One file: exactly one report, naming the path the CALLER asked about.
       await writeFile(path.join(root, 'solo.txt'), 'x', 'utf8');
       expect(await removeNoFollow(root, 'solo.txt', { onRemoved })).toBe(true);
-      expect(count).toBe(1);
+      expect(seen).toEqual(['solo.txt']);
 
-      // A tree of two files and two directories: one report per entry, the directories included.
-      count = 0;
+      // A tree: one report per entry, directories included, each a rel path under the anchor —
+      // which is what lets a caller retire exactly the rows for what actually went.
+      seen = [];
       await mkdir(path.join(root, 'many', 'sub'), { recursive: true });
       await writeFile(path.join(root, 'many', 'one.txt'), 'x', 'utf8');
       await writeFile(path.join(root, 'many', 'sub', 'two.txt'), 'x', 'utf8');
       expect(await removeNoFollow(root, 'many', { recursive: true, onRemoved })).toBe(true);
-      expect(count).toBe(4);
+      expect([...seen].sort()).toEqual(
+        ['many', 'many/one.txt', 'many/sub', 'many/sub/two.txt'].sort(),
+      );
 
       // A non-recursive failure on a non-empty directory removes nothing and reports nothing.
-      count = 0;
+      seen = [];
       await mkdir(path.join(root, 'full'), { recursive: true });
       await writeFile(path.join(root, 'full', 'x.txt'), 'x', 'utf8');
       await expect(removeNoFollow(root, 'full', { onRemoved })).rejects.toMatchObject({
         code: 'ENOTEMPTY',
       });
-      expect(count).toBe(0);
+      expect(seen).toEqual([]);
     });
 
     it('unlinks a link AS a link, leaving its target alone', async () => {

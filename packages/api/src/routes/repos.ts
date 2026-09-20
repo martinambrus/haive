@@ -1496,10 +1496,21 @@ type ResetDbOrTx =
  * prefix pattern would have to escape `_` and `%`, and `KB_DIR` really is
  * `.haive-data/knowledge_base`. Comparing whole segments cannot over-match.
  */
-export function resolveKeptArtifactPaths(livePaths: string[], skippedPaths: string[]): string[] {
+export function resolveKeptArtifactPaths(
+  livePaths: string[],
+  skippedPaths: string[],
+  /** Every path the walk actually unlinked, descendants included, from `onRemoved`. A recursive
+   *  delete that removed some children and then failed reports only its PARENT as skipped, so the
+   *  prefix rule below would otherwise keep rows for files that are already gone — and nothing
+   *  downstream reads disk to notice: `GET /repos/:id/upgrade-status` answers from the ROWS, so a
+   *  stale live row reports a reset file as installed and offers to manage it. Deletion is the
+   *  stronger fact, so it wins over the parent's skip. */
+  removedPaths: ReadonlySet<string> = new Set(),
+): string[] {
   if (skippedPaths.length === 0) return [];
   const kept = new Set<string>();
   for (const path of livePaths) {
+    if (removedPaths.has(path)) continue;
     for (const skip of skippedPaths) {
       if (path === skip || path.startsWith(`${skip}/`)) {
         kept.add(path);
@@ -1649,7 +1660,9 @@ export interface OnboardingResetProvenance {
 export async function resetOnboardingArtifacts(
   root: string,
   provenance: OnboardingResetProvenance,
-): Promise<OnboardingResetOutcome> {
+  // `unlinkedPaths` is deliberately NOT part of `OnboardingResetOutcome`: that interface is the
+  // JSON the route returns, and this set exists to retire rows, not to be read by a person.
+): Promise<OnboardingResetOutcome & { unlinkedPaths: Set<string> }> {
   const { writtenHashes, haiveDirs, haiveEntries } = provenance;
   const removed: string[] = [];
   const cleaned: string[] = [];
@@ -1661,6 +1674,9 @@ export async function resetOnboardingArtifacts(
   /** Recursive removals that failed part-way, and have therefore already modified the tree
    *  without recording anything. See `resetTouchedNothing`. */
   let partialRemovals = 0;
+  /** Every path actually unlinked, descendants included. `removed` holds only the top-level
+   *  targets that returned; this is what a failed recursive delete leaves behind as fact. */
+  const unlinkedPaths = new Set<string>();
 
   // A refusal is a per-item outcome, not a floor: one linked directory must not discard the
   // removal of the twenty beside it, and the reset says what it left alone instead of reporting
@@ -1704,8 +1720,12 @@ export async function resetOnboardingArtifacts(
         await removeNoFollow(root, rel, {
           recursive,
           repairPermissions: true,
-          onRemoved: () => {
+          onRemoved: (removedRel) => {
             unlinkedAny = true;
+            // Recorded per DESCENDANT, not just for the path asked about: a recursive delete that
+            // failed part-way reports only its parent as skipped, and the rows for what it did
+            // remove must still be retired.
+            unlinkedPaths.add(removedRel);
           },
         })
       ) {
@@ -1994,7 +2014,7 @@ export async function resetOnboardingArtifacts(
     );
   }
 
-  return { removed, cleaned, skipped, quarantined };
+  return { removed, cleaned, skipped, quarantined, unlinkedPaths };
 }
 
 /** The repo's on-disk root, or a 404/409 explaining why there isn't one.
@@ -2387,11 +2407,14 @@ async function runOnboardingArtifactReset(
     resolveMergedTasks(onboardingSteps, epoch),
   );
 
-  const { removed, cleaned, skipped, quarantined } = await resetOnboardingArtifacts(root, {
-    writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
-    haiveDirs: written.dirs,
-    haiveEntries: written.entries,
-  });
+  const { removed, cleaned, skipped, quarantined, unlinkedPaths } = await resetOnboardingArtifacts(
+    root,
+    {
+      writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
+      haiveDirs: written.dirs,
+      haiveEntries: written.entries,
+    },
+  );
 
   // Rows that name deleted files must not stay live: they feed the upgrade planner and the
   // rollback. `applicableTemplateIds` is left alone — the next apply overwrites it, and with no
@@ -2419,6 +2442,7 @@ async function runOnboardingArtifactReset(
       resolveKeptArtifactPaths(
         live.map((row) => row.diskPath),
         [...new Set(skipped.map((s) => s.path))],
+        unlinkedPaths,
       ),
     );
     // The completion stamp cannot outlive the files it vouches for: this is the "start over"

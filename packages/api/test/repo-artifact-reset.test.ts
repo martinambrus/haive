@@ -1236,6 +1236,26 @@ describe('resolveKeptArtifactPaths', () => {
   it('keeps nothing when the reset left nothing alone', () => {
     expect(resolveKeptArtifactPaths(live, [])).toEqual([]);
   });
+
+  it('does NOT keep a row for a descendant the walk already deleted', () => {
+    // A recursive delete that removed some children and then hit an IO error reports only its
+    // PARENT as skipped, so the prefix rule above would keep rows for files that are already
+    // gone. Nothing downstream reads disk to notice: `upgrade-status` answers from the rows, so
+    // a stale live row reports a reset file as installed and offers to manage it. Deletion is
+    // the stronger fact and wins over the parent's skip.
+    const deleted = new Set(['.claude/plugins/drupal-php-lsp/plugin.json']);
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins'], deleted)).toEqual([
+      '.claude/plugins/drupal-php-lsp/server.js',
+    ]);
+  });
+
+  it('is unchanged when nothing was deleted, which is the default', () => {
+    // The omitted argument must behave exactly as before this existed, since the smoke and the
+    // route both went through the two-argument form for several rounds.
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins'], new Set()).sort()).toEqual(
+      resolveKeptArtifactPaths(live, ['.claude/plugins']).sort(),
+    );
+  });
 });
 
 describe('sweepSurvivors', () => {
