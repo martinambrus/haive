@@ -87,6 +87,8 @@ async function main(): Promise<void> {
       /** 09_5b emits `{ repaired, ... }` rather than `wroteFiles`; the marker rides whichever
        *  field that step really uses, so no row here teaches a shape the code never sees. */
       shape?: 'wrote' | 'skill-repair';
+      /** The merge phase's durable record, for a `12-worktree-cleanup` row. */
+      mergeResolveState?: unknown;
       /** When the step finished, if later than the task's start — a retry. */
       endedAt?: Date;
     }): Promise<void> => {
@@ -110,6 +112,9 @@ async function main(): Promise<void> {
         stepIndex: 7,
         title: opts.marker,
         status: opts.status,
+        ...(opts.mergeResolveState === undefined
+          ? {}
+          : { mergeResolveState: opts.mergeResolveState as never }),
         output:
           opts.shape === 'skill-repair'
             ? { repaired: [opts.marker], stillFailing: [], attempted: 1 }
@@ -254,6 +259,29 @@ async function main(): Promise<void> {
       'a step retried after the reset is read, however old its task is',
       retried.includes('pre-reset-task-retried-after'),
       retried,
+    );
+
+    // `12-worktree-cleanup` throws when `removeWorktreeDir` fails AFTER the merge is committed,
+    // so the step is FAILED while the merge is real. The row must still be loaded, or the merge
+    // verdict is lost and the sync's changes are never credited. This predicate is SQL, so the
+    // unit suite cannot reach it — a mutation that drops `'failed'` fails nothing there.
+    await seed({
+      repositoryId: repoId,
+      startedAt: AFTER_RESET,
+      stepId: '12-worktree-cleanup',
+      status: 'failed',
+      marker: 'post-reset-failed-cleanup',
+      mergeResolveState: { merged: true },
+    });
+    const withCleanup = await loadProvenanceSteps(db, repoId, RESET_AT);
+    check(
+      'a cleanup step that failed after a durable merge is still loaded',
+      withCleanup.some(
+        (r) =>
+          r.stepId === '12-worktree-cleanup' &&
+          (r.mergeResolveState as { merged?: unknown } | null)?.merged === true,
+      ),
+      withCleanup.map((r) => r.stepId),
     );
 
     // A reset must be REFUSED while an onboarding run is live: it writes into the tree the
