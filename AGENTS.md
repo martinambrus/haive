@@ -1523,10 +1523,18 @@ there names directories nothing was written to (which is also why the query filt
 fallback write to `.claude/agents` when NO provider has an agents dir (amp alone, where
 `agentTargets` is empty), and the LLM-discovered custom agents, which have no manifest id at
 all. 09_5 contributes `written[].mirroredDirs`, each `written[].id` (a skill is the DIRECTORY
-`<dir>/<id>/SKILL.md`) and the `README.md` index it rebuilds every pass; the live
-`onboarding_artifacts` rows are the third source, the only per-file one, and the only one a repo
-whose step payloads predate these fields still has. `.claude` itself needs no gate — it is
-Haive's own directory, and every `ONBOARDING_MARKERS` path lives in it.
+`<dir>/<id>/SKILL.md`) and the `README.md` index it rebuilds every pass. `.claude` itself needs
+no gate — it is Haive's own directory, and every `ONBOARDING_MARKERS` path lives in it.
+
+**A live artifact row puts a directory in scope but never claims a file on its own.**
+`recordOnboardingArtifacts` inserts one row per manifest RENDERING without consulting
+`wroteFiles`, so the file apply SKIPPED has a row too, carrying the hash of what Haive WOULD
+have written rather than what is on disk — claiming by row would hand the user's own definition
+straight to the deletion the quarantine exists to prevent. The entry-level claim for a row is
+therefore a hash check against the bytes on disk (`artifactMatchesDisk`), the same test the
+settings files use and for the same reason. Rows still put the directory in scope, which is what
+keeps an UPGRADED repo's dirs resettable: `02-upgrade-apply` writes through those rows and never
+appears in any 07 `wroteFiles`.
 
 **Inside a proven directory, what Haive cannot claim is MOVED, not deleted.** The quarantine
 checkbox at 07 defaults OFF, on the stated grounds that an agent the user wrote by hand is

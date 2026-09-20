@@ -980,9 +980,17 @@ export function collectWrittenCliContent(
     }
   }
 
-  // The live rows are the only per-file record, and the only one a repo whose step payloads
-  // predate these fields still has.
-  for (const row of artifacts) claimPath(row.diskPath);
+  // The live rows put a directory IN SCOPE — an upgrade writes through them, and they are all a
+  // repo whose step payloads predate these fields has — but they never claim an entry on their
+  // own. `recordOnboardingArtifacts` inserts one row per manifest RENDERING without consulting
+  // `wroteFiles`, so a pre-existing user file that apply SKIPPED has a row too, carrying the
+  // hash of what Haive would have written rather than what is there. That is why the entry-level
+  // claim for a row is the hash check in `resetOnboardingArtifacts`, not this.
+  for (const row of artifacts) {
+    for (const spec of catalog) {
+      if (row.diskPath.startsWith(`${spec.dir}/`)) dirs.add(spec.dir);
+    }
+  }
   return { dirs, entries };
 }
 
@@ -1135,19 +1143,40 @@ export async function resetOnboardingArtifacts(
     });
   }
 
+  /** Whether a live artifact row covers this entry AND the bytes on disk are still the ones it
+   *  recorded. A row on its own is not evidence: `recordOnboardingArtifacts` inserts one per
+   *  manifest RENDERING without consulting `wroteFiles`, so a pre-existing user file that apply
+   *  SKIPPED carries a row holding the hash of what Haive would have written. The same test the
+   *  settings files use, for the same reason. A row deeper than the entry (a bundle skill's
+   *  `<dir>/<id>/SKILL.md`) verifies the directory that contains it. */
+  const artifactMatchesDisk = async (entry: string): Promise<boolean> => {
+    for (const [diskPath, hash] of writtenHashes) {
+      if (diskPath !== entry && !diskPath.startsWith(`${entry}/`)) continue;
+      const content = await readTextNoFollow(root, diskPath, { strict: true }).catch(() => null);
+      if (content !== null && sha256Hex(normalizeContent(content)) === hash) return true;
+    }
+    return false;
+  };
+
   /** Move out what this directory holds that Haive cannot claim, so the removal after it takes
    *  only ours. 07's own mechanism and its own destination (`unmanagedAgentsDir`), because the
    *  quarantine checkbox defaults OFF: a definition the user wrote by hand legitimately sits in
    *  an agents dir beside ours, and there is no way to tell it from an old leftover. `noReplace`
    *  so a name already quarantined by an earlier run is never clobbered — which of the two a
    *  person wants is not ours to decide. */
-  const quarantineForeign = async (dir: string): Promise<number> => {
+  const quarantineForeign = async (
+    dir: string,
+  ): Promise<{ left: number; ours: Array<{ rel: string; isDir: boolean }> }> => {
     const entries = await readdirNoFollow(root, dir, { strict: true });
-    if (entries === null) return 0;
+    const ours: Array<{ rel: string; isDir: boolean }> = [];
+    if (entries === null) return { left: 0, ours };
     let left = 0;
     for (const entry of entries) {
       const from = `${dir}/${entry.name}`;
-      if (haiveEntries.has(from)) continue;
+      if (haiveEntries.has(from) || (await artifactMatchesDisk(from))) {
+        ours.push({ rel: from, isDir: entry.isDirectory() });
+        continue;
+      }
       const to = `${unmanagedAgentsDir(dir)}/${entry.name}`;
       try {
         await renameNoFollow(root, from, to, { noReplace: true, createParents: true });
@@ -1168,7 +1197,7 @@ export async function resetOnboardingArtifacts(
         });
       }
     }
-    return left;
+    return { left, ours };
   };
 
   const dirs = onboardingResetDirs(haiveDirs);
@@ -1179,17 +1208,15 @@ export async function resetOnboardingArtifacts(
       await remove(rel, true);
       continue;
     }
-    let left = 0;
+    let swept = { left: 0, ours: [] as Array<{ rel: string; isDir: boolean }> };
     await guard(rel, async () => {
-      left = await quarantineForeign(rel);
+      swept = await quarantineForeign(rel);
     });
-    // Something of the user's could not be moved out, so the directory cannot go whole: its own
-    // entries are removed instead and it stays, holding what was left behind.
-    if (left === 0) await remove(rel, true);
+    // Something of the user's could not be moved out, so the directory cannot go whole: the
+    // entries that ARE ours are removed instead and it stays, holding what was left behind.
+    if (swept.left === 0) await remove(rel, true);
     else {
-      for (const entry of haiveEntries) {
-        if (entry.startsWith(`${rel}/`)) await remove(entry, true);
-      }
+      for (const entry of swept.ours) await remove(entry.rel, entry.isDir);
     }
   }
   // A candidate Haive cannot be shown to have written is REPORTED, never removed: it is a

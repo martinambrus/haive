@@ -216,14 +216,17 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.agents/skills/README.md')).toBe(true);
   });
 
-  it('claims the entry that contains a deeper artifact path', async () => {
+  it('lets an artifact row put a directory in scope without claiming its contents', async () => {
+    // `recordOnboardingArtifacts` inserts a row per manifest RENDERING without consulting
+    // `wroteFiles`, so a pre-existing user file that apply SKIPPED has a row too. The entry-level
+    // claim for a row is the hash check in `resetOnboardingArtifacts`.
     const { dirs, entries } = collectWrittenCliContent(
       [],
       [{ diskPath: '.grok/skills/bundled-thing/SKILL.md' }],
     );
 
     expect(dirs.has('.grok/skills')).toBe(true);
-    expect(entries.has('.grok/skills/bundled-thing')).toBe(true);
+    expect(entries.has('.grok/skills/bundled-thing')).toBe(false);
   });
 
   it('ignores a payload naming something outside the catalog', async () => {
@@ -319,6 +322,36 @@ describe('resetOnboardingArtifacts', () => {
       'mine\n',
     );
     // Everything of ours still goes, and the emptied directory with it.
+    expect(removed).toContain('.codex/agents');
+    expect(await exists(root, '.codex/agents')).toBe(false);
+  });
+
+  it('removes a file an artifact row claims only while the bytes still match', async () => {
+    // A row is not evidence on its own: one exists for a path apply SKIPPED, carrying the hash of
+    // what Haive would have written. Same file name, two different histories.
+    const root = await repo('reset-row-hash-');
+    await installArtifacts(root);
+    const ours = 'name: reviewer\n';
+    await writeFile(path.join(root, '.codex/agents/from-upgrade.toml'), ours, 'utf8');
+    await writeFile(path.join(root, '.codex/agents/skipped.toml'), 'mine, kept by 07\n', 'utf8');
+
+    const { removed, quarantined } = await resetOnboardingArtifacts(root, {
+      ...provenance(),
+      writtenHashes: new Map([
+        ['.codex/agents/from-upgrade.toml', sha256Hex(normalizeContent(ours))],
+        // What 07 would have written, not what is on disk.
+        ['.codex/agents/skipped.toml', sha256Hex(normalizeContent('name: haive\n'))],
+      ]),
+    });
+
+    expect(quarantined).toContainEqual({
+      from: '.codex/agents/skipped.toml',
+      to: '.codex/agents-legacy/skipped.toml',
+    });
+    expect(await readFile(path.join(root, '.codex/agents-legacy/skipped.toml'), 'utf8')).toBe(
+      'mine, kept by 07\n',
+    );
+    // The matching one was ours, so it goes with the directory.
     expect(removed).toContain('.codex/agents');
     expect(await exists(root, '.codex/agents')).toBe(false);
   });
