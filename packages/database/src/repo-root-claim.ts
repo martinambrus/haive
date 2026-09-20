@@ -31,6 +31,20 @@ export const ROOT_CLAIM_STALE_MS = 15 * 60 * 1000;
  *  lost — a paused event loop, a slow query — before anyone else may take over. */
 export const ROOT_CLAIM_RENEW_MS = Math.floor(ROOT_CLAIM_STALE_MS / 3);
 
+/**
+ * The longest a lease will keep renewing itself before it is left to lapse.
+ *
+ * Renewal introduces a failure the fixed expiry could not have: a handle that is acquired and
+ * never released, in a process that stays alive, would renew forever and block the repository
+ * PERMANENTLY. Every caller releases in a `finally`, so that is a code bug rather than an
+ * expected path — which is exactly why it must fail bounded rather than silently forever.
+ *
+ * Two hours, because it has to sit above the slowest legitimate holder (a cold clone of a very
+ * large repository) and only above it. A holder that really is still working past this loses its
+ * claim, which is the pre-lease behaviour and no worse than it.
+ */
+export const ROOT_CLAIM_MAX_MS = 2 * 60 * 60 * 1000;
+
 /** Is this claim still one another writer must refuse for? Pure, so every reader agrees without a
  *  round trip and the rule is unit-testable. */
 export function isRootClaimLive(claimedAt: Date | null | undefined, now = new Date()): boolean {
@@ -168,9 +182,18 @@ export async function acquireRootClaim(
   if (first === null) return null;
 
   let current: Date | null = first.claimedAt;
+  const giveUpAt = first.claimedAt.getTime() + ROOT_CLAIM_MAX_MS;
   const timer = setInterval(() => {
     void (async () => {
       if (current === null) return;
+      // Stop renewing rather than hold the repository shut forever. A handle that is never
+      // released — a bug, since every caller releases in a `finally` — would otherwise keep this
+      // row claimed for the life of the process.
+      if (Date.now() >= giveUpAt) {
+        current = null;
+        clearInterval(timer);
+        return;
+      }
       const next = await renewRootClaim(db, repositoryId, current).catch(() => current);
       // null means the lease was taken over while we worked. Stop renewing and stop releasing:
       // the claim on the row is someone else's now, and clearing it would strip their protection.
