@@ -1506,12 +1506,30 @@ for every other CLI and the next run wrote on top of them.
 providers' dirs alone (`agentTargetsByDir`, from `providerRows.filter(p => p.enabled)`) and
 `resolveSkillTargetDirs` does the same for skills, so on a repo where only claude is enabled a
 `.codex/agents` or `.grok/skills` holds the user's own definitions and NOTHING of ours — and
-this action is irreversible. The route passes what it can PROVE: the currently enabled
-providers' dirs, which cover the LLM-written skills no artifact row tracks, unioned with the
-dirs the repo's live `onboarding_artifacts` rows name, which cover a provider enabled at
-onboarding and disabled since. A candidate outside that union is REPORTED, not removed.
-`.claude` needs no such gate — it is Haive's own directory, holds `workflow-config.json` and
-the fallback agents write, and every `ONBOARDING_MARKERS` path lives in it.
+this action is irreversible. `collectWrittenCliContent` answers it from the RUNS' own records,
+never from the currently enabled providers: enablement is mutable global state that says nothing
+about what THIS repo's onboarding did, so a CLI enabled afterwards would make its directory
+eligible for a removal no run here ever wrote to, while one disabled since would strand the
+skills it did write. Three sources, all historical: 07's detect payload (`agentTargets`), 09_5's
+output (`written[].mirroredDirs`, and `written[].id` for the `<dir>/<id>/SKILL.md` each skill
+became), and the live `onboarding_artifacts` rows, which are the only per-file record and the
+only one a repo whose step payloads predate those fields still has. A candidate outside that
+union is REPORTED, not removed. `.claude` needs no such gate — it is Haive's own directory,
+holds `workflow-config.json` and the fallback agents write, and every `ONBOARDING_MARKERS` path
+lives in it.
+
+**Inside a proven directory, what Haive cannot claim is MOVED, not deleted.** The quarantine
+checkbox at 07 defaults OFF, on the stated grounds that an agent the user wrote by hand is
+indistinguishable from one an older workflow left behind — so their own definitions legitimately
+sit beside ours, and a recursive removal would take them. The reset therefore runs 07's own
+mechanism first, to 07's own destination (`unmanagedAgentsDir`, the `-legacy` sibling a reset
+then keeps), and removes the directory once only Haive's entries are left. `noReplace`, because
+a name already quarantined is an earlier run's file and which of the two a person wants is not
+ours to decide; an entry that could not be moved is reported and its DIRECTORY then survives,
+with Haive's own entries removed individually around it. Agent ids for the claim come from the
+template manifest rather than the step payload — `acceptedAgentIds` is the user's PICK, so an
+agent they deselected would otherwise read as theirs and be quarantined out of its own
+directory.
 
 `.claude` is swept entry by entry rather than removed whole, because three things in a
 directory Haive owns are not Haive's:

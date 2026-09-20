@@ -148,15 +148,18 @@ async function installUserOwned(root: string): Promise<void> {
 const exists = async (root: string, rel: string): Promise<boolean> =>
   (await lstatNoFollow(root, rel)) !== null;
 
-/** What a repository with every CLI enabled and no per-file record looks like: the catalog dirs
- *  are all Haive's, and only the settings files carry a hash. */
+/** What a run that wrote to every CLI directory recorded: the dirs are Haive's, and the one
+ *  agent `installArtifacts` puts in each is the file it wrote there. */
 function provenance(hashes: Array<[string, string]> = []): {
   writtenHashes: Map<string, string>;
   haiveDirs: Set<string>;
+  haiveEntries: Set<string>;
 } {
+  const catalog = inventoryDirsFromCatalog();
   return {
     writtenHashes: new Map(hashes),
-    haiveDirs: new Set(inventoryDirsFromCatalog().map((d) => d.dir)),
+    haiveDirs: new Set(catalog.map((d) => d.dir)),
+    haiveEntries: new Set(catalog.map((d) => `${d.dir}/code-reviewer.${d.ext ?? 'md'}`)),
   };
 }
 
@@ -190,6 +193,7 @@ describe('resetOnboardingArtifacts', () => {
     const claudeOnly = {
       writtenHashes: new Map<string, string>(),
       haiveDirs: new Set(['.claude/agents', '.claude/skills']),
+      haiveEntries: new Set(['.claude/agents/code-reviewer.md', '.claude/skills/code-reviewer.md']),
     };
 
     const { removed, skipped } = await resetOnboardingArtifacts(root, claudeOnly);
@@ -213,10 +217,56 @@ describe('resetOnboardingArtifacts', () => {
     const { removed } = await resetOnboardingArtifacts(root, {
       writtenHashes: new Map(),
       haiveDirs: new Set(['.codex/agents']),
+      haiveEntries: new Set(['.codex/agents/code-reviewer.toml']),
     });
 
     expect(removed).toContain('.codex/agents');
     expect(await exists(root, '.codex/agents')).toBe(false);
+  });
+
+  it('quarantines a definition Haive did not write instead of deleting it', async () => {
+    // The quarantine checkbox at 07 defaults OFF, so an agent the user wrote by hand legitimately
+    // sits in an agents dir beside ours — and there is no way to tell it from an old leftover.
+    const root = await repo('reset-quarantine-');
+    await installArtifacts(root);
+    await writeFile(path.join(root, '.codex/agents/mine.toml'), 'mine\n', 'utf8');
+
+    const { removed, quarantined } = await resetOnboardingArtifacts(root, provenance());
+
+    expect(quarantined).toContainEqual({
+      from: '.codex/agents/mine.toml',
+      to: '.codex/agents-legacy/mine.toml',
+    });
+    expect(await readFile(path.join(root, '.codex/agents-legacy/mine.toml'), 'utf8')).toBe(
+      'mine\n',
+    );
+    // Everything of ours still goes, and the emptied directory with it.
+    expect(removed).toContain('.codex/agents');
+    expect(await exists(root, '.codex/agents')).toBe(false);
+  });
+
+  it('keeps the directory when something could not be moved out of it', async () => {
+    // The name is already taken in the quarantine, and which of the two a person wants is not
+    // ours to decide — so the file stays, and the removal around it must not take it.
+    const root = await repo('reset-quarantine-taken-');
+    await installArtifacts(root);
+    await writeFile(path.join(root, '.codex/agents/mine.toml'), 'new\n', 'utf8');
+    await mkdir(path.join(root, '.codex/agents-legacy'), { recursive: true });
+    await writeFile(path.join(root, '.codex/agents-legacy/mine.toml'), 'older\n', 'utf8');
+
+    const { removed, skipped } = await resetOnboardingArtifacts(root, provenance());
+
+    expect(skipped).toContainEqual({
+      path: '.codex/agents/mine.toml',
+      reason: 'already quarantined under that name',
+    });
+    expect(await readFile(path.join(root, '.codex/agents/mine.toml'), 'utf8')).toBe('new\n');
+    expect(await readFile(path.join(root, '.codex/agents-legacy/mine.toml'), 'utf8')).toBe(
+      'older\n',
+    );
+    // Ours still goes; the directory stays because it is not empty of the user's.
+    expect(removed).toContain('.codex/agents/code-reviewer.toml');
+    expect(await exists(root, '.codex/agents')).toBe(true);
   });
 
   it('keeps the quarantine and mcp_settings.json, and says so', async () => {

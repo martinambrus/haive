@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, desc, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { eq, and, desc, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   isPathContainmentError,
@@ -36,12 +36,11 @@ import {
   REPO_JOB_NAMES,
   updateRepoExclusionsRequestSchema,
   CLI_PROVIDER_LIST,
-  getCliProviderMetadata,
   HAIVE_DATA_DIR,
   normalizeContent,
   sha256Hex,
+  unmanagedAgentsDir,
   type ArchiveFormat,
-  type CliProviderName,
 } from '@haive/shared';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import { parseScpLikeGitUrl } from '@haive/shared/schemas';
@@ -908,6 +907,83 @@ function onboardingResetDirs(haiveDirs: ReadonlySet<string>): {
   return { remove: [...remove], candidates };
 }
 
+/** The two onboarding steps that RECORD where they wrote. 07's detect payload carries
+ *  `agentTargets` — the agents dirs of the providers enabled AT THE TIME — and 09_5's output
+ *  carries `written[].mirroredDirs`, the skills dirs it mirrored each skill into. */
+const AGENT_TARGETS_STEP_ID = '07-generate-files';
+const SKILL_MIRROR_STEP_ID = '09_5-skill-generation';
+
+/**
+ * Which catalog agents/skills directories Haive is KNOWN to have written to in this repository.
+ *
+ * From the RUNS, never from the currently enabled providers: enablement is mutable global state
+ * that says nothing about what this repo's onboarding did, so a CLI enabled afterwards would
+ * make its directory eligible for a removal no run here ever wrote to, while one disabled since
+ * would strand the skills it did write. The live artifact rows are the third source and the only
+ * per-file one; they also cover a repo whose step payloads predate these fields.
+ *
+ * Every claim is checked against the catalog, so a payload naming something else contributes
+ * nothing — these are stored JSON written by an older Haive, not a typed contract.
+ */
+export function collectWrittenCliContent(
+  steps: ReadonlyArray<{ stepId: string; detectOutput: unknown; output: unknown }>,
+  artifacts: ReadonlyArray<{ diskPath: string }>,
+  templateAgentIds: Iterable<string>,
+): { dirs: Set<string>; entries: Set<string> } {
+  const catalog = inventoryDirsFromCatalog();
+  const byDir = new Map(catalog.map((entry) => [entry.dir, entry]));
+  const dirs = new Set<string>();
+  const entries = new Set<string>();
+  const claimDir = (value: unknown): string | null => {
+    if (typeof value !== 'string' || !byDir.has(value)) return null;
+    dirs.add(value);
+    return value;
+  };
+
+  for (const step of steps) {
+    if (step.stepId === AGENT_TARGETS_STEP_ID) {
+      const targets = (step.detectOutput as { agentTargets?: unknown } | null)?.agentTargets;
+      if (!Array.isArray(targets)) continue;
+      for (const target of targets) {
+        const dir = claimDir((target as { dir?: unknown } | null)?.dir);
+        if (dir === null) continue;
+        // 07 writes `<id>.<ext>` per agent plus the index it generates. The ids come from the
+        // manifest rather than the payload: `acceptedAgentIds` is the user's PICK, so an agent
+        // they deselected would then read as theirs and be quarantined out of its own directory.
+        const ext = byDir.get(dir)?.ext ?? 'md';
+        for (const id of templateAgentIds) entries.add(`${dir}/${id}.${ext}`);
+        entries.add(`${dir}/README.md`);
+      }
+    } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
+      const written = (step.output as { written?: unknown } | null)?.written;
+      if (!Array.isArray(written)) continue;
+      for (const skill of written) {
+        const row = skill as { id?: unknown; mirroredDirs?: unknown } | null;
+        if (!Array.isArray(row?.mirroredDirs)) continue;
+        for (const value of row.mirroredDirs) {
+          const dir = claimDir(value);
+          // A generated skill is a DIRECTORY, `<dir>/<id>/SKILL.md`, so the entry is the id.
+          if (dir !== null && typeof row.id === 'string') entries.add(`${dir}/${row.id}`);
+        }
+      }
+    }
+  }
+
+  // The live rows are the only per-file record, and the only one a repo whose step payloads
+  // predate those fields still has. A path deeper than the entry (a bundle skill's
+  // `<dir>/<id>/SKILL.md`) claims the entry that contains it.
+  for (const row of artifacts) {
+    for (const spec of catalog) {
+      if (!row.diskPath.startsWith(`${spec.dir}/`)) continue;
+      dirs.add(spec.dir);
+      const rest = row.diskPath.slice(spec.dir.length + 1);
+      const head = rest.split('/')[0];
+      if (head) entries.add(`${spec.dir}/${head}`);
+    }
+  }
+  return { dirs, entries };
+}
+
 /** `.haive/` is the git-excluded dir; only this one file in it is onboarding's. */
 const INSTALL_MANIFEST_PATH = '.haive/install.json';
 const ONBOARDING_RESET_FILES = ['.ripgreprc', INSTALL_MANIFEST_PATH];
@@ -974,23 +1050,31 @@ export interface OnboardingResetOutcome {
   cleaned: string[];
   /** What the reset left alone, and why. Kept files and refused links share this channel. */
   skipped: Array<{ path: string; reason: string }>;
+  /** Moved to the `<dir>-legacy` sibling instead of being deleted with the directory. */
+  quarantined: Array<{ from: string; to: string }>;
 }
 
-/** What the caller could establish about what Haive wrote here. Both halves are evidence, not
- *  policy: the reset removes what they cover and reports what they do not. */
+/** What the caller could establish about what Haive wrote here. Every field is evidence, not
+ *  policy: the reset removes what it covers and keeps what it does not. */
 export interface OnboardingResetProvenance {
   /** `written_hash` of every LIVE `onboarding_artifacts` row, by disk path. */
   writtenHashes: ReadonlyMap<string, string>;
   /** Catalog agents/skills directories Haive wrote to for this repository. */
   haiveDirs: ReadonlySet<string>;
+  /** `<dir>/<name>` entries inside those directories that Haive wrote. Anything else in one is
+   *  the user's — the quarantine default is OFF (`07-generate-files.ts:762`), so their own
+   *  definitions legitimately sit beside ours. */
+  haiveEntries: ReadonlySet<string>;
 }
 
 /**
  * Take back what onboarding wrote to a repository, and nothing else.
  *
  * `writtenHashes` is the only evidence that a file Haive CAN write is one it DID write, and it
- * decides the settings files (see `ONBOARDING_SETTINGS_FILES`). `haiveDirs` decides the per-CLI
- * agents and skills directories. Everything else is decided by location.
+ * decides the settings files (see `ONBOARDING_SETTINGS_FILES`). `haiveDirs` decides which
+ * per-CLI directories are in scope at all, and `haiveEntries` which of their contents are ours;
+ * an entry in neither is MOVED to the `-legacy` sibling rather than deleted with the directory.
+ * Everything else is decided by location.
  *
  * Exported beside `stripHaiveContent` and `checkOnboardingMarkers` so the filesystem half is
  * testable without a request: the route adds only the row reads and the DB writes around it.
@@ -999,10 +1083,11 @@ export async function resetOnboardingArtifacts(
   root: string,
   provenance: OnboardingResetProvenance,
 ): Promise<OnboardingResetOutcome> {
-  const { writtenHashes, haiveDirs } = provenance;
+  const { writtenHashes, haiveDirs, haiveEntries } = provenance;
   const removed: string[] = [];
   const cleaned: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
+  const quarantined: Array<{ from: string; to: string }> = [];
 
   // A refusal is a per-item outcome, not a floor: one linked directory must not discard the
   // removal of the twenty beside it, and the reset says what it left alone instead of reporting
@@ -1048,8 +1133,63 @@ export async function resetOnboardingArtifacts(
     });
   }
 
+  /** Move out what this directory holds that Haive cannot claim, so the removal after it takes
+   *  only ours. 07's own mechanism and its own destination (`unmanagedAgentsDir`), because the
+   *  quarantine checkbox defaults OFF: a definition the user wrote by hand legitimately sits in
+   *  an agents dir beside ours, and there is no way to tell it from an old leftover. `noReplace`
+   *  so a name already quarantined by an earlier run is never clobbered — which of the two a
+   *  person wants is not ours to decide. */
+  const quarantineForeign = async (dir: string): Promise<number> => {
+    const entries = await readdirNoFollow(root, dir, { strict: true });
+    if (entries === null) return 0;
+    let left = 0;
+    for (const entry of entries) {
+      const from = `${dir}/${entry.name}`;
+      if (haiveEntries.has(from)) continue;
+      const to = `${unmanagedAgentsDir(dir)}/${entry.name}`;
+      try {
+        await renameNoFollow(root, from, to, { noReplace: true, createParents: true });
+        quarantined.push({ from, to });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' && !isPathContainmentError(err)) {
+          throw err;
+        }
+        // The name is taken, or the entry became a link between the listing and the move. Either
+        // way it stays where it is, and the directory around it must then NOT be removed whole.
+        left += 1;
+        skipped.push({
+          path: from,
+          reason:
+            (err as NodeJS.ErrnoException).code === 'EEXIST'
+              ? 'already quarantined under that name'
+              : (err as { reason: string }).reason,
+        });
+      }
+    }
+    return left;
+  };
+
   const dirs = onboardingResetDirs(haiveDirs);
-  for (const rel of dirs.remove) await remove(rel, true);
+  for (const rel of dirs.remove) {
+    // KB and learnings are Haive's whole and hold no user definitions, so only the per-CLI dirs
+    // are swept first.
+    if (!haiveDirs.has(rel)) {
+      await remove(rel, true);
+      continue;
+    }
+    let left = 0;
+    await guard(rel, async () => {
+      left = await quarantineForeign(rel);
+    });
+    // Something of the user's could not be moved out, so the directory cannot go whole: its own
+    // entries are removed instead and it stays, holding what was left behind.
+    if (left === 0) await remove(rel, true);
+    else {
+      for (const entry of haiveEntries) {
+        if (entry.startsWith(`${rel}/`)) await remove(entry, true);
+      }
+    }
+  }
   // A candidate Haive cannot be shown to have written is REPORTED, never removed: it is a
   // directory for a CLI this repo never had enabled, so everything in it is the user's.
   for (const rel of dirs.candidates) {
@@ -1079,6 +1219,12 @@ export async function resetOnboardingArtifacts(
         kept += 1;
         continue;
       }
+      // `.claude/agents` and `.claude/skills` are catalog directories: the loop above already
+      // ruled on them, so one still here was declined or holds what could not be moved out.
+      if (dirs.candidates.includes(rel) || dirs.remove.includes(rel)) {
+        kept += 1;
+        continue;
+      }
       await remove(rel, entry.isDirectory());
     }
     // Nothing of the user's in it: the directory goes too, as it always did.
@@ -1096,7 +1242,7 @@ export async function resetOnboardingArtifacts(
     });
   }
 
-  return { removed, cleaned, skipped };
+  return { removed, cleaned, skipped, quarantined };
 }
 
 /** The repo's on-disk root, or a 404/409 explaining why there isn't one.
@@ -1322,26 +1468,39 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
     );
 
   // Which per-CLI dirs Haive wrote to, from the two things that can show it. The ENABLED
-  // providers are the set 07 and `resolveSkillTargetDirs` both target, so they cover the
-  // LLM-written skills no artifact row tracks; the live rows cover a provider that has since
-  // been disabled. A dir in neither is left alone — see `onboardingResetDirs`.
-  const providers = await db
-    .select({ name: schema.cliProviders.name })
-    .from(schema.cliProviders)
-    .where(and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)));
-  const haiveDirs = new Set<string>();
-  for (const p of providers) {
-    const meta = getCliProviderMetadata(p.name as CliProviderName);
-    if (meta.projectAgentsDir) haiveDirs.add(meta.projectAgentsDir);
-    haiveDirs.add(meta.projectSkillsDir);
-  }
-  for (const entry of inventoryDirsFromCatalog()) {
-    if (live.some((row) => row.diskPath.startsWith(`${entry.dir}/`))) haiveDirs.add(entry.dir);
-  }
+  // runs recorded where they wrote, and the live rows name individual files. Deliberately NOT
+  // the CURRENTLY enabled providers: that is mutable global state and says nothing about what
+  // THIS repo's run did — a CLI enabled afterwards would make its dir eligible for a removal
+  // no onboarding here ever wrote to.
+  const onboardingSteps = await db
+    .select({
+      stepId: schema.taskSteps.stepId,
+      detectOutput: schema.taskSteps.detectOutput,
+      output: schema.taskSteps.output,
+    })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, id),
+        inArray(schema.taskSteps.stepId, [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID]),
+      ),
+    );
+  const templateAgents = await db
+    .select({ templateId: schema.templateManifestCache.templateId })
+    .from(schema.templateManifestCache);
+  const written = collectWrittenCliContent(
+    onboardingSteps,
+    live,
+    templateAgents
+      .filter((row) => row.templateId.startsWith('agent.'))
+      .map((row) => row.templateId.slice('agent.'.length)),
+  );
 
-  const { removed, cleaned, skipped } = await resetOnboardingArtifacts(root, {
+  const { removed, cleaned, skipped, quarantined } = await resetOnboardingArtifacts(root, {
     writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
-    haiveDirs,
+    haiveDirs: written.dirs,
+    haiveEntries: written.entries,
   });
 
   // Rows that name deleted files must not stay live: they feed the upgrade planner and the
@@ -1364,7 +1523,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
     .update(schema.repositories)
     .set({ onboardedAt: null, updatedAt: new Date() })
     .where(eq(schema.repositories.id, id));
-  return c.json({ ok: true, removed, cleaned, skipped });
+  return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 });
 
 repoRoutes.delete('/:id', async (c) => {

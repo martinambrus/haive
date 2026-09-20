@@ -407,6 +407,8 @@ export default function NewTaskPage() {
       'This will permanently remove onboarding artifacts from the repository root so onboarding can run again:\n' +
         '  • delete the agents and skills directory of every CLI Haive wrote to here (.codex, .gemini,\n' +
         '    .grok, .agents) — a CLI directory it has no record of writing is kept and listed instead\n' +
+        '  • move anything in those directories that Haive did not write into the <dir>-legacy sibling\n' +
+        '    first, so nothing of yours is deleted\n' +
         '  • delete .claude/, the knowledge base and learnings, .ripgreprc and .haive/install.json\n' +
         '  • strip haive-managed blocks from AGENTS.md, CLAUDE.md, and GEMINI.md (file removed if empty after)\n\n' +
         'Kept: .claude/mcp_settings.json, any *-legacy agents directory, and a settings.json that does not\n' +
@@ -422,15 +424,23 @@ export default function NewTaskPage() {
         removed: string[];
         cleaned: string[];
         skipped?: { path: string; reason: string }[];
+        quarantined?: { from: string; to: string }[];
       }>(`/repos/${repositoryId}/onboarding-artifacts`);
       // A reset that could not touch one of the rules files has to SAY so. The run afterwards
       // re-generates its own markers, so a file the strip skipped silently keeps whatever the
       // previous run left in it — and this is not an error: everything else was reset.
-      if (res.skipped?.length) {
-        setResetNote(
-          `Left alone: ${res.skipped.map((s) => `${s.path} (${s.reason})`).join(', ')}.`,
+      // A file MOVED out of a directory Haive then deleted has to be said out loud too, or the
+      // user looks for it where it was and concludes the reset ate it.
+      const notes: string[] = [];
+      if (res.quarantined?.length) {
+        notes.push(
+          `Moved out of the way: ${res.quarantined.map((q) => `${q.from} → ${q.to}`).join(', ')}.`,
         );
       }
+      if (res.skipped?.length) {
+        notes.push(`Left alone: ${res.skipped.map((s) => `${s.path} (${s.reason})`).join(', ')}.`);
+      }
+      if (notes.length) setResetNote(notes.join(' '));
       await refreshStatus(repositoryId);
     } catch (err) {
       setStatusError((err as Error).message ?? 'Failed to reset onboarding');
