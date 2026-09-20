@@ -8,6 +8,7 @@ import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { inventoryDirsFromCatalog } from '../src/lib/tool-inventory.js';
 import {
   checkOnboardingMarkers,
+  collectWrittenCliContent,
   resetOnboardingArtifacts,
   stripHaiveContent,
 } from '../src/routes/repos.js';
@@ -162,6 +163,86 @@ function provenance(hashes: Array<[string, string]> = []): {
     haiveEntries: new Set(catalog.map((d) => `${d.dir}/code-reviewer.${d.ext ?? 'md'}`)),
   };
 }
+
+describe('collectWrittenCliContent', () => {
+  const MANIFEST = ['code-reviewer', 'test-writer'];
+
+  it('claims the claude fallback dirs even when nothing recorded a target', async () => {
+    // With only amp enabled, 07 records an EMPTY `agentTargets` and writes to `.claude/agents`
+    // anyway. Without this the fallback run's agents survive the reset and the next run writes
+    // over them.
+    const { dirs, entries } = collectWrittenCliContent([], [], MANIFEST);
+
+    expect([...dirs].sort()).toEqual(['.claude/agents', '.claude/skills']);
+    expect(entries.has('.claude/agents/code-reviewer.md')).toBe(true);
+    expect(entries.has('.claude/agents/README.md')).toBe(true);
+  });
+
+  it('reads the agents dirs a run recorded, and claims the manifest ids in them', async () => {
+    const { dirs, entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '07-generate-files',
+          detectOutput: { agentTargets: [{ dir: '.codex/agents' }] },
+          output: null,
+        },
+      ],
+      [],
+      MANIFEST,
+    );
+
+    expect(dirs.has('.codex/agents')).toBe(true);
+    // Codex agents are TOML, and the extension comes from the catalog rather than the payload.
+    expect(entries.has('.codex/agents/test-writer.toml')).toBe(true);
+    expect(entries.has('.codex/agents/mine.toml')).toBe(false);
+  });
+
+  it('reads the skills dirs and ids 09_5 mirrored into', async () => {
+    const { dirs, entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '09_5-skill-generation',
+          detectOutput: null,
+          output: { written: [{ id: 'repo-conventions', mirroredDirs: ['.agents/skills'] }] },
+        },
+      ],
+      [],
+      [],
+    );
+
+    expect(dirs.has('.agents/skills')).toBe(true);
+    // A generated skill is a DIRECTORY, `<dir>/<id>/SKILL.md`, so the entry is the id.
+    expect(entries.has('.agents/skills/repo-conventions')).toBe(true);
+  });
+
+  it('claims the entry that contains a deeper artifact path', async () => {
+    const { dirs, entries } = collectWrittenCliContent(
+      [],
+      [{ diskPath: '.grok/skills/bundled-thing/SKILL.md' }],
+      [],
+    );
+
+    expect(dirs.has('.grok/skills')).toBe(true);
+    expect(entries.has('.grok/skills/bundled-thing')).toBe(true);
+  });
+
+  it('ignores a payload naming something outside the catalog', async () => {
+    // These are stored JSON written by an older Haive, not a typed contract.
+    const { dirs } = collectWrittenCliContent(
+      [
+        {
+          stepId: '07-generate-files',
+          detectOutput: { agentTargets: [{ dir: '../etc' }, { dir: 42 }, null] },
+          output: null,
+        },
+      ],
+      [],
+      MANIFEST,
+    );
+
+    expect([...dirs].sort()).toEqual(['.claude/agents', '.claude/skills']);
+  });
+});
 
 describe('resetOnboardingArtifacts', () => {
   it('removes every CLI agents and skills directory, not just claude’s', async () => {

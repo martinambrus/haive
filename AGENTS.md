@@ -1514,9 +1514,17 @@ skills it did write. Three sources, all historical: 07's detect payload (`agentT
 output (`written[].mirroredDirs`, and `written[].id` for the `<dir>/<id>/SKILL.md` each skill
 became), and the live `onboarding_artifacts` rows, which are the only per-file record and the
 only one a repo whose step payloads predate those fields still has. A candidate outside that
-union is REPORTED, not removed. `.claude` needs no such gate — it is Haive's own directory,
-holds `workflow-config.json` and the fallback agents write, and every `ONBOARDING_MARKERS` path
-lives in it.
+union is REPORTED, not removed.
+
+Two details in that query are load-bearing. The step rows are filtered to `status = 'done'`,
+because 07 persists `agentTargets` from its DETECT phase, before the form is even shown — a run
+cancelled or failed while parked there names directories nothing was written to, and a
+pre-existing definition in one whose name matches a manifest agent would then be taken for ours.
+And `.claude/agents`/`.claude/skills` are claimed UNCONDITIONALLY: with no file-based agents
+provider enabled (amp alone) 07 records an EMPTY `agentTargets` and writes there anyway, and
+`resolveSkillTargetDirs` falls back the same way, so without it a fallback run's agents survive
+the reset and the next run writes over them. `.claude` needs no gate of its own either — it is
+Haive's own directory, and every `ONBOARDING_MARKERS` path lives in it.
 
 **Inside a proven directory, what Haive cannot claim is MOVED, not deleted.** The quarantine
 checkbox at 07 defaults OFF, on the stated grounds that an agent the user wrote by hand is

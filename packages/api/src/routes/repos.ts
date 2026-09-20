@@ -913,6 +913,11 @@ function onboardingResetDirs(haiveDirs: ReadonlySet<string>): {
 const AGENT_TARGETS_STEP_ID = '07-generate-files';
 const SKILL_MIRROR_STEP_ID = '09_5-skill-generation';
 
+/** Where 07 writes agents when NO enabled provider has a file-based agents directory (amp
+ *  alone), and where `resolveSkillTargetDirs` falls back to for skills. Agents dir first —
+ *  `claimAgentFiles` is called on it by index. */
+const CLAUDE_FALLBACK_DIRS = ['.claude/agents', '.claude/skills'] as const;
+
 /**
  * Which catalog agents/skills directories Haive is KNOWN to have written to in this repository.
  *
@@ -939,6 +944,22 @@ export function collectWrittenCliContent(
     dirs.add(value);
     return value;
   };
+  /** 07 writes `<id>.<ext>` per agent plus the index it generates. The ids come from the
+   *  manifest rather than the step payload: `acceptedAgentIds` is the user's PICK, so an agent
+   *  they deselected would then read as theirs and be quarantined out of its own directory. */
+  const claimAgentFiles = (dir: string): void => {
+    const ext = byDir.get(dir)?.ext ?? 'md';
+    for (const id of templateAgentIds) entries.add(`${dir}/${id}.${ext}`);
+    entries.add(`${dir}/README.md`);
+  };
+
+  // When no enabled provider has a file-based agents directory — amp alone — 07 records an EMPTY
+  // `agentTargets` and writes to `.claude/agents` anyway, and `resolveSkillTargetDirs` falls back
+  // to `.claude/skills` the same way. Both are Haive's own directory either way, so they are
+  // claimed unconditionally; without this the fallback run's agents survive a reset and the next
+  // run writes over them.
+  for (const dir of CLAUDE_FALLBACK_DIRS) claimDir(dir);
+  claimAgentFiles(CLAUDE_FALLBACK_DIRS[0]);
 
   for (const step of steps) {
     if (step.stepId === AGENT_TARGETS_STEP_ID) {
@@ -946,13 +967,7 @@ export function collectWrittenCliContent(
       if (!Array.isArray(targets)) continue;
       for (const target of targets) {
         const dir = claimDir((target as { dir?: unknown } | null)?.dir);
-        if (dir === null) continue;
-        // 07 writes `<id>.<ext>` per agent plus the index it generates. The ids come from the
-        // manifest rather than the payload: `acceptedAgentIds` is the user's PICK, so an agent
-        // they deselected would then read as theirs and be quarantined out of its own directory.
-        const ext = byDir.get(dir)?.ext ?? 'md';
-        for (const id of templateAgentIds) entries.add(`${dir}/${id}.${ext}`);
-        entries.add(`${dir}/README.md`);
+        if (dir !== null) claimAgentFiles(dir);
       }
     } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
       const written = (step.output as { written?: unknown } | null)?.written;
@@ -1484,6 +1499,11 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
       and(
         eq(schema.tasks.repositoryId, id),
         inArray(schema.taskSteps.stepId, [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID]),
+        // `done` is the proof that APPLY ran. 07 persists `agentTargets` from its detect phase,
+        // before the form is even shown, so a run cancelled or failed while parked at that form
+        // names directories nothing was ever written to — and a pre-existing definition there
+        // whose name matches a manifest agent would then be taken for ours.
+        eq(schema.taskSteps.status, 'done'),
       ),
     );
   const templateAgents = await db
