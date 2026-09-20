@@ -1074,34 +1074,39 @@ export function collectWrittenCliContent(
       const syncDirs = (step.detectOutput as { skillTargetDirs?: unknown } | null)?.skillTargetDirs;
       if (!Array.isArray(syncDirs)) continue;
       const sync = step.output as { generated?: unknown; removed?: unknown } | null;
+      const generated = Array.isArray(sync?.generated) ? sync.generated : [];
+      const removed = Array.isArray(sync?.removed) ? sync.removed : [];
+      // Detect can filter every operation out — all bundle-owned, or naming skills that are
+      // gone — and the run then merges having written nothing. Scoping its target dirs anyway
+      // would move the user's own skills into `-legacy`, as the empty repair pass did.
+      if (generated.length === 0 && removed.length === 0) continue;
       for (const value of syncDirs) {
-        const dir = claimDir(value);
-        if (dir === null) continue;
+        if (typeof value !== 'string' || !byDir.has(value)) continue;
+        const dir = value;
         // A skill it REMOVED is one 09_5 may have written, and leaving that claim standing
-        // would delete a file the user later recreates at the same path.
-        if (Array.isArray(sync?.removed)) {
-          for (const skillId of sync.removed) {
-            if (typeof skillId !== 'string') continue;
-            const gone = `${dir}/${skillId}`;
-            for (const claimed of [...entries]) {
-              if (claimed === gone || claimed.startsWith(`${gone}/`)) entries.delete(claimed);
-            }
+        // would delete a file the user later recreates at the same path. Retiring a claim is
+        // not a write, so it does not put the directory in scope on its own.
+        for (const skillId of removed) {
+          if (typeof skillId !== 'string') continue;
+          const gone = `${dir}/${skillId}`;
+          for (const claimed of [...entries]) {
+            if (claimed === gone || claimed.startsWith(`${gone}/`)) entries.delete(claimed);
           }
         }
-        if (Array.isArray(sync?.generated)) {
-          for (const skillId of sync.generated) {
-            if (typeof skillId !== 'string') continue;
-            const skillDir = `${dir}/${skillId}`;
-            // It rewrites the tree, so 09_5's slugs for that skill are stale.
-            for (const claimed of [...entries]) {
-              if (claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
-            }
-            entries.add(skillDir);
-            entries.add(`${skillDir}/SKILL.md`);
-            // No slugs are recorded, so `sub-skills` stays unclaimed and is moved aside.
+        if (generated.length === 0) continue;
+        dirs.add(dir);
+        for (const skillId of generated) {
+          if (typeof skillId !== 'string') continue;
+          const skillDir = `${dir}/${skillId}`;
+          // It rewrites the tree, so 09_5's slugs for that skill are stale.
+          for (const claimed of [...entries]) {
+            if (claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
           }
-          if (sync.generated.length > 0) entries.add(`${dir}/README.md`);
+          entries.add(skillDir);
+          entries.add(`${skillDir}/SKILL.md`);
+          // No slugs are recorded, so `sub-skills` stays unclaimed and is moved aside.
         }
+        entries.add(`${dir}/README.md`);
       }
     } else if (step.stepId === SKILL_REPAIR_STEP_ID) {
       // 09_5b has its OWN shape — `repaired`, skill IDS, with the target dirs in its DETECT

@@ -337,6 +337,45 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.claude/skills/fine/sub-skills/kept-slug.md')).toBe(true);
   });
 
+  it('scopes no directory for a merged sync that did nothing', async () => {
+    // Detect can filter every operation out — all bundle-owned, or naming skills that are gone —
+    // and the run then merges having written nothing.
+    const { dirs, entries } = collectWrittenCliContent(
+      [skillSync('t1', {}), cleanup('t1', true)],
+      [],
+    );
+
+    expect([...dirs]).toEqual([]);
+    expect([...entries]).toEqual([]);
+  });
+
+  it('retires a removed skill without scoping the directory', async () => {
+    // A removal is not a write: it must retire 09_5's claim so a recreated file is not deleted,
+    // but it does not put the directory in reach of the sweep on its own.
+    const { dirs, entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '09_5-skill-generation',
+          output: { written: [{ id: 'dropped', mirroredDirs: ['.claude/skills'] }] },
+        },
+        skillSync('t1', { removed: ['dropped'] }),
+        cleanup('t1', true),
+      ],
+      [],
+    );
+
+    expect(entries.has('.claude/skills/dropped')).toBe(false);
+    expect(entries.has('.claude/skills/dropped/SKILL.md')).toBe(false);
+    // 09_5 put the directory in scope and claimed its index; the removal added neither, and on
+    // its own — with no 09_5 row — it would have scoped nothing.
+    expect(dirs.has('.claude/skills')).toBe(true);
+    const removalOnly = collectWrittenCliContent(
+      [skillSync('t1', { removed: ['dropped'] }), cleanup('t1', true)],
+      [],
+    );
+    expect([...removalOnly.dirs]).toEqual([]);
+  });
+
   it('scopes no directory for a repair pass that landed nothing', async () => {
     // Every attempted skill is in `stillFailing`, so apply wrote nothing — claiming the target
     // dirs anyway would put directories Haive never touched in reach of the reset.
