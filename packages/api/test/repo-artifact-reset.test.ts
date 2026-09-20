@@ -302,6 +302,15 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.claude/skills/fine/sub-skills/kept-slug.md')).toBe(true);
   });
 
+  it('scopes no directory for a repair pass that landed nothing', async () => {
+    // Every attempted skill is in `stillFailing`, so apply wrote nothing — claiming the target
+    // dirs anyway would put directories Haive never touched in reach of the reset.
+    const { dirs, entries } = collectWrittenCliContent([skillRepair([])], []);
+
+    expect([...dirs]).toEqual([]);
+    expect([...entries]).toEqual([]);
+  });
+
   it('does not claim sub-skills when no slug inside it was recorded', async () => {
     // A directory claimed with nothing named inside reads as wholly ours, so a file the user put
     // there would be deleted rather than moved aside.
@@ -729,6 +738,28 @@ describe('resetOnboardingArtifacts', () => {
     expect(
       await readFile(path.join(root, '.codex/agents-legacy/code-reviewer.toml/NOTES.md'), 'utf8'),
     ).toBe('mine\n');
+  });
+
+  it('moves aside a symlink standing where a claimed file was', async () => {
+    // Only a REGULAR FILE satisfies a file claim. A link is not the file Haive wrote, and
+    // removing it unlinks something a person put there.
+    const root = await repo('reset-claimed-leaf-is-link-');
+    const outside = await repo('reset-claimed-leaf-is-link-out-');
+    await installArtifacts(root);
+    const target = path.join(outside, 'their-agent.toml');
+    await writeFile(target, 'theirs\n', 'utf8');
+    await rm(path.join(root, '.codex/agents/code-reviewer.toml'), { force: true });
+    await symlink(target, path.join(root, '.codex/agents/code-reviewer.toml'));
+
+    const { removed, skipped } = await resetOnboardingArtifacts(root, provenance());
+
+    // The move is REFUSED for a link — `renameNoFollow` will not relocate one — so it is
+    // reported and stays put. What matters is that it is not deleted as though it were ours.
+    expect(removed).not.toContain('.codex/agents/code-reviewer.toml');
+    expect(skipped.map((s) => s.path)).toContain('.codex/agents/code-reviewer.toml');
+    expect(await exists(root, '.codex/agents/code-reviewer.toml')).toBe(true);
+    // What it pointed at was never touched either.
+    expect(await readFile(target, 'utf8')).toBe('theirs\n');
   });
 
   it('keeps the quarantine and mcp_settings.json, and says so', async () => {

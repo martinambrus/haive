@@ -1049,7 +1049,10 @@ export function collectWrittenCliContent(
       if (!Array.isArray(repairDirs)) continue;
       const out = step.output as { repaired?: unknown; repairedSubSkillSlugs?: unknown } | null;
       const repaired = out?.repaired;
-      if (!Array.isArray(repaired)) continue;
+      // A repair pass that landed NOTHING wrote nothing — every skill it attempted is in
+      // `stillFailing`. Scoping its target dirs anyway put directories Haive never touched in
+      // reach of the reset, which would move the user's own skills into `-legacy`.
+      if (!Array.isArray(repaired) || repaired.length === 0) continue;
       const repairedSlugs = (out?.repairedSubSkillSlugs ?? null) as Record<string, unknown> | null;
       for (const value of repairDirs) {
         const dir = claimDir(value);
@@ -1335,9 +1338,12 @@ export async function resetOnboardingArtifacts(
       // `hasDeeperClaims` rests on. So a DIRECTORY standing where a claimed file was is not the
       // file Haive wrote: someone replaced it, and it is moved aside rather than removed with
       // everything in it.
+      // Only a REGULAR FILE satisfies a file claim. A directory was round 13; a SYMLINK is the
+      // same story — a person replaced the generated file with a link of their own, and
+      // removing it unlinks something Haive never wrote.
       const claimed =
         (haiveEntries.has(from) || (await artifactMatchesDisk(from))) &&
-        (!entry.isDirectory() || hasDeeperClaims(from));
+        (entry.isFile() || (entry.isDirectory() && hasDeeperClaims(from)));
       if (claimed) {
         if (entry.isDirectory()) {
           const inner = await quarantineForeign(from, `${legacyDir}/${entry.name}`);
@@ -1391,7 +1397,7 @@ export async function resetOnboardingArtifacts(
           left += await sweepClaimedChildren(rel);
           continue;
         }
-        if (!child.isDirectory() && (haiveEntries.has(rel) || (await artifactMatchesDisk(rel)))) {
+        if (child.isFile() && (haiveEntries.has(rel) || (await artifactMatchesDisk(rel)))) {
           await remove(rel, false);
           continue;
         }
@@ -1473,14 +1479,13 @@ export async function resetOnboardingArtifacts(
         if ((await sweepClaimedChildren(rel)) > 0) kept += 1;
         continue;
       }
-      // A claim names a FILE unless something inside it is named too, so a DIRECTORY standing
-      // where a claimed file was is not the file Haive wrote.
-      if (entry.isDirectory() || !haiveEntries.has(rel)) {
-        if (!(await artifactMatchesDisk(rel)) || entry.isDirectory()) {
-          kept += 1;
-          skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
-          continue;
-        }
+      // A claim names a FILE unless something inside it is named too, so anything else standing
+      // where a claimed file was — a directory, a symlink someone put there — is not the file
+      // Haive wrote.
+      if (!entry.isFile() || (!haiveEntries.has(rel) && !(await artifactMatchesDisk(rel)))) {
+        kept += 1;
+        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+        continue;
       }
       await remove(rel, false);
     }
