@@ -171,9 +171,15 @@ export interface RootClaimHandle {
  * The renewal timer is `unref`ed, so a held claim never keeps a process alive on its own: if
  * everything else has finished, the process exits and the lease expires naturally, which is the
  * correct reading of a holder that is gone.
+ *
+ * Takes a `Database` and NOT a transaction handle, unlike everything else in this module. A lease
+ * outlives any one statement by design, so renewals issued on a handle whose transaction has
+ * ended would fail — silently, since a failed renewal is treated as a transient — and the lease
+ * would lapse in the middle of the work it is protecting. Refusing the type is what stops that
+ * being a comment somebody has to read.
  */
 export async function acquireRootClaim(
-  db: Database | DbHandle,
+  db: Database,
   repositoryId: string,
   kind: RootClaimKind,
   userId?: string,
