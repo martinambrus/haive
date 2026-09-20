@@ -417,6 +417,37 @@ async function main(): Promise<void> {
       afterBlanket.length === 0,
       afterBlanket,
     );
+
+    // A row written WHILE the walk ran belongs to the new epoch and must survive. Task creation
+    // does not honour the root claim, so a fresh onboarding run can reach `12-post-onboarding`
+    // during a long reset; retiring its rows would leave a just-onboarded tree with no
+    // provenance at all. The reset therefore retires only the ids it saw before it started.
+    const snapshotId = await artifactRow('.claude/agents/before.md', 'hash-before');
+    const snapshot = [snapshotId];
+    const duringWalkId = await artifactRow('.claude/agents/during.md', 'hash-during');
+
+    await supersedeResetArtifacts(db, repoId, [], snapshot);
+
+    const afterScoped = await db
+      .select({ id: schema.onboardingArtifacts.id })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repoId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    const scopedLive = afterScoped.map((r) => r.id);
+    check(
+      'a row that existed before the walk is retired',
+      !scopedLive.includes(snapshotId),
+      scopedLive,
+    );
+    check(
+      'a row written during the walk is NOT retired',
+      scopedLive.includes(duringWalkId),
+      scopedLive,
+    );
   } finally {
     // Cascade takes the repositories, tasks and steps with it.
     await db.delete(schema.users).where(eq(schema.users.id, userId));

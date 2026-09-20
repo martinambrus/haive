@@ -1580,7 +1580,16 @@ export async function supersedeResetArtifacts(
   db: ResetDbOrTx,
   repositoryId: string,
   keptPaths: string[],
+  /** The ids of the live rows as they were BEFORE the walk. Scoping to them is what stops the
+   *  reset retiring rows it never looked at: task creation does not honour the root claim, so a
+   *  new onboarding run can reach `12-post-onboarding` while a long walk is still going and write
+   *  rows that postdate `onboarding_reset_at`. Those belong to the NEW epoch — retiring them
+   *  would leave a freshly onboarded tree with no provenance at all. Omitted keeps the previous
+   *  repository-wide behaviour, which the smoke relies on. */
+  liveIds?: string[],
 ): Promise<void> {
+  // Nothing was live when we looked, so there is nothing of OURS to retire.
+  if (liveIds !== undefined && liveIds.length === 0) return;
   await db
     .update(schema.onboardingArtifacts)
     .set({ supersededAt: new Date() })
@@ -1588,6 +1597,7 @@ export async function supersedeResetArtifacts(
       and(
         eq(schema.onboardingArtifacts.repositoryId, repositoryId),
         isNull(schema.onboardingArtifacts.supersededAt),
+        ...(liveIds !== undefined ? [inArray(schema.onboardingArtifacts.id, liveIds)] : []),
         // Spelled out rather than leaning on what `notInArray` does with an empty list. MEASURED,
         // drizzle renders that harmlessly today and the blanket retire still happens — a mutant
         // removing this branch kills no test — but "retire everything" is the behaviour this line
@@ -2435,6 +2445,9 @@ async function runOnboardingArtifactReset(
   // wrote, and they are superseded below.
   const live = await db
     .select({
+      // The id is carried so the closing supersede can be scoped to exactly these rows — the
+      // ones that existed BEFORE the walk. See `supersedeResetArtifacts`.
+      id: schema.onboardingArtifacts.id,
       diskPath: schema.onboardingArtifacts.diskPath,
       writtenHash: schema.onboardingArtifacts.writtenHash,
     })
@@ -2482,18 +2495,24 @@ async function runOnboardingArtifactReset(
   // committed alone would leave the rows gone with NO epoch, and the next reset would then read
   // exactly the pre-reset provenance the epoch exists to exclude — able to claim a file the user
   // recreated by hand at a path an old run once wrote.
+  // Computed BEFORE the transaction opens: `dropAbsentKeptPaths` stats one path per kept row,
+  // and the api and worker share one `max: 10` pool, so holding a connection across filesystem
+  // IO — on a tree that just raised IO errors, no less — is how a pool runs dry.
+  const keptPaths = await dropAbsentKeptPaths(
+    root,
+    resolveKeptArtifactPaths(
+      live.map((row) => row.diskPath),
+      [...new Set(skipped.map((s) => s.path))],
+      vacatedPaths,
+    ),
+  );
+
   await db.transaction(async (tx) => {
     await supersedeResetArtifacts(
       tx,
       id,
-      await dropAbsentKeptPaths(
-        root,
-        resolveKeptArtifactPaths(
-          live.map((row) => row.diskPath),
-          [...new Set(skipped.map((s) => s.path))],
-          vacatedPaths,
-        ),
-      ),
+      keptPaths,
+      live.map((row) => row.id),
     );
     // The completion stamp cannot outlive the files it vouches for: this is the "start over"
     // action, and a repo whose artifacts are gone is not onboarded however it got marked.
