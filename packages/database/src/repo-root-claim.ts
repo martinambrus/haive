@@ -183,29 +183,44 @@ export async function acquireRootClaim(
 
   let current: Date | null = first.claimedAt;
   const giveUpAt = first.claimedAt.getTime() + ROOT_CLAIM_MAX_MS;
+
+  // The in-flight renewal, so `release` can WAIT for it. Without that, a release firing while a
+  // renewal is pending captures the old stamp, its conditional UPDATE matches nothing, and it
+  // returns successfully having cleared NOTHING — leaving the row claimed for a full window after
+  // the writer finished, refusing every refresh, reset and knowledge-file save in between.
+  let renewing: Promise<void> | null = null;
+
+  const renewOnce = async (): Promise<void> => {
+    if (current === null) return;
+    // Stop renewing rather than hold the repository shut forever. A handle that is never
+    // released — a bug, since every caller releases in a `finally` — would otherwise keep this
+    // row claimed for the life of the process.
+    if (Date.now() >= giveUpAt) {
+      current = null;
+      clearInterval(timer);
+      return;
+    }
+    const next = await renewRootClaim(db, repositoryId, current).catch(() => current);
+    // null means the lease was taken over while we worked. Stop renewing and stop releasing:
+    // the claim on the row is someone else's now, and clearing it would strip their protection.
+    current = next;
+    if (current === null) clearInterval(timer);
+  };
+
   const timer = setInterval(() => {
-    void (async () => {
-      if (current === null) return;
-      // Stop renewing rather than hold the repository shut forever. A handle that is never
-      // released — a bug, since every caller releases in a `finally` — would otherwise keep this
-      // row claimed for the life of the process.
-      if (Date.now() >= giveUpAt) {
-        current = null;
-        clearInterval(timer);
-        return;
-      }
-      const next = await renewRootClaim(db, repositoryId, current).catch(() => current);
-      // null means the lease was taken over while we worked. Stop renewing and stop releasing:
-      // the claim on the row is someone else's now, and clearing it would strip their protection.
-      current = next;
-      if (current === null) clearInterval(timer);
-    })();
+    // Never overlap two renewals: the second would race the first on the same stamp.
+    if (renewing !== null) return;
+    renewing = renewOnce().finally(() => {
+      renewing = null;
+    });
   }, ROOT_CLAIM_RENEW_MS);
   timer.unref?.();
 
   return {
     async release() {
       clearInterval(timer);
+      // Let a pending renewal land first, so the stamp below is the one actually on the row.
+      if (renewing !== null) await renewing.catch(() => undefined);
       if (current === null) return;
       await releaseRepositoryRoot(db, repositoryId, current);
       current = null;
