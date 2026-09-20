@@ -16,3 +16,4 @@ export { waitForDatabaseReady, type WaitForDatabaseOptions } from './wait-for-re
 export { resetDagCurrentLevelForRetry } from './dag-reset.js';
 export { CLOSED_GAP_INTO_IDLE_MS } from './closed-gap.js';
 export { isUniqueViolation, isUndefinedTable } from './pg-errors.js';
+export { lockRepositoryRoot, tryLockRepositoryRoot } from './repo-root-lock.js';

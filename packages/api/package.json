@@ -15,13 +15,14 @@
     "test:watch": "vitest",
     "smoke:first-admin-race": "tsx test/first-admin-race-smoke.ts",
     "smoke:reset-provenance": "tsx test/onboarding-reset-provenance-smoke.ts",
+    "smoke:reset-revive-race": "tsx test/reset-revive-race-smoke.ts",
     "smoke:step-retry-skip": "tsx test/step-retry-skip-smoke.ts",
     "smoke:task-retry-parked": "tsx test/task-retry-parked-smoke.ts",
     "smoke:multi-user-isolation": "tsx test/multi-user-isolation-smoke.ts",
     "smoke:plan-chat-surfaces": "tsx test/plan-chat-surfaces-smoke.ts",
     "smoke:terminal": "tsx test/terminal-smoke.ts",
-    "smoke:all": "pnpm smoke:first-admin-race && pnpm smoke:reset-provenance && pnpm smoke:step-retry-skip && pnpm smoke:task-retry-parked && pnpm smoke:multi-user-isolation && pnpm smoke:plan-chat-surfaces && pnpm smoke:terminal",
-    "smoke:ci": "pnpm smoke:first-admin-race && pnpm smoke:reset-provenance && pnpm smoke:step-retry-skip && pnpm smoke:task-retry-parked && pnpm smoke:multi-user-isolation && pnpm smoke:plan-chat-surfaces",
+    "smoke:all": "pnpm smoke:first-admin-race && pnpm smoke:reset-provenance && pnpm smoke:reset-revive-race && pnpm smoke:step-retry-skip && pnpm smoke:task-retry-parked && pnpm smoke:multi-user-isolation && pnpm smoke:plan-chat-surfaces && pnpm smoke:terminal",
+    "smoke:ci": "pnpm smoke:first-admin-race && pnpm smoke:reset-provenance && pnpm smoke:reset-revive-race && pnpm smoke:step-retry-skip && pnpm smoke:task-retry-parked && pnpm smoke:multi-user-isolation && pnpm smoke:plan-chat-surfaces",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
