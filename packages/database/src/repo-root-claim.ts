@@ -207,6 +207,54 @@ async function reconcileAmbiguousRenewal(
 }
 
 /**
+ * The stamps the claim row MIGHT carry, after writes whose outcome could not be established.
+ *
+ * Exported and separated from the lease so the bookkeeping can be tested without driving a fake
+ * database through several renewal cycles on fake timers — the property that matters here is
+ * structural, and burying it in that machinery is how it got written as a single slot twice.
+ *
+ * ADDITIVE is the whole point. Ambiguity composes: a renewal can commit stamp B without an
+ * acknowledgement while a later recovery from B throws BEFORE committing, in which case the row
+ * still holds B. Replacing B with the newer attempt discards the only correct value, both then
+ * miss, and the holder declares a takeover that never happened.
+ */
+export interface CandidateStamps {
+  remember(stamp: Date): void;
+  /** Proven NOT to be the row's value. */
+  drop(stamp: Date): void;
+  /** A proven reading settles it; nothing is a candidate any more. */
+  clear(): void;
+  list(): Date[];
+  size(): number;
+}
+
+/** Each entry costs a full renewal cycle whose read ALSO failed, so reaching this many means the
+ *  database has been unreadable for longer than the stale window — where a takeover is legitimate
+ *  anyway. Bounded so a long-lived handle cannot accumulate without limit. */
+export const CANDIDATE_STAMP_CAP = 8;
+
+export function createCandidateStamps(cap = CANDIDATE_STAMP_CAP): CandidateStamps {
+  const stamps: Date[] = [];
+  const indexOf = (stamp: Date): number => stamps.findIndex((s) => s.getTime() === stamp.getTime());
+  return {
+    remember(stamp) {
+      if (indexOf(stamp) >= 0) return;
+      stamps.push(stamp);
+      if (stamps.length > cap) stamps.shift();
+    },
+    drop(stamp) {
+      const at = indexOf(stamp);
+      if (at >= 0) stamps.splice(at, 1);
+    },
+    clear() {
+      stamps.length = 0;
+    },
+    list: () => [...stamps],
+    size: () => stamps.length,
+  };
+}
+
+/**
  * One renewal attempt, with its ambiguity already resolved as far as it can be.
  *
  * EVERY conditional write to this row has the same problem — a commit whose acknowledgement is
@@ -285,8 +333,22 @@ export async function acquireRootClaim(
   // already known to be gone, and a second `release()` — which the interface promises is safe —
   // would find no stamp and report a takeover that never happened.
   let lost = false;
-  /** The stamp an ambiguous renewal may have written, when the read-back could not confirm it. */
-  let unproven: Date | null = null;
+  /**
+   * Stamps the row MIGHT carry: every ambiguous write whose read-back could not confirm it.
+   *
+   * A set rather than one slot, because ambiguity composes. If a renewal commits stamp B without
+   * an acknowledgement and a later recovery from B throws BEFORE committing — its read-back
+   * failing too — the row still holds B. Remembering only the newest attempt discards it, both
+   * candidates then miss on the next tick, and the handle declares a takeover that never
+   * happened: renewal stops while the clone or reset it protects is still running, and once the
+   * lease goes stale a second writer enters that tree.
+   *
+   * Bounded because each entry costs a full renewal cycle whose read ALSO failed, so reaching
+   * the cap means the database has been unreadable for longer than the stale window — at which
+   * point a takeover is legitimate anyway. A proven answer clears the set, and a candidate that
+   * proves not to be the row's value is dropped.
+   */
+  const candidates = createCandidateStamps();
 
   // The in-flight renewal, so `release` can WAIT for it. Without that, a release firing while a
   // renewal is pending captures the old stamp, its conditional UPDATE matches nothing, and it
@@ -306,36 +368,36 @@ export async function acquireRootClaim(
     // An UNPROVEN answer is a guess, not a reading: the read-back failed too, so the row may
     // well hold what that write attempted. Carrying it is what stops the next healthy renewal
     // matching nothing and reporting a takeover that never happened.
-    if (!next.proven) unproven = next.attempted;
-    else if (next.stamp !== null) unproven = null;
-    // A miss while an unproven stamp is outstanding is not yet a takeover: try renewing FROM the
-    // stamp that write may have left behind before concluding anything. This attempt carries the
-    // SAME ambiguity as any other, which is why it goes through the same helper — resolving it
-    // only on the first write is how this path came to lack a read-back at all.
-    if (next.stamp === null && unproven !== null) {
-      const recovered = await renewReconciled(db, repositoryId, unproven);
-      // PROVEN is tested first, and that ordering is the whole correctness of this block. An
-      // unproven answer always carries a non-null stamp (the reconciler falls back to the one it
-      // was given), so testing the stamp first swallows the ambiguous case into "recovered":
-      // it would adopt that stamp as certain AND clear the outstanding one, leaving us holding a
-      // value the row may not have while having forgotten the value it might. That is the exact
-      // failure this mechanism exists to prevent, reintroduced by the recovery for it.
-      if (!recovered.proven) {
-        // Still unknown, and now in both directions. Keep a working stamp and carry the newest
-        // attempt, so the next tick can ask again once the database answers. `lost` is NEVER set
-        // from an unproven answer: reading "I could not tell" as a takeover stops renewing a
-        // lease that is still protecting a clone in progress, and the uncertainty ends as soon
-        // as one read succeeds. A database failing every read and half its writes degrades this
-        // lease either way; the direction it must not degrade in is the one that lets a second
-        // writer onto the tree.
-        next = { stamp: held, proven: false, attempted: recovered.attempted };
-        unproven = recovered.attempted;
-      } else if (recovered.stamp !== null) {
-        next = recovered;
-        unproven = null;
-      } else {
-        // Proven: the row carries a third value, so the lease really is someone else's.
-        next = recovered;
+    if (!next.proven) candidates.remember(next.attempted);
+    else if (next.stamp !== null) candidates.clear();
+    // A miss while candidates are outstanding is not yet a takeover: one of them may be what the
+    // row actually holds. Each attempt carries the SAME ambiguity as any other, which is why it
+    // goes through the same helper — resolving it only on the first write is how the recovery
+    // path came to lack a read-back at all.
+    if (next.stamp === null && candidates.size() > 0) {
+      for (const candidate of candidates.list()) {
+        const recovered = await renewReconciled(db, repositoryId, candidate);
+        // PROVEN is tested first, and that ordering is the correctness of this block. An
+        // unproven answer always carries a non-null stamp (the reconciler falls back to the one
+        // it was handed), so testing the stamp first would adopt it as certain and discard the
+        // rest — holding a value the row may not have, having forgotten the ones it might.
+        if (!recovered.proven) {
+          // Still unknown, in both directions now. Keep a working stamp and ADD this attempt
+          // rather than replacing the others: a recovery that threw BEFORE committing leaves the
+          // earlier stamp exactly as valid as it was, so both stay possible. `lost` is never
+          // concluded from an answer nothing proved.
+          candidates.remember(recovered.attempted);
+          next = { stamp: held, proven: false, attempted: recovered.attempted };
+          break;
+        }
+        if (recovered.stamp !== null) {
+          next = recovered;
+          candidates.clear();
+          break;
+        }
+        // A PROVEN miss: this candidate is definitively not what the row carries, so drop it and
+        // try the next. Only once every candidate is excluded is this really a takeover.
+        candidates.drop(candidate);
       }
     }
     // null means the lease was taken over while we worked. Stop renewing and stop releasing:
@@ -370,10 +432,17 @@ export async function acquireRootClaim(
       // right after such a renewal would otherwise report a clean release and leave the
       // repository claimed for the rest of the window. The renewal path already retries from the
       // unproven stamp; this is the same rule on the path that actually ends the work.
-      if (!cleared && unproven !== null) {
-        await releaseRepositoryRoot(db, repositoryId, unproven);
-        unproven = null;
+      if (!cleared) {
+        // EVERY candidate, not just the newest. Ambiguity composes: an earlier write may have
+        // committed while a later one did not, so the stamp the row actually carries can be any
+        // of them, and stopping at the first miss leaves the repository claimed with nobody
+        // working on it. Each clear is conditional, so at most one can match and the rest are
+        // no-ops against a row that has already been cleared.
+        for (const candidate of candidates.list()) {
+          if (await releaseRepositoryRoot(db, repositoryId, candidate).catch(() => false)) break;
+        }
       }
+      candidates.clear();
       current = null;
     },
   };
