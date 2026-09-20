@@ -694,6 +694,70 @@ describe('acquireRootClaim', () => {
     expect(writes.length).toBe(4);
   });
 
+  it('retries the initial-claim read, and still fails closed when it never succeeds', async () => {
+    // The renewal's read needs no retry — it carries its attempt forward and asks again on the
+    // next tick. This read has NO next tick: one transient failure abandons a claim that may
+    // have committed, and with no handle there is no renewal and no release, so the row stays
+    // fresh for the entire stale window with nobody holding it.
+    vi.useFakeTimers();
+
+    const build = (readFailures: number) => {
+      const writes: Recorded[] = [];
+      let attempted: Date | null = null;
+      let left = readFailures;
+      const db = {
+        update: () => ({
+          set: (values: { rootClaimedAt: Date | null }) => ({
+            where: () => {
+              const first = writes.length === 0;
+              if (first) attempted = values.rootClaimedAt;
+              let settle!: () => void;
+              const gate = new Promise<void>((resolve) => {
+                settle = resolve;
+              });
+              writes.push({ stamp: values.rootClaimedAt, settle });
+              return {
+                returning: async () => {
+                  await gate;
+                  // The claim COMMITS and loses its acknowledgement.
+                  if (first) throw new Error('claim ack lost');
+                  return [{ id: 'repo-1' }];
+                },
+              };
+            },
+          }),
+        }),
+        select: () => ({
+          from: () => ({
+            where: () => ({
+              limit: async () => {
+                if (left > 0) {
+                  left -= 1;
+                  throw new Error('read failed');
+                }
+                return [{ claimedAt: attempted }];
+              },
+            }),
+          }),
+        }),
+      } as unknown as Database;
+      return { db, writes };
+    };
+
+    // Two transient read failures, then the truth: the claim is adopted rather than abandoned.
+    const transient = build(2);
+    const acquiring = acquireRootClaim(transient.db, 'repo-1', 'reset');
+    transient.writes[0]!.settle();
+    expect(await acquiring).not.toBeNull();
+
+    // Reads that never succeed must still FAIL CLOSED. A handle for a claim we cannot prove we
+    // hold would let the caller rewrite the tree with no protection at all.
+    const hopeless = build(99);
+    const failing = acquireRootClaim(hopeless.db, 'repo-1', 'reset');
+    hopeless.writes[0]!.settle();
+    await expect(failing).rejects.toThrow('claim ack lost');
+  });
+
   it('never runs two renewals at once', async () => {
     vi.useFakeTimers();
     const { db, writes } = fakeDb();

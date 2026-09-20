@@ -336,6 +336,39 @@ export async function releaseWithRetry(
   return outcome;
 }
 
+/** How many times the initial claim's reconciliation will re-read the row. Bounded for the same
+ *  reason the release retry is: a database that cannot be read at all is not rescued by asking
+ *  again, and the caller is waiting. */
+const CLAIM_READ_RETRIES = 3;
+
+/**
+ * The stamp the claim row carries, for a caller that must know whether its own write landed.
+ *
+ * Rethrows `original` once the attempts are spent, which is what keeps this FAILING CLOSED: a
+ * caller that cannot prove it owns the claim must not receive a handle, because it would then
+ * rewrite the tree with no protection at all. The retry only narrows the window in which a
+ * transient read turns a committed claim into an abandoned one.
+ */
+async function readClaimStamp(
+  db: Database | DbHandle,
+  repositoryId: string,
+  original: unknown,
+): Promise<Date | null> {
+  for (let attempt = 0; attempt < CLAIM_READ_RETRIES; attempt += 1) {
+    try {
+      const rows = await db
+        .select({ claimedAt: schema.repositories.rootClaimedAt })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .limit(1);
+      return rows[0]?.claimedAt ?? null;
+    } catch {
+      // Keep trying; the throw below is what happens when they are all spent.
+    }
+  }
+  throw original;
+}
+
 /**
  * One renewal attempt, with its ambiguity already resolved as far as it can be.
  *
@@ -418,12 +451,14 @@ export async function acquireRootClaim(
       // is correct. A read that ALSO fails rethrows: returning a handle for a claim we cannot
       // prove we hold would let the caller rewrite the tree with no protection at all, which is
       // far worse than the block this is trying to avoid.
-      const rows = await db
-        .select({ claimedAt: schema.repositories.rootClaimedAt })
-        .from(schema.repositories)
-        .where(eq(schema.repositories.id, repositoryId))
-        .limit(1);
-      const claimedAt = rows[0]?.claimedAt ?? null;
+      //
+      // RETRIED, unlike the renewal's read, and the asymmetry is the point: a renewal that
+      // cannot read the row carries its attempt forward as a candidate and asks again on the
+      // next tick, so a transient failure there costs nothing. This read has no next tick. One
+      // unguarded attempt means a transient error abandons a claim that may well have committed,
+      // and with no handle there is no renewal and no release — the row then stays fresh for the
+      // entire stale window with nobody holding it.
+      const claimedAt = await readClaimStamp(db, repositoryId, err);
       if (claimedAt !== null && claimedAt.getTime() === attempted.getTime()) {
         return { claimedAt: attempted };
       }
