@@ -1626,6 +1626,64 @@ caller's call: a `workflow` or `run_app` task on a mid-onboarding repo is allowe
 and only the New Task form declines to submit one (its inferred type there is `onboarding`).
 Same stance as `computePlanReady` — a rule strict enough to CHOOSE must not REFUSE.
 
+**FOUR writers can touch a repository root, and the live-task read guards one of them.** The
+survey that established this is worth not repeating:
+
+1. **A revived task job** writing while the walk runs. Still open, deliberately. Two gate designs
+   were built and abandoned: one on the task queue (`task-queue.ts` is concurrency 5 for the whole
+   INSTALLATION, `worker/src/index.ts` force-closes with `close(true)`, and a gate throw inside the
+   processor's `try` reaches `markTaskFailed`), one on the repo queue (below). Neither buys much —
+   between job pickup and `markTaskRunningWithStep` every branch ends in a task-status write and
+   none writes a path the reset deletes, so the window carries no data loss.
+2. **The repo queue**, which `rm -rf`s the root in THREE handlers (`clone.ts` copy, init and
+   clone), reachable from `refresh-tree`. Closed by the claim below.
+3. **`stampRepositoryOnboarded`**, which no lock can reach: it runs from `markTaskCompleted` AFTER
+   `completed` is committed, so every live-task guard has already stopped seeing that run.
+4. **`PUT /tasks/:id/files/content`**, whose `EDITABLE_PREFIXES` are `KB_DIR` and `LEARNINGS_DIR`
+   — exactly what the reset removes recursively — with no task-status check at all, because it
+   exists to review knowledge gates on failed and completed tasks.
+
+**`repositories.onboarding_reset_claimed_at` is a CLAIM, not a lock, and the difference is the
+whole design.** The reset takes it with one atomic UPDATE before reading anything and releases it
+on every exit path; `refresh-tree`, the three `rm -rf` handlers and the knowledge-file editor all
+refuse while it is held. A lock must be HELD across the work it protects, and both places to hold
+one cost more than the race: the repo worker and the task worker run in ONE process on ONE
+`max: 10` pool, so a repo job holding a connection across `rm -rf` + `copyTree` at concurrency 5
+deadlocks the pool; and `repo-queue.ts` sets neither `lockDuration` nor `maxStalledCount`, so a
+handler blocked past BullMQ's 30s default is failed as STALLED without running its catch —
+stranding `status = 'cloning'` with no reconciler anywhere to clear it. (That last one is a
+PRE-EXISTING bug in its own right, and the reason this must never become a lock.) A
+`repo_status` enum value expresses the same claim and was refused because Postgres cannot drop an
+enum value: an irreversible migration for a reversible problem. The cost of a row over a lock is
+that a crashed API leaves it set, which `RESET_CLAIM_STALE_MS` bounds — generously, since expiring
+early re-admits the `rm -rf` the claim exists to exclude.
+
+**A filesystem error inside the walk is a per-item outcome, not a route failure.** It used to
+rethrow, which aborted the route BEFORE the supersede and BEFORE the epoch stamp — files deleted,
+rows live, no epoch. A bad disk reaches that, and so does writer 4: `removeChild`'s final rmdir
+rethrows everything but `ENOENT`/`ENOTDIR`, so a file created under a directory being removed
+raises `ENOTEMPTY`. Errors now become `skipped` entries carrying their errno; anything that is not
+a filesystem error still propagates, because a `TypeError` is a bug. The one tail that needs its
+own rule is a walk that did NOTHING and hit an IO failure: superseding and stamping over an intact
+tree is UNRECOVERABLE, since the epoch excludes every prior step row from `loadProvenanceSteps`
+permanently and the next reset can then claim nothing, remove nothing and keep everything while
+the repo still reads onboarded. That case is reported as a failure and touches no rows. The
+predicate is "an error occurred", never "nothing was removed" — a second reset over a clean tree
+also removes nothing and stays a no-op.
+
+**Every piece of "onboarded" evidence is read against the epoch, not just the column.** Guarding
+`onboarded_at` alone was cosmetic: the completed onboarding task row lives forever, so
+`hasCompleted` kept answering yes across a reset. `resolveOnboardingVerdict` therefore requires a
+completion NEWER than `onboarding_reset_at`, and "no run was ever started here" stops counting
+once a reset exists — a reset IS a run started and taken back. `mark-onboarded` gets its own rule
+rather than that comparison (it has no task to compare against) and refuses while a reset is
+unanswered, because it is the documented escape hatch for a repo whose markers are on disk, which
+is precisely what a reset that could not read the tree leaves. With no epoch every term is
+byte-identical to what it was, which is why none of this needed a backfill.
+
+Left alone deliberately: `landPlanMerge`'s `git merge --ff-only` in the root, which refuses rather
+than overwriting local changes and only touches paths differing between HEAD and target.
+
 ## Onboarding template versioning
 
 Deterministic onboarding artifacts (agent specs, slash commands, `workflow-config.json`, Drupal LSP plugin files, the `agents/README.md` index) are registered as `TemplateItem`s in `packages/worker/src/step-engine/template-manifest.ts`. Every item has:
