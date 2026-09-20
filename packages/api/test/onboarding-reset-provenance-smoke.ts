@@ -21,7 +21,7 @@ import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { loadOnboardingTaskFacts } from '../src/lib/onboarding-state.js';
-import { loadProvenanceSteps } from '../src/routes/repos.js';
+import { loadLiveRootWriters, loadProvenanceSteps } from '../src/routes/repos.js';
 
 const log = logger.child({ module: 'onboarding-reset-provenance-smoke' });
 
@@ -282,6 +282,33 @@ async function main(): Promise<void> {
           (r.mergeResolveState as { merged?: unknown } | null)?.merged === true,
       ),
       withCleanup.map((r) => r.stepId),
+    );
+
+    // A live WORKFLOW merges its worktree at `12-worktree-cleanup`, landing 11d's skills in the
+    // root — so a reset must refuse while one is running, or a merge completing mid-sweep leaves
+    // that workflow without the artifacts it just merged. Another query the unit suite cannot
+    // reach: dropping `workflow` from the type list fails nothing there.
+    const workflowId = randomUUID();
+    await db.insert(schema.tasks).values({
+      id: workflowId,
+      userId,
+      repositoryId: repoId,
+      type: 'workflow',
+      title: 'smoke live workflow',
+      status: 'running',
+      createdAt: AFTER_RESET,
+      updatedAt: AFTER_RESET,
+    });
+    check(
+      'a live workflow blocks the reset, because it can merge into the root',
+      (await loadLiveRootWriters(db, userId, repoId)).length === 1,
+      null,
+    );
+    await db.delete(schema.tasks).where(eq(schema.tasks.id, workflowId));
+    check(
+      'with no root writer live, the reset may proceed',
+      (await loadLiveRootWriters(db, userId, repoId)).length === 0,
+      null,
     );
 
     // A reset must be REFUSED while an onboarding run is live: it writes into the tree the

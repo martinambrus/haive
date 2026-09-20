@@ -1014,6 +1014,31 @@ export function resolveMergedTasks(
 }
 
 /**
+ * Live tasks OTHER than `onboarding` that write Haive-managed files into the repository root.
+ *
+ * Exported for `onboarding-reset-provenance-smoke`: this is a query, so the unit suite cannot
+ * reach it — dropping `workflow` from the type list fails nothing there.
+ */
+export async function loadLiveRootWriters(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  repositoryId: string,
+): Promise<Array<{ id: string }>> {
+  return db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.userId, userId),
+        eq(schema.tasks.repositoryId, repositoryId),
+        inArray(schema.tasks.type, OTHER_ROOT_WRITER_TASK_TYPES),
+        inArray(schema.tasks.status, LIVE_TASK_STATUSES),
+      ),
+    )
+    .limit(1);
+}
+
+/**
  * The step rows whose records may be read as provenance for this repository.
  *
  * Two predicates, and both are load-bearing. `status = 'done'` is the proof that APPLY ran: 07
@@ -1940,18 +1965,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // writes straight to the repo path and then supersedes and re-inserts the same
   // `onboarding_artifacts` rows, so racing it deletes files it just wrote or strips rows it is
   // still working from.
-  const liveWriters = await db
-    .select({ id: schema.tasks.id })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.userId, userId),
-        eq(schema.tasks.repositoryId, id),
-        inArray(schema.tasks.type, OTHER_ROOT_WRITER_TASK_TYPES),
-        inArray(schema.tasks.status, LIVE_TASK_STATUSES),
-      ),
-    )
-    .limit(1);
+  const liveWriters = await loadLiveRootWriters(db, userId, id);
   if (facts.liveTaskId !== null || liveWriters.length > 0) {
     throw new HttpError(
       409,
