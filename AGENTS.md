@@ -1532,9 +1532,15 @@ Provenance is scoped to runs that started after `repositories.onboarding_reset_a
 one of those names by hand and a later run SKIPS it under `overwrite=false`, that stale record
 claims their new file. Reading only the NEWEST run does not fix it: with no re-onboarding since,
 the newest run IS the pre-reset one. NULL there is every repo never reset, which reads exactly as
-it always did, so the column needs no backfill. `11d-skill-sync` rides the same scoping — it
-mirrors skills after onboarding through the same `resolveSkillTargetDirs`, and unclaimed, a
-reset quarantined Haive's own file instead of removing it.
+it always did, so the column needs no backfill.
+
+`11d-skill-sync` rides the same scoping but is read SEPARATELY, because its output is its own
+shape: `{ generated, removed, skipped }`, skill IDS, with the target dirs in its DETECT payload.
+Reading it as 09_5's `written[]` — which it has never emitted — claimed nothing at all. It also
+RETIRES claims, which is why the rows come back OLDEST FIRST: a skill 11d deleted is one 09_5
+may have written, and leaving that claim standing would delete a same-named skill the user
+wrote afterwards. It records no sub-skill slugs, so files under a skill it generated are moved
+aside rather than deleted.
 
 **A claimed DIRECTORY is walked when anything claimed lives beneath it, and taken whole when
 nothing does.** That is what separates a generated skill (`<skills>/<id>`, which holds Haive's

@@ -220,26 +220,46 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.agents/skills/README.md')).toBe(true);
   });
 
-  it('reads a workflow skill sync the same way it reads 09_5', async () => {
-    // `11d-skill-sync` mirrors skills after onboarding through the same `resolveSkillTargetDirs`.
-    // Unclaimed, a reset quarantined Haive's own file instead of removing it.
-    const { dirs, entries } = collectWrittenCliContent(
+  /** 11d's REAL shape: skill ids in the apply output, target dirs in the detect payload. Reading
+   *  it as 09_5's `written[]` claimed nothing at all. */
+  const skillSync = (generated: string[], removed: string[] = []) => ({
+    stepId: '11d-skill-sync',
+    detectOutput: { skillTargetDirs: ['.claude/skills'] },
+    output: { generated, removed, skipped: [], committed: true, commitSha: null },
+  });
+
+  it('reads a workflow skill sync in the shape it actually emits', async () => {
+    const { dirs, entries } = collectWrittenCliContent([skillSync(['learned-thing'])], []);
+
+    expect(dirs.has('.claude/skills')).toBe(true);
+    expect(entries.has('.claude/skills/learned-thing')).toBe(true);
+    expect(entries.has('.claude/skills/learned-thing/SKILL.md')).toBe(true);
+    expect(entries.has('.claude/skills/README.md')).toBe(true);
+  });
+
+  it('retires a claim for a skill a later run deleted', async () => {
+    // 09_5 wrote it, 11d removed it. Leaving the claim standing would delete a same-named skill
+    // the user wrote afterwards — the steps are replayed oldest first for exactly this.
+    const { entries } = collectWrittenCliContent(
       [
         {
-          stepId: '11d-skill-sync',
+          stepId: '09_5-skill-generation',
           output: {
             written: [
-              { id: 'learned-thing', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['naming'] },
+              { id: 'gone', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['naming'] },
+              { id: 'kept', mirroredDirs: ['.claude/skills'] },
             ],
           },
         },
+        skillSync([], ['gone']),
       ],
       [],
     );
 
-    expect(dirs.has('.claude/skills')).toBe(true);
-    expect(entries.has('.claude/skills/learned-thing')).toBe(true);
-    expect(entries.has('.claude/skills/learned-thing/sub-skills/naming.md')).toBe(true);
+    expect(entries.has('.claude/skills/gone')).toBe(false);
+    expect(entries.has('.claude/skills/gone/SKILL.md')).toBe(false);
+    expect(entries.has('.claude/skills/gone/sub-skills/naming.md')).toBe(false);
+    expect(entries.has('.claude/skills/kept')).toBe(true);
   });
 
   it('claims what 07 wrote under .claude, which is not a catalog dir', async () => {

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, desc, gt, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   isPathContainmentError,
@@ -913,9 +913,11 @@ function onboardingResetDirs(haiveDirs: ReadonlySet<string>): {
 const AGENT_TARGETS_STEP_ID = '07-generate-files';
 const SKILL_MIRROR_STEP_ID = '09_5-skill-generation';
 /** `11d-skill-sync` mirrors skills during a WORKFLOW run, through the same
- *  `resolveSkillTargetDirs`, and records them in the shape 09_5 does. Without it a skill written
- *  after onboarding is unclaimed, so a reset quarantines Haive's own file instead of removing
- *  it. It rides the same epoch scoping as the rest. */
+ *  `resolveSkillTargetDirs`. Its output is its OWN shape — `{ generated, removed, skipped }`,
+ *  skill IDS, with the target dirs in its DETECT payload — so it is read separately from 09_5.
+ *  Without it a skill written after onboarding is unclaimed and the reset quarantines Haive's
+ *  own file; worse, a skill it DELETED leaves 09_5's claim standing, which would then delete a
+ *  same-named skill the user wrote afterwards. It rides the same epoch scoping as the rest. */
 const WORKFLOW_SKILL_STEP_ID = '11d-skill-sync';
 const PROVENANCE_STEP_IDS = [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID, WORKFLOW_SKILL_STEP_ID];
 
@@ -939,19 +941,29 @@ export async function loadProvenanceSteps(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
   epoch: Date | null,
-): Promise<Array<{ stepId: string; output: unknown }>> {
-  return db
-    .select({ stepId: schema.taskSteps.stepId, output: schema.taskSteps.output })
-    .from(schema.taskSteps)
-    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, repositoryId),
-        inArray(schema.taskSteps.stepId, PROVENANCE_STEP_IDS),
-        eq(schema.taskSteps.status, 'done'),
-        ...(epoch === null ? [] : [gt(schema.tasks.createdAt, epoch)]),
-      ),
-    );
+): Promise<Array<{ stepId: string; detectOutput: unknown; output: unknown }>> {
+  return (
+    db
+      .select({
+        stepId: schema.taskSteps.stepId,
+        detectOutput: schema.taskSteps.detectOutput,
+        output: schema.taskSteps.output,
+      })
+      .from(schema.taskSteps)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          inArray(schema.taskSteps.stepId, PROVENANCE_STEP_IDS),
+          eq(schema.taskSteps.status, 'done'),
+          ...(epoch === null ? [] : [gt(schema.tasks.createdAt, epoch)]),
+        ),
+      )
+      // OLDEST first, because a later run can RETIRE an earlier claim: `11d-skill-sync` deletes
+      // a skill whose id 09_5 once wrote, and replaying that in the wrong order leaves the dead
+      // claim standing — which would delete a skill of the same name the user wrote afterwards.
+      .orderBy(asc(schema.tasks.createdAt), asc(schema.taskSteps.createdAt))
+  );
 }
 
 /**
@@ -967,7 +979,7 @@ export async function loadProvenanceSteps(
  * nothing — these are stored JSON written by an older Haive, not a typed contract.
  */
 export function collectWrittenCliContent(
-  steps: ReadonlyArray<{ stepId: string; output: unknown }>,
+  steps: ReadonlyArray<{ stepId: string; detectOutput?: unknown; output: unknown }>,
   artifacts: ReadonlyArray<{ diskPath: string }>,
 ): { dirs: Set<string>; entries: Set<string> } {
   const catalog = inventoryDirsFromCatalog();
@@ -1009,7 +1021,39 @@ export function collectWrittenCliContent(
       // no manifest id at all.
       const wrote = (step.output as { wroteFiles?: unknown } | null)?.wroteFiles;
       if (Array.isArray(wrote)) for (const rel of wrote) claimPath(rel);
-    } else if (step.stepId === SKILL_MIRROR_STEP_ID || step.stepId === WORKFLOW_SKILL_STEP_ID) {
+    } else if (step.stepId === WORKFLOW_SKILL_STEP_ID) {
+      // 11d has its OWN shape — `{ generated, removed, skipped }`, skill IDS, with the target
+      // dirs in its DETECT payload — and reading it as 09_5's `written[]` claimed nothing at
+      // all. It also RETIRES claims: a skill it deleted is one 09_5 may have written, and
+      // leaving that claim standing would delete a same-named skill the user wrote afterwards.
+      const dirs09 = (step.detectOutput as { skillTargetDirs?: unknown } | null)?.skillTargetDirs;
+      if (!Array.isArray(dirs09)) continue;
+      const out = step.output as { generated?: unknown; removed?: unknown } | null;
+      for (const value of dirs09) {
+        const dir = claimDir(value);
+        if (dir === null) continue;
+        if (Array.isArray(out?.generated)) {
+          for (const skillId of out.generated) {
+            if (typeof skillId !== 'string') continue;
+            // 11d reuses the onboarding generator, so the layout is the same — but it records no
+            // sub-skill slugs, so those files are moved aside rather than deleted.
+            entries.add(`${dir}/${skillId}`);
+            entries.add(`${dir}/${skillId}/SKILL.md`);
+            entries.add(`${dir}/${skillId}/sub-skills`);
+          }
+          entries.add(`${dir}/README.md`);
+        }
+        if (Array.isArray(out?.removed)) {
+          for (const skillId of out.removed) {
+            if (typeof skillId !== 'string') continue;
+            const gone = `${dir}/${skillId}`;
+            for (const claimed of [...entries]) {
+              if (claimed === gone || claimed.startsWith(`${gone}/`)) entries.delete(claimed);
+            }
+          }
+        }
+      }
+    } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
       const written = (step.output as { written?: unknown } | null)?.written;
       if (!Array.isArray(written)) continue;
       for (const skill of written) {

@@ -83,6 +83,9 @@ async function main(): Promise<void> {
       stepId: string;
       status: 'done' | 'waiting_form' | 'failed';
       marker: string;
+      /** 11d emits `{ generated, ... }` rather than `wroteFiles`; the marker rides whichever
+       *  field that step really uses, so no row here teaches a shape the code never sees. */
+      shape?: 'wrote' | 'skill-sync';
     }): Promise<void> => {
       const taskId = randomUUID();
       await db.insert(schema.tasks).values({
@@ -101,7 +104,10 @@ async function main(): Promise<void> {
         stepIndex: 7,
         title: opts.marker,
         status: opts.status,
-        output: { wroteFiles: [opts.marker] },
+        output:
+          opts.shape === 'skill-sync'
+            ? { generated: [opts.marker], removed: [], skipped: [] }
+            : { wroteFiles: [opts.marker] },
         createdAt: opts.startedAt,
         updatedAt: opts.startedAt,
       });
@@ -134,6 +140,7 @@ async function main(): Promise<void> {
       stepId: '11d-skill-sync',
       status: 'done',
       marker: 'post-reset-skill-sync',
+      shape: 'skill-sync',
     });
     await seed({
       repositoryId: repoId,
@@ -152,7 +159,10 @@ async function main(): Promise<void> {
 
     const markersOf = (rows: Array<{ output: unknown }>): string[] =>
       rows
-        .flatMap((row) => (row.output as { wroteFiles?: string[] } | null)?.wroteFiles ?? [])
+        .flatMap((row) => {
+          const out = row.output as { wroteFiles?: string[]; generated?: string[] } | null;
+          return [...(out?.wroteFiles ?? []), ...(out?.generated ?? [])];
+        })
         .sort();
 
     // NULL epoch: every repo that has never been reset, which must read exactly as it did before
