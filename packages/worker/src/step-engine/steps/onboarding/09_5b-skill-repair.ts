@@ -106,6 +106,12 @@ interface SkillRepairDetect {
 interface SkillRepairApply {
   /** Skill ids that produced a valid corrected skill and were rewritten. */
   repaired: string[];
+  /** Slugs of the `sub-skills/<slug>.md` files rewritten beside each repaired SKILL.md, by
+   *  skill id. Recorded so the onboarding-artifact reset can name them: the repair CLEARS the
+   *  skill dir first, so 09_5's slugs for it are stale, and a directory claimed without naming
+   *  what is inside reads as wholly Haive's — which would delete a file a person put there.
+   *  OPTIONAL: an output persisted before this existed must still be readable. */
+  repairedSubSkillSlugs?: Record<string, string[]>;
   /** Failing skill ids whose agent returned nothing usable — left on disk as-is so 09_6
    *  re-surfaces them (the user can repair again, accept, or regenerate). */
   stillFailing: string[];
@@ -412,6 +418,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     const results = args.agentMiningResults ?? [];
 
     const repaired: string[] = [];
+    const repairedSubSkillSlugs: Record<string, string[]> = {};
     const stillFailing: string[] = [];
     // Per-skill view for the loss note. `stillFailing` is carried to 09_6 for the user to
     // act on, but the step itself still ends green — the note is what says so on the step.
@@ -466,6 +473,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
         }
       }
       repaired.push(failing.skillId);
+      repairedSubSkillSlugs[failing.skillId] = subs.map((sub) => sub.slug);
     }
 
     // Rebuild the README index from the current on-disk set so descriptions stay in sync.
@@ -494,6 +502,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     const degradedNote = miningLossNote('skill repair', outcomes);
     return {
       repaired,
+      repairedSubSkillSlugs,
       stillFailing,
       attempted: detected.failingSkills.length,
       ...(degradedNote ? { degradedNote } : {}),

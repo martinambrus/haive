@@ -1039,8 +1039,10 @@ export function collectWrittenCliContent(
       const repairDirs = (step.detectOutput as { skillTargetDirs?: unknown } | null)
         ?.skillTargetDirs;
       if (!Array.isArray(repairDirs)) continue;
-      const repaired = (step.output as { repaired?: unknown } | null)?.repaired;
+      const out = step.output as { repaired?: unknown; repairedSubSkillSlugs?: unknown } | null;
+      const repaired = out?.repaired;
       if (!Array.isArray(repaired)) continue;
+      const repairedSlugs = (out?.repairedSubSkillSlugs ?? null) as Record<string, unknown> | null;
       for (const value of repairDirs) {
         const dir = claimDir(value);
         if (dir === null) continue;
@@ -1052,6 +1054,16 @@ export function collectWrittenCliContent(
           }
           entries.add(skillDir);
           entries.add(`${skillDir}/SKILL.md`);
+          // Same rule as 09_5: `sub-skills` is claimed ONLY when the slugs in it were named, or
+          // the directory reads as wholly ours and a file the user put there is deleted rather
+          // than moved aside. An output written before the field existed has it quarantined.
+          const slugs = repairedSlugs?.[skillId];
+          if (Array.isArray(slugs) && slugs.length > 0) {
+            entries.add(`${skillDir}/sub-skills`);
+            for (const slug of slugs) {
+              if (typeof slug === 'string') entries.add(`${skillDir}/sub-skills/${slug}.md`);
+            }
+          }
         }
         // It rebuilds the index from the on-disk set whenever it repaired anything.
         if (repaired.length > 0) entries.add(`${dir}/README.md`);
@@ -1311,8 +1323,15 @@ export async function resetOnboardingArtifacts(
     let left = 0;
     for (const entry of entries) {
       const from = `${dir}/${entry.name}`;
-      if (haiveEntries.has(from) || (await artifactMatchesDisk(from))) {
-        if (entry.isDirectory() && hasDeeperClaims(from)) {
+      // A claim names a FILE unless something inside it is named too — that is the invariant
+      // `hasDeeperClaims` rests on. So a DIRECTORY standing where a claimed file was is not the
+      // file Haive wrote: someone replaced it, and it is moved aside rather than removed with
+      // everything in it.
+      const claimed =
+        (haiveEntries.has(from) || (await artifactMatchesDisk(from))) &&
+        (!entry.isDirectory() || hasDeeperClaims(from));
+      if (claimed) {
+        if (entry.isDirectory()) {
           const inner = await quarantineForeign(from, `${legacyDir}/${entry.name}`);
           left += inner.left;
           // The directory is ours only once nothing of theirs is left in it.
@@ -1320,7 +1339,7 @@ export async function resetOnboardingArtifacts(
           else ours.push(...inner.ours);
           continue;
         }
-        ours.push({ rel: from, isDir: entry.isDirectory() });
+        ours.push({ rel: from, isDir: false });
         continue;
       }
       const to = `${legacyDir}/${entry.name}`;
@@ -1364,8 +1383,8 @@ export async function resetOnboardingArtifacts(
           left += await sweepClaimedChildren(rel);
           continue;
         }
-        if (haiveEntries.has(rel) || (await artifactMatchesDisk(rel))) {
-          await remove(rel, child.isDirectory());
+        if (!child.isDirectory() && (haiveEntries.has(rel) || (await artifactMatchesDisk(rel)))) {
+          await remove(rel, false);
           continue;
         }
         left += 1;
@@ -1446,12 +1465,16 @@ export async function resetOnboardingArtifacts(
         if ((await sweepClaimedChildren(rel)) > 0) kept += 1;
         continue;
       }
-      if (!haiveEntries.has(rel) && !(await artifactMatchesDisk(rel))) {
-        kept += 1;
-        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
-        continue;
+      // A claim names a FILE unless something inside it is named too, so a DIRECTORY standing
+      // where a claimed file was is not the file Haive wrote.
+      if (entry.isDirectory() || !haiveEntries.has(rel)) {
+        if (!(await artifactMatchesDisk(rel)) || entry.isDirectory()) {
+          kept += 1;
+          skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+          continue;
+        }
       }
-      await remove(rel, entry.isDirectory());
+      await remove(rel, false);
     }
     // Nothing of the user's in it: the directory goes too, as it always did.
     if (kept === 0) await remove(ONBOARDING_SWEEP_DIR, true);

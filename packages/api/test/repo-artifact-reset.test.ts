@@ -222,10 +222,38 @@ describe('collectWrittenCliContent', () => {
 
   /** 09_5b's REAL shape: repaired skill ids in the apply output, target dirs in the detect
    *  payload. It records no sub-skill slugs. */
-  const skillRepair = (repaired: string[]) => ({
+  const skillRepair = (repaired: string[], repairedSubSkillSlugs?: Record<string, string[]>) => ({
     stepId: '09_5b-skill-repair',
     detectOutput: { skillTargetDirs: ['.claude/skills'] },
-    output: { repaired, stillFailing: [], attempted: repaired.length },
+    output: {
+      repaired,
+      stillFailing: [],
+      attempted: repaired.length,
+      ...(repairedSubSkillSlugs ? { repairedSubSkillSlugs } : {}),
+    },
+  });
+
+  it('claims the sub-skills a repair rewrote, and retires the ones it replaced', async () => {
+    // The repair CLEARS the skill dir, so 09_5's slugs for it are gone from disk. Recording the
+    // new ones is what lets them be removed rather than moved to the legacy tree.
+    const { entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '09_5-skill-generation',
+          output: {
+            written: [
+              { id: 'broken', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['old-slug'] },
+            ],
+          },
+        },
+        skillRepair(['broken'], { broken: ['new-slug'] }),
+      ],
+      [],
+    );
+
+    expect(entries.has('.claude/skills/broken/sub-skills/old-slug.md')).toBe(false);
+    expect(entries.has('.claude/skills/broken/sub-skills/new-slug.md')).toBe(true);
+    expect(entries.has('.claude/skills/broken/sub-skills')).toBe(true);
   });
 
   it('never claims a workflow skill sync, which writes in a worktree', async () => {
@@ -493,7 +521,10 @@ describe('resetOnboardingArtifacts', () => {
         ...base.haiveEntries,
         '.agents/skills/repo-conventions',
         '.agents/skills/repo-conventions/SKILL.md',
+        // `sub-skills` is only ever claimed together with the slugs inside it: a directory
+        // claimed with nothing named in it is not treated as ours, so it would be moved aside.
         '.agents/skills/repo-conventions/sub-skills',
+        '.agents/skills/repo-conventions/sub-skills/naming.md',
       ]),
     });
 
@@ -504,8 +535,8 @@ describe('resetOnboardingArtifacts', () => {
     expect(
       await readFile(path.join(root, '.agents/skills-legacy/repo-conventions/NOTES.md'), 'utf8'),
     ).toBe('mine\n');
-    // A claimed directory with no deeper claims of its own is Haive's wholesale, so the rendered
-    // sub-skills went with it rather than being moved one by one.
+    // The rendered sub-skill was NAMED, so it went with the directory rather than to the legacy
+    // tree beside the user's file.
     expect(await exists(root, '.agents/skills')).toBe(false);
     expect(await exists(root, '.agents/skills-legacy/repo-conventions/sub-skills')).toBe(false);
   });
@@ -654,6 +685,8 @@ describe('resetOnboardingArtifacts', () => {
         ...base.haiveEntries,
         skill,
         `${skill}/SKILL.md`,
+        // `sub-skills` is only ever claimed together with the slugs inside it — a directory
+        // claimed with nothing named in it is not treated as ours.
         `${skill}/sub-skills`,
         `${skill}/sub-skills/naming.md`,
       ]),
@@ -675,6 +708,27 @@ describe('resetOnboardingArtifacts', () => {
     expect(await exists(root, '.agents/skills-legacy/repo-conventions/sub-skills/naming.md')).toBe(
       false,
     );
+  });
+
+  it('moves aside a directory standing where a claimed file was', async () => {
+    // A claim names a FILE unless something inside it is named too. If a person replaced
+    // `code-reviewer.toml` with a directory of their own notes, that is not the file Haive
+    // wrote, and removing it took everything in it.
+    const root = await repo('reset-claimed-leaf-is-dir-');
+    await installArtifacts(root);
+    await rm(path.join(root, '.codex/agents/code-reviewer.toml'), { force: true });
+    await mkdir(path.join(root, '.codex/agents/code-reviewer.toml'), { recursive: true });
+    await writeFile(path.join(root, '.codex/agents/code-reviewer.toml/NOTES.md'), 'mine\n', 'utf8');
+
+    const { quarantined } = await resetOnboardingArtifacts(root, provenance());
+
+    expect(quarantined).toContainEqual({
+      from: '.codex/agents/code-reviewer.toml',
+      to: '.codex/agents-legacy/code-reviewer.toml',
+    });
+    expect(
+      await readFile(path.join(root, '.codex/agents-legacy/code-reviewer.toml/NOTES.md'), 'utf8'),
+    ).toBe('mine\n');
   });
 
   it('keeps the quarantine and mcp_settings.json, and says so', async () => {
