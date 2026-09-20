@@ -634,6 +634,66 @@ describe('acquireRootClaim', () => {
     expect(writes.length).toBe(2);
   });
 
+  it('retries a release whose write did not commit, rather than leaving the claim', async () => {
+    // "The row still holds OUR stamp" and "the row holds someone else's" both used to answer the
+    // same `false`, and the ordinary release has no other candidates to fall through to — so a
+    // single transient error ended the release having cleared nothing, and the finished job held
+    // the repository for the rest of the stale window. Only the first is retryable, and it must
+    // actually be retried.
+    vi.useFakeTimers();
+    const writes: Recorded[] = [];
+    let held: Date | null = null;
+    let failures = 2; // the first two clears fail BEFORE committing
+    const db = {
+      update: () => ({
+        set: (values: { rootClaimedAt: Date | null }) => ({
+          where: () => {
+            const idx = writes.length;
+            let settle!: () => void;
+            const gate = new Promise<void>((resolve) => {
+              settle = resolve;
+            });
+            if (idx === 0) held = values.rootClaimedAt;
+            writes.push({ stamp: values.rootClaimedAt, settle });
+            return {
+              returning: async () => {
+                await gate;
+                if (idx === 0) return [{ id: 'repo-1' }];
+                if (failures > 0) {
+                  failures -= 1;
+                  throw new Error('transient');
+                }
+                held = null;
+                return [{ id: 'repo-1' }];
+              },
+            };
+          },
+        }),
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: async () => [{ claimedAt: held }] }),
+        }),
+      }),
+    } as unknown as Database;
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'reset');
+    writes[0]!.settle();
+    const handle = await acquiring;
+
+    const releasing = handle!.release();
+    // Three clear attempts: two fail before committing, the third lands.
+    for (let i = 0; i < 3; i += 1) {
+      await vi.advanceTimersByTimeAsync(0);
+      writes.at(-1)!.settle();
+    }
+    await releasing;
+
+    expect(held).toBeNull();
+    // The claim write plus three clears.
+    expect(writes.length).toBe(4);
+  });
+
   it('never runs two renewals at once', async () => {
     vi.useFakeTimers();
     const { db, writes } = fakeDb();

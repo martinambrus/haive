@@ -271,13 +271,24 @@ export function createCandidateStamps(cap = CANDIDATE_STAMP_CAP): CandidateStamp
  * and the caller should try another candidate. An unreadable row answers "not confirmed", which
  * keeps the caller trying rather than concluding anything.
  */
+type ReleaseOutcome =
+  /** The row carries no claim: free, whoever freed it. Nothing more to do. */
+  | 'free'
+  /** The row still carries the stamp we tried to clear, so that write did NOT commit. Retryable,
+   *  and the only outcome that is — every other one is settled. */
+  | 'still-ours'
+  /** The row carries a different stamp, so this stamp is not what holds it. */
+  | 'not-ours'
+  /** The read failed as well, so nothing is established. */
+  | 'unknown';
+
 async function releaseReconciled(
   db: Database | DbHandle,
   repositoryId: string,
   claimedAt: Date,
-): Promise<boolean> {
+): Promise<ReleaseOutcome> {
   try {
-    return await releaseRepositoryRoot(db, repositoryId, claimedAt);
+    return (await releaseRepositoryRoot(db, repositoryId, claimedAt)) ? 'free' : 'not-ours';
   } catch {
     try {
       const rows = await db
@@ -285,12 +296,23 @@ async function releaseReconciled(
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
         .limit(1);
-      return (rows[0]?.claimedAt ?? null) === null;
+      const onRow = rows[0]?.claimedAt ?? null;
+      if (onRow === null) return 'free';
+      // STILL OURS is distinct from someone else's, and collapsing the two is how a transient
+      // release error left a finished job holding the repository for the rest of the window: the
+      // ordinary case has no other candidates to fall through to, so a single `false` ended the
+      // release having cleared nothing.
+      return onRow.getTime() === claimedAt.getTime() ? 'still-ours' : 'not-ours';
     } catch {
-      return false;
+      return 'unknown';
     }
   }
 }
+
+/** How many times a release will re-attempt a clear that provably did not commit. Bounded because
+ *  this runs at the END of the work, where a caller is waiting and a database that is failing
+ *  every write will not be rescued by trying forever — the stale window is the backstop. */
+const RELEASE_RETRIES = 3;
 
 /**
  * One renewal attempt, with its ambiguity already resolved as far as it can be.
@@ -488,7 +510,16 @@ export async function acquireRootClaim(
       // Let a pending renewal land first, so the stamp below is the one actually on the row.
       if (renewing !== null) await renewing.catch(() => undefined);
       if (current === null) return;
-      const cleared = await releaseReconciled(db, repositoryId, current);
+      // Retried while the row provably still carries OUR stamp — that write simply did not
+      // commit, and giving up there leaves a finished job holding the repository for the rest of
+      // the window. `unknown` is retried too: nothing was established, and a conditional clear
+      // that turns out to be unnecessary is a harmless no-op.
+      let outcome: ReleaseOutcome = 'still-ours';
+      for (let attempt = 0; attempt < RELEASE_RETRIES; attempt += 1) {
+        outcome = await releaseReconciled(db, repositoryId, current);
+        if (outcome !== 'still-ours' && outcome !== 'unknown') break;
+      }
+      const cleared = outcome === 'free';
       // `current` may be a GUESS: when a renewal's acknowledgement and its read-back both failed,
       // we kept the old stamp while the row may hold the one that write left behind. A release
       // matching nothing is exactly that case, and it is the COMMON one — a job that finishes
@@ -502,7 +533,7 @@ export async function acquireRootClaim(
         // working on it. Each clear is conditional, so at most one can match and the rest are
         // no-ops against a row that has already been cleared.
         for (const candidate of candidates.list()) {
-          if (await releaseReconciled(db, repositoryId, candidate)) break;
+          if ((await releaseReconciled(db, repositoryId, candidate)) === 'free') break;
         }
       }
       candidates.clear();
