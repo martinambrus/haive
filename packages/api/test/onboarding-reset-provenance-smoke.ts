@@ -87,6 +87,8 @@ async function main(): Promise<void> {
       /** 09_5b emits `{ repaired, ... }` rather than `wroteFiles`; the marker rides whichever
        *  field that step really uses, so no row here teaches a shape the code never sees. */
       shape?: 'wrote' | 'skill-repair';
+      /** When the step finished, if later than the task's start — a retry. */
+      endedAt?: Date;
     }): Promise<void> => {
       const taskId = randomUUID();
       await db.insert(schema.tasks).values({
@@ -114,6 +116,9 @@ async function main(): Promise<void> {
             : { wroteFiles: [opts.marker] },
         createdAt: opts.startedAt,
         updatedAt: opts.startedAt,
+        // When the step actually WROTE — the clock the epoch filters on. Defaults to the task's
+        // own start, so a RETRY is modelled by handing a later one.
+        endedAt: opts.endedAt ?? opts.startedAt,
       });
     };
 
@@ -228,6 +233,23 @@ async function main(): Promise<void> {
       where: eq(schema.repositories.id, repoId),
       columns: { onboardingResetAt: true, onboardedAt: true },
     });
+    // A step RETRIED after the reset wrote after it, however old its task is. Keying on
+    // `tasks.created_at` excluded this for good while the files sat on disk.
+    await seed({
+      repositoryId: repoId,
+      startedAt: BEFORE_RESET,
+      endedAt: AFTER_RESET,
+      stepId: '07-generate-files',
+      status: 'done',
+      marker: 'pre-reset-task-retried-after',
+    });
+    const retried = markersOf(await loadProvenanceSteps(db, repoId, RESET_AT));
+    check(
+      'a step retried after the reset is read, however old its task is',
+      retried.includes('pre-reset-task-retried-after'),
+      retried,
+    );
+
     // A reset must be REFUSED while an onboarding run is live: it writes into the tree the
     // reset deletes, and its later steps would carry a `created_at` older than the epoch.
     const liveTaskId = randomUUID();

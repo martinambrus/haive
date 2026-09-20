@@ -10,7 +10,7 @@ import type { Database } from '../db.js';
  * `waiting_user` is in the LIVE set deliberately: a run parked on a form is the normal state
  * of onboarding for most of its life, and it is exactly the state the repo was misread in.
  */
-const LIVE_TASK_STATUSES = [
+export const LIVE_TASK_STATUSES = [
   'created',
   'queued',
   'running',

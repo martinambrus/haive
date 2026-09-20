@@ -64,6 +64,7 @@ import {
 } from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 import {
+  LIVE_TASK_STATUSES,
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
@@ -963,13 +964,20 @@ export async function loadProvenanceSteps(
           eq(schema.tasks.repositoryId, repositoryId),
           inArray(schema.taskSteps.stepId, PROVENANCE_STEP_IDS),
           eq(schema.taskSteps.status, 'done'),
-          ...(epoch === null ? [] : [gt(schema.tasks.createdAt, epoch)]),
+          // The STEP's own clock, never the task's creation time. A failed run — or a single
+          // step — can be retried after a reset, and the task keeps its original `created_at`,
+          // so keying on that excluded the rewritten 07/09_5 output for good while its files sat
+          // on disk. `ended_at` is when this step actually wrote. A `done` step missing it is
+          // excluded, which quarantines its files rather than removing them: the safe direction.
+          ...(epoch === null ? [] : [gt(schema.taskSteps.endedAt, epoch)]),
         ),
       )
       // OLDEST first, because a later run can RETIRE an earlier claim: `11d-skill-sync` deletes
       // a skill whose id 09_5 once wrote, and replaying that in the wrong order leaves the dead
       // claim standing — which would delete a skill of the same name the user wrote afterwards.
-      .orderBy(asc(schema.tasks.createdAt), asc(schema.taskSteps.createdAt))
+      // Ordered by the same execution clock the epoch filters on, so a retried step replays in
+      // the position it actually ran rather than where its task began.
+      .orderBy(asc(schema.taskSteps.endedAt), asc(schema.taskSteps.createdAt))
   );
 }
 
@@ -1718,7 +1726,25 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // for good. The timestamp cannot express that; the request has to be refused. Same live-task
   // rule the onboarded verdict uses, so the two cannot drift.
   const facts = (await loadOnboardingTaskFacts(db, userId, [id])).get(id) ?? NO_ONBOARDING_TASKS;
-  if (facts.liveTaskId !== null) {
+  // `onboarding_upgrade` is a SECOND root writer and `loadOnboardingTaskFacts` cannot see it —
+  // that helper is filtered to `type = 'onboarding'` because it also answers the ONBOARDED
+  // verdict, where a running upgrade must not make a repo read un-onboarded. `02-upgrade-apply`
+  // writes straight to the repo path and then supersedes and re-inserts the same
+  // `onboarding_artifacts` rows, so racing it deletes files it just wrote or strips rows it is
+  // still working from.
+  const liveUpgrade = await db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.userId, userId),
+        eq(schema.tasks.repositoryId, id),
+        eq(schema.tasks.type, 'onboarding_upgrade'),
+        inArray(schema.tasks.status, LIVE_TASK_STATUSES),
+      ),
+    )
+    .limit(1);
+  if (facts.liveTaskId !== null || liveUpgrade.length > 0) {
     throw new HttpError(
       409,
       'An onboarding run is in progress on this repository. Wait for it to finish or cancel it before resetting.',
