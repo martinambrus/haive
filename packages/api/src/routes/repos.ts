@@ -1712,6 +1712,12 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
+  // The epoch is taken BEFORE any reading or deleting, not when the row is finally written.
+  // Nothing serializes an onboarding task against this endpoint — `POST /tasks` refuses only a
+  // second LIVE onboarding — so a task created while this request is walking the tree would
+  // carry a `created_at` older than an end-of-request stamp, and `loadProvenanceSteps` would
+  // exclude that run for good. Its writes land after the reset, so it belongs on the new side.
+  const resetStartedAt = new Date();
   const repoRow = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
     columns: { onboardingResetAt: true },
@@ -1760,7 +1766,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // action, and a repo whose artifacts are gone is not onboarded however it got marked.
   await db
     .update(schema.repositories)
-    .set({ onboardedAt: null, onboardingResetAt: new Date(), updatedAt: new Date() })
+    .set({ onboardedAt: null, onboardingResetAt: resetStartedAt, updatedAt: new Date() })
     .where(eq(schema.repositories.id, id));
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 });
