@@ -3,14 +3,8 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, asc, desc, gt, inArray, isNull, lt, ne, notInArray, or, sql } from 'drizzle-orm';
-import {
-  schema,
-  ROOT_CLAIM_STALE_MS,
-  acquireRootClaim,
-  readLiveRootClaim,
-  rootClaimRefusal,
-} from '@haive/database';
+import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
+import { schema, acquireRootClaim, readLiveRootClaim, rootClaimRefusal } from '@haive/database';
 import {
   errno,
   isPathContainmentError,
@@ -1488,6 +1482,23 @@ export function mayRemoveSweptDirWhole(sweep: 'ok' | 'refused' | 'io', left: num
 }
 
 /**
+ * How many entries a nested sweep must be treated as having LEFT BEHIND.
+ *
+ * A count of zero means "nothing of the user's is in there" only when the sweep ran to the end.
+ * Anything absorbed — an unreadable directory, an entry that turned into a link between the
+ * listing and the walk — leaves the count at whatever it had reached, and the caller adds it to
+ * its own total to decide whether the PARENT may be removed whole. So an unfinished sweep must
+ * report a survivor, or `.claude` is deleted with the user's plugins inside it.
+ *
+ * Both non-`ok` outcomes count here, unlike `mayRemoveSweptDirWhole`, and the difference is which
+ * directory is at stake: there the refused path IS the removal target and removing the link is
+ * the right answer, while here it is a CHILD whose parent would be taken with it.
+ */
+export function sweepSurvivors(outcome: 'ok' | 'refused' | 'io', left: number): number {
+  return outcome === 'ok' ? left : left + 1;
+}
+
+/**
  * Did this walk do nothing at all, having failed to read the tree?
  *
  * The caller supersedes every artifact row and stamps `onboarding_reset_at` on what the walk
@@ -1720,7 +1731,7 @@ export async function resetOnboardingArtifacts(
    *  sweep's note on why `.claude` leaves rather than quarantines. */
   const sweepClaimedChildren = async (dir: string): Promise<number> => {
     let left = 0;
-    await guard(dir, async () => {
+    const outcome = await guard(dir, async () => {
       const children = await readdirNoFollow(root, dir, { strict: true });
       if (children === null) return;
       for (const child of children) {
@@ -1743,7 +1754,9 @@ export async function resetOnboardingArtifacts(
         removed.push(dir);
       }
     });
-    return left;
+    // The caller adds this to its own count and removes `.claude` whole when the total is zero,
+    // so a sweep that did not finish must report a survivor rather than its unfinished zero.
+    return sweepSurvivors(outcome, left);
   };
 
   const dirs = onboardingResetDirs(haiveDirs);
@@ -2030,6 +2043,29 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
   const db = getDb();
   const root = await resolveRepoRoot(db, userId, id);
 
+  // Held across the marker check AND the stamp. The markers are read off DISK, so a rebuild that
+  // starts and finishes in between replaces the tree they were read from and releases its claim
+  // without advancing `onboarding_reset_at` — leaving the predicate below satisfied by evidence
+  // that no longer exists. Holding the root is what makes "the tree I looked at" and "the tree I
+  // am vouching for" the same tree.
+  const held = await acquireRootClaim(db, id, 'verify', userId);
+  if (held === null) {
+    throw new HttpError(409, rootClaimRefusal((await readLiveRootClaim(db, id))?.kind ?? null));
+  }
+  try {
+    return await markRepositoryOnboarded(c, db, userId, id, root);
+  } finally {
+    await held.release().catch(() => undefined);
+  }
+});
+
+async function markRepositoryOnboarded(
+  c: Context<AppEnv>,
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  id: string,
+  root: string,
+): Promise<Response> {
   const { missing } = await checkOnboardingMarkers(root);
   if (missing.length > 0) {
     throw new HttpError(
@@ -2064,9 +2100,13 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
   // The write carries the epoch it was validated against, so a reset landing between the check
   // above and this UPDATE cannot have its work undone by hand: it moves `onboarding_reset_at`,
   // the predicate stops matching, and nothing is stamped. Validating and then writing
-  // unconditionally is the same read-then-act shape the reset's own claim exists to remove — and
-  // the markers cannot catch it either, since a reset is free to leave behind files it could not
-  // claim. A live root claim blocks it for the same reason.
+  // unconditionally is the same read-then-act shape the root claim exists to remove — and the
+  // markers cannot catch it either, since a reset is free to leave behind files it could not
+  // claim.
+  //
+  // Deliberately NOT a "no live claim" term: this handler HOLDS one, so requiring the column to
+  // be empty would refuse its own write every time. Exclusion against the other writers is what
+  // the held claim already provides.
   const stamped = await db
     .update(schema.repositories)
     .set({ onboardedAt: new Date(), updatedAt: new Date() })
@@ -2075,13 +2115,6 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
         eq(schema.repositories.id, id),
         eq(schema.repositories.userId, userId),
         sql`${schema.repositories.onboardingResetAt} IS NOT DISTINCT FROM ${resetAt}`,
-        or(
-          isNull(schema.repositories.rootClaimedAt),
-          lt(
-            schema.repositories.rootClaimedAt,
-            sql`now() - ${`${ROOT_CLAIM_STALE_MS} milliseconds`}::interval`,
-          ),
-        ),
       ),
     )
     .returning({ onboardedAt: schema.repositories.onboardedAt });
@@ -2093,7 +2126,7 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
     );
   }
   return c.json({ ok: true, onboardedAt: written.toISOString() });
-});
+}
 
 repoRoutes.get('/:id/archive', async (c) => {
   const userId = c.get('userId');

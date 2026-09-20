@@ -8,7 +8,7 @@ type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /** Who is rewriting the root. Carried only so a refusal can say what it is waiting for — nothing
  *  branches on it, because the exclusion is mutual either way. */
-export type RootClaimKind = 'reset' | 'rebuild' | 'edit';
+export type RootClaimKind = 'reset' | 'rebuild' | 'edit' | 'verify';
 
 /**
  * How long a root claim is honoured WITHOUT a heartbeat before readers treat it as abandoned.
@@ -261,6 +261,9 @@ export function rootClaimRefusal(kind: RootClaimKind | null): string {
   }
   if (kind === 'edit') {
     return 'A knowledge file in this repository is being saved. Try again in a moment.';
+  }
+  if (kind === 'verify') {
+    return 'This repository is being checked. Try again in a moment.';
   }
   // Also the fallback for a claim written before `root_claim_kind` existed: a refusal still has
   // to say something true, and "reset" is the one a person can act on.

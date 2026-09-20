@@ -14,6 +14,7 @@ import {
   resetOnboardingArtifacts,
   resetTouchedNothing,
   resolveMergedTasks,
+  sweepSurvivors,
   stripHaiveContent,
 } from '../src/routes/repos.js';
 
@@ -1196,6 +1197,27 @@ describe('mayRemoveSweptDirWhole', () => {
     // removal takes the link itself rather than walking through it. Treating it like an IO
     // failure would silently stop deleting linked CLI directories.
     expect(mayRemoveSweptDirWhole('refused', 0)).toBe(true);
+  });
+});
+
+describe('sweepSurvivors', () => {
+  it('reports what a completed sweep actually left', () => {
+    expect(sweepSurvivors('ok', 0)).toBe(0);
+    expect(sweepSurvivors('ok', 2)).toBe(2);
+  });
+
+  it('reports a survivor for a sweep that did not finish', () => {
+    // The caller adds this to its own count and removes `.claude` WHOLE when the total is zero.
+    // An unfinished sweep returning its initialised zero therefore deletes the user's plugins
+    // inside a directory nobody managed to walk.
+    expect(sweepSurvivors('io', 0)).toBe(1);
+  });
+
+  it('reports a survivor for a refusal too, unlike the top-level sweep', () => {
+    // Here the refused path is a CHILD whose parent would be removed with it, so a link must
+    // count as something to keep. At the top level the refused path IS the removal target, and
+    // removing the link itself is the right answer — hence two rules rather than one.
+    expect(sweepSurvivors('refused', 0)).toBe(1);
   });
 });
 
