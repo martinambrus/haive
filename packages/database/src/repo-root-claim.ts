@@ -431,7 +431,7 @@ export async function acquireRootClaim(
       // matching nothing is exactly that case, and it is the COMMON one — a job that finishes
       // right after such a renewal would otherwise report a clean release and leave the
       // repository claimed for the rest of the window. The renewal path already retries from the
-      // unproven stamp; this is the same rule on the path that actually ends the work.
+      // candidates; this is the same rule on the path that actually ends the work.
       if (!cleared) {
         // EVERY candidate, not just the newest. Ambiguity composes: an earlier write may have
         // committed while a later one did not, so the stamp the row actually carries can be any
