@@ -1510,20 +1510,22 @@ this action is irreversible. `collectWrittenCliContent` answers it from the RUNS
 never from the currently enabled providers: enablement is mutable global state that says nothing
 about what THIS repo's onboarding did, so a CLI enabled afterwards would make its directory
 eligible for a removal no run here ever wrote to, while one disabled since would strand the
-skills it did write. Three sources, all historical: 07's detect payload (`agentTargets`), 09_5's
-output (`written[].mirroredDirs`, and `written[].id` for the `<dir>/<id>/SKILL.md` each skill
-became), and the live `onboarding_artifacts` rows, which are the only per-file record and the
-only one a repo whose step payloads predate those fields still has. A candidate outside that
-union is REPORTED, not removed.
+skills it did write. A candidate outside that union is REPORTED, not removed.
 
-Two details in that query are load-bearing. The step rows are filtered to `status = 'done'`,
-because 07 persists `agentTargets` from its DETECT phase, before the form is even shown — a run
-cancelled or failed while parked there names directories nothing was written to, and a
-pre-existing definition in one whose name matches a manifest agent would then be taken for ours.
-And `.claude/agents`/`.claude/skills` are claimed UNCONDITIONALLY: with no file-based agents
-provider enabled (amp alone) 07 records an EMPTY `agentTargets` and writes there anyway, and
-`resolveSkillTargetDirs` falls back the same way, so without it a fallback run's agents survive
-the reset and the next run writes over them. `.claude` needs no gate of its own either — it is
+**What it reads is what each step WROTE, not what it planned to.** 07's apply output carries
+`wroteFiles`; its detect payload's `agentTargets` is the wrong source twice over, because with
+the default `overwrite=false` `writeIfAllowed` SKIPS a pre-existing file — so a user's own
+`code-reviewer.toml` is one a SUCCESSFUL apply deliberately left alone, and claiming it by
+manifest id would exempt it from the quarantine and delete it with the directory — and because
+the detect payload is persisted before the form is even shown, so a run cancelled while parked
+there names directories nothing was written to (which is also why the query filters to
+`status = 'done'`). `wroteFiles` additionally covers the two cases a target list misses: the
+fallback write to `.claude/agents` when NO provider has an agents dir (amp alone, where
+`agentTargets` is empty), and the LLM-discovered custom agents, which have no manifest id at
+all. 09_5 contributes `written[].mirroredDirs`, each `written[].id` (a skill is the DIRECTORY
+`<dir>/<id>/SKILL.md`) and the `README.md` index it rebuilds every pass; the live
+`onboarding_artifacts` rows are the third source, the only per-file one, and the only one a repo
+whose step payloads predate these fields still has. `.claude` itself needs no gate — it is
 Haive's own directory, and every `ONBOARDING_MARKERS` path lives in it.
 
 **Inside a proven directory, what Haive cannot claim is MOVED, not deleted.** The quarantine

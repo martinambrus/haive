@@ -907,16 +907,11 @@ function onboardingResetDirs(haiveDirs: ReadonlySet<string>): {
   return { remove: [...remove], candidates };
 }
 
-/** The two onboarding steps that RECORD where they wrote. 07's detect payload carries
- *  `agentTargets` — the agents dirs of the providers enabled AT THE TIME — and 09_5's output
- *  carries `written[].mirroredDirs`, the skills dirs it mirrored each skill into. */
+/** The two onboarding steps that RECORD what they wrote. 07's apply output carries `wroteFiles`
+ *  — the paths it actually wrote, skipped ones excluded — and 09_5's carries
+ *  `written[].mirroredDirs` plus each skill's id. */
 const AGENT_TARGETS_STEP_ID = '07-generate-files';
 const SKILL_MIRROR_STEP_ID = '09_5-skill-generation';
-
-/** Where 07 writes agents when NO enabled provider has a file-based agents directory (amp
- *  alone), and where `resolveSkillTargetDirs` falls back to for skills. Agents dir first —
- *  `claimAgentFiles` is called on it by index. */
-const CLAUDE_FALLBACK_DIRS = ['.claude/agents', '.claude/skills'] as const;
 
 /**
  * Which catalog agents/skills directories Haive is KNOWN to have written to in this repository.
@@ -931,9 +926,8 @@ const CLAUDE_FALLBACK_DIRS = ['.claude/agents', '.claude/skills'] as const;
  * nothing — these are stored JSON written by an older Haive, not a typed contract.
  */
 export function collectWrittenCliContent(
-  steps: ReadonlyArray<{ stepId: string; detectOutput: unknown; output: unknown }>,
+  steps: ReadonlyArray<{ stepId: string; output: unknown }>,
   artifacts: ReadonlyArray<{ diskPath: string }>,
-  templateAgentIds: Iterable<string>,
 ): { dirs: Set<string>; entries: Set<string> } {
   const catalog = inventoryDirsFromCatalog();
   const byDir = new Map(catalog.map((entry) => [entry.dir, entry]));
@@ -944,31 +938,29 @@ export function collectWrittenCliContent(
     dirs.add(value);
     return value;
   };
-  /** 07 writes `<id>.<ext>` per agent plus the index it generates. The ids come from the
-   *  manifest rather than the step payload: `acceptedAgentIds` is the user's PICK, so an agent
-   *  they deselected would then read as theirs and be quarantined out of its own directory. */
-  const claimAgentFiles = (dir: string): void => {
-    const ext = byDir.get(dir)?.ext ?? 'md';
-    for (const id of templateAgentIds) entries.add(`${dir}/${id}.${ext}`);
-    entries.add(`${dir}/README.md`);
+  /** Claim the entry of `dir` that contains `rel`, so a path deeper than one level (a skill's
+   *  `<dir>/<id>/SKILL.md`) claims the directory it lives in rather than nothing. */
+  const claimPath = (value: unknown): void => {
+    if (typeof value !== 'string') return;
+    for (const spec of catalog) {
+      if (!value.startsWith(`${spec.dir}/`)) continue;
+      dirs.add(spec.dir);
+      const head = value.slice(spec.dir.length + 1).split('/')[0];
+      if (head) entries.add(`${spec.dir}/${head}`);
+    }
   };
-
-  // When no enabled provider has a file-based agents directory — amp alone — 07 records an EMPTY
-  // `agentTargets` and writes to `.claude/agents` anyway, and `resolveSkillTargetDirs` falls back
-  // to `.claude/skills` the same way. Both are Haive's own directory either way, so they are
-  // claimed unconditionally; without this the fallback run's agents survive a reset and the next
-  // run writes over them.
-  for (const dir of CLAUDE_FALLBACK_DIRS) claimDir(dir);
-  claimAgentFiles(CLAUDE_FALLBACK_DIRS[0]);
 
   for (const step of steps) {
     if (step.stepId === AGENT_TARGETS_STEP_ID) {
-      const targets = (step.detectOutput as { agentTargets?: unknown } | null)?.agentTargets;
-      if (!Array.isArray(targets)) continue;
-      for (const target of targets) {
-        const dir = claimDir((target as { dir?: unknown } | null)?.dir);
-        if (dir !== null) claimAgentFiles(dir);
-      }
+      // What 07 actually WROTE, never its target list and never the manifest's agent ids. With
+      // the default `overwrite=false`, `writeIfAllowed` SKIPS a pre-existing file — so a user's
+      // own `code-reviewer.toml` is one a successful apply deliberately left alone, and claiming
+      // it by id would exempt it from the quarantine and delete it with the directory. This also
+      // covers the fallback write to `.claude/agents` when no provider has an agents dir (amp
+      // alone, where `agentTargets` is empty) and the LLM-discovered custom agents, which have
+      // no manifest id at all.
+      const wrote = (step.output as { wroteFiles?: unknown } | null)?.wroteFiles;
+      if (Array.isArray(wrote)) for (const rel of wrote) claimPath(rel);
     } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
       const written = (step.output as { written?: unknown } | null)?.written;
       if (!Array.isArray(written)) continue;
@@ -977,25 +969,20 @@ export function collectWrittenCliContent(
         if (!Array.isArray(row?.mirroredDirs)) continue;
         for (const value of row.mirroredDirs) {
           const dir = claimDir(value);
-          // A generated skill is a DIRECTORY, `<dir>/<id>/SKILL.md`, so the entry is the id.
-          if (dir !== null && typeof row.id === 'string') entries.add(`${dir}/${row.id}`);
+          if (dir === null) continue;
+          // A generated skill is a DIRECTORY, `<dir>/<id>/SKILL.md`, so the entry is the id. The
+          // index beside them is rebuilt from the cumulative set on every pass and is Haive's
+          // too — unclaimed, it would be quarantined out of the directory it describes.
+          if (typeof row.id === 'string') entries.add(`${dir}/${row.id}`);
+          entries.add(`${dir}/README.md`);
         }
       }
     }
   }
 
   // The live rows are the only per-file record, and the only one a repo whose step payloads
-  // predate those fields still has. A path deeper than the entry (a bundle skill's
-  // `<dir>/<id>/SKILL.md`) claims the entry that contains it.
-  for (const row of artifacts) {
-    for (const spec of catalog) {
-      if (!row.diskPath.startsWith(`${spec.dir}/`)) continue;
-      dirs.add(spec.dir);
-      const rest = row.diskPath.slice(spec.dir.length + 1);
-      const head = rest.split('/')[0];
-      if (head) entries.add(`${spec.dir}/${head}`);
-    }
-  }
+  // predate these fields still has.
+  for (const row of artifacts) claimPath(row.diskPath);
   return { dirs, entries };
 }
 
@@ -1488,11 +1475,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // THIS repo's run did — a CLI enabled afterwards would make its dir eligible for a removal
   // no onboarding here ever wrote to.
   const onboardingSteps = await db
-    .select({
-      stepId: schema.taskSteps.stepId,
-      detectOutput: schema.taskSteps.detectOutput,
-      output: schema.taskSteps.output,
-    })
+    .select({ stepId: schema.taskSteps.stepId, output: schema.taskSteps.output })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
     .where(
@@ -1506,16 +1489,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
         eq(schema.taskSteps.status, 'done'),
       ),
     );
-  const templateAgents = await db
-    .select({ templateId: schema.templateManifestCache.templateId })
-    .from(schema.templateManifestCache);
-  const written = collectWrittenCliContent(
-    onboardingSteps,
-    live,
-    templateAgents
-      .filter((row) => row.templateId.startsWith('agent.'))
-      .map((row) => row.templateId.slice('agent.'.length)),
-  );
+  const written = collectWrittenCliContent(onboardingSteps, live);
 
   const { removed, cleaned, skipped, quarantined } = await resetOnboardingArtifacts(root, {
     writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),

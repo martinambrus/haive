@@ -165,61 +165,61 @@ function provenance(hashes: Array<[string, string]> = []): {
 }
 
 describe('collectWrittenCliContent', () => {
-  const MANIFEST = ['code-reviewer', 'test-writer'];
+  const wrote = (...files: string[]) => [
+    { stepId: '07-generate-files', output: { wroteFiles: files } },
+  ];
 
-  it('claims the claude fallback dirs even when nothing recorded a target', async () => {
-    // With only amp enabled, 07 records an EMPTY `agentTargets` and writes to `.claude/agents`
-    // anyway. Without this the fallback run's agents survive the reset and the next run writes
-    // over them.
-    const { dirs, entries } = collectWrittenCliContent([], [], MANIFEST);
-
-    expect([...dirs].sort()).toEqual(['.claude/agents', '.claude/skills']);
-    expect(entries.has('.claude/agents/code-reviewer.md')).toBe(true);
-    expect(entries.has('.claude/agents/README.md')).toBe(true);
-  });
-
-  it('reads the agents dirs a run recorded, and claims the manifest ids in them', async () => {
+  it('claims the files 07 wrote, and nothing it skipped', async () => {
+    // `overwrite` defaults to false, so `writeIfAllowed` SKIPS a pre-existing file — a user's own
+    // `code-reviewer.toml` is one a successful apply deliberately left alone. Claiming it by id
+    // would exempt it from the quarantine and delete it with the directory.
     const { dirs, entries } = collectWrittenCliContent(
-      [
-        {
-          stepId: '07-generate-files',
-          detectOutput: { agentTargets: [{ dir: '.codex/agents' }] },
-          output: null,
-        },
-      ],
+      wrote('.codex/agents/test-writer.toml', '.codex/agents/README.md'),
       [],
-      MANIFEST,
     );
 
     expect(dirs.has('.codex/agents')).toBe(true);
-    // Codex agents are TOML, and the extension comes from the catalog rather than the payload.
     expect(entries.has('.codex/agents/test-writer.toml')).toBe(true);
-    expect(entries.has('.codex/agents/mine.toml')).toBe(false);
+    expect(entries.has('.codex/agents/README.md')).toBe(true);
+    expect(entries.has('.codex/agents/code-reviewer.toml')).toBe(false);
   });
 
-  it('reads the skills dirs and ids 09_5 mirrored into', async () => {
+  it('claims the fallback write and an agent with no manifest id', async () => {
+    // With only amp enabled, `agentTargets` is EMPTY and 07 writes to `.claude/agents` anyway;
+    // an LLM-discovered custom agent has no manifest id at all. Both are in `wroteFiles`.
+    const { dirs, entries } = collectWrittenCliContent(
+      wrote('.claude/agents/discovered-persona.md', '.claude/workflow-config.json'),
+      [],
+    );
+
+    expect(dirs.has('.claude/agents')).toBe(true);
+    expect(entries.has('.claude/agents/discovered-persona.md')).toBe(true);
+    // A path outside the catalog contributes nothing.
+    expect(dirs.has('.claude')).toBe(false);
+  });
+
+  it('claims the skills 09_5 mirrored and the index beside them', async () => {
     const { dirs, entries } = collectWrittenCliContent(
       [
         {
           stepId: '09_5-skill-generation',
-          detectOutput: null,
           output: { written: [{ id: 'repo-conventions', mirroredDirs: ['.agents/skills'] }] },
         },
       ],
-      [],
       [],
     );
 
     expect(dirs.has('.agents/skills')).toBe(true);
     // A generated skill is a DIRECTORY, `<dir>/<id>/SKILL.md`, so the entry is the id.
     expect(entries.has('.agents/skills/repo-conventions')).toBe(true);
+    // 09_5 rebuilds the index every pass; unclaimed it would be quarantined out of its own dir.
+    expect(entries.has('.agents/skills/README.md')).toBe(true);
   });
 
   it('claims the entry that contains a deeper artifact path', async () => {
     const { dirs, entries } = collectWrittenCliContent(
       [],
       [{ diskPath: '.grok/skills/bundled-thing/SKILL.md' }],
-      [],
     );
 
     expect(dirs.has('.grok/skills')).toBe(true);
@@ -230,17 +230,14 @@ describe('collectWrittenCliContent', () => {
     // These are stored JSON written by an older Haive, not a typed contract.
     const { dirs } = collectWrittenCliContent(
       [
-        {
-          stepId: '07-generate-files',
-          detectOutput: { agentTargets: [{ dir: '../etc' }, { dir: 42 }, null] },
-          output: null,
-        },
+        { stepId: '07-generate-files', output: { wroteFiles: ['../etc/passwd', 42, null] } },
+        { stepId: '07-generate-files', output: null },
+        { stepId: '09_5-skill-generation', output: { written: [{ mirroredDirs: 'nope' }] } },
       ],
       [],
-      MANIFEST,
     );
 
-    expect([...dirs].sort()).toEqual(['.claude/agents', '.claude/skills']);
+    expect([...dirs]).toEqual([]);
   });
 });
 
