@@ -1461,6 +1461,13 @@ export function classifyResetFailure(err: unknown): { reason: string; io: boolea
   return code === undefined ? null : { reason: code, io: true };
 }
 
+/** A `Database` or the transaction handle its callback receives. The reset's two closing writes
+ *  run inside one transaction, so the helper between them has to accept either. Mirrors the alias
+ *  in `lib/cancel-task.ts` and `routes/tasks/steps.ts`; a tx handle is NOT assignable from
+ *  `Database`, so the union is required rather than cosmetic. */
+type ResetDbOrTx =
+  ReturnType<typeof getDb> | Parameters<Parameters<ReturnType<typeof getDb>['transaction']>[0]>[0];
+
 /**
  * Which artifact rows a reset must leave live, given the paths it left alone.
  *
@@ -1507,7 +1514,7 @@ export function resolveKeptArtifactPaths(livePaths: string[], skippedPaths: stri
  * database, so dropping the `notInArray` fails nothing there.
  */
 export async function supersedeResetArtifacts(
-  db: ReturnType<typeof getDb>,
+  db: ResetDbOrTx,
   repositoryId: string,
   keptPaths: string[],
 ): Promise<void> {
@@ -2333,20 +2340,27 @@ async function runOnboardingArtifactReset(
   // `12-post-onboarding` supersedes the paths it is about to insert before inserting them, the
   // same defensive shape `02-upgrade-apply` uses, so these survivors cannot collide with the
   // (repository_id, disk_path) WHERE superseded_at IS NULL unique index on a re-onboarding.
-  await supersedeResetArtifacts(
-    db,
-    id,
-    resolveKeptArtifactPaths(
-      live.map((row) => row.diskPath),
-      [...new Set(skipped.map((s) => s.path))],
-    ),
-  );
-  // The completion stamp cannot outlive the files it vouches for: this is the "start over"
-  // action, and a repo whose artifacts are gone is not onboarded however it got marked.
-  await db
-    .update(schema.repositories)
-    .set({ onboardedAt: null, onboardingResetAt: resetStartedAt, updatedAt: new Date() })
-    .where(eq(schema.repositories.id, id));
+  // ONE transaction for both, the same reason `12-post-onboarding` needs one: retiring the rows
+  // and stamping the epoch are halves of a single claim about this repository. A supersede that
+  // committed alone would leave the rows gone with NO epoch, and the next reset would then read
+  // exactly the pre-reset provenance the epoch exists to exclude — able to claim a file the user
+  // recreated by hand at a path an old run once wrote.
+  await db.transaction(async (tx) => {
+    await supersedeResetArtifacts(
+      tx,
+      id,
+      resolveKeptArtifactPaths(
+        live.map((row) => row.diskPath),
+        [...new Set(skipped.map((s) => s.path))],
+      ),
+    );
+    // The completion stamp cannot outlive the files it vouches for: this is the "start over"
+    // action, and a repo whose artifacts are gone is not onboarded however it got marked.
+    await tx
+      .update(schema.repositories)
+      .set({ onboardedAt: null, onboardingResetAt: resetStartedAt, updatedAt: new Date() })
+      .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
+  });
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 }
 
