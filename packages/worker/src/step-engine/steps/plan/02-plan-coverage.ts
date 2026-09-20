@@ -35,6 +35,7 @@ import type { PlanInputsApply } from './00-plan-inputs.js';
 import { uploadsInputRel } from './_plan-inputs.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
+import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 
 /**
@@ -621,12 +622,11 @@ async function foldCoverageResults(
         );
       }
       if (applied.strippedCodeLinks.length > 0) {
-        // Logged, not stamped: no op was lost, and a PARTIAL stamp would list the
-        // node as a structural gap.
         ctx.logger.warn(
           { agentId: result.agentId, strippedCodeLinks: applied.strippedCodeLinks },
           'coverage agent code links stripped',
         );
+        await recordCodeLinksDropped(ctx, result.agentId, applied.strippedCodeLinks);
       }
     } catch (err) {
       hadFailure = true;

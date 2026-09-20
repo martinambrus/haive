@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { planBuildStep } from './01-plan-build.js';
+import { CODE_LINKS_DROPPED } from './_plan-events.js';
 import { applyAgentPatch } from './_plan-prompt.js';
 import { MiningRetryError } from '../../step-definition.js';
 
@@ -44,7 +45,27 @@ describe('plan build wave re-roll', () => {
     rawOutput: null,
     errorMessage: null,
   };
-  const db = { update: () => ({ set: () => ({ where: () => Promise.resolve() }) }) };
+  // Records what the fold writes: stamps go through update(), the dropped-link
+  // event through insert().
+  const writes: { stamps: number; events: Record<string, unknown>[] } = { stamps: 0, events: [] };
+  const db = {
+    update: () => ({
+      set: () => {
+        writes.stamps += 1;
+        return { where: () => Promise.resolve() };
+      },
+    }),
+    insert: () => ({
+      values: async (row: Record<string, unknown>) => {
+        writes.events.push(row);
+      },
+    }),
+  };
+
+  beforeEach(() => {
+    writes.stamps = 0;
+    writes.events = [];
+  });
 
   const foldOneAgentWave = () =>
     planBuildStep
@@ -83,6 +104,39 @@ describe('plan build wave re-roll', () => {
     expect(err).not.toBeInstanceOf(MiningRetryError);
     // Past the re-roll: the fixture's empty plan is what stops it next.
     expect((err as Error).message).toContain('did not produce a root node');
+  });
+
+  it('records dropped code links as a task event, and stamps nothing', async () => {
+    const link =
+      "code link dropped from 'kid': repoPath: Invalid input: expected string, received undefined";
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce({
+      created: ['c'],
+      updated: [],
+      deleted: [],
+      linked: 0,
+      unlinked: 0,
+      codeLinked: 0,
+      refs: { kid: 'c' },
+      dropped: [],
+      strippedCodeLinks: Array.from({ length: 7 }, () => link),
+    });
+    await foldOneAgentWave();
+    // A stamp would make coverage offer a repair agent for a lost annotation.
+    expect(writes.stamps).toBe(0);
+    expect(writes.events).toHaveLength(1);
+    expect(writes.events[0]).toMatchObject({
+      taskId: 't',
+      taskStepId: 's',
+      eventType: CODE_LINKS_DROPPED,
+    });
+    const payload = writes.events[0]!.payload as {
+      agentId: string;
+      count: number;
+      sample: string[];
+    };
+    expect(payload).toMatchObject({ agentId: agent.agentId, count: 7 });
+    // The count carries the scale; the sample carries the shape.
+    expect(payload.sample).toHaveLength(5);
   });
 
   it('still re-rolls a one-agent wave whose reply wrote nothing', async () => {
