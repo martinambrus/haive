@@ -404,10 +404,13 @@ export default function NewTaskPage() {
   async function handleResetOnboarding() {
     if (!repositoryId) return;
     const confirmed = window.confirm(
-      'This will permanently remove onboarding artifacts from the repository so onboarding can run again:\n' +
-        '  • delete .claude/ and .ripgreprc\n' +
+      'This will permanently remove onboarding artifacts from the repository root so onboarding can run again:\n' +
+        '  • delete every CLI agents and skills directory Haive writes (.claude, .codex, .gemini, .grok, .agents)\n' +
+        '  • delete the rest of .claude/, the knowledge base and learnings, .ripgreprc and .haive/install.json\n' +
         '  • strip haive-managed blocks from AGENTS.md, CLAUDE.md, and GEMINI.md (file removed if empty after)\n\n' +
-        'User-authored content outside those marker blocks is preserved. This cannot be undone. Continue?',
+        'Kept: .claude/mcp_settings.json, any *-legacy agents directory, and a settings.json that does not\n' +
+        'match what Haive wrote. Nested directories inside subfolders are untouched, and so is user-authored\n' +
+        'content outside the marker blocks. This cannot be undone. Continue?',
     );
     if (!confirmed) return;
     setResetting(true);

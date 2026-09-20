@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, desc, ne, notInArray, sql } from 'drizzle-orm';
+import { eq, and, desc, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   isPathContainmentError,
@@ -37,6 +37,8 @@ import {
   updateRepoExclusionsRequestSchema,
   CLI_PROVIDER_LIST,
   HAIVE_DATA_DIR,
+  normalizeContent,
+  sha256Hex,
   type ArchiveFormat,
 } from '@haive/shared';
 import { buildScopeTree } from '@haive/shared/scope-tree';
@@ -66,6 +68,7 @@ import {
   resolveOnboardingVerdict,
 } from '../lib/onboarding-state.js';
 import { createRepoArchiveStream } from '../lib/repo-archive.js';
+import { inventoryDirsFromCatalog } from '../lib/tool-inventory.js';
 
 function maxUploadBytes(): number {
   const raw = process.env.MAX_UPLOAD_BYTES;
@@ -873,8 +876,44 @@ export async function checkOnboardingMarkers(
   };
 }
 
-const ONBOARDING_RESET_DIRS = ['.claude', KB_DIR, LEARNINGS_DIR];
-const ONBOARDING_RESET_FILES = ['.ripgreprc'];
+/** Every directory onboarding fills with agents or skills, plus Haive's own knowledge dirs.
+ *
+ *  DERIVED from the provider catalog for the reason `getScaffoldEntries` gives: a hardcoded list
+ *  silently stops matching the day a CLI is added. This one HAD — it was `['.claude', KB_DIR,
+ *  LEARNINGS_DIR]` from when `.claude` was the only CLI directory, so a reset left the previous
+ *  run's agents and skills on disk for every other CLI and the next run wrote on top of them.
+ *
+ *  Exact directories, never their first segment: `.codex` and `.gemini` also hold files Haive
+ *  never wrote. `inventoryDirsFromCatalog` already excludes the `-legacy` quarantine siblings,
+ *  which is what keeps the user's own agent definitions (07 MOVES them there) out of a reset. */
+function onboardingResetDirs(): string[] {
+  const dirs = new Set<string>([KB_DIR, LEARNINGS_DIR]);
+  for (const entry of inventoryDirsFromCatalog()) dirs.add(entry.dir);
+  return [...dirs];
+}
+
+/** `.haive/` is the git-excluded dir; only this one file in it is onboarding's. */
+const INSTALL_MANIFEST_PATH = '.haive/install.json';
+const ONBOARDING_RESET_FILES = ['.ripgreprc', INSTALL_MANIFEST_PATH];
+
+/** The one directory swept entry by entry rather than removed whole: `.claude` holds Haive's
+ *  workflow config, commands and review files beside things Haive must not take back. */
+const ONBOARDING_SWEEP_DIR = '.claude';
+
+/** rtk's two settings files. Haive writes them, but `writeIfAllowed` SKIPS a file that already
+ *  exists (`07-generate-files.ts:789`), so the one on disk may be the user's own — a stored
+ *  `written_hash` is the only evidence either way, so provenance decides per file. */
+const ONBOARDING_SETTINGS_FILES = ['.claude/settings.json', '.gemini/settings.json'];
+
+/** Kept by a sweep although it sits in a directory Haive otherwise owns: `mcp_settings.json` is
+ *  created once and never rewritten (`isUserOwnedAfterWrite`), and a `*-legacy` directory holds
+ *  the agent definitions the user already had, which 07 moved aside rather than deleting. */
+function keptSweepReason(name: string): string | null {
+  if (name === 'mcp_settings.json') return 'user-owned after its first write';
+  if (name.endsWith('-legacy')) return 'quarantined agents you had before onboarding';
+  return null;
+}
+
 const ONBOARDING_RULES_FILES = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
 const HAIVE_MARKER_PAIRS: Array<[string, string]> = [
   ['<!-- haive:project-info -->', '<!-- /haive:project-info -->'],
@@ -912,6 +951,117 @@ export async function stripHaiveContent(
   }
   await writeFileNoFollow(root, rel, cleaned + '\n');
   return { changed: true, deleted: false };
+}
+
+export interface OnboardingResetOutcome {
+  removed: string[];
+  cleaned: string[];
+  /** What the reset left alone, and why. Kept files and refused links share this channel. */
+  skipped: Array<{ path: string; reason: string }>;
+}
+
+/**
+ * Take back what onboarding wrote to a repository, and nothing else.
+ *
+ * `writtenHashes` is the `written_hash` of every LIVE `onboarding_artifacts` row by disk path —
+ * the only evidence that a file Haive CAN write is one it DID write. It decides the settings
+ * files alone (see `ONBOARDING_SETTINGS_FILES`); everything else is decided by location.
+ *
+ * Exported beside `stripHaiveContent` and `checkOnboardingMarkers` so the filesystem half is
+ * testable without a request: the route adds only the row reads and the DB writes around it.
+ */
+export async function resetOnboardingArtifacts(
+  root: string,
+  writtenHashes: ReadonlyMap<string, string>,
+): Promise<OnboardingResetOutcome> {
+  const removed: string[] = [];
+  const cleaned: string[] = [];
+  const skipped: Array<{ path: string; reason: string }> = [];
+
+  // A refusal is a per-item outcome, not a floor: one linked directory must not discard the
+  // removal of the twenty beside it, and the reset says what it left alone instead of reporting
+  // a clean run over a path it never touched.
+  const guard = async (rel: string, run: () => Promise<void>): Promise<void> => {
+    try {
+      await run();
+    } catch (err) {
+      if (!isPathContainmentError(err)) throw err;
+      skipped.push({ path: rel, reason: err.reason });
+    }
+  };
+  // `repairPermissions` on every item, as the whole-`.claude` removal this replaced had: it fires
+  // only on EACCES/EPERM and only adds +0700 to the parent it already holds open, and a sweep of
+  // entries must not fail where a removal of the directory around them succeeded.
+  const remove = (rel: string, recursive: boolean): Promise<void> =>
+    guard(rel, async () => {
+      // The return value replaces a `pathExists` probe, and is strictly better evidence: the probe
+      // could pass and the entry be gone — or replaced by a link — before the delete ran.
+      if (await removeNoFollow(root, rel, { recursive, repairPermissions: true })) {
+        removed.push(rel);
+      }
+    });
+
+  // Settings first, so one the sweep must keep has its verdict before the sweep reaches it, and
+  // one it may take is already gone from the listing.
+  for (const rel of ONBOARDING_SETTINGS_FILES) {
+    await guard(rel, async () => {
+      const content = await readTextNoFollow(root, rel, { strict: true });
+      if (content === null) return;
+      const written = writtenHashes.get(rel);
+      if (written !== undefined && written === sha256Hex(normalizeContent(content))) {
+        if (await removeNoFollow(root, rel)) removed.push(rel);
+        return;
+      }
+      skipped.push({
+        path: rel,
+        reason:
+          written === undefined
+            ? 'not recorded as written by Haive'
+            : 'edited since Haive wrote it',
+      });
+    });
+  }
+
+  for (const rel of onboardingResetDirs()) await remove(rel, true);
+
+  // `.claude` is swept entry by entry rather than removed whole — see `keptSweepReason`. Strict,
+  // so a linked `.claude` is reported rather than read as an empty directory.
+  await guard(ONBOARDING_SWEEP_DIR, async () => {
+    const entries = await readdirNoFollow(root, ONBOARDING_SWEEP_DIR, { strict: true });
+    if (entries === null) return;
+    let kept = 0;
+    for (const entry of entries) {
+      const rel = `${ONBOARDING_SWEEP_DIR}/${entry.name}`;
+      const keep = keptSweepReason(entry.name);
+      if (keep !== null) {
+        kept += 1;
+        skipped.push({ path: rel, reason: keep });
+        continue;
+      }
+      // Still listed means the settings pass kept it, and reported why. The sweep must not
+      // overrule that verdict.
+      if (ONBOARDING_SETTINGS_FILES.includes(rel)) {
+        kept += 1;
+        continue;
+      }
+      await remove(rel, entry.isDirectory());
+    }
+    // Nothing of the user's in it: the directory goes too, as it always did.
+    if (kept === 0) await remove(ONBOARDING_SWEEP_DIR, true);
+  });
+
+  for (const rel of ONBOARDING_RESET_FILES) await remove(rel, false);
+
+  for (const rel of ONBOARDING_RULES_FILES) {
+    await guard(rel, async () => {
+      const result = await stripHaiveContent(root, rel);
+      if (result === null) return;
+      if (result.deleted) removed.push(rel);
+      else if (result.changed) cleaned.push(rel);
+    });
+  }
+
+  return { removed, cleaned, skipped };
 }
 
 /** The repo's on-disk root, or a 404/409 explaining why there isn't one.
@@ -1121,34 +1271,40 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   const db = getDb();
   const root = await resolveRepoRoot(db, userId, id);
 
-  const removed: string[] = [];
-  const cleaned: string[] = [];
-  const skipped: Array<{ path: string; reason: string }> = [];
+  // Read BEFORE the reset: these rows are what says whether a file Haive can write is one it
+  // wrote, and they are superseded below.
+  const live = await db
+    .select({
+      diskPath: schema.onboardingArtifacts.diskPath,
+      writtenHash: schema.onboardingArtifacts.writtenHash,
+    })
+    .from(schema.onboardingArtifacts)
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, id),
+        isNull(schema.onboardingArtifacts.supersededAt),
+      ),
+    );
 
-  for (const rel of ONBOARDING_RESET_DIRS) {
-    // The return value replaces the `pathExists` probe, and is strictly better evidence: the probe
-    // could pass and the entry be gone — or replaced by a link — before the delete ran.
-    if (await removeNoFollow(root, rel, { recursive: true, repairPermissions: true })) {
-      removed.push(rel);
-    }
-  }
-  for (const rel of ONBOARDING_RESET_FILES) {
-    if (await removeNoFollow(root, rel)) removed.push(rel);
-  }
-  for (const rel of ONBOARDING_RULES_FILES) {
-    // A refusal is a per-item outcome, not a floor: one linked rules file must not discard the
-    // strip of the two beside it, and the reset says what it left alone instead of reporting a
-    // clean run over a file it never touched.
-    try {
-      const result = await stripHaiveContent(root, rel);
-      if (result === null) continue;
-      if (result.deleted) removed.push(rel);
-      else if (result.changed) cleaned.push(rel);
-    } catch (err) {
-      if (!isPathContainmentError(err)) throw err;
-      skipped.push({ path: rel, reason: err.reason });
-    }
-  }
+  const { removed, cleaned, skipped } = await resetOnboardingArtifacts(
+    root,
+    new Map(live.map((row) => [row.diskPath, row.writtenHash])),
+  );
+
+  // Rows that name deleted files must not stay live: they feed the upgrade planner and the
+  // rollback, and `12-post-onboarding` inserts without conflict handling, so a re-onboarding
+  // would collide with the (repository_id, disk_path) WHERE superseded_at IS NULL unique index.
+  // Same defensive supersede as `02-upgrade-apply`. `applicableTemplateIds` is left alone — the
+  // next apply overwrites it, and with no live rows the banner already reads "not onboarded".
+  await db
+    .update(schema.onboardingArtifacts)
+    .set({ supersededAt: new Date() })
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, id),
+        isNull(schema.onboardingArtifacts.supersededAt),
+      ),
+    );
   // The completion stamp cannot outlive the files it vouches for: this is the "start over"
   // action, and a repo whose artifacts are gone is not onboarded however it got marked.
   await db

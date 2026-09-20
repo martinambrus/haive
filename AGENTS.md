@@ -1496,6 +1496,22 @@ it vouches for. `POST /repos/:id/mark-onboarded` is the manual route, for a run 
 the work and then failed at a late step (13-onboarding-push against a repo with no remote); it
 refuses when a marker is missing or a run is live.
 
+**That reset takes back what onboarding wrote, and nothing else** (`resetOnboardingArtifacts`).
+Its directories are DERIVED from the provider catalog, the same reason `getScaffoldEntries`
+gives: the hand list it replaced was `['.claude', KB_DIR, LEARNINGS_DIR]` from when `.claude`
+was the only CLI directory, so "start over" left the previous run's agents and skills on disk
+for every other CLI and the next run wrote on top of them. `.claude` is then swept entry by
+entry rather than removed whole, because three things in a directory Haive owns are not Haive's:
+`mcp_settings.json` (created once, never rewritten), any `*-legacy` quarantine (the user's own
+agent definitions, which 07 MOVED there), and a `settings.json` whose bytes do not match the
+live artifact row's `written_hash` — `writeIfAllowed` SKIPS an existing file, so that row is the
+only evidence Haive wrote the one on disk. Each kept file is REPORTED through the same `skipped`
+channel a refused link uses; the reset says what it left alone rather than passing it off as
+reset. The repo's live `onboarding_artifacts` rows are superseded in the same request, after
+those provenance reads: rows naming deleted files must not stay live, and `12-post-onboarding`
+inserts without conflict handling, so a re-onboarding would otherwise collide with the
+`(repository_id, disk_path) WHERE superseded_at IS NULL` unique index.
+
 Two consequences are refusals, and only two. A SECOND onboarding task on a repo that has a live
 one is a 409 at `POST /tasks` — two runs write the same `.claude/` files, the same KB and the
 same scope list, so it is a corruption path rather than a queue. Everything else stays the
