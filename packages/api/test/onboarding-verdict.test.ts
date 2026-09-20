@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
+  hasArtifactsSinceReset,
   type OnboardingTaskFacts,
 } from '../src/lib/onboarding-state.js';
 
@@ -158,15 +159,16 @@ describe('resolveOnboardingVerdict across a reset', () => {
 
   it('offers the manual override to a post-reset run that wrote its artifacts and then failed', () => {
     // THE case this route exists for, and the one a completion test can never express: the run
-    // reached 12-post-onboarding (so live artifact rows exist, which the reset had superseded)
-    // and then failed at 13-onboarding-push against a repo with no remote. It has no
+    // reached 12-post-onboarding (so it wrote artifact rows DATED AFTER the epoch — not merely
+    // live ones, see the partial-reset case below) and then failed at 13-onboarding-push against
+    // a repo with no remote. It has no
     // `completed_at` at all — a run that HAD one would already be stamped and never need the
     // button, which is how requiring one made the hatch dead on every reset repository.
     const v = resolveOnboardingVerdict({
       missing: ALL_PRESENT,
       onboardedAt: null,
       onboardingResetAt: RESET_AT,
-      hasLiveArtifacts: true,
+      hasArtifactsSinceReset: true,
       facts: facts({ hasAny: true }),
     });
     expect(v.canMarkOnboarded).toBe(true);
@@ -181,7 +183,27 @@ describe('resolveOnboardingVerdict across a reset', () => {
       missing: ALL_PRESENT,
       onboardedAt: null,
       onboardingResetAt: RESET_AT,
-      hasLiveArtifacts: false,
+      hasArtifactsSinceReset: false,
+      facts: facts({ hasAny: true }),
+    });
+    expect(v.canMarkOnboarded).toBe(false);
+  });
+
+  it('does not count artifact rows a PARTIAL reset preserved', () => {
+    // The trap `hasArtifactsSinceReset` exists for. A partial reset keeps the live rows for the
+    // paths it could not remove, so rows predating the epoch legitimately survive un-superseded —
+    // and its markers survive by the same token. Reading "a live row exists" as "a run happened
+    // since the reset" would hand back the stamp with no run at all, which is the hazard the
+    // guard was written for in the first place.
+    expect(hasArtifactsSinceReset(BEFORE, RESET_AT)).toBe(false);
+    expect(hasArtifactsSinceReset(AFTER, RESET_AT)).toBe(true);
+    expect(hasArtifactsSinceReset(undefined, RESET_AT)).toBe(false);
+
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      hasArtifactsSinceReset: hasArtifactsSinceReset(BEFORE, RESET_AT),
       facts: facts({ hasAny: true }),
     });
     expect(v.canMarkOnboarded).toBe(false);

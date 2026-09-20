@@ -71,7 +71,8 @@ import {
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
-  loadRepositoriesWithLiveArtifacts,
+  loadNewestLiveArtifactAt,
+  hasArtifactsSinceReset,
 } from '../lib/onboarding-state.js';
 import { createRepoArchiveStream } from '../lib/repo-archive.js';
 import { inventoryDirsFromCatalog } from '../lib/tool-inventory.js';
@@ -184,7 +185,7 @@ repoRoutes.get('/', async (c) => {
   // Which repositories still hold live artifact rows, so a reset repo whose re-run failed at a
   // late step offers the manual button here too. Without it the list and the detail page would
   // disagree about whether the button exists.
-  const withLiveArtifacts = await loadRepositoriesWithLiveArtifacts(
+  const newestArtifactAt = await loadNewestLiveArtifactAt(
     db,
     userId,
     rows.map((r) => r.id),
@@ -215,7 +216,10 @@ repoRoutes.get('/', async (c) => {
             missing: markers.missing,
             onboardedAt: repo.onboardedAt,
             onboardingResetAt: repo.onboardingResetAt,
-            hasLiveArtifacts: withLiveArtifacts.has(repo.id),
+            hasArtifactsSinceReset: hasArtifactsSinceReset(
+              newestArtifactAt.get(repo.id),
+              repo.onboardingResetAt,
+            ),
             facts: onboardingFacts.get(repo.id) ?? NO_ONBOARDING_TASKS,
           })
         : null;
@@ -2116,7 +2120,10 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
     missing,
     onboardedAt: repo.onboardedAt,
     onboardingResetAt: repo.onboardingResetAt,
-    hasLiveArtifacts: (await loadRepositoriesWithLiveArtifacts(db, userId, [id])).has(id),
+    hasArtifactsSinceReset: hasArtifactsSinceReset(
+      (await loadNewestLiveArtifactAt(db, userId, [id])).get(id),
+      repo.onboardingResetAt,
+    ),
     facts,
   });
   return c.json({
@@ -2198,7 +2205,10 @@ async function markRepositoryOnboarded(
   // requirement: the run this route exists for failed at a late step and has no `completed_at`,
   // while one that completed was already stamped from `markTaskCompleted` and never gets here.
   // A live artifact row is what says a run reached step 12 since the reset.
-  const artifactsSinceReset = (await loadRepositoriesWithLiveArtifacts(db, userId, [id])).has(id);
+  const artifactsSinceReset = hasArtifactsSinceReset(
+    (await loadNewestLiveArtifactAt(db, userId, [id])).get(id),
+    resetAt,
+  );
   if (resetAt !== null && !completedSinceReset && !artifactsSinceReset) {
     throw new HttpError(
       409,

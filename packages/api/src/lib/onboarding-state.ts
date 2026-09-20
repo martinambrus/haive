@@ -20,26 +20,36 @@ export const LIVE_TASK_STATUSES = [
 ] as const;
 
 /**
- * The repositories among `repositoryIds` that still hold at least one LIVE `onboarding_artifacts`
- * row.
+ * The newest `generated_at` among the LIVE `onboarding_artifacts` rows of each repository.
  *
- * Only `12-post-onboarding` inserts those rows and a reset supersedes every one of them, so a
- * live row means a run reached step 12 of 27 since the last reset. That is the evidence
- * `mark-onboarded` needs and a completion date cannot give it: the run it exists for failed at a
- * LATER step and therefore has no `completed_at` at all.
+ * Only `12-post-onboarding` inserts those rows, so this dates the last time a run reached step 12
+ * of 27 — the evidence `mark-onboarded` needs and a completion date cannot give it, since the run
+ * that route exists for failed at a LATER step and has no `completed_at` at all.
+ *
+ * A LIVE row is NOT on its own evidence of a run since the reset, which is the trap here: a
+ * PARTIAL reset deliberately preserves the rows for paths it could not remove
+ * (`resolveKeptArtifactPaths`), so rows predating the epoch legitimately survive un-superseded.
+ * Reading their mere existence as "a run reached step 12 since the reset" would let a partial
+ * reset — whose markers also survive, by definition — hand back the stamp with no run at all.
+ * The caller compares this date against that repository's own epoch; the timestamp is returned
+ * rather than a boolean so the comparison happens where the epoch already is, instead of as a
+ * per-repository predicate inside one query.
  *
  * One query for the whole page, like `loadOnboardingTaskFacts` beside it.
  */
-export async function loadRepositoriesWithLiveArtifacts(
+export async function loadNewestLiveArtifactAt(
   db: Database,
   userId: string,
   repositoryIds: string[],
-): Promise<Set<string>> {
-  const found = new Set<string>();
-  if (repositoryIds.length === 0) return found;
+): Promise<Map<string, Date>> {
+  const newest = new Map<string, Date>();
+  if (repositoryIds.length === 0) return newest;
 
   const rows = await db
-    .selectDistinct({ repositoryId: schema.onboardingArtifacts.repositoryId })
+    .select({
+      repositoryId: schema.onboardingArtifacts.repositoryId,
+      generatedAt: schema.onboardingArtifacts.generatedAt,
+    })
     .from(schema.onboardingArtifacts)
     .where(
       and(
@@ -49,8 +59,25 @@ export async function loadRepositoriesWithLiveArtifacts(
       ),
     );
 
-  for (const row of rows) if (row.repositoryId) found.add(row.repositoryId);
-  return found;
+  for (const row of rows) {
+    if (!row.repositoryId || row.generatedAt === null) continue;
+    const seen = newest.get(row.repositoryId);
+    if (seen === undefined || row.generatedAt > seen) newest.set(row.repositoryId, row.generatedAt);
+  }
+  return newest;
+}
+
+/** Whether a repository holds artifact rows written AFTER its reset epoch — the one reading of
+ *  `loadNewestLiveArtifactAt` that is safe, shared so the list route, the status route and
+ *  `mark-onboarded` cannot drift apart on it. */
+export function hasArtifactsSinceReset(
+  newestArtifactAt: Date | undefined,
+  onboardingResetAt: Date | null,
+): boolean {
+  if (newestArtifactAt === undefined) return false;
+  // Never reset: there is no epoch to be after, and nothing consults this in that case anyway.
+  if (onboardingResetAt === null) return true;
+  return newestArtifactAt > onboardingResetAt;
 }
 
 /** What the tasks table knows about onboarding for one repository. */
@@ -173,16 +200,17 @@ export function resolveOnboardingVerdict(input: {
   onboardedAt: Date | null;
   /** `repositories.onboarding_reset_at`. Null on every repo nobody has reset. */
   onboardingResetAt?: Date | null;
-  /** Whether any LIVE `onboarding_artifacts` row exists for this repository. A reset supersedes
-   *  every row, and only `12-post-onboarding` writes them, so a live row is proof that a run got
-   *  through step 12 of 27 SINCE the reset. Omitted defaults to false, which is exactly the
-   *  behaviour before this existed. */
-  hasLiveArtifacts?: boolean;
+  /** Whether this repository holds artifact rows written AFTER its reset epoch — from
+   *  `hasArtifactsSinceReset`, never from the mere existence of a live row, which a PARTIAL reset
+   *  preserves for the paths it could not remove. Only `12-post-onboarding` writes them, so one
+   *  dated after the epoch is proof a run reached step 12 of 27 since the reset. Omitted defaults
+   *  to false, which is exactly the behaviour before this existed. */
+  hasArtifactsSinceReset?: boolean;
   facts: OnboardingTaskFacts;
 }): OnboardingVerdict {
   const { missing, onboardedAt, facts } = input;
   const onboardingResetAt = input.onboardingResetAt ?? null;
-  const hasLiveArtifacts = input.hasLiveArtifacts ?? false;
+  const hasArtifactsSinceReset = input.hasArtifactsSinceReset ?? false;
   const markersPresent = missing.length === 0;
   const inProgressTaskId = facts.liveTaskId;
 
@@ -215,7 +243,8 @@ export function resolveOnboardingVerdict(input: {
   // and only `12-post-onboarding` writes them, so a live one means a run reached step 12 of 27
   // SINCE the reset — which is what "did the work" means here. A repo whose markers are merely
   // leftovers the reset could not remove has no such row and is still refused.
-  const resetUnanswered = onboardingResetAt !== null && !completedSinceReset && !hasLiveArtifacts;
+  const resetUnanswered =
+    onboardingResetAt !== null && !completedSinceReset && !hasArtifactsSinceReset;
 
   return {
     onboarded,
