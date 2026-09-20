@@ -814,6 +814,58 @@ describe('acquireRootClaim', () => {
     expect(await acquiring).toBeNull();
   });
 
+  it('records a takeover DISCOVERED during release, not only one seen by a renewal', async () => {
+    // `lost` used to be set only in `renewOnce`. But if the event loop is blocked past the stale
+    // window, another writer claims the row before the renewal timer runs again and the RELEASE
+    // is the first thing to find out — at which point it cleared its local state and answered
+    // `lost() === false`, so `withRootClaim` and the reset handler both omitted the one warning
+    // that two writers touched the same tree.
+    vi.useFakeTimers();
+    const writes: Recorded[] = [];
+    const db = {
+      update: () => ({
+        set: (values: { rootClaimedAt: Date | null }) => ({
+          where: () => {
+            const first = writes.length === 0;
+            let settle!: () => void;
+            const gate = new Promise<void>((resolve) => {
+              settle = resolve;
+            });
+            writes.push({ stamp: values.rootClaimedAt, settle });
+            return {
+              returning: async () => {
+                await gate;
+                // The claim lands; the later clear runs cleanly and matches nothing, because the
+                // row now carries somebody else's stamp.
+                return first ? [{ id: 'repo-1' }] : [];
+              },
+            };
+          },
+        }),
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [{ claimedAt: new Date('2030-01-01T00:00:00Z'), owner: 'other' }],
+          }),
+        }),
+      }),
+    } as unknown as Database;
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'reset');
+    writes[0]!.settle();
+    const handle = await acquiring;
+    expect(handle!.lost()).toBe(false);
+
+    const releasing = handle!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    writes.at(-1)!.settle();
+    await releasing;
+
+    // The release learned it, so the caller can report it.
+    expect(handle!.lost()).toBe(true);
+  });
+
   it('never runs two renewals at once', async () => {
     vi.useFakeTimers();
     const { db, writes } = fakeDb();

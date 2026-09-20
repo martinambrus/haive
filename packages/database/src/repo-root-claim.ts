@@ -286,10 +286,36 @@ type ReleaseOutcome =
   /** The row still carries the stamp we tried to clear, so that write did NOT commit. Retryable,
    *  and the only outcome that is — every other one is settled. */
   | 'still-ours'
-  /** The row carries a different stamp, so this stamp is not what holds it. */
+  /** The row carries SOMEBODY ELSE'S stamp. Established, so it is not merely "this stamp did not
+   *  match": it means the lease was taken over while we held it, which is the one thing the
+   *  caller must be able to report. Kept distinct from `not-ours` because collapsing them loses
+   *  exactly that — an unmatched clear alone cannot tell a free row from a stolen one. */
+  | 'taken-over'
+  /** This stamp is not what holds the row, and nothing more was established. */
   | 'not-ours'
   /** The read failed as well, so nothing is established. */
   | 'unknown';
+
+/** Classify the row for a clear that matched nothing. A conditional UPDATE that runs cleanly and
+ *  affects no rows says only "not this stamp"; whether the row is free or held by another writer
+ *  is the difference between a normal finish and two writers on one tree, and only a read can
+ *  tell them apart. Reached only on the exceptional path — a release that clears normally never
+ *  runs this. */
+async function classifyUnmatchedClear(
+  db: Database | DbHandle,
+  repositoryId: string,
+): Promise<ReleaseOutcome> {
+  try {
+    const rows = await db
+      .select({ claimedAt: schema.repositories.rootClaimedAt })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .limit(1);
+    return (rows[0]?.claimedAt ?? null) === null ? 'free' : 'taken-over';
+  } catch {
+    return 'not-ours';
+  }
+}
 
 async function releaseReconciled(
   db: Database | DbHandle,
@@ -297,7 +323,8 @@ async function releaseReconciled(
   claimedAt: Date,
 ): Promise<ReleaseOutcome> {
   try {
-    return (await releaseRepositoryRoot(db, repositoryId, claimedAt)) ? 'free' : 'not-ours';
+    if (await releaseRepositoryRoot(db, repositoryId, claimedAt)) return 'free';
+    return classifyUnmatchedClear(db, repositoryId);
   } catch {
     try {
       const rows = await db
@@ -311,7 +338,7 @@ async function releaseReconciled(
       // release error left a finished job holding the repository for the rest of the window: the
       // ordinary case has no other candidates to fall through to, so a single `false` ended the
       // release having cleared nothing.
-      return onRow.getTime() === claimedAt.getTime() ? 'still-ours' : 'not-ours';
+      return onRow.getTime() === claimedAt.getTime() ? 'still-ours' : 'taken-over';
     } catch {
       return 'unknown';
     }
@@ -588,7 +615,13 @@ export async function acquireRootClaim(
       // commit, and giving up there leaves a finished job holding the repository for the rest of
       // the window. `unknown` is retried too: nothing was established, and a conditional clear
       // that turns out to be unnecessary is a harmless no-op.
-      const cleared = (await releaseWithRetry(db, repositoryId, current)) === 'free';
+      const primary = await releaseWithRetry(db, repositoryId, current);
+      // A takeover can be LEARNED here, not only in `renewOnce`: if the event loop was blocked
+      // past the stale window, another writer claimed the row before the renewal timer ran again,
+      // and this release is the first thing to find out. Without recording it, `lost()` answers
+      // false and the callers omit the only warning that two writers touched the same tree.
+      if (primary === 'taken-over') lost = true;
+      const cleared = primary === 'free';
       // `current` may be a GUESS: when a renewal's acknowledgement and its read-back both failed,
       // we kept the old stamp while the row may hold the one that write left behind. A release
       // matching nothing is exactly that case, and it is the COMMON one — a job that finishes
@@ -602,7 +635,9 @@ export async function acquireRootClaim(
         // working on it. Each clear is conditional, so at most one can match and the rest are
         // no-ops against a row that has already been cleared.
         for (const candidate of candidates.list()) {
-          if ((await releaseWithRetry(db, repositoryId, candidate)) === 'free') break;
+          const outcome = await releaseWithRetry(db, repositoryId, candidate);
+          if (outcome === 'taken-over') lost = true;
+          if (outcome === 'free') break;
         }
       }
       candidates.clear();

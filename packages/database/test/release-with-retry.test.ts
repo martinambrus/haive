@@ -62,20 +62,32 @@ describe('releaseWithRetry', () => {
     expect(state.attempts).toBe(3);
   });
 
-  it('does not retry a settled answer', async () => {
-    // A clean no-match means the row does not carry this stamp. Retrying would match nothing
-    // again, so one attempt is the whole of it.
-    const { db, state } = fakeDb(['miss'], STAMP);
-    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('not-ours');
+  it('reports a row that is already free, without retrying', async () => {
+    // A clean no-match over an empty row: somebody freed it, nothing left to do, and nothing was
+    // taken from us.
+    const { db, state } = fakeDb(['miss'], null);
+    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('free');
     expect(state.attempts).toBe(1);
   });
 
-  it('stops at a foreign stamp rather than hammering someone else claim', async () => {
-    // The write failed, but the row is held by a DIFFERENT stamp — settled, and not ours to
-    // clear. Retrying would be pointless at best.
+  it('reports a TAKEOVER when a clean no-match finds a foreign stamp', async () => {
+    // The distinction the caller needs and an unmatched clear cannot give on its own. If the
+    // event loop was blocked past the stale window, another writer claimed the row before the
+    // renewal timer ran again, and this release is the first thing to learn it — so the outcome
+    // has to say "taken over" rather than merely "not this stamp", or `lost()` answers false and
+    // the only warning that two writers touched the tree is never emitted.
+    const other = new Date('2030-01-01T00:00:00Z');
+    const { db, state } = fakeDb(['miss'], other);
+    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('taken-over');
+    expect(state.attempts).toBe(1);
+  });
+
+  it('reports a takeover found by the read-back after a failed clear, without retrying', async () => {
+    // The write failed AND the row is held by a different stamp: settled, not ours to clear, and
+    // established as a takeover. Retrying would be pointless at best.
     const other = new Date('2030-01-01T00:00:00Z');
     const { db, state } = fakeDb(['throw'], other);
-    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('not-ours');
+    expect(await releaseWithRetry(db, 'repo-1', STAMP)).toBe('taken-over');
     expect(state.attempts).toBe(1);
   });
 
