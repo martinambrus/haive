@@ -117,8 +117,12 @@ export async function releaseRepositoryRoot(
   db: Database | DbHandle,
   repositoryId: string,
   claimedAt?: Date,
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  // Whether it actually CLEARED anything. A conditional release that matches no row returns
+  // without error and looks exactly like success, which is how a holder can finish, report a
+  // clean release, and leave the repository claimed for the rest of the window. The caller needs
+  // to know so it can try the other stamp it may be holding.
+  const cleared = await db
     .update(schema.repositories)
     .set({ rootClaimedAt: null, rootClaimKind: null })
     .where(
@@ -128,7 +132,9 @@ export async function releaseRepositoryRoot(
             eq(schema.repositories.rootClaimedAt, claimedAt),
           )
         : eq(schema.repositories.id, repositoryId),
-    );
+    )
+    .returning({ id: schema.repositories.id });
+  return cleared.length > 0;
 }
 
 /**
@@ -318,7 +324,17 @@ export async function acquireRootClaim(
       // Let a pending renewal land first, so the stamp below is the one actually on the row.
       if (renewing !== null) await renewing.catch(() => undefined);
       if (current === null) return;
-      await releaseRepositoryRoot(db, repositoryId, current);
+      const cleared = await releaseRepositoryRoot(db, repositoryId, current);
+      // `current` may be a GUESS: when a renewal's acknowledgement and its read-back both failed,
+      // we kept the old stamp while the row may hold the one that write left behind. A release
+      // matching nothing is exactly that case, and it is the COMMON one — a job that finishes
+      // right after such a renewal would otherwise report a clean release and leave the
+      // repository claimed for the rest of the window. The renewal path already retries from the
+      // unproven stamp; this is the same rule on the path that actually ends the work.
+      if (!cleared && unproven !== null) {
+        await releaseRepositoryRoot(db, repositoryId, unproven);
+        unproven = null;
+      }
       current = null;
     },
   };

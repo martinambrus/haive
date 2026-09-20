@@ -377,6 +377,36 @@ describe('acquireRootClaim', () => {
     expect(handle!.lost()).toBe(false);
   });
 
+  it('releases using the unproven stamp when clearing the held one matches nothing', async () => {
+    // The half the renewal fix did not cover, and the likelier one: a job that FINISHES right
+    // after an unprovable renewal. `current` is then a guess, the conditional clear matches no
+    // row, and a release that matched nothing looks exactly like success — so the holder reports
+    // a clean finish and leaves the repository claimed for the rest of the window.
+    vi.useFakeTimers();
+    const { db, writes } = fakeDbUnprovenRenewal();
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'reset');
+    writes[0]!.settle();
+    const handle = await acquiring;
+
+    // Renewal 1: commits, loses its ack, and the read-back fails too.
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Release: the first clear (index 2) matches nothing, so a second clear must follow.
+    const before = writes.length;
+    const releasing = handle!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+    writes.at(-1)!.settle();
+    await releasing;
+
+    const clears = writes.slice(before).filter((w) => w.stamp === null);
+    expect(clears.length).toBe(2);
+  });
+
   it('never runs two renewals at once', async () => {
     vi.useFakeTimers();
     const { db, writes } = fakeDb();
