@@ -3,7 +3,9 @@
 > **DONE 2026-09-19, as built below.** `663ef973` makes a malformed code link cost the link, not
 > the reply. `38911203` makes the breadth guard count a `node:`-prefixed parent's children, and
 > `b9085ad4` makes a coverage repair see the node it repairs. `a9ec07e1` stops a partially applied
-> plan-build wave from being re-rolled; that loss was found beside these ones.
+> plan-build wave from being re-rolled; that loss was found beside these ones. **What this plan
+> recorded but left alone was then fixed on 2026-09-20** — `dac734bf`, `f304136e` and `cc789f2b` —
+> and the fourth item was dropped on its own measurement. See "Follow-ups" below.
 >
 > **Both designs this plan first leaned toward rested on wrong premises.** Each section corrects its
 > own:
@@ -124,8 +126,42 @@ The re-roll now counts only agents that wrote nothing.
   re-rolls on the dev install followed transient CLI failures.
 - **Test:** the new test fails on the old condition.
 
-**Noted, not fixed:** `applyAgentPatch`'s `retryable` flag retries nothing in any caller. Its only
-effect is the `plan patch rejected:` wording.
+## Follow-ups, done 2026-09-20
+
+Three of the four things this plan recorded but did not fix are now fixed, and the fourth is
+dropped on its own measurement.
+
+- **`dac734bf` — the dead retry translation is gone.** `applyAgentPatch` turned `invalid` into a
+  `RetryableParseError` that no caller could act on: plan-build and plan chat catch every apply
+  error themselves, coverage and sequencing asked for no retry, and plan chat declares no
+  `llm.retry`, so a rethrow would have failed the step rather than re-rolled it. MEASURED across
+  1,523 plan agent rows: no invalid patch at all besides the 2 fixed above. A stamp now reads
+  `plan patch not applied: plan patch failed validation: …`.
+- **`f304136e` — a stripped code link is reported, not just logged.** plan-build and coverage
+  record a `plan.code_links_dropped` task event with the agent id, the count and the first 5
+  entries. The Activity tab renders any event type, so no web change was needed. Still not the
+  mining stamp: its prefixes drive `findStructuralGaps` and `askedState`, and a stripped link
+  costs no op.
+- **`cc789f2b` — a section repair reads a bounded index.** Its plan listing was
+  `slice(0, 60_000)`, and `renderPlanMarkdown` spends 150-250 characters per node, so it stopped
+  around 300-400 nodes and could cut a `node:<uuid>` in half. The spec writer's depth ladder
+  (`steps/plan/_plan-index.ts`, moved out of 04-phase-0b so both steps share it) replaces it:
+  VERIFIED on a 507-node plan, a 10,446-character index, the reduction stated, and all 23 refs
+  whole. `CoverageDetect.planMarkdown` went with it — nothing read it, and it stored a full plan
+  render on every coverage step row.
+
+**DROPPED — the breadth guard ignoring a move.** An upsert that re-parents an existing node takes
+a child slot at its destination and the guard does not count it. MEASURED across 636 plan-build
+and coverage replies: 12 ops carry a uuid `nodeRef` and none of them carries a `parentRef`, in
+either key order. Agents do not move nodes, so a current-parent lookup would be built for a case
+that has never occurred. Re-run this if one ever shows up:
+
+```sql
+select ts.step_id, count(*) as move_ops
+from task_step_agent_minings m join task_steps ts on ts.id = m.task_step_id
+where m.raw_output ~ '\{[^{}]*"nodeRef"\s*:\s*"(node:)?[0-9a-f-]{36}"[^{}]*"parentRef"'
+group by 1;
+```
 
 ## Rollback
 
