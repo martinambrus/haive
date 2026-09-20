@@ -4,7 +4,7 @@ import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { isResetClaimLive, schema } from '@haive/database';
 import { isReadOnlyLocalRepo } from '@haive/shared';
 import {
   isPathContainmentError,
@@ -259,7 +259,19 @@ export async function openEditableKnowledgeFile(
 }
 
 /** 409 when the task's repository is read-only (mirrors the attachment upload
- *  route) — nothing may write into a user's own checkout. */
+ *  route) — nothing may write into a user's own checkout — or while an onboarding-artifact
+ *  reset is walking it.
+ *
+ *  The reset removes KB_DIR and LEARNINGS_DIR recursively and unconditionally, and those are
+ *  two of this route's three `EDITABLE_PREFIXES`. `resolveWorkspaceRoot` falls back to the
+ *  repository root for a task with no worktree, and this route has no live-task requirement at
+ *  all — deliberately, since its purpose is reviewing knowledge gates on failed and completed
+ *  tasks. One tab editing knowledge docs while another clicks "Re-run onboarding" is therefore
+ *  ordinary use, not a corner.
+ *
+ *  It is also the likeliest way to break the reset itself rather than merely lose an edit:
+ *  `removeChild`'s final rmdir rethrows everything but ENOENT/ENOTDIR, so a file created under
+ *  a directory being removed raises ENOTEMPTY mid-walk. */
 async function assertWritableRepo(
   db: ReturnType<typeof getDb>,
   repositoryId: string | null,
@@ -267,10 +279,16 @@ async function assertWritableRepo(
   if (!repositoryId) return;
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, repositoryId),
-    columns: { source: true, writable: true },
+    columns: { source: true, writable: true, onboardingResetClaimedAt: true },
   });
   if (repo && isReadOnlyLocalRepo(repo)) {
     throw new HttpError(409, 'This repository is read-only');
+  }
+  if (isResetClaimLive(repo?.onboardingResetClaimedAt)) {
+    throw new HttpError(
+      409,
+      'This repository is being reset. Wait for that to finish before editing its knowledge files.',
+    );
   }
 }
 
