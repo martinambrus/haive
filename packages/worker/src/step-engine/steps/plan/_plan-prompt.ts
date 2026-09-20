@@ -1,20 +1,14 @@
 import { PLAN_PATCH_MAX_OPS, planTaskProposalSchema, type PlanTaskProposal } from '@haive/shared';
-import {
-  PlanPatchError,
-  applyPlanPatch,
-  stripNodeRefPrefix,
-  type ApplyPlanPatchResult,
-} from '@haive/shared/plan';
+import { applyPlanPatch, stripNodeRefPrefix, type ApplyPlanPatchResult } from '@haive/shared/plan';
 import type { Database } from '@haive/database';
-import { RetryableParseError } from '../../step-definition.js';
 import { parseAgentJson } from '../workflow/_agent-json.js';
 
 /**
  * The one description of the patch contract every plan agent is given.
  *
  * Written once because three step sets emit it and a drifted copy would mean an
- * agent producing patches the applier rejects — which surfaces as a
- * RetryableParseError loop rather than an obvious error.
+ * agent producing patches the applier rejects — which surfaces as a lost reply
+ * rather than an obvious error.
  */
 export const PLAN_PATCH_CONTRACT = `## How to reply
 
@@ -267,14 +261,16 @@ export function conversationalReply(raw: unknown): string | null {
 }
 
 /**
- * Apply an agent's patch, translating the applier's typed refusal into the
- * runner's retry signal.
+ * Apply an agent's patch.
  *
- * `invalid` becomes a RetryableParseError because that is exactly what it means
- * here — the model emitted something the contract does not allow, and
- * re-prompting can fix it. `conflict` and `not_found` do NOT retry: the plan
- * moved under the agent, so the same reply would be rejected again, and the next
- * round will read the new state anyway.
+ * It used to translate the applier's `invalid` into a RetryableParseError, on
+ * the reasoning that a contract violation is worth re-prompting. Nothing ever
+ * acted on it: plan-build and plan chat catch it in their own apply(), coverage
+ * and sequencing asked for no retry, and plan chat declares no `llm.retry`, so a
+ * rethrow would have failed the step rather than re-rolled it. The translation
+ * only changed the wording of a stamp — and MEASURED across 1,523 plan agent
+ * rows, the only invalid patches were the 2 whose code links are now stripped.
+ * A step that wants a re-roll has MiningRetryError, which the runner does honor.
  */
 export async function applyAgentPatch(
   db: Database,
@@ -282,7 +278,6 @@ export async function applyAgentPatch(
   opts: {
     repositoryId: string;
     sourceTaskId: string;
-    retryable: boolean;
     /** HEAD at the time the agent read the tree, stamped on any code links it
      *  emitted so a stale one can be dated. */
     derivedAtCommit?: string | null;
@@ -291,28 +286,21 @@ export async function applyAgentPatch(
     selfNodeId?: string;
   },
 ): Promise<ApplyPlanPatchResult> {
-  try {
-    return await applyPlanPatch(db, patch, {
-      repositoryId: opts.repositoryId,
-      origin: 'llm',
-      sourceTaskId: opts.sourceTaskId,
-      derivedAtCommit: opts.derivedAtCommit ?? null,
-      // An AGENT patch loses the offending op, never the reply. A person editing
-      // in the UI still gets `fail`, which is the default — a human who typed a
-      // bad id should be told, not silently trimmed.
-      onUnresolvableRef: 'drop',
-      // Same bargain for a malformed code link: it loses the link, not the op and
-      // every other op in the reply.
-      onInvalidCodeLink: 'strip',
-      // An agent wrote these nodes, which is exactly what the drift signal asks
-      // about: "has anyone looked at this since the code changed?".
-      marksReviewed: true,
-      ...(opts.selfNodeId ? { selfNodeId: opts.selfNodeId } : {}),
-    });
-  } catch (err) {
-    if (err instanceof PlanPatchError && err.kind === 'invalid' && opts.retryable) {
-      throw new RetryableParseError(`plan patch rejected: ${err.message}`);
-    }
-    throw err;
-  }
+  return applyPlanPatch(db, patch, {
+    repositoryId: opts.repositoryId,
+    origin: 'llm',
+    sourceTaskId: opts.sourceTaskId,
+    derivedAtCommit: opts.derivedAtCommit ?? null,
+    // An AGENT patch loses the offending op, never the reply. A person editing
+    // in the UI still gets `fail`, which is the default — a human who typed a
+    // bad id should be told, not silently trimmed.
+    onUnresolvableRef: 'drop',
+    // Same bargain for a malformed code link: it loses the link, not the op and
+    // every other op in the reply.
+    onInvalidCodeLink: 'strip',
+    // An agent wrote these nodes, which is exactly what the drift signal asks
+    // about: "has anyone looked at this since the code changed?".
+    marksReviewed: true,
+    ...(opts.selfNodeId ? { selfNodeId: opts.selfNodeId } : {}),
+  });
 }

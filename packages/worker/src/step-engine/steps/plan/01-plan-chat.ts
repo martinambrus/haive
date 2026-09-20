@@ -266,7 +266,6 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
             const res = await applyAgentPatch(ctx.db, patch, {
               repositoryId: d.repositoryId,
               sourceTaskId: ctx.taskId,
-              retryable: args.isFinalLlmAttempt !== true,
             });
             result.applied = true;
             dropped = res.dropped;
