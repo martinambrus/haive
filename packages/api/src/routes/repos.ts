@@ -1499,18 +1499,19 @@ type ResetDbOrTx =
 export function resolveKeptArtifactPaths(
   livePaths: string[],
   skippedPaths: string[],
-  /** Every path the walk actually unlinked, descendants included, from `onRemoved`. A recursive
+  /** Every path this walk VACATED — unlinked, or moved aside by the quarantine. A recursive
    *  delete that removed some children and then failed reports only its PARENT as skipped, so the
    *  prefix rule below would otherwise keep rows for files that are already gone — and nothing
    *  downstream reads disk to notice: `GET /repos/:id/upgrade-status` answers from the ROWS, so a
-   *  stale live row reports a reset file as installed and offers to manage it. Deletion is the
-   *  stronger fact, so it wins over the parent's skip. */
-  removedPaths: ReadonlySet<string> = new Set(),
+   *  stale live row reports a reset file as installed and offers to manage it. Vacating is the
+   *  stronger fact, so it wins over the parent's skip. A rename counts because the row names the
+   *  ORIGINAL path, which is empty afterwards either way. */
+  vacatedPaths: ReadonlySet<string> = new Set(),
 ): string[] {
   if (skippedPaths.length === 0) return [];
   const kept = new Set<string>();
   for (const path of livePaths) {
-    if (removedPaths.has(path)) continue;
+    if (vacatedPaths.has(path)) continue;
     for (const skip of skippedPaths) {
       if (path === skip || path.startsWith(`${skip}/`)) {
         kept.add(path);
@@ -1660,9 +1661,9 @@ export interface OnboardingResetProvenance {
 export async function resetOnboardingArtifacts(
   root: string,
   provenance: OnboardingResetProvenance,
-  // `unlinkedPaths` is deliberately NOT part of `OnboardingResetOutcome`: that interface is the
+  // `vacatedPaths` is deliberately NOT part of `OnboardingResetOutcome`: that interface is the
   // JSON the route returns, and this set exists to retire rows, not to be read by a person.
-): Promise<OnboardingResetOutcome & { unlinkedPaths: Set<string> }> {
+): Promise<OnboardingResetOutcome & { vacatedPaths: Set<string> }> {
   const { writtenHashes, haiveDirs, haiveEntries } = provenance;
   const removed: string[] = [];
   const cleaned: string[] = [];
@@ -1674,9 +1675,10 @@ export async function resetOnboardingArtifacts(
   /** Recursive removals that failed part-way, and have therefore already modified the tree
    *  without recording anything. See `resetTouchedNothing`. */
   let partialRemovals = 0;
-  /** Every path actually unlinked, descendants included. `removed` holds only the top-level
-   *  targets that returned; this is what a failed recursive delete leaves behind as fact. */
-  const unlinkedPaths = new Set<string>();
+  /** Every path this walk VACATED: unlinked by `remove()`, deleted directly by the settings
+   *  pass, or moved aside by the quarantine. `removed` holds only the top-level targets that
+   *  returned, so it cannot answer which descendants a failed recursive delete took with it. */
+  const vacatedPaths = new Set<string>();
 
   // A refusal is a per-item outcome, not a floor: one linked directory must not discard the
   // removal of the twenty beside it, and the reset says what it left alone instead of reporting
@@ -1725,7 +1727,7 @@ export async function resetOnboardingArtifacts(
             // Recorded per DESCENDANT, not just for the path asked about: a recursive delete that
             // failed part-way reports only its parent as skipped, and the rows for what it did
             // remove must still be retired.
-            unlinkedPaths.add(removedRel);
+            vacatedPaths.add(removedRel);
           },
         })
       ) {
@@ -1746,7 +1748,12 @@ export async function resetOnboardingArtifacts(
       if (content === null) return;
       const written = writtenHashes.get(rel);
       if (written !== undefined && written === sha256Hex(normalizeContent(content))) {
-        if (await removeNoFollow(root, rel)) removed.push(rel);
+        if (await removeNoFollow(root, rel)) {
+          removed.push(rel);
+          // Vacated, so its row must not survive on a later parent skip — this deletion does not
+          // go through `remove()` and would otherwise be invisible to `vacatedPaths`.
+          vacatedPaths.add(rel);
+        }
         return;
       }
       skipped.push({
@@ -1846,6 +1853,10 @@ export async function resetOnboardingArtifacts(
       try {
         await renameNoFollow(root, from, to, { noReplace: true, createParents: true });
         quarantined.push({ from, to });
+        // A move vacates `from` exactly as a delete does. Its row names the ORIGINAL path, so
+        // keeping it alive on a parent skip would point a live row at an absent file — the same
+        // defect as a deleted descendant, reached by the other way a path can empty.
+        vacatedPaths.add(from);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST' && !isPathContainmentError(err)) {
           throw err;
@@ -2014,7 +2025,7 @@ export async function resetOnboardingArtifacts(
     );
   }
 
-  return { removed, cleaned, skipped, quarantined, unlinkedPaths };
+  return { removed, cleaned, skipped, quarantined, vacatedPaths };
 }
 
 /** The repo's on-disk root, or a 404/409 explaining why there isn't one.
@@ -2407,7 +2418,7 @@ async function runOnboardingArtifactReset(
     resolveMergedTasks(onboardingSteps, epoch),
   );
 
-  const { removed, cleaned, skipped, quarantined, unlinkedPaths } = await resetOnboardingArtifacts(
+  const { removed, cleaned, skipped, quarantined, vacatedPaths } = await resetOnboardingArtifacts(
     root,
     {
       writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
@@ -2442,7 +2453,7 @@ async function runOnboardingArtifactReset(
       resolveKeptArtifactPaths(
         live.map((row) => row.diskPath),
         [...new Set(skipped.map((s) => s.path))],
-        unlinkedPaths,
+        vacatedPaths,
       ),
     );
     // The completion stamp cannot outlive the files it vouches for: this is the "start over"

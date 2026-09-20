@@ -72,6 +72,63 @@ function fakeDbLosingRenewal(): { db: Database; writes: Recorded[] } {
   return { db, writes };
 }
 
+/**
+ * A fake whose RENEWAL commits and then loses its acknowledgement: the update rejects, while the
+ * row goes on to hold the stamp that update was writing. `rowStamp` decides what a read-back
+ * finds — the attempted stamp (the write landed), or a third value (someone took the lease).
+ */
+function fakeDbAmbiguousRenewal(rowStamp: 'attempted' | 'stranger'): {
+  db: Database;
+  writes: Recorded[];
+  selects: number;
+} {
+  const writes: Recorded[] = [];
+  let attempted: Date | null = null;
+  const state = { selects: 0 };
+  const db = {
+    update: () => ({
+      set: (values: { rootClaimedAt: Date | null }) => ({
+        where: () => {
+          const first = writes.length === 0;
+          if (!first && values.rootClaimedAt !== null) attempted = values.rootClaimedAt;
+          let settle!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            settle = resolve;
+          });
+          writes.push({ stamp: values.rootClaimedAt, settle });
+          return {
+            returning: async () => {
+              await gate;
+              // The claim succeeds; the renewal rejects AFTER having written.
+              if (!first && values.rootClaimedAt !== null) throw new Error('connection lost');
+              return [{ id: 'repo-1' }];
+            },
+          };
+        },
+      }),
+    }),
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => {
+            state.selects += 1;
+            const claimedAt =
+              rowStamp === 'attempted' ? attempted : new Date('2030-01-01T00:00:00Z');
+            return [{ claimedAt }];
+          },
+        }),
+      }),
+    }),
+  } as unknown as Database;
+  return {
+    db,
+    writes,
+    get selects() {
+      return state.selects;
+    },
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -188,6 +245,59 @@ describe('acquireRootClaim', () => {
 
     await handle!.release();
     expect(handle!.lost()).toBe(false);
+  });
+
+  it('adopts the attempted stamp when a renewal committed but lost its acknowledgement', async () => {
+    // A write that fails AFTER committing looks identical to one that never ran. Keeping the old
+    // stamp there leaves the row holding a value nothing will ever match again: the release
+    // clears nothing, the next renewal reports the lease lost, and the repository stays claimed
+    // for the rest of the window with nobody working on it. Reading the row back is the only
+    // honest answer.
+    vi.useFakeTimers();
+    const fake = fakeDbAmbiguousRenewal('attempted');
+
+    const acquiring = acquireRootClaim(fake.db, 'repo-1', 'reset');
+    fake.writes[0]!.settle();
+    const handle = await acquiring;
+
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+    fake.writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The lease is still OURS: reconciled, not abandoned.
+    expect(fake.selects).toBeGreaterThan(0);
+    expect(handle!.lost()).toBe(false);
+
+    // And the release still clears, rather than silently matching nothing.
+    const before = fake.writes.length;
+    const releasing = handle!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    fake.writes.at(-1)!.settle();
+    await releasing;
+    expect(fake.writes.length).toBeGreaterThan(before);
+    expect(fake.writes.at(-1)!.stamp).toBeNull();
+  });
+
+  it('treats a third stamp on the row as a genuine takeover', async () => {
+    // The other half: the read-back must not rescue a lease somebody else now holds, or the
+    // release would clear THEIR claim and strip the protection this whole mechanism provides.
+    vi.useFakeTimers();
+    const fake = fakeDbAmbiguousRenewal('stranger');
+
+    const acquiring = acquireRootClaim(fake.db, 'repo-1', 'rebuild');
+    fake.writes[0]!.settle();
+    const handle = await acquiring;
+
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+    fake.writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(handle!.lost()).toBe(true);
+
+    // Releasing a lost lease writes NOTHING.
+    const before = fake.writes.length;
+    await handle!.release();
+    expect(fake.writes.length).toBe(before);
   });
 
   it('never runs two renewals at once', async () => {

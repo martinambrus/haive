@@ -687,12 +687,19 @@ describe('resetOnboardingArtifacts', () => {
     await installArtifacts(root);
     await writeFile(path.join(root, '.codex/agents/mine.toml'), 'mine\n', 'utf8');
 
-    const { removed, quarantined } = await resetOnboardingArtifacts(root, provenance());
+    const { removed, quarantined, vacatedPaths } = await resetOnboardingArtifacts(
+      root,
+      provenance(),
+    );
 
     expect(quarantined).toContainEqual({
       from: '.codex/agents/mine.toml',
       to: '.codex/agents-legacy/mine.toml',
     });
+    // A MOVE vacates its original path exactly as a delete does, and the artifact row names that
+    // original path — so it has to reach `vacatedPaths` or a later parent skip would keep a live
+    // row pointing at a file that is no longer there.
+    expect(vacatedPaths.has('.codex/agents/mine.toml')).toBe(true);
     expect(await readFile(path.join(root, '.codex/agents-legacy/mine.toml'), 'utf8')).toBe(
       'mine\n',
     );
@@ -1059,12 +1066,15 @@ describe('resetOnboardingArtifacts', () => {
     await mkdir(path.join(root, '.gemini'), { recursive: true });
     await writeFile(path.join(root, '.gemini/settings.json'), '{"mine":true}\n', 'utf8');
 
-    const { removed, skipped } = await resetOnboardingArtifacts(
+    const { removed, skipped, vacatedPaths } = await resetOnboardingArtifacts(
       root,
       provenance([['.claude/settings.json', sha256Hex(normalizeContent(ours))]]),
     );
 
     expect(removed).toContain('.claude/settings.json');
+    // This deletion does not go through the walk's `remove()` helper, so it has to record itself
+    // — otherwise a later skip of `.claude` would preserve its row over a file already gone.
+    expect(vacatedPaths.has('.claude/settings.json')).toBe(true);
     expect(await exists(root, '.gemini/settings.json')).toBe(true);
     expect(skipped).toContainEqual({
       path: '.gemini/settings.json',

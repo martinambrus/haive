@@ -144,8 +144,13 @@ export async function renewRootClaim(
   db: Database | DbHandle,
   repositoryId: string,
   previous: Date,
+  /** The stamp to write. Passed in rather than generated here so the CALLER still knows what was
+   *  attempted when this throws: a write that committed and then lost its acknowledgement leaves
+   *  the row holding this value while the caller believes it holds `previous`, and every later
+   *  conditional match — renewal and release alike — then silently misses. */
+  next: Date = new Date(),
 ): Promise<Date | null> {
-  const claimedAt = new Date();
+  const claimedAt = next;
   const renewed = await db
     .update(schema.repositories)
     .set({ rootClaimedAt: claimedAt })
@@ -157,6 +162,40 @@ export async function renewRootClaim(
     )
     .returning({ id: schema.repositories.id });
   return renewed.length > 0 ? claimedAt : null;
+}
+
+/**
+ * Which stamp the row carries after a renewal whose result never arrived: the one we attempted
+ * (it committed), the one we held (it did not), or neither (someone took the lease over).
+ *
+ * A write that fails AFTER committing is indistinguishable from one that never ran, from the
+ * client's side — so the only honest answer comes from reading the row back. Returning `held` on
+ * a read that itself fails is deliberate: that is the behaviour before this existed, and a
+ * transient database problem must not be escalated into "the lease is lost", which would stop
+ * renewing a claim we may well still own.
+ */
+async function reconcileAmbiguousRenewal(
+  db: Database | DbHandle,
+  repositoryId: string,
+  held: Date,
+  attempted: Date,
+): Promise<Date | null> {
+  try {
+    const rows = await db
+      .select({ claimedAt: schema.repositories.rootClaimedAt })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .limit(1);
+    const claimedAt = rows[0]?.claimedAt ?? null;
+    if (claimedAt === null) return null;
+    const stamp = claimedAt.getTime();
+    if (stamp === attempted.getTime()) return attempted;
+    if (stamp === held.getTime()) return held;
+    // Some third value: the lease is someone else's now.
+    return null;
+  } catch {
+    return held;
+  }
 }
 
 /** A held claim. `release` is idempotent and safe to call after the lease was lost. */
@@ -220,7 +259,17 @@ export async function acquireRootClaim(
 
   const renewOnce = async (): Promise<void> => {
     if (current === null) return;
-    const next = await renewRootClaim(db, repositoryId, current).catch(() => current);
+    const held = current;
+    const attempted = new Date();
+    const next = await renewRootClaim(db, repositoryId, held, attempted).catch(() =>
+      // AMBIGUOUS, not failed. The UPDATE may have committed and lost only its acknowledgement,
+      // in which case the row now holds `attempted` while we still believe we hold `held` — and
+      // then every later conditional match misses: the release clears nothing, the next renewal
+      // reports the lease lost, and the repository stays claimed for the rest of the window with
+      // nobody working on it. Ask the row which of the two it actually carries; a read that also
+      // fails keeps the old stamp, which is exactly the previous behaviour.
+      reconcileAmbiguousRenewal(db, repositoryId, held, attempted),
+    );
     // null means the lease was taken over while we worked. Stop renewing and stop releasing:
     // the claim on the row is someone else's now, and clearing it would strip their protection.
     current = next;
