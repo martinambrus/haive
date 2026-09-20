@@ -1671,6 +1671,12 @@ The knowledge-file editor (`PUT /tasks/:id/files/content`) HOLDS one for its wri
 write then lands in a tree being recursively removed — resurrected as an orphan, or written to an
 already-unlinked inode, which returns 200 and silently loses the edit.
 
+That claim is per-REPOSITORY, so two knowledge files being saved in the same repository at the
+same instant now refuse one another with "try again in a moment". Accepted deliberately: the hold
+is one file write long, so the collision needs two saves in the same few milliseconds, and the
+alternative — a per-file lock — would not exclude the reset, which is repo-wide by nature. A
+task with no repository takes nothing, since there is no root to protect.
+
 A lock must be HELD across the work it protects, and both places to hold one cost more than the
 race: the repo worker and the task worker run in ONE process on ONE `max: 10` pool, so a repo job
 holding a connection across `rm -rf` + `copyTree` at concurrency 5 deadlocks the pool; and
