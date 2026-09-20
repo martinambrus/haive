@@ -1001,10 +1001,17 @@ export function resolveMergedTasks(
     // this state intact while stamping a fresh completion — which would date an old merge after
     // the reset and replay claims for files the reset had already deleted. States written
     // before the field existed fall back to the step clock.
-    const mergedAt =
+    const stamped =
       typeof state.mergedAt === 'string' && !Number.isNaN(Date.parse(state.mergedAt))
         ? new Date(state.mergedAt)
-        : row.endedAt;
+        : null;
+    // A state persisted before `mergedAt` existed cannot be dated at all: the row's own clock
+    // moves when the step is RETRIED, which would place an old merge after the reset and replay
+    // claims for files the reset deleted. With an epoch in play such a state is read
+    // conservatively as pre-reset, which quarantines rather than removes; with no epoch there is
+    // no cutoff to be wrong about, so the step clock is good enough for ordering.
+    if (stamped === null && epoch !== null) continue;
+    const mergedAt = stamped ?? row.endedAt;
     if (mergedAt === null) continue;
     // Merged BEFORE the reset means the reset already deleted those files; the claims are stale.
     if (epoch !== null && mergedAt <= epoch) continue;
@@ -1204,7 +1211,15 @@ export function collectWrittenCliContent(
     } else if (step.stepId === WORKFLOW_SKILL_STEP_ID) {
       // Only for a task whose worktree was MERGED — until then these writes live in the
       // worktree and the repository root still holds what onboarding put there.
-      if (!step.taskId || !mergedTasks.has(step.taskId)) continue;
+      if (!step.taskId) continue;
+      const mergedAt = mergedTasks.get(step.taskId);
+      if (!mergedAt) continue;
+      // And only when that merge came AFTER this sync wrote. `resetRowsForRerun` keeps step
+      // 12's old `mergeResolveState`, so a RETRIED 11d — whose worktree was discarded — would
+      // otherwise inherit the previous run's merge and claim paths that were never merged,
+      // deleting the untouched root copy of a skill it wrote over. A sync with no clock of its
+      // own cannot be paired, and is not read.
+      if (!step.endedAt || mergedAt < step.endedAt) continue;
       const syncDirs = (step.detectOutput as { skillTargetDirs?: unknown } | null)?.skillTargetDirs;
       if (!Array.isArray(syncDirs)) continue;
       const sync = step.output as {

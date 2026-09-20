@@ -459,7 +459,12 @@ describe('collectWrittenCliContent', () => {
     const retriedAfter = new Date('2026-02-10T00:00:00Z');
     const epoch = new Date('2026-01-10T00:00:00Z');
     const rows = [
-      skillSync('t1', { generated: ['learned-thing'] }),
+      // The sync has to end BEFORE the merge that carried it — a merge cannot precede the work
+      // it merged, and a pair in that order is a retried sync, which is its own case below.
+      skillSync('t1', {
+        generated: ['learned-thing'],
+        endedAt: new Date('2026-01-02T00:00:00Z'),
+      }),
       cleanup('t1', true, mergedBefore, retriedAfter),
     ];
 
@@ -468,6 +473,41 @@ describe('collectWrittenCliContent', () => {
     expect(collectMerged(rows, new Date('2026-01-01T00:00:00Z')).dirs.has('.claude/skills')).toBe(
       true,
     );
+  });
+
+  it('ignores a sync retried after the merge it would have inherited', async () => {
+    // `resetRowsForRerun` keeps step 12's old `mergeResolveState`, so a RETRIED 11d — whose
+    // worktree was discarded — would inherit the previous run's merge and claim paths that were
+    // never merged, deleting the untouched root copy of a skill it wrote over.
+    const rows = [
+      skillSync('t1', {
+        generated: ['learned-thing'],
+        endedAt: new Date('2026-03-01T00:00:00Z'),
+      }),
+      cleanup('t1', true, new Date('2026-02-01T00:00:00Z')),
+    ];
+
+    expect([...collectMerged(rows).dirs]).toEqual([]);
+  });
+
+  it('never dates an undated legacy merge against an epoch', async () => {
+    // A state persisted before `mergedAt` existed cannot be dated: the row's own clock moves on
+    // retry. With an epoch in play it is read conservatively as pre-reset.
+    const legacy = {
+      taskId: 't1',
+      stepId: '12-worktree-cleanup',
+      output: { action: 'merge_remove', removed: true, merged: true },
+      mergeResolveState: { merged: true },
+      endedAt: new Date('2026-02-01T00:00:00Z'),
+    };
+    const rows = [
+      skillSync('t1', { generated: ['learned-thing'], endedAt: new Date('2026-01-01T00:00:00Z') }),
+      legacy,
+    ];
+
+    expect([...collectMerged(rows, new Date('2026-01-10T00:00:00Z')).dirs]).toEqual([]);
+    // With no reset to be wrong about, the step clock still orders it.
+    expect(collectMerged(rows, null).dirs.has('.claude/skills')).toBe(true);
   });
 
   it('scopes no directory for a merged sync that did nothing', async () => {
