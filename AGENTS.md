@@ -1526,11 +1526,15 @@ all. 09_5 contributes `written[].mirroredDirs`, each `written[].id` with the `SK
 `sub-skills` inside it, and the `README.md` index it rebuilds every pass. `.claude` itself needs
 no gate — it is Haive's own directory, and every `ONBOARDING_MARKERS` path lives in it.
 
-Only the LATEST run's record is read. A reset supersedes artifact rows but leaves step outputs
-behind, so an older run's `wroteFiles` still names paths it wrote and the reset then DELETED —
-and if the user recreates one of those names by hand and a later run SKIPS it under
-`overwrite=false`, that stale record claims their new file and deletes it. The newest run is the
-only one whose record describes the tree as it stands.
+Provenance is scoped to runs that started after `repositories.onboarding_reset_at` (migration
+0161). A reset supersedes artifact rows but CANNOT touch `task_steps`, so an older run's
+`wroteFiles` still names paths it wrote and the reset then DELETED — and if the user recreates
+one of those names by hand and a later run SKIPS it under `overwrite=false`, that stale record
+claims their new file. Reading only the NEWEST run does not fix it: with no re-onboarding since,
+the newest run IS the pre-reset one. NULL there is every repo never reset, which reads exactly as
+it always did, so the column needs no backfill. `11d-skill-sync` rides the same scoping — it
+mirrors skills after onboarding through the same `resolveSkillTargetDirs`, and unclaimed, a
+reset quarantined Haive's own file instead of removing it.
 
 **A claimed DIRECTORY is walked when anything claimed lives beneath it, and taken whole when
 nothing does.** That is what separates a generated skill (`<skills>/<id>`, which holds Haive's
@@ -1564,8 +1568,13 @@ template manifest rather than the step payload — `acceptedAgentIds` is the use
 agent they deselected would otherwise read as theirs and be quarantined out of its own
 directory.
 
-`.claude` is swept entry by entry rather than removed whole, because three things in a
-directory Haive owns are not Haive's:
+`.claude` is swept entry by entry and removes only what it can CLAIM — what 07's `wroteFiles`
+names there (`workflow-config.json`, the slash commands, the Drupal LSP files) or what a live
+row verifies by hash. A person's own `commands/`, `settings.local.json` or hooks live there too,
+and the blanket removal this replaced took them. They are LEFT and reported rather than moved:
+`.claude` survives the reset anyway, so there is nothing to move them out of the way OF, and a
+`-legacy` sibling of it would be noise. Three of its entries are kept by name for their own
+reasons:
 `mcp_settings.json` (created once, never rewritten), any `*-legacy` quarantine (the user's own
 agent definitions, which 07 MOVED there), and a `settings.json` whose bytes do not match the
 live artifact row's `written_hash` — `writeIfAllowed` SKIPS an existing file, so that row is the

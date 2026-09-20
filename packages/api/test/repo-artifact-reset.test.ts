@@ -160,7 +160,11 @@ function provenance(hashes: Array<[string, string]> = []): {
   return {
     writtenHashes: new Map(hashes),
     haiveDirs: new Set(catalog.map((d) => d.dir)),
-    haiveEntries: new Set(catalog.map((d) => `${d.dir}/code-reviewer.${d.ext ?? 'md'}`)),
+    haiveEntries: new Set([
+      ...catalog.map((d) => `${d.dir}/code-reviewer.${d.ext ?? 'md'}`),
+      // 07 writes this, and the `.claude` sweep now removes only what it can claim.
+      '.claude/workflow-config.json',
+    ]),
   };
 }
 
@@ -214,6 +218,38 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.agents/skills/repo-conventions')).toBe(true);
     // 09_5 rebuilds the index every pass; unclaimed it would be quarantined out of its own dir.
     expect(entries.has('.agents/skills/README.md')).toBe(true);
+  });
+
+  it('reads a workflow skill sync the same way it reads 09_5', async () => {
+    // `11d-skill-sync` mirrors skills after onboarding through the same `resolveSkillTargetDirs`.
+    // Unclaimed, a reset quarantined Haive's own file instead of removing it.
+    const { dirs, entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '11d-skill-sync',
+          output: {
+            written: [
+              { id: 'learned-thing', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['naming'] },
+            ],
+          },
+        },
+      ],
+      [],
+    );
+
+    expect(dirs.has('.claude/skills')).toBe(true);
+    expect(entries.has('.claude/skills/learned-thing')).toBe(true);
+    expect(entries.has('.claude/skills/learned-thing/sub-skills/naming.md')).toBe(true);
+  });
+
+  it('claims what 07 wrote under .claude, which is not a catalog dir', async () => {
+    const { entries } = collectWrittenCliContent(
+      wrote('.claude/workflow-config.json', '.claude/commands/review.md'),
+      [],
+    );
+
+    expect(entries.has('.claude/workflow-config.json')).toBe(true);
+    expect(entries.has('.claude/commands')).toBe(true);
   });
 
   it('lets an artifact row put a directory in scope without claiming its contents', async () => {
@@ -274,7 +310,11 @@ describe('resetOnboardingArtifacts', () => {
     const claudeOnly = {
       writtenHashes: new Map<string, string>(),
       haiveDirs: new Set(['.claude/agents', '.claude/skills']),
-      haiveEntries: new Set(['.claude/agents/code-reviewer.md', '.claude/skills/code-reviewer.md']),
+      haiveEntries: new Set([
+        '.claude/agents/code-reviewer.md',
+        '.claude/skills/code-reviewer.md',
+        '.claude/workflow-config.json',
+      ]),
     };
 
     const { removed, skipped } = await resetOnboardingArtifacts(root, claudeOnly);
@@ -442,6 +482,80 @@ describe('resetOnboardingArtifacts', () => {
       'mine\n',
     );
     expect(await exists(root, '.agents/skills')).toBe(false);
+  });
+
+  it('leaves a file in .claude that Haive has no record of writing', async () => {
+    // `.claude` holds things Haive never wrote — a person's own commands, hooks, local settings.
+    // The blanket removal this replaced took them. They are LEFT rather than moved: `.claude`
+    // survives anyway, so there is nothing to move them out of the way of.
+    const root = await repo('reset-claude-user-');
+    await installArtifacts(root);
+    await mkdir(path.join(root, '.claude/commands'), { recursive: true });
+    await writeFile(path.join(root, '.claude/commands/mine.md'), 'mine\n', 'utf8');
+    await writeFile(path.join(root, '.claude/settings.local.json'), '{"mine":1}', 'utf8');
+
+    const { removed, skipped } = await resetOnboardingArtifacts(root, provenance());
+
+    expect(await readFile(path.join(root, '.claude/commands/mine.md'), 'utf8')).toBe('mine\n');
+    expect(await exists(root, '.claude/settings.local.json')).toBe(true);
+    expect(skipped.map((s) => s.path)).toEqual(
+      expect.arrayContaining(['.claude/commands', '.claude/settings.local.json']),
+    );
+    // What it IS known to have written still goes.
+    expect(removed).toContain('.claude/workflow-config.json');
+  });
+
+  it('drops a CLI dot-dir the reset emptied, and keeps one that still holds something', async () => {
+    const root = await repo('reset-empty-parent-');
+    await installArtifacts(root);
+    await writeFile(path.join(root, '.codex/config.toml'), 'theirs\n', 'utf8');
+
+    const { removed } = await resetOnboardingArtifacts(root, provenance());
+
+    // `.grok` held only the dirs the reset removed.
+    expect(await exists(root, '.grok')).toBe(false);
+    expect(removed).toContain('.grok');
+    // `.codex` still has the user's own config, so `rmdir` leaves it alone.
+    expect(await readFile(path.join(root, '.codex/config.toml'), 'utf8')).toBe('theirs\n');
+  });
+
+  it('moves a file out of sub-skills while removing the rendered ones', async () => {
+    const root = await repo('reset-sub-skills-');
+    await installArtifacts(root);
+    const skill = '.agents/skills/repo-conventions';
+    await mkdir(path.join(root, `${skill}/sub-skills`), { recursive: true });
+    await writeFile(path.join(root, `${skill}/SKILL.md`), 'ours\n', 'utf8');
+    await writeFile(path.join(root, `${skill}/sub-skills/naming.md`), 'ours\n', 'utf8');
+    await writeFile(path.join(root, `${skill}/sub-skills/MINE.md`), 'mine\n', 'utf8');
+
+    const base = provenance();
+    const { quarantined } = await resetOnboardingArtifacts(root, {
+      ...base,
+      haiveEntries: new Set([
+        ...base.haiveEntries,
+        skill,
+        `${skill}/SKILL.md`,
+        `${skill}/sub-skills`,
+        `${skill}/sub-skills/naming.md`,
+      ]),
+    });
+
+    expect(quarantined).toContainEqual({
+      from: `${skill}/sub-skills/MINE.md`,
+      to: '.agents/skills-legacy/repo-conventions/sub-skills/MINE.md',
+    });
+    expect(
+      await readFile(
+        path.join(root, '.agents/skills-legacy/repo-conventions/sub-skills/MINE.md'),
+        'utf8',
+      ),
+    ).toBe('mine\n');
+    // The slug 09_5 recorded was ours, so it went with the directory rather than to the legacy
+    // tree beside the user's file.
+    expect(await exists(root, '.agents/skills')).toBe(false);
+    expect(await exists(root, '.agents/skills-legacy/repo-conventions/sub-skills/naming.md')).toBe(
+      false,
+    );
   });
 
   it('keeps the quarantine and mcp_settings.json, and says so', async () => {

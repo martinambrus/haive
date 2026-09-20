@@ -409,11 +409,12 @@ export default function NewTaskPage() {
         '    .grok, .agents) — a CLI directory it has no record of writing is kept and listed instead\n' +
         '  • move anything in those directories that Haive did not write into the <dir>-legacy sibling\n' +
         '    first, so nothing of yours is deleted\n' +
-        '  • delete .claude/, the knowledge base and learnings, .ripgreprc and .haive/install.json\n' +
+        '  • delete from .claude/ only what Haive has a record of writing, and leave the rest\n' +
+        '  • delete the knowledge base and learnings, .ripgreprc and .haive/install.json\n' +
         '  • strip haive-managed blocks from AGENTS.md, CLAUDE.md, and GEMINI.md (file removed if empty after)\n\n' +
-        'Kept: .claude/mcp_settings.json, any *-legacy agents directory, and a settings.json that does not\n' +
-        'match what Haive wrote. Nested directories inside subfolders are untouched, and so is user-authored\n' +
-        'content outside the marker blocks. This cannot be undone. Continue?',
+        'Kept and listed afterwards: your own files in .claude/, mcp_settings.json, any *-legacy directory,\n' +
+        'and a settings.json that does not match what Haive wrote. Nested directories inside subfolders are\n' +
+        'untouched, and so is content outside the marker blocks. This cannot be undone. Continue?',
     );
     if (!confirmed) return;
     setResetting(true);

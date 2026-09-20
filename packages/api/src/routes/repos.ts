@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, desc, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { eq, and, desc, gt, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   isPathContainmentError,
@@ -912,6 +912,12 @@ function onboardingResetDirs(haiveDirs: ReadonlySet<string>): {
  *  `written[].mirroredDirs` plus each skill's id. */
 const AGENT_TARGETS_STEP_ID = '07-generate-files';
 const SKILL_MIRROR_STEP_ID = '09_5-skill-generation';
+/** `11d-skill-sync` mirrors skills during a WORKFLOW run, through the same
+ *  `resolveSkillTargetDirs`, and records them in the shape 09_5 does. Without it a skill written
+ *  after onboarding is unclaimed, so a reset quarantines Haive's own file instead of removing
+ *  it. It rides the same epoch scoping as the rest. */
+const WORKFLOW_SKILL_STEP_ID = '11d-skill-sync';
+const PROVENANCE_STEP_IDS = [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID, WORKFLOW_SKILL_STEP_ID];
 
 /**
  * Which catalog agents/skills directories Haive is KNOWN to have written to in this repository.
@@ -948,6 +954,13 @@ export function collectWrittenCliContent(
       const head = value.slice(spec.dir.length + 1).split('/')[0];
       if (head) entries.add(`${spec.dir}/${head}`);
     }
+    // `.claude` is Haive's own directory but not a catalog one, and its SWEEP removes only what
+    // is claimed here — `workflow-config.json`, the slash commands, the Drupal LSP files. What
+    // is left is the user's and stays put.
+    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) {
+      const head = value.slice(ONBOARDING_SWEEP_DIR.length + 1).split('/')[0];
+      if (head) entries.add(`${ONBOARDING_SWEEP_DIR}/${head}`);
+    }
   };
 
   for (const step of steps) {
@@ -961,23 +974,36 @@ export function collectWrittenCliContent(
       // no manifest id at all.
       const wrote = (step.output as { wroteFiles?: unknown } | null)?.wroteFiles;
       if (Array.isArray(wrote)) for (const rel of wrote) claimPath(rel);
-    } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
+    } else if (step.stepId === SKILL_MIRROR_STEP_ID || step.stepId === WORKFLOW_SKILL_STEP_ID) {
       const written = (step.output as { written?: unknown } | null)?.written;
       if (!Array.isArray(written)) continue;
       for (const skill of written) {
-        const row = skill as { id?: unknown; mirroredDirs?: unknown } | null;
+        const row = skill as {
+          id?: unknown;
+          mirroredDirs?: unknown;
+          subSkillSlugs?: unknown;
+        } | null;
         if (!Array.isArray(row?.mirroredDirs)) continue;
         for (const value of row.mirroredDirs) {
           const dir = claimDir(value);
           if (dir === null) continue;
-          // A generated skill is a DIRECTORY, so the entry is the id — and the two things 09_5
-          // puts INSIDE it are claimed as well, which is what stops the sweep treating the whole
+          // A generated skill is a DIRECTORY, so the entry is the id — and what 09_5 puts INSIDE
+          // it is claimed file by file, which is what stops the sweep treating the whole
           // directory as ours: a `NOTES.md` a person left beside `SKILL.md` is theirs, and a
-          // claimed directory with deeper claims is walked rather than removed whole.
+          // claimed directory with deeper claims is walked rather than removed whole. The
+          // sub-skill SLUGS are named for the same reason one level further down; an output
+          // written before they were recorded claims the directory alone, so its contents are
+          // moved aside rather than deleted.
           if (typeof row.id === 'string') {
-            entries.add(`${dir}/${row.id}`);
-            entries.add(`${dir}/${row.id}/SKILL.md`);
-            entries.add(`${dir}/${row.id}/sub-skills`);
+            const skillDir = `${dir}/${row.id}`;
+            entries.add(skillDir);
+            entries.add(`${skillDir}/SKILL.md`);
+            entries.add(`${skillDir}/sub-skills`);
+            if (Array.isArray(row.subSkillSlugs)) {
+              for (const slug of row.subSkillSlugs) {
+                if (typeof slug === 'string') entries.add(`${skillDir}/sub-skills/${slug}.md`);
+              }
+            }
           }
           // The index beside them is rebuilt from the cumulative set on every pass and is Haive's
           // too — unclaimed, it would be quarantined out of the directory it describes.
@@ -1288,11 +1314,34 @@ export async function resetOnboardingArtifacts(
         kept += 1;
         continue;
       }
+      // Only what Haive is known to have written. `.claude` also holds things it never wrote —
+      // a person's own `commands/`, `settings.local.json`, hooks — and the removal this replaced
+      // took them, which the quarantine everywhere else exists to prevent. They are LEFT rather
+      // than moved: `.claude` survives anyway (`mcp_settings.json` is kept), so there is nothing
+      // to move them out of the way OF, and a `-legacy` sibling of it would be noise.
+      if (!haiveEntries.has(rel) && !(await artifactMatchesDisk(rel))) {
+        kept += 1;
+        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+        continue;
+      }
       await remove(rel, entry.isDirectory());
     }
     // Nothing of the user's in it: the directory goes too, as it always did.
     if (kept === 0) await remove(ONBOARDING_SWEEP_DIR, true);
   });
+
+  // A CLI's own dot-dir is not Haive's and is never a removal target, but one the reset has just
+  // emptied is left-over scaffolding rather than the user's — `rmdir` is used, so a directory
+  // holding anything at all (a `.codex/config.toml`, an `agents-legacy`) is untouched.
+  for (const parent of new Set(dirs.remove.map((rel) => rel.split('/')[0]!))) {
+    if (!parent.startsWith('.') || parent === ONBOARDING_SWEEP_DIR) continue;
+    await guard(parent, async () => {
+      const left = await readdirNoFollow(root, parent, { strict: true });
+      if (left !== null && left.length === 0 && (await removeNoFollow(root, parent))) {
+        removed.push(parent);
+      }
+    });
+  }
 
   for (const rel of ONBOARDING_RESET_FILES) await remove(rel, false);
 
@@ -1513,6 +1562,10 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
+  const repoRow = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { onboardingResetAt: true },
+  });
   const root = await resolveRepoRoot(db, userId, id);
 
   // Read BEFORE the reset: these rows are what says whether a file Haive can write is one it
@@ -1532,32 +1585,28 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
 
   // What the runs recorded WRITING, never the currently enabled providers: that is mutable
   // global state and says nothing about what THIS repo's onboarding did.
-  const stepRows = await db
-    .select({
-      taskId: schema.taskSteps.taskId,
-      stepId: schema.taskSteps.stepId,
-      output: schema.taskSteps.output,
-      startedAt: schema.tasks.createdAt,
-    })
+  //
+  // Scoped to runs that started after the last reset. A reset supersedes artifact rows but
+  // cannot touch `task_steps`, so a pre-reset run's `wroteFiles` still names paths it wrote and
+  // the reset then DELETED — and if the user recreates one of those names by hand and a later
+  // run SKIPS it under `overwrite=false`, that stale record claims their new file. Reading only
+  // the newest run is NOT enough: with no re-onboarding since, the newest run IS the pre-reset
+  // one. `onboarding_reset_at` NULL (never reset here) reads every run, as it always did.
+  const epoch = repoRow?.onboardingResetAt ?? null;
+  const onboardingSteps = await db
+    .select({ stepId: schema.taskSteps.stepId, output: schema.taskSteps.output })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
     .where(
       and(
         eq(schema.tasks.repositoryId, id),
-        inArray(schema.taskSteps.stepId, [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID]),
+        inArray(schema.taskSteps.stepId, PROVENANCE_STEP_IDS),
         // `done` is the proof that APPLY ran: 07 persists its detect payload before the form is
         // even shown, so a run cancelled while parked there wrote nothing.
         eq(schema.taskSteps.status, 'done'),
+        ...(epoch === null ? [] : [gt(schema.tasks.createdAt, epoch)]),
       ),
-    )
-    .orderBy(desc(schema.tasks.createdAt));
-  // The LATEST run only. A reset supersedes artifact rows but leaves step outputs behind, so an
-  // older run's `wroteFiles` still names paths it wrote and the reset then DELETED. If the user
-  // recreates one of those names by hand and a later run skips it under `overwrite=false`, that
-  // stale record would claim their new file and delete it. The newest run is the only one whose
-  // record describes the tree as it stands.
-  const latestTaskId = stepRows[0]?.taskId;
-  const onboardingSteps = stepRows.filter((row) => row.taskId === latestTaskId);
+    );
   const written = collectWrittenCliContent(onboardingSteps, live);
 
   const { removed, cleaned, skipped, quarantined } = await resetOnboardingArtifacts(root, {
@@ -1584,7 +1633,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // action, and a repo whose artifacts are gone is not onboarded however it got marked.
   await db
     .update(schema.repositories)
-    .set({ onboardedAt: null, updatedAt: new Date() })
+    .set({ onboardedAt: null, onboardingResetAt: new Date(), updatedAt: new Date() })
     .where(eq(schema.repositories.id, id));
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 });
