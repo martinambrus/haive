@@ -108,33 +108,56 @@ async function main(): Promise<void> {
     log.info({ taskId: task.id }, 'enqueueing cancel');
     await state.queue.add(TASK_JOB_NAMES.CANCEL, { taskId: task.id, userId });
 
-    const cancelled = await pollUntil(
+    // Wait for the EVENT, never for `status`. `handleCancelTask` writes
+    // `status: 'cancelled'` as its FIRST statement and only reaches
+    // `cleanupTaskContainers` two awaited statements later, so a status barrier can
+    // return before the cleanup runner has been called at all — MEASURED, this smoke
+    // failed ~1 run in 40 on `got 0`, with the cancel job completing 0.32s AFTER the
+    // assertion had already run. `cleanupTaskContainers` awaits the runner and only
+    // then appends this event, carrying its return value as `count`, so an event row
+    // implies the runner has returned. That is what makes it a barrier and the status
+    // not one.
+    //
+    // Two properties of that append are load-bearing here. It is conditional on a
+    // POSITIVE count, so this is only a barrier because the stub returns 3; and the
+    // whole block sits in a catch that warns and swallows. So a stub returning 0, or
+    // throwing, surfaces as a timeout naming this event rather than as `got 0` —
+    // which is the better diagnosis of the two.
+    const cleanupEvents = await pollUntil(
       async () => {
-        const row = await db.query.tasks.findFirst({
-          where: eq(schema.tasks.id, task.id),
-        });
-        return row ?? null;
+        const rows = await db
+          .select()
+          .from(schema.taskEvents)
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, task.id),
+              eq(schema.taskEvents.eventType, 'containers.destroyed'),
+            ),
+          )
+          .orderBy(desc(schema.taskEvents.createdAt));
+        return rows.length > 0 ? rows : null;
       },
-      (t) => t.status === 'cancelled',
-      'task cancelled',
+      (rows) => rows.length >= 1,
+      'containers.destroyed task_event',
     );
 
-    const cleanupEvents = await db
-      .select()
-      .from(schema.taskEvents)
-      .where(
-        and(
-          eq(schema.taskEvents.taskId, task.id),
-          eq(schema.taskEvents.eventType, 'containers.destroyed'),
-        ),
-      )
-      .orderBy(desc(schema.taskEvents.createdAt));
+    // A plain read, not a poll: the status write strictly precedes the cleanup the
+    // barrier above waited for, so by now it is committed. Asserted explicitly
+    // because the poll predicate it replaced was the only thing checking that a
+    // cancel sets the status at all.
+    const cancelled = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, task.id),
+    });
+    if (!cancelled) throw new Error('task row vanished before it could be checked');
+    if (cancelled.status !== 'cancelled') {
+      throw new Error(`expected task status=cancelled, got ${cancelled.status}`);
+    }
 
+    // Guaranteed now rather than raced, since the event waited for above is written
+    // only after the runner returned. Kept as the invariant that the INJECTED runner
+    // ran rather than `defaultContainerCleanup`, which the event alone cannot say.
     if (stubCalls < 1) {
       throw new Error(`expected cleanup stub called at least once, got ${stubCalls}`);
-    }
-    if (cleanupEvents.length < 1) {
-      throw new Error('expected at least one containers.destroyed task_event');
     }
     const payload = cleanupEvents[0]!.payload as { reason?: string; count?: number };
     if (payload.reason !== 'cancelled') {
