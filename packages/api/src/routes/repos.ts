@@ -1004,10 +1004,11 @@ export function collectWrittenCliContent(
     // `.claude` is Haive's own directory but not a catalog one, and its SWEEP removes only what
     // is claimed here — `workflow-config.json`, the slash commands, the Drupal LSP files. What
     // is left is the user's and stays put.
-    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) {
-      const head = value.slice(ONBOARDING_SWEEP_DIR.length + 1).split('/')[0];
-      if (head) entries.add(`${ONBOARDING_SWEEP_DIR}/${head}`);
-    }
+    //
+    // The WHOLE path, never its head segment: `.claude/plugins/drupal-php-lsp/<file>` collapsed
+    // to `.claude/plugins` claims a directory that also holds plugins the user installed, and
+    // the sweep then removes all of them. The sweep walks instead, on `hasDeeperClaims`.
+    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) entries.add(value);
   };
 
   for (const step of steps) {
@@ -1339,6 +1340,35 @@ export async function resetOnboardingArtifacts(
     return { left, ours };
   };
 
+  /** Remove the claimed leaves under a `.claude` directory Haive wrote INTO but does not own,
+   *  and drop the directory once nothing of the user's is left in it. Returns what stayed, so
+   *  the caller knows whether `.claude` itself may still go. Nothing is moved here — see the
+   *  sweep's note on why `.claude` leaves rather than quarantines. */
+  const sweepClaimedChildren = async (dir: string): Promise<number> => {
+    let left = 0;
+    await guard(dir, async () => {
+      const children = await readdirNoFollow(root, dir, { strict: true });
+      if (children === null) return;
+      for (const child of children) {
+        const rel = `${dir}/${child.name}`;
+        if (haiveEntries.has(rel) || (await artifactMatchesDisk(rel))) {
+          await remove(rel, child.isDirectory());
+          continue;
+        }
+        if (child.isDirectory() && hasDeeperClaims(rel)) {
+          left += await sweepClaimedChildren(rel);
+          continue;
+        }
+        left += 1;
+        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+      }
+      if (left === 0 && (await removeNoFollow(root, dir, { repairPermissions: true }))) {
+        removed.push(dir);
+      }
+    });
+    return left;
+  };
+
   const dirs = onboardingResetDirs(haiveDirs);
   for (const rel of dirs.remove) {
     // KB and learnings are Haive's whole and hold no user definitions, so only the per-CLI dirs
@@ -1399,6 +1429,13 @@ export async function resetOnboardingArtifacts(
       // than moved: `.claude` survives anyway (`mcp_settings.json` is kept), so there is nothing
       // to move them out of the way OF, and a `-legacy` sibling of it would be noise.
       if (!haiveEntries.has(rel) && !(await artifactMatchesDisk(rel))) {
+        // Haive wrote something BENEATH it — `.claude/plugins/drupal-php-lsp/<file>` under a
+        // `plugins/` that also holds plugins the user installed. Removing the directory takes
+        // theirs with ours, so it is walked and only the claimed leaves go.
+        if (entry.isDirectory() && hasDeeperClaims(rel)) {
+          if ((await sweepClaimedChildren(rel)) > 0) kept += 1;
+          continue;
+        }
         kept += 1;
         skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
         continue;

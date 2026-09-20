@@ -269,7 +269,10 @@ describe('collectWrittenCliContent', () => {
     );
 
     expect(entries.has('.claude/workflow-config.json')).toBe(true);
-    expect(entries.has('.claude/commands')).toBe(true);
+    // The WHOLE path: claiming the head segment would claim `commands/` and `plugins/`
+    // themselves, and the sweep would then remove what the user put in them.
+    expect(entries.has('.claude/commands/review.md')).toBe(true);
+    expect(entries.has('.claude/commands')).toBe(false);
   });
 
   it('lets an artifact row put a directory in scope without claiming its contents', async () => {
@@ -523,6 +526,47 @@ describe('resetOnboardingArtifacts', () => {
     );
     // What it IS known to have written still goes.
     expect(removed).toContain('.claude/workflow-config.json');
+  });
+
+  it('takes only its own plugin out of .claude/plugins', async () => {
+    // 07 writes `.claude/plugins/drupal-php-lsp/<file>`. Claiming the head segment would claim
+    // `plugins/` itself, and the sweep would then remove every plugin the user installed.
+    const root = await repo('reset-claude-plugins-');
+    await installArtifacts(root);
+    const ours = '.claude/plugins/drupal-php-lsp/plugin.json';
+    await mkdir(path.join(root, '.claude/plugins/drupal-php-lsp'), { recursive: true });
+    await writeFile(path.join(root, ours), '{}', 'utf8');
+    await mkdir(path.join(root, '.claude/plugins/theirs'), { recursive: true });
+    await writeFile(path.join(root, '.claude/plugins/theirs/plugin.json'), 'mine\n', 'utf8');
+
+    const base = provenance();
+    const { removed, skipped } = await resetOnboardingArtifacts(root, {
+      ...base,
+      haiveEntries: new Set([...base.haiveEntries, ours]),
+    });
+
+    expect(await exists(root, '.claude/plugins/drupal-php-lsp')).toBe(false);
+    expect(removed).toContain(ours);
+    expect(await readFile(path.join(root, '.claude/plugins/theirs/plugin.json'), 'utf8')).toBe(
+      'mine\n',
+    );
+    expect(skipped.map((s) => s.path)).toContain('.claude/plugins/theirs');
+  });
+
+  it('drops a .claude directory it wrote into once nothing of the user’s is left', async () => {
+    const root = await repo('reset-claude-plugins-empty-');
+    await installArtifacts(root);
+    const ours = '.claude/plugins/drupal-php-lsp/plugin.json';
+    await mkdir(path.join(root, '.claude/plugins/drupal-php-lsp'), { recursive: true });
+    await writeFile(path.join(root, ours), '{}', 'utf8');
+
+    const base = provenance();
+    await resetOnboardingArtifacts(root, {
+      ...base,
+      haiveEntries: new Set([...base.haiveEntries, ours]),
+    });
+
+    expect(await exists(root, '.claude/plugins')).toBe(false);
   });
 
   it('drops a CLI dot-dir the reset emptied, and keeps one that still holds something', async () => {

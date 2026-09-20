@@ -1576,7 +1576,11 @@ directory.
 
 `.claude` is swept entry by entry and removes only what it can CLAIM — what 07's `wroteFiles`
 names there (`workflow-config.json`, the slash commands, the Drupal LSP files) or what a live
-row verifies by hash. A person's own `commands/`, `settings.local.json` or hooks live there too,
+row verifies by hash. Those claims keep their WHOLE path, never a head segment: the LSP plugin
+is `.claude/plugins/drupal-php-lsp/<file>`, and collapsing that to `.claude/plugins` claims a
+directory that also holds plugins the user installed. A `.claude` directory Haive wrote INTO but
+does not own is WALKED on `hasDeeperClaims`, its claimed leaves removed, and dropped only once
+nothing of the user's is left in it. A person's own `commands/`, `settings.local.json` or hooks live there too,
 and the blanket removal this replaced took them. They are LEFT and reported rather than moved:
 `.claude` survives the reset anyway, so there is nothing to move them out of the way OF, and a
 `-legacy` sibling of it would be noise. Three of its entries are kept by name for their own
