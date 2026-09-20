@@ -256,23 +256,58 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.claude/skills/broken/sub-skills')).toBe(true);
   });
 
-  it('never claims a workflow skill sync, which writes in a worktree', async () => {
-    // 11d writes into the task's worktree, so its record does not describe the repository root
-    // unless the work was merged — and nothing in the row proves that. Claiming from it could
-    // delete an untouched root copy of a skill it only ever changed in a worktree.
+  /** 11d writes into the task's WORKTREE, so its record describes the repository root only once
+   *  `12-worktree-cleanup` says the work was merged. */
+  const skillSync = (taskId: string, opts: { generated?: string[]; removed?: string[] }) => ({
+    taskId,
+    stepId: '11d-skill-sync',
+    detectOutput: { skillTargetDirs: ['.claude/skills'] },
+    output: { generated: opts.generated ?? [], removed: opts.removed ?? [], skipped: [] },
+  });
+  const cleanup = (taskId: string, merged: boolean) => ({
+    taskId,
+    stepId: '12-worktree-cleanup',
+    output: { action: 'merge_remove', removed: true, merged, branchDeleted: false },
+  });
+
+  it('ignores a workflow skill sync whose worktree was never merged', async () => {
+    // Until the merge those writes live in the worktree and the root still holds what
+    // onboarding put there; claiming from it would delete an untouched root copy.
     const { dirs, entries } = collectWrittenCliContent(
-      [
-        {
-          stepId: '11d-skill-sync',
-          detectOutput: { skillTargetDirs: ['.claude/skills'] },
-          output: { generated: ['learned-thing'], removed: [], skipped: [] },
-        },
-      ],
+      [skillSync('t1', { generated: ['learned-thing'] }), cleanup('t1', false)],
       [],
     );
 
     expect([...dirs]).toEqual([]);
     expect([...entries]).toEqual([]);
+  });
+
+  it('claims a merged skill sync, and retires what it removed', async () => {
+    const { dirs, entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '09_5-skill-generation',
+          output: {
+            written: [
+              { id: 'dropped', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['old'] },
+              { id: 'kept', mirroredDirs: ['.claude/skills'] },
+            ],
+          },
+        },
+        skillSync('t1', { generated: ['learned-thing'], removed: ['dropped'] }),
+        cleanup('t1', true),
+      ],
+      [],
+    );
+
+    expect(dirs.has('.claude/skills')).toBe(true);
+    expect(entries.has('.claude/skills/learned-thing/SKILL.md')).toBe(true);
+    // The removed skill's claim is gone, so a file recreated there is not deleted as ours.
+    expect(entries.has('.claude/skills/dropped')).toBe(false);
+    expect(entries.has('.claude/skills/dropped/sub-skills/old.md')).toBe(false);
+    expect(entries.has('.claude/skills/kept')).toBe(true);
+    // 11d records no slugs, so `sub-skills` is left unclaimed and moved aside.
+    expect(entries.has('.claude/skills/learned-thing/sub-skills')).toBe(false);
   });
 
   it('retires the stale slug claims of a skill 09_5b rebuilt', async () => {

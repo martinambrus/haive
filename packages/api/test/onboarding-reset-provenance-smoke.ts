@@ -151,8 +151,8 @@ async function main(): Promise<void> {
       marker: 'post-reset-skill-repair',
       shape: 'skill-repair',
     });
-    // 11d writes in a task WORKTREE, so its record never describes the repository root and the
-    // query must not return it however complete the run was.
+    // 11d writes in a task WORKTREE. Its row IS loaded — the merge verdict decides whether it
+    // counts — so the query returns it and `collectWrittenCliContent` gates on `12`.
     await seed({
       repositoryId: repoId,
       startedAt: AFTER_RESET,
@@ -198,14 +198,19 @@ async function main(): Promise<void> {
     );
     check('another repository never leaks in', !unscoped.includes('other-repo-done'), unscoped);
     check(
-      'a worktree-scoped skill sync is never read as repository provenance',
-      !unscoped.includes('post-reset-worktree-skill-sync'),
+      'a worktree-scoped skill sync is loaded, for the merge verdict to rule on',
+      unscoped.includes('post-reset-worktree-skill-sync'),
       unscoped,
     );
     check(
       'a null epoch reads every run of this repo',
       unscoped.join(',') ===
-        ['post-reset-done', 'post-reset-skill-repair', 'pre-reset-done'].join(','),
+        [
+          'post-reset-done',
+          'post-reset-skill-repair',
+          'post-reset-worktree-skill-sync',
+          'pre-reset-done',
+        ].join(','),
       unscoped,
     );
 
@@ -219,7 +224,8 @@ async function main(): Promise<void> {
     );
     check(
       'runs after the reset are kept, skill repair included',
-      scoped.join(',') === ['post-reset-done', 'post-reset-skill-repair'].join(','),
+      scoped.join(',') ===
+        ['post-reset-done', 'post-reset-skill-repair', 'post-reset-worktree-skill-sync'].join(','),
       scoped,
     );
 

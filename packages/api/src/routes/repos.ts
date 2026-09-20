@@ -927,7 +927,21 @@ const SKILL_MIRROR_STEP_ID = '09_5-skill-generation';
  *  out is that a skill a workflow generated is quarantined rather than removed: clutter, in the
  *  direction that loses nothing. */
 const SKILL_REPAIR_STEP_ID = '09_5b-skill-repair';
-const PROVENANCE_STEP_IDS = [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID, SKILL_REPAIR_STEP_ID];
+/** `11d-skill-sync` mirrors skills during a WORKFLOW run, into that task's WORKTREE — so its
+ *  record describes the repository root ONLY once the work was merged. `12-worktree-cleanup`
+ *  records that verdict as `merged`, set on the `merge_remove` path and only when the merge
+ *  actually ran, so the two are read together: 11d rows count for a task whose cleanup step
+ *  says merged, and are ignored otherwise. Without it, an 11d removal leaves 09_5's claim
+ *  standing and a file the user later recreates at that path is deleted as onboarding output. */
+const WORKFLOW_SKILL_STEP_ID = '11d-skill-sync';
+const WORKTREE_CLEANUP_STEP_ID = '12-worktree-cleanup';
+const PROVENANCE_STEP_IDS = [
+  AGENT_TARGETS_STEP_ID,
+  SKILL_MIRROR_STEP_ID,
+  SKILL_REPAIR_STEP_ID,
+  WORKFLOW_SKILL_STEP_ID,
+  WORKTREE_CLEANUP_STEP_ID,
+];
 
 /**
  * The step rows whose records may be read as provenance for this repository.
@@ -949,10 +963,11 @@ export async function loadProvenanceSteps(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
   epoch: Date | null,
-): Promise<Array<{ stepId: string; detectOutput: unknown; output: unknown }>> {
+): Promise<Array<{ taskId: string; stepId: string; detectOutput: unknown; output: unknown }>> {
   return (
     db
       .select({
+        taskId: schema.taskSteps.taskId,
         stepId: schema.taskSteps.stepId,
         detectOutput: schema.taskSteps.detectOutput,
         output: schema.taskSteps.output,
@@ -994,9 +1009,24 @@ export async function loadProvenanceSteps(
  * nothing — these are stored JSON written by an older Haive, not a typed contract.
  */
 export function collectWrittenCliContent(
-  steps: ReadonlyArray<{ stepId: string; detectOutput?: unknown; output: unknown }>,
+  steps: ReadonlyArray<{
+    taskId?: string;
+    stepId: string;
+    detectOutput?: unknown;
+    output: unknown;
+  }>,
   artifacts: ReadonlyArray<{ diskPath: string }>,
 ): { dirs: Set<string>; entries: Set<string> } {
+  // Which tasks got their worktree MERGED. Read first, because a task's 11d row is replayed
+  // before its cleanup step in execution order and only the verdict says whether 11d's writes
+  // ever reached the repository root.
+  const mergedTasks = new Set<string>();
+  for (const step of steps) {
+    if (step.stepId !== WORKTREE_CLEANUP_STEP_ID) continue;
+    if ((step.output as { merged?: unknown } | null)?.merged === true && step.taskId) {
+      mergedTasks.add(step.taskId);
+    }
+  }
   const catalog = inventoryDirsFromCatalog();
   const byDir = new Map(catalog.map((entry) => [entry.dir, entry]));
   const dirs = new Set<string>();
@@ -1037,6 +1067,42 @@ export function collectWrittenCliContent(
       // no manifest id at all.
       const wrote = (step.output as { wroteFiles?: unknown } | null)?.wroteFiles;
       if (Array.isArray(wrote)) for (const rel of wrote) claimPath(rel);
+    } else if (step.stepId === WORKFLOW_SKILL_STEP_ID) {
+      // Only for a task whose worktree was MERGED — until then these writes live in the
+      // worktree and the repository root still holds what onboarding put there.
+      if (!step.taskId || !mergedTasks.has(step.taskId)) continue;
+      const syncDirs = (step.detectOutput as { skillTargetDirs?: unknown } | null)?.skillTargetDirs;
+      if (!Array.isArray(syncDirs)) continue;
+      const sync = step.output as { generated?: unknown; removed?: unknown } | null;
+      for (const value of syncDirs) {
+        const dir = claimDir(value);
+        if (dir === null) continue;
+        // A skill it REMOVED is one 09_5 may have written, and leaving that claim standing
+        // would delete a file the user later recreates at the same path.
+        if (Array.isArray(sync?.removed)) {
+          for (const skillId of sync.removed) {
+            if (typeof skillId !== 'string') continue;
+            const gone = `${dir}/${skillId}`;
+            for (const claimed of [...entries]) {
+              if (claimed === gone || claimed.startsWith(`${gone}/`)) entries.delete(claimed);
+            }
+          }
+        }
+        if (Array.isArray(sync?.generated)) {
+          for (const skillId of sync.generated) {
+            if (typeof skillId !== 'string') continue;
+            const skillDir = `${dir}/${skillId}`;
+            // It rewrites the tree, so 09_5's slugs for that skill are stale.
+            for (const claimed of [...entries]) {
+              if (claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
+            }
+            entries.add(skillDir);
+            entries.add(`${skillDir}/SKILL.md`);
+            // No slugs are recorded, so `sub-skills` stays unclaimed and is moved aside.
+          }
+          if (sync.generated.length > 0) entries.add(`${dir}/README.md`);
+        }
+      }
     } else if (step.stepId === SKILL_REPAIR_STEP_ID) {
       // 09_5b has its OWN shape — `repaired`, skill IDS, with the target dirs in its DETECT
       // payload — and it CLEARS the skill's tree before rewriting it, so 09_5's slug record for

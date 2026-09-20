@@ -1545,13 +1545,17 @@ opposite — that it is ours wholesale — and a file the user put there is dele
 moved aside. `sub-skills` is therefore claimed only when the slugs in it were recorded, which
 09_5b never does and 09_5 only does for outputs written since `subSkillSlugs` existed.
 
-`11d-skill-sync` is deliberately NOT a source, although it writes skills through the same
-`resolveSkillTargetDirs`. It writes into the task's WORKTREE (`resolveWorktree`), so its record
-does not describe the repository root unless the work was merged — and `12-worktree-cleanup`
-permits `keep` and `remove_only`, so even a completed task does not prove it was. Claiming from
-it could delete an untouched ROOT copy of a skill it only ever changed in a worktree. The cost
-is that a skill a workflow generated is quarantined rather than removed: clutter, in the
-direction that loses nothing.
+`11d-skill-sync` is a source ONLY for a task whose worktree was MERGED. It writes into the
+task's WORKTREE (`resolveWorktree`), so until the merge its record describes a tree the reset is
+not looking at, and claiming from it would delete an untouched ROOT copy of a skill it only ever
+changed there. `12-worktree-cleanup` records that verdict as `merged`, set on the `merge_remove`
+path and only when the merge actually ran, so the two rows are read together — which is why
+`loadProvenanceSteps` also selects `task_id` and loads the cleanup step. Ignoring 11d wholesale
+was NOT safe either, and that is the subtler half: an 11d removal leaves 09_5's claim for that
+skill standing, so a file the user later recreates at the path is deleted as onboarding output.
+A merged sync therefore RETIRES the claims of what it removed and re-claims what it generated.
+It records no sub-skill slugs, so `sub-skills` under a skill it wrote stays unclaimed and is
+moved aside.
 
 **A claimed DIRECTORY is walked when anything claimed lives beneath it, and taken whole when
 nothing does.** That is what separates a generated skill (`<skills>/<id>`, which holds Haive's
