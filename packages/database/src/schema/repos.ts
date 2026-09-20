@@ -241,6 +241,14 @@ export const repositories = pgTable(
      *  NULL is every repo that has never been reset, and reads exactly as it always did.
      *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
     onboardingResetAt: timestamp('onboarding_reset_at'),
+    /** Held while an onboarding-artifact reset is walking this repository's tree, so the writers
+     *  that destroy or rewrite that tree refuse instead of racing it. A claim, not a lock: one
+     *  committed row write, no transaction spanning the filesystem walk and no pooled connection
+     *  pinned — the repo worker and the task worker share ONE `max: 10` pool, so holding a
+     *  connection across `rm -rf` + `copyTree` deadlocks it rather than merely slowing it.
+     *  A crashed API leaves this set, which `RESET_CLAIM_STALE_MS` bounds.
+     *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
+    onboardingResetClaimedAt: timestamp('onboarding_reset_claimed_at'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

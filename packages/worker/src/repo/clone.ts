@@ -13,7 +13,7 @@ import {
   type EntryInfo,
 } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { hasLiveResetClaim, schema, type Database } from '@haive/database';
 import {
   logger,
   HAIVE_DATA_FILES,
@@ -259,12 +259,34 @@ function copyTree(src: string, dest: string): Promise<void> {
  *  the sandbox binds it read-only — this points storagePath into the volume,
  *  so every downstream resolver treats it as a writable volume repo. The copy
  *  is a one-time snapshot taken at import (a later refresh re-copies). */
+/**
+ * Refuse to destroy a repository root that an onboarding-artifact reset is walking.
+ *
+ * Checked in the HANDLER rather than only at the API route that enqueues, because the claim can
+ * land after that route's read and before the job is picked up — at which point nothing but this
+ * is left to stop the `rm -rf`.
+ *
+ * Throwing is the right shape here, not a silent return: the repo queue runs `attempts: 3` with
+ * exponential backoff, so a reset that takes seconds is simply waited out, and one that outlives
+ * the retries parks the row at `error` carrying this message rather than leaving it `cloning`
+ * with no explanation. A silent return would leave the row `cloning` for good, since it is
+ * `persistDetection` at the end of a SUCCESSFUL run that writes `ready`.
+ */
+async function assertNoLiveResetClaim(db: Database, repositoryId: string): Promise<void> {
+  if (await hasLiveResetClaim(db, repositoryId)) {
+    throw new Error(
+      'the repository is being reset; its tree must not be rebuilt until that finishes',
+    );
+  }
+}
+
 export async function handleCopyLocal(
   payload: RepoJobPayload,
   db: Database,
   repoStorageRoot: string,
 ): Promise<void> {
   if (!payload.localPath) throw new Error('localPath required for copy job');
+  await assertNoLiveResetClaim(db, payload.repositoryId);
 
   const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
   await mkdir(path.dirname(dest), { recursive: true });
@@ -605,6 +627,7 @@ export async function handleInit(
   db: Database,
   repoStorageRoot: string,
 ): Promise<void> {
+  await assertNoLiveResetClaim(db, payload.repositoryId);
   const [row] = await db
     .select({ name: schema.repositories.name })
     .from(schema.repositories)
@@ -658,6 +681,7 @@ export async function handleClone(
   repoStorageRoot: string,
 ): Promise<void> {
   if (!payload.remoteUrl) throw new Error('remoteUrl required for clone job');
+  await assertNoLiveResetClaim(db, payload.repositoryId);
 
   const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
   await mkdir(path.dirname(dest), { recursive: true });

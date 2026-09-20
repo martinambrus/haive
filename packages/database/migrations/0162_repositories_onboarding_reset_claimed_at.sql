@@ -1,0 +1,24 @@
+-- Held while an onboarding-artifact reset is walking this repository's tree.
+--
+-- Four writers can touch a repository root and the reset's own guard covers one of them. This is
+-- what makes the destructive ones refuse rather than race: `refresh-tree` and the three repo-queue
+-- handlers that `rm -rf` the root (copy, init, extract), plus the knowledge-base editor, which
+-- writes into exactly the two directories the reset removes recursively.
+--
+-- A CLAIM rather than an advisory lock, deliberately. A lock has to be HELD across the work it
+-- protects, and the only places to hold one here cost more than the race: the repo worker and the
+-- task worker run in ONE process on ONE `max: 10` connection pool, so a repo job holding a
+-- connection across `rm -rf` + `copyTree` at concurrency 5 deadlocks the pool, and the repo queue
+-- sets neither `lockDuration` nor `maxStalledCount`, so a handler blocked past BullMQ's 30s
+-- default is failed as stalled WITHOUT running its catch — stranding `status = 'cloning'` with no
+-- reconciler anywhere to clear it. One committed row write has none of those properties.
+--
+-- A `repo_status` enum value would express the same claim, and was refused: Postgres cannot drop
+-- an enum value, so it is an irreversible migration for a reversible problem. This column reverts
+-- with DROP COLUMN, and nothing depends on its contents — a live claim only ever refuses a
+-- request, so losing it restores the previous behaviour rather than corrupting anything.
+--
+-- NULL means "no reset in flight", which is every existing row, so no backfill is needed and
+-- nothing changes until the first reset claims one. A crashed API leaves a claim behind; readers
+-- treat one older than RESET_CLAIM_STALE_MS as stale rather than blocking on it forever.
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS onboarding_reset_claimed_at timestamp;

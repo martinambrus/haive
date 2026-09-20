@@ -4,7 +4,12 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import {
+  schema,
+  claimRepositoryForReset,
+  isResetClaimLive,
+  releaseRepositoryResetClaim,
+} from '@haive/database';
 import {
   errno,
   isPathContainmentError,
@@ -56,6 +61,7 @@ import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import type { Context } from 'hono';
 import {
   cancelOpenTasksForRepo,
   collectInternalRagProjectNamesForRepo,
@@ -2056,6 +2062,32 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
+  // Claim the repository BEFORE anything is read, and hold it until the handler exits. The
+  // destructive writers — `refresh-tree` and the three repo-queue handlers that `rm -rf` the
+  // root — refuse while it is held, which is the half the live-task guard below cannot cover:
+  // none of them is a task. A claim rather than a lock because the repo worker and the task
+  // worker share one connection pool, so a lock held across the walk deadlocks it.
+  if (!(await claimRepositoryForReset(db, id, userId))) {
+    throw new HttpError(
+      409,
+      'This repository is already being reset. Wait for that to finish before starting another.',
+    );
+  }
+  try {
+    return await runOnboardingArtifactReset(c, db, userId, id);
+  } finally {
+    // Every exit path, the failures included: a reset that threw has stopped touching the tree
+    // just as surely as one that finished, and leaving the claim would block the retry.
+    await releaseRepositoryResetClaim(db, id).catch(() => undefined);
+  }
+});
+
+async function runOnboardingArtifactReset(
+  c: Context<AppEnv>,
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  id: string,
+): Promise<Response> {
   // A live onboarding run writes into the very tree this is about to delete — and its 07/09_5
   // steps may complete AFTER the reset, so their records would name files the reset removed
   // while carrying a `created_at` older than the epoch, which excludes that run's provenance
@@ -2139,7 +2171,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
     .set({ onboardedAt: null, onboardingResetAt: resetStartedAt, updatedAt: new Date() })
     .where(eq(schema.repositories.id, id));
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
-});
+}
 
 repoRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
@@ -2245,6 +2277,15 @@ repoRoutes.post('/:id/refresh-tree', async (c) => {
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
+  // This enqueues a job that `rm -rf`s the whole repository root and copies it again. Refusing
+  // here is the cheap half — the handler checks again, because the claim can land between this
+  // read and the job being picked up, and by then only the worker can stop it.
+  if (isResetClaimLive(repo.onboardingResetClaimedAt)) {
+    throw new HttpError(
+      409,
+      'This repository is being reset. Wait for that to finish before refreshing its tree.',
+    );
+  }
 
   await db
     .update(schema.repositories)
