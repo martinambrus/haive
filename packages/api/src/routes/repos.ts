@@ -1468,6 +1468,26 @@ export function classifyResetFailure(err: unknown): { reason: string; io: boolea
 }
 
 /**
+ * May a swept directory be removed WHOLE?
+ *
+ * `left` counts what could not be moved to the `-legacy` sibling, so zero normally means nothing
+ * of the user's is in there. It means that only if the sweep RAN, though: an IO failure leaves
+ * the count at its initial zero, and removing on it deletes the files the quarantine exists to
+ * move out of the way — the one outcome this whole branch is built to avoid.
+ *
+ * A REFUSAL is not the same and must still remove. It means the directory is a LINK, which
+ * `readdirNoFollow` rejects before the sweep starts; the removal then takes the link itself
+ * rather than walking through it, which is the intended handling of a linked directory.
+ *
+ * Pure and exported because the difference between those two is a single operator that no
+ * fixture can reach: a containment refusal is handled INSIDE the sweep, and a genuine `EIO`
+ * cannot be provoked from a temp directory. A test that tried would prove only its own setup.
+ */
+export function mayRemoveSweptDirWhole(sweep: 'ok' | 'refused' | 'io', left: number): boolean {
+  return sweep !== 'io' && left === 0;
+}
+
+/**
  * Did this walk do nothing at all, having failed to read the tree?
  *
  * The caller supersedes every artifact row and stamps `onboarding_reset_at` on what the walk
@@ -1533,20 +1553,32 @@ export async function resetOnboardingArtifacts(
   // A refusal is a per-item outcome, not a floor: one linked directory must not discard the
   // removal of the twenty beside it, and the reset says what it left alone instead of reporting
   // a clean run over a path it never touched.
-  const guard = async (rel: string, run: () => Promise<void>): Promise<void> => {
+  /**
+   * What the guard absorbed, for the callers whose next step depends on it.
+   *
+   * `refused` and `io` are NOT interchangeable here. A containment refusal usually means the
+   * thing is a LINK, which is a complete answer about it — a linked directory is still removed,
+   * as a link. An IO failure means the work did not finish, and anything inferred from how far
+   * it got is wrong. Most callers ignore this: a refused removal is simply not removed, and is
+   * already reported.
+   */
+  const guard = async (rel: string, run: () => Promise<void>): Promise<'ok' | 'refused' | 'io'> => {
     try {
       await run();
+      return 'ok';
     } catch (err) {
       const verdict = classifyResetFailure(err);
       if (verdict === null) throw err;
       if (verdict.io) ioFailures += 1;
       skipped.push({ path: rel, reason: verdict.reason });
+      return verdict.io ? 'io' : 'refused';
     }
   };
   // `repairPermissions` on every item, as the whole-`.claude` removal this replaced had: it fires
   // only on EACCES/EPERM and only adds +0700 to the parent it already holds open, and a sweep of
   // entries must not fail where a removal of the directory around them succeeded.
-  const remove = (rel: string, recursive: boolean): Promise<void> =>
+  /** Ignored by most callers: a refused item is simply not removed, and is already reported. */
+  const remove = (rel: string, recursive: boolean): Promise<'ok' | 'refused' | 'io'> =>
     guard(rel, async () => {
       // The return value replaces a `pathExists` probe, and is strictly better evidence: the probe
       // could pass and the entry be gone — or replaced by a link — before the delete ran.
@@ -1723,12 +1755,12 @@ export async function resetOnboardingArtifacts(
       continue;
     }
     let swept = { left: 0, ours: [] as Array<{ rel: string; isDir: boolean }> };
-    await guard(rel, async () => {
+    const sweep = await guard(rel, async () => {
       swept = await quarantineForeign(rel);
     });
     // Something of the user's could not be moved out, so the directory cannot go whole: the
     // entries that ARE ours are removed instead and it stays, holding what was left behind.
-    if (swept.left === 0) await remove(rel, true);
+    if (mayRemoveSweptDirWhole(sweep, swept.left)) await remove(rel, true);
     else {
       for (const entry of swept.ours) await remove(entry.rel, entry.isDir);
     }

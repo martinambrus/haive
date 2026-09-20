@@ -10,6 +10,7 @@ import {
   checkOnboardingMarkers,
   classifyResetFailure,
   collectWrittenCliContent,
+  mayRemoveSweptDirWhole,
   resetOnboardingArtifacts,
   resetTouchedNothing,
   resolveMergedTasks,
@@ -1169,6 +1170,32 @@ describe('resetOnboardingArtifacts', () => {
       '.claude/agents-legacy',
       '.claude/mcp_settings.json',
     ]);
+  });
+});
+
+describe('mayRemoveSweptDirWhole', () => {
+  it('removes a directory the sweep emptied', () => {
+    expect(mayRemoveSweptDirWhole('ok', 0)).toBe(true);
+  });
+
+  it('keeps one the sweep could not empty', () => {
+    expect(mayRemoveSweptDirWhole('ok', 1)).toBe(false);
+  });
+
+  it('keeps one whose sweep never finished, whatever the count says', () => {
+    // The regression this exists for. An IO failure leaves the count at its INITIAL zero, and
+    // reading that as "nothing of theirs is left" recursively deletes the user's definitions the
+    // quarantine exists to move aside — the one outcome the whole mechanism is built to prevent.
+    expect(mayRemoveSweptDirWhole('io', 0)).toBe(false);
+    expect(mayRemoveSweptDirWhole('io', 3)).toBe(false);
+  });
+
+  it('still removes a REFUSED directory, because that one is a link', () => {
+    // A containment refusal comes from `readdirNoFollow` rejecting a linked directory before the
+    // sweep starts. It is a complete answer about that directory, not an unfinished job: the
+    // removal takes the link itself rather than walking through it. Treating it like an IO
+    // failure would silently stop deleting linked CLI directories.
+    expect(mayRemoveSweptDirWhole('refused', 0)).toBe(true);
   });
 });
 

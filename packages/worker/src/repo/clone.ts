@@ -585,18 +585,26 @@ export async function handleExtract(
 ): Promise<void> {
   if (!payload.archivePath) throw new Error('archivePath required for extract job');
   if (!payload.archiveFormat) throw new Error('archiveFormat required for extract job');
+  const archivePath = payload.archivePath;
+  const archiveFormat = payload.archiveFormat;
 
-  const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
-  const report = await extractArchive(payload.archivePath, payload.archiveFormat, dest);
-  if (report.note) {
-    logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
-  }
-  await persistDetection(db, payload.repositoryId, dest, report.note);
-  // Only remove the archive after successful extract + detection. Leaving it
-  // in place on failure lets the user (or a retry) look at what actually
-  // arrived on disk instead of silently masking the error.
-  await rm(payload.archivePath, { force: true }).catch(() => {});
-  logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
+  // Claimed like the three that `rm -rf`, because it destroys the root just as thoroughly by a
+  // different verb: `extractArchive` renames the existing tree aside and renames the new one into
+  // its place. Keying the audit on `rm(dest)` missed this one — the property that matters is
+  // "replaces the repository root", not which call does it.
+  return withRootClaim(db, payload.repositoryId, async () => {
+    const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
+    const report = await extractArchive(archivePath, archiveFormat, dest);
+    if (report.note) {
+      logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
+    }
+    await persistDetection(db, payload.repositoryId, dest, report.note);
+    // Only remove the archive after successful extract + detection. Leaving it
+    // in place on failure lets the user (or a retry) look at what actually
+    // arrived on disk instead of silently masking the error.
+    await rm(archivePath, { force: true }).catch(() => {});
+    logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
+  });
 }
 
 /** Run a git command in `cwd`, rejecting on a non-zero exit. Local-only (no
