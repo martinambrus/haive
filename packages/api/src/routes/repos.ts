@@ -1509,9 +1509,21 @@ export function resolveKeptArtifactPaths(
   vacatedPaths: ReadonlySet<string> = new Set(),
 ): string[] {
   if (skippedPaths.length === 0) return [];
+  // A vacated DIRECTORY takes its descendants with it: the quarantine moves an unclaimed
+  // directory wholesale and records only its own path, so an exact match would preserve the rows
+  // for every file inside it — each naming a path that is now empty. Prefix-matched on whole
+  // segments, the same rule the keep test below uses, so the two cannot disagree about what
+  // "inside" means. It cannot over-exclude: a directory only enters the set once it is gone, and
+  // a partial recursive delete never records the parent because its own rmdir failed.
+  const isVacated = (candidate: string): boolean => {
+    for (const vacated of vacatedPaths) {
+      if (candidate === vacated || candidate.startsWith(`${vacated}/`)) return true;
+    }
+    return false;
+  };
   const kept = new Set<string>();
   for (const path of livePaths) {
-    if (vacatedPaths.has(path)) continue;
+    if (isVacated(path)) continue;
     for (const skip of skippedPaths) {
       if (path === skip || path.startsWith(`${skip}/`)) {
         kept.add(path);

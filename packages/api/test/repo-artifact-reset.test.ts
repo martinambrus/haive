@@ -1259,6 +1259,25 @@ describe('resolveKeptArtifactPaths', () => {
     ]);
   });
 
+  it('does NOT keep rows beneath a directory that was moved away whole', () => {
+    // The quarantine moves an UNCLAIMED directory wholesale and records only its own path, so an
+    // exact-match exclusion preserved the row for every file inside it — each naming a path that
+    // is now empty, which `upgrade-status` reports as installed. A vacated directory takes its
+    // descendants with it.
+    const vacated = new Set(['.claude/plugins/drupal-php-lsp']);
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins'], vacated)).toEqual([]);
+  });
+
+  it('matches whole segments when excluding, so a sibling with a shared prefix survives', () => {
+    // `.claude/plugins/drupal-php` is not an ancestor of `.claude/plugins/drupal-php-lsp/...`.
+    // The exclusion must not over-reach any more than the keep rule does.
+    const vacated = new Set(['.claude/plugins/drupal-php']);
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins'], vacated).sort()).toEqual([
+      '.claude/plugins/drupal-php-lsp/plugin.json',
+      '.claude/plugins/drupal-php-lsp/server.js',
+    ]);
+  });
+
   it('is unchanged when nothing was deleted, which is the default', () => {
     // The omitted argument must behave exactly as before this existed, since the smoke and the
     // route both went through the two-argument form for several rounds.
