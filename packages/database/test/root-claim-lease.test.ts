@@ -582,6 +582,58 @@ describe('acquireRootClaim', () => {
     await expect(acquiring).rejects.toThrow('claim ack lost');
   });
 
+  it('does not abandon a release whose acknowledgement was lost', async () => {
+    // The last conditional write to carry unresolved ambiguity. An exception here propagates out
+    // of `release()`, where every caller swallows it in a `.catch()` — so a clear that never
+    // landed leaves the repository claimed for the rest of the window while the job reports a
+    // clean finish, and a clear that DID land throws identically. The row is asked instead.
+    vi.useFakeTimers();
+    const writes: Recorded[] = [];
+    let rowCleared = false;
+    const db = {
+      update: () => ({
+        set: (values: { rootClaimedAt: Date | null }) => ({
+          where: () => {
+            const idx = writes.length;
+            let settle!: () => void;
+            const gate = new Promise<void>((resolve) => {
+              settle = resolve;
+            });
+            writes.push({ stamp: values.rootClaimedAt, settle });
+            return {
+              returning: async () => {
+                await gate;
+                if (idx === 0) return [{ id: 'repo-1' }]; // the claim
+                // The release COMMITS and then loses its acknowledgement.
+                rowCleared = true;
+                throw new Error('release ack lost');
+              },
+            };
+          },
+        }),
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [{ claimedAt: rowCleared ? null : new Date() }],
+          }),
+        }),
+      }),
+    } as unknown as Database;
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'reset');
+    writes[0]!.settle();
+    const handle = await acquiring;
+
+    // It must not throw out of release, and must not go on hunting candidates for a row that is
+    // already free.
+    const releasing = handle!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    writes.at(-1)!.settle();
+    await expect(releasing).resolves.toBeUndefined();
+    expect(writes.length).toBe(2);
+  });
+
   it('never runs two renewals at once', async () => {
     vi.useFakeTimers();
     const { db, writes } = fakeDb();

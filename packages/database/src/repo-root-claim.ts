@@ -259,6 +259,40 @@ export function createCandidateStamps(cap = CANDIDATE_STAMP_CAP): CandidateStamp
 }
 
 /**
+ * One release attempt, answering whether the row is now FREE rather than whether this call
+ * cleared it — the two differ, and only the first is what a releasing holder needs to know.
+ *
+ * The third and last conditional write to this row, and the one whose ambiguity bites hardest:
+ * an exception here propagates out of `release()`, where every caller swallows it in a
+ * `.catch()`, so a clear that never landed leaves the repository claimed for the rest of the
+ * window while the job reports a clean finish. A clear that DID land throws identically.
+ *
+ * So on failure the row is asked. Empty means free, whoever freed it. A stamp means it is not,
+ * and the caller should try another candidate. An unreadable row answers "not confirmed", which
+ * keeps the caller trying rather than concluding anything.
+ */
+async function releaseReconciled(
+  db: Database | DbHandle,
+  repositoryId: string,
+  claimedAt: Date,
+): Promise<boolean> {
+  try {
+    return await releaseRepositoryRoot(db, repositoryId, claimedAt);
+  } catch {
+    try {
+      const rows = await db
+        .select({ claimedAt: schema.repositories.rootClaimedAt })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .limit(1);
+      return (rows[0]?.claimedAt ?? null) === null;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
  * One renewal attempt, with its ambiguity already resolved as far as it can be.
  *
  * EVERY conditional write to this row has the same problem — a commit whose acknowledgement is
@@ -454,7 +488,7 @@ export async function acquireRootClaim(
       // Let a pending renewal land first, so the stamp below is the one actually on the row.
       if (renewing !== null) await renewing.catch(() => undefined);
       if (current === null) return;
-      const cleared = await releaseRepositoryRoot(db, repositoryId, current);
+      const cleared = await releaseReconciled(db, repositoryId, current);
       // `current` may be a GUESS: when a renewal's acknowledgement and its read-back both failed,
       // we kept the old stamp while the row may hold the one that write left behind. A release
       // matching nothing is exactly that case, and it is the COMMON one — a job that finishes
@@ -468,7 +502,7 @@ export async function acquireRootClaim(
         // working on it. Each clear is conditional, so at most one can match and the rest are
         // no-ops against a row that has already been cleared.
         for (const candidate of candidates.list()) {
-          if (await releaseRepositoryRoot(db, repositoryId, candidate).catch(() => false)) break;
+          if (await releaseReconciled(db, repositoryId, candidate)) break;
         }
       }
       candidates.clear();
