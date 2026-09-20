@@ -949,8 +949,8 @@ export interface ProvenanceStepRow {
   detectOutput: unknown;
   output: unknown;
   endedAt: Date | null;
-  prState: string | null;
-  prMergedAt: Date | null;
+  /** The merge phase's durable record, read instead of the cleanup step's apply output. */
+  mergeResolveState: unknown;
 }
 
 /**
@@ -971,21 +971,27 @@ export function resolveMergedTasks(
   rows: ReadonlyArray<{
     taskId: string;
     stepId: string;
-    output: unknown;
+    mergeResolveState: unknown;
     endedAt: Date | null;
-    prState: string | null;
-    prMergedAt: Date | null;
   }>,
   epoch: Date | null,
-): Set<string> {
-  const merged = new Set<string>();
+): Map<string, Date> {
+  const merged = new Map<string, Date>();
   for (const row of rows) {
     if (row.stepId !== WORKTREE_CLEANUP_STEP_ID) continue;
-    const localMerge = (row.output as { merged?: unknown } | null)?.merged === true;
-    const mergedAt = localMerge ? row.endedAt : row.prState === 'merged' ? row.prMergedAt : null;
+    // The LOCAL merge, and only that. A PR merge never reaches this checkout: the poller records
+    // the forge verdict and `13-pr-wait` removes the worktree — nothing pulls. Claiming those
+    // paths would delete a local skill the PR changed but the checkout never received.
+    //
+    // Read from `merge_resolve_state`, NOT the cleanup step's apply output: that step throws
+    // when `removeWorktreeDir` fails AFTER the merge is committed, leaving the step `failed`
+    // while the merge is real. The merge phase wrote this before any of that could go wrong.
+    if ((row.mergeResolveState as { merged?: unknown } | null)?.merged !== true) continue;
+    const mergedAt = row.endedAt;
     if (mergedAt === null) continue;
+    // Merged BEFORE the reset means the reset already deleted those files; the claims are stale.
     if (epoch !== null && mergedAt <= epoch) continue;
-    merged.add(row.taskId);
+    merged.set(row.taskId, mergedAt);
   }
   return merged;
 }
@@ -1019,8 +1025,7 @@ export async function loadProvenanceSteps(
         detectOutput: schema.taskSteps.detectOutput,
         output: schema.taskSteps.output,
         endedAt: schema.taskSteps.endedAt,
-        prState: schema.tasks.prState,
-        prMergedAt: schema.tasks.prMergedAt,
+        mergeResolveState: schema.taskSteps.mergeResolveState,
       })
       .from(schema.taskSteps)
       .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
@@ -1028,7 +1033,19 @@ export async function loadProvenanceSteps(
         and(
           eq(schema.tasks.repositoryId, repositoryId),
           inArray(schema.taskSteps.stepId, PROVENANCE_STEP_IDS),
-          eq(schema.taskSteps.status, 'done'),
+          // `done` is the proof that APPLY ran — except for the cleanup step, which throws
+          // when `removeWorktreeDir` fails after the merge is committed. Its verdict lives in
+          // `merge_resolve_state`, so a `failed` row still carries a real merge.
+          or(
+            and(
+              eq(schema.taskSteps.stepId, WORKTREE_CLEANUP_STEP_ID),
+              inArray(schema.taskSteps.status, ['done', 'failed']),
+            ),
+            and(
+              ne(schema.taskSteps.stepId, WORKTREE_CLEANUP_STEP_ID),
+              eq(schema.taskSteps.status, 'done'),
+            ),
+          ) ?? sql`true`,
           // The STEP's own clock, never the task's creation time. A failed run — or a single
           // step — can be retried after a reset, and the task keeps its original `created_at`,
           // so keying on that excluded the rewritten 07/09_5 output for good while its files sat
@@ -1069,16 +1086,31 @@ export async function loadProvenanceSteps(
  * Every claim is checked against the catalog, so a payload naming something else contributes
  * nothing — these are stored JSON written by an older Haive, not a typed contract.
  */
+/** When a step's writes took effect in the repository ROOT: for a worktree step the MERGE
+ *  time, for everything else when the step itself ended. Undated rows sort first. */
+function effectiveTime(
+  step: { taskId?: string; stepId: string; endedAt?: Date | null },
+  mergedTasks: ReadonlyMap<string, Date>,
+): number {
+  if (step.stepId === WORKFLOW_SKILL_STEP_ID || step.stepId === WORKTREE_CLEANUP_STEP_ID) {
+    const at = step.taskId ? mergedTasks.get(step.taskId) : undefined;
+    return at ? at.getTime() : 0;
+  }
+  return step.endedAt ? step.endedAt.getTime() : 0;
+}
+
 export function collectWrittenCliContent(
   steps: ReadonlyArray<{
     taskId?: string;
     stepId: string;
     detectOutput?: unknown;
     output: unknown;
+    endedAt?: Date | null;
   }>,
   artifacts: ReadonlyArray<{ diskPath: string }>,
-  /** From `resolveMergedTasks`: the tasks whose worktree reached the root after the reset. */
-  mergedTasks: ReadonlySet<string> = new Set(),
+  /** From `resolveMergedTasks`: task id -> when its worktree reached the root, for the tasks
+   *  that reached it after the reset. */
+  mergedTasks: ReadonlyMap<string, Date> = new Map(),
 ): { dirs: Set<string>; entries: Set<string> } {
   const catalog = inventoryDirsFromCatalog();
   const byDir = new Map(catalog.map((entry) => [entry.dir, entry]));
@@ -1109,7 +1141,14 @@ export function collectWrittenCliContent(
     if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) entries.add(value);
   };
 
-  for (const step of steps) {
+  // A worktree write takes effect when the MERGE lands, not when the step ended. Replaying an
+  // 11d removal at its own clock put it BEFORE a newer onboarding run that had since reinstated
+  // the claim, so the removal retired nothing and a file recreated after the merge was deleted.
+  const ordered = [...steps].sort(
+    (a, b) => effectiveTime(a, mergedTasks) - effectiveTime(b, mergedTasks),
+  );
+
+  for (const step of ordered) {
     if (step.stepId === AGENT_TARGETS_STEP_ID) {
       // What 07 actually WROTE, never its target list and never the manifest's agent ids. With
       // the default `overwrite=false`, `writeIfAllowed` SKIPS a pre-existing file — so a user's
@@ -1126,13 +1165,20 @@ export function collectWrittenCliContent(
       if (!step.taskId || !mergedTasks.has(step.taskId)) continue;
       const syncDirs = (step.detectOutput as { skillTargetDirs?: unknown } | null)?.skillTargetDirs;
       if (!Array.isArray(syncDirs)) continue;
-      const sync = step.output as { generated?: unknown; removed?: unknown } | null;
+      const sync = step.output as {
+        generated?: unknown;
+        removed?: unknown;
+        indexRemovedDirs?: unknown;
+      } | null;
       const generated = Array.isArray(sync?.generated) ? sync.generated : [];
       const removed = Array.isArray(sync?.removed) ? sync.removed : [];
+      const indexRemovedDirs = (
+        Array.isArray(sync?.indexRemovedDirs) ? sync.indexRemovedDirs : []
+      ).filter((d): d is string => typeof d === 'string');
       // Detect can filter every operation out — all bundle-owned, or naming skills that are
       // gone — and the run then merges having written nothing. Scoping its target dirs anyway
       // would move the user's own skills into `-legacy`, as the empty repair pass did.
-      if (generated.length === 0 && removed.length === 0) continue;
+      if (generated.length === 0 && removed.length === 0 && indexRemovedDirs.length === 0) continue;
       for (const value of syncDirs) {
         if (typeof value !== 'string' || !byDir.has(value)) continue;
         const dir = value;
@@ -1146,6 +1192,9 @@ export function collectWrittenCliContent(
             if (claimed === gone || claimed.startsWith(`${gone}/`)) entries.delete(claimed);
           }
         }
+        // A removal that emptied the directory DELETED its index, so the earlier claim on
+        // that path goes with it — left standing, an index the user writes there is deleted.
+        if (indexRemovedDirs.includes(dir)) entries.delete(`${dir}/README.md`);
         if (generated.length === 0) continue;
         dirs.add(dir);
         for (const skillId of generated) {

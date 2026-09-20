@@ -92,6 +92,11 @@ interface SkillSyncApply {
   generated: string[];
   /** Skill ids removed from disk. */
   removed: string[];
+  /** Target dirs whose `README.md` index this pass DELETED, because the removals emptied them.
+   *  Recorded so the onboarding-artifact reset can retire the earlier claim on that path: left
+   *  standing, an index the user later writes there is deleted as old onboarding output.
+   *  OPTIONAL: an output persisted before this existed must still be readable. */
+  indexRemovedDirs?: string[];
   /** Skill ids whose agent returned nothing usable — left untouched (an update keeps
    *  the prior skill; a new one is simply not created). */
   skipped: string[];
@@ -488,6 +493,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     }
 
     // Rebuild the README index from the current on-disk set so it reflects adds/removes.
+    const indexRemovedDirs: string[] = [];
     if (generated.length > 0 || removed.length > 0) {
       for (const dir of targetDirs) {
         const summaries = await readDiskSkillSummaries(worktree, dir);
@@ -496,6 +502,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
         const readmeRel = `${wa.prefix}${[...parts, 'README.md'].join('/')}`;
         if (summaries.length === 0) {
           await removeNoFollow(wa.anchor, readmeRel);
+          indexRemovedDirs.push(dir);
           continue;
         }
         await writeFileNoFollow(wa.anchor, readmeRel, skillsReadmeMarkdown(summaries, dir), {
@@ -548,6 +555,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     return {
       generated,
       removed,
+      indexRemovedDirs,
       skipped,
       committed,
       commitSha,

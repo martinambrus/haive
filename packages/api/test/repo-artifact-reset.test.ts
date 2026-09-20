@@ -259,36 +259,32 @@ describe('collectWrittenCliContent', () => {
 
   /** 11d writes into the task's WORKTREE, so its record describes the repository root only once
    *  `12-worktree-cleanup` says the work was merged. */
-  const skillSync = (taskId: string, opts: { generated?: string[]; removed?: string[] }) => ({
+  const skillSync = (
+    taskId: string,
+    opts: { generated?: string[]; removed?: string[]; indexRemovedDirs?: string[]; endedAt?: Date },
+  ) => ({
     taskId,
     stepId: '11d-skill-sync',
     detectOutput: { skillTargetDirs: ['.claude/skills'] },
-    output: { generated: opts.generated ?? [], removed: opts.removed ?? [], skipped: [] },
+    output: {
+      generated: opts.generated ?? [],
+      removed: opts.removed ?? [],
+      indexRemovedDirs: opts.indexRemovedDirs ?? [],
+      skipped: [],
+    },
+    endedAt: opts.endedAt ?? new Date('2026-01-28T00:00:00Z'),
   });
+
   const MERGED_AT = new Date('2026-02-01T00:00:00Z');
-  /** The LOCAL merge path: `merge_remove` records `merged` and the step's end is the merge. */
-  const cleanup = (taskId: string, merged: boolean) => ({
+  /** The LOCAL merge, read from the durable `mergeResolveState` so it survives a cleanup step
+   *  that then failed to remove the worktree. */
+  const cleanup = (taskId: string, merged: boolean, endedAt: Date = MERGED_AT) => ({
     taskId,
     stepId: '12-worktree-cleanup',
     output: { action: 'merge_remove', removed: true, merged, branchDeleted: false },
-    endedAt: MERGED_AT,
-    prState: null,
-    prMergedAt: null,
+    mergeResolveState: { merged },
+    endedAt,
   });
-  /** The PR path: the step stays `merged: false` for good and the poller records it on the task. */
-  const prCleanup = (
-    taskId: string,
-    prState: string | null,
-    prMergedAt: Date | null = MERGED_AT,
-  ) => ({
-    taskId,
-    stepId: '12-worktree-cleanup',
-    output: { action: 'create_pr', removed: false, merged: false, branchDeleted: false },
-    endedAt: new Date('2026-01-25T00:00:00Z'),
-    prState,
-    prMergedAt,
-  });
-  /** Run the real resolver over the rows, as the route does. */
   const collectMerged = (
     rows: Parameters<typeof collectWrittenCliContent>[0],
     epoch: Date | null = null,
@@ -300,10 +296,8 @@ describe('collectWrittenCliContent', () => {
         rows.map((r) => ({
           taskId: (r as { taskId?: string }).taskId ?? '',
           stepId: r.stepId,
-          output: r.output,
+          mergeResolveState: (r as { mergeResolveState?: unknown }).mergeResolveState ?? null,
           endedAt: (r as { endedAt?: Date | null }).endedAt ?? null,
-          prState: (r as { prState?: string | null }).prState ?? null,
-          prMergedAt: (r as { prMergedAt?: Date | null }).prMergedAt ?? null,
         })),
         epoch,
       ),
@@ -373,15 +367,70 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.claude/skills/fine/sub-skills/kept-slug.md')).toBe(true);
   });
 
-  it('honours a PR merge, which the cleanup step never records', async () => {
-    // `create_pr` leaves `merged: false` for good — the merge happens on the forge and the
-    // poller records it on the TASK. Reading only the step's flag ignored every PR workflow.
-    const rows = [skillSync('t1', { generated: ['learned-thing'] }), prCleanup('t1', 'merged')];
+  it('never treats a PR merge as reaching the local checkout', async () => {
+    // Nothing pulls a merged PR into the root: the poller records the forge verdict and
+    // `13-pr-wait` only removes the worktree. Claiming those paths would delete a local skill
+    // the PR had changed but the checkout never received.
+    const prCleanup = {
+      taskId: 't1',
+      stepId: '12-worktree-cleanup',
+      output: { action: 'create_pr', removed: false, merged: false },
+      mergeResolveState: null,
+      endedAt: MERGED_AT,
+    };
 
-    expect(collectMerged(rows).entries.has('.claude/skills/learned-thing/SKILL.md')).toBe(true);
-    // Still open, or closed without merging: nothing of it reached the root.
-    const open = [skillSync('t2', { generated: ['x'] }), prCleanup('t2', 'open', null)];
-    expect([...collectMerged(open).dirs]).toEqual([]);
+    expect([...collectMerged([skillSync('t1', { generated: ['x'] }), prCleanup]).dirs]).toEqual([]);
+  });
+
+  it('counts a merge whose cleanup step then failed', async () => {
+    // `12-worktree-cleanup` throws when `removeWorktreeDir` fails AFTER the merge is committed,
+    // so the step is `failed` while the merge is real and durable in `mergeResolveState`.
+    const failedCleanup = {
+      taskId: 't1',
+      stepId: '12-worktree-cleanup',
+      output: null,
+      mergeResolveState: { merged: true },
+      endedAt: MERGED_AT,
+    };
+
+    const { entries } = collectMerged([
+      skillSync('t1', { generated: ['learned-thing'] }),
+      failedCleanup,
+    ]);
+    expect(entries.has('.claude/skills/learned-thing/SKILL.md')).toBe(true);
+  });
+
+  it('replays a sync at its merge time, not when the step ended', async () => {
+    // 11d removed the skill in a worktree, a NEWER onboarding run reinstated the claim, and the
+    // merge landed after both. Replaying the removal at the 11d step's own clock put it first,
+    // so it retired nothing and the stale claim survived.
+    const { entries } = collectMerged([
+      skillSync('t1', { removed: ['dropped'], endedAt: new Date('2026-01-05T00:00:00Z') }),
+      {
+        stepId: '09_5-skill-generation',
+        output: { written: [{ id: 'dropped', mirroredDirs: ['.claude/skills'] }] },
+        endedAt: new Date('2026-01-20T00:00:00Z'),
+      },
+      cleanup('t1', true, new Date('2026-02-01T00:00:00Z')),
+    ]);
+
+    expect(entries.has('.claude/skills/dropped')).toBe(false);
+  });
+
+  it('retires the index claim when a removal emptied the directory', async () => {
+    // 11d deletes `<dir>/README.md` once the last skill is gone. Left claimed, an index the user
+    // writes there afterwards is deleted as old onboarding output.
+    const { entries } = collectMerged([
+      {
+        stepId: '09_5-skill-generation',
+        output: { written: [{ id: 'dropped', mirroredDirs: ['.claude/skills'] }] },
+        endedAt: new Date('2026-01-02T00:00:00Z'),
+      },
+      skillSync('t1', { removed: ['dropped'], indexRemovedDirs: ['.claude/skills'] }),
+      cleanup('t1', true),
+    ]);
+
+    expect(entries.has('.claude/skills/README.md')).toBe(false);
   });
 
   it('keeps a sync whose merge lands after the reset, and drops one merged before it', async () => {
