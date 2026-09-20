@@ -110,10 +110,18 @@ async function main(): Promise<void> {
     check('exactly one of two simultaneous claims wins', both.filter(Boolean).length === 1, both);
     check('the winning claim is visible to a writer', await hasLiveResetClaim(db, repoA));
 
+    // On an UNCLAIMED repository, or the staleness term refuses it regardless and this passes
+    // whether or not the ownership predicate is there at all. (It did, until a mutant showed it.)
+    const unclaimed = await newRepo();
     check(
       'a claim on another user’s repository is refused',
-      !(await claimRepositoryForReset(db, repoA, otherUserId)),
+      !(await claimRepositoryForReset(db, unclaimed, otherUserId)),
     );
+    check(
+      'and that repository is still free for its owner',
+      await claimRepositoryForReset(db, unclaimed, userId),
+    );
+    await releaseRepositoryResetClaim(db, unclaimed);
 
     await releaseRepositoryResetClaim(db, repoA);
     check('releasing clears it for the next writer', !(await hasLiveResetClaim(db, repoA)));
