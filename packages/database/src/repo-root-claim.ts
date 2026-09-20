@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import * as schema from './schema/index.js';
 import type { Database } from './index.js';
@@ -59,6 +60,10 @@ export interface RootClaim {
   /** The stamp this claim wrote. Hand it back to `releaseRepositoryRoot` so an expired holder
    *  cannot release the claim that replaced it. */
   claimedAt: Date;
+  /** The identity this claim wrote, for the one question the stamp cannot answer: is the claim on
+   *  the row MINE. Two callers can generate the same millisecond, so proving ownership by the
+   *  stamp lets a caller whose write never committed adopt the winner's claim. */
+  owner: string;
 }
 
 /**
@@ -87,11 +92,15 @@ export async function claimRepositoryRoot(
    *  throws, the caller must still know what was attempted, because the write may have committed
    *  and lost only its acknowledgement. */
   attempted: Date = new Date(),
+  /** The identity to write. Unique per attempt, so an ambiguous failure can be resolved by asking
+   *  the row WHOSE claim it carries rather than inferring it from a timestamp two callers can
+   *  share. */
+  owner: string = randomUUID(),
 ): Promise<RootClaim | null> {
   const claimedAt = attempted;
   const claimed = await db
     .update(schema.repositories)
-    .set({ rootClaimedAt: claimedAt, rootClaimKind: kind })
+    .set({ rootClaimedAt: claimedAt, rootClaimKind: kind, rootClaimOwner: owner })
     .where(
       and(
         eq(schema.repositories.id, repositoryId),
@@ -106,7 +115,7 @@ export async function claimRepositoryRoot(
       ),
     )
     .returning({ id: schema.repositories.id });
-  return claimed.length > 0 ? { claimedAt } : null;
+  return claimed.length > 0 ? { claimedAt, owner } : null;
 }
 
 /**
@@ -128,7 +137,7 @@ export async function releaseRepositoryRoot(
   // to know so it can try the other stamp it may be holding.
   const cleared = await db
     .update(schema.repositories)
-    .set({ rootClaimedAt: null, rootClaimKind: null })
+    .set({ rootClaimedAt: null, rootClaimKind: null, rootClaimOwner: null })
     .where(
       claimedAt
         ? and(
@@ -353,15 +362,18 @@ async function readClaimStamp(
   db: Database | DbHandle,
   repositoryId: string,
   original: unknown,
-): Promise<Date | null> {
+): Promise<{ claimedAt: Date | null; owner: string | null }> {
   for (let attempt = 0; attempt < CLAIM_READ_RETRIES; attempt += 1) {
     try {
       const rows = await db
-        .select({ claimedAt: schema.repositories.rootClaimedAt })
+        .select({
+          claimedAt: schema.repositories.rootClaimedAt,
+          owner: schema.repositories.rootClaimOwner,
+        })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
         .limit(1);
-      return rows[0]?.claimedAt ?? null;
+      return { claimedAt: rows[0]?.claimedAt ?? null, owner: rows[0]?.owner ?? null };
     } catch {
       // Keep trying; the throw below is what happens when they are all spent.
     }
@@ -444,7 +456,8 @@ export async function acquireRootClaim(
   // whole stale window with nobody holding it: edits and resets are refused, and a repo job can
   // burn its retries and land the repository in `error`.
   const attempted = new Date();
-  const first = await claimRepositoryRoot(db, repositoryId, kind, userId, attempted).catch(
+  const owner = randomUUID();
+  const first = await claimRepositoryRoot(db, repositoryId, kind, userId, attempted, owner).catch(
     async (err: unknown) => {
       // Did that write land? Only the row can say. Holding the attempted stamp means the CAS
       // succeeded and this caller owns the claim; anything else means it did not, and refusing
@@ -458,11 +471,15 @@ export async function acquireRootClaim(
       // unguarded attempt means a transient error abandons a claim that may well have committed,
       // and with no handle there is no renewal and no release — the row then stays fresh for the
       // entire stale window with nobody holding it.
-      const claimedAt = await readClaimStamp(db, repositoryId, err);
-      if (claimedAt !== null && claimedAt.getTime() === attempted.getTime()) {
-        return { claimedAt: attempted };
-      }
-      if (claimedAt === null) throw err;
+      const row = await readClaimStamp(db, repositoryId, err);
+      // Ownership is proven by the TOKEN, never by the stamp. Two callers can generate the same
+      // millisecond, so a caller whose write threw before committing could otherwise read the
+      // winner's identical stamp and adopt a claim that is not its own — a reset and a rebuild
+      // then walk the same tree, which is the outcome this whole mechanism exists to prevent.
+      if (row.owner !== null && row.owner === owner) return { claimedAt: attempted, owner };
+      // A stamp with no owner is a claim taken before that column existed. It cannot be proven
+      // either way, so it is refused — the same answer this gave before the column existed.
+      if (row.claimedAt === null) throw err;
       return null;
     },
   );

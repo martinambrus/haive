@@ -229,12 +229,16 @@ function fakeDbAmbiguousClaim(rowStamp: 'attempted' | 'stranger' | 'empty'): {
 } {
   const writes: Recorded[] = [];
   let attempted: Date | null = null;
+  let owner: string | null = null;
   const db = {
     update: () => ({
-      set: (values: { rootClaimedAt: Date | null }) => ({
+      set: (values: { rootClaimedAt: Date | null; rootClaimOwner?: string | null }) => ({
         where: () => {
           const first = writes.length === 0;
-          if (first) attempted = values.rootClaimedAt;
+          if (first) {
+            attempted = values.rootClaimedAt;
+            owner = values.rootClaimOwner ?? null;
+          }
           let settle!: () => void;
           const gate = new Promise<void>((resolve) => {
             settle = resolve;
@@ -254,9 +258,12 @@ function fakeDbAmbiguousClaim(rowStamp: 'attempted' | 'stranger' | 'empty'): {
       from: () => ({
         where: () => ({
           limit: async () => {
-            if (rowStamp === 'empty') return [{ claimedAt: null }];
-            if (rowStamp === 'stranger') return [{ claimedAt: new Date('2030-01-01T00:00:00Z') }];
-            return [{ claimedAt: attempted }];
+            // Ownership is proven by the TOKEN now, so the read-back must carry it.
+            if (rowStamp === 'empty') return [{ claimedAt: null, owner: null }];
+            if (rowStamp === 'stranger') {
+              return [{ claimedAt: new Date('2030-01-01T00:00:00Z'), owner: 'someone-else' }];
+            }
+            return [{ claimedAt: attempted, owner }];
           },
         }),
       }),
@@ -704,13 +711,17 @@ describe('acquireRootClaim', () => {
     const build = (readFailures: number) => {
       const writes: Recorded[] = [];
       let attempted: Date | null = null;
+      let owner: string | null = null;
       let left = readFailures;
       const db = {
         update: () => ({
-          set: (values: { rootClaimedAt: Date | null }) => ({
+          set: (values: { rootClaimedAt: Date | null; rootClaimOwner?: string | null }) => ({
             where: () => {
               const first = writes.length === 0;
-              if (first) attempted = values.rootClaimedAt;
+              if (first) {
+                attempted = values.rootClaimedAt;
+                owner = values.rootClaimOwner ?? null;
+              }
               let settle!: () => void;
               const gate = new Promise<void>((resolve) => {
                 settle = resolve;
@@ -735,7 +746,7 @@ describe('acquireRootClaim', () => {
                   left -= 1;
                   throw new Error('read failed');
                 }
-                return [{ claimedAt: attempted }];
+                return [{ claimedAt: attempted, owner }];
               },
             }),
           }),
@@ -756,6 +767,51 @@ describe('acquireRootClaim', () => {
     const failing = acquireRootClaim(hopeless.db, 'repo-1', 'reset');
     hopeless.writes[0]!.settle();
     await expect(failing).rejects.toThrow('claim ack lost');
+  });
+
+  it('refuses a claim whose stamp collides with another caller in the same millisecond', async () => {
+    // THE reason ownership is a token rather than a timestamp. Two callers can generate the same
+    // millisecond. If the first one's UPDATE throws BEFORE committing while the second's
+    // succeeds, the first reads the row, finds a stamp identical to the one it tried to write,
+    // and — proving ownership by the stamp — concludes the claim is its own. A reset and a
+    // rebuild then walk the same tree, which is the outcome this whole mechanism exists to
+    // prevent, reached through its own recovery path.
+    vi.useFakeTimers();
+    const writes: Recorded[] = [];
+    let attempted: Date | null = null;
+    const db = {
+      update: () => ({
+        set: (values: { rootClaimedAt: Date | null }) => ({
+          where: () => {
+            let settle!: () => void;
+            const gate = new Promise<void>((resolve) => {
+              settle = resolve;
+            });
+            attempted = values.rootClaimedAt;
+            writes.push({ stamp: values.rootClaimedAt, settle });
+            return {
+              returning: async () => {
+                await gate;
+                throw new Error('claim ack lost');
+              },
+            };
+          },
+        }),
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            // The row carries OUR millisecond — written by somebody else, whose token differs.
+            limit: async () => [{ claimedAt: attempted, owner: 'the-other-caller' }],
+          }),
+        }),
+      }),
+    } as unknown as Database;
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'reset');
+    writes[0]!.settle();
+    // Refused, not adopted: an identical stamp is not evidence of ownership.
+    expect(await acquiring).toBeNull();
   });
 
   it('never runs two renewals at once', async () => {

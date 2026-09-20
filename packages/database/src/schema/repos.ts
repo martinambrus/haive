@@ -254,6 +254,15 @@ export const repositories = pgTable(
     /** Which kind of writer holds it, carried only so a refusal can name what it is waiting for.
      *  Nothing branches on it — the exclusion is mutual either way. */
     rootClaimKind: text('root_claim_kind'),
+    /** WHO holds it, as an identity rather than a moment. `root_claimed_at` cannot answer that on
+     *  its own: two callers can generate the same millisecond, so a caller whose claiming write
+     *  threw before committing could read the winner's identical stamp and conclude the claim was
+     *  its own — two writers, one tree. Compared only where ownership must be PROVEN (the
+     *  reconciliation after an ambiguous write); renewal and release still match on the stamp,
+     *  since the CAS already guarantees one holder. NULL means "claimed before this column
+     *  existed", which the reconciliation treats as unprovable and refuses.
+     *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
+    rootClaimOwner: text('root_claim_owner'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),
