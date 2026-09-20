@@ -1534,13 +1534,24 @@ claims their new file. Reading only the NEWEST run does not fix it: with no re-o
 the newest run IS the pre-reset one. NULL there is every repo never reset, which reads exactly as
 it always did, so the column needs no backfill.
 
-`11d-skill-sync` rides the same scoping but is read SEPARATELY, because its output is its own
-shape: `{ generated, removed, skipped }`, skill IDS, with the target dirs in its DETECT payload.
-Reading it as 09_5's `written[]` — which it has never emitted — claimed nothing at all. It also
-RETIRES claims, which is why the rows come back OLDEST FIRST: a skill 11d deleted is one 09_5
-may have written, and leaving that claim standing would delete a same-named skill the user
-wrote afterwards. It records no sub-skill slugs, so files under a skill it generated are moved
-aside rather than deleted.
+`09_5b-skill-repair` is the third source and is read on its own terms: `repaired` (skill IDS)
+with the target dirs in its DETECT payload. It CLEARS a failing skill's tree before rewriting
+it, so 09_5's slug record for that skill is STALE — which is why the rows come back OLDEST
+FIRST and a repair RETIRES the earlier claims under that skill before re-claiming it.
+
+**A directory is claimed only when something inside it is named.** `hasDeeperClaims` is what
+makes a claimed directory be WALKED, so claiming one with nothing named inside says the
+opposite — that it is ours wholesale — and a file the user put there is deleted rather than
+moved aside. `sub-skills` is therefore claimed only when the slugs in it were recorded, which
+09_5b never does and 09_5 only does for outputs written since `subSkillSlugs` existed.
+
+`11d-skill-sync` is deliberately NOT a source, although it writes skills through the same
+`resolveSkillTargetDirs`. It writes into the task's WORKTREE (`resolveWorktree`), so its record
+does not describe the repository root unless the work was merged — and `12-worktree-cleanup`
+permits `keep` and `remove_only`, so even a completed task does not prove it was. Claiming from
+it could delete an untouched ROOT copy of a skill it only ever changed in a worktree. The cost
+is that a skill a workflow generated is quarantined rather than removed: clutter, in the
+direction that loses nothing.
 
 **A claimed DIRECTORY is walked when anything claimed lives beneath it, and taken whole when
 nothing does.** That is what separates a generated skill (`<skills>/<id>`, which holds Haive's

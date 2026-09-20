@@ -220,46 +220,75 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.agents/skills/README.md')).toBe(true);
   });
 
-  /** 11d's REAL shape: skill ids in the apply output, target dirs in the detect payload. Reading
-   *  it as 09_5's `written[]` claimed nothing at all. */
-  const skillSync = (generated: string[], removed: string[] = []) => ({
-    stepId: '11d-skill-sync',
+  /** 09_5b's REAL shape: repaired skill ids in the apply output, target dirs in the detect
+   *  payload. It records no sub-skill slugs. */
+  const skillRepair = (repaired: string[]) => ({
+    stepId: '09_5b-skill-repair',
     detectOutput: { skillTargetDirs: ['.claude/skills'] },
-    output: { generated, removed, skipped: [], committed: true, commitSha: null },
+    output: { repaired, stillFailing: [], attempted: repaired.length },
   });
 
-  it('reads a workflow skill sync in the shape it actually emits', async () => {
-    const { dirs, entries } = collectWrittenCliContent([skillSync(['learned-thing'])], []);
+  it('never claims a workflow skill sync, which writes in a worktree', async () => {
+    // 11d writes into the task's worktree, so its record does not describe the repository root
+    // unless the work was merged — and nothing in the row proves that. Claiming from it could
+    // delete an untouched root copy of a skill it only ever changed in a worktree.
+    const { dirs, entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '11d-skill-sync',
+          detectOutput: { skillTargetDirs: ['.claude/skills'] },
+          output: { generated: ['learned-thing'], removed: [], skipped: [] },
+        },
+      ],
+      [],
+    );
 
-    expect(dirs.has('.claude/skills')).toBe(true);
-    expect(entries.has('.claude/skills/learned-thing')).toBe(true);
-    expect(entries.has('.claude/skills/learned-thing/SKILL.md')).toBe(true);
-    expect(entries.has('.claude/skills/README.md')).toBe(true);
+    expect([...dirs]).toEqual([]);
+    expect([...entries]).toEqual([]);
   });
 
-  it('retires a claim for a skill a later run deleted', async () => {
-    // 09_5 wrote it, 11d removed it. Leaving the claim standing would delete a same-named skill
-    // the user wrote afterwards — the steps are replayed oldest first for exactly this.
+  it('retires the stale slug claims of a skill 09_5b rebuilt', async () => {
+    // 09_5b clears the tree before rewriting, so 09_5's slugs for that skill may no longer be on
+    // disk. It records none of its own, so `sub-skills` is left unclaimed and quarantined whole.
     const { entries } = collectWrittenCliContent(
       [
         {
           stepId: '09_5-skill-generation',
           output: {
             written: [
-              { id: 'gone', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['naming'] },
-              { id: 'kept', mirroredDirs: ['.claude/skills'] },
+              { id: 'broken', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['old-slug'] },
+              { id: 'fine', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['kept-slug'] },
             ],
           },
         },
-        skillSync([], ['gone']),
+        skillRepair(['broken']),
       ],
       [],
     );
 
-    expect(entries.has('.claude/skills/gone')).toBe(false);
-    expect(entries.has('.claude/skills/gone/SKILL.md')).toBe(false);
-    expect(entries.has('.claude/skills/gone/sub-skills/naming.md')).toBe(false);
-    expect(entries.has('.claude/skills/kept')).toBe(true);
+    expect(entries.has('.claude/skills/broken/sub-skills/old-slug.md')).toBe(false);
+    expect(entries.has('.claude/skills/broken/sub-skills')).toBe(false);
+    expect(entries.has('.claude/skills/broken')).toBe(true);
+    expect(entries.has('.claude/skills/broken/SKILL.md')).toBe(true);
+    // The skill it did not repair keeps everything 09_5 recorded.
+    expect(entries.has('.claude/skills/fine/sub-skills/kept-slug.md')).toBe(true);
+  });
+
+  it('does not claim sub-skills when no slug inside it was recorded', async () => {
+    // A directory claimed with nothing named inside reads as wholly ours, so a file the user put
+    // there would be deleted rather than moved aside.
+    const { entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '09_5-skill-generation',
+          output: { written: [{ id: 'legacy', mirroredDirs: ['.claude/skills'] }] },
+        },
+      ],
+      [],
+    );
+
+    expect(entries.has('.claude/skills/legacy')).toBe(true);
+    expect(entries.has('.claude/skills/legacy/sub-skills')).toBe(false);
   });
 
   it('claims what 07 wrote under .claude, which is not a catalog dir', async () => {

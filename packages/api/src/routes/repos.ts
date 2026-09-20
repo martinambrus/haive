@@ -912,14 +912,21 @@ function onboardingResetDirs(haiveDirs: ReadonlySet<string>): {
  *  `written[].mirroredDirs` plus each skill's id. */
 const AGENT_TARGETS_STEP_ID = '07-generate-files';
 const SKILL_MIRROR_STEP_ID = '09_5-skill-generation';
-/** `11d-skill-sync` mirrors skills during a WORKFLOW run, through the same
- *  `resolveSkillTargetDirs`. Its output is its OWN shape — `{ generated, removed, skipped }`,
- *  skill IDS, with the target dirs in its DETECT payload — so it is read separately from 09_5.
- *  Without it a skill written after onboarding is unclaimed and the reset quarantines Haive's
- *  own file; worse, a skill it DELETED leaves 09_5's claim standing, which would then delete a
- *  same-named skill the user wrote afterwards. It rides the same epoch scoping as the rest. */
-const WORKFLOW_SKILL_STEP_ID = '11d-skill-sync';
-const PROVENANCE_STEP_IDS = [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID, WORKFLOW_SKILL_STEP_ID];
+/** `09_5b-skill-repair` CLEARS and rebuilds a failing skill's tree in the repo root, so 09_5's
+ *  record of that skill is STALE — the rebuild may produce different sub-skill slugs, and the
+ *  rewritten files would be quarantined as foreign. Its own shape is `repaired` (skill IDS)
+ *  with the target dirs in its DETECT payload, and it records no slugs, so it retires the stale
+ *  claims and re-claims the skill without naming what is inside `sub-skills`.
+ *
+ *  `11d-skill-sync` is deliberately NOT here. It mirrors skills during a WORKFLOW run, but it
+ *  writes into that task's WORKTREE (`resolveWorktree`), so its record does not describe the
+ *  repository root unless the work was merged — and `12-worktree-cleanup` permits `keep` and
+ *  `remove_only`, so even a completed task does not prove it was. Claiming from it could delete
+ *  an untouched ROOT copy of a skill it only ever changed in a worktree. The cost of leaving it
+ *  out is that a skill a workflow generated is quarantined rather than removed: clutter, in the
+ *  direction that loses nothing. */
+const SKILL_REPAIR_STEP_ID = '09_5b-skill-repair';
+const PROVENANCE_STEP_IDS = [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID, SKILL_REPAIR_STEP_ID];
 
 /**
  * The step rows whose records may be read as provenance for this repository.
@@ -1022,37 +1029,32 @@ export function collectWrittenCliContent(
       // no manifest id at all.
       const wrote = (step.output as { wroteFiles?: unknown } | null)?.wroteFiles;
       if (Array.isArray(wrote)) for (const rel of wrote) claimPath(rel);
-    } else if (step.stepId === WORKFLOW_SKILL_STEP_ID) {
-      // 11d has its OWN shape — `{ generated, removed, skipped }`, skill IDS, with the target
-      // dirs in its DETECT payload — and reading it as 09_5's `written[]` claimed nothing at
-      // all. It also RETIRES claims: a skill it deleted is one 09_5 may have written, and
-      // leaving that claim standing would delete a same-named skill the user wrote afterwards.
-      const dirs09 = (step.detectOutput as { skillTargetDirs?: unknown } | null)?.skillTargetDirs;
-      if (!Array.isArray(dirs09)) continue;
-      const out = step.output as { generated?: unknown; removed?: unknown } | null;
-      for (const value of dirs09) {
+    } else if (step.stepId === SKILL_REPAIR_STEP_ID) {
+      // 09_5b has its OWN shape — `repaired`, skill IDS, with the target dirs in its DETECT
+      // payload — and it CLEARS the skill's tree before rewriting it, so 09_5's slug record for
+      // that skill is stale and has to be RETIRED. That is why the rows are replayed oldest
+      // first. It records no slugs of its own, so `sub-skills` is deliberately NOT claimed: a
+      // directory claimed with nothing named inside it reads as wholly ours, and a file the
+      // user put there would be deleted rather than moved aside.
+      const repairDirs = (step.detectOutput as { skillTargetDirs?: unknown } | null)
+        ?.skillTargetDirs;
+      if (!Array.isArray(repairDirs)) continue;
+      const repaired = (step.output as { repaired?: unknown } | null)?.repaired;
+      if (!Array.isArray(repaired)) continue;
+      for (const value of repairDirs) {
         const dir = claimDir(value);
         if (dir === null) continue;
-        if (Array.isArray(out?.generated)) {
-          for (const skillId of out.generated) {
-            if (typeof skillId !== 'string') continue;
-            // 11d reuses the onboarding generator, so the layout is the same — but it records no
-            // sub-skill slugs, so those files are moved aside rather than deleted.
-            entries.add(`${dir}/${skillId}`);
-            entries.add(`${dir}/${skillId}/SKILL.md`);
-            entries.add(`${dir}/${skillId}/sub-skills`);
+        for (const skillId of repaired) {
+          if (typeof skillId !== 'string') continue;
+          const skillDir = `${dir}/${skillId}`;
+          for (const claimed of [...entries]) {
+            if (claimed === skillDir || claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
           }
-          entries.add(`${dir}/README.md`);
+          entries.add(skillDir);
+          entries.add(`${skillDir}/SKILL.md`);
         }
-        if (Array.isArray(out?.removed)) {
-          for (const skillId of out.removed) {
-            if (typeof skillId !== 'string') continue;
-            const gone = `${dir}/${skillId}`;
-            for (const claimed of [...entries]) {
-              if (claimed === gone || claimed.startsWith(`${gone}/`)) entries.delete(claimed);
-            }
-          }
-        }
+        // It rebuilds the index from the on-disk set whenever it repaired anything.
+        if (repaired.length > 0) entries.add(`${dir}/README.md`);
       }
     } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
       const written = (step.output as { written?: unknown } | null)?.written;
@@ -1078,8 +1080,12 @@ export function collectWrittenCliContent(
             const skillDir = `${dir}/${row.id}`;
             entries.add(skillDir);
             entries.add(`${skillDir}/SKILL.md`);
-            entries.add(`${skillDir}/sub-skills`);
-            if (Array.isArray(row.subSkillSlugs)) {
+            // `sub-skills` is claimed ONLY when the slugs inside it were recorded. A directory
+            // claimed with nothing named inside reads as wholly ours — `hasDeeperClaims` is
+            // false — so a file the user put there would be deleted rather than moved aside.
+            // An output written before the slugs existed therefore has it quarantined whole.
+            if (Array.isArray(row.subSkillSlugs) && row.subSkillSlugs.length > 0) {
+              entries.add(`${skillDir}/sub-skills`);
               for (const slug of row.subSkillSlugs) {
                 if (typeof slug === 'string') entries.add(`${skillDir}/sub-skills/${slug}.md`);
               }

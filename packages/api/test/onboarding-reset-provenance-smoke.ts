@@ -83,9 +83,9 @@ async function main(): Promise<void> {
       stepId: string;
       status: 'done' | 'waiting_form' | 'failed';
       marker: string;
-      /** 11d emits `{ generated, ... }` rather than `wroteFiles`; the marker rides whichever
+      /** 09_5b emits `{ repaired, ... }` rather than `wroteFiles`; the marker rides whichever
        *  field that step really uses, so no row here teaches a shape the code never sees. */
-      shape?: 'wrote' | 'skill-sync';
+      shape?: 'wrote' | 'skill-repair';
     }): Promise<void> => {
       const taskId = randomUUID();
       await db.insert(schema.tasks).values({
@@ -105,8 +105,8 @@ async function main(): Promise<void> {
         title: opts.marker,
         status: opts.status,
         output:
-          opts.shape === 'skill-sync'
-            ? { generated: [opts.marker], removed: [], skipped: [] }
+          opts.shape === 'skill-repair'
+            ? { repaired: [opts.marker], stillFailing: [], attempted: 1 }
             : { wroteFiles: [opts.marker] },
         createdAt: opts.startedAt,
         updatedAt: opts.startedAt,
@@ -137,10 +137,19 @@ async function main(): Promise<void> {
     await seed({
       repositoryId: repoId,
       startedAt: AFTER_RESET,
+      stepId: '09_5b-skill-repair',
+      status: 'done',
+      marker: 'post-reset-skill-repair',
+      shape: 'skill-repair',
+    });
+    // 11d writes in a task WORKTREE, so its record never describes the repository root and the
+    // query must not return it however complete the run was.
+    await seed({
+      repositoryId: repoId,
+      startedAt: AFTER_RESET,
       stepId: '11d-skill-sync',
       status: 'done',
-      marker: 'post-reset-skill-sync',
-      shape: 'skill-sync',
+      marker: 'post-reset-worktree-skill-sync',
     });
     await seed({
       repositoryId: repoId,
@@ -160,8 +169,8 @@ async function main(): Promise<void> {
     const markersOf = (rows: Array<{ output: unknown }>): string[] =>
       rows
         .flatMap((row) => {
-          const out = row.output as { wroteFiles?: string[]; generated?: string[] } | null;
-          return [...(out?.wroteFiles ?? []), ...(out?.generated ?? [])];
+          const out = row.output as { wroteFiles?: string[]; repaired?: string[] } | null;
+          return [...(out?.wroteFiles ?? []), ...(out?.repaired ?? [])];
         })
         .sort();
 
@@ -180,9 +189,14 @@ async function main(): Promise<void> {
     );
     check('another repository never leaks in', !unscoped.includes('other-repo-done'), unscoped);
     check(
+      'a worktree-scoped skill sync is never read as repository provenance',
+      !unscoped.includes('post-reset-worktree-skill-sync'),
+      unscoped,
+    );
+    check(
       'a null epoch reads every run of this repo',
       unscoped.join(',') ===
-        ['post-reset-done', 'post-reset-skill-sync', 'pre-reset-done'].join(','),
+        ['post-reset-done', 'post-reset-skill-repair', 'pre-reset-done'].join(','),
       unscoped,
     );
 
@@ -195,8 +209,8 @@ async function main(): Promise<void> {
       scoped,
     );
     check(
-      'runs after the reset are kept, skill sync included',
-      scoped.join(',') === ['post-reset-done', 'post-reset-skill-sync'].join(','),
+      'runs after the reset are kept, skill repair included',
+      scoped.join(',') === ['post-reset-done', 'post-reset-skill-repair'].join(','),
       scoped,
     );
 
