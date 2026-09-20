@@ -206,6 +206,33 @@ async function reconcileAmbiguousRenewal(
   }
 }
 
+/**
+ * One renewal attempt, with its ambiguity already resolved as far as it can be.
+ *
+ * EVERY conditional write to this row has the same problem — a commit whose acknowledgement is
+ * lost is indistinguishable from a write that never ran — so every one of them needs the same
+ * read-back. Patching that in per call site is how the recovery write ended up without it after
+ * the first renewal got it, so both go through here instead.
+ *
+ * `attempted` is returned because the caller must remember it when the answer is UNPROVEN: the
+ * row may hold it, and a later conditional write from the old stamp would then miss and read as
+ * a takeover that never happened.
+ */
+async function renewReconciled(
+  db: Database | DbHandle,
+  repositoryId: string,
+  from: Date,
+): Promise<{ stamp: Date | null; proven: boolean; attempted: Date }> {
+  const attempted = new Date();
+  try {
+    const stamp = await renewRootClaim(db, repositoryId, from, attempted);
+    return { stamp, proven: true, attempted };
+  } catch {
+    const reconciled = await reconcileAmbiguousRenewal(db, repositoryId, from, attempted);
+    return { ...reconciled, attempted };
+  }
+}
+
 /** A held claim. `release` is idempotent and safe to call after the lease was lost. */
 export interface RootClaimHandle {
   release(): Promise<void>;
@@ -270,33 +297,45 @@ export async function acquireRootClaim(
   const renewOnce = async (): Promise<void> => {
     if (current === null) return;
     const held = current;
-    const attempted = new Date();
-    let next = await renewRootClaim(db, repositoryId, held, attempted)
-      .then((stamp) => ({ stamp, proven: true }))
-      .catch(() =>
-        // AMBIGUOUS, not failed. The UPDATE may have committed and lost only its
-        // acknowledgement, in which case the row now holds `attempted` while we still believe we
-        // hold `held` — and then every later conditional match misses: the release clears
-        // nothing, the next renewal reports the lease lost, and the repository stays claimed for
-        // the rest of the window with nobody working on it. Ask the row which it carries.
-        reconcileAmbiguousRenewal(db, repositoryId, held, attempted),
-      );
-    // An UNPROVEN answer is a guess, not a reading: the reconciliation read failed too, so the
-    // row may well hold `attempted`. Carrying it matters because the next healthy renewal would
-    // otherwise match nothing and report a takeover that never happened — renewal stops, the
-    // claim is never cleared, and after the stale window a second writer enters the tree this
-    // one is still rewriting, which is the catastrophe the whole mechanism exists to prevent.
-    if (!next.proven) unproven = attempted;
+    // AMBIGUITY is resolved inside `renewReconciled`: a commit that lost its acknowledgement
+    // leaves the row holding what we tried to write while we still believe we hold `held`, and
+    // then every later conditional match misses — the release clears nothing, the next renewal
+    // reports the lease lost, and the repository stays claimed for the rest of the window with
+    // nobody working on it.
+    let next = await renewReconciled(db, repositoryId, held);
+    // An UNPROVEN answer is a guess, not a reading: the read-back failed too, so the row may
+    // well hold what that write attempted. Carrying it is what stops the next healthy renewal
+    // matching nothing and reporting a takeover that never happened.
+    if (!next.proven) unproven = next.attempted;
     else if (next.stamp !== null) unproven = null;
     // A miss while an unproven stamp is outstanding is not yet a takeover: try renewing FROM the
-    // stamp that write may have left behind before concluding anything.
+    // stamp that write may have left behind before concluding anything. This attempt carries the
+    // SAME ambiguity as any other, which is why it goes through the same helper — resolving it
+    // only on the first write is how this path came to lack a read-back at all.
     if (next.stamp === null && unproven !== null) {
-      const recovered = await renewRootClaim(db, repositoryId, unproven, new Date()).catch(
-        () => null,
-      );
-      if (recovered !== null) {
-        next = { stamp: recovered, proven: true };
+      const recovered = await renewReconciled(db, repositoryId, unproven);
+      // PROVEN is tested first, and that ordering is the whole correctness of this block. An
+      // unproven answer always carries a non-null stamp (the reconciler falls back to the one it
+      // was given), so testing the stamp first swallows the ambiguous case into "recovered":
+      // it would adopt that stamp as certain AND clear the outstanding one, leaving us holding a
+      // value the row may not have while having forgotten the value it might. That is the exact
+      // failure this mechanism exists to prevent, reintroduced by the recovery for it.
+      if (!recovered.proven) {
+        // Still unknown, and now in both directions. Keep a working stamp and carry the newest
+        // attempt, so the next tick can ask again once the database answers. `lost` is NEVER set
+        // from an unproven answer: reading "I could not tell" as a takeover stops renewing a
+        // lease that is still protecting a clone in progress, and the uncertainty ends as soon
+        // as one read succeeds. A database failing every read and half its writes degrades this
+        // lease either way; the direction it must not degrade in is the one that lets a second
+        // writer onto the tree.
+        next = { stamp: held, proven: false, attempted: recovered.attempted };
+        unproven = recovered.attempted;
+      } else if (recovered.stamp !== null) {
+        next = recovered;
         unproven = null;
+      } else {
+        // Proven: the row carries a third value, so the lease really is someone else's.
+        next = recovered;
       }
     }
     // null means the lease was taken over while we worked. Stop renewing and stop releasing:

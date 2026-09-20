@@ -176,6 +176,48 @@ function fakeDbUnprovenRenewal(): { db: Database; writes: Recorded[] } {
   return { db, writes };
 }
 
+/**
+ * Every write is ambiguous and every read fails: the first renewal commits without an
+ * acknowledgement, the read-back fails, the later renewal from the stale stamp misses, and the
+ * RECOVERY write is ambiguous too. Nothing here proves a takeover, so nothing may conclude one.
+ */
+function fakeDbAllAmbiguous(): { db: Database; writes: Recorded[] } {
+  const writes: Recorded[] = [];
+  const db = {
+    update: () => ({
+      set: (values: { rootClaimedAt: Date | null }) => ({
+        where: () => {
+          const idx = writes.length;
+          let settle!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            settle = resolve;
+          });
+          writes.push({ stamp: values.rootClaimedAt, settle });
+          return {
+            returning: async () => {
+              await gate;
+              if (idx === 0) return [{ id: 'repo-1' }]; // the claim
+              if (idx === 1) throw new Error('ack lost'); // renewal 1: committed, unacknowledged
+              if (idx === 2) return []; // renewal 2 from the stale stamp: misses
+              throw new Error('ack lost again'); // the recovery write: ambiguous as well
+            },
+          };
+        },
+      }),
+    }),
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => {
+            throw new Error('read failed');
+          },
+        }),
+      }),
+    }),
+  } as unknown as Database;
+  return { db, writes };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -405,6 +447,44 @@ describe('acquireRootClaim', () => {
 
     const clears = writes.slice(before).filter((w) => w.stamp === null);
     expect(clears.length).toBe(2);
+  });
+
+  it('does not declare a takeover when the RECOVERY write is ambiguous too', async () => {
+    // The recovery write is a conditional write like any other, so it carries the same
+    // commit-without-acknowledgement ambiguity. Converting its exception straight to "lost"
+    // stops renewal on a lease that may still be ours — and after the stale window a second
+    // writer enters the tree this one is still rewriting, which is the catastrophe the whole
+    // mechanism exists to prevent. "I could not tell" is not "somebody else has it".
+    vi.useFakeTimers();
+    const { db, writes } = fakeDbAllAmbiguous();
+
+    const acquiring = acquireRootClaim(db, 'repo-1', 'rebuild');
+    writes[0]!.settle();
+    const handle = await acquiring;
+
+    // Renewal 1: ambiguous, read-back fails.
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handle!.lost()).toBe(false);
+
+    // Renewal 2: the stale stamp misses, and the recovery write is ambiguous as well.
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+    writes.at(-1)!.settle();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Still ours as far as anyone can prove, so renewal must not have stopped.
+    expect(handle!.lost()).toBe(false);
+
+    // NOT covered here, and stated rather than implied: the BRANCH ORDER inside the recovery.
+    // `proven` must be tested before the stamp, because an unproven answer always carries a
+    // non-null stamp (the reconciler falls back to the one it was given) — so a stamp-first test
+    // swallows the ambiguous case, adopting that stamp as certain AND clearing the outstanding
+    // one. Both orderings leave `lost()` false here, and driving this fake to the later cycle
+    // where they diverge turns the test into an exercise in timer sequencing rather than in
+    // behaviour. The ordering is argued in the source comment instead.
   });
 
   it('never runs two renewals at once', async () => {
