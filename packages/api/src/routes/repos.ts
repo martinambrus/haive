@@ -1351,6 +1351,18 @@ export async function resetOnboardingArtifacts(
     });
   }
 
+  /** Whether this exact path is Haive's, by the strongest evidence available for it.
+   *
+   *  A live artifact row OVERRIDES the path claim rather than adding to it: the row carries the
+   *  bytes Haive wrote, so if they no longer match, the user edited or replaced that file and it
+   *  is theirs now — claiming it by path would delete their work. Where no row exists the path
+   *  record is all there is, and it is used; see the note in AGENTS.md on which generated
+   *  outputs still lack a hash. */
+  const claimSatisfied = async (rel: string): Promise<boolean> => {
+    if (writtenHashes.has(rel)) return artifactMatchesDisk(rel);
+    return haiveEntries.has(rel) || (await artifactMatchesDisk(rel));
+  };
+
   /** Whether a live artifact row covers this entry AND the bytes on disk are still the ones it
    *  recorded. A row on its own is not evidence: `recordOnboardingArtifacts` inserts one per
    *  manifest RENDERING without consulting `wroteFiles`, so a pre-existing user file that apply
@@ -1408,7 +1420,7 @@ export async function resetOnboardingArtifacts(
       // same story — a person replaced the generated file with a link of their own, and
       // removing it unlinks something Haive never wrote.
       const claimed =
-        (haiveEntries.has(from) || (await artifactMatchesDisk(from))) &&
+        (await claimSatisfied(from)) &&
         (entry.isFile() || (entry.isDirectory() && hasDeeperClaims(from)));
       if (claimed) {
         if (entry.isDirectory()) {
@@ -1463,7 +1475,7 @@ export async function resetOnboardingArtifacts(
           left += await sweepClaimedChildren(rel);
           continue;
         }
-        if (child.isFile() && (haiveEntries.has(rel) || (await artifactMatchesDisk(rel)))) {
+        if (child.isFile() && (await claimSatisfied(rel))) {
           await remove(rel, false);
           continue;
         }
@@ -1548,7 +1560,7 @@ export async function resetOnboardingArtifacts(
       // A claim names a FILE unless something inside it is named too, so anything else standing
       // where a claimed file was — a directory, a symlink someone put there — is not the file
       // Haive wrote.
-      if (!entry.isFile() || (!haiveEntries.has(rel) && !(await artifactMatchesDisk(rel)))) {
+      if (!entry.isFile() || !(await claimSatisfied(rel))) {
         kept += 1;
         skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
         continue;

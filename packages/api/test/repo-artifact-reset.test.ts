@@ -797,6 +797,31 @@ describe('resetOnboardingArtifacts', () => {
     expect(await readFile(target, 'utf8')).toBe('theirs\n');
   });
 
+  it('moves aside a generated file the user edited, where a row records its bytes', async () => {
+    // The path record says Haive wrote it; the artifact row says what Haive wrote. When the two
+    // disagree the file has been edited, and deleting it loses the user's work — so the row
+    // OVERRIDES the path claim rather than adding to it.
+    const root = await repo('reset-edited-generated-');
+    await installArtifacts(root);
+    const rel = '.codex/agents/code-reviewer.toml';
+    await writeFile(path.join(root, rel), 'name = "mine now"\n', 'utf8');
+
+    const { removed, quarantined } = await resetOnboardingArtifacts(root, {
+      ...provenance(),
+      // What Haive wrote, which is NOT what is on disk.
+      writtenHashes: new Map([[rel, sha256Hex(normalizeContent('name = "haive"\n'))]]),
+    });
+
+    expect(removed).not.toContain(rel);
+    expect(quarantined).toContainEqual({
+      from: rel,
+      to: '.codex/agents-legacy/code-reviewer.toml',
+    });
+    expect(await readFile(path.join(root, '.codex/agents-legacy/code-reviewer.toml'), 'utf8')).toBe(
+      'name = "mine now"\n',
+    );
+  });
+
   it('keeps the quarantine and mcp_settings.json, and says so', async () => {
     const root = await repo('reset-keep-');
     await installArtifacts(root);

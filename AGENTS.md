@@ -1566,6 +1566,15 @@ one by one and the directory would never empty. A descendant keeps its shape und
 `-legacy` sibling (`<skills>-legacy/<id>/NOTES.md`) rather than growing a second quarantine
 inside the tree.
 
+**Where a row exists it OVERRIDES the path record rather than adding to it.** A path record says
+Haive wrote that file once; the row says what it wrote. When the two disagree the user has
+edited or replaced it since, and deleting it destroys their work — so `claimSatisfied` requires
+the hash to match wherever a row is present, and falls back to the path record only where none
+is. KNOWN GAP: the generators that record paths but no hashes — 07's `wroteFiles`, 09_5's
+skills and slugs, 09_5b's repairs, a merged 11d's syncs — are still claimed by PATH, so an
+edited LLM-generated skill is removed rather than moved aside. Closing it means recording a hash
+beside each of those paths at the point they are written.
+
 **A live artifact row puts a directory in scope but never claims a file on its own.**
 `recordOnboardingArtifacts` inserts one row per manifest RENDERING without consulting
 `wroteFiles`, so the file apply SKIPPED has a row too, carrying the hash of what Haive WOULD
