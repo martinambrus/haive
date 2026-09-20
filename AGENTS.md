@@ -1522,9 +1522,24 @@ there names directories nothing was written to (which is also why the query filt
 `status = 'done'`). `wroteFiles` additionally covers the two cases a target list misses: the
 fallback write to `.claude/agents` when NO provider has an agents dir (amp alone, where
 `agentTargets` is empty), and the LLM-discovered custom agents, which have no manifest id at
-all. 09_5 contributes `written[].mirroredDirs`, each `written[].id` (a skill is the DIRECTORY
-`<dir>/<id>/SKILL.md`) and the `README.md` index it rebuilds every pass. `.claude` itself needs
+all. 09_5 contributes `written[].mirroredDirs`, each `written[].id` with the `SKILL.md` and
+`sub-skills` inside it, and the `README.md` index it rebuilds every pass. `.claude` itself needs
 no gate — it is Haive's own directory, and every `ONBOARDING_MARKERS` path lives in it.
+
+Only the LATEST run's record is read. A reset supersedes artifact rows but leaves step outputs
+behind, so an older run's `wroteFiles` still names paths it wrote and the reset then DELETED —
+and if the user recreates one of those names by hand and a later run SKIPS it under
+`overwrite=false`, that stale record claims their new file and deletes it. The newest run is the
+only one whose record describes the tree as it stands.
+
+**A claimed DIRECTORY is walked when anything claimed lives beneath it, and taken whole when
+nothing does.** That is what separates a generated skill (`<skills>/<id>`, which holds Haive's
+`SKILL.md` and `sub-skills` and may also hold a `NOTES.md` a person left there) from
+`sub-skills` itself, which Haive renders wholesale. Without the walk the recursive removal took
+the person's file along with ours; without the stop, every rendered sub-skill would be moved out
+one by one and the directory would never empty. A descendant keeps its shape under the one
+`-legacy` sibling (`<skills>-legacy/<id>/NOTES.md`) rather than growing a second quarantine
+inside the tree.
 
 **A live artifact row puts a directory in scope but never claims a file on its own.**
 `recordOnboardingArtifacts` inserts one row per manifest RENDERING without consulting

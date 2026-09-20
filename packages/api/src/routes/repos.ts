@@ -970,10 +970,17 @@ export function collectWrittenCliContent(
         for (const value of row.mirroredDirs) {
           const dir = claimDir(value);
           if (dir === null) continue;
-          // A generated skill is a DIRECTORY, `<dir>/<id>/SKILL.md`, so the entry is the id. The
-          // index beside them is rebuilt from the cumulative set on every pass and is Haive's
+          // A generated skill is a DIRECTORY, so the entry is the id — and the two things 09_5
+          // puts INSIDE it are claimed as well, which is what stops the sweep treating the whole
+          // directory as ours: a `NOTES.md` a person left beside `SKILL.md` is theirs, and a
+          // claimed directory with deeper claims is walked rather than removed whole.
+          if (typeof row.id === 'string') {
+            entries.add(`${dir}/${row.id}`);
+            entries.add(`${dir}/${row.id}/SKILL.md`);
+            entries.add(`${dir}/${row.id}/sub-skills`);
+          }
+          // The index beside them is rebuilt from the cumulative set on every pass and is Haive's
           // too — unclaimed, it would be quarantined out of the directory it describes.
-          if (typeof row.id === 'string') entries.add(`${dir}/${row.id}`);
           entries.add(`${dir}/README.md`);
         }
       }
@@ -1164,8 +1171,20 @@ export async function resetOnboardingArtifacts(
    *  an agents dir beside ours, and there is no way to tell it from an old leftover. `noReplace`
    *  so a name already quarantined by an earlier run is never clobbered — which of the two a
    *  person wants is not ours to decide. */
+  /** Whether anything claimed lives BENEATH this path, which is what decides a claimed directory
+   *  is walked rather than taken whole: `<skills>/<id>` is ours AND holds `SKILL.md` and
+   *  `sub-skills`, so a `NOTES.md` a person left beside them must still be moved out. A claimed
+   *  directory with no deeper claims (`sub-skills` itself) is Haive's wholesale. */
+  const hasDeeperClaims = (rel: string): boolean => {
+    for (const entry of haiveEntries) if (entry.startsWith(`${rel}/`)) return true;
+    return false;
+  };
+
   const quarantineForeign = async (
     dir: string,
+    /** Where a moved entry goes. Fixed at the top level, so a descendant keeps its shape under
+     *  the one `-legacy` sibling rather than growing a second one inside the tree. */
+    legacyDir: string = unmanagedAgentsDir(dir),
   ): Promise<{ left: number; ours: Array<{ rel: string; isDir: boolean }> }> => {
     const entries = await readdirNoFollow(root, dir, { strict: true });
     const ours: Array<{ rel: string; isDir: boolean }> = [];
@@ -1174,10 +1193,18 @@ export async function resetOnboardingArtifacts(
     for (const entry of entries) {
       const from = `${dir}/${entry.name}`;
       if (haiveEntries.has(from) || (await artifactMatchesDisk(from))) {
+        if (entry.isDirectory() && hasDeeperClaims(from)) {
+          const inner = await quarantineForeign(from, `${legacyDir}/${entry.name}`);
+          left += inner.left;
+          // The directory is ours only once nothing of theirs is left in it.
+          if (inner.left === 0) ours.push({ rel: from, isDir: true });
+          else ours.push(...inner.ours);
+          continue;
+        }
         ours.push({ rel: from, isDir: entry.isDirectory() });
         continue;
       }
-      const to = `${unmanagedAgentsDir(dir)}/${entry.name}`;
+      const to = `${legacyDir}/${entry.name}`;
       try {
         await renameNoFollow(root, from, to, { noReplace: true, createParents: true });
         quarantined.push({ from, to });
@@ -1496,26 +1523,34 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
       ),
     );
 
-  // Which per-CLI dirs Haive wrote to, from the two things that can show it. The ENABLED
-  // runs recorded where they wrote, and the live rows name individual files. Deliberately NOT
-  // the CURRENTLY enabled providers: that is mutable global state and says nothing about what
-  // THIS repo's run did — a CLI enabled afterwards would make its dir eligible for a removal
-  // no onboarding here ever wrote to.
-  const onboardingSteps = await db
-    .select({ stepId: schema.taskSteps.stepId, output: schema.taskSteps.output })
+  // What the runs recorded WRITING, never the currently enabled providers: that is mutable
+  // global state and says nothing about what THIS repo's onboarding did.
+  const stepRows = await db
+    .select({
+      taskId: schema.taskSteps.taskId,
+      stepId: schema.taskSteps.stepId,
+      output: schema.taskSteps.output,
+      startedAt: schema.tasks.createdAt,
+    })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
     .where(
       and(
         eq(schema.tasks.repositoryId, id),
         inArray(schema.taskSteps.stepId, [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID]),
-        // `done` is the proof that APPLY ran. 07 persists `agentTargets` from its detect phase,
-        // before the form is even shown, so a run cancelled or failed while parked at that form
-        // names directories nothing was ever written to — and a pre-existing definition there
-        // whose name matches a manifest agent would then be taken for ours.
+        // `done` is the proof that APPLY ran: 07 persists its detect payload before the form is
+        // even shown, so a run cancelled while parked there wrote nothing.
         eq(schema.taskSteps.status, 'done'),
       ),
-    );
+    )
+    .orderBy(desc(schema.tasks.createdAt));
+  // The LATEST run only. A reset supersedes artifact rows but leaves step outputs behind, so an
+  // older run's `wroteFiles` still names paths it wrote and the reset then DELETED. If the user
+  // recreates one of those names by hand and a later run skips it under `overwrite=false`, that
+  // stale record would claim their new file and delete it. The newest run is the only one whose
+  // record describes the tree as it stands.
+  const latestTaskId = stepRows[0]?.taskId;
+  const onboardingSteps = stepRows.filter((row) => row.taskId === latestTaskId);
   const written = collectWrittenCliContent(onboardingSteps, live);
 
   const { removed, cleaned, skipped, quarantined } = await resetOnboardingArtifacts(root, {

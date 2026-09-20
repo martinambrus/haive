@@ -380,6 +380,44 @@ describe('resetOnboardingArtifacts', () => {
     expect(await exists(root, '.codex/agents')).toBe(true);
   });
 
+  it('moves a file a person left inside a generated skill directory', async () => {
+    // `haiveEntries` claims the skill DIRECTORY, so without walking it the recursive removal
+    // takes the user's notes along with Haive's SKILL.md.
+    const root = await repo('reset-skill-child-');
+    await installArtifacts(root);
+    await mkdir(path.join(root, '.agents/skills/repo-conventions/sub-skills'), { recursive: true });
+    await writeFile(path.join(root, '.agents/skills/repo-conventions/SKILL.md'), 'ours\n', 'utf8');
+    await writeFile(
+      path.join(root, '.agents/skills/repo-conventions/sub-skills/naming.md'),
+      'ours\n',
+      'utf8',
+    );
+    await writeFile(path.join(root, '.agents/skills/repo-conventions/NOTES.md'), 'mine\n', 'utf8');
+
+    const base = provenance();
+    const { quarantined } = await resetOnboardingArtifacts(root, {
+      ...base,
+      haiveEntries: new Set([
+        ...base.haiveEntries,
+        '.agents/skills/repo-conventions',
+        '.agents/skills/repo-conventions/SKILL.md',
+        '.agents/skills/repo-conventions/sub-skills',
+      ]),
+    });
+
+    expect(quarantined).toContainEqual({
+      from: '.agents/skills/repo-conventions/NOTES.md',
+      to: '.agents/skills-legacy/repo-conventions/NOTES.md',
+    });
+    expect(
+      await readFile(path.join(root, '.agents/skills-legacy/repo-conventions/NOTES.md'), 'utf8'),
+    ).toBe('mine\n');
+    // A claimed directory with no deeper claims of its own is Haive's wholesale, so the rendered
+    // sub-skills went with it rather than being moved one by one.
+    expect(await exists(root, '.agents/skills')).toBe(false);
+    expect(await exists(root, '.agents/skills-legacy/repo-conventions/sub-skills')).toBe(false);
+  });
+
   it('keeps the quarantine and mcp_settings.json, and says so', async () => {
     const root = await repo('reset-keep-');
     await installArtifacts(root);
