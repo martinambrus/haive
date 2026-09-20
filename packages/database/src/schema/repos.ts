@@ -241,6 +241,28 @@ export const repositories = pgTable(
      *  NULL is every repo that has never been reset, and reads exactly as it always did.
      *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
     onboardingResetAt: timestamp('onboarding_reset_at'),
+    /** Held while something is rewriting this repository's ROOT exclusively — the
+     *  onboarding-artifact reset, or a repo-queue job that `rm -rf`s and rebuilds the tree.
+     *  RECIPROCAL: both take it, so whichever arrives second refuses. A one-directional check
+     *  leaves the window where a rebuild has already passed it and the reset claims before
+     *  `rm(dest)` runs. A claim, not a lock: one committed row write, no transaction spanning the
+     *  filesystem work and no pooled connection pinned — the repo worker and the task worker share
+     *  ONE `max: 10` pool, so holding a connection across `rm -rf` + `copyTree` deadlocks it.
+     *  A writer killed mid-job leaves this set, which `ROOT_CLAIM_STALE_MS` bounds.
+     *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
+    rootClaimedAt: timestamp('root_claimed_at'),
+    /** Which kind of writer holds it, carried only so a refusal can name what it is waiting for.
+     *  Nothing branches on it — the exclusion is mutual either way. */
+    rootClaimKind: text('root_claim_kind'),
+    /** WHO holds it, as an identity rather than a moment. `root_claimed_at` cannot answer that on
+     *  its own: two callers can generate the same millisecond, so a caller whose claiming write
+     *  threw before committing could read the winner's identical stamp and conclude the claim was
+     *  its own — two writers, one tree. Compared only where ownership must be PROVEN (the
+     *  reconciliation after an ambiguous write); renewal and release still match on the stamp,
+     *  since the CAS already guarantees one holder. NULL means "claimed before this column
+     *  existed", which the reconciliation treats as unprovable and refuses.
+     *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
+    rootClaimOwner: text('root_claim_owner'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

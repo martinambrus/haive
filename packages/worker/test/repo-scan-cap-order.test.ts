@@ -60,5 +60,10 @@ describe('the scrub collectors under the file cap', () => {
     expect(forward.has('alpha_invoice_builder') && forward.has('omega_invoice_builder')).toBe(
       false,
     );
-  });
+    // 30s, against vitest's 5s default. This case attempts reads for more paths than the symbol
+    // cap admits — that volume IS the thing under test, so it cannot shrink — and MEASURED it
+    // takes 1.4s alone. That margin does not survive the full suite: inside 353 files on
+    // parallel forks it has timed out at exactly 5007ms, twice, while passing in isolation every
+    // time. A load-sensitive default failing a correct test is not a signal worth keeping.
+  }, 30_000);
 });

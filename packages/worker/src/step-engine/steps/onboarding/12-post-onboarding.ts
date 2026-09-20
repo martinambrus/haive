@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type {
   CliProviderName,
@@ -299,7 +299,35 @@ async function recordOnboardingArtifacts(
     bundleItemId: extractBundleItemId(r.templateId),
   }));
 
-  await ctx.db.insert(schema.onboardingArtifacts).values(rows);
+  // Defensive supersede + insert, the same shape and for the same reason as `02-upgrade-apply`:
+  // a live row already standing at one of these paths collides on the
+  // `(repository_id, disk_path) WHERE superseded_at IS NULL` unique index and fails the step.
+  //
+  // A reset is now one way to arrive here with live rows still standing. It supersedes rows for
+  // what it REMOVED and deliberately leaves the rest — a file it could not read is still on disk,
+  // and dropping its `written_hash` would make the next reset unable to claim it at all. Those
+  // survivors are exactly the paths a re-onboarding writes again.
+  // ONE transaction, as `02-upgrade-apply` also does and for the reason it states: a half-applied
+  // state is impossible. The caller catches and only WARNS, so a supersede that committed before
+  // a failing insert would leave onboarding running with every prior row for these files retired
+  // and no replacement — destroying the hashes that distinguish Haive's output from the user's
+  // edits, silently, on a path that reports success.
+  const insertPaths = Array.from(new Set(rows.map((r) => r.diskPath)));
+  await ctx.db.transaction(async (tx) => {
+    if (insertPaths.length > 0) {
+      await tx
+        .update(schema.onboardingArtifacts)
+        .set({ supersededAt: new Date() })
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+            isNull(schema.onboardingArtifacts.supersededAt),
+            inArray(schema.onboardingArtifacts.diskPath, insertPaths),
+          ),
+        );
+    }
+    await tx.insert(schema.onboardingArtifacts).values(rows);
+  });
   await updateApplicableTemplateIds(ctx.db, repositoryId, expanded);
 
   const installManifestWritten = await writeInstallManifestFromLiveRows(

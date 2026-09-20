@@ -16,3 +16,17 @@ export { waitForDatabaseReady, type WaitForDatabaseOptions } from './wait-for-re
 export { resetDagCurrentLevelForRetry } from './dag-reset.js';
 export { CLOSED_GAP_INTO_IDLE_MS } from './closed-gap.js';
 export { isUniqueViolation, isUndefinedTable } from './pg-errors.js';
+export {
+  ROOT_CLAIM_RENEW_MS,
+  ROOT_CLAIM_STALE_MS,
+  acquireRootClaim,
+  claimRepositoryRoot,
+  renewRootClaim,
+  isRootClaimLive,
+  readLiveRootClaim,
+  releaseRepositoryRoot,
+  rootClaimRefusal,
+  type RootClaim,
+  type RootClaimHandle,
+  type RootClaimKind,
+} from './repo-root-claim.js';

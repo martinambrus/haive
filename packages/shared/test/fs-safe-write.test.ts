@@ -317,6 +317,47 @@ describe('fs-safe write primitives', () => {
       await expect(stat(path.join(root, 'tree'))).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
+    it('reports each entry it actually removes, and reports nothing when it removes nothing', async () => {
+      // `onRemoved` exists so a caller can tell a removal that FAILED HAVING DELETED SOMETHING
+      // from one that failed before touching anything — the thrown error cannot carry that, and
+      // the return value never arrives on a throw. The onboarding reset needs the distinction in
+      // both directions: superseding its provenance over an intact tree is unrecoverable, and
+      // reporting an untouched tree over a half-deleted one is equally wrong.
+      let seen: string[] = [];
+      const onRemoved = (rel: string) => {
+        seen.push(rel);
+      };
+
+      // Absent: returns false, having changed nothing, so it must report nothing.
+      expect(await removeNoFollow(root, 'nope', { recursive: true, onRemoved })).toBe(false);
+      expect(seen).toEqual([]);
+
+      // One file: exactly one report, naming the path the CALLER asked about.
+      await writeFile(path.join(root, 'solo.txt'), 'x', 'utf8');
+      expect(await removeNoFollow(root, 'solo.txt', { onRemoved })).toBe(true);
+      expect(seen).toEqual(['solo.txt']);
+
+      // A tree: one report per entry, directories included, each a rel path under the anchor —
+      // which is what lets a caller retire exactly the rows for what actually went.
+      seen = [];
+      await mkdir(path.join(root, 'many', 'sub'), { recursive: true });
+      await writeFile(path.join(root, 'many', 'one.txt'), 'x', 'utf8');
+      await writeFile(path.join(root, 'many', 'sub', 'two.txt'), 'x', 'utf8');
+      expect(await removeNoFollow(root, 'many', { recursive: true, onRemoved })).toBe(true);
+      expect([...seen].sort()).toEqual(
+        ['many', 'many/one.txt', 'many/sub', 'many/sub/two.txt'].sort(),
+      );
+
+      // A non-recursive failure on a non-empty directory removes nothing and reports nothing.
+      seen = [];
+      await mkdir(path.join(root, 'full'), { recursive: true });
+      await writeFile(path.join(root, 'full', 'x.txt'), 'x', 'utf8');
+      await expect(removeNoFollow(root, 'full', { onRemoved })).rejects.toMatchObject({
+        code: 'ENOTEMPTY',
+      });
+      expect(seen).toEqual([]);
+    });
+
     it('unlinks a link AS a link, leaving its target alone', async () => {
       await symlink(path.join(outside, 'secret.txt'), path.join(root, 'live.txt'));
       expect(await removeNoFollow(root, 'live.txt')).toBe(true);

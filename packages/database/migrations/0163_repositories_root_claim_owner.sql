@@ -1,0 +1,23 @@
+-- Who holds the root claim, as an identity rather than as a moment.
+--
+-- `root_claimed_at` alone cannot answer "is this claim MINE". It is a millisecond timestamp, and
+-- two callers can generate the same one: if the first caller's claiming UPDATE throws BEFORE
+-- committing while the second caller's succeeds, the first then reads the row, finds a stamp
+-- equal to the one it tried to write, and concludes it owns a claim that belongs to somebody
+-- else. Both proceed, and a reset and a rebuild walk the same tree — the exact outcome the claim
+-- exists to prevent, reached through its own recovery path.
+--
+-- The token is generated per claim attempt and compared only where ownership must be PROVEN,
+-- which is the reconciliation after an ambiguous write. The renewal and the release keep matching
+-- on `root_claimed_at`: the CAS guarantees one holder at a time, so for those the stamp is a
+-- sufficient handle, and keeping their predicates unchanged means a claim taken before this
+-- column existed goes on renewing and releasing exactly as it did.
+--
+-- NULL is therefore not a defect to backfill, it is "claimed before this column existed". The one
+-- place that matters is the reconciliation, which cannot disambiguate such a row and so FAILS
+-- CLOSED — refusing to hand back a handle it cannot prove, which is the same answer it gave
+-- before this column existed.
+--
+-- Reverts with DROP COLUMN. Nothing depends on the contents: a live claim only ever refuses a
+-- request, so losing the column restores the previous behaviour rather than corrupting anything.
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS root_claim_owner text;

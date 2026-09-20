@@ -13,7 +13,7 @@ import {
   type EntryInfo,
 } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { acquireRootClaim, readLiveRootClaim, schema, type Database } from '@haive/database';
 import {
   logger,
   HAIVE_DATA_FILES,
@@ -259,23 +259,69 @@ function copyTree(src: string, dest: string): Promise<void> {
  *  the sandbox binds it read-only — this points storagePath into the volume,
  *  so every downstream resolver treats it as a writable volume repo. The copy
  *  is a one-time snapshot taken at import (a later refresh re-copies). */
+/**
+ * Take the root claim for a rebuild, run the destructive work, and release it.
+ *
+ * HELD across the work rather than checked before it, and that is the whole correctness argument.
+ * A one-time check leaves the window where this handler has already passed it and a reset claims
+ * the row before `rm(dest)` runs — at which point the reset derives provenance and deletes files
+ * while the tree is being recursively removed underneath it. Holding the same claim the reset
+ * takes makes the two mutually exclusive: whichever arrives second is refused.
+ *
+ * Throwing on a refusal is the right shape, not a silent return: the repo queue runs `attempts: 3`
+ * with exponential backoff, so a reset lasting seconds is simply waited out, and one that outlives
+ * the retries parks the row at `error` carrying this message. A silent return would leave the row
+ * `cloning` for good, since it is `persistDetection` at the end of a SUCCESSFUL run that writes
+ * `ready`.
+ */
+async function withRootClaim<T>(
+  db: Database,
+  repositoryId: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const claim = await acquireRootClaim(db, repositoryId, 'rebuild');
+  if (claim === null) {
+    const held = await readLiveRootClaim(db, repositoryId);
+    throw new Error(
+      `the repository root is claimed (${held?.kind ?? 'unknown'}); it must not be rebuilt until that finishes`,
+    );
+  }
+  try {
+    return await run();
+  } finally {
+    await claim.release().catch(() => undefined);
+    // Not thrown: the tree has already been rewritten, and failing here hands the job back to
+    // BullMQ's `attempts: 3`, which re-runs the clone and puts a THIRD writer on it. Logged at
+    // error so the one case where two writers touched one root is findable afterwards.
+    if (claim.lost()) {
+      logger.error(
+        { repositoryId },
+        'root claim was taken over while this job was still rewriting the tree; ' +
+          'another writer may have run against the same repository root',
+      );
+    }
+  }
+}
+
 export async function handleCopyLocal(
   payload: RepoJobPayload,
   db: Database,
   repoStorageRoot: string,
 ): Promise<void> {
   if (!payload.localPath) throw new Error('localPath required for copy job');
+  const localPath = payload.localPath;
+  return withRootClaim(db, payload.repositoryId, async () => {
+    const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
+    await mkdir(path.dirname(dest), { recursive: true });
+    // Clean dest first so a retry (or a refresh re-copy) starts from scratch
+    // instead of merging into a stale tree.
+    await rm(dest, { recursive: true, force: true });
+    await mkdir(dest, { recursive: true });
 
-  const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
-  await mkdir(path.dirname(dest), { recursive: true });
-  // Clean dest first so a retry (or a refresh re-copy) starts from scratch
-  // instead of merging into a stale tree.
-  await rm(dest, { recursive: true, force: true });
-  await mkdir(dest, { recursive: true });
-
-  await copyTree(payload.localPath, dest);
-  await persistDetection(db, payload.repositoryId, dest);
-  logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo copy complete');
+    await copyTree(localPath, dest);
+    await persistDetection(db, payload.repositoryId, dest);
+    logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo copy complete');
+  });
 }
 
 /** uid/gid the extraction tool runs as. NOT 1000: that uid owns every repository on the volume, so a
@@ -549,18 +595,26 @@ export async function handleExtract(
 ): Promise<void> {
   if (!payload.archivePath) throw new Error('archivePath required for extract job');
   if (!payload.archiveFormat) throw new Error('archiveFormat required for extract job');
+  const archivePath = payload.archivePath;
+  const archiveFormat = payload.archiveFormat;
 
-  const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
-  const report = await extractArchive(payload.archivePath, payload.archiveFormat, dest);
-  if (report.note) {
-    logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
-  }
-  await persistDetection(db, payload.repositoryId, dest, report.note);
-  // Only remove the archive after successful extract + detection. Leaving it
-  // in place on failure lets the user (or a retry) look at what actually
-  // arrived on disk instead of silently masking the error.
-  await rm(payload.archivePath, { force: true }).catch(() => {});
-  logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
+  // Claimed like the three that `rm -rf`, because it destroys the root just as thoroughly by a
+  // different verb: `extractArchive` renames the existing tree aside and renames the new one into
+  // its place. Keying the audit on `rm(dest)` missed this one — the property that matters is
+  // "replaces the repository root", not which call does it.
+  return withRootClaim(db, payload.repositoryId, async () => {
+    const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
+    const report = await extractArchive(archivePath, archiveFormat, dest);
+    if (report.note) {
+      logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
+    }
+    await persistDetection(db, payload.repositoryId, dest, report.note);
+    // Only remove the archive after successful extract + detection. Leaving it
+    // in place on failure lets the user (or a retry) look at what actually
+    // arrived on disk instead of silently masking the error.
+    await rm(archivePath, { force: true }).catch(() => {});
+    logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
+  });
 }
 
 /** Run a git command in `cwd`, rejecting on a non-zero exit. Local-only (no
@@ -605,51 +659,53 @@ export async function handleInit(
   db: Database,
   repoStorageRoot: string,
 ): Promise<void> {
-  const [row] = await db
-    .select({ name: schema.repositories.name })
-    .from(schema.repositories)
-    .where(eq(schema.repositories.id, payload.repositoryId))
-    .limit(1);
-  const repoName = row?.name ?? 'project';
+  return withRootClaim(db, payload.repositoryId, async () => {
+    const [row] = await db
+      .select({ name: schema.repositories.name })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, payload.repositoryId))
+      .limit(1);
+    const repoName = row?.name ?? 'project';
 
-  const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
-  await mkdir(path.dirname(dest), { recursive: true });
-  // Clean first so a retry starts from scratch rather than re-initialising over
-  // a half-written tree.
-  await rm(dest, { recursive: true, force: true });
-  await mkdir(dest, { recursive: true });
+    const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
+    await mkdir(path.dirname(dest), { recursive: true });
+    // Clean first so a retry starts from scratch rather than re-initialising over
+    // a half-written tree.
+    await rm(dest, { recursive: true, force: true });
+    await mkdir(dest, { recursive: true });
 
-  const branch = payload.branch?.trim() || 'main';
-  await gitRun(dest, ['init', '--initial-branch', branch]);
-  await writeFile(
-    path.join(dest, 'README.md'),
-    `# ${repoName}\n\nCreated by Haive as a blank project.\n`,
-    'utf8',
-  );
-  // The deterministic half of onboarding, up front. A blank project has nothing
-  // to mine a knowledge base from, but the agent specs, skills and workflow
-  // config never depended on the code — so a repo created empty arrives able to
-  // run a task instead of demanding an onboarding pass over an empty tree.
-  // Best-effort: a scaffold that cannot be rendered must not sink the whole
-  // init, which would leave the user with no repository at all.
-  let scaffold: string[] = [];
-  try {
-    scaffold = await seedBlankScaffold(
-      db,
-      { userId: payload.userId, repositoryId: payload.repositoryId, repoName: row?.name ?? null },
-      dest,
+    const branch = payload.branch?.trim() || 'main';
+    await gitRun(dest, ['init', '--initial-branch', branch]);
+    await writeFile(
+      path.join(dest, 'README.md'),
+      `# ${repoName}\n\nCreated by Haive as a blank project.\n`,
+      'utf8',
     );
-  } catch (err) {
-    logger.warn({ err, repositoryId: payload.repositoryId }, 'blank scaffold seeding failed');
-  }
+    // The deterministic half of onboarding, up front. A blank project has nothing
+    // to mine a knowledge base from, but the agent specs, skills and workflow
+    // config never depended on the code — so a repo created empty arrives able to
+    // run a task instead of demanding an onboarding pass over an empty tree.
+    // Best-effort: a scaffold that cannot be rendered must not sink the whole
+    // init, which would leave the user with no repository at all.
+    let scaffold: string[] = [];
+    try {
+      scaffold = await seedBlankScaffold(
+        db,
+        { userId: payload.userId, repositoryId: payload.repositoryId, repoName: row?.name ?? null },
+        dest,
+      );
+    } catch (err) {
+      logger.warn({ err, repositoryId: payload.repositoryId }, 'blank scaffold seeding failed');
+    }
 
-  // Committed WITH the README rather than left staged: a repository the user has
-  // just created should not open on a diff they did not write.
-  await gitRun(dest, ['add', '--', 'README.md', ...scaffold]);
-  await gitRun(dest, ['commit', '-m', 'chore: initialise blank repository'], INIT_GIT_IDENTITY);
+    // Committed WITH the README rather than left staged: a repository the user has
+    // just created should not open on a diff they did not write.
+    await gitRun(dest, ['add', '--', 'README.md', ...scaffold]);
+    await gitRun(dest, ['commit', '-m', 'chore: initialise blank repository'], INIT_GIT_IDENTITY);
 
-  await persistDetection(db, payload.repositoryId, dest);
-  logger.info({ repositoryId: payload.repositoryId, dest, branch }, 'Blank repo init complete');
+    await persistDetection(db, payload.repositoryId, dest);
+    logger.info({ repositoryId: payload.repositoryId, dest, branch }, 'Blank repo init complete');
+  });
 }
 
 export async function handleClone(
@@ -658,22 +714,24 @@ export async function handleClone(
   repoStorageRoot: string,
 ): Promise<void> {
   if (!payload.remoteUrl) throw new Error('remoteUrl required for clone job');
+  const remoteUrl = payload.remoteUrl;
+  return withRootClaim(db, payload.repositoryId, async () => {
+    const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
+    await mkdir(path.dirname(dest), { recursive: true });
+    await rm(dest, { recursive: true, force: true });
 
-  const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
-  await mkdir(path.dirname(dest), { recursive: true });
-  await rm(dest, { recursive: true, force: true });
+    // Authenticate via the inline credential helper (same mechanism as push), NOT
+    // by embedding the token in the URL. URL userinfo is dropped by curl across a
+    // protocol-change redirect (a Gitea/nginx http->https 301 returns "remote:
+    // Unauthorized"); the helper is resolved against the challenge's host, so it
+    // survives the redirect. It also keeps the token out of .git/config, so the
+    // cloned origin is already the plain URL — no post-clone reset needed.
+    const auth = payload.credentialsId
+      ? await buildCredentialHelper(db, payload.credentialsId, payload.userId)
+      : undefined;
 
-  // Authenticate via the inline credential helper (same mechanism as push), NOT
-  // by embedding the token in the URL. URL userinfo is dropped by curl across a
-  // protocol-change redirect (a Gitea/nginx http->https 301 returns "remote:
-  // Unauthorized"); the helper is resolved against the challenge's host, so it
-  // survives the redirect. It also keeps the token out of .git/config, so the
-  // cloned origin is already the plain URL — no post-clone reset needed.
-  const auth = payload.credentialsId
-    ? await buildCredentialHelper(db, payload.credentialsId, payload.userId)
-    : undefined;
-
-  await gitClone(payload.remoteUrl, dest, payload.branch, auth);
-  await persistDetection(db, payload.repositoryId, dest);
-  logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo clone complete');
+    await gitClone(remoteUrl, dest, payload.branch, auth);
+    await persistDetection(db, payload.repositoryId, dest);
+    logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo clone complete');
+  });
 }

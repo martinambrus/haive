@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, exists, isNull, lt, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 
@@ -21,22 +21,51 @@ import { logger } from '@haive/shared';
  */
 export async function stampRepositoryOnboarded(db: Database, taskId: string): Promise<void> {
   try {
-    const task = await db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, taskId),
-      columns: { id: true, type: true, repositoryId: true },
-    });
-    // `onboarding_upgrade` reconciles template artifacts on an already-onboarded repo and
-    // says nothing about whether onboarding itself ever ran.
-    if (!task || task.type !== 'onboarding' || !task.repositoryId) return;
-
-    await db
+    const now = new Date();
+    // ONE statement, deliberately. Reading the task and then updating the repository leaves a
+    // read->write gap, and that gap is wide here rather than theoretical: `markTaskCompleted`
+    // commits `completed` and then runs container teardown and two Ollama unloads before it gets
+    // this far, so a reset has plenty of room to land in between and see nothing live.
+    const stamped = await db
       .update(schema.repositories)
-      .set({ onboardedAt: new Date(), updatedAt: new Date() })
-      .where(eq(schema.repositories.id, task.repositoryId));
-    logger.info(
-      { taskId, repositoryId: task.repositoryId },
-      'repository marked onboarded by completed onboarding run',
-    );
+      .set({ onboardedAt: now, updatedAt: now })
+      .where(
+        exists(
+          db
+            .select({ one: sql`1` })
+            .from(schema.tasks)
+            .where(
+              and(
+                eq(schema.tasks.id, taskId),
+                eq(schema.tasks.repositoryId, schema.repositories.id),
+                // `onboarding_upgrade` reconciles template artifacts on an already-onboarded
+                // repo and says nothing about whether onboarding itself ever ran.
+                eq(schema.tasks.type, 'onboarding'),
+                // Checked here, not just by the caller: a cancel landing in the window above
+                // flips the row terminal while this is still in flight, and the old code would
+                // have stamped anyway because it never looked at the status at all.
+                eq(schema.tasks.status, 'completed'),
+                // A run that finished BEFORE the repository was reset describes a tree that no
+                // longer exists. Stamping from it re-asserts "onboarded" over artifacts the
+                // reset deleted, and no lock can prevent that — by the time this runs the task
+                // is already terminal, so every live-task guard has stopped seeing it.
+                or(
+                  isNull(schema.repositories.onboardingResetAt),
+                  lt(schema.repositories.onboardingResetAt, schema.tasks.completedAt),
+                ),
+              ),
+            ),
+        ),
+      )
+      .returning({ repositoryId: schema.repositories.id });
+
+    const repositoryId = stamped[0]?.repositoryId;
+    if (repositoryId) {
+      logger.info(
+        { taskId, repositoryId },
+        'repository marked onboarded by completed onboarding run',
+      );
+    }
   } catch (err) {
     logger.warn({ err, taskId }, 'failed to stamp repository onboarded_at');
   }

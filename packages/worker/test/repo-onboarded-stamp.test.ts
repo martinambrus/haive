@@ -2,59 +2,28 @@ import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
 
-type TaskRow = { id: string; type: string; repositoryId: string | null } | undefined;
-
-function makeDb(task: TaskRow): { db: Database; updates: Record<string, unknown>[] } {
-  const updates: Record<string, unknown>[] = [];
-  const db = {
-    query: { tasks: { findFirst: async () => task } },
-    update: () => ({
-      set: (values: Record<string, unknown>) => ({
-        where: async () => {
-          updates.push(values);
-        },
-      }),
-    }),
-  } as unknown as Database;
-  return { db, updates };
-}
-
+/**
+ * What is left here is the one contract a fake can still prove.
+ *
+ * This file used to assert which tasks stamp and which do not, against a hand-rolled `db` whose
+ * `update().set().where()` recorded the values. Those assertions are gone rather than repaired:
+ * the decision is now a single statement whose WHERE carries the whole rule — the task's type,
+ * its `completed` status, and `onboarding_reset_at < tasks.completed_at` — and a fake that
+ * answers whatever the shape demands proves only that the shape was copied correctly. Worse, the
+ * old fake had no `select`, so once the statement grew its EXISTS subquery every one of those
+ * cases threw early and passed by asserting an empty list for the wrong reason.
+ *
+ * The predicate is covered against a real database in `onboarding-reset-claim-smoke`, where
+ * dropping a term actually fails something.
+ */
 describe('stampRepositoryOnboarded', () => {
-  it('stamps the repository when an onboarding task completed', async () => {
-    const { db, updates } = makeDb({ id: 't1', type: 'onboarding', repositoryId: 'r1' });
-    await stampRepositoryOnboarded(db, 't1');
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.onboardedAt).toBeInstanceOf(Date);
-  });
-
-  it('ignores every other task type', async () => {
-    // onboarding_upgrade reconciles template artifacts on an already-onboarded repo; a
-    // workflow task says nothing about onboarding at all.
-    for (const type of ['workflow', 'onboarding_upgrade', 'run_app', 'plan_build']) {
-      const { db, updates } = makeDb({ id: 't1', type, repositoryId: 'r1' });
-      await stampRepositoryOnboarded(db, 't1');
-      expect(updates, type).toEqual([]);
-    }
-  });
-
-  it('ignores a task with no repository, and a task that is gone', async () => {
-    const noRepo = makeDb({ id: 't1', type: 'onboarding', repositoryId: null });
-    await stampRepositoryOnboarded(noRepo.db, 't1');
-    expect(noRepo.updates).toEqual([]);
-
-    const missing = makeDb(undefined);
-    await stampRepositoryOnboarded(missing.db, 't1');
-    expect(missing.updates).toEqual([]);
-  });
-
   it('swallows a database failure — bookkeeping must not break a terminal transition', async () => {
     const db = {
-      query: {
-        tasks: {
-          findFirst: async () => {
-            throw new Error('connection lost');
-          },
-        },
+      select: () => {
+        throw new Error('connection lost');
+      },
+      update: () => {
+        throw new Error('connection lost');
       },
     } as unknown as Database;
     await expect(stampRepositoryOnboarded(db, 't1')).resolves.toBeUndefined();

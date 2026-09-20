@@ -1,0 +1,756 @@
+import { randomUUID } from 'node:crypto';
+import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import * as schema from './schema/index.js';
+import type { Database } from './index.js';
+
+// Transaction handle type (the callback arg of Database.transaction), so a caller inside its own
+// transaction can use these too. Mirrors dag-reset.ts, the other helper api and worker both call.
+type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/** Who is rewriting the root. Carried only so a refusal can say what it is waiting for — nothing
+ *  branches on it, because the exclusion is mutual either way. */
+export type RootClaimKind = 'reset' | 'rebuild' | 'edit' | 'verify';
+
+/**
+ * How long a root claim is honoured WITHOUT a heartbeat before readers treat it as abandoned.
+ *
+ * The honest cost of a claim over a lock: an advisory lock dies with its connection, a row does
+ * not, so a process killed mid-write leaves this set. Bounded rather than permanent, and visible
+ * in one column — unlike `repositories.status`, whose `cloning` has no reconciler anywhere and
+ * strands a repository for good.
+ *
+ * This is a LEASE, not a deadline on the work. A fixed expiry cannot tell a dead holder from a
+ * slow one, and both exist here: `gitClone` has no timeout and `copyTree` is unbounded by
+ * repository size, so a clone or a reset of a large tree can outlive any constant. Expiring one
+ * of those re-admits exactly the concurrent `rm -rf` the claim exists to exclude — the race
+ * returning at the fifteen-minute mark. `acquireRootClaim` therefore renews while it works, so
+ * expiry means "the holder stopped renewing", which is what abandonment actually is.
+ */
+export const ROOT_CLAIM_STALE_MS = 15 * 60 * 1000;
+
+/** How often a live holder refreshes its lease. A third of the window, so two renewals can be
+ *  lost — a paused event loop, a slow query — before anyone else may take over. */
+export const ROOT_CLAIM_RENEW_MS = Math.floor(ROOT_CLAIM_STALE_MS / 3);
+
+/**
+ * There is deliberately NO cap on how long a lease may keep renewing.
+ *
+ * One was tried and reverted, and the reasoning is worth keeping because it looks prudent. The
+ * worry was a handle acquired and never released in a live process, renewing forever and blocking
+ * the repository. But renewal is tied to `release()` for a reason: `gitClone` has no timeout and
+ * `copyTree` is unbounded by repository size, so ANY elapsed-time deadline eventually expires a
+ * holder that is still rewriting the tree — and then a second writer claims and replaces the same
+ * tree concurrently, which is the exact catastrophe this whole mechanism exists to prevent.
+ *
+ * The two failures are not comparable. A cap trades a rare-but-silent DATA LOSS for a leak that
+ * (a) requires a future caller to skip the `finally` every current one has, (b) is visible — the
+ * repository refuses resets and names what holds it — and (c) ends at the next process restart,
+ * because the renewal timer is `unref`ed and dies with the process. Bounding the wrong one of
+ * those is worse than bounding neither.
+ */
+
+/** Is this claim still one another writer must refuse for? Pure, so every reader agrees without a
+ *  round trip and the rule is unit-testable. */
+export function isRootClaimLive(claimedAt: Date | null | undefined, now = new Date()): boolean {
+  if (!claimedAt) return false;
+  return now.getTime() - claimedAt.getTime() < ROOT_CLAIM_STALE_MS;
+}
+
+export interface RootClaim {
+  /** The stamp this claim wrote. Hand it back to `releaseRepositoryRoot` so an expired holder
+   *  cannot release the claim that replaced it. */
+  claimedAt: Date;
+  /** The identity this claim wrote, for the one question the stamp cannot answer: is the claim on
+   *  the row MINE. Two callers can generate the same millisecond, so proving ownership by the
+   *  stamp lets a caller whose write never committed adopt the winner's claim. */
+  owner: string;
+}
+
+/**
+ * Claim a repository's ROOT for exclusive rewriting. `null` means someone else holds it.
+ *
+ * RECIPROCAL, and that is the whole point: the onboarding-artifact reset and the repo-queue
+ * handlers that `rm -rf` the root take the same claim, so whichever arrives second refuses. A
+ * one-directional check — the rebuild reading a flag the reset sets — leaves the window where the
+ * rebuild has already passed its check and the reset claims before `rm(dest)` runs, and both then
+ * walk the same tree.
+ *
+ * One atomic UPDATE, which is what makes it a claim rather than a read: nothing can slip between
+ * the test and the write. A stale claim is taken over rather than waited on, so a writer that died
+ * mid-job costs one window and not the feature.
+ *
+ * `userId` is checked when given. The API routes pass it — the repository writes around them key
+ * on a URL id alone, and a claim is the one that would otherwise let any authenticated caller
+ * stall another tenant's repository. Queue handlers omit it: their payload is Haive's own.
+ */
+export async function claimRepositoryRoot(
+  db: Database | DbHandle,
+  repositoryId: string,
+  kind: RootClaimKind,
+  userId?: string,
+  /** The stamp to write. Passed in for the same reason `renewRootClaim` takes one: when this
+   *  throws, the caller must still know what was attempted, because the write may have committed
+   *  and lost only its acknowledgement. */
+  attempted: Date = new Date(),
+  /** The identity to write. Unique per attempt, so an ambiguous failure can be resolved by asking
+   *  the row WHOSE claim it carries rather than inferring it from a timestamp two callers can
+   *  share. */
+  owner: string = randomUUID(),
+): Promise<RootClaim | null> {
+  const claimedAt = attempted;
+  const claimed = await db
+    .update(schema.repositories)
+    .set({ rootClaimedAt: claimedAt, rootClaimKind: kind, rootClaimOwner: owner })
+    .where(
+      and(
+        eq(schema.repositories.id, repositoryId),
+        ...(userId ? [eq(schema.repositories.userId, userId)] : []),
+        or(
+          isNull(schema.repositories.rootClaimedAt),
+          lt(
+            schema.repositories.rootClaimedAt,
+            sql`now() - ${`${ROOT_CLAIM_STALE_MS} milliseconds`}::interval`,
+          ),
+        ),
+      ),
+    )
+    .returning({ id: schema.repositories.id });
+  return claimed.length > 0 ? { claimedAt, owner } : null;
+}
+
+/**
+ * Release a claim.
+ *
+ * `claimedAt` makes it conditional, and passing it matters: a writer that outran
+ * `ROOT_CLAIM_STALE_MS` has already had its claim taken over, and an unconditional clear would
+ * strip the protection from the job that took over — silently, and exactly on the slowest trees,
+ * which are the ones that reach the window in the first place.
+ */
+export async function releaseRepositoryRoot(
+  db: Database | DbHandle,
+  repositoryId: string,
+  claimedAt?: Date,
+  /** This holder's identity. The stamp alone is not an identity — a successor claiming while we
+   *  renew can share our millisecond — so without this a holder could clear somebody else's
+   *  claim. The predicate admits a NULL owner as well, so a claim taken before that column
+   *  existed still releases exactly as it did. */
+  owner?: string,
+): Promise<boolean> {
+  // Whether it actually CLEARED anything. A conditional release that matches no row returns
+  // without error and looks exactly like success, which is how a holder can finish, report a
+  // clean release, and leave the repository claimed for the rest of the window. The caller needs
+  // to know so it can try the other stamp it may be holding.
+  const cleared = await db
+    .update(schema.repositories)
+    .set({ rootClaimedAt: null, rootClaimKind: null, rootClaimOwner: null })
+    .where(
+      claimedAt
+        ? and(
+            eq(schema.repositories.id, repositoryId),
+            eq(schema.repositories.rootClaimedAt, claimedAt),
+            ...(owner
+              ? [
+                  or(
+                    eq(schema.repositories.rootClaimOwner, owner),
+                    isNull(schema.repositories.rootClaimOwner),
+                  ),
+                ]
+              : []),
+          )
+        : eq(schema.repositories.id, repositoryId),
+    )
+    .returning({ id: schema.repositories.id });
+  return cleared.length > 0;
+}
+
+/**
+ * Refresh a lease we still hold. Returns the new stamp, or null if we no longer hold it.
+ *
+ * Conditional on the stamp we last wrote, so a holder whose lease already expired and was taken
+ * over cannot claw it back — it learns it lost instead, which is what lets `acquireRootClaim`
+ * stop renewing and stop pretending to protect anything.
+ *
+ * Exported so the renewal is testable without waiting out a real interval.
+ */
+export async function renewRootClaim(
+  db: Database | DbHandle,
+  repositoryId: string,
+  previous: Date,
+  /** The stamp to write. Passed in rather than generated here so the CALLER still knows what was
+   *  attempted when this throws: a write that committed and then lost its acknowledgement leaves
+   *  the row holding this value while the caller believes it holds `previous`, and every later
+   *  conditional match — renewal and release alike — then silently misses. */
+  next: Date = new Date(),
+  /** This holder's identity, for the same reason the release takes one: a successor claiming
+   *  while we renew can share our millisecond, and renewing somebody else's claim would extend
+   *  the protection of a writer we are not. A NULL owner is admitted, so a claim taken before
+   *  that column existed goes on renewing exactly as it did. */
+  owner?: string,
+): Promise<Date | null> {
+  const claimedAt = next;
+  const renewed = await db
+    .update(schema.repositories)
+    .set({ rootClaimedAt: claimedAt })
+    .where(
+      and(
+        eq(schema.repositories.id, repositoryId),
+        eq(schema.repositories.rootClaimedAt, previous),
+        ...(owner
+          ? [
+              or(
+                eq(schema.repositories.rootClaimOwner, owner),
+                isNull(schema.repositories.rootClaimOwner),
+              ),
+            ]
+          : []),
+      ),
+    )
+    .returning({ id: schema.repositories.id });
+  return renewed.length > 0 ? claimedAt : null;
+}
+
+/**
+ * Which stamp the row carries after a renewal whose result never arrived: the one we attempted
+ * (it committed), the one we held (it did not), or neither (someone took the lease over).
+ *
+ * A write that fails AFTER committing is indistinguishable from one that never ran, from the
+ * client's side — so the only honest answer comes from reading the row back. Returning `held` on
+ * a read that itself fails is deliberate: that is the behaviour before this existed, and a
+ * transient database problem must not be escalated into "the lease is lost", which would stop
+ * renewing a claim we may well still own.
+ */
+async function reconcileAmbiguousRenewal(
+  db: Database | DbHandle,
+  repositoryId: string,
+  held: Date,
+  attempted: Date,
+  /** This holder's identity. The stamp cannot establish ownership here, and this is the likeliest
+   *  place for it to be wrong: a takeover happens precisely WHILE the expired holder is still
+   *  renewing, so the successor's claim and the old holder's renewal attempt land in the same
+   *  moment — and if they share a millisecond, a timestamp-only read-back reads the successor's
+   *  claim as its own renewal having landed. The old writer then keeps going and its release
+   *  clears the successor's claim. */
+  owner: string,
+): Promise<{ stamp: Date | null; proven: boolean }> {
+  try {
+    const rows = await db
+      .select({
+        claimedAt: schema.repositories.rootClaimedAt,
+        owner: schema.repositories.rootClaimOwner,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .limit(1);
+    const claimedAt = rows[0]?.claimedAt ?? null;
+    const rowOwner = rows[0]?.owner ?? null;
+    if (claimedAt === null) return { stamp: null, proven: true };
+    // Ownership FIRST: a row held by somebody else is a takeover whatever its stamp says, and a
+    // row with no owner was claimed before that column existed and cannot be proven either way.
+    if (rowOwner === null) return { stamp: held, proven: false };
+    if (rowOwner !== owner) return { stamp: null, proven: true };
+    const stamp = claimedAt.getTime();
+    if (stamp === attempted.getTime()) return { stamp: attempted, proven: true };
+    if (stamp === held.getTime()) return { stamp: held, proven: true };
+    // Ours, but carrying neither stamp — an earlier ambiguous renewal of our own. Treat the row's
+    // value as the one we hold rather than guessing between them.
+    return { stamp: claimedAt, proven: true };
+  } catch {
+    // Not an answer. The caller keeps working from `held` but must remember that the row may
+    // instead hold what we tried to write.
+    return { stamp: held, proven: false };
+  }
+}
+
+/**
+ * The stamps the claim row MIGHT carry, after writes whose outcome could not be established.
+ *
+ * Exported and separated from the lease so the bookkeeping can be tested without driving a fake
+ * database through several renewal cycles on fake timers — the property that matters here is
+ * structural, and burying it in that machinery is how it got written as a single slot twice.
+ *
+ * ADDITIVE is the whole point. Ambiguity composes: a renewal can commit stamp B without an
+ * acknowledgement while a later recovery from B throws BEFORE committing, in which case the row
+ * still holds B. Replacing B with the newer attempt discards the only correct value, both then
+ * miss, and the holder declares a takeover that never happened.
+ */
+export interface CandidateStamps {
+  remember(stamp: Date): void;
+  /** Proven NOT to be the row's value. */
+  drop(stamp: Date): void;
+  /** A proven reading settles it; nothing is a candidate any more. */
+  clear(): void;
+  list(): Date[];
+  size(): number;
+}
+
+/** Each entry costs a full renewal cycle whose read ALSO failed, so reaching this many means the
+ *  database has been unreadable for longer than the stale window — where a takeover is legitimate
+ *  anyway. Bounded so a long-lived handle cannot accumulate without limit. */
+export const CANDIDATE_STAMP_CAP = 8;
+
+export function createCandidateStamps(cap = CANDIDATE_STAMP_CAP): CandidateStamps {
+  const stamps: Date[] = [];
+  const indexOf = (stamp: Date): number => stamps.findIndex((s) => s.getTime() === stamp.getTime());
+  return {
+    remember(stamp) {
+      if (indexOf(stamp) >= 0) return;
+      stamps.push(stamp);
+      if (stamps.length > cap) stamps.shift();
+    },
+    drop(stamp) {
+      const at = indexOf(stamp);
+      if (at >= 0) stamps.splice(at, 1);
+    },
+    clear() {
+      stamps.length = 0;
+    },
+    list: () => [...stamps],
+    size: () => stamps.length,
+  };
+}
+
+/**
+ * One release attempt, answering whether the row is now FREE rather than whether this call
+ * cleared it — the two differ, and only the first is what a releasing holder needs to know.
+ *
+ * The third and last conditional write to this row, and the one whose ambiguity bites hardest:
+ * an exception here propagates out of `release()`, where every caller swallows it in a
+ * `.catch()`, so a clear that never landed leaves the repository claimed for the rest of the
+ * window while the job reports a clean finish. A clear that DID land throws identically.
+ *
+ * So on failure the row is asked. Empty means free, whoever freed it. A stamp means it is not,
+ * and the caller should try another candidate. An unreadable row answers "not confirmed", which
+ * keeps the caller trying rather than concluding anything.
+ */
+type ReleaseOutcome =
+  /** The row carries no claim: free, whoever freed it. Nothing more to do. */
+  | 'free'
+  /** The row still carries the stamp we tried to clear, so that write did NOT commit. Retryable,
+   *  and the only outcome that is — every other one is settled. */
+  | 'still-ours'
+  /** The row carries SOMEBODY ELSE'S stamp. Established, so it is not merely "this stamp did not
+   *  match": it means the lease was taken over while we held it, which is the one thing the
+   *  caller must be able to report. Kept distinct from `not-ours` because collapsing them loses
+   *  exactly that — an unmatched clear alone cannot tell a free row from a stolen one. */
+  | 'taken-over'
+  /** This stamp is not what holds the row, and nothing more was established. */
+  | 'not-ours'
+  /** The read failed as well, so nothing is established. */
+  | 'unknown';
+
+/** Classify the row for a clear that matched nothing. A conditional UPDATE that runs cleanly and
+ *  affects no rows says only "not this stamp"; whether the row is free or held by another writer
+ *  is the difference between a normal finish and two writers on one tree, and only a read can
+ *  tell them apart. Reached only on the exceptional path — a release that clears normally never
+ *  runs this. */
+async function classifyUnmatchedClear(
+  db: Database | DbHandle,
+  repositoryId: string,
+  /** This holder's identity. It answers "is the row still mine" outright, which a stamp cannot:
+   *  a stranger can share a millisecond with us, and our own ambiguous renewal can leave the row
+   *  holding a stamp we do not recognise. Reporting either as a takeover is a false alarm about
+   *  data corruption. */
+  owner: string,
+): Promise<ReleaseOutcome> {
+  try {
+    const rows = await db
+      .select({
+        claimedAt: schema.repositories.rootClaimedAt,
+        owner: schema.repositories.rootClaimOwner,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .limit(1);
+    const onRow = rows[0]?.claimedAt ?? null;
+    if (onRow === null) return 'free';
+    const rowOwner = rows[0]?.owner ?? null;
+    // Ours, under some other stamp of ours: not this one, try the next.
+    if (rowOwner === owner) return 'not-ours';
+    // Claimed before the owner column existed: unprovable, and a false takeover is worse than a
+    // missing one, so it is not reported as one.
+    if (rowOwner === null) return 'not-ours';
+    return 'taken-over';
+  } catch {
+    return 'not-ours';
+  }
+}
+
+async function releaseReconciled(
+  db: Database | DbHandle,
+  repositoryId: string,
+  claimedAt: Date,
+  owner: string,
+): Promise<ReleaseOutcome> {
+  try {
+    if (await releaseRepositoryRoot(db, repositoryId, claimedAt, owner)) return 'free';
+    return classifyUnmatchedClear(db, repositoryId, owner);
+  } catch {
+    try {
+      const rows = await db
+        .select({
+          claimedAt: schema.repositories.rootClaimedAt,
+          owner: schema.repositories.rootClaimOwner,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .limit(1);
+      const onRow = rows[0]?.claimedAt ?? null;
+      if (onRow === null) return 'free';
+      const rowOwner = rows[0]?.owner ?? null;
+      // Ownership FIRST, then which of our stamps. STILL OURS is what makes a retry worthwhile —
+      // that write did not commit — and collapsing it into "not this stamp" is how a transient
+      // release error once left a finished job holding the repository for a whole window.
+      if (rowOwner !== null && rowOwner === owner) {
+        return onRow.getTime() === claimedAt.getTime() ? 'still-ours' : 'not-ours';
+      }
+      if (rowOwner === null) return 'not-ours';
+      return 'taken-over';
+    } catch {
+      return 'unknown';
+    }
+  }
+}
+
+/** How many times a release will re-attempt a clear that provably did not commit. Bounded because
+ *  this runs at the END of the work, where a caller is waiting and a database that is failing
+ *  every write will not be rescued by trying forever — the stale window is the backstop. */
+const RELEASE_RETRIES = 3;
+
+/**
+ * Clear one stamp, retrying while the answer is UNSETTLED.
+ *
+ * `still-ours` means that write did not commit and the row is still held by this stamp; `unknown`
+ * means nothing was established. Both are retryable and everything else is final. Shared by the
+ * primary clear and by each candidate, because an ambiguous renewal that stored a candidate makes
+ * the CANDIDATE loop the only release path there is — applying the retry to one and not the other
+ * leaves exactly the case the retry exists for uncovered.
+ */
+export async function releaseWithRetry(
+  db: Database | DbHandle,
+  repositoryId: string,
+  stamp: Date,
+  /** This holder's identity, so a row that is still ours is never mistaken for a stranger's. */
+  owner: string,
+): Promise<ReleaseOutcome> {
+  let outcome: ReleaseOutcome = 'still-ours';
+  for (let attempt = 0; attempt < RELEASE_RETRIES; attempt += 1) {
+    outcome = await releaseReconciled(db, repositoryId, stamp, owner);
+    if (outcome !== 'still-ours' && outcome !== 'unknown') return outcome;
+  }
+  return outcome;
+}
+
+/** How many times the initial claim's reconciliation will re-read the row. Bounded for the same
+ *  reason the release retry is: a database that cannot be read at all is not rescued by asking
+ *  again, and the caller is waiting. */
+const CLAIM_READ_RETRIES = 3;
+
+/**
+ * The stamp the claim row carries, for a caller that must know whether its own write landed.
+ *
+ * Rethrows `original` once the attempts are spent, which is what keeps this FAILING CLOSED: a
+ * caller that cannot prove it owns the claim must not receive a handle, because it would then
+ * rewrite the tree with no protection at all. The retry only narrows the window in which a
+ * transient read turns a committed claim into an abandoned one.
+ */
+async function readClaimStamp(
+  db: Database | DbHandle,
+  repositoryId: string,
+  original: unknown,
+): Promise<{ claimedAt: Date | null; owner: string | null }> {
+  for (let attempt = 0; attempt < CLAIM_READ_RETRIES; attempt += 1) {
+    try {
+      const rows = await db
+        .select({
+          claimedAt: schema.repositories.rootClaimedAt,
+          owner: schema.repositories.rootClaimOwner,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .limit(1);
+      return { claimedAt: rows[0]?.claimedAt ?? null, owner: rows[0]?.owner ?? null };
+    } catch {
+      // Keep trying; the throw below is what happens when they are all spent.
+    }
+  }
+  throw original;
+}
+
+/**
+ * One renewal attempt, with its ambiguity already resolved as far as it can be.
+ *
+ * EVERY conditional write to this row has the same problem — a commit whose acknowledgement is
+ * lost is indistinguishable from a write that never ran — so every one of them needs the same
+ * read-back. Patching that in per call site is how the recovery write ended up without it after
+ * the first renewal got it, so both go through here instead.
+ *
+ * `attempted` is returned because the caller must remember it when the answer is UNPROVEN: the
+ * row may hold it, and a later conditional write from the old stamp would then miss and read as
+ * a takeover that never happened.
+ */
+async function renewReconciled(
+  db: Database | DbHandle,
+  repositoryId: string,
+  from: Date,
+  owner: string,
+): Promise<{ stamp: Date | null; proven: boolean; attempted: Date }> {
+  const attempted = new Date();
+  try {
+    const stamp = await renewRootClaim(db, repositoryId, from, attempted, owner);
+    return { stamp, proven: true, attempted };
+  } catch {
+    const reconciled = await reconcileAmbiguousRenewal(db, repositoryId, from, attempted, owner);
+    return { ...reconciled, attempted };
+  }
+}
+
+/** A held claim. `release` is idempotent and safe to call after the lease was lost. */
+export interface RootClaimHandle {
+  release(): Promise<void>;
+  /**
+   * Did another writer take this lease over while we held it?
+   *
+   * Only reachable when renewals fail for a FULL stale window while the database stays healthy
+   * enough for someone else's takeover CAS — a partition that reaches us and not them, or an
+   * event loop blocked for fifteen minutes. It means two writers touched one tree.
+   *
+   * Observable rather than fatal, deliberately. The destructive work cannot be preempted: there
+   * is no cancelling a `copyTree` or an `rm -rf` mid-call, and THROWING afterwards would hand the
+   * job back to BullMQ's `attempts: 3`, which re-runs the clone and puts a third writer on the
+   * same tree. What is left is to say so, loudly, at the point where a caller would otherwise
+   * report a clean result.
+   */
+  lost(): boolean;
+}
+
+/**
+ * Take a root claim and KEEP it for as long as the caller works, then release it.
+ *
+ * This is the form every caller should use. The bare `claimRepositoryRoot` writes one stamp and
+ * walks away, which is fine only for work that certainly finishes inside
+ * `ROOT_CLAIM_STALE_MS` — and neither a clone nor a reset of a large repository certainly does.
+ *
+ * The renewal timer is `unref`ed, so a held claim never keeps a process alive on its own: if
+ * everything else has finished, the process exits and the lease expires naturally, which is the
+ * correct reading of a holder that is gone.
+ *
+ * Takes a `Database` and NOT a transaction handle, unlike everything else in this module. A lease
+ * outlives any one statement by design, so renewals issued on a handle whose transaction has
+ * ended would fail — silently, since a failed renewal is treated as a transient — and the lease
+ * would lapse in the middle of the work it is protecting. Refusing the type is what stops that
+ * being a comment somebody has to read.
+ */
+export async function acquireRootClaim(
+  db: Database,
+  repositoryId: string,
+  kind: RootClaimKind,
+  userId?: string,
+): Promise<RootClaimHandle | null> {
+  // The INITIAL claim is a conditional write like any other, and it was the one exception to
+  // that rule. If it commits and loses its acknowledgement, this function throws — so the caller
+  // never reaches the `try` whose `finally` releases, and the repository stays claimed for the
+  // whole stale window with nobody holding it: edits and resets are refused, and a repo job can
+  // burn its retries and land the repository in `error`.
+  const attempted = new Date();
+  const owner = randomUUID();
+  const first = await claimRepositoryRoot(db, repositoryId, kind, userId, attempted, owner).catch(
+    async (err: unknown) => {
+      // Did that write land? Only the row can say. Holding the attempted stamp means the CAS
+      // succeeded and this caller owns the claim; anything else means it did not, and refusing
+      // is correct. A read that ALSO fails rethrows: returning a handle for a claim we cannot
+      // prove we hold would let the caller rewrite the tree with no protection at all, which is
+      // far worse than the block this is trying to avoid.
+      //
+      // RETRIED, unlike the renewal's read, and the asymmetry is the point: a renewal that
+      // cannot read the row carries its attempt forward as a candidate and asks again on the
+      // next tick, so a transient failure there costs nothing. This read has no next tick. One
+      // unguarded attempt means a transient error abandons a claim that may well have committed,
+      // and with no handle there is no renewal and no release — the row then stays fresh for the
+      // entire stale window with nobody holding it.
+      const row = await readClaimStamp(db, repositoryId, err);
+      // Ownership is proven by the TOKEN, never by the stamp. Two callers can generate the same
+      // millisecond, so a caller whose write threw before committing could otherwise read the
+      // winner's identical stamp and adopt a claim that is not its own — a reset and a rebuild
+      // then walk the same tree, which is the outcome this whole mechanism exists to prevent.
+      if (row.owner !== null && row.owner === owner) return { claimedAt: attempted, owner };
+      // A stamp with no owner is a claim taken before that column existed. It cannot be proven
+      // either way, so it is refused — the same answer this gave before the column existed.
+      if (row.claimedAt === null) throw err;
+      return null;
+    },
+  );
+  if (first === null) return null;
+
+  let current: Date | null = first.claimedAt;
+
+  // Set where the loss is LEARNED, not where it is noticed. Deriving it from `current === null` at
+  // release time would be wrong in both directions: `lost()` would answer false for a lease
+  // already known to be gone, and a second `release()` — which the interface promises is safe —
+  // would find no stamp and report a takeover that never happened.
+  let lost = false;
+  /**
+   * Stamps the row MIGHT carry: every ambiguous write whose read-back could not confirm it.
+   *
+   * A set rather than one slot, because ambiguity composes. If a renewal commits stamp B without
+   * an acknowledgement and a later recovery from B throws BEFORE committing — its read-back
+   * failing too — the row still holds B. Remembering only the newest attempt discards it, both
+   * candidates then miss on the next tick, and the handle declares a takeover that never
+   * happened: renewal stops while the clone or reset it protects is still running, and once the
+   * lease goes stale a second writer enters that tree.
+   *
+   * Bounded because each entry costs a full renewal cycle whose read ALSO failed, so reaching
+   * the cap means the database has been unreadable for longer than the stale window — at which
+   * point a takeover is legitimate anyway. A proven answer clears the set, and a candidate that
+   * proves not to be the row's value is dropped.
+   */
+  const candidates = createCandidateStamps();
+
+  // The in-flight renewal, so `release` can WAIT for it. Without that, a release firing while a
+  // renewal is pending captures the old stamp, its conditional UPDATE matches nothing, and it
+  // returns successfully having cleared NOTHING — leaving the row claimed for a full window after
+  // the writer finished, refusing every refresh, reset and knowledge-file save in between.
+  let renewing: Promise<void> | null = null;
+
+  const renewOnce = async (): Promise<void> => {
+    if (current === null) return;
+    const held = current;
+    // AMBIGUITY is resolved inside `renewReconciled`: a commit that lost its acknowledgement
+    // leaves the row holding what we tried to write while we still believe we hold `held`, and
+    // then every later conditional match misses — the release clears nothing, the next renewal
+    // reports the lease lost, and the repository stays claimed for the rest of the window with
+    // nobody working on it.
+    let next = await renewReconciled(db, repositoryId, held, owner);
+    // An UNPROVEN answer is a guess, not a reading: the read-back failed too, so the row may
+    // well hold what that write attempted. Carrying it is what stops the next healthy renewal
+    // matching nothing and reporting a takeover that never happened.
+    if (!next.proven) candidates.remember(next.attempted);
+    else if (next.stamp !== null) candidates.clear();
+    // A miss while candidates are outstanding is not yet a takeover: one of them may be what the
+    // row actually holds. Each attempt carries the SAME ambiguity as any other, which is why it
+    // goes through the same helper — resolving it only on the first write is how the recovery
+    // path came to lack a read-back at all.
+    if (next.stamp === null && candidates.size() > 0) {
+      for (const candidate of candidates.list()) {
+        const recovered = await renewReconciled(db, repositoryId, candidate, owner);
+        // PROVEN is tested first, and that ordering is the correctness of this block. An
+        // unproven answer always carries a non-null stamp (the reconciler falls back to the one
+        // it was handed), so testing the stamp first would adopt it as certain and discard the
+        // rest — holding a value the row may not have, having forgotten the ones it might.
+        if (!recovered.proven) {
+          // Still unknown, in both directions now. Keep a working stamp and ADD this attempt
+          // rather than replacing the others: a recovery that threw BEFORE committing leaves the
+          // earlier stamp exactly as valid as it was, so both stay possible. `lost` is never
+          // concluded from an answer nothing proved.
+          candidates.remember(recovered.attempted);
+          next = { stamp: held, proven: false, attempted: recovered.attempted };
+          break;
+        }
+        if (recovered.stamp !== null) {
+          next = recovered;
+          candidates.clear();
+          break;
+        }
+        // A PROVEN miss: this candidate is definitively not what the row carries, so drop it and
+        // try the next. Only once every candidate is excluded is this really a takeover.
+        candidates.drop(candidate);
+      }
+    }
+    // null means the lease was taken over while we worked. Stop renewing and stop releasing:
+    // the claim on the row is someone else's now, and clearing it would strip their protection.
+    current = next.stamp;
+    if (current === null) {
+      lost = true;
+      clearInterval(timer);
+    }
+  };
+
+  const timer = setInterval(() => {
+    // Never overlap two renewals: the second would race the first on the same stamp.
+    if (renewing !== null) return;
+    renewing = renewOnce().finally(() => {
+      renewing = null;
+    });
+  }, ROOT_CLAIM_RENEW_MS);
+  timer.unref?.();
+
+  return {
+    lost: () => lost,
+    async release() {
+      clearInterval(timer);
+      // Let a pending renewal land first, so the stamp below is the one actually on the row.
+      if (renewing !== null) await renewing.catch(() => undefined);
+      if (current === null) return;
+      // Retried while the row provably still carries OUR stamp — that write simply did not
+      // commit, and giving up there leaves a finished job holding the repository for the rest of
+      // the window. `unknown` is retried too: nothing was established, and a conditional clear
+      // that turns out to be unnecessary is a harmless no-op.
+      // The OWNER answers "is the row still mine" outright, which no stamp can: an ambiguous
+      // renewal leaves the row holding a candidate while `current` is the older stamp, and a
+      // stranger can share a millisecond with either. Reporting either as a takeover raises a
+      // data-corruption warning about a claim nobody else ever held.
+      const primary = await releaseWithRetry(db, repositoryId, current, owner);
+      // A takeover can be LEARNED here, not only in `renewOnce`: if the event loop was blocked
+      // past the stale window, another writer claimed the row before the renewal timer ran again,
+      // and this release is the first thing to find out. Without recording it, `lost()` answers
+      // false and the callers omit the only warning that two writers touched the same tree.
+      if (primary === 'taken-over') lost = true;
+      const cleared = primary === 'free';
+      // `current` may be a GUESS: when a renewal's acknowledgement and its read-back both failed,
+      // we kept the old stamp while the row may hold the one that write left behind. A release
+      // matching nothing is exactly that case, and it is the COMMON one — a job that finishes
+      // right after such a renewal would otherwise report a clean release and leave the
+      // repository claimed for the rest of the window. The renewal path already retries from the
+      // candidates; this is the same rule on the path that actually ends the work.
+      if (!cleared) {
+        // EVERY candidate, not just the newest. Ambiguity composes: an earlier write may have
+        // committed while a later one did not, so the stamp the row actually carries can be any
+        // of them, and stopping at the first miss leaves the repository claimed with nobody
+        // working on it. Each clear is conditional, so at most one can match and the rest are
+        // no-ops against a row that has already been cleared.
+        for (const candidate of candidates.list()) {
+          const outcome = await releaseWithRetry(db, repositoryId, candidate, owner);
+          if (outcome === 'taken-over') lost = true;
+          if (outcome === 'free') break;
+        }
+      }
+      candidates.clear();
+      current = null;
+    },
+  };
+}
+
+/** The live claim on this repository, or null. Readers that only need to refuse use this; the
+ *  kind is for the message they show. */
+export async function readLiveRootClaim(
+  db: Database | DbHandle,
+  repositoryId: string,
+): Promise<{ kind: RootClaimKind | null; claimedAt: Date } | null> {
+  const rows = await db
+    .select({
+      claimedAt: schema.repositories.rootClaimedAt,
+      kind: schema.repositories.rootClaimKind,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  const row = rows[0];
+  if (!row?.claimedAt || !isRootClaimLive(row.claimedAt)) return null;
+  return { kind: (row.kind as RootClaimKind | null) ?? null, claimedAt: row.claimedAt };
+}
+
+/** What a refusal should say. One place, so the reset route, the refresh route, the knowledge-file
+ *  editor and the queue handlers cannot describe the same state three different ways. */
+export function rootClaimRefusal(kind: RootClaimKind | null): string {
+  if (kind === 'rebuild') {
+    return 'This repository is being rebuilt from its source. Wait for that to finish and try again.';
+  }
+  if (kind === 'edit') {
+    return 'A knowledge file in this repository is being saved. Try again in a moment.';
+  }
+  if (kind === 'verify') {
+    return 'This repository is being checked. Try again in a moment.';
+  }
+  // Also the fallback for a claim written before `root_claim_kind` existed: a refusal still has
+  // to say something true, and "reset" is the one a person can act on.
+  return 'This repository is being reset. Wait for that to finish and try again.';
+}

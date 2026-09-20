@@ -4,8 +4,9 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, acquireRootClaim, readLiveRootClaim, rootClaimRefusal } from '@haive/database';
 import {
+  errno,
   isPathContainmentError,
   lstatNoFollow,
   openFileNoFollow,
@@ -51,10 +52,12 @@ import {
   trimGlobSlashes,
   tagManagedKnowledgeNodes,
 } from '@haive/shared/knowledge-paths';
+import { logger } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import type { Context } from 'hono';
 import {
   cancelOpenTasksForRepo,
   collectInternalRagProjectNamesForRepo,
@@ -68,6 +71,8 @@ import {
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
+  loadNewestLiveArtifactAt,
+  hasArtifactsSinceReset,
 } from '../lib/onboarding-state.js';
 import { createRepoArchiveStream } from '../lib/repo-archive.js';
 import { inventoryDirsFromCatalog } from '../lib/tool-inventory.js';
@@ -177,6 +182,14 @@ repoRoutes.get('/', async (c) => {
     userId,
     rows.map((r) => r.id),
   );
+  // Which repositories still hold live artifact rows, so a reset repo whose re-run failed at a
+  // late step offers the manual button here too. Without it the list and the detail page would
+  // disagree about whether the button exists.
+  const newestArtifactAt = await loadNewestLiveArtifactAt(
+    db,
+    userId,
+    rows.map((r) => r.id),
+  );
 
   const countsByRepo = new Map<string, { open: number; active: number }>();
   for (const row of taskCounts) {
@@ -202,6 +215,11 @@ repoRoutes.get('/', async (c) => {
         ? resolveOnboardingVerdict({
             missing: markers.missing,
             onboardedAt: repo.onboardedAt,
+            onboardingResetAt: repo.onboardingResetAt,
+            hasArtifactsSinceReset: hasArtifactsSinceReset(
+              newestArtifactAt.get(repo.id),
+              repo.onboardingResetAt,
+            ),
             facts: onboardingFacts.get(repo.id) ?? NO_ONBOARDING_TASKS,
           })
         : null;
@@ -1436,6 +1454,231 @@ export interface OnboardingResetOutcome {
   quarantined: Array<{ from: string; to: string }>;
 }
 
+/**
+ * How a per-item failure inside the walk is dispositioned.
+ *
+ * `null` means it is NOT the walk's to absorb — a `TypeError` is a bug and must reach the caller.
+ * Everything else becomes a `skipped` entry, because a refusal is a per-item outcome and an IO
+ * failure is one for exactly the same reason: one bad entry must not discard the twenty beside it.
+ * Letting an IO error out aborts the route BEFORE the caller supersedes the artifact rows and
+ * stamps the epoch, which leaves files deleted, rows live and no epoch.
+ *
+ * Containment is tested FIRST and that order is load-bearing: `PathContainmentError.code` is the
+ * string `EPATHCONTAINMENT`, so `errno` answers for it too and a reversed order would report every
+ * refused link as an IO failure — which would then trip the empty-walk floor below.
+ *
+ * Pure and exported so the branch is unit-testable. The alternative is a fixture that chmods a
+ * directory, and that silently proves nothing wherever the tests run as root.
+ */
+export function classifyResetFailure(err: unknown): { reason: string; io: boolean } | null {
+  if (isPathContainmentError(err)) return { reason: err.reason, io: false };
+  const code = errno(err);
+  return code === undefined ? null : { reason: code, io: true };
+}
+
+/** A `Database` or the transaction handle its callback receives. The reset's two closing writes
+ *  run inside one transaction, so the helper between them has to accept either. Mirrors the alias
+ *  in `lib/cancel-task.ts` and `routes/tasks/steps.ts`; a tx handle is NOT assignable from
+ *  `Database`, so the union is required rather than cosmetic. */
+type ResetDbOrTx =
+  ReturnType<typeof getDb> | Parameters<Parameters<ReturnType<typeof getDb>['transaction']>[0]>[0];
+
+/**
+ * Which artifact rows a reset must leave live, given the paths it left alone.
+ *
+ * `skipped` names what the reset did not take, and some of those are DIRECTORIES: a `.claude`
+ * sweep that could not read `plugins/` reports the parent, while the rows underneath it are at
+ * `.claude/plugins/drupal-php-lsp/<file>`. Matching `disk_path` exactly therefore retires rows for
+ * files that are still on disk, which is the bug this pair of functions exists to prevent — one
+ * level down.
+ *
+ * Expanded in JS against the rows the caller already loaded rather than with a SQL `LIKE`: a
+ * prefix pattern would have to escape `_` and `%`, and `KB_DIR` really is
+ * `.haive-data/knowledge_base`. Comparing whole segments cannot over-match.
+ */
+export function resolveKeptArtifactPaths(
+  livePaths: string[],
+  skippedPaths: string[],
+  /** Every path this walk VACATED — unlinked, or moved aside by the quarantine. A recursive
+   *  delete that removed some children and then failed reports only its PARENT as skipped, so the
+   *  prefix rule below would otherwise keep rows for files that are already gone — and nothing
+   *  downstream reads disk to notice: `GET /repos/:id/upgrade-status` answers from the ROWS, so a
+   *  stale live row reports a reset file as installed and offers to manage it. Vacating is the
+   *  stronger fact, so it wins over the parent's skip. A rename counts because the row names the
+   *  ORIGINAL path, which is empty afterwards either way. */
+  vacatedPaths: ReadonlySet<string> = new Set(),
+): string[] {
+  if (skippedPaths.length === 0) return [];
+  // A vacated DIRECTORY takes its descendants with it: the quarantine moves an unclaimed
+  // directory wholesale and records only its own path, so an exact match would preserve the rows
+  // for every file inside it — each naming a path that is now empty. Prefix-matched on whole
+  // segments, the same rule the keep test below uses, so the two cannot disagree about what
+  // "inside" means. It cannot over-exclude: a directory only enters the set once it is gone, and
+  // a partial recursive delete never records the parent because its own rmdir failed.
+  const isVacated = (candidate: string): boolean => {
+    for (const vacated of vacatedPaths) {
+      if (candidate === vacated || candidate.startsWith(`${vacated}/`)) return true;
+    }
+    return false;
+  };
+  const kept = new Set<string>();
+  for (const path of livePaths) {
+    if (isVacated(path)) continue;
+    for (const skip of skippedPaths) {
+      if (path === skip || path.startsWith(`${skip}/`)) {
+        kept.add(path);
+        break;
+      }
+    }
+  }
+  return [...kept];
+}
+
+/**
+ * Drop from `kept` the paths that are CONFIDENTLY absent from disk.
+ *
+ * `resolveKeptArtifactPaths` answers from what this walk did, so it cannot see a file that was
+ * already missing before the reset ran — a generated file the user deleted by hand, whose row is
+ * still live. Preserving that row under a skipped ancestor leaves `upgrade-status`, which answers
+ * from the rows, reporting an absent file as installed.
+ *
+ * `strict: true` is load-bearing rather than tidy. Under it `lstatNoFollow` returns null ONLY for
+ * an absent errno and THROWS for anything else, so an IO failure — likely here, since the reason
+ * this path runs at all is that the walk hit one — cannot masquerade as absence and retire the
+ * row of a file that is merely unreadable. Only a confident absence drops a row; every other
+ * answer keeps it, which is the direction that loses nothing.
+ */
+export async function dropAbsentKeptPaths(root: string, kept: string[]): Promise<string[]> {
+  const present: string[] = [];
+  for (const rel of kept) {
+    const found = await lstatNoFollow(root, rel, { strict: true }).catch(() => 'unknown' as const);
+    if (found === null) continue;
+    present.push(rel);
+  }
+  return present;
+}
+
+/**
+ * Retire the artifact rows a reset invalidated, and only those.
+ *
+ * `keptPaths` is what the reset LEFT ALONE — kept files, refused links, and anything an IO error
+ * stopped it reaching. Their rows stay live, and that is the point: a partial reset used to
+ * supersede everything, which dropped the `written_hash` that was the only evidence Haive wrote
+ * the surviving file. With the epoch also excluding the old step provenance, no later reset could
+ * claim it — the file stayed on disk for good, and `writeIfAllowed` skips an existing file, so a
+ * re-onboarding never refreshed it either. A live row beside a file that is still there is simply
+ * true.
+ *
+ * Safe against the `(repository_id, disk_path) WHERE superseded_at IS NULL` unique index because
+ * `12-post-onboarding` supersedes the paths it is about to insert before inserting them, the same
+ * defensive shape `02-upgrade-apply` uses.
+ *
+ * Exported for the live-DB smoke: this is a WHERE clause, and the unit suite runs against no
+ * database, so dropping the `notInArray` fails nothing there.
+ */
+export async function supersedeResetArtifacts(
+  db: ResetDbOrTx,
+  repositoryId: string,
+  keptPaths: string[],
+  /** The ids of the live rows as they were BEFORE the walk. Scoping to them is what stops the
+   *  reset retiring rows it never looked at: task creation does not honour the root claim, so a
+   *  new onboarding run can reach `12-post-onboarding` while a long walk is still going and write
+   *  rows that postdate `onboarding_reset_at`. Those belong to the NEW epoch — retiring them
+   *  would leave a freshly onboarded tree with no provenance at all. Omitted keeps the previous
+   *  repository-wide behaviour, which the smoke relies on. */
+  liveIds?: string[],
+): Promise<void> {
+  // Nothing was live when we looked, so there is nothing of OURS to retire.
+  if (liveIds !== undefined && liveIds.length === 0) return;
+  await db
+    .update(schema.onboardingArtifacts)
+    .set({ supersededAt: new Date() })
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+        isNull(schema.onboardingArtifacts.supersededAt),
+        ...(liveIds !== undefined ? [inArray(schema.onboardingArtifacts.id, liveIds)] : []),
+        // Spelled out rather than leaning on what `notInArray` does with an empty list. MEASURED,
+        // drizzle renders that harmlessly today and the blanket retire still happens — a mutant
+        // removing this branch kills no test — but "retire everything" is the behaviour this line
+        // is responsible for, and it should not rest on a library edge case nothing asserts.
+        ...(keptPaths.length > 0
+          ? [notInArray(schema.onboardingArtifacts.diskPath, keptPaths)]
+          : []),
+      ),
+    );
+}
+
+/**
+ * May a swept directory be removed WHOLE?
+ *
+ * `left` counts what could not be moved to the `-legacy` sibling, so zero normally means nothing
+ * of the user's is in there. It means that only if the sweep RAN, though: an IO failure leaves
+ * the count at its initial zero, and removing on it deletes the files the quarantine exists to
+ * move out of the way — the one outcome this whole branch is built to avoid.
+ *
+ * A REFUSAL is not the same and must still remove. It means the directory is a LINK, which
+ * `readdirNoFollow` rejects before the sweep starts; the removal then takes the link itself
+ * rather than walking through it, which is the intended handling of a linked directory.
+ *
+ * Pure and exported because the difference between those two is a single operator that no
+ * fixture can reach: a containment refusal is handled INSIDE the sweep, and a genuine `EIO`
+ * cannot be provoked from a temp directory. A test that tried would prove only its own setup.
+ */
+export function mayRemoveSweptDirWhole(sweep: 'ok' | 'refused' | 'io', left: number): boolean {
+  return sweep !== 'io' && left === 0;
+}
+
+/**
+ * How many entries a nested sweep must be treated as having LEFT BEHIND.
+ *
+ * A count of zero means "nothing of the user's is in there" only when the sweep ran to the end.
+ * Anything absorbed — an unreadable directory, an entry that turned into a link between the
+ * listing and the walk — leaves the count at whatever it had reached, and the caller adds it to
+ * its own total to decide whether the PARENT may be removed whole. So an unfinished sweep must
+ * report a survivor, or `.claude` is deleted with the user's plugins inside it.
+ *
+ * Both non-`ok` outcomes count here, unlike `mayRemoveSweptDirWhole`, and the difference is which
+ * directory is at stake: there the refused path IS the removal target and removing the link is
+ * the right answer, while here it is a CHILD whose parent would be taken with it.
+ */
+export function sweepSurvivors(outcome: 'ok' | 'refused' | 'io', left: number): number {
+  return outcome === 'ok' ? left : left + 1;
+}
+
+/**
+ * Did this walk do nothing at all, having failed to read the tree?
+ *
+ * The caller supersedes every artifact row and stamps `onboarding_reset_at` on what the walk
+ * returns, and doing that over an INTACT tree is unrecoverable: the epoch excludes every prior
+ * step row from `loadProvenanceSteps` for good, so the next reset can claim nothing, removes
+ * nothing and keeps everything — with the repository still reading `onboarded`, because
+ * `resolveOnboardingVerdict` also ORs `hasCompleted`. Today's torn state self-heals by comparison;
+ * a live row whose file is gone simply fails `artifactMatchesDisk`.
+ *
+ * Keyed on an IO failure HAVING OCCURRED, never on "nothing was removed": a second reset over an
+ * already-clean tree also removes nothing, and must stay the no-op it has always been.
+ */
+export function resetTouchedNothing(
+  outcome: Pick<OnboardingResetOutcome, 'removed' | 'cleaned' | 'quarantined'>,
+  ioFailures: number,
+  /** Recursive removals that ended in an IO failure. A recursive delete unlinks descendants as
+   *  it walks, so one that threw part-way has ALREADY modified the tree while appending nothing
+   *  to `removed` — the push happens only after `removeNoFollow` returns. Reading the completed
+   *  arrays as proof the tree is intact is then wrong in the one direction that cannot be
+   *  recovered: the route would abort without superseding, leaving live rows naming deleted
+   *  files and `onboarded_at` set over a half-removed tree. */
+  partialRemovals: number,
+): boolean {
+  return (
+    ioFailures > 0 &&
+    partialRemovals === 0 &&
+    outcome.removed.length === 0 &&
+    outcome.cleaned.length === 0 &&
+    outcome.quarantined.length === 0
+  );
+}
+
 /** What the caller could establish about what Haive wrote here. Every field is evidence, not
  *  policy: the reset removes what it covers and keeps what it does not. */
 export interface OnboardingResetProvenance {
@@ -1464,35 +1707,84 @@ export interface OnboardingResetProvenance {
 export async function resetOnboardingArtifacts(
   root: string,
   provenance: OnboardingResetProvenance,
-): Promise<OnboardingResetOutcome> {
+  // `vacatedPaths` is deliberately NOT part of `OnboardingResetOutcome`: that interface is the
+  // JSON the route returns, and this set exists to retire rows, not to be read by a person.
+): Promise<OnboardingResetOutcome & { vacatedPaths: Set<string> }> {
   const { writtenHashes, haiveDirs, haiveEntries } = provenance;
   const removed: string[] = [];
   const cleaned: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
   const quarantined: Array<{ from: string; to: string }> = [];
+  /** Skips caused by an IO failure rather than by policy. Only these make an empty walk a
+   *  failure — a second reset over an already-clean tree also removes nothing and is a no-op. */
+  let ioFailures = 0;
+  /** Recursive removals that failed part-way, and have therefore already modified the tree
+   *  without recording anything. See `resetTouchedNothing`. */
+  let partialRemovals = 0;
+  /** Every path this walk VACATED: unlinked by `remove()`, deleted directly by the settings
+   *  pass, or moved aside by the quarantine. `removed` holds only the top-level targets that
+   *  returned, so it cannot answer which descendants a failed recursive delete took with it. */
+  const vacatedPaths = new Set<string>();
 
   // A refusal is a per-item outcome, not a floor: one linked directory must not discard the
   // removal of the twenty beside it, and the reset says what it left alone instead of reporting
   // a clean run over a path it never touched.
-  const guard = async (rel: string, run: () => Promise<void>): Promise<void> => {
+  /**
+   * What the guard absorbed, for the callers whose next step depends on it.
+   *
+   * `refused` and `io` are NOT interchangeable here. A containment refusal usually means the
+   * thing is a LINK, which is a complete answer about it — a linked directory is still removed,
+   * as a link. An IO failure means the work did not finish, and anything inferred from how far
+   * it got is wrong. Most callers ignore this: a refused removal is simply not removed, and is
+   * already reported.
+   */
+  const guard = async (rel: string, run: () => Promise<void>): Promise<'ok' | 'refused' | 'io'> => {
     try {
       await run();
+      return 'ok';
     } catch (err) {
-      if (!isPathContainmentError(err)) throw err;
-      skipped.push({ path: rel, reason: err.reason });
+      const verdict = classifyResetFailure(err);
+      if (verdict === null) throw err;
+      if (verdict.io) ioFailures += 1;
+      skipped.push({ path: rel, reason: verdict.reason });
+      return verdict.io ? 'io' : 'refused';
     }
   };
   // `repairPermissions` on every item, as the whole-`.claude` removal this replaced had: it fires
   // only on EACCES/EPERM and only adds +0700 to the parent it already holds open, and a sweep of
   // entries must not fail where a removal of the directory around them succeeded.
-  const remove = (rel: string, recursive: boolean): Promise<void> =>
-    guard(rel, async () => {
+  /** Ignored by most callers: a refused item is simply not removed, and is already reported. */
+  const remove = async (rel: string, recursive: boolean): Promise<'ok' | 'refused' | 'io'> => {
+    // Set by the primitive on each entry it actually unlinks. "The call threw" and "the tree
+    // changed" are INDEPENDENT: `walkDir`, the leaf `lstat` and `removeChild`'s own `open` all
+    // raise before the first unlink, so counting every failed recursive call as partial progress
+    // stamps the epoch over an intact tree — unrecoverable, and the mirror of the bug that made
+    // this counter necessary in the first place.
+    let unlinkedAny = false;
+    const verdict = await guard(rel, async () => {
       // The return value replaces a `pathExists` probe, and is strictly better evidence: the probe
       // could pass and the entry be gone — or replaced by a link — before the delete ran.
-      if (await removeNoFollow(root, rel, { recursive, repairPermissions: true })) {
+      if (
+        await removeNoFollow(root, rel, {
+          recursive,
+          repairPermissions: true,
+          onRemoved: (removedRel) => {
+            unlinkedAny = true;
+            // Recorded per DESCENDANT, not just for the path asked about: a recursive delete that
+            // failed part-way reports only its parent as skipped, and the rows for what it did
+            // remove must still be retired.
+            vacatedPaths.add(removedRel);
+          },
+        })
+      ) {
         removed.push(rel);
       }
     });
+    // A recursive delete unlinks as it walks, so one that failed AFTER unlinking something has
+    // already changed the tree while `removed` stays empty — the push happens only on return.
+    if (recursive && verdict === 'io' && unlinkedAny) partialRemovals += 1;
+    return verdict;
+  };
 
   // Settings first, so one the sweep must keep has its verdict before the sweep reaches it, and
   // one it may take is already gone from the listing.
@@ -1502,7 +1794,12 @@ export async function resetOnboardingArtifacts(
       if (content === null) return;
       const written = writtenHashes.get(rel);
       if (written !== undefined && written === sha256Hex(normalizeContent(content))) {
-        if (await removeNoFollow(root, rel)) removed.push(rel);
+        if (await removeNoFollow(root, rel)) {
+          removed.push(rel);
+          // Vacated, so its row must not survive on a later parent skip — this deletion does not
+          // go through `remove()` and would otherwise be invisible to `vacatedPaths`.
+          vacatedPaths.add(rel);
+        }
         return;
       }
       skipped.push({
@@ -1602,6 +1899,10 @@ export async function resetOnboardingArtifacts(
       try {
         await renameNoFollow(root, from, to, { noReplace: true, createParents: true });
         quarantined.push({ from, to });
+        // A move vacates `from` exactly as a delete does. Its row names the ORIGINAL path, so
+        // keeping it alive on a parent skip would point a live row at an absent file — the same
+        // defect as a deleted descendant, reached by the other way a path can empty.
+        vacatedPaths.add(from);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST' && !isPathContainmentError(err)) {
           throw err;
@@ -1627,7 +1928,7 @@ export async function resetOnboardingArtifacts(
    *  sweep's note on why `.claude` leaves rather than quarantines. */
   const sweepClaimedChildren = async (dir: string): Promise<number> => {
     let left = 0;
-    await guard(dir, async () => {
+    const outcome = await guard(dir, async () => {
       const children = await readdirNoFollow(root, dir, { strict: true });
       if (children === null) return;
       for (const child of children) {
@@ -1650,7 +1951,9 @@ export async function resetOnboardingArtifacts(
         removed.push(dir);
       }
     });
-    return left;
+    // The caller adds this to its own count and removes `.claude` whole when the total is zero,
+    // so a sweep that did not finish must report a survivor rather than its unfinished zero.
+    return sweepSurvivors(outcome, left);
   };
 
   const dirs = onboardingResetDirs(haiveDirs);
@@ -1662,12 +1965,12 @@ export async function resetOnboardingArtifacts(
       continue;
     }
     let swept = { left: 0, ours: [] as Array<{ rel: string; isDir: boolean }> };
-    await guard(rel, async () => {
+    const sweep = await guard(rel, async () => {
       swept = await quarantineForeign(rel);
     });
     // Something of the user's could not be moved out, so the directory cannot go whole: the
     // entries that ARE ours are removed instead and it stays, holding what was left behind.
-    if (swept.left === 0) await remove(rel, true);
+    if (mayRemoveSweptDirWhole(sweep, swept.left)) await remove(rel, true);
     else {
       for (const entry of swept.ours) await remove(entry.rel, entry.isDir);
     }
@@ -1759,7 +2062,16 @@ export async function resetOnboardingArtifacts(
     });
   }
 
-  return { removed, cleaned, skipped, quarantined };
+  if (resetTouchedNothing({ removed, cleaned, quarantined }, ioFailures, partialRemovals)) {
+    throw new HttpError(
+      500,
+      `The repository could not be read, so nothing was reset: ${skipped
+        .map((s) => `${s.path} (${s.reason})`)
+        .join(', ')}`,
+    );
+  }
+
+  return { removed, cleaned, skipped, quarantined, vacatedPaths };
 }
 
 /** The repo's on-disk root, or a 404/409 explaining why there isn't one.
@@ -1880,7 +2192,13 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const db = getDb();
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
-    columns: { id: true, storagePath: true, localPath: true, onboardedAt: true },
+    columns: {
+      id: true,
+      storagePath: true,
+      localPath: true,
+      onboardedAt: true,
+      onboardingResetAt: true,
+    },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
   const root = repo.storagePath ?? repo.localPath;
@@ -1891,6 +2209,11 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const { onboarded, inProgressTaskId, canMarkOnboarded } = resolveOnboardingVerdict({
     missing,
     onboardedAt: repo.onboardedAt,
+    onboardingResetAt: repo.onboardingResetAt,
+    hasArtifactsSinceReset: hasArtifactsSinceReset(
+      (await loadNewestLiveArtifactAt(db, userId, [id])).get(id),
+      repo.onboardingResetAt,
+    ),
     facts,
   });
   return c.json({
@@ -1921,6 +2244,29 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
   const db = getDb();
   const root = await resolveRepoRoot(db, userId, id);
 
+  // Held across the marker check AND the stamp. The markers are read off DISK, so a rebuild that
+  // starts and finishes in between replaces the tree they were read from and releases its claim
+  // without advancing `onboarding_reset_at` — leaving the predicate below satisfied by evidence
+  // that no longer exists. Holding the root is what makes "the tree I looked at" and "the tree I
+  // am vouching for" the same tree.
+  const held = await acquireRootClaim(db, id, 'verify', userId);
+  if (held === null) {
+    throw new HttpError(409, rootClaimRefusal((await readLiveRootClaim(db, id))?.kind ?? null));
+  }
+  try {
+    return await markRepositoryOnboarded(c, db, userId, id, root);
+  } finally {
+    await held.release().catch(() => undefined);
+  }
+});
+
+async function markRepositoryOnboarded(
+  c: Context<AppEnv>,
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  id: string,
+  root: string,
+): Promise<Response> {
   const { missing } = await checkOnboardingMarkers(root);
   if (missing.length > 0) {
     throw new HttpError(
@@ -1932,14 +2278,64 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
   if (facts.liveTaskId) {
     throw new HttpError(409, 'An onboarding run is still in progress for this repository');
   }
+  // This route exists for a run that did the work and then failed at a late step. A repository
+  // whose newest completed run predates its own reset is the opposite case, and stamping it here
+  // would hand back by hand exactly the state the reset took away — with no live artifact rows
+  // behind it. The markers above cannot catch it: a reset that could not read the tree leaves
+  // them all in place.
+  const resetRow = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { onboardingResetAt: true },
+  });
+  const resetAt = resetRow?.onboardingResetAt ?? null;
+  const completedSinceReset =
+    facts.newestCompletedAt !== null && resetAt !== null && facts.newestCompletedAt > resetAt;
+  // The same test `resolveOnboardingVerdict` uses for `canMarkOnboarded`, or the button and the
+  // route disagree about whether this is allowed. A post-reset COMPLETION cannot be the
+  // requirement: the run this route exists for failed at a late step and has no `completed_at`,
+  // while one that completed was already stamped from `markTaskCompleted` and never gets here.
+  // A live artifact row is what says a run reached step 12 since the reset.
+  const artifactsSinceReset = hasArtifactsSinceReset(
+    (await loadNewestLiveArtifactAt(db, userId, [id])).get(id),
+    resetAt,
+  );
+  if (resetAt !== null && !completedSinceReset && !artifactsSinceReset) {
+    throw new HttpError(
+      409,
+      'This repository was reset and no onboarding run has written its artifacts since, so it cannot be marked onboarded. Run onboarding instead.',
+    );
+  }
 
-  const onboardedAt = new Date();
-  await db
+  // The write carries the epoch it was validated against, so a reset landing between the check
+  // above and this UPDATE cannot have its work undone by hand: it moves `onboarding_reset_at`,
+  // the predicate stops matching, and nothing is stamped. Validating and then writing
+  // unconditionally is the same read-then-act shape the root claim exists to remove — and the
+  // markers cannot catch it either, since a reset is free to leave behind files it could not
+  // claim.
+  //
+  // Deliberately NOT a "no live claim" term: this handler HOLDS one, so requiring the column to
+  // be empty would refuse its own write every time. Exclusion against the other writers is what
+  // the held claim already provides.
+  const stamped = await db
     .update(schema.repositories)
-    .set({ onboardedAt, updatedAt: new Date() })
-    .where(eq(schema.repositories.id, id));
-  return c.json({ ok: true, onboardedAt: onboardedAt.toISOString() });
-});
+    .set({ onboardedAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.repositories.id, id),
+        eq(schema.repositories.userId, userId),
+        sql`${schema.repositories.onboardingResetAt} IS NOT DISTINCT FROM ${resetAt}`,
+      ),
+    )
+    .returning({ onboardedAt: schema.repositories.onboardedAt });
+  const written = stamped[0]?.onboardedAt;
+  if (!written) {
+    throw new HttpError(
+      409,
+      'This repository changed while it was being marked onboarded. Check its status and try again.',
+    );
+  }
+  return c.json({ ok: true, onboardedAt: written.toISOString() });
+}
 
 repoRoutes.get('/:id/archive', async (c) => {
   const userId = c.get('userId');
@@ -1967,6 +2363,51 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
+  // Claim the repository BEFORE anything is read, and hold it until the handler exits. The
+  // destructive writers — `refresh-tree` and the three repo-queue handlers that `rm -rf` the
+  // root — refuse while it is held, which is the half the live-task guard below cannot cover:
+  // none of them is a task. A claim rather than a lock because the repo worker and the task
+  // worker share one connection pool, so a lock held across the walk deadlocks it.
+  // Acquired as a LEASE: a reset of a large knowledge base can outlive any fixed expiry, and a
+  // claim that expires under a still-running holder re-admits the very `rm -rf` it excludes.
+  const claim = await acquireRootClaim(db, id, 'reset', userId);
+  if (claim === null) {
+    // The CAS refuses for three different reasons and answering 409 to all of them would turn a
+    // wrong id and someone else's repository into "already being reset". Ownership is resolved
+    // here rather than before the claim so the claim stays the FIRST write: checking first would
+    // reintroduce the read-then-act gap this replaced.
+    const owned = await db.query.repositories.findFirst({
+      where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+      columns: { id: true },
+    });
+    if (!owned) throw new HttpError(404, 'Repository not found');
+    throw new HttpError(409, rootClaimRefusal((await readLiveRootClaim(db, id))?.kind ?? null));
+  }
+  try {
+    return await runOnboardingArtifactReset(c, db, userId, id);
+  } finally {
+    // Every exit path, the failures included: a reset that threw has stopped touching the tree
+    // just as surely as one that finished, and leaving the claim would block the retry.
+    await claim.release().catch(() => undefined);
+    if (claim.lost()) {
+      // Reachable only if renewals failed for a full stale window while the database stayed
+      // healthy enough for someone else's takeover. The walk cannot be preempted, so this is
+      // recorded rather than acted on — the response has already described a reset that may have
+      // been running beside another writer.
+      logger.error(
+        { repositoryId: id },
+        'root claim was taken over while the onboarding reset was still walking the tree',
+      );
+    }
+  }
+});
+
+async function runOnboardingArtifactReset(
+  c: Context<AppEnv>,
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  id: string,
+): Promise<Response> {
   // A live onboarding run writes into the very tree this is about to delete — and its 07/09_5
   // steps may complete AFTER the reset, so their records would name files the reset removed
   // while carrying a `created_at` older than the epoch, which excludes that run's provenance
@@ -2004,6 +2445,9 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // wrote, and they are superseded below.
   const live = await db
     .select({
+      // The id is carried so the closing supersede can be scoped to exactly these rows — the
+      // ones that existed BEFORE the walk. See `supersedeResetArtifacts`.
+      id: schema.onboardingArtifacts.id,
       diskPath: schema.onboardingArtifacts.diskPath,
       writtenHash: schema.onboardingArtifacts.writtenHash,
     })
@@ -2023,34 +2467,62 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
     resolveMergedTasks(onboardingSteps, epoch),
   );
 
-  const { removed, cleaned, skipped, quarantined } = await resetOnboardingArtifacts(root, {
-    writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
-    haiveDirs: written.dirs,
-    haiveEntries: written.entries,
-  });
+  const { removed, cleaned, skipped, quarantined, vacatedPaths } = await resetOnboardingArtifacts(
+    root,
+    {
+      writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
+      haiveDirs: written.dirs,
+      haiveEntries: written.entries,
+    },
+  );
 
   // Rows that name deleted files must not stay live: they feed the upgrade planner and the
-  // rollback, and `12-post-onboarding` inserts without conflict handling, so a re-onboarding
-  // would collide with the (repository_id, disk_path) WHERE superseded_at IS NULL unique index.
-  // Same defensive supersede as `02-upgrade-apply`. `applicableTemplateIds` is left alone — the
-  // next apply overwrites it, and with no live rows the banner already reads "not onboarded".
-  await db
-    .update(schema.onboardingArtifacts)
-    .set({ supersededAt: new Date() })
-    .where(
-      and(
-        eq(schema.onboardingArtifacts.repositoryId, id),
-        isNull(schema.onboardingArtifacts.supersededAt),
-      ),
+  // rollback. `applicableTemplateIds` is left alone — the next apply overwrites it, and with no
+  // live rows the banner already reads "not onboarded".
+  //
+  // A row for a path the reset LEFT ALONE stays live, and that is the point. A partial reset —
+  // the KB removed, one settings file unreadable — used to supersede everything, which dropped
+  // the `written_hash` that was the only evidence Haive wrote the surviving file. With the epoch
+  // also excluding the old step provenance, no later reset could claim it: the file stayed on
+  // disk for good, and `writeIfAllowed` skips an existing file, so a re-onboarding never
+  // refreshed it either. A live row beside a file that is still there is simply true.
+  //
+  // `12-post-onboarding` supersedes the paths it is about to insert before inserting them, the
+  // same defensive shape `02-upgrade-apply` uses, so these survivors cannot collide with the
+  // (repository_id, disk_path) WHERE superseded_at IS NULL unique index on a re-onboarding.
+  // ONE transaction for both, the same reason `12-post-onboarding` needs one: retiring the rows
+  // and stamping the epoch are halves of a single claim about this repository. A supersede that
+  // committed alone would leave the rows gone with NO epoch, and the next reset would then read
+  // exactly the pre-reset provenance the epoch exists to exclude — able to claim a file the user
+  // recreated by hand at a path an old run once wrote.
+  // Computed BEFORE the transaction opens: `dropAbsentKeptPaths` stats one path per kept row,
+  // and the api and worker share one `max: 10` pool, so holding a connection across filesystem
+  // IO — on a tree that just raised IO errors, no less — is how a pool runs dry.
+  const keptPaths = await dropAbsentKeptPaths(
+    root,
+    resolveKeptArtifactPaths(
+      live.map((row) => row.diskPath),
+      [...new Set(skipped.map((s) => s.path))],
+      vacatedPaths,
+    ),
+  );
+
+  await db.transaction(async (tx) => {
+    await supersedeResetArtifacts(
+      tx,
+      id,
+      keptPaths,
+      live.map((row) => row.id),
     );
-  // The completion stamp cannot outlive the files it vouches for: this is the "start over"
-  // action, and a repo whose artifacts are gone is not onboarded however it got marked.
-  await db
-    .update(schema.repositories)
-    .set({ onboardedAt: null, onboardingResetAt: resetStartedAt, updatedAt: new Date() })
-    .where(eq(schema.repositories.id, id));
+    // The completion stamp cannot outlive the files it vouches for: this is the "start over"
+    // action, and a repo whose artifacts are gone is not onboarded however it got marked.
+    await tx
+      .update(schema.repositories)
+      .set({ onboardedAt: null, onboardingResetAt: resetStartedAt, updatedAt: new Date() })
+      .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
+  });
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
-});
+}
 
 repoRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
@@ -2156,6 +2628,14 @@ repoRoutes.post('/:id/refresh-tree', async (c) => {
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
+  // This enqueues a job that `rm -rf`s the whole repository root and copies it again. Refusing
+  // here is the cheap half — the handler checks again, because the claim can land between this
+  // read and the job being picked up, and by then only the worker can stop it.
+  // The cheap half. The handler claims the root itself before it deletes anything, which is what
+  // actually closes the race — this only turns the common case into an immediate 409 instead of a
+  // job that starts, refuses and parks the row at `error`.
+  const held = await readLiveRootClaim(db, id);
+  if (held) throw new HttpError(409, rootClaimRefusal(held.kind));
 
   await db
     .update(schema.repositories)

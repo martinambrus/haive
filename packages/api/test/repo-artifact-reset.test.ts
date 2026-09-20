@@ -3,14 +3,20 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { normalizeContent, sha256Hex } from '@haive/shared';
-import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { PathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { inventoryDirsFromCatalog } from '../src/lib/tool-inventory.js';
 import {
   checkOnboardingMarkers,
+  classifyResetFailure,
   collectWrittenCliContent,
+  mayRemoveSweptDirWhole,
   resetOnboardingArtifacts,
+  resetTouchedNothing,
+  resolveKeptArtifactPaths,
+  dropAbsentKeptPaths,
   resolveMergedTasks,
+  sweepSurvivors,
   stripHaiveContent,
 } from '../src/routes/repos.js';
 
@@ -682,12 +688,19 @@ describe('resetOnboardingArtifacts', () => {
     await installArtifacts(root);
     await writeFile(path.join(root, '.codex/agents/mine.toml'), 'mine\n', 'utf8');
 
-    const { removed, quarantined } = await resetOnboardingArtifacts(root, provenance());
+    const { removed, quarantined, vacatedPaths } = await resetOnboardingArtifacts(
+      root,
+      provenance(),
+    );
 
     expect(quarantined).toContainEqual({
       from: '.codex/agents/mine.toml',
       to: '.codex/agents-legacy/mine.toml',
     });
+    // A MOVE vacates its original path exactly as a delete does, and the artifact row names that
+    // original path — so it has to reach `vacatedPaths` or a later parent skip would keep a live
+    // row pointing at a file that is no longer there.
+    expect(vacatedPaths.has('.codex/agents/mine.toml')).toBe(true);
     expect(await readFile(path.join(root, '.codex/agents-legacy/mine.toml'), 'utf8')).toBe(
       'mine\n',
     );
@@ -1054,12 +1067,15 @@ describe('resetOnboardingArtifacts', () => {
     await mkdir(path.join(root, '.gemini'), { recursive: true });
     await writeFile(path.join(root, '.gemini/settings.json'), '{"mine":true}\n', 'utf8');
 
-    const { removed, skipped } = await resetOnboardingArtifacts(
+    const { removed, skipped, vacatedPaths } = await resetOnboardingArtifacts(
       root,
       provenance([['.claude/settings.json', sha256Hex(normalizeContent(ours))]]),
     );
 
     expect(removed).toContain('.claude/settings.json');
+    // This deletion does not go through the walk's `remove()` helper, so it has to record itself
+    // — otherwise a later skip of `.claude` would preserve its row over a file already gone.
+    expect(vacatedPaths.has('.claude/settings.json')).toBe(true);
     expect(await exists(root, '.gemini/settings.json')).toBe(true);
     expect(skipped).toContainEqual({
       path: '.gemini/settings.json',
@@ -1167,5 +1183,221 @@ describe('resetOnboardingArtifacts', () => {
       '.claude/agents-legacy',
       '.claude/mcp_settings.json',
     ]);
+  });
+});
+
+describe('mayRemoveSweptDirWhole', () => {
+  it('removes a directory the sweep emptied', () => {
+    expect(mayRemoveSweptDirWhole('ok', 0)).toBe(true);
+  });
+
+  it('keeps one the sweep could not empty', () => {
+    expect(mayRemoveSweptDirWhole('ok', 1)).toBe(false);
+  });
+
+  it('keeps one whose sweep never finished, whatever the count says', () => {
+    // The regression this exists for. An IO failure leaves the count at its INITIAL zero, and
+    // reading that as "nothing of theirs is left" recursively deletes the user's definitions the
+    // quarantine exists to move aside — the one outcome the whole mechanism is built to prevent.
+    expect(mayRemoveSweptDirWhole('io', 0)).toBe(false);
+    expect(mayRemoveSweptDirWhole('io', 3)).toBe(false);
+  });
+
+  it('still removes a REFUSED directory, because that one is a link', () => {
+    // A containment refusal comes from `readdirNoFollow` rejecting a linked directory before the
+    // sweep starts. It is a complete answer about that directory, not an unfinished job: the
+    // removal takes the link itself rather than walking through it. Treating it like an IO
+    // failure would silently stop deleting linked CLI directories.
+    expect(mayRemoveSweptDirWhole('refused', 0)).toBe(true);
+  });
+});
+
+describe('resolveKeptArtifactPaths', () => {
+  const live = [
+    '.claude/settings.json',
+    '.claude/plugins/drupal-php-lsp/plugin.json',
+    '.claude/plugins/drupal-php-lsp/server.js',
+    '.claude/agents/code-reviewer.md',
+    '.haive-data/knowledge_base/ARCHITECTURE.md',
+  ];
+
+  it('keeps a row whose own path was left alone', () => {
+    expect(resolveKeptArtifactPaths(live, ['.claude/settings.json'])).toEqual([
+      '.claude/settings.json',
+    ]);
+  });
+
+  it('keeps the rows BENEATH a directory that was left alone', () => {
+    // The bug: a sweep that could not read `plugins/` reports the parent, while the rows sit two
+    // levels down. Matching `disk_path` exactly retired them, so the next reset could not claim
+    // files that are still on disk — the same failure this pair exists to prevent, one level down.
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins']).sort()).toEqual([
+      '.claude/plugins/drupal-php-lsp/plugin.json',
+      '.claude/plugins/drupal-php-lsp/server.js',
+    ]);
+  });
+
+  it('matches whole segments, so a prefix that is not a parent is not kept', () => {
+    // `.claude/plugin` is not an ancestor of `.claude/plugins/...`. A SQL LIKE would also have to
+    // escape the `_` in `knowledge_base`, which is why this is done in JS.
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugin'])).toEqual([]);
+    expect(resolveKeptArtifactPaths(live, ['.haive-data/knowledgeXbase'])).toEqual([]);
+  });
+
+  it('keeps nothing when the reset left nothing alone', () => {
+    expect(resolveKeptArtifactPaths(live, [])).toEqual([]);
+  });
+
+  it('does NOT keep a row for a descendant the walk already deleted', () => {
+    // A recursive delete that removed some children and then hit an IO error reports only its
+    // PARENT as skipped, so the prefix rule above would keep rows for files that are already
+    // gone. Nothing downstream reads disk to notice: `upgrade-status` answers from the rows, so
+    // a stale live row reports a reset file as installed and offers to manage it. Deletion is
+    // the stronger fact and wins over the parent's skip.
+    const deleted = new Set(['.claude/plugins/drupal-php-lsp/plugin.json']);
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins'], deleted)).toEqual([
+      '.claude/plugins/drupal-php-lsp/server.js',
+    ]);
+  });
+
+  it('does NOT keep rows beneath a directory that was moved away whole', () => {
+    // The quarantine moves an UNCLAIMED directory wholesale and records only its own path, so an
+    // exact-match exclusion preserved the row for every file inside it — each naming a path that
+    // is now empty, which `upgrade-status` reports as installed. A vacated directory takes its
+    // descendants with it.
+    const vacated = new Set(['.claude/plugins/drupal-php-lsp']);
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins'], vacated)).toEqual([]);
+  });
+
+  it('matches whole segments when excluding, so a sibling with a shared prefix survives', () => {
+    // `.claude/plugins/drupal-php` is not an ancestor of `.claude/plugins/drupal-php-lsp/...`.
+    // The exclusion must not over-reach any more than the keep rule does.
+    const vacated = new Set(['.claude/plugins/drupal-php']);
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins'], vacated).sort()).toEqual([
+      '.claude/plugins/drupal-php-lsp/plugin.json',
+      '.claude/plugins/drupal-php-lsp/server.js',
+    ]);
+  });
+
+  it('is unchanged when nothing was deleted, which is the default', () => {
+    // The omitted argument must behave exactly as before this existed, since the smoke and the
+    // route both went through the two-argument form for several rounds.
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins'], new Set()).sort()).toEqual(
+      resolveKeptArtifactPaths(live, ['.claude/plugins']).sort(),
+    );
+  });
+});
+
+describe('dropAbsentKeptPaths', () => {
+  it('drops a kept path whose file is already gone, and keeps one that is there', async () => {
+    // `resolveKeptArtifactPaths` answers from what the WALK did, so it cannot see a file that was
+    // already missing before the reset — a generated file the user deleted by hand, whose row is
+    // still live. Preserving that row under a skipped ancestor leaves `upgrade-status`, which
+    // answers from the rows, reporting an absent file as installed.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'kept-absent-'));
+    await mkdir(path.join(root, '.claude'), { recursive: true });
+    await writeFile(path.join(root, '.claude/here.md'), 'x', 'utf8');
+
+    expect(await dropAbsentKeptPaths(root, ['.claude/here.md', '.claude/gone.md'])).toEqual([
+      '.claude/here.md',
+    ]);
+  });
+
+  it('keeps a path it could not resolve at all', async () => {
+    // Only a CONFIDENT absence drops a row; anything undecidable is kept, because retiring a row
+    // on "I could not tell" loses the claim for a file that may merely be unreadable.
+    //
+    // NOTE what this does and does not cover. A `..` path is refused by `toSafeRel`, which
+    // throws `invalid-path` whether or not `strict` is set — so this pins the undecidable-is-kept
+    // rule but NOT the `strict: true` flag itself. That flag's discriminating case is a
+    // non-containment IO error (EACCES/EIO) during the stat, where non-strict folds the error
+    // into `null` and would retire the row of a file that exists. A mutant dropping `strict`
+    // survives this suite, and an IO error is not provokable from a temp directory here — see
+    // the same limitation on the reset's own IO paths.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'kept-unknown-'));
+    expect(await dropAbsentKeptPaths(root, ['../escape.md'])).toEqual(['../escape.md']);
+  });
+});
+
+describe('sweepSurvivors', () => {
+  it('reports what a completed sweep actually left', () => {
+    expect(sweepSurvivors('ok', 0)).toBe(0);
+    expect(sweepSurvivors('ok', 2)).toBe(2);
+  });
+
+  it('reports a survivor for a sweep that did not finish', () => {
+    // The caller adds this to its own count and removes `.claude` WHOLE when the total is zero.
+    // An unfinished sweep returning its initialised zero therefore deletes the user's plugins
+    // inside a directory nobody managed to walk.
+    expect(sweepSurvivors('io', 0)).toBe(1);
+  });
+
+  it('reports a survivor for a refusal too, unlike the top-level sweep', () => {
+    // Here the refused path is a CHILD whose parent would be removed with it, so a link must
+    // count as something to keep. At the top level the refused path IS the removal target, and
+    // removing the link itself is the right answer — hence two rules rather than one.
+    expect(sweepSurvivors('refused', 0)).toBe(1);
+  });
+});
+
+describe('classifyResetFailure', () => {
+  it('absorbs a refused link as a policy skip, not an IO failure', () => {
+    const err = new PathContainmentError('link', '/anchor', 'a/b', 'a');
+    expect(classifyResetFailure(err)).toEqual({ reason: 'link', io: false });
+  });
+
+  it('absorbs a filesystem error as an IO skip carrying its errno', () => {
+    expect(classifyResetFailure(Object.assign(new Error('nope'), { code: 'EACCES' }))).toEqual({
+      reason: 'EACCES',
+      io: true,
+    });
+    // The code the KB editor actually collides with: removeChild's final rmdir rethrows it.
+    expect(classifyResetFailure(Object.assign(new Error('busy'), { code: 'ENOTEMPTY' }))).toEqual({
+      reason: 'ENOTEMPTY',
+      io: true,
+    });
+  });
+
+  it('refuses to absorb anything that is not a filesystem error', () => {
+    expect(classifyResetFailure(new TypeError('cannot read properties of undefined'))).toBeNull();
+    expect(classifyResetFailure('a bare string')).toBeNull();
+    expect(classifyResetFailure(null)).toBeNull();
+  });
+
+  it('does not count a containment refusal as IO, whatever its code reads like', () => {
+    // PathContainmentError.code is the STRING 'EPATHCONTAINMENT', so errno answers for it too.
+    // Testing containment second would report every refused link as an IO failure and trip the
+    // empty-walk floor on a tree that is merely full of symlinks.
+    const err = new PathContainmentError('out-of-tree', '/anchor', 'x', 'x');
+    expect(classifyResetFailure(err)?.io).toBe(false);
+  });
+});
+
+describe('resetTouchedNothing', () => {
+  const nothing = { removed: [], cleaned: [], quarantined: [] };
+
+  it('is false for a clean tree, which legitimately removes nothing', () => {
+    expect(resetTouchedNothing(nothing, 0, 0)).toBe(false);
+  });
+
+  it('is true only when an IO failure left the walk with nothing done', () => {
+    expect(resetTouchedNothing(nothing, 1, 0)).toBe(true);
+  });
+
+  it('is false whenever the walk achieved anything at all', () => {
+    expect(resetTouchedNothing({ ...nothing, removed: ['.claude/agents'] }, 3, 0)).toBe(false);
+    expect(resetTouchedNothing({ ...nothing, cleaned: ['AGENTS.md'] }, 3, 0)).toBe(false);
+    expect(resetTouchedNothing({ ...nothing, quarantined: [{ from: 'a', to: 'b' }] }, 3, 0)).toBe(
+      false,
+    );
+  });
+
+  it('is false when a recursive removal failed part-way, though nothing was recorded', () => {
+    // The sharp case: `remove()` appends to `removed` only AFTER `removeNoFollow` returns, so a
+    // recursive delete that unlinked some descendants and then threw leaves every array empty
+    // while the tree is already half gone. Reading that as "nothing happened" aborts before the
+    // supersede, leaving live rows naming deleted files and `onboarded_at` set — the one torn
+    // state this predicate exists to prevent, reached by the path it could not see.
+    expect(resetTouchedNothing(nothing, 1, 1)).toBe(false);
   });
 });

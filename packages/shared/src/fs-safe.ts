@@ -125,7 +125,10 @@ const fdPath = (fd: number): string => `/proc/self/fd/${fd}`;
 const at = (dirFd: number, name: string): string => `${fdPath(dirFd)}/${name}`;
 const below = (real: string, name: string): string =>
   real === '/' ? `/${name}` : `${real}/${name}`;
-const errno = (err: unknown): string | undefined => {
+/** A Node filesystem error's `code`, or undefined for anything that is not one. Exported because
+ *  callers that turn an IO failure into a per-item outcome need the same test this module uses,
+ *  and two copies of "is this an fs error" is the disagreement that makes one of them wrong. */
+export const errno = (err: unknown): string | undefined => {
   const code = (err as { code?: unknown } | null)?.code;
   return typeof code === 'string' ? code : undefined;
 };
@@ -829,6 +832,20 @@ export interface RemoveOptions {
    *  `sites/default` at 0555, where nothing may unlink inside it; this replaces the `chmod -R u+w`
    *  that a removal used to shell out to. */
   repairPermissions?: boolean;
+  /**
+   * Called once for each entry actually unlinked or rmdir'ed.
+   *
+   * Exists so a caller can tell a recursive removal that failed HAVING DELETED SOMETHING from one
+   * that failed before touching anything — a distinction the thrown error cannot carry and the
+   * return value never reaches, since a throw skips it. `walkDir`, the leaf `lstat` and
+   * `removeChild`'s own `open` all raise before the first unlink, so "the call threw" and "the
+   * tree changed" are independent facts. The onboarding reset needs both: superseding over an
+   * INTACT tree is unrecoverable, and reporting an untouched tree over a HALF-DELETED one is
+   * equally wrong in the other direction.
+   *
+   * Optional and unused by every other caller, so it changes nothing for them.
+   */
+  onRemoved?: (rel: string) => void;
 }
 
 /** Retry one operation after granting `u+rwx` on the directory that refused it. The chmod goes
@@ -853,12 +870,16 @@ async function withRepair<T>(
 /** Empty the directory `dirFh` holds. ENOTEMPTY is re-scanned rather than trusted: a concurrent
  *  writer can add an entry between the listing and the `rmdir`, and three passes is enough for that
  *  while still terminating on a directory something is actively filling. */
-async function removeDirContents(dirFh: FileHandle, opts: RemoveOptions): Promise<void> {
+async function removeDirContents(
+  dirFh: FileHandle,
+  opts: RemoveOptions,
+  relPrefix: string,
+): Promise<void> {
   for (let pass = 0; pass < 3; pass += 1) {
     const names = await withRepair(dirFh, opts, () => readdir(fdPath(dirFh.fd)));
     if (names.length === 0) return;
     for (const name of names) {
-      await removeChild(dirFh, name, opts);
+      await removeChild(dirFh, name, opts, relPrefix === '' ? name : `${relPrefix}/${name}`);
     }
   }
 }
@@ -867,7 +888,12 @@ async function removeDirContents(dirFh: FileHandle, opts: RemoveOptions): Promis
  *  UNLINKED rather than followed — the link itself is what has to go — and a directory is recursed
  *  into only through a descriptor opened `O_NOFOLLOW`, so an entry swapped for a link mid-walk is
  *  unlinked instead of descended. */
-async function removeChild(dirFh: FileHandle, name: string, opts: RemoveOptions): Promise<void> {
+async function removeChild(
+  dirFh: FileHandle,
+  name: string,
+  opts: RemoveOptions,
+  rel: string,
+): Promise<void> {
   const st = await lstat(at(dirFh.fd, name)).catch((err: unknown) => {
     if (ABSENT.has(errno(err) ?? '')) return null;
     throw err;
@@ -875,12 +901,21 @@ async function removeChild(dirFh: FileHandle, name: string, opts: RemoveOptions)
   if (st === null) return;
 
   if (!st.isDirectory()) {
+    let unlinked = true;
     await withRepair(dirFh, opts, () => unlink(at(dirFh.fd, name))).catch((err: unknown) => {
       // Raced into a directory since the lstat; EISDIR re-dispatches rather than failing.
-      if (errno(err) === 'EISDIR') return removeChild(dirFh, name, opts);
-      if (ABSENT.has(errno(err) ?? '')) return undefined;
+      if (errno(err) === 'EISDIR') {
+        unlinked = false;
+        return removeChild(dirFh, name, opts, rel);
+      }
+      // Already gone: something else removed it, so THIS call changed nothing.
+      if (ABSENT.has(errno(err) ?? '')) {
+        unlinked = false;
+        return undefined;
+      }
       throw err;
     });
+    if (unlinked) opts.onRemoved?.(rel);
     return;
   }
 
@@ -893,6 +928,7 @@ async function removeChild(dirFh: FileHandle, name: string, opts: RemoveOptions)
     // Swapped for a link or a file since the lstat: unlink the name, never follow it.
     if (code === 'ELOOP' || code === 'ENOTDIR') {
       await withRepair(dirFh, opts, () => unlink(at(dirFh.fd, name)));
+      opts.onRemoved?.(rel);
       return;
     }
     if (code === 'EACCES' || code === 'EPERM') {
@@ -905,14 +941,19 @@ async function removeChild(dirFh: FileHandle, name: string, opts: RemoveOptions)
     }
   }
   try {
-    await removeDirContents(child, opts);
+    await removeDirContents(child, opts, rel);
   } finally {
     await closeQuietly(child);
   }
+  let removed = true;
   await withRepair(dirFh, opts, () => rmdir(at(dirFh.fd, name))).catch((err: unknown) => {
-    if (ABSENT.has(errno(err) ?? '')) return undefined;
+    if (ABSENT.has(errno(err) ?? '')) {
+      removed = false;
+      return undefined;
+    }
     throw err;
   });
+  if (removed) opts.onRemoved?.(rel);
 }
 
 /**
@@ -953,9 +994,10 @@ export async function removeNoFollow(
     if (st === null) return false;
     if (st.isDirectory() && !opts.recursive) {
       await withRepair(dir.fh, opts, () => rmdir(at(dir.fh.fd, leaf)));
+      opts.onRemoved?.(safe);
       return true;
     }
-    await removeChild(dir.fh, leaf, opts);
+    await removeChild(dir.fh, leaf, opts, safe);
     return true;
   } finally {
     await closeQuietly(dir.fh);
