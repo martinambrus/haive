@@ -13,6 +13,7 @@ import {
   mayRemoveSweptDirWhole,
   resetOnboardingArtifacts,
   resetTouchedNothing,
+  resolveKeptArtifactPaths,
   resolveMergedTasks,
   sweepSurvivors,
   stripHaiveContent,
@@ -1197,6 +1198,43 @@ describe('mayRemoveSweptDirWhole', () => {
     // removal takes the link itself rather than walking through it. Treating it like an IO
     // failure would silently stop deleting linked CLI directories.
     expect(mayRemoveSweptDirWhole('refused', 0)).toBe(true);
+  });
+});
+
+describe('resolveKeptArtifactPaths', () => {
+  const live = [
+    '.claude/settings.json',
+    '.claude/plugins/drupal-php-lsp/plugin.json',
+    '.claude/plugins/drupal-php-lsp/server.js',
+    '.claude/agents/code-reviewer.md',
+    '.haive-data/knowledge_base/ARCHITECTURE.md',
+  ];
+
+  it('keeps a row whose own path was left alone', () => {
+    expect(resolveKeptArtifactPaths(live, ['.claude/settings.json'])).toEqual([
+      '.claude/settings.json',
+    ]);
+  });
+
+  it('keeps the rows BENEATH a directory that was left alone', () => {
+    // The bug: a sweep that could not read `plugins/` reports the parent, while the rows sit two
+    // levels down. Matching `disk_path` exactly retired them, so the next reset could not claim
+    // files that are still on disk — the same failure this pair exists to prevent, one level down.
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugins']).sort()).toEqual([
+      '.claude/plugins/drupal-php-lsp/plugin.json',
+      '.claude/plugins/drupal-php-lsp/server.js',
+    ]);
+  });
+
+  it('matches whole segments, so a prefix that is not a parent is not kept', () => {
+    // `.claude/plugin` is not an ancestor of `.claude/plugins/...`. A SQL LIKE would also have to
+    // escape the `_` in `knowledge_base`, which is why this is done in JS.
+    expect(resolveKeptArtifactPaths(live, ['.claude/plugin'])).toEqual([]);
+    expect(resolveKeptArtifactPaths(live, ['.haive-data/knowledgeXbase'])).toEqual([]);
+  });
+
+  it('keeps nothing when the reset left nothing alone', () => {
+    expect(resolveKeptArtifactPaths(live, [])).toEqual([]);
   });
 });
 

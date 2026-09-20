@@ -1462,6 +1462,33 @@ export function classifyResetFailure(err: unknown): { reason: string; io: boolea
 }
 
 /**
+ * Which artifact rows a reset must leave live, given the paths it left alone.
+ *
+ * `skipped` names what the reset did not take, and some of those are DIRECTORIES: a `.claude`
+ * sweep that could not read `plugins/` reports the parent, while the rows underneath it are at
+ * `.claude/plugins/drupal-php-lsp/<file>`. Matching `disk_path` exactly therefore retires rows for
+ * files that are still on disk, which is the bug this pair of functions exists to prevent — one
+ * level down.
+ *
+ * Expanded in JS against the rows the caller already loaded rather than with a SQL `LIKE`: a
+ * prefix pattern would have to escape `_` and `%`, and `KB_DIR` really is
+ * `.haive-data/knowledge_base`. Comparing whole segments cannot over-match.
+ */
+export function resolveKeptArtifactPaths(livePaths: string[], skippedPaths: string[]): string[] {
+  if (skippedPaths.length === 0) return [];
+  const kept = new Set<string>();
+  for (const path of livePaths) {
+    for (const skip of skippedPaths) {
+      if (path === skip || path.startsWith(`${skip}/`)) {
+        kept.add(path);
+        break;
+      }
+    }
+  }
+  return [...kept];
+}
+
+/**
  * Retire the artifact rows a reset invalidated, and only those.
  *
  * `keptPaths` is what the reset LEFT ALONE — kept files, refused links, and anything an IO error
@@ -2306,7 +2333,14 @@ async function runOnboardingArtifactReset(
   // `12-post-onboarding` supersedes the paths it is about to insert before inserting them, the
   // same defensive shape `02-upgrade-apply` uses, so these survivors cannot collide with the
   // (repository_id, disk_path) WHERE superseded_at IS NULL unique index on a re-onboarding.
-  await supersedeResetArtifacts(db, id, [...new Set(skipped.map((s) => s.path))]);
+  await supersedeResetArtifacts(
+    db,
+    id,
+    resolveKeptArtifactPaths(
+      live.map((row) => row.diskPath),
+      [...new Set(skipped.map((s) => s.path))],
+    ),
+  );
   // The completion stamp cannot outlive the files it vouches for: this is the "start over"
   // action, and a repo whose artifacts are gone is not onboarded however it got marked.
   await db
