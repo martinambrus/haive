@@ -920,6 +920,41 @@ const WORKFLOW_SKILL_STEP_ID = '11d-skill-sync';
 const PROVENANCE_STEP_IDS = [AGENT_TARGETS_STEP_ID, SKILL_MIRROR_STEP_ID, WORKFLOW_SKILL_STEP_ID];
 
 /**
+ * The step rows whose records may be read as provenance for this repository.
+ *
+ * Two predicates, and both are load-bearing. `status = 'done'` is the proof that APPLY ran: 07
+ * persists its detect payload before the form is even shown, so a run cancelled or failed while
+ * parked there names directories nothing was written to. `epoch` is
+ * `repositories.onboarding_reset_at`: a reset supersedes artifact rows but CANNOT touch
+ * `task_steps`, so a pre-reset run's `wroteFiles` still names paths it wrote and the reset then
+ * DELETED — and if the user recreates one of those names by hand and a later run SKIPS it under
+ * `overwrite=false`, that stale record claims their new file. Reading only the NEWEST run does
+ * not fix it: with no re-onboarding since, the newest run IS the pre-reset one. A null epoch is
+ * every repo never reset, which reads every run exactly as it always did.
+ *
+ * Exported for `onboarding-reset-provenance-smoke`, which is the only thing that can exercise
+ * the predicates — they are SQL, and the unit tests run against no database.
+ */
+export async function loadProvenanceSteps(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+  epoch: Date | null,
+): Promise<Array<{ stepId: string; output: unknown }>> {
+  return db
+    .select({ stepId: schema.taskSteps.stepId, output: schema.taskSteps.output })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        inArray(schema.taskSteps.stepId, PROVENANCE_STEP_IDS),
+        eq(schema.taskSteps.status, 'done'),
+        ...(epoch === null ? [] : [gt(schema.tasks.createdAt, epoch)]),
+      ),
+    );
+}
+
+/**
  * Which catalog agents/skills directories Haive is KNOWN to have written to in this repository.
  *
  * From the RUNS, never from the currently enabled providers: enablement is mutable global state
@@ -1583,30 +1618,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
       ),
     );
 
-  // What the runs recorded WRITING, never the currently enabled providers: that is mutable
-  // global state and says nothing about what THIS repo's onboarding did.
-  //
-  // Scoped to runs that started after the last reset. A reset supersedes artifact rows but
-  // cannot touch `task_steps`, so a pre-reset run's `wroteFiles` still names paths it wrote and
-  // the reset then DELETED — and if the user recreates one of those names by hand and a later
-  // run SKIPS it under `overwrite=false`, that stale record claims their new file. Reading only
-  // the newest run is NOT enough: with no re-onboarding since, the newest run IS the pre-reset
-  // one. `onboarding_reset_at` NULL (never reset here) reads every run, as it always did.
-  const epoch = repoRow?.onboardingResetAt ?? null;
-  const onboardingSteps = await db
-    .select({ stepId: schema.taskSteps.stepId, output: schema.taskSteps.output })
-    .from(schema.taskSteps)
-    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, id),
-        inArray(schema.taskSteps.stepId, PROVENANCE_STEP_IDS),
-        // `done` is the proof that APPLY ran: 07 persists its detect payload before the form is
-        // even shown, so a run cancelled while parked there wrote nothing.
-        eq(schema.taskSteps.status, 'done'),
-        ...(epoch === null ? [] : [gt(schema.tasks.createdAt, epoch)]),
-      ),
-    );
+  const onboardingSteps = await loadProvenanceSteps(db, id, repoRow?.onboardingResetAt ?? null);
   const written = collectWrittenCliContent(onboardingSteps, live);
 
   const { removed, cleaned, skipped, quarantined } = await resetOnboardingArtifacts(root, {
