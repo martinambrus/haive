@@ -77,18 +77,11 @@ describe('resolveRepoMirrors under agent isolation', () => {
     ]);
   });
 
-  it('is passed the spec flag by the exec-core spawner', async () => {
-    // A proxy for driving createSandboxSpawner, which needs an image, credentials and a runner.
-    // Without it the argument could be deleted and every unit test above would still pass — the
-    // shape that let piece 4 ship a spec field with one writer and no readers.
-    const { readFile } = await import('node:fs/promises');
-    const source = await readFile(new URL('./exec-core.ts', import.meta.url), 'utf8');
-    const call = source.indexOf('await resolveRepoMirrors(');
-    expect(call).toBeGreaterThan(-1);
-    expect(source.slice(call, call + 220)).toContain(
-      'maskAgentDefinitions: spec.maskAgentDefinitions',
-    );
-  });
+  // That the SPAWNER passes the flag is asserted behaviourally in
+  // `test/sandbox-repo-mirrors.test.ts`, which drives createSandboxSpawner with the sandbox runner
+  // and this resolver as its two faked edges. A source-grep proxy lived here first, written on the
+  // assumption that driving the spawner needed an image and credentials; it does not, and a string
+  // match beside a real call assertion would only invite the next reader to trust the weaker one.
 });
 
 describe('resolveRepoMirrors', () => {

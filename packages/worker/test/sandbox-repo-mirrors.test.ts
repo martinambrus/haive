@@ -62,7 +62,10 @@ describe('sandbox spawner: repo mirrors', () => {
 
     await createSandboxSpawner(null, null, repoMount, SANDBOX_WORKDIR, null, [], [mask])(spec);
 
-    expect(resolveRepoMirrors).toHaveBeenCalledWith(spec.repoMirrors, repoMount);
+    // `undefined` is the positional storageRoot, left as the resolver's own default.
+    expect(resolveRepoMirrors).toHaveBeenCalledWith(spec.repoMirrors, repoMount, undefined, {
+      maskAgentDefinitions: false,
+    });
     const [runSpec, options] = runInSandbox.mock.calls[0]! as [
       { extraFiles: { containerPath: string }[] },
       { extraMounts: DockerVolumeMount[] },
@@ -73,5 +76,35 @@ describe('sandbox spawner: repo mirrors', () => {
       mask.containerPath,
       agentFile.containerPath,
     ]);
+  });
+
+  it('tells the resolver to drop the agent mirror when the invocation is isolated', async () => {
+    // agy loads its agents from `~/.gemini/config`, not the workspace, so the mirror bypassed the
+    // workspace mask entirely and per-call isolation was inert for this provider. The rule lives in
+    // resolveRepoMirrors; what this asserts is that the spawner actually tells it — the argument
+    // could be deleted and every unit test of the rule itself would still pass.
+    runInSandbox.mockResolvedValue({
+      exitCode: 0,
+      stdout: '',
+      stderr: '',
+      durationMs: 1,
+      timedOut: false,
+      resolvedCommand: 'agy',
+      wrapperId: null,
+    });
+    resolveRepoMirrors.mockResolvedValue({ mounts: [], files: [] });
+    const spec = new AntigravityAdapter().buildCliInvocation(provider, 'do x', {});
+    spec.maskAgentDefinitions = true;
+    const repoMount: DockerVolumeMount = {
+      source: 'haive_repos',
+      target: SANDBOX_WORKDIR,
+      subpath: 'u/r',
+    };
+
+    await createSandboxSpawner(null, null, repoMount, SANDBOX_WORKDIR)(spec);
+
+    expect(resolveRepoMirrors).toHaveBeenCalledWith(spec.repoMirrors, repoMount, undefined, {
+      maskAgentDefinitions: true,
+    });
   });
 });
