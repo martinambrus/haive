@@ -141,6 +141,40 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
   return Array.from(set).sort();
 }
 
+/** Enqueue a repository job, and mark the row `error` if the ENQUEUE itself fails.
+ *
+ *  The row is committed at `cloning` before any of these calls run, so a throwing `queue.add` —
+ *  Redis down or failing over — otherwise leaves a repository whose job never existed, with
+ *  nothing to move it off `cloning`. The worker's boot reconciler cannot cover that case in
+ *  bounded time: it deliberately ignores rows younger than its cutoff, because a young row is
+ *  indistinguishable from one whose enqueue is still in flight. So it is closed here, where the
+ *  failure actually happens and no race is involved.
+ *
+ *  Rethrows, because the caller's request really did fail and must say so. The status write is
+ *  best-effort: if the database is unreachable too there is nothing to be done, and masking the
+ *  original error with a second one helps nobody. */
+export async function addRepoJobOrMarkError(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+  add: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await add();
+  } catch (err) {
+    await db
+      .update(schema.repositories)
+      .set({
+        status: 'error',
+        statusMessage:
+          'Could not queue the job that prepares this repository. Use Retry to try again.',
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.repositories.id, repositoryId))
+      .catch(() => undefined);
+    throw err;
+  }
+}
+
 export const repoRoutes = new Hono<AppEnv>();
 
 repoRoutes.use('*', requireAuth);
@@ -313,12 +347,14 @@ repoRoutes.post('/', async (c) => {
           ? REPO_JOB_NAMES.COPY
           : REPO_JOB_NAMES.SCAN
         : REPO_JOB_NAMES.CLONE;
-  await queue.add(jobName, payload, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  await addRepoJobOrMarkError(db, repo.id, () =>
+    queue.add(jobName, payload, {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    }),
+  );
 
   return c.json({ repository: repo }, 201);
 });
@@ -421,11 +457,13 @@ repoRoutes.post('/upload', async (c) => {
   // One attempt only: a bad archive will fail the same way on retry, and the
   // worker deletes the archive on success, so retrying would run against a
   // missing file and mask the real error.
-  await queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
-    attempts: 1,
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  await addRepoJobOrMarkError(db, repo.id, () =>
+    queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
+      attempts: 1,
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    }),
+  );
 
   return c.json({ repository: repo }, 201);
 });
@@ -659,11 +697,13 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
   // One attempt only: a bad archive will fail the same way on retry, and the
   // worker deletes the archive on success, so retrying would run against a
   // missing file and mask the real error.
-  await queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
-    attempts: 1,
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  await addRepoJobOrMarkError(db, repo.id, () =>
+    queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
+      attempts: 1,
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    }),
+  );
 
   await db
     .update(schema.repoUploads)
@@ -2809,10 +2849,12 @@ repoRoutes.post('/:id/refresh-tree', async (c) => {
         ? REPO_JOB_NAMES.COPY
         : REPO_JOB_NAMES.SCAN
       : REPO_JOB_NAMES.CLONE;
-  await queue.add(jobName, payload, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-  });
+  await addRepoJobOrMarkError(db, repo.id, () =>
+    queue.add(jobName, payload, {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5000 },
+    }),
+  );
 
   return c.json({ ok: true });
 });
