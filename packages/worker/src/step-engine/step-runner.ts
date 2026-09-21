@@ -1044,6 +1044,10 @@ async function resolveAiFixPhase(
     cliProviderId: plan.providerId,
     effortLevel: preferredEffort ?? undefined,
     kind: payloadKind,
+    // The profile the dispatcher was given above, carried onto the payload too. Without it
+    // cli-exec wires the FULL MCP surface while the prompt it runs describes the step's
+    // narrowed one — the prompt and the tools disagree, silently.
+    toolProfile: stepDef.llm?.toolProfile,
     spec: plan.invocation.spec,
     timeoutMs: fixBudget.timeoutMs,
   });
