@@ -37,8 +37,43 @@ async function git(dir: string, args: string[]): Promise<string> {
 }
 
 const dirs: string[] = [];
+
+/**
+ * Stop git writing into a fixture repo after the test that made it has returned.
+ *
+ * A commit can trigger `git gc --auto`, which DETACHES by default, so it keeps writing
+ * `.git/objects/pack` past the awaited `execFile`. The teardown below then walks a tree
+ * something is still filling and `rmdir` fails `ENOTEMPTY` — MEASURED on CI run
+ * 35607941673, `ENOTEMPTY ... rmdir '/tmp/planmerge-local-7TkHPI/.git/objects/pack'`,
+ * one failure of 4,854 tests on a commit whose whole content was two markdown files,
+ * and the same job passed on the IDENTICAL sha when rerun.
+ *
+ * Set repo-locally rather than through the environment: every git process touching this
+ * tree then inherits it, including the ones `merge.ts` spawns through `gitRun` for
+ * `worktree prune` and `worktree remove --force`, and nothing changes for any other
+ * suite. Called after `clone` too, which creates its own `.git` and inherits no config
+ * from the remote.
+ */
+async function quietGit(dir: string): Promise<void> {
+  await git(dir, ['config', 'gc.auto', '0']);
+}
+
 afterEach(async () => {
-  for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) {
+    // Retried on ENOTEMPTY rather than trusted, the same reading `removeDirContents`
+    // (`@haive/shared/fs-safe`) takes for the same errno: a writer can add an entry
+    // between the listing and the `rmdir`, and a few passes cover that while still
+    // terminating on a directory something is actively filling. `quietGit` removes the
+    // writer this was measured against; this covers any other.
+    for (let pass = 0; ; pass += 1) {
+      try {
+        await rm(d, { recursive: true, force: true });
+        break;
+      } catch (err) {
+        if (pass >= 2 || (err as { code?: string }).code !== 'ENOTEMPTY') throw err;
+      }
+    }
+  }
 });
 
 async function write(dir: string, file: string, body: string): Promise<void> {
@@ -58,11 +93,13 @@ async function unrelatedPair(): Promise<{ local: string; remote: string }> {
   dirs.push(remote, local);
 
   await git(remote, ['init', '-b', 'main']);
+  await quietGit(remote);
   await write(remote, 'README.md', '# vareska\n\nfrom the forge\n');
   await git(remote, ['add', '-A']);
   await git(remote, ['commit', '-m', 'Initial commit']);
 
   await git(local, ['init', '-b', 'main']);
+  await quietGit(local);
   await write(local, 'README.md', '# vareska-claude\n\nCreated by Haive as a blank project.\n');
   await write(local, '.haive-data/plan.json', '{"nodes":["local"]}\n');
   await write(local, '.haive-data/plan.md', '# Plan\n\nlocal\n');
@@ -88,6 +125,7 @@ describe('divergence', () => {
     const clone = await mkdtemp(path.join(tmpdir(), 'planmerge-clone-'));
     dirs.push(clone);
     await git(clone, ['clone', remote, '.']);
+    await quietGit(clone);
     // The remote moves on. Committed in place rather than pushed: a non-bare repo
     // refuses a push to its checked-out branch, which is a property of the fixture,
     // not of anything under test.
