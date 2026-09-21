@@ -1178,11 +1178,16 @@ export function collectWrittenCliContent(
   /** From `resolveMergedTasks`: task id -> when its worktree reached the root, for the tasks
    *  that reached it after the reset. */
   mergedTasks: ReadonlyMap<string, Date> = new Map(),
-): { dirs: Set<string>; entries: Set<string> } {
+): { dirs: Set<string>; entries: Map<string, string | null> } {
   const catalog = inventoryDirsFromCatalog();
   const byDir = new Map(catalog.map((entry) => [entry.dir, entry]));
   const dirs = new Set<string>();
-  const entries = new Set<string>();
+  /** Claimed entry -> the `normalizeContent`-hash of what Haive wrote there, or null for a claim
+   *  with no hash behind it (a directory, a generator that records none, an output written before
+   *  hashes existed). ONE structure rather than a parallel map, because these claims are RETIRED
+   *  in four places below and a second record of the same fact would desync the first time one of
+   *  those deletes was touched. */
+  const entries = new Map<string, string | null>();
   const claimDir = (value: unknown): string | null => {
     if (typeof value !== 'string' || !byDir.has(value)) return null;
     dirs.add(value);
@@ -1190,13 +1195,19 @@ export function collectWrittenCliContent(
   };
   /** Claim the entry of `dir` that contains `rel`, so a path deeper than one level (a skill's
    *  `<dir>/<id>/SKILL.md`) claims the directory it lives in rather than nothing. */
-  const claimPath = (value: unknown): void => {
+  const claimPath = (value: unknown, hash: string | null = null): void => {
     if (typeof value !== 'string') return;
     for (const spec of catalog) {
       if (!value.startsWith(`${spec.dir}/`)) continue;
       dirs.add(spec.dir);
       const head = value.slice(spec.dir.length + 1).split('/')[0];
-      if (head) entries.add(`${spec.dir}/${head}`);
+      if (!head) continue;
+      const entry = `${spec.dir}/${head}`;
+      // The hash belongs to `value`, so it travels only when the claimed entry IS that path. A
+      // path deeper than one level claims the DIRECTORY that contains it, and a directory has no
+      // content to hash — recording the file's digest against it would make the whole directory
+      // read as edited the moment anything inside it changed.
+      entries.set(entry, entry === value ? hash : null);
     }
     // `.claude` is Haive's own directory but not a catalog one, and its SWEEP removes only what
     // is claimed here — `workflow-config.json`, the slash commands, the Drupal LSP files. What
@@ -1205,7 +1216,7 @@ export function collectWrittenCliContent(
     // The WHOLE path, never its head segment: `.claude/plugins/drupal-php-lsp/<file>` collapsed
     // to `.claude/plugins` claims a directory that also holds plugins the user installed, and
     // the sweep then removes all of them. The sweep walks instead, on `hasDeeperClaims`.
-    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) entries.add(value);
+    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) entries.set(value, hash);
   };
 
   // A worktree write takes effect when the MERGE lands, not when the step ended. Replaying an
@@ -1224,8 +1235,19 @@ export function collectWrittenCliContent(
       // covers the fallback write to `.claude/agents` when no provider has an agents dir (amp
       // alone, where `agentTargets` is empty) and the LLM-discovered custom agents, which have
       // no manifest id at all.
-      const wrote = (step.output as { wroteFiles?: unknown } | null)?.wroteFiles;
-      if (Array.isArray(wrote)) for (const rel of wrote) claimPath(rel);
+      const out = step.output as { wroteFiles?: unknown; wroteFileHashes?: unknown } | null;
+      const wrote = out?.wroteFiles;
+      // `wroteFileHashes` is OPTIONAL and is deliberately NARROWER than `wroteFiles`: the root
+      // rules files are appended to rather than rendered, so 07 records no hash for them, and an
+      // output written before the field existed records none at all. Either way the claim falls
+      // back to the path alone, which is exactly what this did before hashes existed.
+      const hashes = (out?.wroteFileHashes ?? null) as Record<string, unknown> | null;
+      if (Array.isArray(wrote)) {
+        for (const rel of wrote) {
+          const hash = typeof rel === 'string' ? hashes?.[rel] : undefined;
+          claimPath(rel, typeof hash === 'string' ? hash : null);
+        }
+      }
     } else if (step.stepId === WORKFLOW_SKILL_STEP_ID) {
       // Only for a task whose worktree was MERGED — until then these writes live in the
       // worktree and the repository root still holds what onboarding put there.
@@ -1263,7 +1285,7 @@ export function collectWrittenCliContent(
         for (const skillId of removed) {
           if (typeof skillId !== 'string') continue;
           const gone = `${dir}/${skillId}`;
-          for (const claimed of [...entries]) {
+          for (const claimed of [...entries.keys()]) {
             if (claimed === gone || claimed.startsWith(`${gone}/`)) entries.delete(claimed);
           }
         }
@@ -1276,14 +1298,14 @@ export function collectWrittenCliContent(
           if (typeof skillId !== 'string') continue;
           const skillDir = `${dir}/${skillId}`;
           // It rewrites the tree, so 09_5's slugs for that skill are stale.
-          for (const claimed of [...entries]) {
+          for (const claimed of [...entries.keys()]) {
             if (claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
           }
-          entries.add(skillDir);
-          entries.add(`${skillDir}/SKILL.md`);
+          entries.set(skillDir, null);
+          entries.set(`${skillDir}/SKILL.md`, null);
           // No slugs are recorded, so `sub-skills` stays unclaimed and is moved aside.
         }
-        entries.add(`${dir}/README.md`);
+        entries.set(`${dir}/README.md`, null);
       }
     } else if (step.stepId === SKILL_REPAIR_STEP_ID) {
       // 09_5b has its OWN shape — `repaired`, skill IDS, with the target dirs in its DETECT
@@ -1308,24 +1330,24 @@ export function collectWrittenCliContent(
         for (const skillId of repaired) {
           if (typeof skillId !== 'string') continue;
           const skillDir = `${dir}/${skillId}`;
-          for (const claimed of [...entries]) {
+          for (const claimed of [...entries.keys()]) {
             if (claimed === skillDir || claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
           }
-          entries.add(skillDir);
-          entries.add(`${skillDir}/SKILL.md`);
+          entries.set(skillDir, null);
+          entries.set(`${skillDir}/SKILL.md`, null);
           // Same rule as 09_5: `sub-skills` is claimed ONLY when the slugs in it were named, or
           // the directory reads as wholly ours and a file the user put there is deleted rather
           // than moved aside. An output written before the field existed has it quarantined.
           const slugs = repairedSlugs?.[skillId];
           if (Array.isArray(slugs) && slugs.length > 0) {
-            entries.add(`${skillDir}/sub-skills`);
+            entries.set(`${skillDir}/sub-skills`, null);
             for (const slug of slugs) {
-              if (typeof slug === 'string') entries.add(`${skillDir}/sub-skills/${slug}.md`);
+              if (typeof slug === 'string') entries.set(`${skillDir}/sub-skills/${slug}.md`, null);
             }
           }
         }
         // It rebuilds the index from the on-disk set whenever it repaired anything.
-        if (repaired.length > 0) entries.add(`${dir}/README.md`);
+        if (repaired.length > 0) entries.set(`${dir}/README.md`, null);
       }
     } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
       const written = (step.output as { written?: unknown } | null)?.written;
@@ -1349,22 +1371,23 @@ export function collectWrittenCliContent(
           // moved aside rather than deleted.
           if (typeof row.id === 'string') {
             const skillDir = `${dir}/${row.id}`;
-            entries.add(skillDir);
-            entries.add(`${skillDir}/SKILL.md`);
+            entries.set(skillDir, null);
+            entries.set(`${skillDir}/SKILL.md`, null);
             // `sub-skills` is claimed ONLY when the slugs inside it were recorded. A directory
             // claimed with nothing named inside reads as wholly ours — `hasDeeperClaims` is
             // false — so a file the user put there would be deleted rather than moved aside.
             // An output written before the slugs existed therefore has it quarantined whole.
             if (Array.isArray(row.subSkillSlugs) && row.subSkillSlugs.length > 0) {
-              entries.add(`${skillDir}/sub-skills`);
+              entries.set(`${skillDir}/sub-skills`, null);
               for (const slug of row.subSkillSlugs) {
-                if (typeof slug === 'string') entries.add(`${skillDir}/sub-skills/${slug}.md`);
+                if (typeof slug === 'string')
+                  entries.set(`${skillDir}/sub-skills/${slug}.md`, null);
               }
             }
           }
           // The index beside them is rebuilt from the cumulative set on every pass and is Haive's
           // too — unclaimed, it would be quarantined out of the directory it describes.
-          entries.add(`${dir}/README.md`);
+          entries.set(`${dir}/README.md`, null);
         }
       }
     }
@@ -1451,7 +1474,7 @@ export interface OnboardingResetOutcome {
   /** What the reset left alone, and why. Kept files and refused links share this channel. */
   skipped: Array<{ path: string; reason: string }>;
   /** Moved to the `<dir>-legacy` sibling instead of being deleted with the directory. */
-  quarantined: Array<{ from: string; to: string }>;
+  quarantined: Array<{ from: string; to: string; reason?: 'edited' }>;
 }
 
 /**
@@ -1679,6 +1702,21 @@ export function resetTouchedNothing(
   );
 }
 
+/** Why a path was, or was not, established as Haive's.
+ *
+ *  `edited` and `unrecorded` are both "not ours" and lead to the same disposition — the file
+ *  survives. They differ only in what the reset TELLS the person, which is the point: a generated
+ *  file someone has changed and a file Haive never wrote are different facts, and a reset that
+ *  reports them identically can never be tuned, because nobody can tell a genuine edit from a
+ *  commit hook that reformatted what Haive wrote. */
+type ClaimVerdict = 'ours' | 'edited' | 'unrecorded';
+
+/** The `skipped` reason for a claim that did not hold. The settings pass has distinguished these
+ *  two since it shipped (`ONBOARDING_SETTINGS_FILES`); the sweeps reported only the second, for
+ *  both. */
+const claimRefusalReason = (verdict: Exclude<ClaimVerdict, 'ours'>): string =>
+  verdict === 'edited' ? 'edited since Haive wrote it' : 'no record that Haive wrote it';
+
 /** What the caller could establish about what Haive wrote here. Every field is evidence, not
  *  policy: the reset removes what it covers and keeps what it does not. */
 export interface OnboardingResetProvenance {
@@ -1686,10 +1724,16 @@ export interface OnboardingResetProvenance {
   writtenHashes: ReadonlyMap<string, string>;
   /** Catalog agents/skills directories Haive wrote to for this repository. */
   haiveDirs: ReadonlySet<string>;
-  /** `<dir>/<name>` entries inside those directories that Haive wrote. Anything else in one is
-   *  the user's — the quarantine default is OFF (`07-generate-files.ts:762`), so their own
-   *  definitions legitimately sit beside ours. */
-  haiveEntries: ReadonlySet<string>;
+  /** `<dir>/<name>` entries inside those directories that Haive wrote, each mapped to the
+   *  `normalizeContent`-hash of the bytes it wrote there, or null where no hash was recorded — a
+   *  directory, a generator that records none, or an output written before hashes existed.
+   *  Anything else in one is the user's — the quarantine default is OFF
+   *  (`07-generate-files.ts:762`), so their own definitions legitimately sit beside ours.
+   *
+   *  A null is a claim with no evidence behind it and is honoured as one, which is what keeps
+   *  every pre-existing step output behaving exactly as it did. A hash is the evidence that a
+   *  file still holds what Haive put there — see `claimSatisfied`. */
+  haiveEntries: ReadonlyMap<string, string | null>;
 }
 
 /**
@@ -1714,7 +1758,7 @@ export async function resetOnboardingArtifacts(
   const removed: string[] = [];
   const cleaned: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
-  const quarantined: Array<{ from: string; to: string }> = [];
+  const quarantined: Array<{ from: string; to: string; reason?: 'edited' }> = [];
   /** Skips caused by an IO failure rather than by policy. Only these make an empty walk a
    *  failure — a second reset over an already-clean tree also removes nothing and is a no-op. */
   let ioFailures = 0;
@@ -1814,14 +1858,55 @@ export async function resetOnboardingArtifacts(
 
   /** Whether this exact path is Haive's, by the strongest evidence available for it.
    *
-   *  A live artifact row OVERRIDES the path claim rather than adding to it: the row carries the
-   *  bytes Haive wrote, so if they no longer match, the user edited or replaced that file and it
-   *  is theirs now — claiming it by path would delete their work. Where no row exists the path
-   *  record is all there is, and it is used; see the note in AGENTS.md on which generated
-   *  outputs still lack a hash. */
-  const claimSatisfied = async (rel: string): Promise<boolean> => {
-    if (writtenHashes.has(rel)) return artifactMatchesDisk(rel);
-    return haiveEntries.has(rel) || (await artifactMatchesDisk(rel));
+   *  Two independent records can say what Haive wrote here — a live artifact row, and the hash
+   *  the writing STEP recorded — and they are CO-EQUAL. Either one matching the bytes on disk
+   *  settles it, because neither can match by accident: a row's hash is the rendering Haive
+   *  produced, and a step hash exists only for a path that step actually wrote (`writeIfAllowed`
+   *  SKIPS a pre-existing file and records nothing for it, which is what makes a step hash proof
+   *  of authorship rather than of rendering — do not "fix" the skip path to record one).
+   *
+   *  They are NOT a precedence chain, and the case that forces it is real: 07 renders the agents
+   *  index through `resolveAgents`, which substitutes `stubCustomAgent` for an accepted id it
+   *  cannot resolve, while the manifest renders it through `resolveAgentsForIndex`, which DROPS
+   *  that id. Different table, so the `agents-index` row can never match the README 07 actually
+   *  wrote, and a row-wins rule quarantines that file out of a directory Haive indisputably owns.
+   *
+   *  What the row IS needed for is the upgrade: `02-upgrade-apply` rewrites a file and inserts a
+   *  row carrying the NEW hash while 07's step hash still names pre-upgrade bytes. So a
+   *  step-hash-wins rule would quarantine every upgraded repository's own files. Asking both is
+   *  what serves each case.
+   *
+   *  A claim with no hash behind it at all is honoured on the path alone, exactly as it was
+   *  before hashes existed — that is every pre-existing step output, and the reason this needed
+   *  no backfill. */
+  const claimSatisfied = async (rel: string): Promise<ClaimVerdict> => {
+    const recorded = haiveEntries.get(rel);
+    const stepHash = typeof recorded === 'string' ? recorded : null;
+    const claimedByStep = haiveEntries.has(rel);
+    if (await artifactMatchesDisk(rel)) return 'ours';
+    if (stepHash !== null && (await stepHashMatches(rel, stepHash))) return 'ours';
+
+    // `edited` is a claim about AUTHORSHIP and is only ever made where authorship is PROVEN.
+    // A step hash is proof on its own — it exists only for a path that step wrote. A row is not:
+    // `recordOnboardingArtifacts` inserts one per manifest RENDERING, so a file apply SKIPPED
+    // carries a row too, holding what Haive WOULD have written. A row that no longer matches is
+    // therefore two different stories — "Haive wrote it and you changed it" and "this was always
+    // yours" — and only the step record separates them.
+    if (stepHash !== null) return 'edited';
+    if (claimedByStep && writtenHashes.has(rel)) return 'edited';
+
+    // Claimed, but by a record that never carried a hash — a directory, a generator that records
+    // none, or an output written before they existed. A row with nothing to corroborate it does
+    // not make the file ours, exactly as before.
+    if (writtenHashes.has(rel)) return 'unrecorded';
+    return claimedByStep ? 'ours' : 'unrecorded';
+  };
+
+  /** Whether the bytes on disk are still the ones the writing step recorded. Same normalisation
+   *  as the row check, or the two records would disagree about identical files. */
+  const stepHashMatches = async (rel: string, hash: string): Promise<boolean> => {
+    const content = await readTextNoFollow(root, rel, { strict: true }).catch(() => null);
+    return content !== null && sha256Hex(normalizeContent(content)) === hash;
   };
 
   /** Whether a live artifact row covers this entry AND the bytes on disk are still the ones it
@@ -1856,7 +1941,7 @@ export async function resetOnboardingArtifacts(
    *  the matched artifact was deleted rather than moved. */
   const hasDeeperClaims = (rel: string): boolean => {
     const prefix = `${rel}/`;
-    for (const entry of haiveEntries) if (entry.startsWith(prefix)) return true;
+    for (const entry of haiveEntries.keys()) if (entry.startsWith(prefix)) return true;
     for (const diskPath of writtenHashes.keys()) if (diskPath.startsWith(prefix)) return true;
     return false;
   };
@@ -1880,9 +1965,9 @@ export async function resetOnboardingArtifacts(
       // Only a REGULAR FILE satisfies a file claim. A directory was round 13; a SYMLINK is the
       // same story — a person replaced the generated file with a link of their own, and
       // removing it unlinks something Haive never wrote.
+      const verdict = await claimSatisfied(from);
       const claimed =
-        (await claimSatisfied(from)) &&
-        (entry.isFile() || (entry.isDirectory() && hasDeeperClaims(from)));
+        verdict === 'ours' && (entry.isFile() || (entry.isDirectory() && hasDeeperClaims(from)));
       if (claimed) {
         if (entry.isDirectory()) {
           const inner = await quarantineForeign(from, `${legacyDir}/${entry.name}`);
@@ -1898,7 +1983,11 @@ export async function resetOnboardingArtifacts(
       const to = `${legacyDir}/${entry.name}`;
       try {
         await renameNoFollow(root, from, to, { noReplace: true, createParents: true });
-        quarantined.push({ from, to });
+        // `reason` only where there is something to say: most quarantines are the expected case,
+        // a definition the person wrote by hand, and labelling those says nothing. `edited` is
+        // the one worth surfacing — Haive generated the file and it does not hold what Haive
+        // wrote. Optional, so nothing that renders this list has to change to ignore it.
+        quarantined.push(verdict === 'edited' ? { from, to, reason: 'edited' } : { from, to });
         // A move vacates `from` exactly as a delete does. Its row names the ORIGINAL path, so
         // keeping it alive on a parent skip would point a live row at an absent file — the same
         // defect as a deleted descendant, reached by the other way a path can empty.
@@ -1940,12 +2029,13 @@ export async function resetOnboardingArtifacts(
           left += await sweepClaimedChildren(rel);
           continue;
         }
-        if (child.isFile() && (await claimSatisfied(rel))) {
+        const verdict = child.isFile() ? await claimSatisfied(rel) : 'unrecorded';
+        if (verdict === 'ours') {
           await remove(rel, false);
           continue;
         }
         left += 1;
-        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+        skipped.push({ path: rel, reason: claimRefusalReason(verdict) });
       }
       if (left === 0 && (await removeNoFollow(root, dir, { repairPermissions: true }))) {
         removed.push(dir);
@@ -2027,9 +2117,12 @@ export async function resetOnboardingArtifacts(
       // A claim names a FILE unless something inside it is named too, so anything else standing
       // where a claimed file was — a directory, a symlink someone put there — is not the file
       // Haive wrote.
-      if (!entry.isFile() || !(await claimSatisfied(rel))) {
+      // A non-file standing where a claimed file was keeps the ORIGINAL wording: the claim was
+      // never consulted, so "edited" would be a verdict nothing reached.
+      const verdict = entry.isFile() ? await claimSatisfied(rel) : 'unrecorded';
+      if (verdict !== 'ours') {
         kept += 1;
-        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+        skipped.push({ path: rel, reason: claimRefusalReason(verdict) });
         continue;
       }
       await remove(rel, false);
@@ -2279,10 +2372,10 @@ async function markRepositoryOnboarded(
     throw new HttpError(409, 'An onboarding run is still in progress for this repository');
   }
   // This route exists for a run that did the work and then failed at a late step. A repository
-  // whose newest completed run predates its own reset is the opposite case, and stamping it here
-  // would hand back by hand exactly the state the reset took away — with no live artifact rows
-  // behind it. The markers above cannot catch it: a reset that could not read the tree leaves
-  // them all in place.
+  // whose reset has been answered by NEITHER a later completion NOR a later artifact row is the
+  // opposite case, and stamping it here would hand back by hand exactly the state the reset took
+  // away. The markers above cannot catch it: a reset that could not read the tree leaves them all
+  // in place.
   const resetRow = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
     columns: { onboardingResetAt: true },
@@ -2295,6 +2388,12 @@ async function markRepositoryOnboarded(
   // requirement: the run this route exists for failed at a late step and has no `completed_at`,
   // while one that completed was already stamped from `markTaskCompleted` and never gets here.
   // A live artifact row is what says a run reached step 12 since the reset.
+  //
+  // Only `hasArtifactsSinceReset` is literally shared. `completedSinceReset` above is this route's
+  // OWN term and is NARROWER than the verdict's (`onboarding-state.ts`): with no epoch the
+  // verdict's answers true and this one false. They agree regardless, because the refusal below is
+  // already inside `resetAt !== null` — so do not read the two as one definition, and do not hoist
+  // either into the other on the strength of this comment.
   const artifactsSinceReset = hasArtifactsSinceReset(
     (await loadNewestLiveArtifactAt(db, userId, [id])).get(id),
     resetAt,

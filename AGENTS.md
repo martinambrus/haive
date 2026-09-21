@@ -1566,14 +1566,52 @@ one by one and the directory would never empty. A descendant keeps its shape und
 `-legacy` sibling (`<skills>-legacy/<id>/NOTES.md`) rather than growing a second quarantine
 inside the tree.
 
-**Where a row exists it OVERRIDES the path record rather than adding to it.** A path record says
-Haive wrote that file once; the row says what it wrote. When the two disagree the user has
-edited or replaced it since, and deleting it destroys their work — so `claimSatisfied` requires
-the hash to match wherever a row is present, and falls back to the path record only where none
-is. KNOWN GAP: the generators that record paths but no hashes — 07's `wroteFiles`, 09_5's
-skills and slugs, 09_5b's repairs, a merged 11d's syncs — are still claimed by PATH, so an
-edited LLM-generated skill is removed rather than moved aside. Closing it means recording a hash
-beside each of those paths at the point they are written.
+**A row and a step hash are CO-EQUAL evidence, not a precedence chain.** `claimSatisfied` answers
+a VERDICT — `ours` / `edited` / `unrecorded` — and either record matching the bytes on disk
+settles it. It is not "the row wins", and the case that forbids that is live: 07 renders the
+agents index through `resolveAgents`, which substitutes `stubCustomAgent` for an accepted id it
+cannot resolve, while the manifest renders it through `resolveAgentsForIndex`, which DROPS that
+id. Different table, so the `agents-index` row can NEVER match the README 07 actually wrote, and
+a row-wins rule quarantines that file out of a directory Haive indisputably owns. The row is
+still needed in the other direction: `02-upgrade-apply` rewrites a file and inserts a row
+carrying the NEW hash while 07's step hash still names pre-upgrade bytes, so a step-hash-wins
+rule would quarantine every upgraded repository's own files.
+
+**`edited` is a claim about AUTHORSHIP and is only made where authorship is PROVEN.** A step
+hash proves it alone, because one exists only for a path that step WROTE — `writeIfAllowed`
+skips a pre-existing file and records nothing for it, and that absence is load-bearing rather
+than an omission. A row does NOT prove it: `recordOnboardingArtifacts` inserts one per manifest
+RENDERING, so a file apply skipped carries a row too, holding what Haive WOULD have written. A
+row that no longer matches is therefore two different stories — "Haive wrote it and you changed
+it" and "this was always yours" — and only the step record separates them. Getting this wrong
+tells a person their own untouched file was "edited since Haive wrote it"; the skipped-file case
+in `repo-artifact-reset.test.ts` exists for exactly that confusion and catches it.
+
+Dispositions do NOT depend on which of the two refused: a file that fails the claim is
+quarantined where it was quarantined and kept where it was kept. Only the REASON travels, using
+the wording the settings pass has had since it shipped. That half is the point — with one flat
+reason for both, a genuine user edit and a commit hook that reformatted what Haive wrote are
+indistinguishable in production, and a gate nobody can measure is a gate nobody can tune.
+
+REMAINING GAP: 07 records hashes; the SKILL generators do not — 09_5's skills and slugs, 09_5b's
+repairs, a merged 11d's syncs — so an edited LLM-generated skill is still removed rather than
+moved aside. Closing it means recording a hash beside each of those paths at the point they are
+written. 11d is the one that must NOT simply follow: it writes into the task's WORKTREE and
+those bytes reach the root through a git merge with AI conflict resolution, so a mismatch there
+is not evidence of a user edit.
+
+Two landmines to know about before extending this, both inert today:
+`12-post-onboarding` inserts a row whose `diskPath` is `AGENTS.md` and whose `written_hash` is
+the hash of the cli-rules BLOCK rather than the file — an entry in `writtenHashes` that can
+never match its own path, harmless only because the sweep never visits a root file. And
+`01b-install-plugins` runs CLI plugin commands against `.claude/plugins/drupal-php-lsp`, the
+exact paths 07 wrote, so a CLI that ever normalises those JSONs makes them read as edited.
+
+Rejected, so it is not re-litigated: having 07 insert artifact ROWS for the paths the manifest
+does not cover would unify the two mechanisms, but a live row with no current rendering
+classifies as `obsolete` in the upgrade plan and `02-upgrade-apply` then DELETES the file —
+arming the upgrade path against the user's own custom agents. The step payload is the right
+carrier.
 
 **A partial reset therefore leaves a residue, and that is the accepted trade.** Where the walk
 removed something but an I/O error skipped a generated directory, the epoch still advances —

@@ -15,7 +15,9 @@ import {
   CLI_RULES_START,
   CLI_RULES_END,
   getCliProviderMetadata,
+  normalizeContent,
   resolveEffectiveRules,
+  sha256Hex,
   unmanagedAgentsDir,
 } from '@haive/shared';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
@@ -239,6 +241,22 @@ export interface GenerateFilesApply {
    *  Present only when something moved — a step output is what a later reader has,
    *  and an empty array is indistinguishable from a run that never offered it. */
   quarantinedAgentFiles?: { from: string; to: string }[];
+  /** `normalizeContent`-hash of the bytes this run WROTE, per path, for the paths in
+   *  `wroteFiles`. The onboarding reset uses it to tell a generated file the user has since
+   *  edited from one still holding what Haive put there, so the former is moved aside instead
+   *  of deleted (`resetOnboardingArtifacts`, api). Manifest-backed files already get that from
+   *  their `onboarding_artifacts` row; this is what covers the ones with no row — the
+   *  LLM-discovered agents and the fallback write.
+   *
+   *  A hash is recorded only for a path this run actually wrote. A pre-existing file that
+   *  `writeIfAllowed` SKIPPED is deliberately absent: that absence is what makes a recorded
+   *  hash proof of authorship rather than merely of rendering, so do not "fix" the skip path
+   *  to record one.
+   *
+   *  OPTIONAL — step output is persisted and replayed, so an output written before this
+   *  existed must still be readable. It then carries no hash and the reset falls back to the
+   *  path claim, which is exactly the behaviour that shipped before this field. */
+  wroteFileHashes?: Record<string, string>;
 }
 
 /** Table-style index listing every agent by `name` and `description`. Mirrors the
@@ -781,6 +799,15 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const skippedFiles: string[] = [];
     const appendedFiles: string[] = [];
     const quarantinedAgentFiles: { from: string; to: string }[] = [];
+    const wroteFileHashes: Record<string, string> = {};
+
+    /** Record a path as written, with the hash of the bytes that went to disk. One helper so
+     *  the two write sites cannot disagree about normalisation — the reset compares against
+     *  `normalizeContent` too, and a hash taken any other way silently never matches. */
+    const recordWrite = (rel: string, contents: string): void => {
+      wroteFiles.push(rel);
+      wroteFileHashes[rel] = sha256Hex(normalizeContent(contents));
+    };
 
     const writeIfAllowed = async (rel: string, contents: string): Promise<void> => {
       // `lstatNoFollow` rather than the old `stat` probe: `stat` follows a link, and reports a
@@ -791,7 +818,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         return;
       }
       await writeFileNoFollow(ctx.repoPath, rel, contents, { createParents: true });
-      wroteFiles.push(rel);
+      recordWrite(rel, contents);
     };
 
     /** Append text to file if not already present, or create if missing.
@@ -831,6 +858,12 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         },
         { create: true, createParents: true },
       );
+      // `wroteFiles.push`, never `recordWrite`, and that is deliberate. These are the root rules
+      // files, which hold the user's own text around a Haive marker block: hashing `block` under
+      // the FILE's path would record a digest that can never match the file, the same trap
+      // `12-post-onboarding` already carries for its `AGENTS.md` row. It costs nothing, because a
+      // root path has no `/` and so is claimed by neither arm of the reset's `claimPath` — these
+      // files are reconciled by `stripHaiveContent` instead, which reads the markers themselves.
       if (result === 'created') wroteFiles.push(rel);
       else if (result === 'unchanged') skippedFiles.push(rel);
       else if (appended) appendedFiles.push(rel);
@@ -898,10 +931,14 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         }
         if (quarantinedAgentFiles.some((q) => q.to.startsWith(`${destDir}/`))) {
           const readmeRel = `${destDir}/README.md`;
-          await writeFileNoFollow(ctx.repoPath, readmeRel, legacyAgentsReadme(group.dir, destDir), {
+          // Not through `writeIfAllowed` — this one always overwrites — so it records its own
+          // hash. Inert today, because `keptSweepReason` keeps any `*-legacy` name before the
+          // claim is consulted; recorded anyway so it does not become a hole the day that changes.
+          const readmeBody = legacyAgentsReadme(group.dir, destDir);
+          await writeFileNoFollow(ctx.repoPath, readmeRel, readmeBody, {
             createParents: true,
           });
-          wroteFiles.push(readmeRel);
+          recordWrite(readmeRel, readmeBody);
         }
       }
     }
@@ -1023,6 +1060,11 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       skippedFiles,
       agentCount: agents.length,
       ...(quarantinedAgentFiles.length > 0 ? { quarantinedAgentFiles } : {}),
+      // LAST on purpose. `maybeEnqueueStepSummary` hands the step-summary model
+      // `JSON.stringify(output, null, 2).slice(0, 4000)`, and ~90 paths against a 64-char digest
+      // is more than twice that budget on its own — declared last, the slice cuts the hashes and
+      // keeps the fields the recap is actually about.
+      ...(Object.keys(wroteFileHashes).length > 0 ? { wroteFileHashes } : {}),
     };
   },
 };
