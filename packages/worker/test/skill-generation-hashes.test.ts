@@ -188,10 +188,19 @@ describe('skillGenerationStep.apply — recorded content hashes', () => {
       llmOutput: { skills: [] },
     } as unknown as Parameters<typeof skillGenerationStep.apply>[1])) as GenOut;
 
-    // The raw array still holds both — this asserts the RECAP is right, not that the duplicate
-    // was removed, which is a wider change than a recap should make.
-    expect(out.written.length).toBeGreaterThan(1);
+    // Deduped at the source, so EVERY count derived from `written` is right together — the skill
+    // total, the sub-skill total, and the README index, which used to show the skill twice. A
+    // guard on the recap alone would have kept this line correct while the index stayed wrong.
+    expect(out.written).toHaveLength(1);
+    expect(out.totalSubSkills).toBe(1);
     expect(out.summary).toContain('Wrote 1 skill(s) (0 generated, 1 imported)');
+    expect(out.summary).toContain('1 sub-skill(s)');
+
+    // And the index carries ONE row for it. Counted on the row's own link pattern rather than on
+    // the bare id, which the row template names twice and the layout block names again — a count
+    // of the id would have had to expect 3 and would have passed for the wrong reason.
+    const readme = await readFile(path.join(repoRoot, ...DIRS[0]!.split('/'), 'README.md'), 'utf8');
+    expect(readme.split('](./shared/SKILL.md)').length - 1).toBe(1);
   });
 
   it('says nothing about composition when nothing was imported', async () => {

@@ -1266,7 +1266,18 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         ? detected.skillTargetDirs
         : [DEFAULT_PROJECT_SKILLS_DIR];
 
-    const bundleSkills = detected.bundleSkills ?? [];
+    // Deduped by id, keeping the LAST occurrence. `loadBundleSkills` does not deduplicate and
+    // `custom_bundle_items` enforces uniqueness only per (bundle, source path), so two items can
+    // declare one skill id. Both used to be written — the second overwriting the first — and both
+    // landed in `written`, so every count derived from it was wrong: the skill total, the
+    // sub-skill total, the log line, and the README index, which showed the skill as a repeated
+    // row. Fixing them one at a time is what this replaced; this is the one place that makes a
+    // duplicate impossible for all of them.
+    //
+    // LAST, not first, is what keeps it behaviour-preserving on disk: the later write is the one
+    // whose bytes survived the overwrite, so the tree is byte-identical and the index now names
+    // the entry that is actually there.
+    const bundleSkills = [...new Map((detected.bundleSkills ?? []).map((s) => [s.id, s])).values()];
     const plan = computeDomainPlan(detected, maxSkills);
 
     // Prior cumulative state — each loop pass extends the previous one so the
@@ -1492,13 +1503,11 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // the user's own library. `llmSkillCount` is the generated subset, cumulative and excluding
     // bundles. The parenthetical is omitted when nothing was imported, so the ordinary run reads
     // as plainly as it did.
-    // UNIQUE ids, not `written.length`: `loadBundleSkills` does not deduplicate, and the database
-    // only enforces uniqueness per (bundle, source path) — so two bundle items declaring the same
-    // skill id both land in `written` while writing the same directory twice, and the raw length
-    // then reports two skills where one exists. `llmSkillCount` needs no such treatment: `seenIds`
-    // is seeded with the bundle ids and every accepted id is added to it, so an LLM skill can
-    // neither repeat itself nor collide with a bundle.
-    const writtenCount = new Set(written.map((w) => w.id)).size;
+    // Plain `written.length`, deliberately, now that `bundleSkills` is deduped at the top: a
+    // second guard here would keep this number right while the README index and the sub-skill
+    // total went wrong, which hides a broken dedupe behind the most visible surface. One
+    // structural fix, and the duplicate-id case asserts all of these together.
+    const writtenCount = written.length;
     const importedCount = Math.max(0, writtenCount - llmSkillCount);
     const composition =
       importedCount > 0 ? ` (${llmSkillCount} generated, ${importedCount} imported)` : '';
