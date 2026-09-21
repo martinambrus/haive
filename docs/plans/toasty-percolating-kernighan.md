@@ -629,7 +629,17 @@ hand afterwards, so each piece below is independently green and revertible:
    `fdir@6.5.0(picomatch@4.0.4)` up with it and so changes the SCANNER the predicate must agree with.
 3. **The dispatch rule.** `agentIsolationApplies`, `promptNamesAgentPath`, the project-instruction
    scan, the persona reader, the rewrite's positive arm, `LlmInvocationSpec.agentPool`, the spec
-   fields, and `07_7-secret-sweep` declaring `'*'`.
+   fields, and `07_7-secret-sweep` declaring `'*'`. **AS BUILT**, with three departures worth
+   knowing. The instruction scan, the persona reader, the kill-switch read and the mask policy live
+   in a NEW `orchestrator/agent-isolation.ts` rather than inside `dispatcher.ts` as Critical files
+   says: that file is already ~500 lines and the async half is testable on its own against a fixture
+   tree. `agentIsolationApplies` itself stays pure, in `dispatcher.ts`, beside the request it reads.
+   `promptNamesAgentPath` DUPLICATES the whole-segment primitive that `classifyReadPath`
+   (`cli-executor/tool-usage.ts`) already has — shared cannot import worker, so the two anchorings
+   are kept identical by comment and by test rather than by sharing code; consolidating them is a
+   follow-up, not this piece. And `agent_persona.oversized` is recorded by a direct
+   `schema.taskEvents` insert, because `appendEvent` lives in `task-queue.ts`, which the dispatcher
+   cannot import for the same cycle reason `invocationRepoSubpath` moved.
 4. **The exec mask.** `agent-definition-mask.ts`, the `authMounts` append, the dropped secret and
    `#ddev-generated` file masks, and the stub cleanup in a `finally`.
 5. **Switch surface and docs.** The admin GET/PUT pair shaped on `codex-app-server`

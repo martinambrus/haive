@@ -3,6 +3,7 @@ import {
   CONFIG_KEYS,
   configService,
   getCliProviderMetadata,
+  promptNamesAgentPath,
   type StepCapability,
 } from '@haive/shared';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
@@ -25,6 +26,7 @@ import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
 import {
   adaptPromptForCliCapabilities,
   agentGuidanceIds,
+  stripAgentGuidanceBlocks,
 } from '../step-engine/steps/_retrieval-guidance.js';
 import {
   resolveGlobalKbDigest,
@@ -32,6 +34,15 @@ import {
   type GlobalKbDigestEntry,
 } from '../step-engine/steps/_global-kb-digest.js';
 import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
+import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
+import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
+import {
+  instructionsNameAgentPath,
+  readPersonaBodies,
+  recordOversizedPersonas,
+  resolveAgentIsolationEnabled,
+  resolvePersonaMaskPolicy,
+} from './agent-isolation.js';
 import {
   resolveInvocationUsesWorktreeGitBoundary,
   withWorktreeGitBoundary,
@@ -151,7 +162,61 @@ export interface DispatchRequest {
    *  exposed on the pure resolver only for deterministic unit tests. Absent means none recorded,
    *  which builds `codex exec`. */
   codexAppServer?: CodexAppServerVerdicts | null;
+  /** The step's opt-out from per-call agent isolation (`LlmInvocationSpec.agentPool`), passed by
+   *  `resolveLlmPhase`. `'*'` means this dispatch needs the whole agent pool visible. */
+  agentPool?: '*';
+  /** The global agent-isolation switch, resolved by `resolveTaskDispatch`; exposed on the pure
+   *  resolver only for deterministic unit tests, like `codexAppServer`. Absent or false means
+   *  today's behaviour for every newly dispatched invocation. */
+  agentIsolation?: boolean;
+  /** Whether the SELECTED provider's repository instruction chain names an agent directory, or
+   *  could not be scanned — either way isolation ends. Resolved by `resolveTaskDispatch` after the
+   *  provider is known (the file to read is `adapter.rulesFile`) and fed back into one second
+   *  `resolveDispatch` pass; exposed on the pure resolver only for tests. */
+  instructionsNameAgentPath?: boolean;
+  /** Persona bodies read at dispatch from the selected provider's agents directory, keyed by marker
+   *  id. Resolved alongside the verdict above and carried on the same second pass. Scanned VERBATIM
+   *  by `agentIsolationApplies`: a body that names an agent path ends isolation, because a replacer's
+   *  return value is never rescanned and a marker block inside a body reaches the model as written. */
+  agentBodies?: Record<string, string>;
   registry?: CliAdapterRegistry;
+}
+
+/**
+ * Is this invocation agent-ISOLATED? Pure, so the rule is one readable predicate and testable
+ * without a database.
+ *
+ * All six must hold. Each is a case where hiding the agent directories would take away something
+ * the invocation needs, rather than a preference:
+ *
+ * - the kill switch is on;
+ * - it is a `kind: 'prompt'` dispatch — the sub-agent kinds rebuild each sub-step's spec worker-side
+ *   from `{cwd, extraEnv, effortLevel}` and no step builds one, so they behave exactly as today;
+ * - it declares no `file_write` — a tmpfs mask is writable, so an invocation that edits the project's
+ *   tree would lose an edit to `.claude/agents/x.md` when the container exits;
+ * - it declares no `subagents` — a dispatch that may spawn native sub-agents keeps the catalog it
+ *   spawns from;
+ * - neither the prompt (with Haive's own marker blocks stripped) nor any persona body it carries nor
+ *   the repository's instruction chain names an agent directory or a file inside one;
+ * - the step did not declare `agentPool: '*'`.
+ */
+export function agentIsolationApplies(req: DispatchRequest): boolean {
+  if (req.agentIsolation !== true) return false;
+  if (req.input.kind !== 'prompt') return false;
+  if (req.agentPool === '*') return false;
+  if (req.input.capabilities.includes('file_write')) return false;
+  if (req.input.capabilities.includes('subagents')) return false;
+  // A scan that matched OR could not be completed. Both end isolation.
+  if (req.instructionsNameAgentPath === true) return false;
+  // Haive's own marker pointers name `.claude/agents/<id>.md` by construction, so they are removed
+  // before the scan; a user-forged marker-shaped block is removed with them and never reaches the
+  // model. Bodies are scanned as they are, because they DO reach it unrewritten.
+  if (promptNamesAgentPath(stripAgentGuidanceBlocks(req.input.prompt), SANDBOX_WORKDIR))
+    return false;
+  for (const body of Object.values(req.agentBodies ?? {})) {
+    if (promptNamesAgentPath(body, SANDBOX_WORKDIR)) return false;
+  }
+  return true;
 }
 
 /** Task-aware production entry point. Tests and pure selection callers may use
@@ -169,6 +234,7 @@ export async function resolveTaskDispatch(
     appReach,
     codexAppServer,
     hasRepo,
+    agentIsolation,
   ] = await Promise.all([
     hasReadyLspBridge(db, taskId),
     resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
@@ -179,6 +245,7 @@ export async function resolveTaskDispatch(
     resolveAppReach(db, taskId),
     resolveCodexAppServerVerdicts(db, taskId),
     taskHasRepository(db, taskId),
+    resolveAgentIsolationEnabled(),
   ]);
   const resolved: DispatchRequest = {
     ...req,
@@ -191,6 +258,7 @@ export async function resolveTaskDispatch(
     appReach,
     codexAppServer,
     hasRepo,
+    agentIsolation,
   };
   const plan = resolveDispatch(resolved);
   // A provider's first steerable codex dispatch in a task is where its app-server transport is
@@ -199,24 +267,86 @@ export async function resolveTaskDispatch(
   // copy of that ordering here. A probe that reaches no verdict leaves this dispatch on
   // `codex exec`, and the next steerable dispatch tries again.
   const { provider, adapter } = plan;
-  if (
+  if (provider === null || adapter === null) return plan;
+
+  const verdict =
     codexAppServer !== null &&
     req.steeringRequested === true &&
     req.input.kind === 'prompt' &&
-    provider !== null &&
-    adapter !== null &&
     provider.name === 'codex' &&
     currentCodexAppServerVerdict(codexAppServer, provider) === null
+      ? await ensureCodexAppServerVerdict(db, taskId, provider, adapter)
+      : null;
+
+  // Per-call agent isolation resolves against the SELECTED provider: the instruction file to scan
+  // is `adapter.rulesFile` and the agents directory to read is that provider's own. Gathered here
+  // and fed back into ONE second pass, together with any codex verdict — early-returning on each
+  // would skip the others the moment a task needs both.
+  const isolation = await resolveAgentIsolation(db, taskId, resolved, provider, adapter);
+
+  if (verdict === null && isolation === null) return plan;
+  return resolveDispatch({
+    ...resolved,
+    ...(verdict ? { codexAppServer: { ...codexAppServer!, [provider.id]: verdict } } : {}),
+    ...(isolation ?? {}),
+  });
+}
+
+/** The instruction verdict and the persona bodies, or null when nothing new was learned.
+ *
+ *  Runs only when the pure rule already holds on everything that does not need IO, so a dispatch
+ *  that is not a candidate — a coder, a sub-agent split, a step declaring `agentPool: '*'`, or a
+ *  prompt that already names an agent path — costs no query and no read. The instruction scan comes
+ *  FIRST because a match ends isolation and leaves no body worth reading. */
+async function resolveAgentIsolation(
+  db: Database,
+  taskId: string,
+  resolved: DispatchRequest,
+  provider: CliProviderRecord,
+  adapter: BaseCliAdapter,
+): Promise<Pick<DispatchRequest, 'instructionsNameAgentPath' | 'agentBodies'> | null> {
+  if (!agentIsolationApplies(resolved)) return null;
+
+  const workerTree = await resolveInvocationWorkerTree(db, taskId, resolved.worktreeRel);
+  // No repository tree: nothing is mounted, so no agent directory can be read or masked, and the
+  // instructions that would name one do not exist either.
+  if (workerTree === null) return { instructionsNameAgentPath: false };
+
+  const namesAgentPath = await instructionsNameAgentPath({
+    workerTree,
+    rulesFile: adapter.rulesFile,
+    rulesFileMode: adapter.rulesFileMode === 'import' ? 'import' : 'native',
+  });
+  if (namesAgentPath) return { instructionsNameAgentPath: true };
+
+  // The same four-condition gate today's pointer survives (Decision 1): outside it the prompt is
+  // unchanged, so there is no body to read and nothing to paste.
+  const metadata = getCliProviderMetadata(provider.name);
+  const ids = resolved.input.kind === 'prompt' ? agentGuidanceIds(resolved.input.prompt) : [];
+  if (
+    ids.length === 0 ||
+    !metadata.projectAgentsDir ||
+    metadata.agentFileFormat !== 'markdown' ||
+    !adapter.supportsLsp ||
+    resolved.lspConfigured !== true
   ) {
-    const verdict = await ensureCodexAppServerVerdict(db, taskId, provider, adapter);
-    if (verdict) {
-      return resolveDispatch({
-        ...resolved,
-        codexAppServer: { ...codexAppServer, [provider.id]: verdict },
-      });
-    }
+    return { instructionsNameAgentPath: false };
   }
-  return plan;
+
+  // Fails CLOSED, unlike the rest of isolation: a policy that cannot be evaluated pastes nothing,
+  // because a body already in a prompt cannot be retracted.
+  const mask = await resolvePersonaMaskPolicy(db, taskId, workerTree);
+  if (mask === null) return { instructionsNameAgentPath: false };
+
+  const { bodies, oversized } = await readPersonaBodies({
+    workerTree,
+    projectAgentsDir: metadata.projectAgentsDir,
+    ids,
+    policy: mask.policy,
+    loadTracked: mask.loadTracked,
+  });
+  await recordOversizedPersonas(db, taskId, oversized);
+  return { instructionsNameAgentPath: false, agentBodies: bodies };
 }
 
 /** The task's codex app-server verdicts, or null when the admin switch is off or unreadable. Null
@@ -326,12 +456,17 @@ function buildCliSidePlan(
   // disagree — a prompt that says "discover with rag_search" while the digest is withheld
   // describes a surface neither half is looking at.
   const ragWired = adapter.supportsMcp && req.mcpSurface?.rag.enabled === true;
+  // One decision for this plan, so the prompt and the mounts cannot disagree: the same boolean
+  // chooses whether a persona body replaces the pointer and whether exec masks the directories.
+  const isolated = agentIsolationApplies(req);
   const adaptPrompt = (prompt: string): string => {
     const capabilityAdapted = adaptPromptForCliCapabilities(prompt, {
       supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
       ragWired,
       projectAgentsDir: providerMetadata.projectAgentsDir,
       agentFileFormat: providerMetadata.agentFileFormat,
+      isolated,
+      agentBodies: req.agentBodies,
     });
     // Both boundaries ride the same predicate: an invocation isolated to a worktree is
     // exactly the one that gets the read-only `.git` and `#ddev-generated` masks, so a
@@ -414,6 +549,19 @@ function buildCliSidePlan(
       steeringMode,
     });
     if (assignedAgentIds.length > 0) spec.assignedAgentIds = assignedAgentIds;
+    if (isolated) spec.maskAgentDefinitions = true;
+    // Recorded from the bodies actually pasted, and NOT gated on isolation: exec rechecks whatever
+    // paths are recorded, and a future path pastes template personas outside isolation too. Only
+    // the ids the rewrite could paste are listed, so a marker that fell back to its inline protocol
+    // contributes nothing to recheck.
+    if (isolated && providerMetadata.projectAgentsDir && req.agentBodies) {
+      // Every key here came from this prompt's own marker ids — the reader was handed
+      // `agentGuidanceIds(prompt)` and returns only ids it could read — so the keys ARE the pasted
+      // set and need no re-filtering.
+      const dir = providerMetadata.projectAgentsDir;
+      const pasted = Object.keys(req.agentBodies).map((id) => `${dir}/${id}.md`);
+      if (pasted.length > 0) spec.pastedPersonaPaths = pasted;
+    }
     return {
       mode: 'cli',
       providerId: provider.id,

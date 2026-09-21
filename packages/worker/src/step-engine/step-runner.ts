@@ -70,6 +70,7 @@ import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
+import { promptCarriesPastedPersona } from './steps/_retrieval-guidance.js';
 import { ensureArchivesExpanded } from '../attachments/expand-archives.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
 import { augmentPromptWithLedger, capSummaryForLedger, recordLedgerEntry } from './task-ledger.js';
@@ -757,6 +758,7 @@ async function resolveLlmPhase(
       capabilities: llmSpec.requiredCapabilities,
     },
     toolProfile: llmSpec.toolProfile,
+    agentPool: llmSpec.agentPool,
     invokeOpts: {
       cwd: params.workspacePath,
       effortLevel: preferredEffort ?? undefined,
@@ -3162,9 +3164,21 @@ async function retryMiningAgents(
       );
     const promptById = new Map(priorPrompts.map((r) => [r.id, r.prompt]));
     const titleByAgentId = new Map(wantedRows.map((r) => [r.agentId, r.agentTitle]));
+    const skippedPastedPersona: string[] = [];
     for (const [agentId, t] of unofferedWithPrior) {
       const prompt = promptById.get(t.cliInvocationId!);
       if (!prompt) continue;
+      // A stored prompt carrying a PASTED persona body cannot be re-sent. Those bytes were read
+      // under the ORIGINAL dispatch's secret-mask policy, which may since have changed, and a
+      // recovered dispatch records no `pastedPersonaPaths` for exec to recheck — so re-sending
+      // would hand the provider a body nothing rechecks. Skipping leaves the agent exactly where it
+      // was before recovery existed, and the configuration that stopped offering it no longer asks
+      // for it. A stored prompt carrying today's POINTER instead is fine: it pasted nothing, and
+      // the pointer names its own agent file, so the path scan leaves that retry unisolated.
+      if (promptCarriesPastedPersona(prompt)) {
+        skippedPastedPersona.push(agentId);
+        continue;
+      }
       // No roleKey: the seat a wave agent occupied is not recorded anywhere, and
       // inventing one would silently route the retry to a different CLI than the
       // run it is repeating. Unset resolves as the step's own preference then the

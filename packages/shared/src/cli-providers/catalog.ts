@@ -463,6 +463,73 @@ export function unmanagedAgentsDir(projectAgentsDir: string): string {
   return `${projectAgentsDir}-legacy`;
 }
 
+/** Every repo-level agent directory ANY supported CLI reads, derived from the catalog so a new
+ *  provider joins without a change here.
+ *
+ *  The union is required rather than the dispatched provider's own directory alone: grok reads
+ *  `.claude/agents` and `.agents/agents` besides its own. The `-legacy` quarantine siblings
+ *  (`unmanagedAgentsDir`) are deliberately NOT members — they hold the user's own definitions and
+ *  stay visible. Whole-segment matching keeps them out for free, since `agents-legacy` is a
+ *  different segment from `agents`. */
+export const AGENT_DIRECTORIES: string[] = [
+  ...new Set(
+    CLI_PROVIDER_LIST.map((p) => p.projectAgentsDir).filter((d): d is string => d !== null),
+  ),
+].sort();
+
+const AGENT_DIR_SEGMENTS: string[][] = AGENT_DIRECTORIES.map((dir) =>
+  dir.split('/').filter((s) => s.length > 0),
+);
+
+/** Path-like runs of text. Deliberately generous: the point is to find every token that COULD be
+ *  a path, then judge each one, rather than to parse prose correctly. */
+const PATH_TOKEN_RE = /[A-Za-z0-9_.~$*/-]+/g;
+
+/** Same rule as `classifyReadPath` in the worker's `cli-executor/tool-usage.ts`, which cannot be
+ *  imported here (shared must not depend on worker). Kept byte-identical in behaviour on purpose:
+ *  two anchorings that must agree eventually will not. */
+function startsWithSegments(segments: readonly string[], prefix: readonly string[]): boolean {
+  if (segments.length < prefix.length) return false;
+  for (let i = 0; i < prefix.length; i++) {
+    if (segments[i] !== prefix[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Does this text name an agent directory, or a file inside one?
+ *
+ * Asked of a dispatch prompt and of a repository instruction file, because either can send a CLI
+ * to a definition an agent-definition mask would hide — and an agent told to read a file it cannot
+ * see is worse off than one that was never isolated. A match means "do not isolate this
+ * invocation", so the helper REMOVES nothing and decides nothing else.
+ *
+ * `workdir` is the sandbox MOUNT ROOT (`/haive/workdir`), passed in by worker-side callers since
+ * shared cannot import it; `null` means only relative paths can match. Matched on whole segments
+ * from the root, the way `isDeniedPath` is: `.claude/agents`, `.claude/agents/` and
+ * `.claude/agents/x.md` all count, while `.claude`, `.claude/agents-legacy/x.md` and
+ * `docs/.claude/agents/x.md` do not.
+ */
+export function promptNamesAgentPath(text: string, workdir: string | null): boolean {
+  if (!text) return false;
+  const prefix = workdir === null ? null : workdir.endsWith('/') ? workdir : `${workdir}/`;
+
+  for (const match of text.matchAll(PATH_TOKEN_RE)) {
+    let token = match[0];
+    if (token.startsWith('/')) {
+      if (prefix === null || !token.startsWith(prefix)) continue;
+      token = token.slice(prefix.length);
+    }
+    while (token.startsWith('./')) token = token.slice(2);
+    const segments = token.split('/').filter((s) => s.length > 0 && s !== '.');
+    if (segments.length === 0) continue;
+    for (const dirSegments of AGENT_DIR_SEGMENTS) {
+      if (startsWithSegments(segments, dirSegments)) return true;
+    }
+  }
+  return false;
+}
+
 /** Provider names whose reported costUsd is a real backend price (safe to sum as $).
  *  Used by the token telemetry to keep local/subscription/mispriced $ out of the
  *  headline cost. See CliProviderMetadata.costBasis. */

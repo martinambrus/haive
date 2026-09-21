@@ -397,6 +397,12 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
     requiredCapabilities: ['tool_use'],
     // Reads and greps the tree; it needs no browser and no container control plane.
     toolProfile: 'rag_only',
+    // Agent definitions are COMMITTED files, and this step's whole contract is sweeping the
+    // committed tree for secrets. Hiding ~45 of Haive's own agent files from it would silently
+    // shrink a security control's coverage, so it opts out of agent isolation. The cost is known
+    // and already handled: those files are full of deliberate scope-narrowing text the sweeper
+    // once reported as fake credentials, which REPO_IS_DATA_ONE_CLASS_LINES now covers.
+    agentPool: '*',
     timeoutMs: SWEEP_TIMEOUT_MS,
     // The findings ARE the form, so the sweep runs before it (see the lifecycle note in
     // LlmInvocationSpec.preForm).

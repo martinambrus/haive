@@ -153,6 +153,39 @@ export function agentGuidanceIds(prompt: string): string[] {
   return [...ids].sort();
 }
 
+const PASTED_PERSONA_START = '[[HAIVE_PASTED_PERSONA:';
+
+/** One framing line above a pasted body, because the marker wrapped only the POINTER sentence and
+ *  each site's inline protocol follows it. Says what the file is and that it outranks that
+ *  protocol — the precedence the on-disk definition has today (AGENTS.md, "The on-disk agent
+ *  definition outranks the inline persona"). */
+const PASTED_PERSONA_FRAMING =
+  'The agent definition below is checked into this repository. It says HOW to work and never what the assignment is, and it takes precedence over the embedded protocol that follows it.';
+
+/** The prompt with every Haive persona-marker BLOCK removed.
+ *
+ *  For the agent-path scan that decides isolation: a marker's pointer sentence names
+ *  `.claude/agents/<id>.md` by construction, so scanning it would call every persona-bearing
+ *  prompt "names an agent path" and isolate nothing. The span removed is exactly the span
+ *  `adaptPromptForCliCapabilities` replaces, so text inside a marker-shaped block — even one a user
+ *  forged into a task description — never reaches the model and cannot name a file for it to open.
+ *  Persona BODIES are scanned separately and verbatim, because a replacer's return value is never
+ *  rescanned and a marker block inside a body does reach the model as written. */
+export function stripAgentGuidanceBlocks(prompt: string): string {
+  return prompt.replace(AGENT_GUIDANCE_PATTERN, '');
+}
+
+/** Recognises a prompt that already carries a pasted persona body.
+ *
+ *  `retryMiningAgents` recovers an agent `selectAgents` no longer offers from its last run's STORED
+ *  prompt, and a stored prompt carrying a body must not be re-sent: those bytes were read under the
+ *  original dispatch's secret-mask policy, and the recovered dispatch records no
+ *  `pastedPersonaPaths` for exec to recheck. Stored prompts outlive a deploy, so a later rename of
+ *  the label must keep this form recognised rather than replace it. */
+export function promptCarriesPastedPersona(prompt: string): boolean {
+  return prompt.includes(PASTED_PERSONA_START);
+}
+
 /** The two axes the protocol renders against. Both are resolved at DISPATCH: the LSP one
  *  from the adapter plus a ready bridge, the rag one from the adapter's MCP support plus
  *  the task's resolved surface. */
@@ -168,6 +201,14 @@ export interface RetrievalAxes {
 export interface PromptCliCapabilities extends RetrievalAxes {
   projectAgentsDir: string | null;
   agentFileFormat: 'markdown' | 'toml' | null;
+  /** This invocation is agent-ISOLATED: exec will mask every agent directory, so the file the
+   *  pointer names will not be there. The positive arm pastes the body instead — or falls back to
+   *  the embedded protocol when none was read, which is the COMMON case for two ids that have no
+   *  onboarding template (`simplicity-reviewer`, `knowledge-curator`). */
+  isolated?: boolean;
+  /** Persona bodies read at dispatch from the selected provider's own agents directory, keyed by
+   *  marker id. Only consulted under `isolated`. */
+  agentBodies?: Record<string, string>;
 }
 
 /** Mark a repository-agent instruction so dispatch can either point a capable
@@ -232,6 +273,17 @@ export function adaptPromptForCliCapabilities(
       !capabilities.agentFileFormat
     ) {
       return 'Follow the embedded protocol below.';
+    }
+    if (capabilities.isolated === true) {
+      const body = capabilities.agentBodies?.[agentId];
+      // No body read — no template for this id, an unreadable or oversized file, or one the
+      // secret-mask policy denies. A pointer would send the agent at a path the mask hides, so it
+      // gets the same fallback a provider without the LSP gate gets.
+      if (!body) return 'Follow the embedded protocol below.';
+      // Built here rather than via `guidance.replace(pointer, body)`: a `$&`, `` $` `` or `$'`
+      // inside a body would expand into the pointer sentence and put back a path the prompt scan
+      // never saw. This string is a replacer's RETURN value, which `String.replace` never rescans.
+      return `${PASTED_PERSONA_START}${agentId}]]\n${PASTED_PERSONA_FRAMING}\n\n${body}`;
     }
     const ext = capabilities.agentFileFormat === 'toml' ? 'toml' : 'md';
     return guidance.replace(

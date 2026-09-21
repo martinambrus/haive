@@ -121,6 +121,17 @@ export interface CliCommandSpec {
   /** Written into the sandbox before the run, for a CLI whose prompt arrives by
    *  PATH rather than argv or stdin. */
   promptFile?: { containerPath: string; content: string };
+  /** This invocation is agent-ISOLATED: exec masks every repo-level agent directory with an empty
+   *  read-only tmpfs, and the prompt carries the personas it needs inline instead of pointing at
+   *  files that will not be there. Decided once at dispatch by `agentIsolationApplies` and carried
+   *  here so the prompt and the mounts cannot disagree when the switch flips between dispatch and
+   *  exec — the spec is never persisted, so a BullMQ retry replays this same decision. */
+  maskAgentDefinitions?: boolean;
+  /** Repository-relative paths of the persona bodies the rewrite PASTED into this prompt, for the
+   *  exec-time secret-mask recheck: a deny rule or the masking switch can change while the job
+   *  waits in the queue, and a body already in a prompt cannot be retracted. Recorded whether or
+   *  not the invocation is isolated, because exec rechecks whatever paths are recorded. */
+  pastedPersonaPaths?: string[];
   /** CLI configuration the adapter needs in place for this run, mounted read-only at a path
    *  OUTSIDE the auth volume, so nothing is merged into a config file the CLI also writes
    *  (grok: `/etc/grok/managed_config.toml`). */
