@@ -1,6 +1,7 @@
+import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { WORKTREE_SUBDIR } from './worktree-paths.js';
+import { worktreeDirName, WORKTREE_SUBDIR } from './worktree-paths.js';
 
 export const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
 
@@ -88,4 +89,63 @@ export async function resolveInvocationUsesWorktreeGitBoundary(
     worktreeBranch: task.worktreeBranch,
     worktreeRel,
   });
+}
+
+export const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+
+/** The repo-volume subpath ONE invocation mounts, or `undefined` for a read-only local-path
+ *  repository, which is bound at its root and has no subpath at all.
+ *
+ *  `worktreeRel` is repo-root-relative: `''` means the repo root, a worktree rel means that
+ *  worktree. Unset falls back to the feature worktree derived from `worktreeBranch`, and a task
+ *  with no branch (onboarding) gets the bare repo-root subpath.
+ *
+ *  Lives here rather than in cli-exec's resolvers because the dispatcher needs the same answer
+ *  and cannot import that file: `resolvers.ts` reaches the dispatcher back through
+ *  `task-queue.ts` -> `step-engine/index.ts` -> `step-runner.ts`. `resolvers.ts` re-exports it,
+ *  so the secret and `#ddev-generated` masks keep their existing imports. */
+export function invocationRepoSubpath(args: {
+  storagePath: string | null;
+  localPath?: string | null;
+  userId: string;
+  repositoryId: string;
+  worktreeBranch?: string | null;
+  worktreeRel?: string;
+}): string | undefined {
+  const storagePath = args.storagePath ?? args.localPath ?? null;
+  if (storagePath && storagePath.startsWith(`${HOST_REPO_ROOT}/`)) return undefined;
+
+  const base = `${args.userId}/${args.repositoryId}`;
+  if (args.worktreeRel != null) {
+    return args.worktreeRel ? `${base}/${args.worktreeRel}` : base;
+  }
+  if (args.worktreeBranch) {
+    return `${base}/${WORKTREE_SUBDIR}/${worktreeDirName(args.worktreeBranch)}`;
+  }
+  return base;
+}
+
+/** The worker's own filesystem path for the tree an invocation actually mounts.
+ *
+ *  Mirrors resolveTaskRepoMount: a volume mount carries a subpath (the worktree this invocation
+ *  is isolated to, or the repo root for a task with no worktree), while a bind mount (read-only
+ *  local-path repo) has no subpath and is the worker's /host-fs view of the repo root. With no
+ *  mount supplied (unit tests / defensive) it falls back to the repo-root tree the mount would
+ *  bind.
+ *
+ *  Pure, and shared by every mask that scans what the sandbox will see, so the scanned set can
+ *  never drift from the mounted set — the failure mode this exists to prevent is a mask computed
+ *  against a path the container never binds, which silently masks nothing while looking like a
+ *  clean repo. */
+export function resolveInvocationWorkerRoot(args: {
+  repoMountSubpath?: string;
+  storagePath: string | null;
+  userId: string;
+  repositoryId: string;
+}): string {
+  if (args.repoMountSubpath) {
+    return posix.join(WORKER_REPO_STORAGE_ROOT, args.repoMountSubpath);
+  }
+  if (args.storagePath?.startsWith(HOST_REPO_ROOT + '/')) return args.storagePath;
+  return posix.join(WORKER_REPO_STORAGE_ROOT, `${args.userId}/${args.repositoryId}`);
 }

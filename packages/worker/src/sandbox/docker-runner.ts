@@ -37,6 +37,11 @@ export interface DockerVolumeMount {
    *  hides whatever the real file held. runInSandbox enforces it. Left unset for the repo mount,
    *  where nesting is how secret masking works. */
   kind?: 'auth';
+  /** Render an empty in-memory tmpfs AT `target` instead of a bind or volume mount, so the
+   *  container sees a directory with nothing in it. `source` has no meaning for this form and
+   *  is ignored — pass `''`, since a tmpfs has no host side. A tmpfs is writable (mode 1777)
+   *  unless `readOnly` is set, and nothing written to one survives the container. */
+  tmpfs?: true;
 }
 
 /** Volume mount argv.
@@ -51,7 +56,13 @@ export interface DockerVolumeMount {
 export function buildMountArgs(mounts: readonly DockerVolumeMount[]): string[] {
   const args: string[] = [];
   for (const m of mounts) {
-    if (m.subpath) {
+    // Before the subpath/bind split on purpose: a tmpfs entry carries no source, and the bind
+    // branch would render one as `-v :<target>`, which docker rejects.
+    if (m.tmpfs) {
+      const parts = ['type=tmpfs', `destination=${m.target}`];
+      if (m.readOnly) parts.push('readonly');
+      args.push('--mount', parts.join(','));
+    } else if (m.subpath) {
       const parts = [
         'type=volume',
         `source=${m.source}`,

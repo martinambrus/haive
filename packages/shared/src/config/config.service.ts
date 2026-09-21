@@ -143,6 +143,11 @@ export const CONFIG_KEYS = {
   // CLI agents in the cli-exec sandbox). Default true; set 'false' to disable
   // masking for every repo without per-repo edits or a redeploy.
   SECRET_MASK_ENABLED: 'config:sandbox:secretMaskEnabled',
+  // Global kill-switch for per-call agent isolation (an invocation that neither writes files
+  // nor names an agent path is given empty agent directories, and the persona it needs is
+  // pasted into its prompt instead). Default true; 'false' restores the previous behaviour
+  // for every newly dispatched invocation, and one already queued keeps its decision.
+  AGENT_ISOLATION_ENABLED: 'config:sandbox:agentIsolationEnabled',
   // Global kill-switch for carrying a repository's untracked runtime files (the
   // secret-mask glob set: .env, settings.local.php, service-account json …) from the
   // repo root into each newly created worktree. `git worktree add` materialises tracked
@@ -653,6 +658,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.REGISTRATION_MODE]: 'closed',
   [CONFIG_KEYS.EXTERNAL_SYNC_ENABLED]: 'true',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
+  [CONFIG_KEYS.AGENT_ISOLATION_ENABLED]: 'true',
   [CONFIG_KEYS.TEST_BROWSER_PROVISION_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
   [CONFIG_KEYS.CODEX_APP_SERVER_ENABLED]: 'true',
