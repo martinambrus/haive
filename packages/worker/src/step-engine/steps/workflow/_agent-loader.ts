@@ -47,12 +47,15 @@ export async function loadAgentPersonas(repoPath: string): Promise<AgentPersona[
   return personas;
 }
 
-interface ParsedAgentFile {
+export interface ParsedAgentFile {
   frontmatter: Record<string, string>;
   body: string;
 }
 
-function parseAgentFile(raw: string): ParsedAgentFile | null {
+/** Exported for readers that want ONE agent file by name rather than the whole directory,
+ *  so the frontmatter rules (no closing fence = unparseable, body after the fence) have a
+ *  single implementation. */
+export function parseAgentFile(raw: string): ParsedAgentFile | null {
   if (!raw.startsWith('---')) {
     return { frontmatter: {}, body: raw };
   }

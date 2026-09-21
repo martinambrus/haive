@@ -1,4 +1,4 @@
-import { join, posix } from 'node:path';
+import { join } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import {
   ensureTaskScratchWorkspace,
@@ -52,19 +52,16 @@ import {
 import { getDb } from '../../db.js';
 import { getTaskQueue } from '../task-queue.js';
 import { CliLoginRequiredError, log } from './_shared.js';
-import {
-  sandboxWorktreePath,
-  worktreeDirName,
-  WORKTREE_SUBDIR,
-  splitRepoSubpath,
-} from '../../repo/worktree-paths.js';
+import { sandboxWorktreePath, splitRepoSubpath } from '../../repo/worktree-paths.js';
 import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../../repo/worktree-permissions.js';
 import {
   HOST_REPO_ROOT,
+  invocationRepoSubpath,
   invocationUsesWorktreeGitBoundary,
+  WORKER_REPO_STORAGE_ROOT,
 } from '../../repo/worktree-git-boundary.js';
 
 export { HOST_REPO_ROOT } from '../../repo/worktree-git-boundary.js';
@@ -560,17 +557,19 @@ export async function resolveInvocationRepoMount(
   // Volume repo: mount ONLY the worktree subpath at the workdir root. Override wins
   // (DAG sibling / merge integration); otherwise the feature worktree from the branch;
   // otherwise the bare repo-root subpath (a task with no worktree — onboarding).
-  const base = `${task.userId}/${task.repositoryId}`;
-  // worktreeRel is repo-root-relative: '' means the repo root, a worktree rel means that
-  // worktree. Unset falls back to the feature worktree derived from the branch.
-  const subpath =
-    worktreeRel != null
-      ? worktreeRel
-        ? `${base}/${worktreeRel}`
-        : base
-      : task.worktreeBranch
-        ? `${base}/${WORKTREE_SUBDIR}/${worktreeDirName(task.worktreeBranch)}`
-        : base;
+  // The rule itself lives in invocationRepoSubpath (repo/worktree-git-boundary.ts): the
+  // dispatcher needs the same answer and cannot import this file.
+  const subpath = invocationRepoSubpath({
+    storagePath: repo.storagePath,
+    localPath: repo.localPath,
+    userId: task.userId,
+    repositoryId: task.repositoryId,
+    worktreeBranch: task.worktreeBranch,
+    worktreeRel,
+  });
+  // A local-path repo is the only case it declines, and that branch returned above. Narrowed
+  // rather than asserted, so a change to either side surfaces as no mount instead of a wrong one.
+  if (subpath === undefined) return { repoMount: null, hasWorktree: false, hasRepo: true };
   // A linked worktree lives under WORKTREE_SUBDIR and its `.git` is a gitfile (mask it);
   // the repo root — onboarding, or a 12-cleanup merge that runs at the parent checkout —
   // has a `.git` DIRECTORY and must NOT be masked. Key the signal on the mounted path so a
@@ -630,32 +629,16 @@ export async function resolveRepoMount(
   };
 }
 
-export const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
-
-/** The worker's own filesystem path for the tree an invocation actually mounts.
- *
- *  Mirrors resolveTaskRepoMount above: a volume mount carries a subpath (the worktree
- *  this invocation is isolated to, or the repo root for a task with no worktree), while
- *  a bind mount (read-only local-path repo) has no subpath and is the worker's /host-fs
- *  view of the repo root. With no mount supplied (unit tests / defensive) it falls back
- *  to the repo-root tree the mount would bind.
- *
- *  Pure, and shared by every mask that scans what the sandbox will see, so the scanned
- *  set can never drift from the mounted set — the failure mode this exists to prevent is
- *  a mask computed against a path the container never binds, which silently masks
- *  nothing while looking like a clean repo. */
-export function resolveInvocationWorkerRoot(args: {
-  repoMountSubpath?: string;
-  storagePath: string | null;
-  userId: string;
-  repositoryId: string;
-}): string {
-  if (args.repoMountSubpath) {
-    return posix.join(WORKER_REPO_STORAGE_ROOT, args.repoMountSubpath);
-  }
-  if (args.storagePath?.startsWith(HOST_REPO_ROOT + '/')) return args.storagePath;
-  return posix.join(WORKER_REPO_STORAGE_ROOT, `${args.userId}/${args.repositoryId}`);
-}
+/** Re-exported from `repo/worktree-git-boundary.ts`, where they moved so the dispatcher can
+ *  reach them: this file reaches the dispatcher back through `task-queue.ts` ->
+ *  `step-engine/index.ts` -> `step-runner.ts`, so importing it there would close a cycle.
+ *  Kept re-exported here because every mask that scans what the sandbox mounts imports them
+ *  from this module. */
+export {
+  WORKER_REPO_STORAGE_ROOT,
+  invocationRepoSubpath,
+  resolveInvocationWorkerRoot,
+} from '../../repo/worktree-git-boundary.js';
 
 /** Make the repo-volume subpath writable by 1000:1000 (the `node` user the
  *  sandbox CLI runs as). Named volumes default to root-owned content,

@@ -26,6 +26,13 @@
 >   plus `AgentMiningDispatch.personaIds`. This plan's spec fields now join an established pattern
 >   instead of introducing one, and its pre-rewrite marker read already has a call site.
 >
+> **STARTED 2026-09-21. Piece 1 landed at `7deb542d` (PR #191); piece 2 is the commit this line
+> ships with.** So this plan is no longer "Not started" — read the Commit sequence for what remains,
+> and note that piece 2's revision moved `resolveInvocationWorkerTree` into piece 3 and added a
+> `picomatch` dependency that Decision 1 explains. Three Critical-files claims were wrong and are
+> corrected in place: `invocationRepoSubpath` and `resolveInvocationWorkerTree` did not exist,
+> and `resolveInvocationWorkerRoot` has two callers rather than three.
+>
 > **RE-VERIFIED AGAIN 2026-09-21 against `main` at `9ea6f06e`, 176 commits after the last pass.**
 > Still not started: all six absences hold, and `agentPool` is absent as a spec field (the twelve
 > matches under `packages/` are `agentPoolMeasuredEnabled`/`agentPoolSafetyMb`, the unrelated RAM
@@ -135,8 +142,24 @@ type — inherits it without anyone maintaining a list of special steps.
    untracked files only (`queues/cli-exec/secret-mask.ts`) — and a file the sandbox would mask counts
    as missing: pasting it would hand the provider the very bytes the mask keeps from the agent. When
    that policy cannot be evaluated nothing is pasted, matching masking's fail-closed rule. The policy
-   is extracted into a dependency-free predicate the reader can call, for the same import-cycle
-   reason `invocationRepoSubpath` moves (dispatch side, item 4). The policy is checked again at exec,
+   is extracted into a predicate the reader can call — free of DB, config and `resolvers.js` imports,
+   for the same import-cycle reason `invocationRepoSubpath` moves (dispatch side, item 4).
+   **What that predicate MATCHES WITH was an open gap until piece 2, and it is not free.** The policy
+   is glob arrays (`computeEffectiveSecretGlobs` returns `{deny, ignore}`) and `computeSecretMasks`
+   evaluates them with tinyglobby's directory SCANNER, which cannot judge one path and which this
+   reader must not run. Node's own `path.matchesGlob` was MEASURED against that scanner over a
+   26-path fixture and agreed on only 21: `**` will not descend into a dotted directory and `*` will
+   not match a dotted basename without `dot: true`, so `**/.env` missed `.config/.env` and `**/*.pem`
+   missed `.hidden.pem` — three of the five differences in the UNSAFE direction, a real secret the
+   scanner hides that the predicate would have called clean and pasted into a prompt. So piece 2
+   declares `picomatch` (4.0.4, pinned to the version tinyglobby itself resolves, with an ambient
+   `.d.ts` because it ships no types and `@types/picomatch` is not in the lockfile) and the predicate
+   uses `picomatch(globs, { dot: true })` — the same engine and option the scanner uses internally.
+   `secret-mask-policy.test.ts` pins the two against each other over that fixture tree, because one
+   policy evaluated by two engines is the failure this arrangement exists to avoid. The untracked
+   half cannot be pure: `filterUntracked` asks `git ls-files`, so the predicate takes the tracked
+   SET (or `null`, meaning git could not answer — mask more, never less) from its caller.
+   The policy is checked again at exec,
    because a deny rule or the masking switch can change while the job waits in the queue:
    `buildCliSidePlan` records the repository-relative paths of the bodies it pasted on the spec
    (`CliCommandSpec.pastedPersonaPaths`), and `executeByKind`, which already resolves the secret masks
@@ -482,7 +505,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 
 - `CONFIG_KEYS.AGENT_ISOLATION_ENABLED` = `'config:sandbox:agentIsolationEnabled'`, default `'true'`
   in `DEFAULT_CONFIG` (`packages/shared/src/config/config.service.ts`), seeded by `setnx`, so it
-  needs no migration.
+  needs no migration. **AS BUILT in piece 2**, declared beside `SECRET_MASK_ENABLED` and with no
+  reader yet, which is what makes that commit inert.
 - Read ONCE, in `resolveTaskDispatch`, shaped like `resolveCodexAppServerVerdicts`: a failed read
   means off, which is today's behaviour. Exec never reads it — the decision rides
   `spec.maskAgentDefinitions`, which is also what keeps the 30 s per-process config cache from
@@ -521,19 +545,32 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **Spec:** `cli-adapters/types.ts` (`CliCommandSpec.maskAgentDefinitions` and
   `CliCommandSpec.pastedPersonaPaths`). No `CliExecJobPayload`
   change, no enqueue literal change, nothing in `codex.ts`.
-- **Tree resolution:** `repo/worktree-git-boundary.ts` (`invocationRepoSubpath`,
-  `resolveInvocationWorkerTree`, and the moved `resolveInvocationWorkerRoot` /
-  `WORKER_REPO_STORAGE_ROOT`), `queues/cli-exec/resolvers.ts` (re-exports; `resolveInvocationRepoMount`
+- **Tree resolution:** `repo/worktree-git-boundary.ts` (the moved `resolveInvocationWorkerRoot` /
+  `WORKER_REPO_STORAGE_ROOT`, plus a NEW `invocationRepoSubpath`),
+  `queues/cli-exec/resolvers.ts` (re-exports; `resolveInvocationRepoMount`
   — `export async function` at `resolvers.ts:502` — calls `invocationRepoSubpath`).
-  **That move is WIDER than planned, and wider again than the last pass recorded.**
-  `resolveInvocationWorkerRoot` sits at `resolvers.ts:647` and has three callers
-  that did not exist when this was written — `secret-mask.ts`, `ddev-generated-mask.ts` and
-  `ripgrep-config.ts`, the last two created or converted by the containment series. MEASURED
-  2026-09-21, `WORKER_REPO_STORAGE_ROOT` is read in FIVE source files — `resolvers.ts`,
+  **Neither `invocationRepoSubpath` nor `resolveInvocationWorkerTree` EXISTS yet — both are this
+  plan's to write, and an earlier draft of this bullet listed them as though they already lived in
+  that module.** MEASURED 2026-09-21: zero matches for either name anywhere in `packages/worker/src`.
+  `invocationRepoSubpath` is the subpath rule currently INLINE in `resolveInvocationRepoMount`
+  (`resolvers.ts:560-575`), extracted and moved in piece 2, where `resolveInvocationRepoMount` becomes
+  its first caller — so it is never dead code. `resolveInvocationWorkerTree` belongs to PIECE 3, not
+  piece 2: its only callers are the project-instruction and persona paths, so landing it in the
+  foundations commit would add an unused async function to a commit whose contract is that nothing
+  reads the switch yet.
+  **The move is WIDER than planned, and wider again than the last pass recorded.**
+  `resolveInvocationWorkerRoot` sits at `resolvers.ts:647` and has TWO callers
+  that did not exist when this was written — `secret-mask.ts:99` and `ddev-generated-mask.ts:92`.
+  **Not three:** `ripgrep-config.ts` only NAMES it, in a comment at `:13` saying its two branches
+  mirror it, and neither imports nor calls it — an earlier pass counted that mention as a caller.
+  MEASURED 2026-09-21, `WORKER_REPO_STORAGE_ROOT` is read in FIVE source files — `resolvers.ts`,
   `exec-core.ts`, `ripgrep-config.ts`, `repo-mirrors.ts` and `queues/task-queue.ts` — plus TWO
   tests, `ripgrep-config.test.ts` and `test/secret-mask-resolve.test.ts`. So the re-export has seven
   importers to keep compiling, not the five the earlier count implied, and `repo-mirrors.ts` and
-  `task-queue.ts` are both new to that list.
+  `task-queue.ts` are both new to that list. A re-export alone does NOT satisfy them: `export { X }
+  from` creates no local binding, so `ensureRepoMountWritable` (two uses of
+  `WORKER_REPO_STORAGE_ROOT` in the same file) needs the import as well — `resolvers.ts` already
+  uses exactly that import-plus-re-export pair for `HOST_REPO_ROOT`, which is the shape to copy.
 - **Exec:** `queues/cli-exec/agent-definition-mask.ts` (NEW), `queues/cli-exec/exec-core.ts`
   (append to `authMounts`; fail before the CLI starts when the policy predicate then denies a pasted
   persona path, whether or not the file still exists; remove a race's mount stubs in a `finally`
@@ -575,10 +612,21 @@ hand afterwards, so each piece below is independently green and revertible:
 1. **The `toolProfile` drift** (Decision 7). One line plus its test, and deliberately first: it is a
    pre-existing mismatch this plan merely found, not agent isolation, so it should not be reviewed as
    part of one.
-2. **Foundations, no behaviour change.** The `worktree-git-boundary.ts` move with its re-exports, the
-   secret-mask policy predicate carved out of `secret-mask.ts`, `parseAgentFile` exported, the
-   `tmpfs` form on `DockerVolumeMount`, and `CONFIG_KEYS.AGENT_ISOLATION_ENABLED` with its default.
+2. **Foundations, no behaviour change.** The `worktree-git-boundary.ts` move with its re-exports
+   (`WORKER_REPO_STORAGE_ROOT`, `resolveInvocationWorkerRoot`, and the newly extracted
+   `invocationRepoSubpath`, whose first caller is `resolveInvocationRepoMount`), the secret-mask
+   policy predicate carved out of `secret-mask.ts` — which brings `picomatch` 4.0.4 and an ambient
+   `.d.ts` with it, see Decision 1 — `parseAgentFile` exported, the `tmpfs` form on
+   `DockerVolumeMount`, and `CONFIG_KEYS.AGENT_ISOLATION_ENABLED` with its default.
    Everything compiles and every path behaves exactly as today; nothing reads the switch yet.
+   **`resolveInvocationWorkerTree` is NOT in this piece** — it is new, async, and its only callers
+   are piece 3's, so putting it here would add an unused function to the commit that promises none.
+   The dependency is the one thing here that is not inert: adding a direct `picomatch` retires the
+   lockfile's stale `picomatch@4.0.5` and moves `lint-staged` and `vite` to `4.0.7` inside the `^4`
+   range they already permitted. MEASURED: a bare `--lockfile-only` install with no package.json
+   change produces an EMPTY diff, so that churn is caused by the declaration rather than pre-existing
+   drift; pinning `4.0.7` instead is worse, because it drags tinyglobby's own
+   `fdir@6.5.0(picomatch@4.0.4)` up with it and so changes the SCANNER the predicate must agree with.
 3. **The dispatch rule.** `agentIsolationApplies`, `promptNamesAgentPath`, the project-instruction
    scan, the persona reader, the rewrite's positive arm, `LlmInvocationSpec.agentPool`, the spec
    fields, and `07_7-secret-sweep` declaring `'*'`.
