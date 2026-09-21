@@ -51,6 +51,9 @@ interface SkillGenDetect {
 }
 
 interface SkillGenApply {
+  /** Lifted verbatim into the step's "What the agent did" panel by `resolveCuratedSummary`, so
+   *  this recap costs no CLI call. */
+  summary: string;
   written: {
     id: string;
     /** Carried so the README index can be rebuilt from the cumulative set on
@@ -1470,7 +1473,22 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       'skill-generation loop pass written',
     );
 
+    // Lifted verbatim into the step's "What the agent did" panel by `resolveCuratedSummary`, so
+    // this recap costs no CLI call — the runner skips `maybeEnqueueStepSummary` entirely once a
+    // step emits one. Computed from the CUMULATIVE output, which is what makes it correct on a
+    // loop step: the runner returns before the curated-summary block on any pass that requested
+    // continuation, so only the final pass ever writes `task_steps.summary`.
+    //
+    // The caveat channel is separate and deliberately NOT repeated here: `degradedNote` is its
+    // own column, written beside `summary` on the same finalize.
+    const droppedCount = droppedForSubSkills.length + rejectedIds.length + droppedFromCap;
+    const summary =
+      `Generated ${written.length} skill(s) with ${totalSubSkills} sub-skill(s), mirrored into ` +
+      `${targetDirs.length} CLI skills ${targetDirs.length === 1 ? 'directory' : 'directories'}.` +
+      (droppedCount > 0 ? ` ${droppedCount} candidate(s) were dropped.` : '');
+
     return {
+      summary,
       totalSubSkills,
       droppedFromCap,
       rejectedIds,
@@ -1482,10 +1500,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       llmSkillCount,
       consecutiveEmpty,
       ...(degradedNote ? { degradedNote } : {}),
-      // `written` and the hash tables come LAST because the step summariser is handed
-      // `JSON.stringify(output).slice(0, 4000)`, and at roughly 700 bytes per skill `written`
-      // alone fills that on any real run — declared first, as it was, it left the recap nothing
-      // but a truncated list of the first few skills and none of the counters above.
+      // `written` and the hash tables still come LAST, though the pressure that put them there is
+      // gone: with a curated `summary` above, `maybeEnqueueStepSummary` never runs for this step
+      // and nothing slices this object to 4,000 characters any more. Left in place because the
+      // order costs nothing and the day someone removes the summary it matters again.
       written,
       ...(Object.keys(skillHashes).length > 0 ? { skillHashes } : {}),
       ...(Object.keys(skillSubSkillHashes).length > 0 ? { skillSubSkillHashes } : {}),

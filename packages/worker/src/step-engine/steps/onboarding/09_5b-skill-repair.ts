@@ -104,6 +104,9 @@ interface SkillRepairDetect {
 }
 
 interface SkillRepairApply {
+  /** Lifted verbatim into the step's "What the agent did" panel by `resolveCuratedSummary`, so
+   *  this recap costs no CLI call. */
+  summary: string;
   /** Skill ids that produced a valid corrected skill and were rewritten. */
   repaired: string[];
   /** Slugs of the `sub-skills/<slug>.md` files rewritten beside each repaired SKILL.md, by
@@ -541,11 +544,23 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       'skill repair apply complete',
     );
     const degradedNote = miningLossNote('skill repair', outcomes);
+    // Lifted verbatim into the step's "What the agent did" panel by `resolveCuratedSummary`, so
+    // this recap costs no CLI call. `degradedNote` is a separate column written beside it on the
+    // same finalize, so the caveat is deliberately not repeated here — what this says is what the
+    // pass DID, and a repair that landed nothing is a sentence worth reading on its own.
+    const attempted = detected.failingSkills.length;
+    const summary =
+      `Repaired ${repaired.length} of ${attempted} failing skill(s).` +
+      (stillFailing.length > 0
+        ? ` ${stillFailing.length} still need attention and are left on disk as they were.`
+        : '');
+
     return {
+      summary,
       repaired,
       repairedSubSkillSlugs,
       stillFailing,
-      attempted: detected.failingSkills.length,
+      attempted,
       ...(degradedNote ? { degradedNote } : {}),
       // After `degradedNote`, so the summariser's 4000-char slice cuts the hashes and keeps the
       // note a person actually reads.

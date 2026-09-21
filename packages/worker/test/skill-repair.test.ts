@@ -6,6 +6,7 @@ import type { AgentMiningResult, StepContext } from '../src/step-engine/step-def
 import { skillRepairStep } from '../src/step-engine/steps/onboarding/09_5b-skill-repair.js';
 import { checkSkill } from '../src/step-engine/steps/onboarding/09_6-skill-verification.js';
 import { normalizeContent, sha256Hex } from '@haive/shared';
+import { resolveCuratedSummary } from '../src/step-engine/_step-summary.js';
 
 const DIRS = ['.claude/skills', '.gemini/skills'];
 
@@ -197,6 +198,35 @@ describe('skillRepairStep.apply', () => {
     // that directory's own on-disk set.
     const readme = await readFile(path.join(repo, ...first.split('/'), 'README.md'), 'utf8');
     expect(out.repairedReadmeHashes?.[first]).toBe(sha256Hex(normalizeContent(readme)));
+  });
+
+  it('emits a curated summary whose counts are the ones it actually repaired', async () => {
+    // Through the REAL apply, for the same reason the hash case above is: an api-side test that
+    // feeds a synthetic object would stay green if this step stopped emitting a summary.
+    for (const dir of DIRS) {
+      await writeSkillDir(repo, dir, 'broken', '# Broken\n\n(no overview)\n', {});
+      await writeSkillDir(repo, dir, 'hopeless', '# Hopeless\n\n(no overview)\n', {});
+    }
+
+    const out = (await skillRepairStep.apply(ctxFor(repo), {
+      detected: detectStub([
+        { skillId: 'broken', issues: ['no sub-skills'] },
+        { skillId: 'hopeless', issues: ['no sub-skills'] },
+      ]),
+      formValues: {},
+      // One repairable, one the agent returns nothing usable for — so both halves of the sentence
+      // have something to say.
+      agentMiningResults: [
+        miningResult('broken', repairJson('broken')),
+        miningResult('hopeless', 'sorry, I could not produce JSON'),
+      ],
+      iteration: 0,
+      previousIterations: [],
+    })) as { summary: string; repaired: string[]; attempted: number; stillFailing: string[] };
+
+    expect(resolveCuratedSummary(out)).toBe(out.summary);
+    expect(out.summary).toContain(`${out.repaired.length} of ${out.attempted}`);
+    expect(out.summary).toContain(`${out.stillFailing.length} still need attention`);
   });
 
   it('repairs only failing skills across all mirror dirs, clears stale leaves, and passes verification', async () => {

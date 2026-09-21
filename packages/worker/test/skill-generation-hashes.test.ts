@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { logger, normalizeContent, sha256Hex } from '@haive/shared';
 import { skillGenerationStep } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
+import { resolveCuratedSummary } from '../src/step-engine/_step-summary.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
 /**
@@ -73,7 +74,9 @@ function skill(id: string, rough = false) {
 }
 
 type GenOut = {
+  summary: string;
   written: { id: string }[];
+  totalSubSkills: number;
   skillHashes?: Record<string, string>;
   skillSubSkillHashes?: Record<string, Record<string, string>>;
   skillReadmeHashes?: Record<string, string>;
@@ -137,6 +140,21 @@ describe('skillGenerationStep.apply — recorded content hashes', () => {
     }
     // Different directories genuinely produce different bytes, which is why one hash will not do.
     expect(out.skillReadmeHashes?.[DIRS[0]!]).not.toBe(out.skillReadmeHashes?.[DIRS[1]!]);
+  });
+
+  it('emits a curated summary whose counts are the ones it actually wrote', async () => {
+    // Driven through the REAL apply, because the api-side test that asserts the curated path
+    // picks a `summary` up feeds a synthetic object — it would stay green if this step stopped
+    // emitting one, which is the same hole the hash tests above exist to close.
+    const out = await callApply({
+      llmOutput: { skills: [skill('conventions'), skill('naming')] },
+    });
+
+    expect(resolveCuratedSummary(out)).toBe(out.summary);
+    expect(out.summary).toContain(`${out.written.length} skill(s)`);
+    expect(out.summary).toContain(`${out.totalSubSkills} sub-skill(s)`);
+    // Two mirrors in this fixture, so the plural branch is the one exercised.
+    expect(out.summary).toContain(`${DIRS.length} CLI skills directories`);
   });
 
   it('carries a prior pass’s hashes forward, as it carries the skills themselves', async () => {
