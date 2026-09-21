@@ -1474,7 +1474,7 @@ export interface OnboardingResetOutcome {
   /** What the reset left alone, and why. Kept files and refused links share this channel. */
   skipped: Array<{ path: string; reason: string }>;
   /** Moved to the `<dir>-legacy` sibling instead of being deleted with the directory. */
-  quarantined: Array<{ from: string; to: string }>;
+  quarantined: Array<{ from: string; to: string; reason?: 'edited' }>;
 }
 
 /**
@@ -1702,6 +1702,21 @@ export function resetTouchedNothing(
   );
 }
 
+/** Why a path was, or was not, established as Haive's.
+ *
+ *  `edited` and `unrecorded` are both "not ours" and lead to the same disposition — the file
+ *  survives. They differ only in what the reset TELLS the person, which is the point: a generated
+ *  file someone has changed and a file Haive never wrote are different facts, and a reset that
+ *  reports them identically can never be tuned, because nobody can tell a genuine edit from a
+ *  commit hook that reformatted what Haive wrote. */
+type ClaimVerdict = 'ours' | 'edited' | 'unrecorded';
+
+/** The `skipped` reason for a claim that did not hold. The settings pass has distinguished these
+ *  two since it shipped (`ONBOARDING_SETTINGS_FILES`); the sweeps reported only the second, for
+ *  both. */
+const claimRefusalReason = (verdict: Exclude<ClaimVerdict, 'ours'>): string =>
+  verdict === 'edited' ? 'edited since Haive wrote it' : 'no record that Haive wrote it';
+
 /** What the caller could establish about what Haive wrote here. Every field is evidence, not
  *  policy: the reset removes what it covers and keeps what it does not. */
 export interface OnboardingResetProvenance {
@@ -1743,7 +1758,7 @@ export async function resetOnboardingArtifacts(
   const removed: string[] = [];
   const cleaned: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
-  const quarantined: Array<{ from: string; to: string }> = [];
+  const quarantined: Array<{ from: string; to: string; reason?: 'edited' }> = [];
   /** Skips caused by an IO failure rather than by policy. Only these make an empty walk a
    *  failure — a second reset over an already-clean tree also removes nothing and is a no-op. */
   let ioFailures = 0;
@@ -1843,14 +1858,55 @@ export async function resetOnboardingArtifacts(
 
   /** Whether this exact path is Haive's, by the strongest evidence available for it.
    *
-   *  A live artifact row OVERRIDES the path claim rather than adding to it: the row carries the
-   *  bytes Haive wrote, so if they no longer match, the user edited or replaced that file and it
-   *  is theirs now — claiming it by path would delete their work. Where no row exists the path
-   *  record is all there is, and it is used; see the note in AGENTS.md on which generated
-   *  outputs still lack a hash. */
-  const claimSatisfied = async (rel: string): Promise<boolean> => {
-    if (writtenHashes.has(rel)) return artifactMatchesDisk(rel);
-    return haiveEntries.has(rel) || (await artifactMatchesDisk(rel));
+   *  Two independent records can say what Haive wrote here — a live artifact row, and the hash
+   *  the writing STEP recorded — and they are CO-EQUAL. Either one matching the bytes on disk
+   *  settles it, because neither can match by accident: a row's hash is the rendering Haive
+   *  produced, and a step hash exists only for a path that step actually wrote (`writeIfAllowed`
+   *  SKIPS a pre-existing file and records nothing for it, which is what makes a step hash proof
+   *  of authorship rather than of rendering — do not "fix" the skip path to record one).
+   *
+   *  They are NOT a precedence chain, and the case that forces it is real: 07 renders the agents
+   *  index through `resolveAgents`, which substitutes `stubCustomAgent` for an accepted id it
+   *  cannot resolve, while the manifest renders it through `resolveAgentsForIndex`, which DROPS
+   *  that id. Different table, so the `agents-index` row can never match the README 07 actually
+   *  wrote, and a row-wins rule quarantines that file out of a directory Haive indisputably owns.
+   *
+   *  What the row IS needed for is the upgrade: `02-upgrade-apply` rewrites a file and inserts a
+   *  row carrying the NEW hash while 07's step hash still names pre-upgrade bytes. So a
+   *  step-hash-wins rule would quarantine every upgraded repository's own files. Asking both is
+   *  what serves each case.
+   *
+   *  A claim with no hash behind it at all is honoured on the path alone, exactly as it was
+   *  before hashes existed — that is every pre-existing step output, and the reason this needed
+   *  no backfill. */
+  const claimSatisfied = async (rel: string): Promise<ClaimVerdict> => {
+    const recorded = haiveEntries.get(rel);
+    const stepHash = typeof recorded === 'string' ? recorded : null;
+    const claimedByStep = haiveEntries.has(rel);
+    if (await artifactMatchesDisk(rel)) return 'ours';
+    if (stepHash !== null && (await stepHashMatches(rel, stepHash))) return 'ours';
+
+    // `edited` is a claim about AUTHORSHIP and is only ever made where authorship is PROVEN.
+    // A step hash is proof on its own — it exists only for a path that step wrote. A row is not:
+    // `recordOnboardingArtifacts` inserts one per manifest RENDERING, so a file apply SKIPPED
+    // carries a row too, holding what Haive WOULD have written. A row that no longer matches is
+    // therefore two different stories — "Haive wrote it and you changed it" and "this was always
+    // yours" — and only the step record separates them.
+    if (stepHash !== null) return 'edited';
+    if (claimedByStep && writtenHashes.has(rel)) return 'edited';
+
+    // Claimed, but by a record that never carried a hash — a directory, a generator that records
+    // none, or an output written before they existed. A row with nothing to corroborate it does
+    // not make the file ours, exactly as before.
+    if (writtenHashes.has(rel)) return 'unrecorded';
+    return claimedByStep ? 'ours' : 'unrecorded';
+  };
+
+  /** Whether the bytes on disk are still the ones the writing step recorded. Same normalisation
+   *  as the row check, or the two records would disagree about identical files. */
+  const stepHashMatches = async (rel: string, hash: string): Promise<boolean> => {
+    const content = await readTextNoFollow(root, rel, { strict: true }).catch(() => null);
+    return content !== null && sha256Hex(normalizeContent(content)) === hash;
   };
 
   /** Whether a live artifact row covers this entry AND the bytes on disk are still the ones it
@@ -1909,9 +1965,9 @@ export async function resetOnboardingArtifacts(
       // Only a REGULAR FILE satisfies a file claim. A directory was round 13; a SYMLINK is the
       // same story — a person replaced the generated file with a link of their own, and
       // removing it unlinks something Haive never wrote.
+      const verdict = await claimSatisfied(from);
       const claimed =
-        (await claimSatisfied(from)) &&
-        (entry.isFile() || (entry.isDirectory() && hasDeeperClaims(from)));
+        verdict === 'ours' && (entry.isFile() || (entry.isDirectory() && hasDeeperClaims(from)));
       if (claimed) {
         if (entry.isDirectory()) {
           const inner = await quarantineForeign(from, `${legacyDir}/${entry.name}`);
@@ -1927,7 +1983,11 @@ export async function resetOnboardingArtifacts(
       const to = `${legacyDir}/${entry.name}`;
       try {
         await renameNoFollow(root, from, to, { noReplace: true, createParents: true });
-        quarantined.push({ from, to });
+        // `reason` only where there is something to say: most quarantines are the expected case,
+        // a definition the person wrote by hand, and labelling those says nothing. `edited` is
+        // the one worth surfacing — Haive generated the file and it does not hold what Haive
+        // wrote. Optional, so nothing that renders this list has to change to ignore it.
+        quarantined.push(verdict === 'edited' ? { from, to, reason: 'edited' } : { from, to });
         // A move vacates `from` exactly as a delete does. Its row names the ORIGINAL path, so
         // keeping it alive on a parent skip would point a live row at an absent file — the same
         // defect as a deleted descendant, reached by the other way a path can empty.
@@ -1969,12 +2029,13 @@ export async function resetOnboardingArtifacts(
           left += await sweepClaimedChildren(rel);
           continue;
         }
-        if (child.isFile() && (await claimSatisfied(rel))) {
+        const verdict = child.isFile() ? await claimSatisfied(rel) : 'unrecorded';
+        if (verdict === 'ours') {
           await remove(rel, false);
           continue;
         }
         left += 1;
-        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+        skipped.push({ path: rel, reason: claimRefusalReason(verdict) });
       }
       if (left === 0 && (await removeNoFollow(root, dir, { repairPermissions: true }))) {
         removed.push(dir);
@@ -2056,9 +2117,12 @@ export async function resetOnboardingArtifacts(
       // A claim names a FILE unless something inside it is named too, so anything else standing
       // where a claimed file was — a directory, a symlink someone put there — is not the file
       // Haive wrote.
-      if (!entry.isFile() || !(await claimSatisfied(rel))) {
+      // A non-file standing where a claimed file was keeps the ORIGINAL wording: the claim was
+      // never consulted, so "edited" would be a verdict nothing reached.
+      const verdict = entry.isFile() ? await claimSatisfied(rel) : 'unrecorded';
+      if (verdict !== 'ours') {
         kept += 1;
-        skipped.push({ path: rel, reason: 'no record that Haive wrote it' });
+        skipped.push({ path: rel, reason: claimRefusalReason(verdict) });
         continue;
       }
       await remove(rel, false);

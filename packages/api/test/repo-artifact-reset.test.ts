@@ -1048,9 +1048,13 @@ describe('resetOnboardingArtifacts', () => {
     });
 
     expect(removed).not.toContain(rel);
+    // Reported as EDITED, not merely moved: the path record proves Haive wrote here and the row
+    // says what it wrote, so the two together establish authorship. A row on its OWN never can —
+    // see the skipped-file case above, which is quarantined with no reason at all.
     expect(quarantined).toContainEqual({
       from: rel,
       to: '.codex/agents-legacy/code-reviewer.toml',
+      reason: 'edited',
     });
     expect(await readFile(path.join(root, '.codex/agents-legacy/code-reviewer.toml'), 'utf8')).toBe(
       'name = "mine now"\n',
