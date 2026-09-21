@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
 import { ensureTaskScratchWorkspace } from '../../repo/scratch-workspace.js';
+import { invocationRepoSubpath } from '../../repo/worktree-git-boundary.js';
 import { resolveInvocationRepoMount } from './resolvers.js';
 
 // Only the filesystem half is stubbed: the subpath and the repo-less predicate stay real, and
@@ -82,6 +83,49 @@ describe('resolveInvocationRepoMount', () => {
     expect(repoMount?.readOnly).toBe(true);
     expect(repoMount?.subpath).toBeUndefined();
     expect(hasWorktree).toBe(false);
+  });
+
+  it('mounts EXACTLY the subpath invocationRepoSubpath derives, for every shape', async () => {
+    // The two answers agree today only because this resolver calls that function — the dispatcher
+    // needs the same tree and cannot import this file, so the rule lives there. Pin the agreement
+    // rather than the strings: a change to either side that drifts them apart would otherwise mount
+    // one tree while the persona reader and the exec recheck reason about another.
+    const shapes: { worktreeBranch: string | null; worktreeRel?: string }[] = [
+      { worktreeBranch: 'feature/x' },
+      { worktreeBranch: 'feature/x', worktreeRel: '.haive/worktrees/feature-x--issue-3' },
+      { worktreeBranch: 'feature/x', worktreeRel: '' },
+      { worktreeBranch: null },
+    ];
+    for (const shape of shapes) {
+      const task = { userId: 'u1', repositoryId: 'r1', worktreeBranch: shape.worktreeBranch };
+      const db = mkDb(task, VOLUME_REPO);
+      const { repoMount } = await resolveInvocationRepoMount(db, 't1', shape.worktreeRel);
+      expect(repoMount?.subpath, JSON.stringify(shape)).toBe(
+        invocationRepoSubpath({
+          storagePath: VOLUME_REPO.storagePath,
+          localPath: VOLUME_REPO.localPath,
+          userId: task.userId,
+          repositoryId: task.repositoryId,
+          worktreeBranch: task.worktreeBranch,
+          worktreeRel: shape.worktreeRel,
+        }),
+      );
+    }
+
+    // The one case it declines, and the resolver returns before consulting it: a local-path repo is
+    // bound from a host path with no subpath at all, so "undefined" has to mean the same thing on
+    // both sides.
+    const localDb = mkDb(VOLUME_TASK, { source: 'local', storagePath: '/host-fs/proj' });
+    const { repoMount: localMount } = await resolveInvocationRepoMount(localDb, 't1');
+    expect(localMount?.subpath).toBeUndefined();
+    expect(
+      invocationRepoSubpath({
+        storagePath: '/host-fs/proj',
+        userId: 'u1',
+        repositoryId: 'r1',
+        worktreeBranch: 'feature/x',
+      }),
+    ).toBeUndefined();
   });
 
   it('returns no mount for a repo-less task of a type that requires one', async () => {
