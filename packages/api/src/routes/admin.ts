@@ -748,6 +748,25 @@ adminRoutes.put('/config/codex-app-server', async (c) => {
   return c.json({ enabled });
 });
 
+const agentIsolationSchema = z.object({ enabled: z.boolean() });
+
+// Per-call agent isolation: an invocation that neither writes files nor names an agent path is given
+// empty agent directories, and the persona it needs is pasted into its prompt instead. Read ONCE per
+// dispatch (within the ~30s config cache), never at exec — the decision rides the command spec, which
+// is what keeps one invocation's prompt and its mounts on the same side of a flip. Off restores the
+// previous behaviour for every newly dispatched invocation; one already queued keeps its decision.
+adminRoutes.get('/config/agent-isolation', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.AGENT_ISOLATION_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/agent-isolation', async (c) => {
+  const { enabled } = agentIsolationSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.AGENT_ISOLATION_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'agent-isolation switch updated');
+  return c.json({ enabled });
+});
+
 const prWorkflowSchema = z.object({ enabled: z.boolean() });
 
 // Global master switch for the create-PR close-out workflow. Gates step 12's create_pr
