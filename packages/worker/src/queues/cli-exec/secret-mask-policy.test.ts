@@ -80,6 +80,86 @@ describe('secretMaskDeniesPath', () => {
     }
   });
 
+  it('agrees with the scanner on NEGATED globs, which reach both engines verbatim', async () => {
+    // The API stores secret_mask_allow / secret_mask_deny_extend after nothing but a trim, so a
+    // `!` pattern reaches the scanner and this predicate unchanged. tinyglobby REWRITES negation
+    // before matching (a negated deny pattern loses its `!` and becomes an ignore; a negated ignore
+    // pattern is discarded) while `picomatch(array)` is an any-match in which `!x` matches every
+    // path that is not `x` — so without the same rewrite the two disagree, and on the ignore side
+    // they disagree the unsafe way: one negated allow glob made `ignored()` true for nearly every
+    // path and this predicate then permitted bytes the scanner masks.
+    //
+    // Asked of the SCANNER rather than of tinyglobby's source, because agreement is the contract.
+    const files = [
+      '.claude/agents/safe.md',
+      '.claude/agents/other.md',
+      'docs/readme.md',
+      '.env',
+      'keep.md',
+    ];
+    const root = await mkdtemp(join(tmpdir(), 'secret-mask-negated-'));
+    try {
+      for (const rel of files) {
+        const abs = join(root, rel);
+        await mkdir(join(abs, '..'), { recursive: true });
+        await writeFile(abs, 'x');
+      }
+
+      // Codex's own example, plus a negated ALLOW, which is the direction that failed unsafely.
+      for (const policy of [
+        secretMaskPolicy({ denyExtend: ['**/*.md', '!**/.claude/agents/safe.md'] }),
+        secretMaskPolicy({ denyExtend: ['**/*.md'], allow: ['!**/keep.md'] }),
+      ]) {
+        const scanned = new Set(
+          await glob(policy.globs.deny, {
+            cwd: root,
+            dot: true,
+            ignore: policy.globs.ignore,
+            onlyFiles: true,
+            expandDirectories: false,
+            followSymbolicLinks: false,
+          }),
+        );
+        const scannerSays = files.filter((rel) => scanned.has(rel)).sort();
+        const predicateSays = files.filter((rel) => secretMaskDeniesPath(policy, rel)).sort();
+        expect(predicateSays).toEqual(scannerSays);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('survives a LONE negation, which picomatch refuses as an empty pattern', async () => {
+    // A repository can store `!` on its own: the API trims and drops falsy values, and `'!'` is
+    // truthy. tinyglobby strips the negation and normalises the remainder through `posix.normalize`,
+    // which turns '' into '.', so its scan runs. Pushing the bare '' here instead made picomatch
+    // throw `Expected pattern to be a non-empty string`, so every isolated dispatch that evaluated a
+    // persona path failed on a configuration the scanner accepts.
+    const files = ['.env', 'notes.md'];
+    const root = await mkdtemp(join(tmpdir(), 'secret-mask-lone-bang-'));
+    try {
+      for (const rel of files) await writeFile(join(root, rel), 'x');
+
+      const policy = secretMaskPolicy({ denyExtend: ['!'] });
+      const scanned = new Set(
+        await glob(policy.globs.deny, {
+          cwd: root,
+          dot: true,
+          ignore: policy.globs.ignore,
+          onlyFiles: true,
+          expandDirectories: false,
+          followSymbolicLinks: false,
+        }),
+      );
+      // No throw, and the same verdict the scanner reaches.
+      const scannerSays = files.filter((rel) => scanned.has(rel)).sort();
+      const predicateSays = files.filter((rel) => secretMaskDeniesPath(policy, rel)).sort();
+      expect(predicateSays).toEqual(scannerSays);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('spares a carve-out and a structural ignore dir, and catches the dotted cases', () => {
     const policy = secretMaskPolicy({});
     expect(secretMaskDeniesPath(policy, '.env')).toBe(true);

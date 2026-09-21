@@ -180,21 +180,44 @@ export function dropMasksUnderAgentDirs(
  * become, while uid-1000 writes into that one path fail until it is removed. Best-effort — a
  * failure logs and leaves the path, which is item 6's fail-open rule.
  *
- * `runtimeUid` is the uid the container ran as (0 for the root-owned stubs Docker leaves). Passed in
- * so a fixture test can exercise the same path with its own uid, since an unprivileged test cannot
- * create a root-owned directory.
+ * `runtimeUid` is the uid the container ran as (0 for the root-owned stubs Docker leaves), and
+ * `repoOwnerUid` the uid that owns the repository tree (default: read from the anchor). Both are
+ * injectable so a fixture can exercise this path, since an unprivileged test cannot create a
+ * root-owned directory.
  */
 export async function removeAgentMaskStubs(
   records: readonly AgentMaskRecord[],
   runtimeUid = 0,
+  repoOwnerUid?: number,
 ): Promise<void> {
   for (const record of records) {
-    // It existed before the run, so it is the repository's own directory, not a stub.
-    if (record.inode !== null) continue;
     try {
       const info = await lstatNoFollow(record.anchor, record.anchorRel);
       if (info?.kind !== 'directory') continue;
+      // Still the SAME directory, so it is the repository's own and not a stub. Comparing the inode
+      // rather than merely asking whether one was recorded is what makes this REACHABLE at all:
+      // every record carries an inode (`computeAgentDefinitionMasks` emits one only for a directory
+      // that exists), so the `record.inode !== null` guard this replaced skipped cleanup in every
+      // production case — including the one it was written for, where the directory was removed
+      // between the scan and container create and Docker recreated the target as an empty stub.
+      //
+      // The comparison is NECESSARY BUT NOT SUFFICIENT, and an inode number is reusable besides:
+      // MEASURED on ext2/ext3, a directory removed and immediately recreated in the same parent came
+      // back with the identical inode, so a replaced directory can also read as unchanged.
+      if (record.inode !== null && info.stats.ino === record.inode) continue;
       if (info.stats.uid !== runtimeUid) continue;
+
+      // PROVENANCE, and it has to be affirmative: removal is permitted only for a directory DOCKER
+      // created, never merely for one that changed. A different inode plus `runtimeUid` ownership is
+      // satisfied by a legitimate host-side recreate too — a root-owned local-path repository whose
+      // agent directory is removed and recreated during the run has a new inode, is empty, and is
+      // owned by uid 0 exactly as a stub is. Deleting that is host-side DATA LOSS, and `/host-fs` is
+      // mounted writable. So the container's uid must DIFFER from the repository tree's owner, which
+      // is what actually distinguishes Docker's root-owned mountpoint from the repo's own directory.
+      // When the two match, or the owner cannot be read, provenance is unknown and the directory is
+      // KEPT: an empty root-owned stub is clutter, and clutter is the direction to fail in.
+      const owner = repoOwnerUid ?? (await lstatNoFollow(record.anchor, ''))?.stats.uid;
+      if (owner === undefined || owner === info.stats.uid) continue;
       // Without `recursive` a non-empty directory fails ENOTEMPTY, exactly as `rmdir` does — which
       // IS the check: a stub that now holds something is no longer a stub, and refusing to delete it
       // is the outcome we want rather than one this module has to write. An already-absent path

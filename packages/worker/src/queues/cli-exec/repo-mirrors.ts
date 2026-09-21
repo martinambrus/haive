@@ -27,11 +27,17 @@ export async function resolveRepoMirrors(
   mirrors: CliCommandSpec['repoMirrors'],
   repoMount: DockerVolumeMount | null,
   storageRoot: string = WORKER_REPO_STORAGE_ROOT,
+  opts: { maskAgentDefinitions?: boolean } = {},
 ): Promise<RepoMirrorResolution> {
   const out: RepoMirrorResolution = { mounts: [], files: [] };
   if (!mirrors?.length || !repoMount?.subpath) return out;
   const { anchor, rel } = splitRepoSubpath(storageRoot, repoMount.subpath);
   for (const mirror of mirrors) {
+    // An isolated invocation gets NO agent mirror. agy ignores the workspace `.agents/` in a
+    // headless run and loads definitions from `~/.gemini/config` instead, so mirroring them there
+    // hands it every persona the workspace mask hides and leaves isolation inert for that provider.
+    // The skills mirror stays: skills are not what isolation withholds.
+    if (opts.maskAgentDefinitions === true && mirror.layout === 'agentMdDirs') continue;
     const dirRel = rel ? `${rel}/${mirror.repoDir}` : mirror.repoDir;
     const dir = await lstatNoFollow(anchor, dirRel);
     if (dir?.kind !== 'directory') continue;

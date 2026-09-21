@@ -1534,7 +1534,12 @@ export function createSandboxSpawner(
     // silently cost browser verification.
     allMounts.push(npmCacheMount());
     // Repo customizations a CLI reads only from its home (agy), from this invocation's own tree.
-    const mirrors = await resolveRepoMirrors(spec.repoMirrors, repoMount);
+    // `maskAgentDefinitions` drops the AGENT mirror for an isolated run and keeps the skills one —
+    // the rule lives in resolveRepoMirrors so it is tested against the same fixtures as the mirrors
+    // themselves rather than only at this call site.
+    const mirrors = await resolveRepoMirrors(spec.repoMirrors, repoMount, undefined, {
+      maskAgentDefinitions: spec.maskAgentDefinitions === true,
+    });
     allMounts.push(...mirrors.mounts);
     const runnerOptions: Parameters<typeof runInSandbox>[1] = { workdir: sandboxWorkdir };
     if (sandboxImage) runnerOptions.image = sandboxImage;

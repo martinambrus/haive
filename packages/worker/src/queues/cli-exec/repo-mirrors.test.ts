@@ -57,6 +57,33 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+describe('resolveRepoMirrors under agent isolation', () => {
+  it('drops the AGENT mirror and keeps the skills mirror', async () => {
+    // agy ignores the workspace `.agents/` in a headless run and loads definitions from
+    // `~/.gemini/config`, so mirroring them there hands it every persona the workspace mask hides —
+    // isolation was inert for this provider. Skills are not what isolation withholds, so that
+    // mirror is unchanged.
+    const isolated = await resolveRepoMirrors([SKILLS, AGENTS], volumeMount('u/r'), root, {
+      maskAgentDefinitions: true,
+    });
+    expect(isolated.files).toEqual([]);
+    expect(isolated.mounts.map((m) => m.target)).toEqual(['/home/node/.gemini/config/skills']);
+
+    // The same call without the flag still carries both, so a non-isolated dispatch is untouched.
+    const open = await resolveRepoMirrors([SKILLS, AGENTS], volumeMount('u/r'), root);
+    expect(open.mounts.map((m) => m.target)).toEqual(['/home/node/.gemini/config/skills']);
+    expect(open.files.map((f) => f.containerPath)).toEqual([
+      '/home/node/.gemini/config/agents/code-reviewer/agent.md',
+    ]);
+  });
+
+  // That the SPAWNER passes the flag is asserted behaviourally in
+  // `test/sandbox-repo-mirrors.test.ts`, which drives createSandboxSpawner with the sandbox runner
+  // and this resolver as its two faked edges. A source-grep proxy lived here first, written on the
+  // assumption that driving the spawner needed an image and credentials; it does not, and a string
+  // match beside a real call assertion would only invite the next reader to trust the weaker one.
+});
+
 describe('resolveRepoMirrors', () => {
   it('mounts a directory read-only from the repository tree', async () => {
     const out = await resolveRepoMirrors([SKILLS], volumeMount('u/r'), root);
