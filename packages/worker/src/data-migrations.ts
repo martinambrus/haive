@@ -245,26 +245,28 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
 
   // The same state set and the same reasoning as `reconcileUnenqueuedStepSummaries` — including
   // why `paused` is deliberately absent. Re-measure there before changing it here.
+  // NOT closed afterwards, and that is the whole reason `getCliExecQueue` is a singleton nothing
+  // closes at boot either. `getBullRedis()` is a SHARED ioredis instance, and bullmq's `Queue`
+  // does not mark a passed-in connection as `shared` — so `close()` reaches
+  // `RedisConnection.close`'s `if (!this.extraOptions.shared)` branch and calls `quit()` on it.
+  // Closing here therefore tears down the worker's Redis for every queue that comes after,
+  // at boot, on any install that happens to have a `cloning` row.
   const queue = new Queue<RepoJobPayload>(QUEUE_NAMES.REPO, { connection: getBullRedis() });
-  const stillQueued = new Set<string>();
-  try {
-    const jobs = await queue.getJobs([
-      'waiting',
-      'delayed',
-      'prioritized',
-      'active',
-      'waiting-children',
-    ]);
-    for (const job of jobs) {
-      const repositoryId = (job?.data as { repositoryId?: unknown } | undefined)?.repositoryId;
-      if (typeof repositoryId === 'string') stillQueued.add(repositoryId);
-    }
-  } finally {
-    await queue.close().catch(() => undefined);
-  }
-  // A throw above propagates deliberately: `runOne` logs it and this migration does nothing.
+  const jobs = await queue.getJobs([
+    'waiting',
+    'delayed',
+    'prioritized',
+    'active',
+    'waiting-children',
+  ]);
+  // A throw here propagates deliberately: `runOne` logs it and this migration does nothing.
   // Without the queue's answer every `cloning` row looks stranded, and flipping one whose job is
   // about to run would show the user an error for a repository that is fine.
+  const stillQueued = new Set<string>();
+  for (const job of jobs) {
+    const repositoryId = (job?.data as { repositoryId?: unknown } | undefined)?.repositoryId;
+    if (typeof repositoryId === 'string') stillQueued.add(repositoryId);
+  }
 
   const stranded = cloning.filter((row) => !stillQueued.has(row.id)).map((row) => row.id);
   if (stranded.length === 0) return;

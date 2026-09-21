@@ -513,13 +513,7 @@ function RepoCard(props: RepoCardProps) {
               icon: expanded ? X : FolderMinus,
               onClick: onExpand,
             },
-            // `cloning` as well as `error`, because a repository CAN strand there: the worker
-            // reconciles one whose job is gone at its next boot, and until then this is the only
-            // way back — every other action on this card is gated on `ready`, so the alternative
-            // is delete and re-add. Safe while a job is genuinely running: `refresh-tree` takes a
-            // root claim and a live claim refuses it, which is what makes offering the button
-            // harmless rather than a second writer on the same tree.
-            (repo.status === 'error' || repo.status === 'cloning') && {
+            repo.status === 'error' && {
               key: 'retry',
               label: retrying ? 'Retrying...' : 'Retry',
               icon: RefreshCw,

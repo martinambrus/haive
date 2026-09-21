@@ -113,17 +113,30 @@ describe('reconcileStrandedCloningRepos', () => {
     expect(recorded).toHaveLength(0);
   });
 
-  it('closes the queue even when the read throws, and writes nothing', async () => {
+  it('writes nothing when the queue cannot be read', async () => {
     // Without the queue's answer every row looks stranded, so the safe outcome is to do nothing.
-    // The throw reaches `runOne`, which logs it; the connection must not leak on the way out.
+    // The throw reaches `runOne`, which logs it and moves on.
     getJobs.mockReset().mockRejectedValue(new Error('redis is down'));
-    closed.mockReset().mockResolvedValue(undefined);
     const recorded: RecordedUpdate[] = [];
 
     await expect(reconcileStrandedCloningRepos(makeDb(['stranded'], recorded))).rejects.toThrow(
       'redis is down',
     );
-    expect(closed).toHaveBeenCalled();
     expect(recorded).toHaveLength(0);
+  });
+
+  it('never CLOSES the queue, because the Redis connection is shared', async () => {
+    // The defect this exists to prevent, and it is not theoretical: `getBullRedis()` hands out one
+    // shared ioredis instance, and bullmq's `Queue` does not mark a passed-in connection as
+    // `shared` — so `close()` reaches `RedisConnection.close`'s `if (!this.extraOptions.shared)`
+    // branch and calls `quit()` on it. A close here tears down the worker's Redis for every queue
+    // that runs after this migration, at boot, on any install with a `cloning` row. It shipped in
+    // the first draft of this PR and took an unrelated e2e test down with it.
+    getJobs.mockReset().mockResolvedValue([]);
+    closed.mockReset();
+
+    await reconcileStrandedCloningRepos(makeDb(['stranded'], []));
+
+    expect(closed).not.toHaveBeenCalled();
   });
 });
