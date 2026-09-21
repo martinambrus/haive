@@ -2,7 +2,7 @@ import { readTextNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shar
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, SkillEntry } from '@haive/shared';
-import { mapWithConcurrency } from '@haive/shared';
+import { mapWithConcurrency, normalizeContent, sha256Hex } from '@haive/shared';
 import type { KbFileSummary } from './09-qa.js';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
@@ -120,6 +120,26 @@ interface SkillRepairApply {
   /** Set when a repair this step attempted did not land. Lifted verbatim by
    *  computeDegradedNote. Optional: apply outputs are persisted. */
   degradedNote?: string;
+  /* --- Content hashes of what this pass REWROTE, so the onboarding-artifact reset can tell a
+   *  repaired file the user has since edited from one still holding what Haive put there, and
+   *  move it aside instead of deleting it. These supersede 09_5's hashes for the same skill, the
+   *  way `repairedSubSkillSlugs` already supersedes its slugs — the repair CLEARS the skill dir
+   *  before rewriting, so 09_5's record for it is stale in both respects.
+   *
+   *  ONE hash serves every target dir: `skillMd` and the sub-skill bodies are rendered ABOVE the
+   *  dir loop and neither renderer takes a directory. The README is keyed BY dir, because it
+   *  interpolates its own path and is rebuilt from that dir's own on-disk set.
+   *
+   *  Declared LAST because the step summariser is handed `JSON.stringify(output).slice(0, 4000)`,
+   *  and a hash is noise to a recap where `degradedNote` above it is not. All OPTIONAL — an
+   *  output persisted before these existed must still be readable, and the reset then claims by
+   *  path alone, exactly as it did before hashes. --- */
+  /** Skill id -> hash of its rewritten `SKILL.md`. */
+  repairedHashes?: Record<string, string>;
+  /** Skill id -> sub-skill slug -> hash of the rewritten `sub-skills/<slug>.md`. */
+  repairedSubSkillHashes?: Record<string, Record<string, string>>;
+  /** Target dir -> hash of the `README.md` index rebuilt in it. */
+  repairedReadmeHashes?: Record<string, string>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -419,6 +439,9 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
 
     const repaired: string[] = [];
     const repairedSubSkillSlugs: Record<string, string[]> = {};
+    const repairedHashes: Record<string, string> = {};
+    const repairedSubSkillHashes: Record<string, Record<string, string>> = {};
+    const repairedReadmeHashes: Record<string, string> = {};
     const stillFailing: string[] = [];
     // Per-skill view for the loss note. `stillFailing` is carried to 09_6 for the user to
     // act on, but the step itself still ends green — the note is what says so on the step.
@@ -453,6 +476,14 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       const entry: SkillEntry = { ...match, id: failing.skillId };
       const skillMd = skillToMarkdown(entry);
       const subs = sanitizeSubSkills(entry);
+      // Rendered ONCE, above the dir loop, in the same shape 09_5 uses. It used to be built
+      // inline per directory, which threw the bytes away and left nothing to hash. Rendering it
+      // here is byte-identical because `subSkillToMarkdown` takes no directory — which is also
+      // what lets one hash stand for every mirror.
+      const renderedSubs = subs.map((sub) => ({
+        slug: sub.slug,
+        content: subSkillToMarkdown(entry.id, sub),
+      }));
 
       for (const dir of targetDirs) {
         const parts = dir.split('/').filter((p) => p.length > 0);
@@ -463,17 +494,25 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
         await writeFileNoFollow(ctx.repoPath, `${skillRel}/SKILL.md`, skillMd, {
           createParents: true,
         });
-        for (const sub of subs) {
+        for (const rs of renderedSubs) {
           await writeFileNoFollow(
             ctx.repoPath,
-            `${skillRel}/sub-skills/${sub.slug}.md`,
-            subSkillToMarkdown(entry.id, sub),
-            { createParents: true },
+            `${skillRel}/sub-skills/${rs.slug}.md`,
+            rs.content,
+            {
+              createParents: true,
+            },
           );
         }
       }
       repaired.push(failing.skillId);
-      repairedSubSkillSlugs[failing.skillId] = subs.map((sub) => sub.slug);
+      repairedSubSkillSlugs[failing.skillId] = renderedSubs.map((rs) => rs.slug);
+      repairedHashes[failing.skillId] = sha256Hex(normalizeContent(skillMd));
+      if (renderedSubs.length > 0) {
+        repairedSubSkillHashes[failing.skillId] = Object.fromEntries(
+          renderedSubs.map((rs) => [rs.slug, sha256Hex(normalizeContent(rs.content))]),
+        );
+      }
     }
 
     // Rebuild the README index from the current on-disk set so descriptions stay in sync.
@@ -482,12 +521,14 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
         const summaries = await readDiskSkillSummaries(ctx.repoPath, dir);
         if (summaries.length === 0) continue;
         const parts = dir.split('/').filter((p) => p.length > 0);
-        await writeFileNoFollow(
-          ctx.repoPath,
-          [...parts, 'README.md'].join('/'),
-          skillsReadmeMarkdown(summaries, dir),
-          { createParents: true },
-        );
+        // Bound rather than passed inline, so the bytes that go to disk are the bytes hashed.
+        // Per dir on BOTH counts: the render interpolates the directory, and `summaries` is
+        // re-read from that directory's own tree.
+        const readme = skillsReadmeMarkdown(summaries, dir);
+        await writeFileNoFollow(ctx.repoPath, [...parts, 'README.md'].join('/'), readme, {
+          createParents: true,
+        });
+        repairedReadmeHashes[dir] = sha256Hex(normalizeContent(readme));
       }
     }
 
@@ -506,6 +547,11 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       stillFailing,
       attempted: detected.failingSkills.length,
       ...(degradedNote ? { degradedNote } : {}),
+      // After `degradedNote`, so the summariser's 4000-char slice cuts the hashes and keeps the
+      // note a person actually reads.
+      ...(Object.keys(repairedHashes).length > 0 ? { repairedHashes } : {}),
+      ...(Object.keys(repairedSubSkillHashes).length > 0 ? { repairedSubSkillHashes } : {}),
+      ...(Object.keys(repairedReadmeHashes).length > 0 ? { repairedReadmeHashes } : {}),
     };
   },
 };

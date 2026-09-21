@@ -4,7 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
-import { skillEntrySchema } from '@haive/shared';
+import { normalizeContent, sha256Hex, skillEntrySchema } from '@haive/shared';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
@@ -95,6 +95,29 @@ interface SkillGenApply {
   /** Set when the loop gives up short of `targetCount` but above the failure floor.
    *  Lifted verbatim by computeDegradedNote. Optional: apply outputs are persisted. */
   degradedNote?: string;
+  /* --- Content hashes of what this step WROTE, so the onboarding-artifact reset can tell a
+   *  generated file the user has since edited from one still holding what Haive put there, and
+   *  move it aside instead of deleting it. Keyed by skill id / target dir rather than nested in
+   *  `written[]`, and declared LAST, for one reason each:
+   *
+   *  - `written[]` round-trips through `task_steps.iterations`, which is `jsonb` and normalises
+   *    object key order, so a hash nested there would land mid-element on every entry carried
+   *    from a prior pass and defeat the ordering below.
+   *  - the step summariser is handed `JSON.stringify(output).slice(0, 4000)`, so whatever is last
+   *    is what the slice cuts. These are noise to a recap; the fields above are not.
+   *
+   *  ONE hash serves every mirror dir: `skillMd` and the sub-skill bodies are rendered ABOVE the
+   *  target-dir loop and neither renderer takes a directory, so every mirror gets identical bytes.
+   *  The README is the exception and is keyed by dir, because it interpolates its own path.
+   *
+   *  All OPTIONAL — an output persisted before these existed must still be readable, and the
+   *  reset then falls back to claiming by path alone, exactly as it did before hashes. --- */
+  /** Skill id -> hash of its `SKILL.md`. */
+  skillHashes?: Record<string, string>;
+  /** Skill id -> sub-skill slug -> hash of `sub-skills/<slug>.md`. */
+  skillSubSkillHashes?: Record<string, Record<string, string>>;
+  /** Target dir -> hash of the `README.md` index written into it. */
+  skillReadmeHashes?: Record<string, string>;
 }
 
 // Skill IR types (SkillEntry, SkillSubSkill, supporting shapes) live in
@@ -1306,6 +1329,13 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
 
     // Render + write each new skill (and the bundle on pass 0) to every target dir.
     const newWritten: SkillGenApply['written'] = [];
+    // Seeded from the prior pass for the same reason `written` is: each pass returns the
+    // CUMULATIVE library, and a skill an earlier pass wrote is never rewritten by a later one
+    // (`toWrite` holds only newly accepted ids), so its hash stays valid and must survive.
+    const skillHashes: Record<string, string> = { ...(prior?.skillHashes ?? {}) };
+    const skillSubSkillHashes: Record<string, Record<string, string>> = {
+      ...(prior?.skillSubSkillHashes ?? {}),
+    };
     let newSubSkills = 0;
     for (const entry of toWrite) {
       const skillMd = skillToMarkdown(entry);
@@ -1340,6 +1370,14 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       }
 
       newSubSkills += renderedSubs.length;
+      // Hashed from the strings that were just written, which every mirror dir received
+      // identically — both renders sit above the loop and neither takes a directory.
+      skillHashes[entry.id] = sha256Hex(normalizeContent(skillMd));
+      if (renderedSubs.length > 0) {
+        skillSubSkillHashes[entry.id] = Object.fromEntries(
+          renderedSubs.map((rs) => [rs.slug, sha256Hex(normalizeContent(rs.content))]),
+        );
+      }
       newWritten.push({
         id: entry.id,
         title: entry.title,
@@ -1355,18 +1393,22 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
 
     // Rebuild the README index from the cumulative set every pass (deterministic,
     // code-only, no tokens) so it stays complete as skills accrue.
+    // Keyed by dir and NOT seeded from the prior pass: unlike a skill file, this one is rewritten
+    // from the cumulative set on every pass, so only the last pass's bytes are on disk. An earlier
+    // hash would name content that no longer exists.
+    const skillReadmeHashes: Record<string, string> = {};
     if (written.length > 0) {
       for (const targetDir of targetDirs) {
         const parts = targetDir.split('/').filter((p) => p.length > 0);
-        await writeFileNoFollow(
-          ctx.repoPath,
-          [...parts, 'README.md'].join('/'),
-          skillsReadmeMarkdown(
-            written.map((w) => ({ id: w.id, title: w.title, description: w.description })),
-            targetDir,
-          ),
-          { createParents: true },
+        // Bound rather than passed inline, so the bytes that go to disk are the bytes hashed.
+        const readme = skillsReadmeMarkdown(
+          written.map((w) => ({ id: w.id, title: w.title, description: w.description })),
+          targetDir,
         );
+        await writeFileNoFollow(ctx.repoPath, [...parts, 'README.md'].join('/'), readme, {
+          createParents: true,
+        });
+        skillReadmeHashes[targetDir] = sha256Hex(normalizeContent(readme));
       }
     }
 
@@ -1429,7 +1471,6 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     );
 
     return {
-      written,
       totalSubSkills,
       droppedFromCap,
       rejectedIds,
@@ -1441,6 +1482,14 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       llmSkillCount,
       consecutiveEmpty,
       ...(degradedNote ? { degradedNote } : {}),
+      // `written` and the hash tables come LAST because the step summariser is handed
+      // `JSON.stringify(output).slice(0, 4000)`, and at roughly 700 bytes per skill `written`
+      // alone fills that on any real run — declared first, as it was, it left the recap nothing
+      // but a truncated list of the first few skills and none of the counters above.
+      written,
+      ...(Object.keys(skillHashes).length > 0 ? { skillHashes } : {}),
+      ...(Object.keys(skillSubSkillHashes).length > 0 ? { skillSubSkillHashes } : {}),
+      ...(Object.keys(skillReadmeHashes).length > 0 ? { skillReadmeHashes } : {}),
     };
   },
 };

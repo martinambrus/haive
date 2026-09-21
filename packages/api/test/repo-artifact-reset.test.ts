@@ -324,6 +324,106 @@ describe('collectWrittenCliContent', () => {
     expect(entries.has('.agents/skills/README.md')).toBe(true);
   });
 
+  it('carries 09_5’s hashes onto the files, and never onto a directory', async () => {
+    const { entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '09_5-skill-generation',
+          output: {
+            written: [
+              {
+                id: 'repo-conventions',
+                mirroredDirs: ['.agents/skills', '.claude/skills'],
+                subSkillSlugs: ['naming'],
+              },
+            ],
+            skillHashes: { 'repo-conventions': 'skill-hash' },
+            skillSubSkillHashes: { 'repo-conventions': { naming: 'sub-hash' } },
+            skillReadmeHashes: { '.agents/skills': 'readme-a', '.claude/skills': 'readme-b' },
+          },
+        },
+      ],
+      [],
+    );
+
+    // ONE hash serves every mirror: the render sits above the target-dir loop and takes no
+    // directory, so each mirror holds identical bytes.
+    expect(entries.get('.agents/skills/repo-conventions/SKILL.md')).toBe('skill-hash');
+    expect(entries.get('.claude/skills/repo-conventions/SKILL.md')).toBe('skill-hash');
+    expect(entries.get('.agents/skills/repo-conventions/sub-skills/naming.md')).toBe('sub-hash');
+    // Directories have no content to hash. Hanging a file's digest on one would make the whole
+    // directory read as edited the moment anything inside it changed.
+    expect(entries.get('.agents/skills/repo-conventions')).toBeNull();
+    expect(entries.get('.agents/skills/repo-conventions/sub-skills')).toBeNull();
+    // The README is the one per-DIR hash, because the render interpolates its own path.
+    expect(entries.get('.agents/skills/README.md')).toBe('readme-a');
+    expect(entries.get('.claude/skills/README.md')).toBe('readme-b');
+  });
+
+  it('keeps the sub-skills claim gated on SLUGS, never on the hashes', async () => {
+    // An output recording slugs but no hashes is every pre-existing one. Re-gating on the hash
+    // map would drop that claim for all of them, and `hasDeeperClaims` would then read the
+    // directory as wholly ours — deleting a file a person left there instead of moving it aside.
+    const { entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '09_5-skill-generation',
+          output: {
+            written: [
+              {
+                id: 'repo-conventions',
+                mirroredDirs: ['.agents/skills'],
+                subSkillSlugs: ['naming'],
+              },
+            ],
+          },
+        },
+      ],
+      [],
+    );
+
+    expect(entries.has('.agents/skills/repo-conventions/sub-skills')).toBe(true);
+    expect(entries.get('.agents/skills/repo-conventions/sub-skills/naming.md')).toBeNull();
+  });
+
+  it('lets a repair’s hashes SUPERSEDE the generation’s for the same skill', async () => {
+    // 09_5b clears the skill dir before rewriting, so 09_5's record for it is stale in every
+    // respect. The rows replay oldest first and the repair retires what the generation claimed.
+    const { entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '09_5-skill-generation',
+          endedAt: new Date('2026-01-01T00:00:00Z'),
+          output: {
+            written: [{ id: 'broken', mirroredDirs: ['.agents/skills'], subSkillSlugs: ['old'] }],
+            skillHashes: { broken: 'stale' },
+            skillSubSkillHashes: { broken: { old: 'stale-sub' } },
+          },
+        },
+        {
+          stepId: '09_5b-skill-repair',
+          endedAt: new Date('2026-01-02T00:00:00Z'),
+          detectOutput: { skillTargetDirs: ['.agents/skills'] },
+          output: {
+            repaired: ['broken'],
+            repairedSubSkillSlugs: { broken: ['fresh'] },
+            repairedHashes: { broken: 'repaired' },
+            repairedSubSkillHashes: { broken: { fresh: 'repaired-sub' } },
+            repairedReadmeHashes: { '.agents/skills': 'repaired-readme' },
+          },
+        },
+      ],
+      [],
+    );
+
+    expect(entries.get('.agents/skills/broken/SKILL.md')).toBe('repaired');
+    expect(entries.get('.agents/skills/broken/sub-skills/fresh.md')).toBe('repaired-sub');
+    expect(entries.get('.agents/skills/README.md')).toBe('repaired-readme');
+    // The slug the repair replaced is retired outright — claim and hash together, which is what
+    // one structure buys over a record beside it.
+    expect(entries.has('.agents/skills/broken/sub-skills/old.md')).toBe(false);
+  });
+
   /** 09_5b's REAL shape: repaired skill ids in the apply output, target dirs in the detect
    *  payload. It records no sub-skill slugs. */
   const skillRepair = (repaired: string[], repairedSubSkillSlugs?: Record<string, string[]>) => ({
@@ -858,6 +958,82 @@ describe('resetOnboardingArtifacts', () => {
     // Ours still goes; the directory stays because it is not empty of the user's.
     expect(removed).toContain('.codex/agents/code-reviewer.toml');
     expect(await exists(root, '.codex/agents')).toBe(true);
+  });
+
+  it('moves aside a generated SKILL.md the user edited, and says it was edited', async () => {
+    // The gap this closes. A generated skill claimed by path alone was DELETED however it had
+    // been changed; with the bytes recorded, an edited one survives and the reset says why.
+    const root = await repo('reset-skill-edited-');
+    await installArtifacts(root);
+    await mkdir(path.join(root, '.agents/skills/repo-conventions/sub-skills'), { recursive: true });
+    await writeFile(
+      path.join(root, '.agents/skills/repo-conventions/SKILL.md'),
+      'MINE NOW\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(root, '.agents/skills/repo-conventions/sub-skills/naming.md'),
+      'ours\n',
+      'utf8',
+    );
+
+    const base = provenance();
+    const { removed, quarantined } = await resetOnboardingArtifacts(root, {
+      ...base,
+      haiveEntries: new Map<string, string | null>([
+        ...base.haiveEntries,
+        ['.agents/skills/repo-conventions', null],
+        // What 09_5 wrote, which is NOT what is on disk.
+        ['.agents/skills/repo-conventions/SKILL.md', sha256Hex(normalizeContent('ours\n'))],
+        ['.agents/skills/repo-conventions/sub-skills', null],
+        [
+          '.agents/skills/repo-conventions/sub-skills/naming.md',
+          sha256Hex(normalizeContent('ours\n')),
+        ],
+      ]),
+    });
+
+    expect(removed).not.toContain('.agents/skills/repo-conventions/SKILL.md');
+    expect(quarantined).toContainEqual({
+      from: '.agents/skills/repo-conventions/SKILL.md',
+      to: '.agents/skills-legacy/repo-conventions/SKILL.md',
+      reason: 'edited',
+    });
+    expect(
+      await readFile(path.join(root, '.agents/skills-legacy/repo-conventions/SKILL.md'), 'utf8'),
+    ).toBe('MINE NOW\n');
+  });
+
+  it('still removes a generated skill whose bytes are untouched', async () => {
+    // The half that must not regress: a gate that keeps everything is no better than one that
+    // deletes everything.
+    const root = await repo('reset-skill-intact-');
+    await installArtifacts(root);
+    await mkdir(path.join(root, '.agents/skills/repo-conventions/sub-skills'), { recursive: true });
+    await writeFile(path.join(root, '.agents/skills/repo-conventions/SKILL.md'), 'ours\n', 'utf8');
+    await writeFile(
+      path.join(root, '.agents/skills/repo-conventions/sub-skills/naming.md'),
+      'ours\n',
+      'utf8',
+    );
+
+    const base = provenance();
+    const ours = sha256Hex(normalizeContent('ours\n'));
+    const { quarantined } = await resetOnboardingArtifacts(root, {
+      ...base,
+      haiveEntries: new Map<string, string | null>([
+        ...base.haiveEntries,
+        ['.agents/skills/repo-conventions', null],
+        ['.agents/skills/repo-conventions/SKILL.md', ours],
+        ['.agents/skills/repo-conventions/sub-skills', null],
+        ['.agents/skills/repo-conventions/sub-skills/naming.md', ours],
+      ]),
+    });
+
+    expect(await exists(root, '.agents/skills')).toBe(false);
+    expect(quarantined).not.toContainEqual(
+      expect.objectContaining({ from: '.agents/skills/repo-conventions/SKILL.md' }),
+    );
   });
 
   it('moves a file a person left inside a generated skill directory', async () => {
