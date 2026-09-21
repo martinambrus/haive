@@ -1486,9 +1486,19 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // capped skill twice. `droppedForSubSkills` has no such overlap; it is built from its own
     // list and those candidates never reach the rejected branch.
     const droppedCount = droppedForSubSkills.length + rejectedIds.length;
+    // "Wrote", not "Generated", and the split named whenever bundles contributed: iteration 0
+    // prepends the repository's own `bundleSkills` to `toWrite`, so `written` holds imported
+    // skills as well as model-made ones and calling the total "generated" credits the model with
+    // the user's own library. `llmSkillCount` is the generated subset, cumulative and excluding
+    // bundles. The parenthetical is omitted when nothing was imported, so the ordinary run reads
+    // as plainly as it did.
+    const importedCount = Math.max(0, written.length - llmSkillCount);
+    const composition =
+      importedCount > 0 ? ` (${llmSkillCount} generated, ${importedCount} imported)` : '';
     const summary =
-      `Generated ${written.length} skill(s) with ${totalSubSkills} sub-skill(s), mirrored into ` +
-      `${targetDirs.length} CLI skills ${targetDirs.length === 1 ? 'directory' : 'directories'}.` +
+      `Wrote ${written.length} skill(s)${composition} with ${totalSubSkills} sub-skill(s), ` +
+      `mirrored into ${targetDirs.length} CLI skills ` +
+      `${targetDirs.length === 1 ? 'directory' : 'directories'}.` +
       (droppedCount > 0 ? ` ${droppedCount} candidate(s) were dropped.` : '');
 
     return {

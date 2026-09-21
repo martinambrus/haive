@@ -157,6 +157,31 @@ describe('skillGenerationStep.apply — recorded content hashes', () => {
     expect(out.summary).toContain(`${DIRS.length} CLI skills directories`);
   });
 
+  it('does not credit the model with skills the repository imported', async () => {
+    // Iteration 0 prepends the repo's own `bundleSkills` to what gets written, so the cumulative
+    // total holds imported skills too. Calling that "generated" hands the model credit for the
+    // user's own library — and this text is copied to the task ledger, so it outlives the panel.
+    const out = (await skillGenerationStep.apply(ctxFor(), {
+      detected: { ...detected, bundleSkills: [skill('imported-a'), skill('imported-b')] },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+      isFinalLlmAttempt: true,
+      llmOutput: { skills: [skill('made-here')] },
+    } as unknown as Parameters<typeof skillGenerationStep.apply>[1])) as GenOut;
+
+    expect(out.written).toHaveLength(3);
+    expect(out.summary).toContain('Wrote 3 skill(s) (1 generated, 2 imported)');
+  });
+
+  it('says nothing about composition when nothing was imported', async () => {
+    // The ordinary run has to read as plainly as it did before the split existed.
+    const out = await callApply({ llmOutput: { skills: [skill('conventions')] } });
+
+    expect(out.summary).toContain('Wrote 1 skill(s) with');
+    expect(out.summary).not.toContain('imported');
+  });
+
   it('counts a capped candidate ONCE in the dropped clause', async () => {
     // An over-cap candidate increments `droppedFromCap` AND is pushed to `rejectedIds`, so a
     // recap that sums both reports every capped skill twice. A number in this panel is read as
