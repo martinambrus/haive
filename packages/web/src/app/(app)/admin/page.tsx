@@ -181,6 +181,8 @@ function AdminPageInner() {
   const [codexAppServerEnabled, setCodexAppServerEnabled] = useState<boolean | null>(null);
   const [codexAppServerFailures, setCodexAppServerFailures] = useState<CodexAppServerFailure[]>([]);
   const [savingCodexAppServer, setSavingCodexAppServer] = useState(false);
+  const [agentIsolationEnabled, setAgentIsolationEnabled] = useState<boolean | null>(null);
+  const [savingAgentIsolation, setSavingAgentIsolation] = useState(false);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState<boolean | null>(null);
   const [savingPrWorkflow, setSavingPrWorkflow] = useState(false);
   const [ragEmbedding, setRagEmbedding] = useState<RagEmbeddingSettings | null>(null);
@@ -287,6 +289,7 @@ function AdminPageInner() {
         concurrencyData,
         steeringData,
         codexAppServerData,
+        agentIsolationData,
         softTimeoutData,
         timeoutLadderData,
         ideData,
@@ -324,6 +327,7 @@ function AdminPageInner() {
         api.get<{ enabled: boolean; recentFailures: CodexAppServerFailure[] }>(
           '/admin/config/codex-app-server',
         ),
+        api.get<{ enabled: boolean }>('/admin/config/agent-isolation'),
         api.get<{ enabled: boolean; percent: number }>('/admin/config/cli-soft-timeout'),
         api.get<{ baseMinutes: number; ladder: string; rungs: number[] }>(
           '/admin/config/cli-timeout-ladder',
@@ -365,6 +369,7 @@ function AdminPageInner() {
       setSteeringEnabled(steeringData.enabled);
       setCodexAppServerEnabled(codexAppServerData.enabled);
       setCodexAppServerFailures(codexAppServerData.recentFailures);
+      setAgentIsolationEnabled(agentIsolationData.enabled);
       setPrWorkflowEnabled(prWorkflowData.enabled);
       setSoftTimeoutEnabled(softTimeoutData.enabled);
       setSoftTimeoutPercentInput(String(softTimeoutData.percent));
@@ -656,6 +661,21 @@ function AdminPageInner() {
       setError((err as Error).message ?? 'Failed to update codex app-server steering');
     } finally {
       setSavingCodexAppServer(false);
+    }
+  }
+
+  async function setAgentIsolation(next: boolean) {
+    setSavingAgentIsolation(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/agent-isolation', {
+        enabled: next,
+      });
+      setAgentIsolationEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update agent isolation');
+    } finally {
+      setSavingAgentIsolation(false);
     }
   }
 
@@ -1698,6 +1718,35 @@ function AdminPageInner() {
               </ul>
             )}
           </div>
+        </Card>
+      )}
+
+      {tab === 'execution' && agentIsolationEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Per-call agent isolation</CardTitle>
+            <CardDescription>
+              Hides the repository&apos;s agent definitions from a call that has no use for them,
+              and pastes the one persona it does need straight into its prompt instead. Every CLI
+              lists that directory on every call — names and descriptions — so for a reviewer or a
+              miner it is context nobody asked for. A call is left alone whenever it could still
+              need the files: if it writes to the project, may spawn native sub-agents, mentions an
+              agent path itself, or the repository&apos;s own instruction file points at one. Turn
+              this off to give every new call the whole directory back. Takes effect within ~30s; a
+              run already queued keeps the decision it was dispatched with.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={agentIsolationEnabled}
+              disabled={savingAgentIsolation}
+              onChange={(e) => void setAgentIsolation(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {agentIsolationEnabled ? 'Enabled' : 'Disabled'}
+            {savingAgentIsolation && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
         </Card>
       )}
 
