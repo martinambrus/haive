@@ -174,6 +174,26 @@ describe('skillGenerationStep.apply — recorded content hashes', () => {
     expect(out.summary).toContain('Wrote 3 skill(s) (1 generated, 2 imported)');
   });
 
+  it('counts two bundle items declaring ONE id as one skill', async () => {
+    // `loadBundleSkills` does not deduplicate and the database only enforces uniqueness per
+    // (bundle, source path), so two items can declare the same skill id. They write the same
+    // directory twice and both land in `written` — the raw length then claims two skills where
+    // one exists on disk.
+    const out = (await skillGenerationStep.apply(ctxFor(), {
+      detected: { ...detected, bundleSkills: [skill('shared'), skill('shared')] },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+      isFinalLlmAttempt: true,
+      llmOutput: { skills: [] },
+    } as unknown as Parameters<typeof skillGenerationStep.apply>[1])) as GenOut;
+
+    // The raw array still holds both — this asserts the RECAP is right, not that the duplicate
+    // was removed, which is a wider change than a recap should make.
+    expect(out.written.length).toBeGreaterThan(1);
+    expect(out.summary).toContain('Wrote 1 skill(s) (0 generated, 1 imported)');
+  });
+
   it('says nothing about composition when nothing was imported', async () => {
     // The ordinary run has to read as plainly as it did before the split existed.
     const out = await callApply({ llmOutput: { skills: [skill('conventions')] } });

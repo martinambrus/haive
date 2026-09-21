@@ -1492,11 +1492,18 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // the user's own library. `llmSkillCount` is the generated subset, cumulative and excluding
     // bundles. The parenthetical is omitted when nothing was imported, so the ordinary run reads
     // as plainly as it did.
-    const importedCount = Math.max(0, written.length - llmSkillCount);
+    // UNIQUE ids, not `written.length`: `loadBundleSkills` does not deduplicate, and the database
+    // only enforces uniqueness per (bundle, source path) — so two bundle items declaring the same
+    // skill id both land in `written` while writing the same directory twice, and the raw length
+    // then reports two skills where one exists. `llmSkillCount` needs no such treatment: `seenIds`
+    // is seeded with the bundle ids and every accepted id is added to it, so an LLM skill can
+    // neither repeat itself nor collide with a bundle.
+    const writtenCount = new Set(written.map((w) => w.id)).size;
+    const importedCount = Math.max(0, writtenCount - llmSkillCount);
     const composition =
       importedCount > 0 ? ` (${llmSkillCount} generated, ${importedCount} imported)` : '';
     const summary =
-      `Wrote ${written.length} skill(s)${composition} with ${totalSubSkills} sub-skill(s), ` +
+      `Wrote ${writtenCount} skill(s)${composition} with ${totalSubSkills} sub-skill(s), ` +
       `mirrored into ${targetDirs.length} CLI skills ` +
       `${targetDirs.length === 1 ? 'directory' : 'directories'}.` +
       (droppedCount > 0 ? ` ${droppedCount} candidate(s) were dropped.` : '');
