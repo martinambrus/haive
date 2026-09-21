@@ -96,11 +96,32 @@ describe('generateFilesStep.apply — recorded write hashes', () => {
     });
 
     // Derived from the FILE, not from the value 07 passed itself: the reset compares against
-    // disk, so a hash taken over anything else is one that can never match. This is also what
-    // pins the normalisation — the two sides agreeing is the whole mechanism.
+    // disk, so a hash taken over anything else is one that can never match.
     const onDisk = await readFile(path.join(repo, CONFIG), 'utf8');
     expect(out.wroteFiles).toContain(CONFIG);
     expect(out.wroteFileHashes?.[CONFIG]).toBe(sha256Hex(normalizeContent(onDisk)));
+  });
+
+  it('records the NORMALISED hash, for content that is not already normal', async () => {
+    // Deliberately a file whose bytes are not normalise-stable. Most of what 07 writes happens
+    // to be — `workflowConfigJson` is `JSON.stringify` plus a newline — so a test using one of
+    // those passes whether or not `normalizeContent` is applied at all, and pins nothing. This
+    // one has trailing spaces and a blank-line run, which is what the two sides must agree to
+    // ignore: `artifactMatchesDisk` normalises before comparing, so a raw digest here would
+    // read every such file as edited the moment the reset looked at it.
+    const rel = '.claude/mcp_settings.json';
+    const raw = '{"servers":{}}   \n\n\n';
+    const out = await generateFilesStep.apply(ctx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected: { ...detect(), mcpSettingsJson: raw },
+      formValues: {},
+    });
+
+    const onDisk = await readFile(path.join(repo, rel), 'utf8');
+    expect(normalizeContent(onDisk)).not.toBe(onDisk);
+    expect(out.wroteFileHashes?.[rel]).toBe(sha256Hex(normalizeContent(onDisk)));
+    expect(out.wroteFileHashes?.[rel]).not.toBe(sha256Hex(onDisk));
   });
 
   it('records NOTHING for a file it skipped', async () => {
