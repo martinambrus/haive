@@ -31,6 +31,7 @@ import {
 } from './steps/onboarding/07-generate-files.js';
 import {
   skillToMarkdown,
+  sanitizeSubSkills,
   subSkillToMarkdown,
   type SkillEntry,
 } from './steps/onboarding/09_5-skill-generation.js';
@@ -416,7 +417,20 @@ export function expandCustomBundlesFor(
       // skill
       if (skillTargets.length === 0) continue;
       const skillContent = skillToMarkdown(item.spec);
-      const subRenderings = (item.spec.subSkills ?? []).map((sub) => ({
+      // `sanitizeSubSkills`, not the raw list, because every actual WRITER uses it (09_5, 09_5b,
+      // 11d, and `skillToMarkdown` itself) and a rendering is what becomes an
+      // `onboarding_artifacts` row. `skillSubSkillSchema` types `summary` and `body` as bare
+      // `z.string()`, so a sub-skill file that is frontmatter-only parses, persists, and is then
+      // dropped at write time — leaving a row for a path onboarding never wrote, and an UPGRADE
+      // that writes the file onboarding refused. One bundle, two different trees depending on
+      // which path installed it.
+      //
+      // Deliberately NOT fixed by adding `.min(1)` to the schema: a parse failure drops the whole
+      // skill entry (`bundle-parser/index.ts`), so one frontmatter-only sub-skill file would cost
+      // the user its entire parent skill, where today it costs only that sub-skill. Nothing else
+      // about this call changes a path — `bundleIdSchema` already enforces exactly the slug shape
+      // the sanitizer normalises to, and basenames within one `sub-skills/` dir are unique.
+      const subRenderings = sanitizeSubSkills(item.spec).map((sub) => ({
         slug: sub.slug,
         content: subSkillToMarkdown(item.spec.id, sub),
       }));

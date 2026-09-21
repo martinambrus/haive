@@ -113,6 +113,52 @@ describe('expandCustomBundlesFor', () => {
     }
   });
 
+  it('emits NO rendering for a sub-skill nothing will write', () => {
+    // A `sub-skills/<slug>.md` that is frontmatter-only decodes to an empty `body`, and
+    // `skillSubSkillSchema` types it as a bare `z.string()`, so it parses and persists — then
+    // every WRITER drops it through `sanitizeSubSkills`. A rendering becomes an
+    // `onboarding_artifacts` row, so emitting one here left a row for a path onboarding never
+    // wrote, and an UPGRADE that writes the file onboarding refused: one bundle, two different
+    // trees depending on which path installed it.
+    const withEmptyBody: SkillEntry = {
+      ...skillSpec,
+      subSkills: [
+        ...(skillSpec.subSkills ?? []),
+        {
+          slug: 'hollow',
+          name: 'styling-hollow',
+          title: 'Hollow',
+          description: 'has no body',
+          summary: 'hollow',
+          body: '   ',
+        },
+      ],
+    };
+    const bundles: BundleForExpansion[] = [
+      {
+        id: 'b1',
+        items: [
+          {
+            id: 'item-s',
+            kind: 'skill',
+            schemaVersion: 2,
+            contentHash: 'skill-hash',
+            spec: withEmptyBody,
+          },
+        ],
+      },
+    ];
+
+    const expanded = expandCustomBundlesFor(bundles, [], ['.claude/skills']);
+    const paths = expanded.map((e) => e.diskPath).sort();
+
+    // The valid sibling still renders; only the hollow one is gone.
+    expect(paths).toEqual([
+      '.claude/skills/styling/SKILL.md',
+      '.claude/skills/styling/sub-skills/colors.md',
+    ]);
+  });
+
   it('returns empty when there are no targets for the item kind', () => {
     const bundles: BundleForExpansion[] = [
       {
