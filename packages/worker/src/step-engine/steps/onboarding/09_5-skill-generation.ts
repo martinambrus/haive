@@ -51,6 +51,9 @@ interface SkillGenDetect {
 }
 
 interface SkillGenApply {
+  /** Lifted verbatim into the step's "What the agent did" panel by `resolveCuratedSummary`, so
+   *  this recap costs no CLI call. */
+  summary: string;
   written: {
     id: string;
     /** Carried so the README index can be rebuilt from the cumulative set on
@@ -1263,7 +1266,18 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         ? detected.skillTargetDirs
         : [DEFAULT_PROJECT_SKILLS_DIR];
 
-    const bundleSkills = detected.bundleSkills ?? [];
+    // Deduped by id, keeping the LAST occurrence. `loadBundleSkills` does not deduplicate and
+    // `custom_bundle_items` enforces uniqueness only per (bundle, source path), so two items can
+    // declare one skill id. Both used to be written — the second overwriting the first — and both
+    // landed in `written`, so every count derived from it was wrong: the skill total, the
+    // sub-skill total, the log line, and the README index, which showed the skill as a repeated
+    // row. Fixing them one at a time is what this replaced; this is the one place that makes a
+    // duplicate impossible for all of them.
+    //
+    // LAST, not first, is what keeps it behaviour-preserving on disk: the later write is the one
+    // whose bytes survived the overwrite, so the tree is byte-identical and the index now names
+    // the entry that is actually there.
+    const bundleSkills = [...new Map((detected.bundleSkills ?? []).map((s) => [s.id, s])).values()];
     const plan = computeDomainPlan(detected, maxSkills);
 
     // Prior cumulative state — each loop pass extends the previous one so the
@@ -1470,7 +1484,41 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       'skill-generation loop pass written',
     );
 
+    // Lifted verbatim into the step's "What the agent did" panel by `resolveCuratedSummary`, so
+    // this recap costs no CLI call — the runner skips `maybeEnqueueStepSummary` entirely once a
+    // step emits one. Computed from the CUMULATIVE output, which is what makes it correct on a
+    // loop step: the runner returns before the curated-summary block on any pass that requested
+    // continuation, so only the final pass ever writes `task_steps.summary`.
+    //
+    // The caveat channel is separate and deliberately NOT repeated here: `degradedNote` is its
+    // own column, written beside `summary` on the same finalize.
+    // `droppedFromCap` is deliberately NOT added: an over-cap candidate increments it AND is
+    // pushed to `rejectedThisPass`, which `rejectedIds` carries — so summing both counts every
+    // capped skill twice. `droppedForSubSkills` has no such overlap; it is built from its own
+    // list and those candidates never reach the rejected branch.
+    const droppedCount = droppedForSubSkills.length + rejectedIds.length;
+    // "Wrote", not "Generated", and the split named whenever bundles contributed: iteration 0
+    // prepends the repository's own `bundleSkills` to `toWrite`, so `written` holds imported
+    // skills as well as model-made ones and calling the total "generated" credits the model with
+    // the user's own library. `llmSkillCount` is the generated subset, cumulative and excluding
+    // bundles. The parenthetical is omitted when nothing was imported, so the ordinary run reads
+    // as plainly as it did.
+    // Plain `written.length`, deliberately, now that `bundleSkills` is deduped at the top: a
+    // second guard here would keep this number right while the README index and the sub-skill
+    // total went wrong, which hides a broken dedupe behind the most visible surface. One
+    // structural fix, and the duplicate-id case asserts all of these together.
+    const writtenCount = written.length;
+    const importedCount = Math.max(0, writtenCount - llmSkillCount);
+    const composition =
+      importedCount > 0 ? ` (${llmSkillCount} generated, ${importedCount} imported)` : '';
+    const summary =
+      `Wrote ${writtenCount} skill(s)${composition} with ${totalSubSkills} sub-skill(s), ` +
+      `mirrored into ${targetDirs.length} CLI skills ` +
+      `${targetDirs.length === 1 ? 'directory' : 'directories'}.` +
+      (droppedCount > 0 ? ` ${droppedCount} candidate(s) were dropped.` : '');
+
     return {
+      summary,
       totalSubSkills,
       droppedFromCap,
       rejectedIds,
@@ -1482,10 +1530,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       llmSkillCount,
       consecutiveEmpty,
       ...(degradedNote ? { degradedNote } : {}),
-      // `written` and the hash tables come LAST because the step summariser is handed
-      // `JSON.stringify(output).slice(0, 4000)`, and at roughly 700 bytes per skill `written`
-      // alone fills that on any real run — declared first, as it was, it left the recap nothing
-      // but a truncated list of the first few skills and none of the counters above.
+      // `written` and the hash tables still come LAST, though the pressure that put them there is
+      // gone: with a curated `summary` above, `maybeEnqueueStepSummary` never runs for this step
+      // and nothing slices this object to 4,000 characters any more. Left in place because the
+      // order costs nothing and the day someone removes the summary it matters again.
       written,
       ...(Object.keys(skillHashes).length > 0 ? { skillHashes } : {}),
       ...(Object.keys(skillSubSkillHashes).length > 0 ? { skillSubSkillHashes } : {}),

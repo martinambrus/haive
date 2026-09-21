@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { logger, normalizeContent, sha256Hex } from '@haive/shared';
 import { skillGenerationStep } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
+import { resolveCuratedSummary } from '../src/step-engine/_step-summary.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
 /**
@@ -73,7 +74,9 @@ function skill(id: string, rough = false) {
 }
 
 type GenOut = {
+  summary: string;
   written: { id: string }[];
+  totalSubSkills: number;
   skillHashes?: Record<string, string>;
   skillSubSkillHashes?: Record<string, Record<string, string>>;
   skillReadmeHashes?: Record<string, string>;
@@ -137,6 +140,89 @@ describe('skillGenerationStep.apply — recorded content hashes', () => {
     }
     // Different directories genuinely produce different bytes, which is why one hash will not do.
     expect(out.skillReadmeHashes?.[DIRS[0]!]).not.toBe(out.skillReadmeHashes?.[DIRS[1]!]);
+  });
+
+  it('emits a curated summary whose counts are the ones it actually wrote', async () => {
+    // Driven through the REAL apply, because the api-side test that asserts the curated path
+    // picks a `summary` up feeds a synthetic object — it would stay green if this step stopped
+    // emitting one, which is the same hole the hash tests above exist to close.
+    const out = await callApply({
+      llmOutput: { skills: [skill('conventions'), skill('naming')] },
+    });
+
+    expect(resolveCuratedSummary(out)).toBe(out.summary);
+    expect(out.summary).toContain(`${out.written.length} skill(s)`);
+    expect(out.summary).toContain(`${out.totalSubSkills} sub-skill(s)`);
+    // Two mirrors in this fixture, so the plural branch is the one exercised.
+    expect(out.summary).toContain(`${DIRS.length} CLI skills directories`);
+  });
+
+  it('does not credit the model with skills the repository imported', async () => {
+    // Iteration 0 prepends the repo's own `bundleSkills` to what gets written, so the cumulative
+    // total holds imported skills too. Calling that "generated" hands the model credit for the
+    // user's own library — and this text is copied to the task ledger, so it outlives the panel.
+    const out = (await skillGenerationStep.apply(ctxFor(), {
+      detected: { ...detected, bundleSkills: [skill('imported-a'), skill('imported-b')] },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+      isFinalLlmAttempt: true,
+      llmOutput: { skills: [skill('made-here')] },
+    } as unknown as Parameters<typeof skillGenerationStep.apply>[1])) as GenOut;
+
+    expect(out.written).toHaveLength(3);
+    expect(out.summary).toContain('Wrote 3 skill(s) (1 generated, 2 imported)');
+  });
+
+  it('counts two bundle items declaring ONE id as one skill', async () => {
+    // `loadBundleSkills` does not deduplicate and the database only enforces uniqueness per
+    // (bundle, source path), so two items can declare the same skill id. They write the same
+    // directory twice and both land in `written` — the raw length then claims two skills where
+    // one exists on disk.
+    const out = (await skillGenerationStep.apply(ctxFor(), {
+      detected: { ...detected, bundleSkills: [skill('shared'), skill('shared')] },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+      isFinalLlmAttempt: true,
+      llmOutput: { skills: [] },
+    } as unknown as Parameters<typeof skillGenerationStep.apply>[1])) as GenOut;
+
+    // Deduped at the source, so EVERY count derived from `written` is right together — the skill
+    // total, the sub-skill total, and the README index, which used to show the skill twice. A
+    // guard on the recap alone would have kept this line correct while the index stayed wrong.
+    expect(out.written).toHaveLength(1);
+    expect(out.totalSubSkills).toBe(1);
+    expect(out.summary).toContain('Wrote 1 skill(s) (0 generated, 1 imported)');
+    expect(out.summary).toContain('1 sub-skill(s)');
+
+    // And the index carries ONE row for it. Counted on the row's own link pattern rather than on
+    // the bare id, which the row template names twice and the layout block names again — a count
+    // of the id would have had to expect 3 and would have passed for the wrong reason.
+    const readme = await readFile(path.join(repoRoot, ...DIRS[0]!.split('/'), 'README.md'), 'utf8');
+    expect(readme.split('](./shared/SKILL.md)').length - 1).toBe(1);
+  });
+
+  it('says nothing about composition when nothing was imported', async () => {
+    // The ordinary run has to read as plainly as it did before the split existed.
+    const out = await callApply({ llmOutput: { skills: [skill('conventions')] } });
+
+    expect(out.summary).toContain('Wrote 1 skill(s) with');
+    expect(out.summary).not.toContain('imported');
+  });
+
+  it('counts a capped candidate ONCE in the dropped clause', async () => {
+    // An over-cap candidate increments `droppedFromCap` AND is pushed to `rejectedIds`, so a
+    // recap that sums both reports every capped skill twice. A number in this panel is read as
+    // fact, which makes a wrong one worse than none at all.
+    const out = await callApply({
+      llmOutput: { skills: [skill('first'), skill('second')] },
+      formValues: { maxSkills: 1 },
+    });
+
+    expect(out.written).toHaveLength(1);
+    // One candidate over the cap: the clause says 1, not 2.
+    expect(out.summary).toContain('1 candidate(s) were dropped');
   });
 
   it('carries a prior pass’s hashes forward, as it carries the skills themselves', async () => {
