@@ -97,6 +97,19 @@ export interface LlmInvocationSpec {
    *  resolves them, and the endpoint answers
    *  `400 Deferred tools require tools.tool_search`. */
   toolProfile?: 'rag_only' | 'none';
+  /** Opt this step's invocations OUT of per-call agent isolation.
+   *
+   *  `'*'` means "this dispatch needs the whole agent pool visible", so the exec-side mask is not
+   *  applied and no persona body is pasted. The only value PR 1 needs; pools naming specific
+   *  agents are out of scope. Read by `agentIsolationApplies` via `DispatchRequest.agentPool`,
+   *  passed by `resolveLlmPhase`.
+   *
+   *  A step needs this only when hiding the definitions would shrink what it is FOR — the worked
+   *  example is `07_7-secret-sweep`, which sweeps committed secrets across the whole tree and would
+   *  otherwise silently stop covering ~45 committed agent files. A step that merely reads them is
+   *  already handled: the prompt path scan leaves any invocation whose prompt names an agent
+   *  directory unisolated, with nothing to declare. */
+  agentPool?: '*';
   /** Test-only synthetic LLM output used when HAIVE_TEST_BYPASS_LLM=1.
    *  Steps whose apply() throws on null llmOutput must define this so smoke
    *  tests can exercise the full pipeline without a real CLI provider. */

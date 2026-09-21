@@ -125,6 +125,51 @@ export function invocationRepoSubpath(args: {
   return base;
 }
 
+/** The worker-side path of the tree ONE invocation will mount, resolved from the task.
+ *
+ *  `ctx.repoPath` is always the repository ROOT, while cli-exec mounts the invocation's worktree,
+ *  so a dispatch-side reader that wants the bytes the agent will see has to resolve the same tree
+ *  the mount will bind. Composes the two functions beside it rather than re-deriving either.
+ *
+ *  Null when the task has no repository (nothing is mounted) or its repository row is gone. For a
+ *  read-only local-path repository `invocationRepoSubpath` declines and the answer is the
+ *  `/host-fs` view of the repo root — which is exactly what that mount binds.
+ *
+ *  Async and DB-backed, so it is called only where a verdict needs the real tree: the
+ *  project-instruction scan and the persona reader. */
+export async function resolveInvocationWorkerTree(
+  db: Database,
+  taskId: string,
+  worktreeRel?: string,
+): Promise<string | null> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { userId: true, repositoryId: true, worktreeBranch: true },
+  });
+  if (!task?.repositoryId) return null;
+
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, task.repositoryId),
+    columns: { storagePath: true, localPath: true },
+  });
+  if (!repo) return null;
+
+  const storagePath = repo.storagePath ?? repo.localPath;
+  const subpath = invocationRepoSubpath({
+    storagePath,
+    userId: task.userId,
+    repositoryId: task.repositoryId,
+    worktreeBranch: task.worktreeBranch,
+    worktreeRel,
+  });
+  return resolveInvocationWorkerRoot({
+    repoMountSubpath: subpath,
+    storagePath,
+    userId: task.userId,
+    repositoryId: task.repositoryId,
+  });
+}
+
 /** The worker's own filesystem path for the tree an invocation actually mounts.
  *
  *  Mirrors resolveTaskRepoMount: a volume mount carries a subpath (the worktree this invocation

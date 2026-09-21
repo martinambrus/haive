@@ -51,6 +51,76 @@ const AXES: RetrievalAxes[] = [
   { supportsLsp: false, ragWired: false },
 ];
 
+describe('adaptPromptForCliCapabilities under isolation', () => {
+  const CAPABLE = {
+    supportsLsp: true,
+    ragWired: true,
+    projectAgentsDir: '.claude/agents',
+    agentFileFormat: 'markdown' as const,
+  };
+  const marked = (id: string): string =>
+    agentDefinitionGuidance(id, `Follow .claude/agents/${id}.md if it exists.`);
+
+  it('pastes the body behind the label, and drops the pointer path', () => {
+    const out = adaptPromptForCliCapabilities(marked('peer-reviewer'), {
+      ...CAPABLE,
+      isolated: true,
+      agentBodies: { 'peer-reviewer': '# Peer reviewer\n\nScore every dimension.' },
+    });
+    expect(out).toContain('[[HAIVE_PASTED_PERSONA:peer-reviewer]]');
+    expect(out).toContain('Score every dimension.');
+    expect(out).toContain('takes precedence over the embedded protocol');
+    // The file will be masked, so the prompt must not send the agent at it.
+    expect(out).not.toContain('.claude/agents/peer-reviewer.md');
+  });
+
+  it('falls back to the embedded protocol when no body was read', () => {
+    // The COMMON case for two ids with no onboarding template: simplicity-reviewer, knowledge-curator.
+    const out = adaptPromptForCliCapabilities(marked('simplicity-reviewer'), {
+      ...CAPABLE,
+      isolated: true,
+      agentBodies: {},
+    });
+    expect(out).toBe('Follow the embedded protocol below.');
+  });
+
+  it('carries a body containing $& verbatim', () => {
+    // The reason the isolated arm builds its string instead of calling `guidance.replace(ptr, body)`:
+    // a `$&` in a replacement STRING expands to the matched text, putting the pointer path — and the
+    // marker around it — back into a prompt the path scan already cleared.
+    const body = "Never write $& or $` or $' in a report.";
+    const out = adaptPromptForCliCapabilities(marked('peer-reviewer'), {
+      ...CAPABLE,
+      isolated: true,
+      agentBodies: { 'peer-reviewer': body },
+    });
+    expect(out).toContain(body);
+    expect(out).not.toContain('.claude/agents/peer-reviewer.md');
+    expect(out).not.toContain('HAIVE_AGENT_DEFINITION');
+  });
+
+  it('leaves the pointer arm exactly as it is when isolation is off', () => {
+    const prompt = marked('peer-reviewer');
+    const off = adaptPromptForCliCapabilities(prompt, CAPABLE);
+    const explicit = adaptPromptForCliCapabilities(prompt, { ...CAPABLE, isolated: false });
+    expect(off).toContain('.claude/agents/peer-reviewer.md');
+    expect(off).not.toContain('HAIVE_PASTED_PERSONA');
+    expect(explicit).toBe(off);
+  });
+
+  it('ignores bodies on a provider that does not pass the pointer gate', () => {
+    // Outside the four-condition gate the prompt is unchanged today, so isolation pastes nothing
+    // there either — the fallback line is what such a provider already got.
+    const out = adaptPromptForCliCapabilities(marked('peer-reviewer'), {
+      ...CAPABLE,
+      supportsLsp: false,
+      isolated: true,
+      agentBodies: { 'peer-reviewer': 'a body' },
+    });
+    expect(out).toBe('Follow the embedded protocol below.');
+  });
+});
+
 describe('buildRetrievalGuidance', () => {
   // Six splice sites join with `.filter(Boolean)` and nine without. An empty element would
   // therefore render the "same" block two different ways, and the dispatch-time replaceAll
