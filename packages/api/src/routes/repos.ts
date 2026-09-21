@@ -1178,11 +1178,16 @@ export function collectWrittenCliContent(
   /** From `resolveMergedTasks`: task id -> when its worktree reached the root, for the tasks
    *  that reached it after the reset. */
   mergedTasks: ReadonlyMap<string, Date> = new Map(),
-): { dirs: Set<string>; entries: Set<string> } {
+): { dirs: Set<string>; entries: Map<string, string | null> } {
   const catalog = inventoryDirsFromCatalog();
   const byDir = new Map(catalog.map((entry) => [entry.dir, entry]));
   const dirs = new Set<string>();
-  const entries = new Set<string>();
+  /** Claimed entry -> the `normalizeContent`-hash of what Haive wrote there, or null for a claim
+   *  with no hash behind it (a directory, a generator that records none, an output written before
+   *  hashes existed). ONE structure rather than a parallel map, because these claims are RETIRED
+   *  in four places below and a second record of the same fact would desync the first time one of
+   *  those deletes was touched. */
+  const entries = new Map<string, string | null>();
   const claimDir = (value: unknown): string | null => {
     if (typeof value !== 'string' || !byDir.has(value)) return null;
     dirs.add(value);
@@ -1190,13 +1195,19 @@ export function collectWrittenCliContent(
   };
   /** Claim the entry of `dir` that contains `rel`, so a path deeper than one level (a skill's
    *  `<dir>/<id>/SKILL.md`) claims the directory it lives in rather than nothing. */
-  const claimPath = (value: unknown): void => {
+  const claimPath = (value: unknown, hash: string | null = null): void => {
     if (typeof value !== 'string') return;
     for (const spec of catalog) {
       if (!value.startsWith(`${spec.dir}/`)) continue;
       dirs.add(spec.dir);
       const head = value.slice(spec.dir.length + 1).split('/')[0];
-      if (head) entries.add(`${spec.dir}/${head}`);
+      if (!head) continue;
+      const entry = `${spec.dir}/${head}`;
+      // The hash belongs to `value`, so it travels only when the claimed entry IS that path. A
+      // path deeper than one level claims the DIRECTORY that contains it, and a directory has no
+      // content to hash — recording the file's digest against it would make the whole directory
+      // read as edited the moment anything inside it changed.
+      entries.set(entry, entry === value ? hash : null);
     }
     // `.claude` is Haive's own directory but not a catalog one, and its SWEEP removes only what
     // is claimed here — `workflow-config.json`, the slash commands, the Drupal LSP files. What
@@ -1205,7 +1216,7 @@ export function collectWrittenCliContent(
     // The WHOLE path, never its head segment: `.claude/plugins/drupal-php-lsp/<file>` collapsed
     // to `.claude/plugins` claims a directory that also holds plugins the user installed, and
     // the sweep then removes all of them. The sweep walks instead, on `hasDeeperClaims`.
-    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) entries.add(value);
+    if (value.startsWith(`${ONBOARDING_SWEEP_DIR}/`)) entries.set(value, hash);
   };
 
   // A worktree write takes effect when the MERGE lands, not when the step ended. Replaying an
@@ -1224,8 +1235,19 @@ export function collectWrittenCliContent(
       // covers the fallback write to `.claude/agents` when no provider has an agents dir (amp
       // alone, where `agentTargets` is empty) and the LLM-discovered custom agents, which have
       // no manifest id at all.
-      const wrote = (step.output as { wroteFiles?: unknown } | null)?.wroteFiles;
-      if (Array.isArray(wrote)) for (const rel of wrote) claimPath(rel);
+      const out = step.output as { wroteFiles?: unknown; wroteFileHashes?: unknown } | null;
+      const wrote = out?.wroteFiles;
+      // `wroteFileHashes` is OPTIONAL and is deliberately NARROWER than `wroteFiles`: the root
+      // rules files are appended to rather than rendered, so 07 records no hash for them, and an
+      // output written before the field existed records none at all. Either way the claim falls
+      // back to the path alone, which is exactly what this did before hashes existed.
+      const hashes = (out?.wroteFileHashes ?? null) as Record<string, unknown> | null;
+      if (Array.isArray(wrote)) {
+        for (const rel of wrote) {
+          const hash = typeof rel === 'string' ? hashes?.[rel] : undefined;
+          claimPath(rel, typeof hash === 'string' ? hash : null);
+        }
+      }
     } else if (step.stepId === WORKFLOW_SKILL_STEP_ID) {
       // Only for a task whose worktree was MERGED — until then these writes live in the
       // worktree and the repository root still holds what onboarding put there.
@@ -1263,7 +1285,7 @@ export function collectWrittenCliContent(
         for (const skillId of removed) {
           if (typeof skillId !== 'string') continue;
           const gone = `${dir}/${skillId}`;
-          for (const claimed of [...entries]) {
+          for (const claimed of [...entries.keys()]) {
             if (claimed === gone || claimed.startsWith(`${gone}/`)) entries.delete(claimed);
           }
         }
@@ -1276,14 +1298,14 @@ export function collectWrittenCliContent(
           if (typeof skillId !== 'string') continue;
           const skillDir = `${dir}/${skillId}`;
           // It rewrites the tree, so 09_5's slugs for that skill are stale.
-          for (const claimed of [...entries]) {
+          for (const claimed of [...entries.keys()]) {
             if (claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
           }
-          entries.add(skillDir);
-          entries.add(`${skillDir}/SKILL.md`);
+          entries.set(skillDir, null);
+          entries.set(`${skillDir}/SKILL.md`, null);
           // No slugs are recorded, so `sub-skills` stays unclaimed and is moved aside.
         }
-        entries.add(`${dir}/README.md`);
+        entries.set(`${dir}/README.md`, null);
       }
     } else if (step.stepId === SKILL_REPAIR_STEP_ID) {
       // 09_5b has its OWN shape — `repaired`, skill IDS, with the target dirs in its DETECT
@@ -1308,24 +1330,24 @@ export function collectWrittenCliContent(
         for (const skillId of repaired) {
           if (typeof skillId !== 'string') continue;
           const skillDir = `${dir}/${skillId}`;
-          for (const claimed of [...entries]) {
+          for (const claimed of [...entries.keys()]) {
             if (claimed === skillDir || claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
           }
-          entries.add(skillDir);
-          entries.add(`${skillDir}/SKILL.md`);
+          entries.set(skillDir, null);
+          entries.set(`${skillDir}/SKILL.md`, null);
           // Same rule as 09_5: `sub-skills` is claimed ONLY when the slugs in it were named, or
           // the directory reads as wholly ours and a file the user put there is deleted rather
           // than moved aside. An output written before the field existed has it quarantined.
           const slugs = repairedSlugs?.[skillId];
           if (Array.isArray(slugs) && slugs.length > 0) {
-            entries.add(`${skillDir}/sub-skills`);
+            entries.set(`${skillDir}/sub-skills`, null);
             for (const slug of slugs) {
-              if (typeof slug === 'string') entries.add(`${skillDir}/sub-skills/${slug}.md`);
+              if (typeof slug === 'string') entries.set(`${skillDir}/sub-skills/${slug}.md`, null);
             }
           }
         }
         // It rebuilds the index from the on-disk set whenever it repaired anything.
-        if (repaired.length > 0) entries.add(`${dir}/README.md`);
+        if (repaired.length > 0) entries.set(`${dir}/README.md`, null);
       }
     } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
       const written = (step.output as { written?: unknown } | null)?.written;
@@ -1349,22 +1371,23 @@ export function collectWrittenCliContent(
           // moved aside rather than deleted.
           if (typeof row.id === 'string') {
             const skillDir = `${dir}/${row.id}`;
-            entries.add(skillDir);
-            entries.add(`${skillDir}/SKILL.md`);
+            entries.set(skillDir, null);
+            entries.set(`${skillDir}/SKILL.md`, null);
             // `sub-skills` is claimed ONLY when the slugs inside it were recorded. A directory
             // claimed with nothing named inside reads as wholly ours — `hasDeeperClaims` is
             // false — so a file the user put there would be deleted rather than moved aside.
             // An output written before the slugs existed therefore has it quarantined whole.
             if (Array.isArray(row.subSkillSlugs) && row.subSkillSlugs.length > 0) {
-              entries.add(`${skillDir}/sub-skills`);
+              entries.set(`${skillDir}/sub-skills`, null);
               for (const slug of row.subSkillSlugs) {
-                if (typeof slug === 'string') entries.add(`${skillDir}/sub-skills/${slug}.md`);
+                if (typeof slug === 'string')
+                  entries.set(`${skillDir}/sub-skills/${slug}.md`, null);
               }
             }
           }
           // The index beside them is rebuilt from the cumulative set on every pass and is Haive's
           // too — unclaimed, it would be quarantined out of the directory it describes.
-          entries.add(`${dir}/README.md`);
+          entries.set(`${dir}/README.md`, null);
         }
       }
     }
@@ -1686,10 +1709,16 @@ export interface OnboardingResetProvenance {
   writtenHashes: ReadonlyMap<string, string>;
   /** Catalog agents/skills directories Haive wrote to for this repository. */
   haiveDirs: ReadonlySet<string>;
-  /** `<dir>/<name>` entries inside those directories that Haive wrote. Anything else in one is
-   *  the user's — the quarantine default is OFF (`07-generate-files.ts:762`), so their own
-   *  definitions legitimately sit beside ours. */
-  haiveEntries: ReadonlySet<string>;
+  /** `<dir>/<name>` entries inside those directories that Haive wrote, each mapped to the
+   *  `normalizeContent`-hash of the bytes it wrote there, or null where no hash was recorded — a
+   *  directory, a generator that records none, or an output written before hashes existed.
+   *  Anything else in one is the user's — the quarantine default is OFF
+   *  (`07-generate-files.ts:762`), so their own definitions legitimately sit beside ours.
+   *
+   *  A null is a claim with no evidence behind it and is honoured as one, which is what keeps
+   *  every pre-existing step output behaving exactly as it did. A hash is the evidence that a
+   *  file still holds what Haive put there — see `claimSatisfied`. */
+  haiveEntries: ReadonlyMap<string, string | null>;
 }
 
 /**
@@ -1856,7 +1885,7 @@ export async function resetOnboardingArtifacts(
    *  the matched artifact was deleted rather than moved. */
   const hasDeeperClaims = (rel: string): boolean => {
     const prefix = `${rel}/`;
-    for (const entry of haiveEntries) if (entry.startsWith(prefix)) return true;
+    for (const entry of haiveEntries.keys()) if (entry.startsWith(prefix)) return true;
     for (const diskPath of writtenHashes.keys()) if (diskPath.startsWith(prefix)) return true;
     return false;
   };

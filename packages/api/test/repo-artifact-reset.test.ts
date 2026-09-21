@@ -156,22 +156,34 @@ async function installUserOwned(root: string): Promise<void> {
 const exists = async (root: string, rel: string): Promise<boolean> =>
   (await lstatNoFollow(root, rel)) !== null;
 
+/** Paths claimed with NO hash behind them — the shape every generator but 07 records, and what
+ *  every output written before hashes existed replays to. */
+const claims = (...paths: string[]): Map<string, string | null> =>
+  new Map(paths.map((rel): [string, string | null] => [rel, null]));
+
 /** What a run that wrote to every CLI directory recorded: the dirs are Haive's, and the one
  *  agent `installArtifacts` puts in each is the file it wrote there. */
-function provenance(hashes: Array<[string, string]> = []): {
+function provenance(
+  hashes: Array<[string, string]> = [],
+  /** What the STEP recorded writing, keyed by the same path the entry uses. Absent for a path
+   *  means a claim with no hash behind it, which is every pre-existing output. */
+  stepHashes: Array<[string, string]> = [],
+): {
   writtenHashes: Map<string, string>;
   haiveDirs: Set<string>;
-  haiveEntries: Set<string>;
+  haiveEntries: Map<string, string | null>;
 } {
   const catalog = inventoryDirsFromCatalog();
+  const step = new Map(stepHashes);
+  const claimed = [
+    ...catalog.map((d) => `${d.dir}/code-reviewer.${d.ext ?? 'md'}`),
+    // 07 writes this, and the `.claude` sweep now removes only what it can claim.
+    '.claude/workflow-config.json',
+  ];
   return {
     writtenHashes: new Map(hashes),
     haiveDirs: new Set(catalog.map((d) => d.dir)),
-    haiveEntries: new Set([
-      ...catalog.map((d) => `${d.dir}/code-reviewer.${d.ext ?? 'md'}`),
-      // 07 writes this, and the `.claude` sweep now removes only what it can claim.
-      '.claude/workflow-config.json',
-    ]),
+    haiveEntries: new Map(claimed.map((rel) => [rel, step.get(rel) ?? null])),
   };
 }
 
@@ -646,11 +658,11 @@ describe('resetOnboardingArtifacts', () => {
     const claudeOnly = {
       writtenHashes: new Map<string, string>(),
       haiveDirs: new Set(['.claude/agents', '.claude/skills']),
-      haiveEntries: new Set([
+      haiveEntries: claims(
         '.claude/agents/code-reviewer.md',
         '.claude/skills/code-reviewer.md',
         '.claude/workflow-config.json',
-      ]),
+      ),
     };
 
     const { removed, skipped } = await resetOnboardingArtifacts(root, claudeOnly);
@@ -674,7 +686,7 @@ describe('resetOnboardingArtifacts', () => {
     const { removed } = await resetOnboardingArtifacts(root, {
       writtenHashes: new Map(),
       haiveDirs: new Set(['.codex/agents']),
-      haiveEntries: new Set(['.codex/agents/code-reviewer.toml']),
+      haiveEntries: claims('.codex/agents/code-reviewer.toml'),
     });
 
     expect(removed).toContain('.codex/agents');
@@ -780,14 +792,16 @@ describe('resetOnboardingArtifacts', () => {
     const base = provenance();
     const { quarantined } = await resetOnboardingArtifacts(root, {
       ...base,
-      haiveEntries: new Set([
+      haiveEntries: new Map([
         ...base.haiveEntries,
-        '.agents/skills/repo-conventions',
-        '.agents/skills/repo-conventions/SKILL.md',
-        // `sub-skills` is only ever claimed together with the slugs inside it: a directory
-        // claimed with nothing named in it is not treated as ours, so it would be moved aside.
-        '.agents/skills/repo-conventions/sub-skills',
-        '.agents/skills/repo-conventions/sub-skills/naming.md',
+        ...claims(
+          '.agents/skills/repo-conventions',
+          '.agents/skills/repo-conventions/SKILL.md',
+          // `sub-skills` is only ever claimed together with the slugs inside it: a directory
+          // claimed with nothing named in it is not treated as ours, so it would be moved aside.
+          '.agents/skills/repo-conventions/sub-skills',
+          '.agents/skills/repo-conventions/sub-skills/naming.md',
+        ),
       ]),
     });
 
@@ -865,7 +879,7 @@ describe('resetOnboardingArtifacts', () => {
     const base = provenance();
     const { removed, skipped } = await resetOnboardingArtifacts(root, {
       ...base,
-      haiveEntries: new Set([...base.haiveEntries, ours]),
+      haiveEntries: new Map([...base.haiveEntries, ...claims(ours)]),
     });
 
     expect(await exists(root, '.claude/plugins/drupal-php-lsp')).toBe(false);
@@ -912,7 +926,7 @@ describe('resetOnboardingArtifacts', () => {
     const base = provenance();
     await resetOnboardingArtifacts(root, {
       ...base,
-      haiveEntries: new Set([...base.haiveEntries, ours]),
+      haiveEntries: new Map([...base.haiveEntries, ...claims(ours)]),
     });
 
     expect(await exists(root, '.claude/plugins')).toBe(false);
@@ -944,14 +958,16 @@ describe('resetOnboardingArtifacts', () => {
     const base = provenance();
     const { quarantined } = await resetOnboardingArtifacts(root, {
       ...base,
-      haiveEntries: new Set([
+      haiveEntries: new Map([
         ...base.haiveEntries,
-        skill,
-        `${skill}/SKILL.md`,
-        // `sub-skills` is only ever claimed together with the slugs inside it — a directory
-        // claimed with nothing named in it is not treated as ours.
-        `${skill}/sub-skills`,
-        `${skill}/sub-skills/naming.md`,
+        ...claims(
+          skill,
+          `${skill}/SKILL.md`,
+          // `sub-skills` is only ever claimed together with the slugs inside it — a directory
+          // claimed with nothing named in it is not treated as ours.
+          `${skill}/sub-skills`,
+          `${skill}/sub-skills/naming.md`,
+        ),
       ]),
     });
 
