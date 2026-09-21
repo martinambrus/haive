@@ -1593,12 +1593,34 @@ the wording the settings pass has had since it shipped. That half is the point �
 reason for both, a genuine user edit and a commit hook that reformatted what Haive wrote are
 indistinguishable in production, and a gate nobody can measure is a gate nobody can tune.
 
-REMAINING GAP: 07 records hashes; the SKILL generators do not — 09_5's skills and slugs, 09_5b's
-repairs, a merged 11d's syncs — so an edited LLM-generated skill is still removed rather than
-moved aside. Closing it means recording a hash beside each of those paths at the point they are
-written. 11d is the one that must NOT simply follow: it writes into the task's WORKTREE and
-those bytes reach the root through a git merge with AI conflict resolution, so a mismatch there
-is not evidence of a user edit.
+07, `09_5-skill-generation` and `09_5b-skill-repair` all record hashes. `11d-skill-sync` does NOT,
+and must not simply follow: it writes into the task's WORKTREE and those bytes reach the root
+through a git merge with AI conflict resolution, so a mismatch there is evidence that a merge
+happened, not that anyone edited anything. Its claims stay path-only.
+
+**The skill tables are TOP-LEVEL and keyed by id, never carried on `written[]`.** 09_5's
+`written[]` round-trips through `task_steps.iterations`, which is `jsonb`, and jsonb NORMALISES
+object key order — so a hash nested in an element would land mid-object on every entry a later
+pass carries forward, and could never be kept where the summariser's 4000-char slice cuts. Only
+the top level of the returned object survives in declaration order, because that object reaches
+`buildStepSummaryPrompt` in memory. `written` itself is declared LAST in 09_5 for the same
+budget: at ~700 bytes per skill it alone fills that slice.
+
+ONE hash covers every mirror directory in both steps, because `skillMd` and the sub-skill bodies
+are rendered ABOVE the target-dir loop and neither renderer takes a directory. The README is the
+exception and is keyed BY dir, since its render interpolates its own path — and in 09_5b it is
+also rebuilt from that dir's own on-disk set.
+
+**No claim is re-gated on a hash.** `sub-skills` still turns on the SLUGS, so an output recording
+slugs but no hashes keeps exactly the claim it always had; re-gating would drop it for every
+pre-existing output and change what happens to a file a person left in that directory.
+Directories are claimed with `null` always, having no content to hash.
+
+**A fixture for this is normalise-stable by default, so it pins nothing.** MEASURED twice in one
+PR: removing `normalizeContent` from a SKILL.md hash left every step-side test passing, because
+the fixture roughened only the sub-skill body. Roughen the OVERVIEW too — inside the text, since
+`skillToMarkdown` trims its ends — and assert `normalizeContent(x) !== x` per file before
+asserting what the hash is.
 
 Two landmines to know about before extending this, both inert today:
 `12-post-onboarding` inserts a row whose `diskPath` is `AGENTS.md` and whose `written_hash` is
