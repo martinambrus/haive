@@ -2279,10 +2279,10 @@ async function markRepositoryOnboarded(
     throw new HttpError(409, 'An onboarding run is still in progress for this repository');
   }
   // This route exists for a run that did the work and then failed at a late step. A repository
-  // whose newest completed run predates its own reset is the opposite case, and stamping it here
-  // would hand back by hand exactly the state the reset took away — with no live artifact rows
-  // behind it. The markers above cannot catch it: a reset that could not read the tree leaves
-  // them all in place.
+  // whose reset has been answered by NEITHER a later completion NOR a later artifact row is the
+  // opposite case, and stamping it here would hand back by hand exactly the state the reset took
+  // away. The markers above cannot catch it: a reset that could not read the tree leaves them all
+  // in place.
   const resetRow = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
     columns: { onboardingResetAt: true },
@@ -2295,6 +2295,12 @@ async function markRepositoryOnboarded(
   // requirement: the run this route exists for failed at a late step and has no `completed_at`,
   // while one that completed was already stamped from `markTaskCompleted` and never gets here.
   // A live artifact row is what says a run reached step 12 since the reset.
+  //
+  // Only `hasArtifactsSinceReset` is literally shared. `completedSinceReset` above is this route's
+  // OWN term and is NARROWER than the verdict's (`onboarding-state.ts`): with no epoch the
+  // verdict's answers true and this one false. They agree regardless, because the refusal below is
+  // already inside `resetAt !== null` — so do not read the two as one definition, and do not hoist
+  // either into the other on the strength of this comment.
   const artifactsSinceReset = hasArtifactsSinceReset(
     (await loadNewestLiveArtifactAt(db, userId, [id])).get(id),
     resetAt,

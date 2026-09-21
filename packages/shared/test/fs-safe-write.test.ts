@@ -356,6 +356,13 @@ describe('fs-safe write primitives', () => {
         code: 'ENOTEMPTY',
       });
       expect(seen).toEqual([]);
+
+      // An EMPTY directory taken non-recursively: its own branch, reached by neither case above,
+      // and the shape the reset's swept-dir removal actually uses once every child has gone.
+      seen = [];
+      await mkdir(path.join(root, 'hollow'), { recursive: true });
+      expect(await removeNoFollow(root, 'hollow', { onRemoved })).toBe(true);
+      expect(seen).toEqual(['hollow']);
     });
 
     it('unlinks a link AS a link, leaving its target alone', async () => {
