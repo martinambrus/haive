@@ -3170,7 +3170,8 @@ async function retryMiningAgents(
       if (!prompt) continue;
       // A stored prompt carrying a PASTED persona body cannot be re-sent. Those bytes were read
       // under the ORIGINAL dispatch's secret-mask policy, which may since have changed, and a
-      // recovered dispatch records no `pastedPersonaPaths` for exec to recheck — so re-sending
+      // recovered dispatch records no `pastedPersonaPaths` for `assertPastedPersonasStillAllowed`
+      // (queues/cli-exec/secret-mask.ts) to recheck at exec — so re-sending
       // would hand the provider a body nothing rechecks. Skipping leaves the agent exactly where it
       // was before recovery existed, and the configuration that stopped offering it no longer asks
       // for it. A stored prompt carrying today's POINTER instead is fine: it pasted nothing, and
