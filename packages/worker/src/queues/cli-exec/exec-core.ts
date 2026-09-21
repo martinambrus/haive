@@ -83,6 +83,11 @@ import { resolveRipgrepConfigEnv } from './ripgrep-config.js';
 import { worktreeGitfileMask } from './gitfile-mask.js';
 import { consumePreemptionMark } from './preempt-mark.js';
 import { resolveDdevGeneratedMasks } from './ddev-generated-mask.js';
+import {
+  dropMasksUnderAgentDirs,
+  removeAgentMaskStubs,
+  resolveAgentDefinitionMasks,
+} from './agent-definition-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
 import {
   classifyAntigravityDiagnostic,
@@ -422,6 +427,24 @@ export async function executeByKind(
       // prompt references — the worktree-only mount hides the repo-root .haive/ otherwise.
       const uploadsMount = await resolveTaskUploadsMount(db, payload.taskId, repoMount);
       if (uploadsMount) authMounts.push(uploadsMount);
+      // Per-call agent isolation, decided at DISPATCH and carried on the spec — exec never reads the
+      // switch, so a flip between the two cannot split this invocation's prompt from its mounts.
+      // Appended to `authMounts` because that array already carries a non-auth entry (the uploads
+      // mount) and `assertNoAuthVolumeNesting` checks only `kind: 'auth'` targets, so no new
+      // parameter has to be threaded through executeCliSpec.
+      const agentMasks = await resolveAgentDefinitionMasks(
+        db,
+        payload.taskId,
+        repoMount,
+        payload.spec as CliCommandSpec,
+      );
+      authMounts.push(...agentMasks.mounts);
+      // Filtered on a LOCAL binding, never on `maskFiles` itself: that array is built outside this
+      // switch and the `subagent_sequential` case below consumes it unchanged, and the sub-agent
+      // kinds are deliberately never isolated. A file mask under a masked directory cannot be
+      // created — Docker has no mountpoint to make inside a read-only tmpfs — so keeping one would
+      // fail the whole invocation, while the tmpfs already hides that subtree.
+      const branchMaskFiles = dropMasksUnderAgentDirs(maskFiles, agentMasks.mounts);
       // Re-resolved HERE and not carried on the job: the dispatcher already resolved it at
       // ENQUEUE to write the prompt, but a runner can be recreated (new IP) between the two,
       // and an --add-host pointing at a dead address is worse than none. Same split, and the
@@ -501,28 +524,37 @@ export async function executeByKind(
       const statusUpdater = payload.taskStepId
         ? createStepStatusUpdater(db, payload.taskStepId, payload.invocationId)
         : undefined;
-      return executeCliSpec(
-        payload.spec as CliCommandSpec,
-        deps,
-        payload.timeoutMs,
-        secrets,
-        wrapperContent,
-        sandboxImage,
-        repoMount,
-        sandboxWorkdir,
-        networkPolicy,
-        egressDomains,
-        [...mcp.files, ...maskFiles],
-        authMounts,
-        statusUpdater,
-        payload.taskId ?? null,
-        payload.invocationId ?? null,
-        mcp.extraArgs,
-        makeUsageSnapshotPersister(db, payload.invocationId),
-        payload.softTimeout === true,
-        appReach,
-        payload.invocationId ? makeSteerableClearer(db, payload.invocationId) : undefined,
-      );
+      try {
+        // `return await`, not `return`: a bare return would settle the finally BEFORE the
+        // invocation completes, and the cleanup would remove a mount stub mid-run.
+        return await executeCliSpec(
+          payload.spec as CliCommandSpec,
+          deps,
+          payload.timeoutMs,
+          secrets,
+          wrapperContent,
+          sandboxImage,
+          repoMount,
+          sandboxWorkdir,
+          networkPolicy,
+          egressDomains,
+          [...mcp.files, ...branchMaskFiles],
+          authMounts,
+          statusUpdater,
+          payload.taskId ?? null,
+          payload.invocationId ?? null,
+          mcp.extraArgs,
+          makeUsageSnapshotPersister(db, payload.invocationId),
+          payload.softTimeout === true,
+          appReach,
+          payload.invocationId ? makeSteerableClearer(db, payload.invocationId) : undefined,
+        );
+      } finally {
+        // Also covers the codex app-server fallback's recursive executeCliSpec, which runs INSIDE
+        // the call above. Never throws — it logs and leaves the path — so it cannot mask a real
+        // failure on the way out.
+        await removeAgentMaskStubs(agentMasks.records);
+      }
     }
     case 'subagent_sequential':
       return executeSubAgentSequential(

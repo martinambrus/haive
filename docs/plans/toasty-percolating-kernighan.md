@@ -641,7 +641,17 @@ hand afterwards, so each piece below is independently green and revertible:
    `schema.taskEvents` insert, because `appendEvent` lives in `task-queue.ts`, which the dispatcher
    cannot import for the same cycle reason `invocationRepoSubpath` moved.
 4. **The exec mask.** `agent-definition-mask.ts`, the `authMounts` append, the dropped secret and
-   `#ddev-generated` file masks, and the stub cleanup in a `finally`.
+   `#ddev-generated` file masks, and the stub cleanup in a `finally`. **AS BUILT**, with two
+   departures. `realpathNoFollow` does NOT exist in `@haive/shared/fs-safe` and was dropped rather
+   than added: every primitive there already refuses a link in any component of the rel and verifies
+   the held inode through `/proc/self/fd`, so `lstatNoFollow` answering `symlink` for the entry is
+   the whole containment check this module needs, and resolving a realpath alongside it would be a
+   second mechanism that must agree with the first. Stub cleanup calls `removeNoFollow` with
+   `recursive` UNSET, which fails `ENOTEMPTY` exactly as `rmdir` does — so "a stub that now holds
+   something is no longer a stub" is the primitive's behaviour rather than an emptiness test written
+   here, and an already-absent path answers `false` instead of throwing. The `maskFiles` filter runs
+   on a LOCAL binding inside the `cli`/`agent_mining` branch, never on the shared array, because
+   `subagent_sequential` consumes that one unchanged and the sub-agent kinds are never isolated.
 5. **Switch surface and docs.** The admin GET/PUT pair shaped on `codex-app-server`
    (`api/src/routes/admin.ts:719`/`:744`), the web card, the `AGENTS.md` paragraph, and the capture
    harness.
