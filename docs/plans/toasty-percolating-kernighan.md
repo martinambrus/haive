@@ -25,6 +25,24 @@
 >   an `assignedAgentIds` field on `DispatchRequest`, `CliCommandSpec` and `SubAgentInvocation`,
 >   plus `AgentMiningDispatch.personaIds`. This plan's spec fields now join an established pattern
 >   instead of introducing one, and its pre-rewrite marker read already has a call site.
+>
+> **RE-VERIFIED AGAIN 2026-09-21 against `main` at `9ea6f06e`, 176 commits after the last pass.**
+> Still not started: all six absences hold, and `agentPool` is absent as a spec field (the twelve
+> matches under `packages/` are `agentPoolMeasuredEnabled`/`agentPoolSafetyMb`, the unrelated RAM
+> budget). Every claim was re-checked and the corrections are folded into the sections they belong
+> to rather than listed here. Four change WORK rather than a line number:
+>
+> - `WORKER_REPO_STORAGE_ROOT` is now read by FIVE source files and TWO tests, so dispatch item 4's
+>   move has seven importers to keep compiling.
+> - `AGENT_GUIDANCE_PATTERN` is PRIVATE, so Decision 3's label pattern is the first exported one in
+>   that module rather than a second.
+> - Decision 1's four-term gate is three terms in the rewrite: `buildCliSidePlan` folds
+>   `lspConfigured` into `supportsLsp` before calling it.
+> - **Decision 7's drift is STILL LIVE**, so its one-line commit is still owed.
+>
+> Three anchors moved by one line and two files moved directory; `01b-install-plugins.ts` was never
+> missing, it is under `steps/workflow/`. **Landing order is now stated** under "Commit sequence":
+> this is one plan and five changes, because it is not one reviewable diff.
 
 ## Context
 
@@ -78,6 +96,10 @@ type — inherits it without anyone maintaining a list of special steps.
 1. **Persona bodies are pasted only where today's pointer survives.** `adaptPromptForCliCapabilities`
    (`steps/_retrieval-guidance.ts`, whose only caller is `buildCliSidePlan`) keeps the pointer
    only for a provider with `supportsLsp && lspConfigured && projectAgentsDir && agentFileFormat`
+   (**VERIFIED 2026-09-21: the rewrite itself tests three of those.** `buildCliSidePlan` folds the
+   fourth in when it builds the capabilities — `dispatcher.ts:331`, `supportsLsp:
+   adapter.supportsLsp && req.lspConfigured === true` — so `adaptPromptForCliCapabilities` never
+   sees `lspConfigured` as a term of its own. The effective gate is the four, at the caller.)
    — today claude-code, zai, ollama, muse, openrouter and grok with a ready LSP bridge
    (`hasReadyLspBridge` is task-level, so grok's gate is claude's) — and replaces the whole marker
    with "Follow the embedded protocol below." everywhere else, on purpose: older agent files can
@@ -339,6 +361,13 @@ per-directory files it reads once it works in that directory, CLI-specific extra
    `toolProfile` to the dispatcher (`step-runner.ts`, `resolveAiFixPhase`) but omits it from its
    payload, so cli-exec wires the full MCP surface while the prompt describes the step's narrowed
    one. One line, own commit, own test in `test/step-runner-llm.test.ts`.
+   **VERIFIED STILL LIVE 2026-09-21:** `resolveAiFixPhase` (`step-runner.ts:903`) passes
+   `toolProfile: stepDef.llm?.toolProfile` at `:982`, while its enqueue payload at `:1039-1050`
+   carries `invocationId`, `taskId`, `taskStepId`, `userId`, `cliProviderId`, `effortLevel`, `kind`,
+   `spec` and `timeoutMs` — and no `toolProfile`. Worth noting this fix is NOT agent isolation: it is
+   a mismatch this plan happened to find, which is why it lands first and alone. Its agent always
+   declares `file_write` (`capabilities: ['tool_use', 'file_write']` at `:980`), so it is never
+   isolated either way.
 
 ## Design — exec side
 
@@ -404,8 +433,11 @@ per-directory files it reads once it works in that directory, CLI-specific extra
    `computeAgentDefinitionMasks(workerRoot, containerWorkdir)` does the filesystem work, returning the
    mounts with the identities item 2 records, and `removeAgentMaskStubs(records, runtimeUid = 0)` is
    the cleanup. The fixture-tree tests call both, the second with the test's own uid, since an
-   unprivileged test cannot create a root-owned directory. `01b-install-plugins.ts` builds its own mask list for plugin
-   installs, which load no agents — unchanged.
+   unprivileged test cannot create a root-owned directory. `steps/workflow/01b-install-plugins.ts`
+   builds its own mask list for plugin installs, which load no agents — unchanged. (VERIFIED
+   2026-09-21: it assembles `mounts` at `:205` from `resolveAuthMounts` plus the secret and gitfile
+   masks, so it never reaches the `authMounts` seam item 4 appends to. It is under `steps/workflow/`,
+   not `steps/onboarding/` where its `01b` prefix suggests.)
 6. **Fails OPEN, unlike secret masking.** This is a context control, not a confidentiality one: a
    stat that throws logs a warning and masks nothing, a stub cleanup that throws logs and leaves the
    path, and the persona body was already pasted at
@@ -426,7 +458,8 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   it keeps today's view, with the warning still the mitigation it is today. Rewording a measured
   prompt to win back isolation for one step is not worth it in PR 1.
 - **08-knowledge-acquisition, 09-qa, 09_5, 09_5b** — `loadMiningScopeExcludeGlobs` always adds
-  `AGENT_TOOLING_DIRS` (`_scope.ts` `withAgentToolingDirs`, added after a KB miner was handed 34 of
+  `AGENT_TOOLING_DIRS` (the constant now lives in `_scope-seed.ts`, which `_scope.ts` imports;
+  `withAgentToolingDirs` is still in `_scope.ts` at `:194`, added after a KB miner was handed 34 of
   Haive's own generated agent definitions as project source), and `scopeInstructionLines` enforces
   it by prompt text alone ("Do NOT open, read, grep, list, sample or crawl them"). 08 and 09-qa are
   isolated, so the agents half of that rule becomes enforced; 09_5 and 09_5b write skills
@@ -472,8 +505,11 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   called from `buildCliSidePlan` BEFORE the rewrite with the comment this plan's marker read needs;
   reuse both rather than adding a second pre-rewrite read),
   `step-engine/steps/workflow/_agent-loader.ts` (export
-  `parseAgentFile`, still private at `:54`; a filename-keyed single-file reader, which is now one
-  `readTextNoFollow` call plus the secret-mask policy check — see Decision 1, AS BUILT),
+  `parseAgentFile`, still private at `:55`; a filename-keyed single-file reader, which is now one
+  `readTextNoFollow` call plus the secret-mask policy check — see Decision 1, AS BUILT. The
+  primitive is re-exported as `readRegularFileNoFollow` from `steps/onboarding/_helpers.ts:167`,
+  which this loader already imports, and `loadAgentPersonas` — `export async function` at `:18` —
+  keys personas on the frontmatter `name` at `:33`),
   `queues/cli-exec/secret-mask.ts` (its
   effective policy extracted as a dependency-free single-path predicate; it exports only
   `SecretMaskError`, `resolveSecretMasks`, `computeSecretMasks` and `listTrackedFiles` today, so the
@@ -488,11 +524,16 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
 - **Tree resolution:** `repo/worktree-git-boundary.ts` (`invocationRepoSubpath`,
   `resolveInvocationWorkerTree`, and the moved `resolveInvocationWorkerRoot` /
   `WORKER_REPO_STORAGE_ROOT`), `queues/cli-exec/resolvers.ts` (re-exports; `resolveInvocationRepoMount`
-  — `resolvers.ts:503` — calls `invocationRepoSubpath`). **That move is WIDER than planned.**
-  `resolveInvocationWorkerRoot` still sits at `resolvers.ts:648` and has three callers
-  that did not exist then — `secret-mask.ts`, `ddev-generated-mask.ts` and `ripgrep-config.ts`, the
-  last two created or converted by the containment series — and `WORKER_REPO_STORAGE_ROOT` is read
-  in four source files plus a test, so the re-export has to keep every one of them compiling.
+  — `export async function` at `resolvers.ts:502` — calls `invocationRepoSubpath`).
+  **That move is WIDER than planned, and wider again than the last pass recorded.**
+  `resolveInvocationWorkerRoot` sits at `resolvers.ts:647` and has three callers
+  that did not exist when this was written — `secret-mask.ts`, `ddev-generated-mask.ts` and
+  `ripgrep-config.ts`, the last two created or converted by the containment series. MEASURED
+  2026-09-21, `WORKER_REPO_STORAGE_ROOT` is read in FIVE source files — `resolvers.ts`,
+  `exec-core.ts`, `ripgrep-config.ts`, `repo-mirrors.ts` and `queues/task-queue.ts` — plus TWO
+  tests, `ripgrep-config.test.ts` and `test/secret-mask-resolve.test.ts`. So the re-export has seven
+  importers to keep compiling, not the five the earlier count implied, and `repo-mirrors.ts` and
+  `task-queue.ts` are both new to that list.
 - **Exec:** `queues/cli-exec/agent-definition-mask.ts` (NEW), `queues/cli-exec/exec-core.ts`
   (append to `authMounts`; fail before the CLI starts when the policy predicate then denies a pasted
   persona path, whether or not the file still exists; remove a race's mount stubs in a `finally`
@@ -522,6 +563,39 @@ Every prompt naming an agent directory was checked (onboarding, onboarding-upgra
   is denied by exec time, including one whose file was deleted first, and stub cleanup: a masked directory swapped for an empty one after
   the build is removed, while one that was filled or kept its identity stays), a NEW docker-runner argv test (no mount form has one today), NEW
   `test/agent-listing-capture.ts`.
+
+## Commit sequence
+
+**One plan, five changes, because this is not one reviewable diff.** It spans the dispatcher, a new
+exec module, a module move with seven importers, a mount form, a config key, an admin route, a web
+card, an `AGENTS.md` section and ten-plus test targets. `docs/plans/README.md` and the repo's own
+review rule both say to split rather than push that as a single change, and the batch is reviewed by
+hand afterwards, so each piece below is independently green and revertible:
+
+1. **The `toolProfile` drift** (Decision 7). One line plus its test, and deliberately first: it is a
+   pre-existing mismatch this plan merely found, not agent isolation, so it should not be reviewed as
+   part of one.
+2. **Foundations, no behaviour change.** The `worktree-git-boundary.ts` move with its re-exports, the
+   secret-mask policy predicate carved out of `secret-mask.ts`, `parseAgentFile` exported, the
+   `tmpfs` form on `DockerVolumeMount`, and `CONFIG_KEYS.AGENT_ISOLATION_ENABLED` with its default.
+   Everything compiles and every path behaves exactly as today; nothing reads the switch yet.
+3. **The dispatch rule.** `agentIsolationApplies`, `promptNamesAgentPath`, the project-instruction
+   scan, the persona reader, the rewrite's positive arm, `LlmInvocationSpec.agentPool`, the spec
+   fields, and `07_7-secret-sweep` declaring `'*'`.
+4. **The exec mask.** `agent-definition-mask.ts`, the `authMounts` append, the dropped secret and
+   `#ddev-generated` file masks, and the stub cleanup in a `finally`.
+5. **Switch surface and docs.** The admin GET/PUT pair shaped on `codex-app-server`
+   (`api/src/routes/admin.ts:719`/`:744`), the web card, the `AGENTS.md` paragraph, and the capture
+   harness.
+
+**Whether 3 and 4 are one change or two is a judgement, not a preference.** It is recorded here
+rather than left to whoever picks this up. Split, there is a window between them where the prompt has
+narrowed and the mounts have not: an isolated invocation whose prompt names no agent file while the
+directories are still visible. That is the SAFE direction, by exec item 6's own reasoning — leaving
+the files visible only restores today's listing — and each piece is large enough to deserve its own
+review. Folding them keeps prompt and mounts in step at every commit, at the cost of one large diff.
+Default to splitting; fold them if the reviewer would rather have one atomic behaviour change than
+two reviewable ones.
 
 ## Verification
 
