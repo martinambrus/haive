@@ -221,6 +221,91 @@ describe('collectWrittenCliContent', () => {
     expect(dirs.has('.claude')).toBe(false);
   });
 
+  it('carries the hash 07 recorded for each path it wrote', async () => {
+    // The evidence that closes the gap: a path record alone cannot say whether the file still
+    // holds what Haive put there, so the reset had to delete an edited file to avoid keeping
+    // one it owned.
+    const { entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '07-generate-files',
+          output: {
+            wroteFiles: ['.codex/agents/test-writer.toml', '.codex/agents/README.md'],
+            wroteFileHashes: {
+              '.codex/agents/test-writer.toml': 'aaa',
+              '.codex/agents/README.md': 'bbb',
+            },
+          },
+        },
+      ],
+      [],
+    );
+
+    expect(entries.get('.codex/agents/test-writer.toml')).toBe('aaa');
+    expect(entries.get('.codex/agents/README.md')).toBe('bbb');
+  });
+
+  it('claims a path with NO hash when the output carries none', async () => {
+    // Every output written before the field existed, and every generator that records none. The
+    // claim still stands — it is the hash that is absent, not the claim — so this is byte for
+    // byte what the reset did before hashes, which is why none of this needed a backfill.
+    const { entries } = collectWrittenCliContent(wrote('.codex/agents/test-writer.toml'), []);
+
+    expect(entries.has('.codex/agents/test-writer.toml')).toBe(true);
+    expect(entries.get('.codex/agents/test-writer.toml')).toBeNull();
+  });
+
+  it('never hangs a file’s hash on the DIRECTORY a deeper path claims', async () => {
+    // A path more than one level under a catalog dir claims the directory that contains it, and a
+    // directory has no content to hash. Recording the file's digest against it would make the
+    // whole directory read as edited the moment anything inside it changed — and a directory is
+    // exactly what the sweep walks rather than removes.
+    const { entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '07-generate-files',
+          output: {
+            wroteFiles: ['.agents/skills/repo-conventions/SKILL.md'],
+            wroteFileHashes: { '.agents/skills/repo-conventions/SKILL.md': 'aaa' },
+          },
+        },
+      ],
+      [],
+    );
+
+    expect(entries.has('.agents/skills/repo-conventions')).toBe(true);
+    expect(entries.get('.agents/skills/repo-conventions')).toBeNull();
+  });
+
+  it('lets the NEWER run’s hash win, in effective-time order', async () => {
+    // The same replay order `entries` has always used. First-wins — the shape a `if (!has) set`
+    // would produce — would claim a path against bytes a later `overwrite: true` run replaced,
+    // and report the newer file as edited.
+    const { entries } = collectWrittenCliContent(
+      [
+        {
+          stepId: '07-generate-files',
+          endedAt: new Date('2026-01-02T00:00:00Z'),
+          output: {
+            wroteFiles: ['.codex/agents/test-writer.toml'],
+            wroteFileHashes: { '.codex/agents/test-writer.toml': 'newer' },
+          },
+        },
+        {
+          stepId: '07-generate-files',
+          endedAt: new Date('2026-01-01T00:00:00Z'),
+          output: {
+            wroteFiles: ['.codex/agents/test-writer.toml'],
+            wroteFileHashes: { '.codex/agents/test-writer.toml': 'older' },
+          },
+        },
+      ],
+      [],
+    );
+
+    expect(entries.get('.codex/agents/test-writer.toml')).toBe('newer');
+  });
+
   it('claims the skills 09_5 mirrored and the index beside them', async () => {
     const { dirs, entries } = collectWrittenCliContent(
       [
@@ -1059,6 +1144,92 @@ describe('resetOnboardingArtifacts', () => {
     expect(await readFile(path.join(root, '.codex/agents-legacy/code-reviewer.toml'), 'utf8')).toBe(
       'name = "mine now"\n',
     );
+  });
+
+  it('moves aside an edited file that NO row covers, on the step hash alone', async () => {
+    // The gap this exists to close. An LLM-discovered agent and the amp-only fallback write have
+    // no manifest id and so no artifact row: before the step hash there was no way to tell one
+    // the user had edited from one still holding what Haive wrote, and the reset deleted both.
+    const root = await repo('reset-step-hash-edited-');
+    await installArtifacts(root);
+    const rel = '.codex/agents/code-reviewer.toml';
+    await writeFile(path.join(root, rel), 'name = "mine now"\n', 'utf8');
+
+    const { removed, quarantined } = await resetOnboardingArtifacts(root, {
+      // No `writtenHashes` at all — the step record is the only evidence there is.
+      ...provenance([], [[rel, sha256Hex(normalizeContent('name = "haive"\n'))]]),
+    });
+
+    expect(removed).not.toContain(rel);
+    expect(quarantined).toContainEqual({
+      from: rel,
+      to: '.codex/agents-legacy/code-reviewer.toml',
+      reason: 'edited',
+    });
+    expect(await readFile(path.join(root, '.codex/agents-legacy/code-reviewer.toml'), 'utf8')).toBe(
+      'name = "mine now"\n',
+    );
+  });
+
+  it('still removes a generated file whose bytes are untouched', async () => {
+    // The other half, and the one that must not regress: a hash that MATCHES is what lets the
+    // directory go. A gate that kept everything would be no better than one that deleted
+    // everything.
+    const root = await repo('reset-step-hash-intact-');
+    await installArtifacts(root);
+
+    const { removed, quarantined } = await resetOnboardingArtifacts(root, {
+      // `installArtifacts` writes 'x\n' into every catalog dir.
+      ...provenance([], [['.codex/agents/code-reviewer.toml', sha256Hex(normalizeContent('x\n'))]]),
+    });
+
+    expect(removed).toContain('.codex/agents');
+    expect(await exists(root, '.codex/agents')).toBe(false);
+    expect(quarantined).not.toContainEqual(
+      expect.objectContaining({ from: '.codex/agents/code-reviewer.toml' }),
+    );
+  });
+
+  it('lets a matching step hash rescue a file whose ROW disagrees', async () => {
+    // Co-equal evidence, and a bug that exists today. 07 renders the agents index through
+    // `resolveAgents`, which substitutes a stub for an accepted id it cannot resolve, while the
+    // manifest renders it through `resolveAgentsForIndex`, which DROPS that id. The two tables
+    // differ, so the `agents-index` row can never match the README 07 actually wrote — and a
+    // row-wins rule quarantines that file out of a directory Haive indisputably owns.
+    const root = await repo('reset-row-vs-step-');
+    await installArtifacts(root);
+    const rel = '.codex/agents/code-reviewer.toml';
+
+    const { removed, quarantined } = await resetOnboardingArtifacts(root, {
+      ...provenance(
+        // What the MANIFEST would render — a different table, so it never matches.
+        [[rel, sha256Hex(normalizeContent('name = "manifest rendering"\n'))]],
+        // What 07 actually wrote, which is what is on disk.
+        [[rel, sha256Hex(normalizeContent('x\n'))]],
+      ),
+    });
+
+    expect(removed).toContain('.codex/agents');
+    expect(quarantined).not.toContainEqual(expect.objectContaining({ from: rel }));
+  });
+
+  it('keeps an edited file in the .claude sweep, and says it was edited', async () => {
+    // The `.claude` sweep KEEPS rather than quarantines — `.claude` survives the reset anyway, so
+    // there is nothing to move it out of the way of — and a kept file is only ever as useful as
+    // the reason beside it.
+    const root = await repo('reset-claude-edited-');
+    await installArtifacts(root);
+    await writeFile(path.join(root, '.claude/workflow-config.json'), '{"mine":true}', 'utf8');
+
+    const { skipped } = await resetOnboardingArtifacts(root, {
+      ...provenance([], [['.claude/workflow-config.json', sha256Hex(normalizeContent('{}'))]]),
+    });
+
+    expect(skipped).toContainEqual({
+      path: '.claude/workflow-config.json',
+      reason: 'edited since Haive wrote it',
+    });
+    expect(await exists(root, '.claude/workflow-config.json')).toBe(true);
   });
 
   it('keeps the quarantine and mcp_settings.json, and says so', async () => {
