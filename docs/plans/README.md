@@ -22,12 +22,16 @@ after 30 days.
 Verified against the tree, not taken from the plan bodies.
 
 **This table is COMPLETE as of 2026-09-18 — every plan file has a row.** MEASURED that day:
-`docs/plans/` holds 50 plan files and this table has 50 rows. Nineteen were added that day after
-verifying each against the tree, and the fiftieth is `plan-patch-drop-measurement`, written the same
-day as a not-started follow-up. The reverse check is empty too, so no row names a file that does not
-exist. The earlier wording here said 48 files against 29 rows; both counts were stale, which is the
-reason for the rule that follows: **a plan added to this directory adds its row in the same change.**
-Nothing else keeps the two in step, and a missing row reads as "unknown" rather than as an oversight.
+`docs/plans/` held 50 plan files against 50 rows, nineteen of them added that day after verifying
+each against the tree, plus `plan-patch-drop-measurement` as a not-started follow-up. **Re-measured
+2026-09-21: 52 files and 52 rows**, both `comm` directions still empty, so no row names a missing file
+and no file lacks a row — `plan-patch-gap-sweep` and `plan-patch-guard-losses` arrived with their
+rows, which is the rule below working rather than an exception to it.
+
+An earlier version of this paragraph said 48 files against 29 rows; both counts were stale, and that
+is the reason for the rule that follows: **a plan added to this directory adds its row in the same
+change.** Nothing else keeps the two in step, and a missing row reads as "unknown" rather than as an
+oversight.
 Rows are in historical order rather than alphabetical, with those nineteen together ahead of any
 later addition.
 
@@ -95,7 +99,7 @@ unreachable for the input the plan was about.
 | `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started. Delivery to a published-image install DECIDED 2026-09-07: per-customer api+worker images built by the vendor; `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` inherit it |
 | `solitary-partitioning-lampson` | Per-install namespacing (two installs on one machine) | Not started; **next priority after `steadfast-committing-gray`**. Containers, networks, six volumes AND the RAG/global-KB databases all carry global names today, so a second install shares them SILENTLY |
 | `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | **SHIPPED** 2026-09-08, all five slices. Exercised for real: a published v0.1.0 install was upgraded to v0.1.2, and a deliberately failed health gate rolled back to v0.1.0 with service restored. Four defects were found by running it that reading it did not surface |
-| `toasty-percolating-kernighan` | Per-call agent isolation | Not started; planned 2026-09-14 and reviewed against the code the same day. Read-only CLI invocations stop loading every repository agent definition and get the assigned persona pasted instead; `rippling-wibbling-puffin` Phase 3.1 builds on it |
+| `toasty-percolating-kernighan` | Per-call agent isolation | Not started; planned 2026-09-14, re-verified against `main` on 2026-09-18 (`47d5fd2a`) and again on 2026-09-21 (`9ea6f06e`, 176 commits later) — still not started, with the second pass's corrections folded into the sections they belong to. Read-only CLI invocations stop loading every repository agent definition and get the assigned persona pasted instead; `rippling-wibbling-puffin` Phase 3.1 builds on it. **Lands in five commits, see its "Commit sequence"** — one plan, but past one reviewable diff |
 | `translator-module` | Translator — resellable module | Not started |
 | `amber-provider-verdict-heron` | Persistent provider-verdict banner below the CLI terminal | **Shipped**, and its own status line said otherwise — corrected 2026-09-18. `failure-class.ts:215` carries `content_filter: 'Provider refused the prompt (content filter)'` with the refusal pattern at `:295` anchored on refusal-specific wording rather than generic words; `describeInvocationStatus` (`web/src/components/terminal/cli-stream-status.ts`) has its own unit test; `StepTerminal.tsx:536-544` renders the persistent amber block, reading the invocation row rather than the stream so it survives the CLI ending and the 600s stream expiry. It landed at `StepTerminal.tsx`, NOT the `CliStreamViewer.tsx` its checklist names |
 | `anointing-gatekeeping-ibex` | First-admin onboarding + registration gating | **Shipped in full** 2026-09-09, verified 2026-09-18: `registration-status` in `api/src/routes/auth.ts`, `CONFIG_KEYS.REGISTRATION_MODE` (`config.service.ts:129`) with `REGISTRATION_MODES` at `:619`, migration `0153_user_invites.sql`, and `/admin/users` |
