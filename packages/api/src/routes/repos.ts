@@ -1166,6 +1166,28 @@ function effectiveTime(
   return step.endedAt ? step.endedAt.getTime() : 0;
 }
 
+/** A persisted `Record<string, string>` of hashes, read defensively. Step output is stored
+ *  verbatim as jsonb and replayed, so anything here may be absent, null, or a shape an older
+ *  build never wrote — and a claim with no hash is the pre-hash behaviour, never an error. */
+function hashTable(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, hash] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof hash === 'string' && hash.length > 0) out[key] = hash;
+  }
+  return out;
+}
+
+/** The same, one level deeper: skill id -> slug -> hash. */
+function nestedHashTable(value: unknown): Record<string, Record<string, string>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, Record<string, string>> = {};
+  for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = hashTable(inner);
+  }
+  return out;
+}
+
 export function collectWrittenCliContent(
   steps: ReadonlyArray<{
     taskId?: string;
@@ -1309,21 +1331,28 @@ export function collectWrittenCliContent(
       }
     } else if (step.stepId === SKILL_REPAIR_STEP_ID) {
       // 09_5b has its OWN shape — `repaired`, skill IDS, with the target dirs in its DETECT
-      // payload — and it CLEARS the skill's tree before rewriting it, so 09_5's slug record for
-      // that skill is stale and has to be RETIRED. That is why the rows are replayed oldest
-      // first. It records no slugs of its own, so `sub-skills` is deliberately NOT claimed: a
-      // directory claimed with nothing named inside it reads as wholly ours, and a file the
-      // user put there would be deleted rather than moved aside.
+      // payload — and it CLEARS the skill's tree before rewriting it, so 09_5's record for that
+      // skill is stale in EVERY respect (slugs and hashes alike) and has to be RETIRED. That is
+      // why the rows are replayed oldest first.
       const repairDirs = (step.detectOutput as { skillTargetDirs?: unknown } | null)
         ?.skillTargetDirs;
       if (!Array.isArray(repairDirs)) continue;
-      const out = step.output as { repaired?: unknown; repairedSubSkillSlugs?: unknown } | null;
+      const out = step.output as {
+        repaired?: unknown;
+        repairedSubSkillSlugs?: unknown;
+        repairedHashes?: unknown;
+        repairedSubSkillHashes?: unknown;
+        repairedReadmeHashes?: unknown;
+      } | null;
       const repaired = out?.repaired;
       // A repair pass that landed NOTHING wrote nothing — every skill it attempted is in
       // `stillFailing`. Scoping its target dirs anyway put directories Haive never touched in
       // reach of the reset, which would move the user's own skills into `-legacy`.
       if (!Array.isArray(repaired) || repaired.length === 0) continue;
       const repairedSlugs = (out?.repairedSubSkillSlugs ?? null) as Record<string, unknown> | null;
+      const repairedHashes = hashTable(out?.repairedHashes);
+      const repairedSubHashes = nestedHashTable(out?.repairedSubSkillHashes);
+      const repairedReadmeHashes = hashTable(out?.repairedReadmeHashes);
       for (const value of repairDirs) {
         const dir = claimDir(value);
         if (dir === null) continue;
@@ -1333,25 +1362,41 @@ export function collectWrittenCliContent(
           for (const claimed of [...entries.keys()]) {
             if (claimed === skillDir || claimed.startsWith(`${skillDir}/`)) entries.delete(claimed);
           }
+          // The DIRECTORY has no content, so it is claimed without a hash, always.
           entries.set(skillDir, null);
-          entries.set(`${skillDir}/SKILL.md`, null);
-          // Same rule as 09_5: `sub-skills` is claimed ONLY when the slugs in it were named, or
-          // the directory reads as wholly ours and a file the user put there is deleted rather
-          // than moved aside. An output written before the field existed has it quarantined.
+          entries.set(`${skillDir}/SKILL.md`, repairedHashes[skillId] ?? null);
+          // Same rule as 09_5: `sub-skills` is claimed ONLY when the SLUGS in it were named — the
+          // hashes never gate it. A directory claimed with nothing named inside reads as wholly
+          // ours and a file the user put there is deleted rather than moved aside, so an output
+          // that records slugs but no hashes must keep the claim it has always had.
           const slugs = repairedSlugs?.[skillId];
           if (Array.isArray(slugs) && slugs.length > 0) {
             entries.set(`${skillDir}/sub-skills`, null);
+            const subHashes = repairedSubHashes[skillId] ?? {};
             for (const slug of slugs) {
-              if (typeof slug === 'string') entries.set(`${skillDir}/sub-skills/${slug}.md`, null);
+              if (typeof slug !== 'string') continue;
+              entries.set(`${skillDir}/sub-skills/${slug}.md`, subHashes[slug] ?? null);
             }
           }
         }
         // It rebuilds the index from the on-disk set whenever it repaired anything.
-        if (repaired.length > 0) entries.set(`${dir}/README.md`, null);
+        if (repaired.length > 0) entries.set(`${dir}/README.md`, repairedReadmeHashes[dir] ?? null);
       }
     } else if (step.stepId === SKILL_MIRROR_STEP_ID) {
-      const written = (step.output as { written?: unknown } | null)?.written;
+      const gen = step.output as {
+        written?: unknown;
+        skillHashes?: unknown;
+        skillSubSkillHashes?: unknown;
+        skillReadmeHashes?: unknown;
+      } | null;
+      const written = gen?.written;
       if (!Array.isArray(written)) continue;
+      // Keyed by skill id and target dir rather than carried on each `written[]` element:
+      // that array round-trips through a `jsonb` column, which normalises object key order, so a
+      // hash nested there could not be kept last where the summariser's slice cuts.
+      const skillHashes = hashTable(gen?.skillHashes);
+      const subSkillHashes = nestedHashTable(gen?.skillSubSkillHashes);
+      const readmeHashes = hashTable(gen?.skillReadmeHashes);
       for (const skill of written) {
         const row = skill as {
           id?: unknown;
@@ -1371,23 +1416,30 @@ export function collectWrittenCliContent(
           // moved aside rather than deleted.
           if (typeof row.id === 'string') {
             const skillDir = `${dir}/${row.id}`;
+            // The DIRECTORY has no content, so it is claimed without a hash, always.
             entries.set(skillDir, null);
-            entries.set(`${skillDir}/SKILL.md`, null);
-            // `sub-skills` is claimed ONLY when the slugs inside it were recorded. A directory
-            // claimed with nothing named inside reads as wholly ours — `hasDeeperClaims` is
-            // false — so a file the user put there would be deleted rather than moved aside.
-            // An output written before the slugs existed therefore has it quarantined whole.
+            // One hash serves every mirror: 09_5 renders SKILL.md above its target-dir loop and
+            // the renderer takes no directory, so each mirror holds identical bytes.
+            entries.set(`${skillDir}/SKILL.md`, skillHashes[row.id] ?? null);
+            // `sub-skills` is claimed ONLY when the slugs inside it were recorded, and the hashes
+            // never gate it. A directory claimed with nothing named inside reads as wholly ours —
+            // `hasDeeperClaims` is false — so a file the user put there would be deleted rather
+            // than moved aside. An output written before the slugs existed therefore has it
+            // quarantined whole, and one recording slugs but no hashes keeps exactly the claim it
+            // has always had.
             if (Array.isArray(row.subSkillSlugs) && row.subSkillSlugs.length > 0) {
               entries.set(`${skillDir}/sub-skills`, null);
+              const subHashes = subSkillHashes[row.id] ?? {};
               for (const slug of row.subSkillSlugs) {
                 if (typeof slug === 'string')
-                  entries.set(`${skillDir}/sub-skills/${slug}.md`, null);
+                  entries.set(`${skillDir}/sub-skills/${slug}.md`, subHashes[slug] ?? null);
               }
             }
           }
           // The index beside them is rebuilt from the cumulative set on every pass and is Haive's
-          // too — unclaimed, it would be quarantined out of the directory it describes.
-          entries.set(`${dir}/README.md`, null);
+          // too — unclaimed, it would be quarantined out of the directory it describes. Its hash
+          // is per DIR, because the render interpolates the directory it is written into.
+          entries.set(`${dir}/README.md`, readmeHashes[dir] ?? null);
         }
       }
     }
