@@ -1,13 +1,16 @@
 # Per-call agent isolation (PR 1)
 
-> **Not started** — planned 2026-09-14 against `main` at `3c0a93f6` and reviewed against the code the
-> same day. Built-in steps only; custom task types reach the same rule through
+> **LANDED 2026-09-21, in six PRs** — #191 `7deb542d`, #192 `bde5722e`, #193 `fe3148a5`, #194
+> `16f8be37`, #195 `a66a79de`, #196 `0bb6fe45`. What is left is this plan's own Verification
+> section: items 1, 2 and 4. Planned 2026-09-14 against `main` at `3c0a93f6` and reviewed against
+> the code the same day. Built-in steps only; custom task types reach the same rule through
 > `rippling-wibbling-puffin` Phase 3.1, whose companion edits are listed below and are ALREADY
 > FOLDED INTO that plan — its prompt-template entry shape carries `agentPool?`, its `{{agent:<id>}}`
 > section is written, and its dangling-reference rule already covers personas — so nothing is owed
 > there.
 >
-> **RE-VERIFIED 2026-09-18 against `main` at `47d5fd2a`.** Still not started: no
+> **RE-VERIFIED 2026-09-18 against `main` at `47d5fd2a` — three days before piece 1, so this
+> records the state on that date and not today's.** Not started then: no
 > `agent-definition-mask.ts`, no `agentIsolationApplies`, no `promptNamesAgentPath`, no
 > `agentPool`, no `maskAgentDefinitions`/`pastedPersonaPaths`, and no
 > `CONFIG_KEYS.AGENT_ISOLATION_ENABLED`. Every other file and symbol this plan names still exists,
@@ -26,15 +29,19 @@
 >   plus `AgentMiningDispatch.personaIds`. This plan's spec fields now join an established pattern
 >   instead of introducing one, and its pre-rewrite marker read already has a call site.
 >
-> **STARTED 2026-09-21. Piece 1 landed at `7deb542d` (PR #191); piece 2 is the commit this line
-> ships with.** So this plan is no longer "Not started" — read the Commit sequence for what remains,
-> and note that piece 2's revision moved `resolveInvocationWorkerTree` into piece 3 and added a
-> `picomatch` dependency that Decision 1 explains. Three Critical-files claims were wrong and are
-> corrected in place: `invocationRepoSubpath` and `resolveInvocationWorkerTree` did not exist,
-> and `resolveInvocationWorkerRoot` has two callers rather than three.
+> **BUILT AND MERGED 2026-09-21, all six pieces**: #191 `7deb542d` (the retry_ai `toolProfile`
+> drift, which this plan only found while auditing the dispatch path), #192 `bde5722e`
+> (foundations, inert by design), #193 `fe3148a5` (the dispatch rule), #194 `16f8be37` (the exec
+> mask), #195 `a66a79de` (the switch surface and docs) and #196 `0bb6fe45` (the exec-time persona
+> recheck piece 4 shipped WITHOUT — see that Commit sequence entry). Piece 2's revision moved
+> `resolveInvocationWorkerTree` into piece 3 and added a `picomatch` dependency that Decision 1
+> explains, and three Critical-files claims were wrong and are corrected in place:
+> `invocationRepoSubpath` and `resolveInvocationWorkerTree` did not exist, and
+> `resolveInvocationWorkerRoot` has two callers rather than three.
 >
-> **RE-VERIFIED AGAIN 2026-09-21 against `main` at `9ea6f06e`, 176 commits after the last pass.**
-> Still not started: all six absences hold, and `agentPool` is absent as a spec field (the twelve
+> **RE-VERIFIED AGAIN 2026-09-21 against `main` at `9ea6f06e`, 176 commits after the last pass —
+> that pass PRECEDED piece 1, so its "not started" is history and not the current state.** It
+> found all six absences holding, and `agentPool` absent as a spec field (the twelve
 > matches under `packages/` are `agentPoolMeasuredEnabled`/`agentPoolSafetyMb`, the unrelated RAM
 > budget). Every claim was re-checked and the corrections are folded into the sections they belong
 > to rather than listed here. Four change WORK rather than a line number:
@@ -822,8 +829,9 @@ stores only `stepIds: string[]` and needs nothing.
 6. **Header blockquote.** Records the dependency: Phase 3.1's agent handling needs this plan's
    rule, which ships first and independently.
 
-`docs/plans/README.md` gains a status row for this plan (Not started) and a cross-plan dependency
-bullet: `rippling-wibbling-puffin` Phase 3.1 builds on this plan's per-invocation agent isolation.
+`docs/plans/README.md` carries a status row for this plan (SHIPPED, six PRs) and a cross-plan
+dependency bullet: `rippling-wibbling-puffin` Phase 3.1 builds on this plan's per-invocation agent
+isolation.
 
 ## Out of scope (each measured or found in review, each its own change)
 
