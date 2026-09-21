@@ -15,6 +15,7 @@ import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-ru
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { splitWorktreePath, WORKTREE_SUBDIR } from '../../repo/worktree-paths.js';
 import { resolveInvocationWorkerRoot } from './resolvers.js';
+import { secretMaskDeniesPath, secretMaskPolicy } from './secret-mask-policy.js';
 import { log } from './_shared.js';
 
 const execFileAsync = promisify(execFile);
@@ -107,6 +108,110 @@ export async function resolveSecretMasks(
     workerRoot,
     { allow: repo.secretMaskAllow, denyExtend: repo.secretMaskDenyExtend },
     repoMount?.target ?? SANDBOX_WORKDIR,
+  );
+}
+
+/**
+ * Refuse the invocation when a persona body pasted at DISPATCH would be masked NOW.
+ *
+ * `buildCliSidePlan` records the repository-relative path of every body the prompt rewrite pasted
+ * (`CliCommandSpec.pastedPersonaPaths`). A deny rule, a repository's `secret_mask_allow`, or the
+ * masking switch itself can change while the job waits in the queue — and a body already in a prompt
+ * cannot be retracted. So the policy is evaluated a second time here, before the CLI starts, and a
+ * path it now denies fails the invocation loudly. A retry then rebuilds the prompt under the current
+ * policy, which is the outcome that actually repairs it.
+ *
+ * It asks the POLICY, never the mask set. `computeSecretMasks` only mounts over files that still
+ * exist, so a denied file DELETED after dispatch produces no mount at all while its bytes are already
+ * in the prompt — and an absent mask is never evidence of an allowed path, the same reason masking
+ * refuses to read an empty scan as a clean repository.
+ *
+ * Fails CLOSED, unlike the agent-definition mask beside it: a task or repository row that cannot be
+ * resolved throws rather than waving the paths through. `SecretMaskError` is deliberate — it is the
+ * path `handleCliExecJob` already records on the invocation (exit -1) and fails the step with, so
+ * this needs no new failure plumbing.
+ *
+ * A no-op for every invocation that pasted nothing, which is all of them outside isolation: an empty
+ * list returns before any query runs.
+ */
+export async function assertPastedPersonasStillAllowed(
+  db: Database,
+  taskId: string,
+  repoMount: DockerVolumeMount | null | undefined,
+  paths: readonly string[],
+): Promise<void> {
+  if (paths.length === 0) return;
+
+  let globallyEnabled: boolean;
+  try {
+    globallyEnabled = await configService.getBoolean(CONFIG_KEYS.SECRET_MASK_ENABLED, true);
+  } catch (err) {
+    throw new SecretMaskError(
+      `secret-mask: could not read the masking switch to recheck ${paths.length} pasted persona ` +
+        `path(s): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  // Masking off means nothing is hidden from this run, so nothing pasted can be a leak.
+  if (!globallyEnabled) return;
+
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { userId: true, repositoryId: true },
+  });
+  if (!task) {
+    throw new SecretMaskError(`secret-mask: task ${taskId} not found for a pasted-persona recheck`);
+  }
+  // No repository means no tree was mounted and no persona could have come off one.
+  if (!task.repositoryId) return;
+
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, task.repositoryId),
+    columns: {
+      storagePath: true,
+      localPath: true,
+      secretMaskEnabled: true,
+      secretMaskAllow: true,
+      secretMaskDenyExtend: true,
+    },
+  });
+  if (!repo) {
+    throw new SecretMaskError(
+      `secret-mask: repository ${task.repositoryId} for task ${taskId} not found for a ` +
+        'pasted-persona recheck',
+    );
+  }
+  if (!repo.secretMaskEnabled) return;
+
+  const policy = secretMaskPolicy({
+    allow: repo.secretMaskAllow,
+    denyExtend: repo.secretMaskDenyExtend,
+  });
+
+  // The tracked set is resolved at most once, and only for a path the globs already deny: masking is
+  // untracked-only, so git can rescue a denied path but never condemn an allowed one.
+  let tracked: Set<string> | null | undefined;
+  const denied: string[] = [];
+  for (const rel of paths) {
+    if (!secretMaskDeniesPath(policy, rel)) continue;
+    if (tracked === undefined) {
+      tracked = await listTrackedFiles(
+        resolveInvocationWorkerRoot({
+          repoMountSubpath: repoMount?.subpath,
+          storagePath: repo.storagePath ?? repo.localPath,
+          userId: task.userId,
+          repositoryId: task.repositoryId,
+        }),
+      );
+    }
+    if (secretMaskDeniesPath({ ...policy, tracked }, rel)) denied.push(rel);
+  }
+  if (denied.length === 0) return;
+
+  throw new SecretMaskError(
+    `secret-mask: ${denied.length} agent definition(s) were pasted into this prompt at dispatch ` +
+      `and the masking policy now hides them (${denied.join(', ')}). The prompt cannot be unsent, ` +
+      'so the invocation is refused instead of run. Retry the step to rebuild the prompt under the ' +
+      'current policy, or widen the repository\'s "Secret mask allow" globs.',
   );
 }
 

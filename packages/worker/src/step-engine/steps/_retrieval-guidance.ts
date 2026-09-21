@@ -180,7 +180,8 @@ export function stripAgentGuidanceBlocks(prompt: string): string {
  *  `retryMiningAgents` recovers an agent `selectAgents` no longer offers from its last run's STORED
  *  prompt, and a stored prompt carrying a body must not be re-sent: those bytes were read under the
  *  original dispatch's secret-mask policy, and the recovered dispatch records no
- *  `pastedPersonaPaths` for exec to recheck. Stored prompts outlive a deploy, so a later rename of
+ *  `pastedPersonaPaths` for `assertPastedPersonasStillAllowed` (queues/cli-exec/secret-mask.ts) to
+ *  recheck at exec. Stored prompts outlive a deploy, so a later rename of
  *  the label must keep this form recognised rather than replace it. */
 export function promptCarriesPastedPersona(prompt: string): boolean {
   return prompt.includes(PASTED_PERSONA_START);

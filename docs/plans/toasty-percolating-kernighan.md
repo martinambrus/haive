@@ -642,7 +642,14 @@ hand afterwards, so each piece below is independently green and revertible:
    cannot import for the same cycle reason `invocationRepoSubpath` moved.
 4. **The exec mask.** `agent-definition-mask.ts`, the `authMounts` append, the dropped secret and
    `#ddev-generated` file masks, and the stub cleanup in a `finally`. **AS BUILT**, with two
-   departures. `realpathNoFollow` does NOT exist in `@haive/shared/fs-safe` and was dropped rather
+   departures — and note that it SHIPPED INCOMPLETE: Decision 1's exec-time recheck of
+   `pastedPersonaPaths` was not written, so that field had one writer and zero readers while two
+   comments asserted the recheck happened. Piece 6 (`assertPastedPersonasStillAllowed` in
+   `queues/cli-exec/secret-mask.ts`, called from `executeByKind` before `executeCliSpec`) is what
+   closes it. The dispatch-to-exec `spec` forwarding was VERIFIED intact across all nine enqueue
+   sites at the same time — eight pass `plan.invocation.spec`, the step-summary pass at
+   `step-runner.ts:2828` passes `invocation.spec`, and `exec-core.ts` reads it back at `:439`/`:531`
+   — so `maskAgentDefinitions` does arrive and the mask does engage. `realpathNoFollow` does NOT exist in `@haive/shared/fs-safe` and was dropped rather
    than added: every primitive there already refuses a link in any component of the rel and verifies
    the held inode through `/proc/self/fd`, so `lstatNoFollow` answering `symlink` for the entry is
    the whole containment check this module needs, and resolving a realpath alongside it would be a

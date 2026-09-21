@@ -78,7 +78,7 @@ import {
 import { emittedDefaultServerNames } from '../../sandbox/mcp-config.js';
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
 import { resolveRepoMirrors } from './repo-mirrors.js';
-import { resolveSecretMasks } from './secret-mask.js';
+import { assertPastedPersonasStillAllowed, resolveSecretMasks } from './secret-mask.js';
 import { resolveRipgrepConfigEnv } from './ripgrep-config.js';
 import { worktreeGitfileMask } from './gitfile-mask.js';
 import { consumePreemptionMark } from './preempt-mark.js';
@@ -432,6 +432,27 @@ export async function executeByKind(
       // Appended to `authMounts` because that array already carries a non-auth entry (the uploads
       // mount) and `assertNoAuthVolumeNesting` checks only `kind: 'auth'` targets, so no new
       // parameter has to be threaded through executeCliSpec.
+      // A persona body pasted at DISPATCH is rechecked against the CURRENT masking policy before
+      // anything starts: a deny rule or the switch can change while the job waits in the queue, and
+      // a prompt cannot be unsent. Throws SecretMaskError, which handleCliExecJob already records on
+      // the invocation and fails the step with. Placed before executeCliSpec so a refusal starts no
+      // container and leaves no mount stub to clean up.
+      // A persona body pasted at DISPATCH is rechecked against the CURRENT masking policy before
+      // anything starts: a deny rule or the switch can change while the job waits in the queue, and
+      // a prompt cannot be unsent. Throws SecretMaskError, which handleCliExecJob already records on
+      // the invocation and fails the step with. Placed before executeCliSpec so a refusal starts no
+      // container and leaves no mount stub to clean up.
+      // A persona body pasted at DISPATCH is rechecked against the CURRENT masking policy before
+      // anything starts: a deny rule or the switch can change while the job waits in the queue, and
+      // a prompt cannot be unsent. Throws SecretMaskError, which handleCliExecJob already records on
+      // the invocation and fails the step with. Placed before executeCliSpec so a refusal starts no
+      // container and leaves no mount stub to clean up.
+      await assertPastedPersonasStillAllowed(
+        db,
+        payload.taskId,
+        repoMount,
+        (payload.spec as CliCommandSpec).pastedPersonaPaths ?? [],
+      );
       const agentMasks = await resolveAgentDefinitionMasks(
         db,
         payload.taskId,
