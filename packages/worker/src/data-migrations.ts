@@ -1,10 +1,19 @@
 import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { Queue } from 'bullmq';
 import { schema, type Database } from '@haive/database';
-import { CONFIG_KEYS, configService, logger, type OnboardingToolingMirror } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  logger,
+  QUEUE_NAMES,
+  type OnboardingToolingMirror,
+  type RepoJobPayload,
+} from '@haive/shared';
 import { FACET_VALUE_ALIAS_PAIRS, globalKbEntries, withGlobalKb } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { TOOLING_ID_PATTERN } from './cli-executor/tool-usage.js';
+import { getBullRedis } from './redis.js';
 import { getCliExecQueue } from './queues/cli-exec/_shared.js';
 import { backfillToolUsageAtBoot } from './queues/cli-exec/tool-usage-backfill.js';
 import { globalKbTopicKey } from './step-engine/steps/_global-kb-promote.js';
@@ -41,6 +50,7 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'skipRemovedSteps', kind: 'convergent', run: skipRemovedSteps },
   { id: 'supersedePhantomAgentArtifacts', kind: 'convergent', run: supersedePhantomAgentArtifacts },
   { id: 'clearPrunedSandboxImageState', kind: 'convergent', run: clearPrunedSandboxImageState },
+  { id: 'reconcileStrandedCloningRepos', kind: 'convergent', run: reconcileStrandedCloningRepos },
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
   { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
   // After the schema backfill has canonicalised the facets those keys are derived from — it runs
@@ -197,6 +207,80 @@ async function reconcileUnenqueuedStepSummaries(db: Database): Promise<void> {
       ),
     );
   log.warn({ count: orphaned.length }, 'finalized step-summary rows that were never enqueued');
+}
+
+/** Release a repository stranded at `cloning` by a job that will never run it.
+ *
+ *  `cloning` is the only transient value of `repo_status`, and exactly two things move it on:
+ *  `persistDetection` writes `ready`, and the repo-queue processor's catch writes `error`. Both
+ *  need the processor to RUN, and there are two ways it never does.
+ *
+ *  A job that stalls past `maxStalledCount` is failed by a DEFERRED failure that BullMQ raises on
+ *  the next pickup, before `callProcessJob` — so the catch is skipped. And `POST /repos` commits
+ *  the row at `cloning` and only THEN calls `queue.add`, outside any try/catch, so a Redis blip
+ *  leaves a row whose job never existed. The first is narrowed by this queue's `maxStalledCount`;
+ *  the second cannot be reached by any queue option at all, which is why this exists.
+ *
+ *  A stranded repository is not a cosmetic problem: Create task, Run app, Terminal, Plan,
+ *  Estimates, Download and the onboarding CTA are all gated on `ready`, the card re-polls every
+ *  5s forever, and Retry renders only for `error` — invisible on the one state that cannot
+ *  self-heal. Landing on `error` is what hands the user that button back.
+ *
+ *  Only the QUEUE can tell "stranded" from "queued but not yet picked up", which is why this runs
+ *  here rather than beside the boot reaps in `index.ts`: `runDataMigrations` is awaited before any
+ *  worker starts, so nothing can consume or add a job underneath the scan. This is the same
+ *  argument `reconcileUnenqueuedStepSummaries` makes, and unlike `clearPrunedSandboxImageState`
+ *  the ordering alone is NOT sufficient evidence here — a row can legitimately be `cloning` with
+ *  its job still waiting, so the queue has to be asked. The `status` guard on the UPDATE is the
+ *  second half: it makes the write a compare-and-swap, so a job that somehow began between the
+ *  scan and the write keeps its row.
+ *
+ *  Costs nothing in the common case: with no `cloning` rows it never opens a queue at all. */
+export async function reconcileStrandedCloningRepos(db: Database): Promise<void> {
+  const cloning = await db
+    .select({ id: schema.repositories.id })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.status, 'cloning'));
+  if (cloning.length === 0) return;
+
+  // The same state set and the same reasoning as `reconcileUnenqueuedStepSummaries` — including
+  // why `paused` is deliberately absent. Re-measure there before changing it here.
+  const queue = new Queue<RepoJobPayload>(QUEUE_NAMES.REPO, { connection: getBullRedis() });
+  const stillQueued = new Set<string>();
+  try {
+    const jobs = await queue.getJobs([
+      'waiting',
+      'delayed',
+      'prioritized',
+      'active',
+      'waiting-children',
+    ]);
+    for (const job of jobs) {
+      const repositoryId = (job?.data as { repositoryId?: unknown } | undefined)?.repositoryId;
+      if (typeof repositoryId === 'string') stillQueued.add(repositoryId);
+    }
+  } finally {
+    await queue.close().catch(() => undefined);
+  }
+  // A throw above propagates deliberately: `runOne` logs it and this migration does nothing.
+  // Without the queue's answer every `cloning` row looks stranded, and flipping one whose job is
+  // about to run would show the user an error for a repository that is fine.
+
+  const stranded = cloning.filter((row) => !stillQueued.has(row.id)).map((row) => row.id);
+  if (stranded.length === 0) return;
+
+  await db
+    .update(schema.repositories)
+    .set({
+      status: 'error',
+      statusMessage:
+        'Preparing this repository did not finish — the worker stopped while it was running. Use Retry to start again.',
+      updatedAt: new Date(),
+    })
+    .where(
+      and(inArray(schema.repositories.id, stranded), eq(schema.repositories.status, 'cloning')),
+    );
+  log.warn({ count: stranded.length }, 'released repositories stranded at cloning');
 }
 
 /** Record, on every `kb_author` task that predates the record, whether it was created with a

@@ -52,6 +52,21 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
     {
       connection: getBullRedis(),
       concurrency: 5,
+      // Clone, copy and extract all run unbounded — `gitClone` has no timeout and `copyTree` is
+      // bounded only by repository size, which is why each takes a renewable root claim. The
+      // default 30s lock expires whenever the renewal timer cannot run (event-loop starvation, a
+      // Redis hiccup, a tsx-watch restart), and BullMQ then redelivers the job to a second
+      // processor WHILE the first is still inside `rm -rf` + `cp -a` on the same root. The claim
+      // refuses that second runner, whose catch writes `error` while the first is still working,
+      // and the first then overwrites it with `ready` — so the short lock is a correctness
+      // problem here, not only a liveness one.
+      lockDuration: 30 * 60 * 1000,
+      // Default 1 makes the SECOND stall of a job terminal, and terminal here means the deferred
+      // failure is raised on the next pickup BEFORE the processor runs — so the catch that writes
+      // `status: 'error'` never executes and the repository strands at `cloning` for good. Two
+      // restarts inside one clone is ordinary (a crash loop, an OOM cycle, a deploy). The boot
+      // reconciler in `data-migrations.ts` is the backstop for the strand this still leaves.
+      maxStalledCount: 10,
     },
   );
 
