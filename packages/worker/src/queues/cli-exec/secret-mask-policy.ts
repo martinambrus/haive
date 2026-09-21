@@ -81,10 +81,15 @@ export function secretMaskDeniesPath(policy: SecretMaskPolicy, rel: string): boo
  * directions, and the ignore side diverges the unsafe way: one negated allow glob makes `ignored()`
  * true for nearly every path, so this predicate permits bytes the scanner masks.
  *
- * MEASURED against the installed tinyglobby 0.2.17 (`dist/index.mjs:185,189-190`), which is three
+ * MEASURED against the installed tinyglobby 0.2.17 (`dist/index.mjs:185,189-190`), which is four
  * rules: a negated DENY pattern loses its `!` and moves to the ignore set; a negated IGNORE pattern
- * is discarded outright; and `!(` is picomatch's extglob negation rather than a negated pattern, so
- * it stays a positive. `!!x` is dropped by tinyglobby's own else-if and is dropped here too.
+ * is discarded outright; `!(` is picomatch's extglob negation rather than a negated pattern, so it
+ * stays a positive; and the pattern a LONE `!` derives is `.`, not the empty string, because
+ * tinyglobby runs it through `posix.normalize` (MEASURED: `normalize('') === '.'`, and its own
+ * `|| "."` fallback at `:151` is the same idea). That last one is not cosmetic — `picomatch` REFUSES
+ * an empty pattern, so pushing `''` made this throw on a configuration the scanner accepts, and the
+ * two answers differ besides: an ignore of `.` matches the repository root alone while dropping the
+ * entry matches nothing. `!!x` is dropped by tinyglobby's own else-if and is dropped here too.
  */
 function partitionLikeTinyglobby(
   deny: readonly string[],
@@ -94,7 +99,10 @@ function partitionLikeTinyglobby(
   const out: string[] = [];
   for (const p of deny) {
     if (p[0] !== '!' || p[1] === '(') match.push(p);
-    else if (p[1] !== '!' || p[2] === '(') out.push(p.slice(1));
+    // `|| '.'` is rule four: a lone `!` derives '', which picomatch REFUSES, while tinyglobby
+    // normalises it to '.'. Skipping the entry instead would not match the scanner — an ignore of
+    // '.' matches the repository root alone, where dropping it matches nothing.
+    else if (p[1] !== '!' || p[2] === '(') out.push(p.slice(1) || '.');
   }
   for (const p of ignore) {
     if (p[0] !== '!' || p[1] === '(') out.push(p);
