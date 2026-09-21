@@ -49,6 +49,31 @@ import type { GenerateFilesDetect } from './07-generate-files.js';
 
 const exec = promisify(execFile);
 
+/**
+ * Commit what onboarding generated, WITHOUT running the repository's hooks.
+ *
+ * `--no-verify` is the whole point of this helper, and it is not a convenience. A `pre-commit`
+ * hook that REWRITES what is staged — prettier, lint-staged, `markdownlint --fix` — silently
+ * breaks onboarding's own provenance: `recordOnboardingArtifacts` runs BEFORE this commit and
+ * stores the hash of the manifest RENDERING, and the onboarding reset later compares that against
+ * what is on disk. Let a formatter through and every agent file, SKILL.md and sub-skill this run
+ * just wrote stops matching its own record, so the reset keeps or quarantines Haive's own output
+ * and reports it to the user as their edit. `normalizeContent` absorbs whitespace and blank-line
+ * drift, but not a rewritten list marker or heading style.
+ *
+ * Scoped to THIS commit, which carries only generated files. Do NOT generalise it: the
+ * workflow-side commits (`10-gate-3-commit`, `completeMergeHostSide`) carry the USER'S code, where
+ * their hooks are wanted and load-bearing, and `clone.ts`'s blank-repo init commit runs on a tree
+ * `git init` has just created, where there is no hook to bypass.
+ */
+export async function commitGeneratedFiles(
+  repoPath: string,
+  message: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  await exec('git', ['commit', '--no-verify', '-m', message], { cwd: repoPath, env });
+}
+
 const DEFAULT_COMMIT_MESSAGE = [
   'add: agentic workflow setup',
   '',
@@ -719,10 +744,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             : DEFAULT_COMMIT_MESSAGE;
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
-      await exec('git', ['commit', '-m', message], {
-        cwd: ctx.repoPath,
-        env: { ...process.env, ...identity },
-      });
+      await commitGeneratedFiles(ctx.repoPath, message, { ...process.env, ...identity });
       const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;
