@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, notInArray, sql } from 'drizzle-orm';
 import { Queue } from 'bullmq';
 import { schema, type Database } from '@haive/database';
 import {
@@ -23,6 +23,10 @@ import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers
 import { describePlanOp, proposedOps } from './step-engine/steps/workflow/_plan-ops.js';
 
 const log = logger.child({ module: 'data-migrations' });
+
+/** How long a repository must have sat at `cloning` before the boot reconciler will call it
+ *  stranded. See `reconcileStrandedCloningRepos` for why an age is needed at all. */
+const STRANDED_CLONING_MIN_AGE_MS = 5 * 60 * 1000;
 
 /** What a data migration does to data that cannot be got back.
  *
@@ -237,10 +241,26 @@ async function reconcileUnenqueuedStepSummaries(db: Database): Promise<void> {
  *
  *  Costs nothing in the common case: with no `cloning` rows it never opens a queue at all. */
 export async function reconcileStrandedCloningRepos(db: Database): Promise<void> {
+  // A row younger than this is not a candidate, and the reason is a race the status guard cannot
+  // close. The api runs independently of this boot, so `POST /repos` can INSERT a `cloning` row
+  // between the select below and the queue read under it, and call `queue.add` after that read —
+  // enqueueing changes no column, so the compare-and-swap still matches and a repository whose
+  // job is genuinely queued gets a false `error`. That is not cosmetic: `error` is exactly the
+  // status the Retry button renders on, and a Retry raced against a live job enqueues a second
+  // destructive rebuild.
+  //
+  // The window being excluded is the gap between one SELECT and one queue read, so any margin
+  // over a few seconds is enormous. Five minutes buys that margin at the cost of deferring a
+  // genuinely stranded row to a later boot when the worker died and restarted within five
+  // minutes of starting the clone — which is the safe direction to be wrong in, and convergent:
+  // the row is still there next time.
+  const cutoff = new Date(Date.now() - STRANDED_CLONING_MIN_AGE_MS);
   const cloning = await db
     .select({ id: schema.repositories.id })
     .from(schema.repositories)
-    .where(eq(schema.repositories.status, 'cloning'));
+    .where(
+      and(eq(schema.repositories.status, 'cloning'), lt(schema.repositories.updatedAt, cutoff)),
+    );
   if (cloning.length === 0) return;
 
   // The same state set and the same reasoning as `reconcileUnenqueuedStepSummaries` — including

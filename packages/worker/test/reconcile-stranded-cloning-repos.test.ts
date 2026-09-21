@@ -48,11 +48,18 @@ interface RecordedUpdate {
   where: unknown;
 }
 
-function makeDb(cloningIds: string[], recorded: RecordedUpdate[]): Database {
+function makeDb(
+  cloningIds: string[],
+  recorded: RecordedUpdate[],
+  selectWhere: unknown[] = [],
+): Database {
   return {
     select: () => ({
       from: () => ({
-        where: async () => cloningIds.map((id) => ({ id })),
+        where: async (cond: unknown) => {
+          selectWhere.push(cond);
+          return cloningIds.map((id) => ({ id }));
+        },
       }),
     }),
     update: () => ({
@@ -123,6 +130,20 @@ describe('reconcileStrandedCloningRepos', () => {
       'redis is down',
     );
     expect(recorded).toHaveLength(0);
+  });
+
+  it('only considers rows old enough that no concurrent import could have made them', async () => {
+    // The api runs independently of this boot, so `POST /repos` can INSERT a `cloning` row between
+    // the select and the queue read, and enqueue after it. Enqueueing changes no column, so the
+    // compare-and-swap still matches and a repository whose job is genuinely queued would be given
+    // a false `error` — which is the status Retry renders on, and a Retry raced against a live job
+    // enqueues a second destructive rebuild. An age is the only thing that closes that window.
+    getJobs.mockReset().mockResolvedValue([]);
+    const selectWhere: unknown[] = [];
+
+    await reconcileStrandedCloningRepos(makeDb(['stranded'], [], selectWhere));
+
+    expect(conditionColumns(selectWhere[0])).toContain('updated_at');
   });
 
   it('never CLOSES the queue, because the Redis connection is shared', async () => {
