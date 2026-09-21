@@ -157,6 +157,20 @@ describe('skillGenerationStep.apply — recorded content hashes', () => {
     expect(out.summary).toContain(`${DIRS.length} CLI skills directories`);
   });
 
+  it('counts a capped candidate ONCE in the dropped clause', async () => {
+    // An over-cap candidate increments `droppedFromCap` AND is pushed to `rejectedIds`, so a
+    // recap that sums both reports every capped skill twice. A number in this panel is read as
+    // fact, which makes a wrong one worse than none at all.
+    const out = await callApply({
+      llmOutput: { skills: [skill('first'), skill('second')] },
+      formValues: { maxSkills: 1 },
+    });
+
+    expect(out.written).toHaveLength(1);
+    // One candidate over the cap: the clause says 1, not 2.
+    expect(out.summary).toContain('1 candidate(s) were dropped');
+  });
+
   it('carries a prior pass’s hashes forward, as it carries the skills themselves', async () => {
     // Each pass returns the CUMULATIVE library and never rewrites an earlier pass's skill, so its
     // hash stays valid and must survive. Dropping the carry would leave every skill but the last

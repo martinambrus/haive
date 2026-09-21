@@ -1481,7 +1481,11 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     //
     // The caveat channel is separate and deliberately NOT repeated here: `degradedNote` is its
     // own column, written beside `summary` on the same finalize.
-    const droppedCount = droppedForSubSkills.length + rejectedIds.length + droppedFromCap;
+    // `droppedFromCap` is deliberately NOT added: an over-cap candidate increments it AND is
+    // pushed to `rejectedThisPass`, which `rejectedIds` carries — so summing both counts every
+    // capped skill twice. `droppedForSubSkills` has no such overlap; it is built from its own
+    // list and those candidates never reach the rejected branch.
+    const droppedCount = droppedForSubSkills.length + rejectedIds.length;
     const summary =
       `Generated ${written.length} skill(s) with ${totalSubSkills} sub-skill(s), mirrored into ` +
       `${targetDirs.length} CLI skills ${targetDirs.length === 1 ? 'directory' : 'directories'}.` +
