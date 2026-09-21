@@ -143,13 +143,40 @@ describe('removeAgentMaskStubs', () => {
     return { rel, workerPath: join(root, rel), anchor: root, anchorRel: rel, inode };
   }
 
+  // The repo tree's owner, which must DIFFER from the container's uid for provenance to be
+  // affirmative. A fixture root is owned by the test uid, so a real read would make every case
+  // ambiguous; this stands for the uid-1000 repository a root-owned stub sits inside.
+  const OTHER_OWNER = process.getuid!() + 1;
+
   it('removes an EMPTY stub Docker left behind', async () => {
     const root = await tree(['.claude/agents']);
     try {
       // inode null = it did not exist before the run, so this directory is Docker's stub.
-      await removeAgentMaskStubs([record(root, '.claude/agents', null)], process.getuid!());
+      await removeAgentMaskStubs(
+        [record(root, '.claude/agents', null)],
+        process.getuid!(),
+        OTHER_OWNER,
+      );
       const { mounts } = await computeAgentDefinitionMasks(root, WORKDIR);
       expect(mounts).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('KEEPS a replaced directory when provenance is ambiguous', async () => {
+    // Codex's counterexample, and the reason an inode mismatch plus ownership is not enough: a
+    // root-owned local-path repository whose agent directory is legitimately removed and recreated
+    // on the host during the run has a new inode, is empty, and is owned by the same uid a Docker
+    // stub would be. `/host-fs` is mounted writable, so removing it is real data loss. With the
+    // repo tree and the container sharing a uid the two cases are indistinguishable, and clutter is
+    // the direction to fail in.
+    const root = await tree(['.claude/agents']);
+    try {
+      const { records } = await computeAgentDefinitionMasks(root, WORKDIR);
+      const replaced = [record(root, '.claude/agents', records[0]!.inode! + 1)];
+      await removeAgentMaskStubs(replaced, process.getuid!(), process.getuid!());
+      expect((await computeAgentDefinitionMasks(root, WORKDIR)).mounts).toHaveLength(1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -158,7 +185,11 @@ describe('removeAgentMaskStubs', () => {
   it('REFUSES to remove a stub that now holds something', async () => {
     const root = await tree(['.claude/agents'], { '.claude/agents/written.md': 'by the agent' });
     try {
-      await removeAgentMaskStubs([record(root, '.claude/agents', null)], process.getuid!());
+      await removeAgentMaskStubs(
+        [record(root, '.claude/agents', null)],
+        process.getuid!(),
+        OTHER_OWNER,
+      );
       // ENOTEMPTY is the check rather than one this module writes: a directory with contents is no
       // longer a stub, and the failure is swallowed and logged.
       const { mounts } = await computeAgentDefinitionMasks(root, WORKDIR);
@@ -201,7 +232,7 @@ describe('removeAgentMaskStubs', () => {
       // The same reuse bounds what the comparison can do in production, which is why ownership and
       // emptiness are the discriminators that carry it — see removeAgentMaskStubs.
       const replaced = [record(root, '.claude/agents', records[0]!.inode! + 1)];
-      await removeAgentMaskStubs(replaced, process.getuid!());
+      await removeAgentMaskStubs(replaced, process.getuid!(), OTHER_OWNER);
       expect((await computeAgentDefinitionMasks(root, WORKDIR)).mounts).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
