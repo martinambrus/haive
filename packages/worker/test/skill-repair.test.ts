@@ -5,19 +5,22 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentMiningResult, StepContext } from '../src/step-engine/step-definition.js';
 import { skillRepairStep } from '../src/step-engine/steps/onboarding/09_5b-skill-repair.js';
 import { checkSkill } from '../src/step-engine/steps/onboarding/09_6-skill-verification.js';
+import { normalizeContent, sha256Hex } from '@haive/shared';
 
 const DIRS = ['.claude/skills', '.gemini/skills'];
 
 /** A valid repair JSON payload (fenced, as a CLI would emit) for skill `id` with 3
  *  sub-skills whose bodies clear the verification body floor. */
-function repairJson(id: string): string {
+function repairJson(id: string, bodySuffix = ''): string {
   const sub = (slug: string) => ({
     slug,
     name: `${id}-${slug}`,
     title: `Title ${slug}`,
     description: `activation description for ${slug}`,
     summary: `summary for ${slug}`,
-    body: `## Purpose\n\nThe ${slug} leaf explains one facet in enough prose to clear the body floor and then some, citing lib/x.ts:1-9.`,
+    body:
+      `## Purpose\n\nThe ${slug} leaf explains one facet in enough prose to clear the body floor and then some, citing lib/x.ts:1-9.` +
+      (bodySuffix ? `\n\n${bodySuffix}` : ''),
   });
   const obj = {
     skills: [
@@ -131,6 +134,57 @@ describe('skillRepairStep.apply', () => {
   });
   afterEach(async () => {
     await rm(repo, { recursive: true, force: true });
+  });
+
+  it('records the hash of every file it rewrote, normalised, and one hash per mirror', async () => {
+    // Without this the field is only ever fed synthetically by the api-side tests, so the step
+    // could stop emitting it — or hash the wrong string — and the whole reset suite stays green.
+    for (const dir of DIRS) {
+      await writeSkillDir(repo, dir, 'broken', '# Broken\n\n(no overview)\n', {});
+    }
+
+    const out = (await skillRepairStep.apply(ctxFor(repo), {
+      detected: detectStub([{ skillId: 'broken', issues: ['no sub-skills'] }]),
+      formValues: {},
+      // The body carries trailing spaces and a blank-line run DELIBERATELY: most generated
+      // markdown is already normalise-stable, and a fixture built from it pins nothing — the two
+      // digests coincide and dropping `normalizeContent` survives. `sanitizeSubSkills` passes the
+      // body through untouched, so this reaches disk.
+      agentMiningResults: [miningResult('broken', repairJson('broken', 'trailing   \n\n\n\nmore'))],
+      iteration: 0,
+      previousIterations: [],
+    })) as {
+      repairedHashes?: Record<string, string>;
+      repairedSubSkillHashes?: Record<string, Record<string, string>>;
+      repairedReadmeHashes?: Record<string, string>;
+    };
+
+    const first = DIRS[0]!;
+    const second = DIRS[1]!;
+    const skillMd = await readFile(
+      path.join(repo, ...first.split('/'), 'broken', 'SKILL.md'),
+      'utf8',
+    );
+    expect(out.repairedHashes?.broken).toBe(sha256Hex(normalizeContent(skillMd)));
+
+    // ONE hash for every mirror, which is only sound because the mirrors are byte-identical.
+    const mirrored = await readFile(
+      path.join(repo, ...second.split('/'), 'broken', 'SKILL.md'),
+      'utf8',
+    );
+    expect(mirrored).toBe(skillMd);
+
+    const leafPath = path.join(repo, ...first.split('/'), 'broken', 'sub-skills', 'alpha.md');
+    const leaf = await readFile(leafPath, 'utf8');
+    // The fixture must actually bite, or the normalisation assertion below proves nothing.
+    expect(normalizeContent(leaf)).not.toBe(leaf);
+    expect(out.repairedSubSkillHashes?.broken?.alpha).toBe(sha256Hex(normalizeContent(leaf)));
+    expect(out.repairedSubSkillHashes?.broken?.alpha).not.toBe(sha256Hex(leaf));
+
+    // The README is per DIR, because the render interpolates its own path and is rebuilt from
+    // that directory's own on-disk set.
+    const readme = await readFile(path.join(repo, ...first.split('/'), 'README.md'), 'utf8');
+    expect(out.repairedReadmeHashes?.[first]).toBe(sha256Hex(normalizeContent(readme)));
   });
 
   it('repairs only failing skills across all mirror dirs, clears stale leaves, and passes verification', async () => {
