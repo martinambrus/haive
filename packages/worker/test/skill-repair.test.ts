@@ -11,7 +11,13 @@ const DIRS = ['.claude/skills', '.gemini/skills'];
 
 /** A valid repair JSON payload (fenced, as a CLI would emit) for skill `id` with 3
  *  sub-skills whose bodies clear the verification body floor. */
-function repairJson(id: string, bodySuffix = ''): string {
+/** Trailing spaces and a blank-line run, placed INSIDE the text rather than at its end:
+ *  `skillToMarkdown` trims the overview, so a suffix at the very end would vanish. */
+const ROUGH = 'first line   \n\n\n\nsecond line';
+
+/** `rough` makes the written bytes NOT normalise-stable, in BOTH the SKILL.md and the sub-skill
+ *  files — they are hashed separately, and a stable one pins nothing about the normalisation. */
+function repairJson(id: string, rough = false): string {
   const sub = (slug: string) => ({
     slug,
     name: `${id}-${slug}`,
@@ -20,7 +26,7 @@ function repairJson(id: string, bodySuffix = ''): string {
     summary: `summary for ${slug}`,
     body:
       `## Purpose\n\nThe ${slug} leaf explains one facet in enough prose to clear the body floor and then some, citing lib/x.ts:1-9.` +
-      (bodySuffix ? `\n\n${bodySuffix}` : ''),
+      (rough ? `\n\n${ROUGH}` : ''),
   });
   const obj = {
     skills: [
@@ -28,7 +34,8 @@ function repairJson(id: string, bodySuffix = ''): string {
         id,
         title: `${id} Repaired`,
         description: `A repaired ${id} skill.`,
-        overview: 'What this domain covers and when an agent invokes it.',
+        overview:
+          'What this domain covers and when an agent invokes it.' + (rough ? `\n\n${ROUGH}` : ''),
         subSkills: [sub('alpha'), sub('beta'), sub('gamma')],
       },
     ],
@@ -146,11 +153,11 @@ describe('skillRepairStep.apply', () => {
     const out = (await skillRepairStep.apply(ctxFor(repo), {
       detected: detectStub([{ skillId: 'broken', issues: ['no sub-skills'] }]),
       formValues: {},
-      // The body carries trailing spaces and a blank-line run DELIBERATELY: most generated
-      // markdown is already normalise-stable, and a fixture built from it pins nothing — the two
-      // digests coincide and dropping `normalizeContent` survives. `sanitizeSubSkills` passes the
-      // body through untouched, so this reaches disk.
-      agentMiningResults: [miningResult('broken', repairJson('broken', 'trailing   \n\n\n\nmore'))],
+      // `rough` makes the written bytes NOT normalise-stable, in BOTH files: most generated
+      // markdown already is, and a fixture built from it pins nothing — the two digests coincide
+      // and dropping `normalizeContent` survives. `sanitizeSubSkills` passes a body through
+      // untouched, and the overview is only trimmed at its ends, so both reach disk rough.
+      agentMiningResults: [miningResult('broken', repairJson('broken', true))],
       iteration: 0,
       previousIterations: [],
     })) as {
@@ -165,7 +172,12 @@ describe('skillRepairStep.apply', () => {
       path.join(repo, ...first.split('/'), 'broken', 'SKILL.md'),
       'utf8',
     );
+    // Each file asserts the fixture BITES before asserting what it proves. Without this on
+    // SKILL.md the raw and normalised digests agree and dropping `normalizeContent` survives —
+    // measured, and in this PR it survived twice before the fixtures were fixed.
+    expect(normalizeContent(skillMd)).not.toBe(skillMd);
     expect(out.repairedHashes?.broken).toBe(sha256Hex(normalizeContent(skillMd)));
+    expect(out.repairedHashes?.broken).not.toBe(sha256Hex(skillMd));
 
     // ONE hash for every mirror, which is only sound because the mirrors are byte-identical.
     const mirrored = await readFile(

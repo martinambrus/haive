@@ -45,13 +45,20 @@ const detected = {
   bundleSkills: [],
 };
 
-/** `bodySuffix` is how a test makes the written bytes NOT normalise-stable. */
-function skill(id: string, bodySuffix = '') {
+/** Trailing spaces and a blank-line run, placed INSIDE the text rather than at its end:
+ *  `skillToMarkdown` trims the overview, so a suffix at the very end would vanish and the file
+ *  would stay normalise-stable. Both files this fixture produces must be non-stable, or an
+ *  assertion about normalisation passes on content that never needed any. */
+const ROUGH = 'first line   \n\n\n\nsecond line';
+
+/** `rough` is how a test makes the written bytes NOT normalise-stable — in BOTH files, since
+ *  SKILL.md and the sub-skill are hashed separately and a stable one pins nothing. */
+function skill(id: string, rough = false) {
   return {
     id,
     title: `${id} title`,
     description: `${id} description`,
-    overview: 'What this domain covers.',
+    overview: rough ? `What this domain covers.\n\n${ROUGH}` : 'What this domain covers.',
     subSkills: [
       {
         slug: 'alpha',
@@ -59,7 +66,7 @@ function skill(id: string, bodySuffix = '') {
         title: 'Alpha',
         description: 'd',
         summary: 's',
-        body: '## Purpose\n\nx' + (bodySuffix ? `\n\n${bodySuffix}` : ''),
+        body: '## Purpose\n\nx' + (rough ? `\n\n${ROUGH}` : ''),
       },
     ],
   };
@@ -88,22 +95,24 @@ describe('skillGenerationStep.apply — recorded content hashes', () => {
     // The trailing spaces and blank-line run are deliberate. Generated markdown is mostly
     // normalise-stable, and a fixture built from it pins nothing — both digests agree and
     // dropping `normalizeContent` survives. `sanitizeSubSkills` passes a body through untouched.
-    const out = await callApply({
-      llmOutput: { skills: [skill('conventions', 'trailing   \n\n\n\nmore')] },
-    });
+    const out = await callApply({ llmOutput: { skills: [skill('conventions', true)] } });
 
     const first = DIRS[0]!;
     const skillMd = await readFile(
       path.join(repoRoot, ...first.split('/'), 'conventions', 'SKILL.md'),
       'utf8',
     );
+    // Each file asserts the fixture BITES before asserting what it proves. Without this on
+    // SKILL.md the raw and normalised digests agree, and dropping `normalizeContent` survives —
+    // measured, not hypothetical.
+    expect(normalizeContent(skillMd)).not.toBe(skillMd);
     expect(out.skillHashes?.conventions).toBe(sha256Hex(normalizeContent(skillMd)));
+    expect(out.skillHashes?.conventions).not.toBe(sha256Hex(skillMd));
 
     const leaf = await readFile(
       path.join(repoRoot, ...first.split('/'), 'conventions', 'sub-skills', 'alpha.md'),
       'utf8',
     );
-    // The fixture must bite, or the assertion under it proves nothing.
     expect(normalizeContent(leaf)).not.toBe(leaf);
     expect(out.skillSubSkillHashes?.conventions?.alpha).toBe(sha256Hex(normalizeContent(leaf)));
     expect(out.skillSubSkillHashes?.conventions?.alpha).not.toBe(sha256Hex(leaf));
