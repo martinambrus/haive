@@ -189,11 +189,23 @@ export async function removeAgentMaskStubs(
   runtimeUid = 0,
 ): Promise<void> {
   for (const record of records) {
-    // It existed before the run, so it is the repository's own directory, not a stub.
-    if (record.inode !== null) continue;
     try {
       const info = await lstatNoFollow(record.anchor, record.anchorRel);
       if (info?.kind !== 'directory') continue;
+      // Still the SAME directory, so it is the repository's own and not a stub. Comparing the inode
+      // rather than merely asking whether one was recorded is what makes this REACHABLE at all:
+      // every record carries an inode (`computeAgentDefinitionMasks` emits one only for a directory
+      // that exists), so the `record.inode !== null` guard this replaced skipped cleanup in every
+      // production case — including the one it was written for, where the directory was removed
+      // between the scan and container create and Docker recreated the target as an empty stub.
+      //
+      // The comparison is a cheap early exit and NOT the load-bearing test, because an inode number
+      // is reusable: MEASURED on ext2/ext3, a directory removed and immediately recreated in the
+      // same parent came back with the identical inode, so a replaced directory can read as
+      // unchanged. What separates the two in production is OWNERSHIP — Docker's stub is root-owned
+      // while the repository's own directory belongs to the repo owner, and `runtimeUid` is 0 there
+      // — together with the emptiness ENOTEMPTY enforces below.
+      if (record.inode !== null && info.stats.ino === record.inode) continue;
       if (info.stats.uid !== runtimeUid) continue;
       // Without `recursive` a non-empty directory fails ENOTEMPTY, exactly as `rmdir` does — which
       // IS the check: a stub that now holds something is no longer a stub, and refusing to delete it

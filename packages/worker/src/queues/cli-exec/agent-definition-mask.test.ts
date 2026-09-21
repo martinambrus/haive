@@ -171,9 +171,38 @@ describe('removeAgentMaskStubs', () => {
   it('leaves a directory that existed BEFORE the run alone', async () => {
     const root = await tree(['.claude/agents']);
     try {
-      // A real inode means the repository owns it; it is not ours to delete however empty it is.
-      await removeAgentMaskStubs([record(root, '.claude/agents', 12345)], process.getuid!());
+      // The SAME inode means the repository owns it; it is not ours to delete however empty it is.
+      // Taken from the scan rather than fabricated: cleanup compares the recorded inode with the one
+      // on disk, so a sentinel value reads as "this directory was replaced" and would be removed.
+      // This case used to pass a literal 12345, which satisfied the old `inode !== null` guard —
+      // i.e. it passed without ever exercising the comparison it exists to describe.
+      const { records } = await computeAgentDefinitionMasks(root, WORKDIR);
+      await removeAgentMaskStubs(records, process.getuid!());
       expect((await computeAgentDefinitionMasks(root, WORKDIR)).mounts).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('removes a stub that REPLACED the recorded directory between scan and container create', async () => {
+    const root = await tree(['.claude/agents']);
+    try {
+      // Every production record carries a real inode — computeAgentDefinitionMasks emits one only
+      // for a directory that exists — which is why the old `record.inode !== null` guard skipped
+      // cleanup in every case, including this one: the directory went away after the scan and
+      // Docker recreated the mount target as an empty root-owned stub uid 1000 could not write.
+      const { records } = await computeAgentDefinitionMasks(root, WORKDIR);
+      expect(records[0]!.inode).not.toBeNull();
+
+      // The differing inode is set rather than produced by rm + mkdir, because that does NOT
+      // reliably produce one: MEASURED on this host's /tmp (ext2/ext3), a directory removed and
+      // immediately recreated in the same parent came back with the IDENTICAL inode (1003682 both
+      // times). So the recreate-it-for-real version of this test failed while the code was correct.
+      // The same reuse bounds what the comparison can do in production, which is why ownership and
+      // emptiness are the discriminators that carry it — see removeAgentMaskStubs.
+      const replaced = [record(root, '.claude/agents', records[0]!.inode! + 1)];
+      await removeAgentMaskStubs(replaced, process.getuid!());
+      expect((await computeAgentDefinitionMasks(root, WORKDIR)).mounts).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

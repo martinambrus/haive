@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -128,6 +128,62 @@ describe('instructionsNameAgentPath', () => {
     for (let i = 1; i < 7; i++) files[`a${i}.md`] = `@a${i + 1}.md\n`;
     files['a7.md'] = 'see .claude/agents/deep.md\n';
     const root = await tree(files);
+    try {
+      expect(
+        await instructionsNameAgentPath({
+          workerTree: root,
+          rulesFile: 'CLAUDE.md',
+          rulesFileMode: 'import',
+        }),
+      ).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails OPEN when the rules file is a SYMLINK rather than reading through it', async () => {
+    // The read is lenient by default, which folded a containment refusal into `null` — and `null`
+    // means "absent", i.e. "names nothing". So a symlinked instruction file left isolation ENABLED
+    // while a CLI, which does follow the link, could be told to read an agent definition the mask
+    // then hid. `strict: true` is what makes this refusal reach the catch.
+    const root = await tree({ 'real.md': 'see .claude/agents/x.md\n' });
+    try {
+      await symlink('real.md', join(root, 'CLAUDE.md'));
+      expect(
+        await instructionsNameAgentPath({
+          workerTree: root,
+          rulesFile: 'CLAUDE.md',
+          rulesFileMode: 'import',
+        }),
+      ).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails OPEN when the rules path is not a regular file', async () => {
+    const root = await tree({ 'README.md': 'x' });
+    try {
+      // A directory where the instruction file should be: the reader refuses a non-regular target,
+      // which is a refusal and not an absence.
+      await mkdir(join(root, 'CLAUDE.md'));
+      expect(
+        await instructionsNameAgentPath({
+          workerTree: root,
+          rulesFile: 'CLAUDE.md',
+          rulesFileMode: 'import',
+        }),
+      ).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('counts the budget in BYTES, so a multibyte file over the cap fails OPEN', async () => {
+    // 400k euro signs: ~1.2 MB of UTF-8 against 400k UTF-16 code units. `text.length > budget`
+    // measured the code units, so this file passed a 1 MiB byte cap as though it fit, and its
+    // unscanned tail — where the agent path sits — was never examined.
+    const root = await tree({ 'CLAUDE.md': `${'€'.repeat(400_000)}\n.claude/agents/deep.md\n` });
     try {
       expect(
         await instructionsNameAgentPath({

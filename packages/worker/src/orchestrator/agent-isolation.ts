@@ -14,7 +14,7 @@
 import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { readFileNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import { readFileNoFollow, type ReadResult } from '@haive/shared/fs-safe';
 import { CONFIG_KEYS, configService, logger, promptNamesAgentPath } from '@haive/shared';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { parseAgentFile } from '../step-engine/steps/workflow/_agent-loader.js';
@@ -82,18 +82,28 @@ export async function instructionsNameAgentPath(args: {
     if (opened > MAX_INSTRUCTION_IMPORTS) return true;
     opened += 1;
 
-    let text: string | null;
+    let read: ReadResult | null;
     try {
-      text = await readTextNoFollow(args.workerTree, rel, { maxBytes: budget + 1 });
+      // `strict` is what makes the catch below reachable: without it a containment refusal, an
+      // unreadable file or a non-regular one folds into `null`, which the absence branch then reads
+      // as "names nothing" — so a symlinked rules file a CLI still follows would leave isolation ON
+      // while the mask hid the definition it references. Absence stays `null` under strict
+      // (fs-safe's `readResult` answers ABSENT before it consults the flag), so the common case of a
+      // repository with no instruction file is unaffected.
+      read = await readFileNoFollow(args.workerTree, rel, { maxBytes: budget + 1, strict: true });
     } catch {
       // A refusal is indistinguishable from a file that names something, so it ends isolation.
       return true;
     }
     // An ABSENT file names nothing. Only the entry point is commonly absent (a repository with no
     // instruction file at all), and that is the normal case, not a fault.
-    if (text === null) continue;
-    if (text.length > budget) return true;
-    budget -= text.length;
+    if (read === null) continue;
+    // Counted in BYTES, which is what the reader caps and what `size` reports. `text.length` is
+    // UTF-16 code units, so a multibyte file read at `budget + 1` bytes can measure under `budget`
+    // and be accepted as complete while its unscanned tail names an agent path.
+    if (read.truncated || read.size > budget) return true;
+    const text = read.data.toString('utf8');
+    budget -= read.size;
 
     if (promptNamesAgentPath(text, SANDBOX_WORKDIR)) return true;
     if (args.rulesFileMode !== 'import') continue;

@@ -64,10 +64,42 @@ export function secretMaskDeniesPath(policy: SecretMaskPolicy, rel: string): boo
   // Tracked (committed) files are out of scope for masking, so they are readable.
   if (policy.tracked?.has(normalised)) return false;
 
-  const denied = picomatch(policy.globs.deny, { dot: true });
+  const { match, ignore } = partitionLikeTinyglobby(policy.globs.deny, policy.globs.ignore);
+  const denied = picomatch(match, { dot: true });
   if (!denied(normalised)) return false;
-  const ignored = picomatch(policy.globs.ignore, { dot: true });
+  const ignored = picomatch(ignore, { dot: true });
   return !ignored(normalised);
+}
+
+/**
+ * Split the two glob arrays the way tinyglobby does before either is compiled.
+ *
+ * `picomatch(array)` is an ANY-match, so a negated member behaves as its own matcher: `!x` matches
+ * every path that is not `x`. tinyglobby instead REWRITES negation before matching, and the repo
+ * settings reach both engines verbatim — the API stores `secret_mask_allow` and
+ * `secret_mask_deny_extend` after nothing but a trim. Without this the two verdicts diverge in both
+ * directions, and the ignore side diverges the unsafe way: one negated allow glob makes `ignored()`
+ * true for nearly every path, so this predicate permits bytes the scanner masks.
+ *
+ * MEASURED against the installed tinyglobby 0.2.17 (`dist/index.mjs:185,189-190`), which is three
+ * rules: a negated DENY pattern loses its `!` and moves to the ignore set; a negated IGNORE pattern
+ * is discarded outright; and `!(` is picomatch's extglob negation rather than a negated pattern, so
+ * it stays a positive. `!!x` is dropped by tinyglobby's own else-if and is dropped here too.
+ */
+function partitionLikeTinyglobby(
+  deny: readonly string[],
+  ignore: readonly string[],
+): { match: string[]; ignore: string[] } {
+  const match: string[] = [];
+  const out: string[] = [];
+  for (const p of deny) {
+    if (p[0] !== '!' || p[1] === '(') match.push(p);
+    else if (p[1] !== '!' || p[2] === '(') out.push(p.slice(1));
+  }
+  for (const p of ignore) {
+    if (p[0] !== '!' || p[1] === '(') out.push(p);
+  }
+  return { match, ignore: out };
 }
 
 function normaliseRel(rel: string): string | null {
