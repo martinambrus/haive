@@ -280,6 +280,46 @@ describe('advanceStep LLM phase', () => {
     expect(enqueued[0]!.toolProfile).toBe('rag_only');
   });
 
+  it("threads a step's toolProfile onto the retry_ai fix agent's payload too", async () => {
+    // The fix agent runs the SAME step, so it must be told the same surface. The
+    // dispatcher was already given `toolProfile`; the payload was not, so cli-exec wired
+    // the full MCP surface while the prompt described the step's narrowed one.
+    const state = freshState();
+    // `aiFixContext` is what retry_ai sets, and it is what routes advanceStep into
+    // resolveAiFixPhase (the step declares neither dagExecute nor mergeResolve).
+    state.taskStepRow.aiFixContext = { priorError: 'boom', priorOutput: 'partial' };
+    const db = makeMockDb(state);
+    const enqueued: CliExecJobPayload[] = [];
+    const stepDef = baseStep();
+    stepDef.llm!.toolProfile = 'rag_only';
+    await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]!.toolProfile).toBe('rag_only');
+    // Proof this went through the FIX path rather than the ordinary llm one, which would
+    // carry `toolProfile` too and so cannot be told apart by the payload. `kind` is 'cli' on
+    // both. The prompt CAN tell them apart: only resolveAiFixPhase builds a diagnose-and-fix
+    // prompt carrying the recorded error, and `buildPrompt` is what the llm path inserts.
+    const invInsert = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(invInsert).toBeDefined();
+    expect(invInsert!.row.prompt).toContain('Diagnose the root cause');
+    expect(invInsert!.row.prompt).toContain('boom');
+    expect(invInsert!.row.prompt).not.toContain('prompt with detected=');
+  });
+
   it('routes api_key zai providers through the claude CLI binary', async () => {
     const state = freshState();
     const db = makeMockDb(state);
