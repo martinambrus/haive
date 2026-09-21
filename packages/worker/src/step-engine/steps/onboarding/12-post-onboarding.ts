@@ -49,29 +49,49 @@ import type { GenerateFilesDetect } from './07-generate-files.js';
 
 const exec = promisify(execFile);
 
+/** Files the index already holds against HEAD. Read BEFORE onboarding stages its own, so
+ *  "the user had work staged" can be told from "we staged this". */
+export async function stagedFiles(repoPath: string): Promise<string[]> {
+  const { stdout } = await exec('git', ['diff', '--cached', '--name-only'], { cwd: repoPath });
+  return stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 /**
- * Commit what onboarding generated, WITHOUT running the repository's hooks.
+ * Commit what onboarding generated, skipping the repository's hooks when — and only when — the
+ * commit carries nothing but generated files.
  *
- * `--no-verify` is the whole point of this helper, and it is not a convenience. A `pre-commit`
- * hook that REWRITES what is staged — prettier, lint-staged, `markdownlint --fix` — silently
- * breaks onboarding's own provenance: `recordOnboardingArtifacts` runs BEFORE this commit and
- * stores the hash of the manifest RENDERING, and the onboarding reset later compares that against
- * what is on disk. Let a formatter through and every agent file, SKILL.md and sub-skill this run
- * just wrote stops matching its own record, so the reset keeps or quarantines Haive's own output
- * and reports it to the user as their edit. `normalizeContent` absorbs whitespace and blank-line
- * drift, but not a rewritten list marker or heading style.
+ * `--no-verify` is the point of this helper, and it is not a convenience. A `pre-commit` hook that
+ * REWRITES what is staged — prettier, lint-staged, `markdownlint --fix` — silently breaks
+ * onboarding's own provenance: `recordOnboardingArtifacts` runs BEFORE this commit and stores the
+ * hash of the manifest RENDERING, and the onboarding reset later compares that against what is on
+ * disk. Let a formatter through and every agent file, SKILL.md and sub-skill this run just wrote
+ * stops matching its own record, so the reset keeps or quarantines Haive's own output and reports
+ * it to the user as their edit. `normalizeContent` absorbs whitespace and blank-line drift, but
+ * not a rewritten list marker or heading style.
  *
- * Scoped to THIS commit, which carries only generated files. Do NOT generalise it: the
- * workflow-side commits (`10-gate-3-commit`, `completeMergeHostSide`) carry the USER'S code, where
- * their hooks are wanted and load-bearing, and `clone.ts`'s blank-repo init commit runs on a tree
- * `git init` has just created, where there is no hook to bypass.
+ * `userStaged` is what the index ALREADY held before onboarding staged anything, and it decides
+ * the bypass — which is why it is passed in rather than a boolean the caller computes. This commit
+ * is PATHLESS, so it carries the whole index, and `git add` adds to that index rather than
+ * replacing it. Where someone already had their own work staged, skipping THEIR checks on THEIR
+ * code is the opposite of what this is for, so the hooks run and provenance drift becomes the
+ * lesser outcome.
+ *
+ * Do NOT generalise the flag either: the workflow-side commits (`10-gate-3-commit`,
+ * `completeMergeHostSide`) carry the USER'S code, where their hooks are wanted and load-bearing,
+ * and `clone.ts`'s blank-repo init commit runs on a tree `git init` has just created.
  */
 export async function commitGeneratedFiles(
   repoPath: string,
   message: string,
   env: NodeJS.ProcessEnv,
+  userStaged: readonly string[],
 ): Promise<void> {
-  await exec('git', ['commit', '--no-verify', '-m', message], { cwd: repoPath, env });
+  const argv =
+    userStaged.length === 0 ? ['commit', '--no-verify', '-m', message] : ['commit', '-m', message];
+  await exec('git', argv, { cwd: repoPath, env });
 }
 
 const DEFAULT_COMMIT_MESSAGE = [
@@ -716,6 +736,12 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         await exec('git', ['add', '-A'], { cwd: ctx.repoPath });
         ctx.logger.info({ initBranch }, 'post-onboarding: initialized git repository');
       }
+      // What the USER already had staged, read before we touch the index. The commit below is
+      // pathless and `git add` adds rather than replaces, so anything already here would ride
+      // along — and hooks must not be skipped for somebody else's code. After `didInit` there is
+      // nothing to protect: the repository was created moments ago and its whole index is the
+      // `add -A` above, which this step commits by design.
+      const userStaged = didInit ? [] : await stagedFiles(ctx.repoPath);
       // -f: .haive/install.json lives under .haive/, which 01-worktree-setup adds to
       // .git/info/exclude on repos that ran a workflow task. A plain `git add` of an
       // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
@@ -744,7 +770,20 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             : DEFAULT_COMMIT_MESSAGE;
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
-      await commitGeneratedFiles(ctx.repoPath, message, { ...process.env, ...identity });
+      if (userStaged.length > 0) {
+        // Said out loud, because it changes what the reset can later prove about these files:
+        // with the user's own work in the same commit their hooks run, and a formatter among
+        // them rewrites what onboarding just recorded a hash for.
+        warnings.push(
+          `you had ${userStaged.length} file(s) staged, so they are part of this commit and your git hooks ran on it`,
+        );
+      }
+      await commitGeneratedFiles(
+        ctx.repoPath,
+        message,
+        { ...process.env, ...identity },
+        userStaged,
+      );
       const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;
