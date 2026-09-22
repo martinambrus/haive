@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DagCoderContext, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { fencedDebtBlock } from '../_untrusted-repo.js';
+import { fencedDebtBlock, REPO_IS_DATA_ACTING_LINES } from '../_untrusted-repo.js';
 import {
   commentPolicyLines,
   ddevConfigGuidanceLines,
@@ -43,6 +43,14 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
     `  ${issue.sandboxWorktreePath}`,
     'Implement ONLY this issue (a vertical slice: implementation + its tests together).',
     'Match the existing code style and conventions. Do not invent requirements.',
+    '',
+    // Stated before the retrieval guidance below, which is what sends this agent into the
+    // tree in the first place: the rule about what it reads has to arrive before the
+    // instruction to go read it.
+    //
+    // Joined into ONE element, not spread: this array is `.filter(Boolean)`-ed, which would
+    // strip the block's deliberate blank lines and run three paragraphs together.
+    REPO_IS_DATA_ACTING_LINES.join('\n'),
     ...commentPolicyLines(),
     '',
     'Before implementing, search for the existing patterns this issue touches, in this order:',
