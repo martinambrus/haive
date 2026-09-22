@@ -262,15 +262,21 @@ export const REPO_IS_DATA_AUTHORING_LINES = [
 /* ------------------------------------------------------------------ */
 /* One rule for "this value is named on a line of the prompt".          */
 /*                                                                     */
-/* JS `\s` covers LF, CR, LS (U+2028) and PS (U+2029) but NOT U+0085    */
-/* (NEL), which is a Cc control rather than a Space_Separator — so a    */
-/* rule written as `\s+` has a gap exactly where a forged line goes.    */
+/* A RANGE, not a list of the characters that happen to break a line.   */
+/* Enumerating cost three rounds and was wrong every time: `\s` misses   */
+/* U+0085 (NEL, a Cc control rather than a Space_Separator), a C0-only  */
+/* class misses U+2028/U+2029, and an ASCII-control class still misses  */
+/* the information separators U+001C-U+001E. So the class is EVERY      */
+/* Unicode control — C0, DEL and C1 — plus the two line separators,     */
+/* with TAB (U+0009) the one carve-out: it is the only control a real   */
+/* value carries and it cannot start a line.                            */
+/*                                                                     */
 /* `@haive/shared/plan/render.ts` keeps its own copy of the collapse,   */
 /* since web and the api may not import from the worker.               */
 /* ------------------------------------------------------------------ */
 
-const LINE_WHITESPACE = /[\s\u0085]+/g;
-const LINE_BREAK = /[\n\r\u000b\u000c\u0085\u2028\u2029]/;
+const LINE_WHITESPACE = /[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
+const LINE_BREAK = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/;
 
 /** Collapse a value onto ONE line, losslessly apart from the whitespace itself. For a
  *  field that is a single line by nature and already bounded by its column, where a cap
@@ -282,7 +288,8 @@ export const collapseToLine = (s: string | null | undefined): string =>
  *
  *  The test for a value that must not be rewritten — a filename or a KB id the agent
  *  then opens, where a mangled name is worse than an absent one. `API Security` and
- *  every other odd-but-real name passes; only one that cannot be a single line fails. */
+ *  every other odd-but-real name passes, TAB included; only one that cannot be a
+ *  single printable line fails. */
 export const isSingleLine = (s: string): boolean => !LINE_BREAK.test(s);
 
 /** Reduce agent-authored PROSE that is named on a header line, above any guard.

@@ -88,9 +88,11 @@ export function renderPlanMarkdownFrom(
   // document here, the committed `.haive-data/plan.md`, the canvas and every prompt
   // this render feeds. `planNodeSchema.title` is `z.string().trim()`, which strips the
   // ends and leaves the interior, so collapsing is the render's own job.
-  // `\s` misses U+0085 (NEL), a Cc control rather than a Space_Separator — the same gap
-  // `collapseToLine` closes in the worker's prompt builders.
-  const oneLine = (s: string): string => s.replace(/[\s\u0085]+/g, ' ').trim();
+  // Every Unicode control (C0, DEL, C1) plus the two line separators, not the handful
+  // `\s` happens to cover: it misses U+0085, and an ASCII class misses U+001C-U+001E
+  // and U+2028/U+2029. The same class `collapseToLine` uses in the worker.
+  const oneLine = (s: string): string =>
+    s.replace(/[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim();
 
   const lines: string[] = [];
 
