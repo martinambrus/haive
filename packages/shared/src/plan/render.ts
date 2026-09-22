@@ -83,6 +83,13 @@ export function renderPlanMarkdownFrom(
   // to `.haive-data/plan.md` and the canvas all say the same thing.
   const derived = computePlanSequence(nodes, edges);
 
+  // A markdown heading and a list item are ONE LINE by definition, so a title or an
+  // edge note carrying a newline does not render as itself anywhere: it breaks the
+  // document here, the committed `.haive-data/plan.md`, the canvas and every prompt
+  // this render feeds. `planNodeSchema.title` is `z.string().trim()`, which strips the
+  // ends and leaves the interior, so collapsing is the render's own job.
+  const oneLine = (s: string): string => s.replace(/\s+/g, ' ').trim();
+
   const lines: string[] = [];
 
   const emit = (node: PlanNodeRecord): void => {
@@ -98,7 +105,7 @@ export function renderPlanMarkdownFrom(
     // for. It is a position in the CURRENT plan, not an id — the `node:` ref
     // below is the thing to quote back.
     const seq = derived.sequenceById.get(node.id);
-    lines.push(`${hashes} ${seq === undefined ? '' : `${seq}. `}${node.title}${focus}`);
+    lines.push(`${hashes} ${seq === undefined ? '' : `${seq}. `}${oneLine(node.title)}${focus}`);
 
     const blockers = derived.blockedById.get(node.id) ?? [];
     const attrs = [
@@ -117,9 +124,9 @@ export function renderPlanMarkdownFrom(
     for (const link of links) {
       const target = titleById.get(link.toNodeId);
       if (!target) continue;
-      const note = link.note ? ` — ${link.note}` : '';
+      const note = link.note ? ` — ${oneLine(link.note)}` : '';
       lines.push(
-        `- ${EDGE_LABEL[link.kind]}: ${target} (\`${PLAN_NODE_REF_PREFIX}${link.toNodeId}\`)${note}`,
+        `- ${EDGE_LABEL[link.kind]}: ${oneLine(target)} (\`${PLAN_NODE_REF_PREFIX}${link.toNodeId}\`)${note}`,
       );
     }
 

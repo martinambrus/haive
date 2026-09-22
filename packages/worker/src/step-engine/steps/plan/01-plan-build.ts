@@ -301,7 +301,16 @@ async function listKbFiles(ctx: StepContext): Promise<string[]> {
   // Lenient: null folds absent, unreadable and a linked `KB_DIR` into the empty
   // list the `catch` here already produced.
   const entries = await readdirNoFollow(ctx.repoPath, KB_DIR);
-  return (entries ?? []).filter((e) => e.isFile()).map((e) => e.name);
+  return (
+    (entries ?? [])
+      .filter((e) => e.isFile())
+      .map((e) => e.name)
+      // A filename is a `Dirent.name` copied verbatim onto the prompt's FIRST line, above
+      // every guard, and on Linux any byte but `/` and NUL is legal in one. Dropped rather
+      // than collapsed: the agent opens these by name, so a mangled name is worse than an
+      // absent one, and the prompt sends it to the directory regardless.
+      .filter((name) => !/[\u0000-\u001f\u007f]/.test(name))
+  );
 }
 
 function sourceGuidance(d: PlanBuildDetect): string {
