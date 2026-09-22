@@ -487,6 +487,17 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
         }),
         opts: {},
       },
+      {
+        // A server NAMED like an agent path. `loadUserMcpServers` takes the repository's `mcpServers`
+        // keys verbatim from its own `.claude/mcp_settings.json`, so this is a shape a repository can
+        // actually produce, and it lands in `named` below — correctly, because the rendered block does
+        // name an agent path. See the asymmetry case for what that means in production.
+        label: 'agent-path-shaped server name',
+        surface: mcpFixture(true, true, true, {
+          '.claude/agents/foo': { command: 'npx', args: ['-y', 'foo-mcp'] },
+        }),
+        opts: {},
+      },
     ] as const
   ).map((cell) => ({
     label: `mcpSurfacePrompt (${cell.label})`,
@@ -1228,6 +1239,11 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '09_5-skill-generation (mining) [1:cap-1-routing]',
       '09_5-skill-generation (mining) [2:cap-2-testing]',
       '09_5-skill-generation (mining) [3:cap-3-theming]',
+      // A repository-controlled MCP server NAME shaped like an agent path. It belongs here: the rendered
+      // block does name one. What it also exposes is a dispatcher asymmetry — that block is appended
+      // AFTER `agentIsolationApplies` has decided — pinned in its own case and recorded as an open item
+      // rather than fixed in this test-only change.
+      'mcpSurfacePrompt (agent-path-shaped server name)',
     ]);
     // And the answer to the finding that added these fixtures: `03-phase-0a-discovery` is NOT here.
     // Its mining prompt is clean, which is the one thing scanning it could establish.
@@ -1289,7 +1305,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 140 clean + 10 named = 150 built, 3 unreachable. The unreachable count walked
+    // MEASURED 2026-09-22: 140 clean + 11 named = 151 built, 3 unreachable. The unreachable count walked
     // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
     // and discovery got a persona roster; the built count then grew again with the truncation-retry
     // axis, which doubles every loop role. The floor sat at 40 when
@@ -1299,7 +1315,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(150);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(151);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1514,6 +1530,34 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // Both names and the separator: this arm exists to tell the model what a REPOSITORY wired up, so
     // the server names are the part that varies and the part a path could hide in.
     expect(text).toContain('Project-configured servers: `company-docs`, `jira`.');
+  });
+
+  it('PINS a production asymmetry: the MCP block is appended after the isolation decision', () => {
+    // NOT a fixture gap like every other case in this file — a gap in the dispatcher, recorded here
+    // because this is where it is observable.
+    //
+    // VERIFIED in `orchestrator/dispatcher.ts`: `agentIsolationApplies(req)` runs at :461 against
+    // `req.input.prompt`, and `withMcpSurface` appends the surface block at :481, INSIDE `adaptPrompt`
+    // — after the decision. `loadUserMcpServers` (`sandbox/mcp-surface.ts:198`) takes the repository's
+    // `mcpServers` keys verbatim from its own `.claude/mcp_settings.json`, so a repository can name a
+    // server `.claude/agents/foo` and that string reaches the FINAL prompt without ever being scanned.
+    //
+    // This case asserts the mechanism, not a verdict: the appended block CAN carry an agent path. The
+    // fix belongs in the dispatcher (scan the resolved user server names alongside the prompt) and is
+    // deliberately NOT in this test-only change. If someone lands that fix, this assertion is the one to
+    // update, and the `named` entry above goes with it.
+    const withPathShapedName = mcpSurfacePrompt(
+      mcpFixture(true, true, true, { '.claude/agents/foo': { command: 'npx' } }),
+      {},
+    );
+    expect(promptNamesAgentPath(withPathShapedName, SANDBOX_WORKDIR)).toBe(true);
+    // And the same surface with a benign name does not, so the assertion above is about the NAME rather
+    // than about anything else the block happens to say.
+    const benign = mcpSurfacePrompt(
+      mcpFixture(true, true, true, { 'company-docs': { command: 'npx' } }),
+      {},
+    );
+    expect(promptNamesAgentPath(benign, SANDBOX_WORKDIR)).toBe(false);
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {
