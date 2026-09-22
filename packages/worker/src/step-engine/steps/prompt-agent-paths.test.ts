@@ -697,6 +697,88 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
     'reads a config value; returns the prompt unchanged when unset',
 };
 
+/**
+ * One prior pass per history-reading loop step, because `previousIterations: []` renders the
+ * NO-HISTORY arm of every one of them and production almost never dispatches that shape.
+ *
+ * MEASURED in 05: with an empty array `latestReview` answers null, `reviewLost` is true and the
+ * corrector gets `SELF_REVIEW_FALLBACK` — so `formatPriorFindings`, the block a normal odd pass
+ * actually carries, was never scanned. All six loop steps read history, and five of them do it the
+ * same way: scan backwards for an `applyOutput` whose `source` equals a literal. That literal is the
+ * whole fixture; a proxy cannot supply it, since a proxy fails every strict comparison.
+ *
+ * Keyed by step id. A step absent here still builds with `[]`, which is the no-history arm and remains
+ * worth scanning — both arms are dispatched in production.
+ */
+const PRIOR_ITERATIONS: Record<string, unknown[]> = {
+  '05-phase-0b5-spec-quality': [
+    {
+      iteration: 0,
+      applyOutput: {
+        source: 'review',
+        spec: '## Admin route\nThe admin route must reject unauthenticated callers.',
+        verdict: 'NEEDS_REVISION',
+        findings: [
+          {
+            severity: 'high',
+            dimension: 'goal_clarity',
+            comment: 'The success criterion for an anonymous request is not stated.',
+          },
+        ],
+      },
+    },
+  ],
+  '07b-phase-4-validate': [
+    {
+      iteration: 0,
+      applyOutput: {
+        source: 'validator',
+        verdict: 'fix_required',
+        // `accumulatedFixes` ends `return last ? last.fixesApplied : fixes` — unguarded, so a record
+        // missing this field throws rather than rendering the no-history arm. It is REQUIRED on
+        // `ValidateApply`, so production cannot hit that; an invalid fixture can, and did.
+        fixesApplied: ['Required the session middleware on the admin route.'],
+        issues: [
+          {
+            severity: 'high',
+            file: 'src/app/admin.ts',
+            description: 'No auth check.',
+            fix: 'Guard it.',
+          },
+        ],
+      },
+    },
+  ],
+  '08a-browser-verify': [
+    {
+      iteration: 0,
+      applyOutput: {
+        source: 'tester',
+        verdict: 'fix_required',
+        // `TestFailure` objects, not strings: buildFixerPrompt renders `f.description` and `f.evidence`.
+        failures: [
+          {
+            description: 'The admin page renders a blank body when the session is missing.',
+            evidence: '03-admin-anonymous.png',
+          },
+        ],
+        fixesApplied: [],
+        screenshots: [],
+      },
+    },
+  ],
+  '07a-code-simplify': [
+    {
+      iteration: 0,
+      applyOutput: {
+        source: 'simplifier',
+        filesSimplified: ['src/app/admin.ts'],
+        changesMade: ['Collapsed two duplicate guards in the admin handler.'],
+      },
+    },
+  ],
+};
+
 /** Every prompt production can dispatch, across all three registry paths plus the named builders. */
 function promptSources(): PromptSource[] {
   const out: PromptSource[] = [...NAMED_PROMPT_BUILDERS];
@@ -735,7 +817,9 @@ function promptSources(): PromptSource[] {
               detected: permissive(),
               formValues: permissive(),
               iteration: n,
-              previousIterations: [],
+              previousIterations: (PRIOR_ITERATIONS[id] ?? []) as Parameters<
+                typeof iteration
+              >[0]['previousIterations'],
             }),
         });
       }
@@ -1010,6 +1094,38 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(enrich).toContain('A repository is checked out at the working directory.');
     expect(enrich).toContain('NO repository is checked out');
     expect(enrich).toContain('- id: kb-101');
+  });
+
+  it('RENDERS the loop arms that need a PRIOR pass', async () => {
+    // `previousIterations: []` is the no-history arm, and production almost never dispatches it: an odd
+    // pass of 05 carries the preceding review. With an empty array `latestReview` answers null and the
+    // corrector got `SELF_REVIEW_FALLBACK` instead of `formatPriorFindings` — so the block a normal
+    // corrector actually receives was never scanned. Same shape in 07b, 08a and 07a.
+    const textFor = async (prefix: string): Promise<string> => {
+      const built = (
+        await Promise.all(
+          promptSources()
+            .filter((source) => source.label.startsWith(prefix))
+            .map(async (source) => builtEntries(source, await source.build())),
+        )
+      ).flat();
+      expect(built.length, `${prefix}: no source built`).toBeGreaterThan(0);
+      return built.map((b) => b.prompt).join('\n\n');
+    };
+
+    const specQuality = await textFor('05-phase-0b5-spec-quality (loop iteration');
+    expect(specQuality).toContain('=== Findings from iteration 1 ===');
+    expect(specQuality).toContain('[high] goal_clarity: The success criterion');
+
+    expect(await textFor('07b-phase-4-validate (loop iteration')).toContain(
+      'Required the session middleware on the admin route.',
+    );
+    expect(await textFor('08a-browser-verify (loop iteration')).toContain(
+      'The admin page renders a blank body when the session is missing.',
+    );
+    expect(await textFor('07a-code-simplify (loop iteration')).toContain(
+      'Collapsed two duplicate guards in the admin handler.',
+    );
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {
