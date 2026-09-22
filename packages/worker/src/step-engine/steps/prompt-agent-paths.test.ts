@@ -26,6 +26,7 @@ import { withModelCapabilityBoundary } from '../../cli-adapters/model-capabiliti
 import { buildAdversaryPrompt, buildVerifyPrompt } from './workflow/08d-adversarial-qa.js';
 import { buildSequencePrompt } from './plan/03-plan-sequence.js';
 import { buildCoverageRepairPrompt } from './plan/02-plan-coverage.js';
+import { appAuthPromptLines } from './workflow/_app-auth.js';
 
 /**
  * Verification item 2's tripwire: which BUILT-IN prompts name an agent directory once Haive's own
@@ -280,6 +281,19 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
         context: ['The plan as it stands (titles only):', '', '- Auth'],
       }),
   },
+  // BOTH branches explicitly. These lines are spliced into the tester, adversary and verifier prompts,
+  // and `permissive().appLogin.ok` is truthy — so every proxy-driven route through those builders
+  // emitted the authenticated branch alone. Production emits the unauthenticated one whenever login is
+  // absent or fails, and my exclusion of this helper as "covered via 08a" was true of half of it.
+  {
+    label: 'appAuthPromptLines (authenticated)',
+    build: () => appAuthPromptLines({ attempted: true, ok: true, reason: '' }).join('\n'),
+  },
+  {
+    label: 'appAuthPromptLines (unauthenticated)',
+    build: () =>
+      appAuthPromptLines({ attempted: true, ok: false, reason: 'no credentials' }).join('\n'),
+  },
   {
     label: '02-plan-coverage buildCoverageRepairPrompt (wave, no section)',
     build: () =>
@@ -421,6 +435,7 @@ const SCANNED_PROMPT_EXPORTS = [
   'buildAdversaryPrompt',
   'buildSequencePrompt',
   'buildCoverageRepairPrompt',
+  'appAuthPromptLines',
   // NOT `withModelCapabilityBoundary`: this list is the audit's bookkeeping — names the sweep below
   // can actually see — and that wrapper contains no "prompt", so listing it here reads as a stale
   // entry. It is scanned as a SOURCE in NAMED_PROMPT_BUILDERS, which is the distinction: a source the
@@ -431,7 +446,6 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
   antigravityStdinPrompt: 'wraps an already-built prompt for stdin; adds no text of its own',
   deliverPrompt: 'delivery mechanism (argv vs stdin), not a builder',
   expiredPromptFilter: 'a SQL predicate for stream-log retention',
-  appAuthPromptLines: 'lines appended to a browser-verify prompt; covered via 08a above',
   parsePromptDefects: 'a parser of agent OUTPUT',
   assembleNativePrompt:
     'sub-agent assembly — `input.kind` is not `prompt` there, so agentIsolationApplies excludes it',
