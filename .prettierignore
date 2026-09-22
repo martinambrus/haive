@@ -18,3 +18,23 @@ orchestration.zip
 # appended as amendments, so a reader never has to sweep the file to assemble one
 # subject. Excluded here so formatting never rewrites a body. See docs/plans/README.md.
 docs/plans
+
+# Nested git worktrees are SEPARATE CHECKOUTS, usually on another branch. The root scripts glob
+# `**/*.{ts,tsx,js,jsx,json,md}`, so without these `pnpm format` rewrites files that belong to a
+# different branch and a different working tree — MEASURED at 80 files with one worktree present.
+# The `docs/plans` entry above cannot cover them either: prettier anchors a pattern containing a
+# slash to THIS file's directory, so it does not match `<worktree>/docs/plans/`, and those plan
+# bodies are exactly what that entry exists to protect.
+#
+# CI never sees any of this (it clones fresh, no worktrees), so the whole cost fell on local runs:
+# `pnpm format:check` reported 81 files where 1 was real.
+#
+# BOTH roots matter, and the second is the dangerous one. `.claude/worktrees` is where a Claude Code
+# session works. `.haive/worktrees` is where Haive's OWN `01-worktree-setup` puts a running task's
+# feature branch (`repo/worktree-paths.ts:5`), and it is excluded through `.git/info/exclude` rather
+# than `.gitignore` — which prettier does not read, its defaults being `.gitignore` and this file. So
+# it is invisible to `git status` and fully visible to prettier: MEASURED, `prettier --file-info` on a
+# path under it answered `"ignored": false`. A root `pnpm format` during a live task would rewrite
+# that task's own branch mid-run.
+.claude/worktrees
+.haive/worktrees
