@@ -446,6 +446,18 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   // Blocks SPLICED INTO other prompts. A bare agent path in one of these would end isolation for
   // every dispatch that carries it, which is broader than any single step.
   {
+    // A KB entry TITLE shaped like an agent path. Titles are author-written free text and the digest
+    // interpolates them verbatim, so this is a shape the corpus can hold. Same asymmetry as the MCP
+    // server name: appended after the isolation decision.
+    label: 'globalKbDigestPrompt (agent-path-shaped title)',
+    exportKey: 'step-engine/steps/_global-kb-digest.ts#globalKbDigestPrompt',
+    build: () =>
+      globalKbDigestPrompt([
+        { category: 'standards', title: '.claude/agents/foo' },
+        { category: 'standards', title: 'Escape every interpolated label' },
+      ]),
+  },
+  {
     // CONCRETE entries, two categories. A proxy is an empty ITERABLE, so `for (const e of entries)`
     // ran zero times and the category/title loop — the body of this block — never rendered. Production
     // cannot dispatch the scanned shape at all: `withGlobalKbDigest` skips the block when the list is
@@ -1243,6 +1255,9 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       // block does name one. What it also exposes is a dispatcher asymmetry — that block is appended
       // AFTER `agentIsolationApplies` has decided — pinned in its own case and recorded as an open item
       // rather than fixed in this test-only change.
+      // Both post-decision appends that carry NON-HAIVE text and can therefore hold a path a repository
+      // or a KB author wrote. Sorted, so the digest entry precedes the MCP one.
+      'globalKbDigestPrompt (agent-path-shaped title)',
       'mcpSurfacePrompt (agent-path-shaped server name)',
     ]);
     // And the answer to the finding that added these fixtures: `03-phase-0a-discovery` is NOT here.
@@ -1305,7 +1320,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 140 clean + 11 named = 151 built, 3 unreachable. The unreachable count walked
+    // MEASURED 2026-09-22: 140 clean + 12 named = 152 built, 3 unreachable. The unreachable count walked
     // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
     // and discovery got a persona roster; the built count then grew again with the truncation-retry
     // axis, which doubles every loop role. The floor sat at 40 when
@@ -1315,7 +1330,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(151);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(152);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1532,7 +1547,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(text).toContain('Project-configured servers: `company-docs`, `jira`.');
   });
 
-  it('PINS a production asymmetry: the MCP block is appended after the isolation decision', () => {
+  it('PINS a production asymmetry: external text is appended after the isolation decision', () => {
     // NOT a fixture gap like every other case in this file — a gap in the dispatcher, recorded here
     // because this is where it is observable.
     //
@@ -1558,6 +1573,20 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       {},
     );
     expect(promptNamesAgentPath(benign, SANDBOX_WORKDIR)).toBe(false);
+
+    // The MCP names are ONE instance. `adaptPrompt` makes seven appends after the decision and THREE
+    // carry text Haive did not write: `withMcpSurface` (repository `mcpServers` keys),
+    // `withGlobalKbDigest` (author-written KB titles) and `withAppReach` (the resolved app URL and
+    // `addHosts`). The other four are Haive constants or persona bodies, which are scanned separately and
+    // verbatim. So the fix is not "also scan server names" — it is that the decision must account for
+    // every append carrying external text. The digest half is asserted here too, so what is pinned is the
+    // CLASS rather than one field.
+    const digestWithPath = globalKbDigestPrompt([
+      { category: 'standards', title: '.claude/agents/foo' },
+    ]);
+    expect(promptNamesAgentPath(digestWithPath, SANDBOX_WORKDIR)).toBe(true);
+    const digestBenign = globalKbDigestPrompt([{ category: 'standards', title: 'Escaping rules' }]);
+    expect(promptNamesAgentPath(digestBenign, SANDBOX_WORKDIR)).toBe(false);
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {
