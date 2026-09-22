@@ -78,8 +78,12 @@ interface PlanChatApply {
 }
 
 function buildChatPrompt(d: PlanChatDetect): string {
+  // Per TURN, and only the assistant's. A conversation's ORDER is its content, so the two
+  // cannot be grouped the way `loadPriorFixContext` groups rounds — and the user's turns are
+  // the operator speaking, which must never be fenced. What YOU said earlier is your own
+  // output, and an earlier turn may have quoted a repository file it read.
   const history = d.transcript
-    .map((m) => `${m.role === 'user' ? 'User' : 'You'}: ${m.body}`)
+    .map((m) => (m.role === 'user' ? `User: ${m.body}` : `You:\n${fencedAgentBlock(m.body)}`))
     .join('\n\n');
   return [
     'You are editing a project plan through conversation.',

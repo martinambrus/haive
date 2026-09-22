@@ -10,6 +10,7 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
+import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import {
   MAX_PROPOSED_OPS,
   describeDropped,
@@ -134,6 +135,12 @@ async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
 
 function buildReconcilePrompt(d: PlanReconcileDetect): string {
   return [
+    // This step reads repository files and emits plan-patch ops, so what it writes becomes
+    // a task description like any other plan node — and its proposals reach a form where
+    // every one is ticked by default, which makes the human gate weak evidence. Joined
+    // into one element so the block's blank lines survive.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
     'A development task has just finished on this repository. Bring the PROJECT PLAN back in',
     'line with what now exists.',
     '',
