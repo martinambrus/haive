@@ -1,8 +1,17 @@
 # Per-call agent isolation (PR 1)
 
 > **LANDED 2026-09-21, in six PRs** — #191 `7deb542d`, #192 `bde5722e`, #193 `fe3148a5`, #194
-> `16f8be37`, #195 `a66a79de`, #196 `0bb6fe45`. What is left is this plan's own Verification
-> section: items 1, 2 and 4. Planned 2026-09-14 against `main` at `3c0a93f6` and reviewed against
+> `16f8be37`, #195 `a66a79de`, #196 `0bb6fe45`. **Verification item 2 COMPLETED 2026-09-22** in #200
+> (two assertions) and #202 `842012ff` (the third, the built-in prompt-builder scan). What is left is
+> items 1 and 4, both of which need a live run.
+>
+> Item 2's own work found a PRODUCTION defect the plan had not predicted, fixed in #211 `689f842a`:
+> `adaptPrompt` splices the MCP surface and the global-KB digest in AFTER `agentIsolationApplies`
+> returns, and both carry text Haive did not write — a repository's own `mcpServers` keys and
+> author-written KB titles — so either could put an agent path into the final prompt of an invocation
+> already chosen for isolation. The rule now has a SEVENTH condition scanning those resolved values.
+> That is the argument for writing the assertion rather than reasoning about it: the scan was specified
+> to catch a new prompt builder, and what it actually caught was the dispatcher. Planned 2026-09-14 against `main` at `3c0a93f6` and reviewed against
 > the code the same day. Built-in steps only; custom task types reach the same rule through
 > `rippling-wibbling-puffin` Phase 3.1, whose companion edits are listed below and are ALREADY
 > FOLDED INTO that plan — its prompt-template entry shape carries `agentPool?`, its `{{agent:<id>}}`
@@ -707,7 +716,18 @@ scratch.
    - a fixture repository with a distinct sentinel in each candidate instruction file (`CLAUDE.md`,
      `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, and a copy in a nested directory) shows which of
      them each CLI puts in its first request, checked against its `rulesFile` and that file's imports.
-2. **Unit tests** (`pnpm --filter @haive/worker exec vitest run`), modelled on
+2. **DONE** — #200 landed the catalog and `invocationRepoSubpath` assertions; #202 landed the
+   built-in-prompt-builder scan as `packages/worker/src/step-engine/steps/prompt-agent-paths.test.ts`,
+   which boots the production registry and scans 186 built prompts across every dispatch path (llm,
+   loop by role x truncation-retry x history x detect-variant, mining, `MiningWaveError` waves, the
+   direct `resolveTaskDispatch` calls no registry step owns, and the blocks spliced in after the
+   decision). Thirteen prompts legitimately name a path, each with its reason recorded; three sources
+   stay unreachable and are asserted BY NAME because `selectAgents` needs a live database there. Two
+   things that file learned the hard way are worth carrying into any similar harness: a permissive
+   proxy stand-in reaches only a builder's DEFAULT arm, and an assertion written to bound a gap will
+   hide it unless it names what it tolerates.
+
+   Unit tests (`pnpm --filter @haive/worker exec vitest run`), modelled on
    `test/mcp-none.test.ts` and `test/ddev-generated-mask.test.ts`: the mask builder (existing
    real directories only, symlinked ones left unmasked, read-only, fail-open, secret and ddev file
    masks under a masked directory dropped), `agentIsolationApplies` (a named agent directory or file, and `subagents`, included; the pointer inside a prompt's persona marker does not count, while the same marker-shaped block inside a pasted body does and keeps the invocation unmasked), a catalog assertion that
