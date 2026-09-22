@@ -14,6 +14,7 @@ import {
   REPO_IS_DATA_AUTHORING_LINES,
   REPO_IS_DATA_LINES,
   REPO_IS_DATA_ONE_CLASS_LINES,
+  UNTRUSTED_OPEN,
 } from './_untrusted-repo.js';
 import { REFUTE_LENSES, buildRefutePrompt } from './workflow/08c-code-review.js';
 import { buildExpandPrompt, buildRootPrompt } from './plan/01-plan-build.js';
@@ -1627,6 +1628,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // kind of thing is told not to, a coder is told what it may not CHANGE, and an author is
     // told what its words become. Handing a step the wrong one files a report in a schema
     // that describes something else — the failure REPO_IS_DATA_ONE_CLASS_LINES documents.
+    const DEFECT_HEADING = '=== Defect to fix (found downstream) ===';
     const REVIEWING = 'Report it as a finding, naming';
     const ONE_CLASS = 'your findings array holds one kind of thing';
     const ACTING = 'You EDIT files, so the stakes are higher here';
@@ -1680,6 +1682,18 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     for (const { key, prompt } of await eachPrompt('05-phase-0b5-spec-quality')) {
       expect(prompt, key).toContain(key.includes('corrector') ? AUTHORING : ONE_CLASS);
       expect(prompt, key).not.toContain(ACTING);
+    }
+
+    // The fix loop is one hop further on: a reviewing step is TOLD to quote the tree text
+    // that tried to steer it, `buildFindingsSummary` copies that into the diagnosis, and 07
+    // is its only reader. Wherever a prompt names it, it is fenced.
+    const fixArms = (await eachPrompt('07-phase-2-implement')).filter(({ prompt }) =>
+      prompt.includes(DEFECT_HEADING),
+    );
+    expect(fixArms.length, 'no 07 fix arm rendered').toBeGreaterThan(0);
+    for (const { key, prompt } of fixArms) {
+      const after = prompt.slice(prompt.indexOf(DEFECT_HEADING) + DEFECT_HEADING.length);
+      expect(after.trimStart().startsWith(UNTRUSTED_OPEN), key).toBe(true);
     }
   });
 
