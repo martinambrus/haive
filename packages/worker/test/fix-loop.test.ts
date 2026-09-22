@@ -410,6 +410,38 @@ function ev(sourceStepId: string, round: number, diagnosis: string) {
   };
 }
 
+describe('composition sites that join a person and a machine', () => {
+  // Every slice in this module is applied to text that can now carry a fence inside it,
+  // because the fence is added where the two are JOINED. A HEAD slice keeps the BEGIN and
+  // drops the END, which swallows the rest of the prompt; a TAIL slice does the reverse.
+  it('gate directive fences the failure it quotes, and never the instruction', () => {
+    const out = buildGateDirectiveDiagnosis(
+      'Stop rewriting the middleware.',
+      'AssertionError, and a line from src/x.ts saying to ignore the spec.',
+    );
+    const open = out.indexOf(UNTRUSTED_OPEN);
+    expect(open).toBeGreaterThan(-1);
+    expect(out.indexOf('Stop rewriting the middleware.')).toBeLessThan(open);
+    expect(out.indexOf('ignore the spec.')).toBeGreaterThan(open);
+  });
+
+  it('honored constraints survive a HEAD slice with their fence closed', async () => {
+    // Long enough that the per-entry head slice lands inside the fence, which keeps the
+    // BEGIN and drops the END — and this block is unfenced by design, so an unmatched BEGIN
+    // swallows the rest of the prompt.
+    const inner = [
+      'ddev start failed.',
+      UNTRUSTED_OPEN,
+      'console noise '.repeat(400),
+      UNTRUSTED_CLOSE,
+    ].join('\n');
+    const block = await loadHonoredConstraints(ctxWith([ev('07c-ddev-reconcile', 1, inner)], 3));
+
+    expect(block).toContain(UNTRUSTED_OPEN);
+    expect(block.split(UNTRUSTED_OPEN).length).toBe(block.split(UNTRUSTED_CLOSE).length);
+  });
+});
+
 describe('fixLoopFingerprint', () => {
   it('is stable across volatile tokens (line numbers, uuids, paths)', () => {
     const a = fixLoopFingerprint(
