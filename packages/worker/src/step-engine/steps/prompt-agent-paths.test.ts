@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { promptNamesAgentPath } from '@haive/shared';
 import { StepRegistry } from '../registry.js';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
-import { stripAgentGuidanceBlocks } from './_retrieval-guidance.js';
+import {
+  adaptPromptForCliCapabilities,
+  agentDefinitionGuidance,
+  buildRetrievalGuidance,
+  stripAgentGuidanceBlocks,
+} from './_retrieval-guidance.js';
 import { registerAllSteps } from './index.js';
 import { buildRefutePrompt } from './workflow/08c-code-review.js';
 import { buildExpandPrompt } from './plan/01-plan-build.js';
@@ -79,6 +84,15 @@ function bootRegistry(): StepRegistry {
  * iteration is empty, and string interpolation yields `''`. `then` is undefined so `await` resolves
  * rather than hanging on a thenable, and `toJSON` answers a plain `{}` — see the note at that line
  * for the two opposite failures that shape it.
+ *
+ * ITS REAL LIMITATION, and it is systemic rather than a detail: a proxy fails every strict comparison
+ * against a literal (`reach.mode === 'sandbox_http'`, `format === 'toml'`), so a builder driven this
+ * way emits the DEFAULT branch of each conditional and no other. So "40+ prompts scanned" means 40+
+ * prompts in their default variant, NOT every variant each can emit. Where a branch is known to
+ * produce substantially different text, explicit fixtures are used instead of the proxy —
+ * `appReachPrompt` across its three modes and TLS states, and `adaptPromptForCliCapabilities` across
+ * its four (LSP, rag) cells. For the rest, an alternative branch that named an agent directory would
+ * still pass this file, and that is the honest boundary of what it proves.
  */
 function permissive(): never {
   const target = function noop(): void {};
@@ -175,7 +189,23 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   // every dispatch that carries it, which is broader than any single step.
   { label: 'globalKbDigestPrompt (block)', build: () => globalKbDigestPrompt(permissive()) },
   { label: 'mcpSurfacePrompt (block)', build: () => mcpSurfacePrompt(permissive(), permissive()) },
-  { label: 'appReachPrompt (block)', build: () => appReachPrompt(permissive()) },
+  // EXPLICIT fixtures, not a permissive proxy: `appReachPrompt` branches on
+  // `reach.mode === 'sandbox_http'` and then on the URL scheme and `tlsTrusted`, and a proxy fails
+  // every strict comparison against a literal — so a proxy scans the browser-only branch and nothing
+  // else. This is the general limitation noted at `permissive` below, made concrete.
+  ...(
+    [
+      { mode: 'sandbox_http', url: 'https://app.ddev.site', tlsTrusted: true },
+      { mode: 'sandbox_http', url: 'https://app.ddev.site', tlsTrusted: false },
+      { mode: 'sandbox_http', url: 'http://app-runner:3000', tlsTrusted: false },
+      { mode: 'browser_only', url: 'https://app.ddev.site', tlsTrusted: false },
+      { mode: 'none', url: null, tlsTrusted: false },
+    ] as const
+  ).map((reach) => ({
+    label: `appReachPrompt (${reach.mode}${reach.tlsTrusted ? ', tls trusted' : ''})`,
+    build: () =>
+      appReachPrompt({ ...reach, addHosts: [] } as unknown as Parameters<typeof appReachPrompt>[0]),
+  })),
   // The step-summary pass. `maybeEnqueueStepSummary` dispatches BOTH of these through
   // `resolveTaskDispatch` with `kind: 'prompt'` and no capabilities, so isolation applies to them like
   // anything else — the invocation being unlinked (`task_step_id` NULL) is an attribution fact and
@@ -200,6 +230,47 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     build: () => DDEV_GENERATED_BOUNDARY_PROMPT,
   },
   { label: 'PROMPT_DEFECT_INSTRUCTION (const block)', build: () => PROMPT_DEFECT_INSTRUCTION },
+  // `adaptPromptForCliCapabilities` SUBSTITUTES text — the retrieval-protocol cell for the provider's
+  // (LSP, rag) pair, and the agent-guidance arm — and it runs AFTER `agentIsolationApplies` has
+  // decided. So a variant that named an agent directory would reach an invocation whose mask hides
+  // it. Excluding it as "the rewriter the scan runs" was wrong: the scan never calls it.
+  //
+  // Only the ISOLATED arms are scanned. The pointer arm deliberately names the agent file and runs
+  // only when isolation is OFF, so scanning it would add a positive that says nothing about masking.
+  ...(
+    [
+      { supportsLsp: true, ragWired: true },
+      { supportsLsp: true, ragWired: false },
+      { supportsLsp: false, ragWired: true },
+      { supportsLsp: false, ragWired: false },
+    ] as const
+  ).flatMap((axes) =>
+    [
+      { withBody: true, label: 'pasted body' },
+      { withBody: false, label: 'embedded fallback' },
+    ].map(({ withBody, label }) => ({
+      label: `adaptPromptForCliCapabilities (lsp=${axes.supportsLsp} rag=${axes.ragWired}, ${label})`,
+      build: () =>
+        adaptPromptForCliCapabilities(
+          [
+            agentDefinitionGuidance(
+              'peer-reviewer',
+              'Follow .claude/agents/peer-reviewer.md if it exists.',
+            ),
+            ...buildRetrievalGuidance({ supportsLsp: true, ragWired: true }),
+          ].join('\n'),
+          {
+            ...axes,
+            projectAgentsDir: '.claude/agents',
+            agentFileFormat: 'markdown',
+            isolated: true,
+            agentBodies: withBody
+              ? { 'peer-reviewer': '# Peer reviewer\n\nScore every dimension.' }
+              : {},
+          },
+        ),
+    })),
+  ),
 ];
 
 /**
@@ -226,13 +297,13 @@ const SCANNED_PROMPT_EXPORTS = [
   'WORKTREE_GIT_BOUNDARY_PROMPT',
   'DDEV_GENERATED_BOUNDARY_PROMPT',
   'PROMPT_DEFECT_INSTRUCTION',
+  'adaptPromptForCliCapabilities',
 ];
 
 const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
   antigravityStdinPrompt: 'wraps an already-built prompt for stdin; adds no text of its own',
   deliverPrompt: 'delivery mechanism (argv vs stdin), not a builder',
   expiredPromptFilter: 'a SQL predicate for stream-log retention',
-  adaptPromptForCliCapabilities: 'the rewriter the scan itself runs, not a source of text',
   appAuthPromptLines: 'lines appended to a browser-verify prompt; covered via 08a above',
   parsePromptDefects: 'a parser of agent OUTPUT',
   assembleNativePrompt:
