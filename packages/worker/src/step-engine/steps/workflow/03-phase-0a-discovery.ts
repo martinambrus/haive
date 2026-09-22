@@ -10,6 +10,7 @@ import type {
 import { miningLossNote, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadAgentPersonas, type AgentPersona } from './_agent-loader.js';
@@ -178,6 +179,11 @@ function buildAgentMiningPrompt(
     'builds or tests, or any other mutating command, and do NOT ask clarifying questions.',
     '',
     '=== How to research — follow this order ===',
+    // Before the search instruction: the rule about what an agent reads has to arrive
+    // before it is told to go read. Joined into one element so the block's blank lines
+    // survive however this array is assembled.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
     ...retrievalGuidanceLines(),
     'Ground your analysis in what you actually retrieve, and stay strictly read-only throughout.',
     '',

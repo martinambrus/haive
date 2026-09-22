@@ -31,6 +31,7 @@ import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import type { PlanInputsApply } from './00-plan-inputs.js';
 
 /**
@@ -345,6 +346,11 @@ function sourceGuidance(d: PlanBuildDetect): string {
   return [
     kb,
     'Look up how the code is actually organised before naming a component, in this order:',
+    // Before the search instruction: the rule about what an agent reads has to arrive
+    // before it is told to go read. Joined into one element so the block's blank lines
+    // survive however this array is assembled.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
     ...retrievalGuidanceLines(),
     'The plan records what the project is MEANT to be, so a component belongs in it even when',
     'the code for it does not exist yet — but every component that DOES exist should be named',

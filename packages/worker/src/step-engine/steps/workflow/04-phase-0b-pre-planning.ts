@@ -13,6 +13,7 @@ import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { loadBusinessRequirements } from './_business-requirements.js';
 import { isBugBranch } from './01-worktree-setup.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import { resolveReviewDimensions } from '@haive/shared/review';
 import {
   dimensionScopeLines,
@@ -495,6 +496,11 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         'Ground every claim in the discovery summary — do not invent details.',
         '',
         'How to research — follow this order:',
+        // Before the search instruction: the rule about what an agent reads has to arrive
+        // before it is told to go read. Joined into one element so the block's blank lines
+        // survive however this array is assembled.
+        REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+        '',
         ...retrievalGuidanceLines(),
         'Two knowledge kinds are worth naming, both reachable through that same search:',
         `- LEARNINGS (paths under \`${LEARNINGS_DIR}/\`): durable lessons from PRIOR runs. Search them to`,
