@@ -23,7 +23,11 @@ import { WORKTREE_GIT_BOUNDARY_PROMPT } from '../../repo/worktree-git-boundary.j
 import { DDEV_GENERATED_BOUNDARY_PROMPT } from '../../repo/ddev-generated-boundary.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './workflow/_prompt-defect.js';
 import { withModelCapabilityBoundary } from '../../cli-adapters/model-capabilities.js';
-import { buildAdversaryPrompt, buildVerifyPrompt } from './workflow/08d-adversarial-qa.js';
+import {
+  VERIFY_LENSES,
+  buildAdversaryPrompt,
+  buildVerifyPrompt,
+} from './workflow/08d-adversarial-qa.js';
 import { buildSequencePrompt } from './plan/03-plan-sequence.js';
 import { buildCoverageRepairPrompt } from './plan/02-plan-coverage.js';
 import { appAuthPromptLines } from './workflow/_app-auth.js';
@@ -266,10 +270,40 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   // The wave builders Codex found to be PURE after all — my earlier claim that all six remaining
   // `MiningWaveError` sites were inline was wrong: these three are named functions, and 08d's verifier
   // feeds BOTH of its wave sites. Each gained an `export` for this.
-  {
-    label: '08d buildVerifyPrompt (wave)',
-    build: () => buildVerifyPrompt(permissive(), permissive(), permissive()),
-  },
+  // CONCRETE findings and the REAL lens roster, because a proxy reaches neither of the two regions
+  // this builder appends. `group.findings.length` is 0 through a proxy, so `many` is false and the
+  // grouped-findings block never renders; `findings.flatMap(...)` returns the stub's empty array, so
+  // the per-finding block never renders; and spreading `lens.lines` yields nothing, so not one line of
+  // `VERIFY_LENSES` was ever scanned. A bare agent path in any of those would have disabled isolation
+  // for every real verifier wave with this file green.
+  //
+  // Both group sizes, because the builder words itself differently for one finding and for several and
+  // only the multi arm renders the grouped block.
+  ...(
+    [
+      { label: 'one finding', findings: 1 },
+      { label: 'grouped findings', findings: 2 },
+    ] as const
+  ).flatMap((size) =>
+    [...VERIFY_LENSES, null].map((lens) => ({
+      label: `08d buildVerifyPrompt (${size.label}, lens ${lens?.id ?? 'generic'})`,
+      build: () =>
+        buildVerifyPrompt(
+          permissive(),
+          {
+            key: 'src/app/handler.ts:42',
+            findings: Array.from({ length: size.findings }, (_unused, i) => ({
+              severity: 'high' as const,
+              category: 'authorization',
+              location: `src/app/handler.ts:${42 + i}`,
+              impact: 'An unauthenticated caller reaches the admin route.',
+              poc: `curl -i http://localhost:3000/admin/${i}`,
+            })),
+          },
+          lens,
+        ),
+    })),
+  ),
   {
     // A REAL id, not a proxy. This builder embeds a marker block whose text interpolates the id
     // (`.claude/agents/${a.id}.md`), and a proxy id renders `[[HAIVE_AGENT_DEFINITION:]]` plus
@@ -712,10 +746,11 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const { clean, named, unbuildable } = await scanBuiltPrompts();
     // Coverage is pinned so that WEAKENING is visible: if builders start rejecting the permissive
     // inputs, this drops and the guard shrinks without anyone noticing otherwise.
-    // MEASURED 2026-09-22: 90 clean + 4 named = 94 built, 12 unreachable. The floor sat at 40 while the
-    // loop path contributed one source per STEP; per-role it contributes 12, and a floor less than half
-    // the real number is a ratchet that never catches anything.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(90);
+    // MEASURED 2026-09-22: 97 clean + 4 named = 101 built, 12 unreachable. The floor sat at 40 while
+    // the loop path contributed one source per STEP and the verifier one source per proxy; per role and
+    // per lens they contribute 12 and 8. A floor under half the real number is a ratchet that never
+    // catches anything, so it is re-measured whenever sources are added.
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(101);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
     // Held at the measured 12, so a NEW unreachable source has to be acknowledged rather than absorbed
@@ -733,6 +768,32 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // `apply()` bodies to reach it is not the answer: several applies write files, which a unit test
     // must not do.
     expect(named).not.toContain('08c-code-review buildRefutePrompt (wave 2)');
+  });
+
+  it('actually RENDERS the verifier regions a proxy left dark', async () => {
+    // A fixture that reaches nothing passes every assertion in this file, so the three regions the
+    // permissive proxy skipped are named explicitly here. Without this the previous fixture looked
+    // like coverage of `buildVerifyPrompt` while scanning only its unconditional prose.
+    const built = (
+      await Promise.all(
+        promptSources()
+          .filter((s) => s.label.startsWith('08d buildVerifyPrompt'))
+          .map(async (s) => builtEntries(s, await s.build())),
+      )
+    ).flat();
+    // Both group sizes times three lenses plus the generic arm.
+    expect(built.length).toBe(8);
+    const all = built.map((b) => b.prompt).join('\n\n');
+
+    // 1. every lens's own text, straight from the production roster.
+    for (const lens of VERIFY_LENSES) {
+      expect(all, `lens ${lens.id} never rendered`).toContain(lens.lines[0]);
+    }
+    // 2. the per-finding block, from `findings.flatMap` — the stub returned [] for this.
+    expect(all).toContain('Proof of concept: curl -i http://localhost:3000/admin/0');
+    expect(all).toContain('Severity as filed: high');
+    // 3. the grouped arm, which needs `findings.length > 1` and so never rendered through a proxy.
+    expect(all).toContain('These 2 findings were grouped because they name the same place in the');
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {

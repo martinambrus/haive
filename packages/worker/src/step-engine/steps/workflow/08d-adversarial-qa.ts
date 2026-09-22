@@ -245,7 +245,10 @@ const MAX_VERIFIED_ADVISORY = 20;
  *  looks fine and stops — and the three map the distinct ways a PoC can be wrong while
  *  still appearing to work: it never ran, it ran against something that only exists in
  *  this sandbox, or it ran and succeeded for a reason unrelated to the code blamed. */
-const VERIFY_LENSES = [
+/** The verifier panel's lenses. Exported for the prompt-path tripwire, which must scan each lens's
+ *  REAL text: a locally built lens-shaped fixture would duplicate these lines and leave the ones
+ *  production appends unscanned. */
+export const VERIFY_LENSES = [
   {
     id: 'execute',
     title: 'executes',
