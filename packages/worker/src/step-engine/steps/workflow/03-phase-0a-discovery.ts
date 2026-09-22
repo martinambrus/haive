@@ -10,7 +10,12 @@ import type {
 import { miningLossNote, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { REPO_IS_DATA_AUTHORING_LINES, collapseToLine } from '../_untrusted-repo.js';
+import {
+  REPO_IS_DATA_AUTHORING_LINES,
+  UNTRUSTED_FENCE_LEGEND,
+  collapseToLine,
+  fencedAgentBlock,
+} from '../_untrusted-repo.js';
 import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadAgentPersonas, type AgentPersona } from './_agent-loader.js';
@@ -161,7 +166,7 @@ function stubDiscoverySummary(detect: DiscoveryDetect): {
   };
 }
 
-function buildAgentMiningPrompt(
+export function buildAgentMiningPrompt(
   persona: AgentPersona,
   detect: DiscoveryDetect,
   extraContext: string,
@@ -198,8 +203,14 @@ function buildAgentMiningPrompt(
     `Feature/area: ${detect.feature ?? '(unspecified)'}`,
     `Additional context: ${extraContext || '(none)'}`,
     '',
+    UNTRUSTED_FENCE_LEGEND.join('\n'),
+    '',
     '=== Knowledge base index (previews; use rag_search for full content) ===',
-    snippets || '(no knowledge base files available)',
+    // A preview is the first 600 characters of a repository FILE and the id beside it is
+    // that file's name, so this block is the tree quoted into the prompt — the guard above
+    // covers what the agent goes and reads, not what arrives already inlined. The ids stay
+    // quotable, which is what `relevantKbIds` asks for below.
+    fencedAgentBlock(snippets || '(no knowledge base files available)'),
     '',
     '=== Required output ===',
     'When your research is done, emit ONE JSON object inside a ```json fenced code block with',

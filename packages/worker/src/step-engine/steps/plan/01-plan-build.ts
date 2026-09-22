@@ -301,16 +301,7 @@ async function listKbFiles(ctx: StepContext): Promise<string[]> {
   // Lenient: null folds absent, unreadable and a linked `KB_DIR` into the empty
   // list the `catch` here already produced.
   const entries = await readdirNoFollow(ctx.repoPath, KB_DIR);
-  return (
-    (entries ?? [])
-      .filter((e) => e.isFile())
-      .map((e) => e.name)
-      // A filename is a `Dirent.name` copied verbatim onto the prompt's FIRST line, above
-      // every guard, and on Linux any byte but `/` and NUL is legal in one. Dropped rather
-      // than collapsed: the agent opens these by name, so a mangled name is worse than an
-      // absent one, and the prompt sends it to the directory regardless.
-      .filter(isSingleLine)
-  );
+  return (entries ?? []).filter((e) => e.isFile()).map((e) => e.name);
 }
 
 function sourceGuidance(d: PlanBuildDetect): string {
@@ -348,9 +339,17 @@ function sourceGuidance(d: PlanBuildDetect): string {
       'STATUS: nothing here is built. Leave status alone — every node is outstanding work.',
     ].join('\n');
   }
+  // Filtered HERE rather than in `listKbFiles`, for the reason `fencedDebtBlock` gives:
+  // detect output is PERSISTED and `step-runner` replays it, so a step detected before
+  // this shipped still carries the raw names. A filename is a `Dirent.name` copied
+  // verbatim onto the prompt's FIRST line, above every guard, and on Linux any byte but
+  // `/` and NUL is legal in one. Dropped rather than collapsed: the agent opens these by
+  // name, so a mangled name is worse than an absent one, and the prompt sends it to the
+  // directory regardless.
+  const kbFiles = d.kbFiles.filter(isSingleLine);
   const kb =
-    d.kbFiles.length > 0
-      ? `Read the knowledge base at ${KB_DIR}/ first (${d.kbFiles.length} file(s): ${d.kbFiles.slice(0, 20).join(', ')}).`
+    kbFiles.length > 0
+      ? `Read the knowledge base at ${KB_DIR}/ first (${kbFiles.length} file(s): ${kbFiles.slice(0, 20).join(', ')}).`
       : `This repository has no knowledge base yet.`;
   return [
     kb,
@@ -373,7 +372,7 @@ function sourceGuidance(d: PlanBuildDetect): string {
   ].join('\n');
 }
 
-function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string {
+export function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string {
   return [
     `You are drafting the top of a project plan for "${d.repoName}".`,
     '',
