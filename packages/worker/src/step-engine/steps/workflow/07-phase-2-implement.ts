@@ -1,6 +1,7 @@
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { REPO_IS_DATA_ACTING_LINES } from '../_untrusted-repo.js';
 import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadTaskMeta } from './_task-meta.js';
@@ -356,6 +357,11 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       const values = args.formValues as { instructions?: string };
       // Shared guidance + output contract used by both the original and fix passes.
       const common = [
+        // Before the search instruction: the rule about what an agent reads has to arrive
+        // before it is told to go read. Joined into one element so the block's blank lines
+        // survive however this array is assembled.
+        REPO_IS_DATA_ACTING_LINES.join('\n'),
+        '',
         'Before implementing, search for the existing patterns the spec references, in this order:',
         ...retrievalGuidanceLines(),
         'Follow the patterns you find; avoid documented anti-patterns.',

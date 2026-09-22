@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { REPO_IS_DATA_ACTING_LINES } from '../_untrusted-repo.js';
 import { resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
@@ -251,6 +252,10 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
       const d = args.detected as SimplifyDetect;
       return [
         ...CODE_SIMPLIFIER_DEFINITION,
+        '',
+        // The rule about what an agent reads arrives before it acts. Joined into one
+        // element so the block's blank lines survive however this array is assembled.
+        REPO_IS_DATA_ACTING_LINES.join('\n'),
         '',
         '=== Your assignment ===',
         `An implementation just finished in the workspace: ${d.sandboxWorktreePath}`,
