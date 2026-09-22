@@ -8,6 +8,11 @@ import { buildRefutePrompt } from './workflow/08c-code-review.js';
 import { buildExpandPrompt } from './plan/01-plan-build.js';
 import { buildAgentSelectorPrompt } from './workflow/_agent-selector.js';
 import { buildEnrichPrompt } from './kb-author/01-enrich.js';
+import { advisorPrompt, fixCoderPrompt, replannerPrompt, reviewerPrompt } from '../dag-executor.js';
+import { buildMergeFixPrompt } from '../git-merge.js';
+import { globalKbDigestPrompt } from './_global-kb-digest.js';
+import { mcpSurfacePrompt } from '../../sandbox/mcp-surface.js';
+import { appReachPrompt } from '../../queues/cli-exec/app-reach.js';
 
 /**
  * Verification item 2's tripwire: which BUILT-IN prompts name an agent directory once Haive's own
@@ -33,7 +38,14 @@ import { buildEnrichPrompt } from './kb-author/01-enrich.js';
  * The registry is booted through `registerAllSteps`, the production entry point, so a step added to
  * any workflow index is covered without touching this file.
  *
- * With all three paths and permissive inputs, 40+ prompts are actually built and scanned, and the
+ * A FIFTH source is not a registry path at all: prompts dispatched DIRECTLY through
+ * `resolveTaskDispatch` by `dag-executor` (reviewer, advisor, replanner, fix-coder), the
+ * merge-resolver's fix prompt, and the blocks spliced into other prompts (`mcpSurfacePrompt`,
+ * `globalKbDigestPrompt`, `appReachPrompt`). Those are listed by name in NAMED_PROMPT_BUILDERS, and
+ * the last case in this file FAILS if a newly exported `*Prompt` symbol is neither scanned nor
+ * excluded with a reason — which is what ends the review-by-review discovery that built this list.
+ *
+ * With every source above and permissive inputs, 50+ prompts are actually built and scanned, and the
  * measured positives are exactly the two the plan predicted — `06_5-agent-discovery` and
  * `09_5-skill-generation`. An earlier version of this file reached only 14 prompts on one path and
  * reported NONE, which read as "no built-in prompt names an agent path" and was false.
@@ -59,15 +71,20 @@ function bootRegistry(): StepRegistry {
  *
  * Every access answers, so a builder that dereferences deeply still runs: unknown properties give
  * another permissive value, `map`/`filter`/`slice` give `[]`, `join`/`trim`/`replace` give `''`,
- * iteration is empty, and string interpolation yields `''`. `then` and `toJSON` are deliberately
- * undefined — a thenable would make `await` hang, and a `toJSON` that returned another proxy would
- * send `JSON.stringify` into recursion.
+ * iteration is empty, and string interpolation yields `''`. `then` is undefined so `await` resolves
+ * rather than hanging on a thenable, and `toJSON` answers a plain `{}` — see the note at that line
+ * for the two opposite failures that shape it.
  */
 function permissive(): never {
   const target = function noop(): void {};
   return new Proxy(target, {
     get(_t, prop) {
-      if (prop === 'then' || prop === 'toJSON') return undefined;
+      if (prop === 'then') return undefined;
+      // A PLAIN empty object, not another proxy: several builders do
+      // `JSON.stringify(x).slice(0, N)`, and stringify of a function target answers `undefined`,
+      // so `.slice` would throw — while a proxy-returning toJSON would send stringify into
+      // recursion. Both failure modes were observed here.
+      if (prop === 'toJSON') return () => ({});
       if (prop === Symbol.toPrimitive || prop === 'toString' || prop === Symbol.toStringTag) {
         return () => '';
       }
@@ -132,7 +149,75 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     build: () => buildAgentSelectorPrompt(permissive()),
   },
   { label: '01-enrich buildEnrichPrompt', build: () => buildEnrichPrompt(permissive()) },
+  // dag-executor dispatches these DIRECTLY through `resolveTaskDispatch` with `kind: 'prompt'` and
+  // `tool_use` only — no registry step owns them, so nothing above would ever reach them.
+  { label: 'dag reviewerPrompt', build: () => reviewerPrompt(permissive(), permissive()) },
+  { label: 'dag advisorPrompt', build: () => advisorPrompt(permissive(), permissive()) },
+  {
+    label: 'dag replannerPrompt',
+    build: () => replannerPrompt(permissive(), permissive(), permissive()),
+  },
+  {
+    label: 'dag fixCoderPrompt',
+    build: () => fixCoderPrompt(permissive(), permissive(), permissive()),
+  },
+  // merge-resolver's conflict-resolution prompt.
+  {
+    label: 'git-merge buildMergeFixPrompt',
+    build: () => buildMergeFixPrompt(permissive(), permissive(), permissive()),
+  },
+  // Blocks SPLICED INTO other prompts. A bare agent path in one of these would end isolation for
+  // every dispatch that carries it, which is broader than any single step.
+  { label: 'globalKbDigestPrompt (block)', build: () => globalKbDigestPrompt(permissive()) },
+  { label: 'mcpSurfacePrompt (block)', build: () => mcpSurfacePrompt(permissive(), permissive()) },
+  { label: 'appReachPrompt (block)', build: () => appReachPrompt(permissive()) },
 ];
+
+/**
+ * Exported `*Prompt` symbols that are deliberately NOT scanned, each with the reason. The
+ * completeness case below fails if a new one appears in neither list — which is what ends the
+ * round-by-round discovery that produced this file: llm, then loop, then mining, then waves, then
+ * dag-executor's direct dispatches were each found one review at a time.
+ */
+const SCANNED_PROMPT_EXPORTS = [
+  'buildRefutePrompt',
+  'buildExpandPrompt',
+  'buildAgentSelectorPrompt',
+  'buildEnrichPrompt',
+  'reviewerPrompt',
+  'advisorPrompt',
+  'replannerPrompt',
+  'fixCoderPrompt',
+  'buildMergeFixPrompt',
+  'globalKbDigestPrompt',
+  'mcpSurfacePrompt',
+  'appReachPrompt',
+];
+
+const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
+  antigravityStdinPrompt: 'wraps an already-built prompt for stdin; adds no text of its own',
+  deliverPrompt: 'delivery mechanism (argv vs stdin), not a builder',
+  expiredPromptFilter: 'a SQL predicate for stream-log retention',
+  adaptPromptForCliCapabilities: 'the rewriter the scan itself runs, not a source of text',
+  appAuthPromptLines: 'lines appended to a browser-verify prompt; covered via 08a above',
+  parsePromptDefects: 'a parser of agent OUTPUT',
+  assembleNativePrompt:
+    'sub-agent assembly — `input.kind` is not `prompt` there, so agentIsolationApplies excludes it',
+  buildAgentMiningSummaryPrompt:
+    'the step-summary recap pass; its own invocation is unlinked and it carries no agent pointer',
+  buildAgentDiscoveryPrompt: "06_5's llm builder, already scanned through the registry",
+  // The four augmenters take a `db` and RETURN THE PROMPT UNCHANGED when there is no data — no
+  // ledger entries, no attachments, no learned guidance, no stored terseness level. Scanning them
+  // with permissive inputs would therefore exercise none of their own text and report a vacuous
+  // clean, which is the failure mode this file has already been corrected for twice. Their added
+  // text is data-derived (filenames, stored guidance) rather than a static template, so a fixed bare
+  // agent path cannot live in the part that varies; a path in their unconditional wrapper text is a
+  // real residual gap and is recorded as one here.
+  augmentPromptWithLedger: 'data-derived; returns the prompt unchanged with no ledger entries',
+  augmentPromptWithAttachments: 'data-derived; returns the prompt unchanged with no attachments',
+  augmentPromptWithLearnedGuidance: 'data-derived; returns the prompt unchanged with no guidance',
+  augmentPromptWithTerseness: 'reads a config value; returns the prompt unchanged when unset',
+};
 
 /** Every prompt production can dispatch, across all three registry paths plus the named builders. */
 function promptSources(): PromptSource[] {
@@ -286,7 +371,12 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(clean.length + named.length).toBeGreaterThanOrEqual(40);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
-    expect(unbuildable.length).toBeLessThanOrEqual(12);
+    expect(unbuildable.length).toBeLessThanOrEqual(14);
+    // Every NAMED builder must actually build, or the coverage claimed by listing it is fiction.
+    // This is the check that would have caught a hand-added source silently landing in the
+    // unreachable bucket while the counts still looked healthy.
+    const namedLabels = NAMED_PROMPT_BUILDERS.map((s) => s.label);
+    expect(unbuildable.filter((label) => namedLabels.includes(label))).toEqual([]);
     // KNOWN RESIDUAL GAP, stated so nobody reads this file as exhaustive: six of the eight
     // `MiningWaveError` sites (08d x2, 02-plan-coverage x3, 03-plan-sequence) assemble their dispatch
     // arrays INLINE inside `apply()`, with no named builder to call. Reaching them needs either that
@@ -294,5 +384,49 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // write files, which is a side effect a unit test must not have. The two wave prompts that DO have
     // named builders (08c's refuter, plan-build's expand) are scanned above.
     expect(named).not.toContain('08c-code-review buildRefutePrompt (wave 2)');
+  });
+
+  it('classifies EVERY exported prompt symbol, so a new one cannot escape unnoticed', async () => {
+    // This case exists because of how this file grew: llm, then loop iterations, then mining, then
+    // mining waves, then dag-executor's direct dispatches were each found ONE REVIEW AT A TIME, and
+    // every intermediate version looked complete. Enumerating the symbols ends that loop — a new
+    // exported prompt builder now fails here until someone either scans it or excludes it by name.
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const srcRoot = fileURLToPath(new URL('../../', import.meta.url));
+
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        const full = `${dir}/${entry}`;
+        if (statSync(full).isDirectory()) walk(full);
+        else if (entry.endsWith('.ts') && !entry.endsWith('.test.ts')) files.push(full);
+      }
+    };
+    walk(srcRoot);
+
+    const exported = new Set<string>();
+    for (const file of files) {
+      const src = readFileSync(file, 'utf8');
+      for (const m of src.matchAll(/^export (?:async )?function (\w*Prompt\w*)\b/gm)) {
+        exported.add(m[1]!);
+      }
+      for (const m of src.matchAll(/^export const (\w*Prompt\w*)\s*[=:]/gm)) exported.add(m[1]!);
+    }
+
+    const scanned = new Set(SCANNED_PROMPT_EXPORTS);
+    const unclassified = [...exported]
+      .filter((name) => !scanned.has(name) && !(name in NOT_A_DISPATCHED_PROMPT))
+      .sort();
+    expect(unclassified).toEqual([]);
+
+    // No stale bookkeeping either: every name claimed as scanned or excluded must still exist.
+    const stale = [...scanned, ...Object.keys(NOT_A_DISPATCHED_PROMPT)]
+      .filter((name) => !exported.has(name))
+      .sort();
+    expect(stale).toEqual([]);
+
+    // The sweep found the tree, not an empty directory.
+    expect(exported.size).toBeGreaterThan(15);
   });
 });
