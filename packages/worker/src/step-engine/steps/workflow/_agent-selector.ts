@@ -70,6 +70,16 @@ export interface AgentSelection {
   source: 'llm' | 'fallback';
 }
 
+/** Validated and fallen back against EVERY persona, not the roster's filtered set, and the
+ *  difference is deliberate.
+ *
+ *  `survivesFence` hides a persona whose id `fenceSafe` would rewrite, so that the reply can
+ *  quote an id back verbatim. It is not a verdict on the persona: a filename carrying four `=`
+ *  is odd, not hostile, and the description reaches its miner BELOW 03's guard like every
+ *  other one, where the persona carve-out governs it. Filtering here too would mean a
+ *  repository whose ids all look like that gets NO miners and discovery degrades to the stub
+ *  — losing a capability over a naming quirk, which is the wrong direction to fail in. A model
+ *  cannot name an id it was never shown, so the wider validation set is inert in practice. */
 export function parseAgentSelection(raw: unknown, personas: AgentPersona[]): AgentSelection {
   const validIds = new Set(personas.map((p) => p.id));
   const fromLlm = extractSelection(raw);
