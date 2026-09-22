@@ -66,7 +66,10 @@ interface AdversaryDef {
 }
 
 // Roster, cumulative by level (poc ⊂ standard ⊂ enterprise).
-const ADVERSARIES: AdversaryDef[] = [
+// Exported for the prompt-path tripwire: the registry mining source cannot reach these prompts
+// (`assertReviewableChange` throws on an empty change set before the roster is mapped), so scanning
+// each persona's REAL text is only possible from the roster itself.
+export const ADVERSARIES: AdversaryDef[] = [
   {
     id: 'edge-case-breaker',
     title: 'Edge Case Breaker',

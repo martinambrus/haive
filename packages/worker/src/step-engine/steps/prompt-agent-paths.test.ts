@@ -24,6 +24,7 @@ import { DDEV_GENERATED_BOUNDARY_PROMPT } from '../../repo/ddev-generated-bounda
 import { PROMPT_DEFECT_INSTRUCTION } from './workflow/_prompt-defect.js';
 import { withModelCapabilityBoundary } from '../../cli-adapters/model-capabilities.js';
 import {
+  ADVERSARIES,
   VERIFY_LENSES,
   buildAdversaryPrompt,
   buildVerifyPrompt,
@@ -103,10 +104,17 @@ function bootRegistry(): StepRegistry {
  * its four (LSP, rag) cells. For the rest, an alternative branch that named an agent directory would
  * still pass this file, and that is the honest boundary of what it proves.
  */
-function permissive(): never {
+function permissive(overrides: Record<string, unknown> = {}): never {
   const target = function noop(): void {};
   return new Proxy(target, {
     get(_t, prop) {
+      // Concrete fields win. This is how a builder's non-default arms are reached without hand-building
+      // a whole detect payload: name only the fields a branch turns on and let the proxy answer the
+      // rest. Three consecutive review rounds found an arm the bare proxy could not render, so this is
+      // the lever for that whole class rather than one more bespoke fixture.
+      if (typeof prop === 'string' && Object.hasOwn(overrides, prop)) {
+        return overrides[prop];
+      }
       if (prop === 'then') return undefined;
       // A PLAIN empty object, not another proxy: several builders do
       // `JSON.stringify(x).slice(0, N)`, and stringify of a function target answers `undefined`,
@@ -304,23 +312,35 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
         ),
     })),
   ),
-  {
-    // A REAL id, not a proxy. This builder embeds a marker block whose text interpolates the id
-    // (`.claude/agents/${a.id}.md`), and a proxy id renders `[[HAIVE_AGENT_DEFINITION:]]` plus
-    // `.claude/agents/.md` — a malformed marker that `stripAgentGuidanceBlocks` cannot match, so the
-    // path survives stripping and the source reports a FALSE positive. MEASURED: with the proxy this
-    // showed up in `named`; with a real id it does not, which is production behaviour.
-    label: '08d buildAdversaryPrompt',
+  // The REAL roster, one source per adversary. A synthetic `persona: 'Persona.'` stood here and scanned
+  // none of the six production persona strings — and the registry's 08d mining source cannot reach them
+  // either, because `assertReviewableChange` throws on the proxy's empty change set before the roster is
+  // mapped (it is one of the 12 `unbuildable` entries). So an agent path added to any persona was
+  // invisible from both directions.
+  //
+  // Real ids matter here beyond realism: this builder embeds a marker block interpolating the id
+  // (`.claude/agents/${a.id}.md`), and a PROXY id renders `[[HAIVE_AGENT_DEFINITION:]]` with
+  // `.claude/agents/.md` — a malformed marker `stripAgentGuidanceBlocks` cannot match, so the path
+  // survives stripping and the source reports a FALSE positive. MEASURED both ways in an earlier round.
+  //
+  // `implementationFiles` is concrete so `changedFilesBlock` renders its POPULATED arm plus both
+  // notices: through the bare proxy `files.length === 0` and it emitted only NO_CHANGE_SET_FALLBACK,
+  // so the file list, the LINES note and the COVERAGE note were all dark.
+  ...ADVERSARIES.map((adversary) => ({
+    label: `08d buildAdversaryPrompt (${adversary.id})`,
     build: () =>
       buildAdversaryPrompt(
-        {
-          id: 'security-auditor',
-          title: 'Security auditor',
-          persona: 'Persona.',
-        } as unknown as Parameters<typeof buildAdversaryPrompt>[0],
-        permissive(),
+        adversary,
+        permissive({
+          implementationFiles: {
+            files: ['src/app/handler.ts', 'src/lib/auth.ts'],
+            total: 3,
+            truncated: true,
+            changedLines: { 'src/app/handler.ts': 'lines 12-18, 45' },
+          },
+        }),
       ),
-  },
+  })),
   {
     label: '03-plan-sequence buildSequencePrompt (wave)',
     build: () => buildSequencePrompt(permissive(), permissive(), permissive()),
@@ -746,11 +766,12 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const { clean, named, unbuildable } = await scanBuiltPrompts();
     // Coverage is pinned so that WEAKENING is visible: if builders start rejecting the permissive
     // inputs, this drops and the guard shrinks without anyone noticing otherwise.
-    // MEASURED 2026-09-22: 97 clean + 4 named = 101 built, 12 unreachable. The floor sat at 40 while
-    // the loop path contributed one source per STEP and the verifier one source per proxy; per role and
-    // per lens they contribute 12 and 8. A floor under half the real number is a ratchet that never
-    // catches anything, so it is re-measured whenever sources are added.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(101);
+    // MEASURED 2026-09-22: 102 clean + 4 named = 106 built, 12 unreachable. The floor sat at 40 while
+    // the loop path contributed one source per STEP, the verifier one source per proxy and the adversary
+    // one synthetic persona; per role, per lens and per persona they contribute 12, 8 and 6. A floor
+    // under half the real number is a ratchet that never catches anything, so it is re-measured
+    // whenever sources are added.
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(106);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
     // Held at the measured 12, so a NEW unreachable source has to be acknowledged rather than absorbed
@@ -794,6 +815,27 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(all).toContain('Severity as filed: high');
     // 3. the grouped arm, which needs `findings.length > 1` and so never rendered through a proxy.
     expect(all).toContain('These 2 findings were grouped because they name the same place in the');
+  });
+
+  it('RENDERS every real adversary persona and the populated change-set block', async () => {
+    const built = (
+      await Promise.all(
+        promptSources()
+          .filter((s) => s.label.startsWith('08d buildAdversaryPrompt'))
+          .map(async (s) => builtEntries(s, await s.build())),
+      )
+    ).flat();
+    expect(built.length).toBe(ADVERSARIES.length);
+    const all = built.map((b) => b.prompt).join('\n\n');
+
+    // Each persona's own words, straight from the production roster.
+    for (const adversary of ADVERSARIES) {
+      expect(all, `persona ${adversary.id} never rendered`).toContain(adversary.persona);
+    }
+    // `changedFilesBlock`'s three arms, none of which a bare proxy reaches.
+    expect(all).toContain('- src/app/handler.ts — lines 12-18, 45');
+    expect(all).toContain('LINES: the note after a file is the part of it THIS change wrote');
+    expect(all).toContain('COVERAGE: the list above is 2 of 3 changed files.');
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {
