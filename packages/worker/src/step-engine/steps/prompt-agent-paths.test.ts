@@ -25,6 +25,7 @@ import { PROMPT_DEFECT_INSTRUCTION } from './workflow/_prompt-defect.js';
 import { withModelCapabilityBoundary } from '../../cli-adapters/model-capabilities.js';
 import { buildAdversaryPrompt, buildVerifyPrompt } from './workflow/08d-adversarial-qa.js';
 import { buildSequencePrompt } from './plan/03-plan-sequence.js';
+import { buildCoverageRepairPrompt } from './plan/02-plan-coverage.js';
 
 /**
  * Verification item 2's tripwire: which BUILT-IN prompts name an agent directory once Haive's own
@@ -263,6 +264,35 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     label: '03-plan-sequence buildSequencePrompt (wave)',
     build: () => buildSequencePrompt(permissive(), permissive(), permissive()),
   },
+  // 02-plan-coverage's re-decomposition wave. Its template was inline in `apply()` and is now a pure
+  // builder so it can be reached here — the step declares only `tool_use`, so isolation applies to it.
+  // Both section shapes are exercised, since `sectionBody: null` and `''` take different branches.
+  {
+    label: '02-plan-coverage buildCoverageRepairPrompt (wave, with section)',
+    build: () =>
+      buildCoverageRepairPrompt({
+        subject: 'the plan node "Auth" (decomposition lost)',
+        repairInstruction: 'Rebuild the missing subtree.',
+        lostDetail: 'three children',
+        sectionBody: 'The section body.',
+        note: 'Keep it small.',
+        maxChildren: 7,
+        context: ['The plan as it stands (titles only):', '', '- Auth'],
+      }),
+  },
+  {
+    label: '02-plan-coverage buildCoverageRepairPrompt (wave, no section)',
+    build: () =>
+      buildCoverageRepairPrompt({
+        subject: 'the source document section "Billing"',
+        repairInstruction: 'No node in the plan covers this section.',
+        lostDetail: null,
+        sectionBody: null,
+        note: null,
+        maxChildren: 7,
+        context: ['- Billing'],
+      }),
+  },
   // EXPLICIT fixtures, not a permissive proxy: `appReachPrompt` branches on
   // `reach.mode === 'sandbox_http'` and then on the URL scheme and `tlsTrusted`, and a proxy fails
   // every strict comparison against a literal — so a proxy scans the browser-only branch and nothing
@@ -390,6 +420,7 @@ const SCANNED_PROMPT_EXPORTS = [
   'buildVerifyPrompt',
   'buildAdversaryPrompt',
   'buildSequencePrompt',
+  'buildCoverageRepairPrompt',
   // NOT `withModelCapabilityBoundary`: this list is the audit's bookkeeping — names the sweep below
   // can actually see — and that wrapper contains no "prompt", so listing it here reads as a stale
   // entry. It is scanned as a SOURCE in NAMED_PROMPT_BUILDERS, which is the distinction: a source the
