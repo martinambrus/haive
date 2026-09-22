@@ -2,7 +2,12 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DagCoderContext, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { fencedDebtBlock } from '../_untrusted-repo.js';
+import {
+  fencedDebtBlock,
+  REPO_IS_DATA_ACTING_LINES,
+  safeKey,
+  safeTitle,
+} from '../_untrusted-repo.js';
 import {
   commentPolicyLines,
   ddevConfigGuidanceLines,
@@ -37,12 +42,23 @@ interface DagExecuteApply {
 
 function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string {
   return [
-    `You are implementing ${issue.issueKey}: ${issue.title}`,
+    // Header line, ABOVE the guard below — so these are reduced, not merely fenced. Both are
+    // planner-authored and `dagIssueSchema` permits a multiline title, which would otherwise
+    // put its own instruction line in the trusted preamble.
+    `You are implementing ${safeKey(issue.issueKey)}: ${safeTitle(issue.title)}`,
     '',
     'Your working directory is already set to your isolated git worktree:',
     `  ${issue.sandboxWorktreePath}`,
     'Implement ONLY this issue (a vertical slice: implementation + its tests together).',
     'Match the existing code style and conventions. Do not invent requirements.',
+    '',
+    // Stated before the retrieval guidance below, which is what sends this agent into the
+    // tree in the first place: the rule about what it reads has to arrive before the
+    // instruction to go read it.
+    //
+    // Joined into ONE element, not spread: this array is `.filter(Boolean)`-ed, which would
+    // strip the block's deliberate blank lines and run three paragraphs together.
+    REPO_IS_DATA_ACTING_LINES.join('\n'),
     ...commentPolicyLines(),
     '',
     'Before implementing, search for the existing patterns this issue touches, in this order:',

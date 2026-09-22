@@ -1,6 +1,7 @@
 import { isPathContainmentError, readTextNoFollow } from '@haive/shared/fs-safe';
 import { gitRun } from '../repo/git-push.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
+import { REPO_IS_DATA_MERGE_LINES, safeRef, safeTitle } from './steps/_untrusted-repo.js';
 
 // Shared git-merge / conflict-resolution core. Extracted from dag-executor.ts so
 // both the DAG executor (issue branches -> integration branch) and the
@@ -28,7 +29,17 @@ export function buildMergeFixPrompt(branch: string, title?: string, guidance?: s
   return [
     'A git merge conflict occurred while merging an implemented issue branch into the integration branch.',
     'Your working directory is the integration worktree, MID-MERGE — the conflict markers are live in the files.',
-    `Conflicting branch: ${branch}${title ? ` (${title})` : ''}.`,
+    `Conflicting branch: ${safeRef(branch)}${title ? ` (${safeTitle(title)})` : ''}.`,
+    '',
+    // Its OWN variant, not the coder's. This agent edits files and the host stages and commits
+    // the result, so it needs the tree-is-data protection — but the acting variant tells an
+    // agent to disregard instructions about how to behave, and `guidance` below is exactly
+    // that AND legitimate: merge-resolver asks the USER how to resolve the conflict and passes
+    // the answer through. "Take ours for the generated file" is behavioural, human and
+    // authoritative, so the coder text would have pitted the guard against the operator.
+    //
+    // Spread rather than joined: this array is NOT `.filter(Boolean)`-ed, so blank lines live.
+    ...REPO_IS_DATA_MERGE_LINES,
     ...(guidance ? ['', `User guidance for resolving this conflict: ${guidance}`] : []),
     '',
     'Resolve EVERY conflict by EDITING the conflicted files: remove the <<<<<<< / ======= / >>>>>>> markers',
