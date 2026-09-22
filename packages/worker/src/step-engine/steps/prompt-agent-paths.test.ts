@@ -1679,6 +1679,14 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       ['04a-spec-audit', ONE_CLASS, REVIEWING],
       ['05a-resolve-spec-warnings', AUTHORING, REVIEWING],
       ['08b-test-management', ACTING, REVIEWING],
+      // Every step that WRITES plan content. What they write becomes a task description or,
+      // for the sequencer, a `depends_on` that HOLDS BACK work — an instruction to everything
+      // downstream. All four hold `tool_use` whether or not their prompt sends them to the
+      // tree, which is why the guard does not depend on a retrieval block being present.
+      ['01-plan-build', AUTHORING, REVIEWING],
+      ['01-plan-chat', AUTHORING, REVIEWING],
+      ['02-plan-coverage', AUTHORING, REVIEWING],
+      ['03-plan-sequence', AUTHORING, REVIEWING],
     ] as const) {
       for (const { key, prompt } of await eachPrompt(prefix)) {
         expect(prompt, key).toContain(expected);

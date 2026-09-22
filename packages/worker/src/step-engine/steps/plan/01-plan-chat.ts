@@ -5,6 +5,12 @@ import { loadPlanNode, renderPlanMarkdown } from '@haive/shared/plan';
 import type { StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import {
+  REPO_IS_DATA_AUTHORING_LINES,
+  UNTRUSTED_FENCE_LEGEND,
+  fencedAgentBlock,
+  safeTitle,
+} from '../_untrusted-repo.js';
+import {
   PLAN_PATCH_CONTRACT,
   applyAgentPatch,
   conversationalReply,
@@ -78,12 +84,19 @@ function buildChatPrompt(d: PlanChatDetect): string {
   return [
     'You are editing a project plan through conversation.',
     '',
+    // This step holds `tool_use`, so it can read the repository whether or not the
+    // prompt sends it there — and every node it patches becomes a later agent's
+    // assignment. Joined into one element so the block's blank lines survive.
+    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+    '',
+    UNTRUSTED_FENCE_LEGEND.join('\n'),
+    '',
     'Here is the WHOLE plan. Each node shows its id, kind, status and links.',
     '',
-    d.planMarkdown,
+    fencedAgentBlock(d.planMarkdown),
     '',
     `## The user is looking at`,
-    `${d.nodeTitle} (\`node:${d.nodeId}\`, version ${d.nodeVersion})`,
+    `${safeTitle(d.nodeTitle)} (\`node:${d.nodeId}\`, version ${d.nodeVersion})`,
     '',
     '## Conversation so far',
     history || '(this is the first message)',
