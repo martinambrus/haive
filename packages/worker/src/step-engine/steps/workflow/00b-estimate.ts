@@ -5,6 +5,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { resolveRagSyncPrefs } from './_rag-index.js';
 import { retrieveSimilarTaskIds } from './_task-embedding.js';
+import { collapseToLine } from '../_untrusted-repo.js';
 import {
   buildAnchors,
   planProximityTaskIds,
@@ -152,7 +153,11 @@ function renderAnchor(a: EstimateAnchor): string {
     a.crossRepo ? '(other repo — same stack)' : '',
   ].filter(Boolean);
   let line = bits.join(' ');
-  if (a.description) line += `\n    ${a.description}`;
+  // Another TASK's description, quoted here as an anchor. It is not this task's
+  // assignment and nothing in it is direction for this pass — it may have been composed
+  // from plan-node bodies, which is agent prose. Collapsed rather than fenced: these are
+  // one-line bullets in a list the estimator scans, and `_estimate` already caps them.
+  if (a.description) line += `\n    ${collapseToLine(a.description)}`;
   if (a.changedPaths.length > 0) {
     line += `\n    files: ${a.changedPaths.slice(0, ANCHOR_PATHS_SHOWN).join(', ')}`;
   }
