@@ -837,6 +837,43 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
 };
 
 /**
+ * ALTERNATIVE detect values, where one field selects between prompts rather than between lines.
+ *
+ * `DETECT_OVERRIDES` gives a step ONE payload, which is enough for a guard (`implementationFiles`) or a
+ * roster (`personas`). It is not enough when the field picks a different BUILDER: `08a-browser-verify`
+ * returns `buildChecklistPrompt` outright for `mode === 'manual'` (`08a:829`), so with a single payload
+ * that builder is never reached at all.
+ *
+ * Found by a source audit rather than by review: a regex for `d.<field> === '<literal>'` across every
+ * step, then filtered to the steps that actually build a prompt. Worth knowing what that audit does NOT
+ * catch, because it is why this arrived late — a comparison inside a HELPER that takes the field as a
+ * parameter is invisible to it (`lensesForLevel(d.level)` was found by review, not by this), and a
+ * `typeof x === 'string'` guard is a false positive.
+ */
+const DETECT_VARIANTS: Record<
+  string,
+  Array<{ suffix: string; fields: Record<string, unknown> }>
+> = {
+  '08a-browser-verify': [
+    { suffix: '', fields: { mode: 'mcp' } },
+    // A DIFFERENT builder, not a different branch of one.
+    { suffix: ', manual mode', fields: { mode: 'manual' } },
+  ],
+  '08b-test-management': [
+    { suffix: '', fields: { primary: 'playwright' } },
+    { suffix: ', package script', fields: { primary: 'pkg-script' } },
+  ],
+};
+
+/** The detect payloads to build a step's prompts with: its variants, else its single override. */
+function detectVariants(id: string): Array<{ suffix: string; fields: Record<string, unknown> }> {
+  const variants = DETECT_VARIANTS[id];
+  const base = DETECT_OVERRIDES[id] ?? {};
+  if (!variants) return [{ suffix: '', fields: base }];
+  return variants.map((v) => ({ suffix: v.suffix, fields: { ...base, ...v.fields } }));
+}
+
+/**
  * One prior pass per history-reading loop step, because `previousIterations: []` renders the
  * NO-HISTORY arm of every one of them and production almost never dispatches that shape.
  *
@@ -1048,14 +1085,16 @@ function promptSources(): PromptSource[] {
     const id = def.metadata.id;
     const llm = def.llm;
     if (llm) {
-      out.push({
-        label: id,
-        build: () =>
-          llm.buildPrompt({
-            detected: permissive(DETECT_OVERRIDES[id] ?? {}),
-            formValues: permissive(),
-          }),
-      });
+      for (const variant of detectVariants(id)) {
+        out.push({
+          label: `${id}${variant.suffix}`,
+          build: () =>
+            llm.buildPrompt({
+              detected: permissive(variant.fields),
+              formValues: permissive(),
+            }),
+        });
+      }
     }
     const iteration = def.loop?.buildIterationPrompt;
     if (iteration) {
@@ -1100,20 +1139,22 @@ function promptSources(): PromptSource[] {
       for (const [role, n] of byRole) {
         for (const retries of [0, 2]) {
           for (const history of histories) {
-            const retrySuffix = retries === 0 ? '' : `, truncation retry ${retries}`;
-            out.push({
-              label: `${id} (loop iteration ${n}/${role}${retrySuffix}${history.suffix})`,
-              build: () =>
-                iteration({
-                  detected: permissive(DETECT_OVERRIDES[id] ?? {}),
-                  formValues: permissive(),
-                  iteration: n,
-                  truncationRetries: retries,
-                  previousIterations: history.value as Parameters<
-                    typeof iteration
-                  >[0]['previousIterations'],
-                }),
-            });
+            for (const variant of detectVariants(id)) {
+              const retrySuffix = retries === 0 ? '' : `, truncation retry ${retries}`;
+              out.push({
+                label: `${id} (loop iteration ${n}/${role}${retrySuffix}${history.suffix}${variant.suffix})`,
+                build: () =>
+                  iteration({
+                    detected: permissive(variant.fields),
+                    formValues: permissive(),
+                    iteration: n,
+                    truncationRetries: retries,
+                    previousIterations: history.value as Parameters<
+                      typeof iteration
+                    >[0]['previousIterations'],
+                  }),
+              });
+            }
           }
         }
       }
@@ -1338,7 +1379,8 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 159 clean + 12 named = 171 built, 3 unreachable. The loop path alone is now
+    // MEASURED 2026-09-22: 173 clean + 12 named = 185 built, 3 unreachable. The loop path is
+    // role x truncation-retry x history x detect-variant, which is why it dominates the count. The loop path alone is now
     // role x truncation-retry x history, which is why it dominates the count. The unreachable count walked
     // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
     // and discovery got a persona roster; the built count then grew again with the truncation-retry
@@ -1349,7 +1391,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(171);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(185);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1642,6 +1684,27 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // The marker each lens embeds interpolates its own id, so the prompts DO name an agent path before
     // stripping — and come out clean after it. That is the marker path working, not a gap.
     expect(all).toContain('[[HAIVE_AGENT_DEFINITION:operational-reviewer]]');
+  });
+
+  it("RENDERS 08a's manual-mode builder, which is a different function", async () => {
+    const built = (
+      await Promise.all(
+        promptSources()
+          .filter((source) => source.label.startsWith('08a-browser-verify'))
+          .map(async (source) => builtEntries(source, await source.build())),
+      )
+    ).flat();
+    const all = built.map((b) => b.prompt).join('\n\n');
+
+    // `08a:829` returns `buildChecklistPrompt` outright for `mode === 'manual'` — a DIFFERENT builder,
+    // not a branch of the tester prompt, and private. With one detect payload per step it was never
+    // called, so none of its text was scanned.
+    expect(all).toContain(
+      'Generate a structured MANUAL testing checklist for the implemented feature',
+    );
+    // And the mcp arm still renders, so the variant axis ADDED a shape rather than trading one away —
+    // the mistake round twenty-one made with the history fixture.
+    expect(all).toContain('chrome-devtools');
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {
