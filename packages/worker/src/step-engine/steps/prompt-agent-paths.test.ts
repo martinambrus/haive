@@ -863,6 +863,44 @@ const DETECT_VARIANTS: Record<
     { suffix: '', fields: { primary: 'playwright' } },
     { suffix: ', package script', fields: { primary: 'pkg-script' } },
   ],
+  // A path in DATA rather than in a template — the first of that shape in this file.
+  // `11-final-review` serialises its findings into the prompt (`11-final-review.ts:248`,
+  // `Findings: ${JSON.stringify(detected.findings)}`), and when onboarding produced NO agent files the
+  // `no-agents` finding's detail interpolates `activeAgentsTarget.dir`, which is `.claude/agents` for
+  // claude. So the prompt names an agent directory only for repos where that finding exists. Both
+  // variants are built, because the positive is a property of the data and the clean case is the common
+  // one.
+  '11-final-review': [
+    {
+      suffix: '',
+      fields: {
+        counts: { knowledgeBase: 12, skills: 8, agents: 4 },
+        findings: [
+          {
+            id: 'ok',
+            severity: 'info',
+            label: 'Onboarding output looks complete',
+            detail: 'All expected onboarding artefacts were produced.',
+          },
+        ],
+      },
+    },
+    {
+      suffix: ', no agents produced',
+      fields: {
+        counts: { knowledgeBase: 12, skills: 8, agents: 0 },
+        findings: [
+          {
+            id: 'no-agents',
+            severity: 'info',
+            label: 'No subagent files',
+            detail:
+              'No .claude/agents/*.md files were produced; agent discovery step may not be ported yet.',
+          },
+        ],
+      },
+    },
+  ],
 };
 
 /** The detect payloads to build a step's prompts with: its variants, else its single override. */
@@ -1314,6 +1352,12 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       // block does name one. What it also exposes is a dispatcher asymmetry — that block is appended
       // AFTER `agentIsolationApplies` has decided — pinned in its own case and recorded as an open item
       // rather than fixed in this test-only change.
+      // A path carried in DATA: this step serialises its findings, and the no-agents finding names the
+      // agent directory it is reporting as empty. Read-only (`requiredCapabilities: ['tool_use']`), so
+      // the path scan really does decide its isolation. Correct rather than a defect — a reviewer told
+      // that a directory produced nothing should not have that directory masked — and it arises ONLY
+      // when onboarding produced no agent files, which is why the other variant is clean.
+      '11-final-review, no agents produced',
       // Both post-decision appends that carry NON-HAIVE text and can therefore hold a path a repository
       // or a KB author wrote. Sorted, so the digest entry precedes the MCP one.
       'globalKbDigestPrompt (agent-path-shaped title)',
@@ -1379,7 +1423,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 173 clean + 12 named = 185 built, 3 unreachable. The loop path is
+    // MEASURED 2026-09-22: 173 clean + 13 named = 186 built, 3 unreachable. The loop path is
     // role x truncation-retry x history x detect-variant, which is why it dominates the count. The loop path alone is now
     // role x truncation-retry x history, which is why it dominates the count. The unreachable count walked
     // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
@@ -1391,7 +1435,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(185);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(186);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
