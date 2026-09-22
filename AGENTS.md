@@ -486,10 +486,17 @@ index exists. The boundary is that index, not a list of step ids.
 
 Every agent reads text somebody else wrote, and no agent can tell an honest comment from one
 placed to steer it. `steps/_untrusted-repo.ts` is the one home for the rules that answer that,
-and `prompt-agent-paths.test.ts` is what stops them drifting: it renders EVERY prompt the step
-registry can build and asserts these properties over each one individually, never over their
-concatenation — a joined text passes as soon as one arm carries the guard, which is how
-`01-plan-build`'s expand wave and `08b`'s fix pass each shipped unguarded.
+and `prompt-agent-paths.test.ts` is what stops them drifting: it builds every prompt the step
+registry can reach — loop arms and detect variants included — and asserts these properties over
+each one INDIVIDUALLY, never over their concatenation. A joined text passes as soon as one arm
+carries the guard, which is how `01-plan-build`'s expand wave and `08b`'s fix pass each shipped
+unguarded.
+
+Read that file's own header before trusting it further, because its boundary is systemic: a
+permissive proxy fails every strict comparison, so a builder driven that way emits the DEFAULT
+branch of each conditional and no other, and an unmodelled branch would still pass. Nor does it
+see what the dispatch-time augmenters ADD — `augmentPromptWithLedger` and its siblings run after
+every builder — which is why the ledger's own fence is pinned in `task-ledger.test.ts` instead.
 
 **FOUR VARIANTS, AND THE ENDING IS THE WHOLE CHOICE.** They share a first half; what differs is
 what the pass is told to DO about text that tried to steer it, which has to match what its
