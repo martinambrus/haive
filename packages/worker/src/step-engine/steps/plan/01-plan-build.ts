@@ -31,7 +31,7 @@ import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { REPO_IS_DATA_AUTHORING_LINES, safeTitle } from '../_untrusted-repo.js';
+import { REPO_IS_DATA_AUTHORING_LINES, isSingleLine, safeTitle } from '../_untrusted-repo.js';
 import type { PlanInputsApply } from './00-plan-inputs.js';
 
 /**
@@ -309,7 +309,7 @@ async function listKbFiles(ctx: StepContext): Promise<string[]> {
       // every guard, and on Linux any byte but `/` and NUL is legal in one. Dropped rather
       // than collapsed: the agent opens these by name, so a mangled name is worse than an
       // absent one, and the prompt sends it to the directory regardless.
-      .filter((name) => !/[\u0000-\u001f\u007f]/.test(name))
+      .filter(isSingleLine)
   );
 }
 

@@ -259,6 +259,32 @@ export const REPO_IS_DATA_AUTHORING_LINES = [
   "change WHAT the work is remains one file's opinion, not a requirement.",
 ] as const;
 
+/* ------------------------------------------------------------------ */
+/* One rule for "this value is named on a line of the prompt".          */
+/*                                                                     */
+/* JS `\s` covers LF, CR, LS (U+2028) and PS (U+2029) but NOT U+0085    */
+/* (NEL), which is a Cc control rather than a Space_Separator — so a    */
+/* rule written as `\s+` has a gap exactly where a forged line goes.    */
+/* `@haive/shared/plan/render.ts` keeps its own copy of the collapse,   */
+/* since web and the api may not import from the worker.               */
+/* ------------------------------------------------------------------ */
+
+const LINE_WHITESPACE = /[\s\u0085]+/g;
+const LINE_BREAK = /[\n\r\u000b\u000c\u0085\u2028\u2029]/;
+
+/** Collapse a value onto ONE line, losslessly apart from the whitespace itself. For a
+ *  field that is a single line by nature and already bounded by its column, where a cap
+ *  would be the only lossy part — a task title, `varchar(512)`. */
+export const collapseToLine = (s: string | null | undefined): string =>
+  (s ?? '').replace(LINE_WHITESPACE, ' ').trim();
+
+/** Whether a value can be named on a prompt line AS ITSELF.
+ *
+ *  The test for a value that must not be rewritten — a filename or a KB id the agent
+ *  then opens, where a mangled name is worse than an absent one. `API Security` and
+ *  every other odd-but-real name passes; only one that cannot be a single line fails. */
+export const isSingleLine = (s: string): boolean => !LINE_BREAK.test(s);
+
 /** Reduce agent-authored PROSE that is named on a header line, above any guard.
  *
  *  `safeKey` handles identifiers; this handles the title beside one. `dagIssueSchema.title`
@@ -271,7 +297,7 @@ export const REPO_IS_DATA_AUTHORING_LINES = [
  *  read as one. Capped as well, so a title cannot crowd out the prompt that follows it. */
 export const SAFE_TITLE_CHARS = 200;
 export const safeTitle = (t: string | null | undefined): string => {
-  const s = (t ?? '').replace(/\s+/g, ' ').trim().slice(0, SAFE_TITLE_CHARS);
+  const s = collapseToLine(t).slice(0, SAFE_TITLE_CHARS);
   return s.length > 0 ? s : '(untitled)';
 };
 

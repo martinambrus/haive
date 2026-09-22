@@ -16,8 +16,9 @@ import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-g
 import {
   REPO_IS_DATA_AUTHORING_LINES,
   UNTRUSTED_FENCE_LEGEND,
+  collapseToLine,
   fencedAgentBlock,
-  safeRef,
+  isSingleLine,
 } from '../_untrusted-repo.js';
 import { resolveReviewDimensions } from '@haive/shared/review';
 import {
@@ -538,7 +539,11 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         '4. For before/after comparisons (UI, API, config), emit two ADJACENT fenced blocks whose',
         '   info-strings are exactly `before` and `after` — the renderer shows them side-by-side.',
         '',
-        `Task title: ${detected.taskTitle || '(untitled)'}`,
+        // `tasks.title` is `varchar(512)` and one line by nature, but a plan-chat proposal
+        // prefills it and nothing bounds what that agent wrote. Collapsed rather than
+        // `safeTitle`d: the column already bounds the length, so the 200-char cap would be
+        // the only lossy part of it.
+        `Task title: ${collapseToLine(detected.taskTitle) || '(untitled)'}`,
         `Task description: ${detected.taskDescription || '(none)'}`,
         revising
           ? `=== Reviewer feedback to address in this revised spec ===\n${scopeVal || detected.priorRejectionFeedback}`
@@ -560,11 +565,12 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
             ]
           : []),
         '',
-        // A mining agent returns these as arbitrary strings, so one can carry a newline and an
-        // instruction onto a line that sits OUTSIDE every fence. A KB id is a path stem under
-        // the knowledge-base directory, which is what `safeRef` keeps and `safeKey` would
-        // flatten.
-        `Relevant KB ids: ${detected.relevantKbIds.map(safeRef).join(', ') || '(none)'}`,
+        // A mining agent returns these as arbitrary strings, so one can carry a newline and
+        // an instruction onto a line that sits OUTSIDE every fence. Filtered, never
+        // rewritten: `resolveKbReferences` resolves an id AS IT IS, so `API Security`
+        // reduced to `API_Security` points the writer at a page that does not exist — the
+        // same reason `listKbFiles` drops a name rather than collapsing it.
+        `Relevant KB ids: ${detected.relevantKbIds.filter(isSingleLine).join(', ') || '(none)'}`,
         '',
         INSIGHTS_INSTRUCTION,
       ].join('\n');

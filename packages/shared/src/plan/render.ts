@@ -88,7 +88,9 @@ export function renderPlanMarkdownFrom(
   // document here, the committed `.haive-data/plan.md`, the canvas and every prompt
   // this render feeds. `planNodeSchema.title` is `z.string().trim()`, which strips the
   // ends and leaves the interior, so collapsing is the render's own job.
-  const oneLine = (s: string): string => s.replace(/\s+/g, ' ').trim();
+  // `\s` misses U+0085 (NEL), a Cc control rather than a Space_Separator — the same gap
+  // `collapseToLine` closes in the worker's prompt builders.
+  const oneLine = (s: string): string => s.replace(/[\s\u0085]+/g, ' ').trim();
 
   const lines: string[] = [];
 
