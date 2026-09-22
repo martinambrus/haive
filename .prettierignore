@@ -18,3 +18,14 @@ orchestration.zip
 # appended as amendments, so a reader never has to sweep the file to assemble one
 # subject. Excluded here so formatting never rewrites a body. See docs/plans/README.md.
 docs/plans
+
+# Nested git worktrees are SEPARATE CHECKOUTS, usually on another branch. The root scripts glob
+# `**/*.{ts,tsx,js,jsx,json,md}`, so without this `pnpm format` rewrites files that belong to a
+# different branch and a different session's working tree — MEASURED at 80 files with one worktree
+# present. The `docs/plans` entry above cannot cover them either: prettier anchors a bare path to the
+# repo root, so it does not match `.claude/worktrees/<name>/docs/plans/`, and those plan bodies are
+# exactly what that entry exists to protect.
+#
+# CI never sees any of this (it clones fresh, no worktrees), so the whole cost fell on local runs:
+# `pnpm format:check` reported 81 files where 1 was real.
+.claude/worktrees
