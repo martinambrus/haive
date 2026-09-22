@@ -735,8 +735,19 @@ scratch.
    `promptNamesAgentPath` (`.claude/agents/`, `.claude/agents`, `.claude/agents/x.md`,
    `./.claude/agents/x.md` and `/haive/workdir/.claude/agents/x.md` in running text match; `.claude`,
    `docs/.claude/agents/x.md` and `.claude/agents-old/x.md` do not; among built-in prompt builders,
-   with persona markers removed the way `agentIsolationApplies` removes them, only 06_5 and 09_5 match, so a new match fails the test and
-   becomes a conscious decision), marker ids, the persona path
+   with persona markers removed the way `agentIsolationApplies` removes them, every match is an explicit
+   list entry, so a new one fails the test and becomes a conscious decision — the criterion is the
+   EXPLICITNESS, not a count. As built the list holds 13, and each is a decision rather than a leak:
+   `06_5-agent-discovery`, whose prose legitimately points at prior-setup agent files and which declares
+   `requiredCapabilities: []`, so this scan IS what disables its isolation; `09_5-skill-generation` in six
+   variants (llm, both loop roles, both truncation-retry roles and its four-agent mining fan-out), moot
+   because it declares `file_write` and is excluded two conditions earlier; `11-final-review`'s no-agents
+   variant, where the path arrives in DATA rather than a template — it serialises its findings and the
+   `no-agents` finding interpolates the agent directory it is reporting as empty; and two fixtures that
+   exist to exercise the SEVENTH condition (a repository-shaped MCP server name and a KB digest title),
+   which are positives by construction. Planned as "only 06_5 and 09_5", which was right for the three
+   paths this plan knew about and wrong once the scan reached the wave, data-carried and post-decision
+   ones), marker ids, the persona path
    (found / missing / an unparseable file or an empty or frontmatter-only body treated as missing / a file the secret mask covers, or whose mask status cannot be evaluated, never pasted / a persona pasted before a deny rule appeared fails the invocation at exec, including one whose file was deleted before exec / the link, FIFO, pseudo-file and out-of-tree cases DELEGATED to `packages/shared/test/fs-safe.test.ts`, which already pins them for the primitive this reader now calls — a symlinked or out-of-tree `<id>.md`, an agent directory swapped for a symlink, a FIFO that does not block, a pseudo-file reporting size 0 — so they are asserted once, where the guarantee lives / oversized alone or over the per-prompt budget together / a frontmatter `name` that differs from the filename / an oversized unrelated file that is never read / a body naming another agent file / a body containing `$&`, `` $` `` or `$'` pasted literally / template-less id / grok's directory / a provider outside the gate keeps
    today's rewrite / isolation off keeps today's rewrite), `invocationRepoSubpath` against
    `resolveInvocationRepoMount` for the local-path, root, override and branch cases, the tmpfs argv
