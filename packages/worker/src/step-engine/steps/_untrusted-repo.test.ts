@@ -12,6 +12,7 @@ import {
   survivesFence,
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
+  balanceFences,
 } from './_untrusted-repo.js';
 
 /** Every Unicode control point: C0, DEL and C1. */
@@ -129,6 +130,31 @@ describe('fencing agent text', () => {
     expect(survivesFence('a===b')).toBe(true);
     expect(survivesFence('API====Security')).toBe(false);
     expect(survivesFence(UNTRUSTED_CLOSE)).toBe(false);
+  });
+
+  it('repairs a fence a tail slice cut in half', () => {
+    // The real shape: a gate-2 diagnosis with the runtime output fenced inside it, kept to
+    // its last N characters. The slice keeps the END and drops the BEGIN, which leaves the
+    // contained text loose AND closes an outer fence early.
+    const whole = `Developer feedback.\n${fencedAgentBlock('TypeError at admin.js:1')}`;
+    const tail = whole.slice(-40);
+
+    expect(tail).toContain(UNTRUSTED_CLOSE);
+    expect(tail).not.toContain(UNTRUSTED_OPEN);
+
+    const repaired = balanceFences(tail);
+    expect(repaired.startsWith(UNTRUSTED_OPEN)).toBe(true);
+    expect(repaired.split(UNTRUSTED_OPEN).length - 1).toBe(1);
+    expect(repaired.split(UNTRUSTED_CLOSE).length - 1).toBe(1);
+  });
+
+  it('closes an unmatched BEGIN, and leaves a balanced string alone', () => {
+    const headCut = `${UNTRUSTED_OPEN}\nconsole noise`;
+    expect(balanceFences(headCut).endsWith(UNTRUSTED_CLOSE)).toBe(true);
+
+    const balanced = fencedAgentBlock('fine');
+    expect(balanceFences(balanced)).toBe(balanced);
+    expect(balanceFences('no fences here')).toBe('no fences here');
   });
 
   it('keys on the run of `=`, never on either banner wording', () => {

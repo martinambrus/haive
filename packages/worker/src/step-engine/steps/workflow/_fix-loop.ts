@@ -3,7 +3,7 @@ import { schema, type Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { cleanText, contentFingerprint } from '../../task-ledger.js';
-import { fencedAgentBlock } from '../_untrusted-repo.js';
+import { balanceFences, fencedAgentBlock } from '../_untrusted-repo.js';
 
 // Durable channel for the fix-loop diagnosis. When a downstream step finds a blocking
 // defect it returns `loop_back`; handleResult records the diagnosis here and re-enters
@@ -179,7 +179,10 @@ export interface FixLoopRequest {
  *  locate the actual error within the output (the LLM is the dynamic extractor).
  *  Keeps the tail when very long — CLI errors put the summary last. */
 export function cleanDiagnosis(raw: string): string {
-  return cleanText(raw, 6000);
+  // `cleanText` keeps the TAIL, and a gate-2 diagnosis carries fences inside it — so the
+  // slice can drop a BEGIN and leave its contents loose. Repaired, never re-cut: the limit
+  // is what the budget allows and the banner is 37 characters.
+  return balanceFences(cleanText(raw, 6000));
 }
 
 /** Stable signature of a fix-loop diagnosis, namespaced by its source step. Two diagnoses
@@ -572,7 +575,9 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
     const fp = p.fingerprint ?? fixLoopFingerprint(p.sourceStepId ?? '', p.diagnosis ?? '');
     if (seenFp.has(fp)) continue;
     seenFp.add(fp);
-    const short = diag.length > PRIOR_FIX_ENTRY_LIMIT ? diag.slice(-PRIOR_FIX_ENTRY_LIMIT) : diag;
+    const short = balanceFences(
+      diag.length > PRIOR_FIX_ENTRY_LIMIT ? diag.slice(-PRIOR_FIX_ENTRY_LIMIT) : diag,
+    );
     entries.push({
       line: `- ${p.sourceStepId ?? 'downstream'} (round ${p.round}): ${short}`,
       human: HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? ''),

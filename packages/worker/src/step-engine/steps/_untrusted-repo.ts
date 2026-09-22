@@ -295,6 +295,28 @@ const LINE_BREAK = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/;
 export const collapseToLine = (s: string | null | undefined): string =>
   (s ?? '').replace(LINE_WHITESPACE, ' ').trim();
 
+/** Repair a fence a SLICE cut in half.
+ *
+ *  Several consumers keep only the tail of a long diagnosis (`cleanDiagnosis` at 6,000
+ *  characters, the prior-round entry at 400), and a diagnosis can now arrive with a fence
+ *  already inside it — `formatRejectDiagnosis` contains the runtime output and the audit
+ *  findings where it joins them to the developer's own words. A TAIL slice keeps the END
+ *  banner and drops the BEGIN, which leaves the contained text loose in the trusted region
+ *  and, nested inside another fence, closes that one early.
+ *
+ *  Counted rather than parsed, and it fails toward MORE containment: an unmatched END gets
+ *  an OPEN in front of it, an unmatched BEGIN gets a CLOSE after it. A tail slice keeps the
+ *  end of the string, which is where the contained halves are appended, so wrapping what
+ *  survives is also what it means. */
+export function balanceFences(s: string): string {
+  const count = (needle: string): number => s.split(needle).length - 1;
+  const opens = count(UNTRUSTED_OPEN);
+  const closes = count(UNTRUSTED_CLOSE);
+  if (opens === closes) return s;
+  if (closes > opens) return `${UNTRUSTED_OPEN}\n${s}`;
+  return `${s}\n${UNTRUSTED_CLOSE}`;
+}
+
 /** Whether a value survives a fence AS ITSELF.
  *
  *  `fenceSafe` collapses any run of four or more `=`, which is the fence's own integrity and
