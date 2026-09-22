@@ -3,12 +3,7 @@ import { promptNamesAgentPath } from '@haive/shared';
 import { StepRegistry } from '../registry.js';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
 import { stripAgentGuidanceBlocks } from './_retrieval-guidance.js';
-import { registerOnboardingSteps } from './onboarding/index.js';
-import { registerOnboardingUpgradeSteps } from './onboarding-upgrade/index.js';
-import { registerWorkflowSteps } from './workflow/index.js';
-import { registerPlanSteps } from './plan/index.js';
-import { registerKbAuthorSteps } from './kb-author/index.js';
-import { registerRunAppSteps } from './run-app/index.js';
+import { registerAllSteps } from './index.js';
 
 /**
  * Verification item 2's tripwire: among the BUILT-IN prompt builders, which ones name an agent
@@ -20,7 +15,7 @@ import { registerRunAppSteps } from './run-app/index.js';
  * rendered block is stripped before the scan, and code that WRITES those files
  * (`_agent-templates.ts`, `_scope.ts`). None of those end isolation; a bare path in prompt text does.
  *
- * So the registry is booted for real — every workflow type's own `register*Steps` — and each `llm`
+ * So the registry is booted for real — through `registerAllSteps`, the production entry point — and each `llm`
  * spec's `buildPrompt` is called. That is possible because `buildPrompt` takes `LlmBuildArgs`
  * (`{ detected, formValues, iteration? }`) rather than a live `StepContext`: no database, no task,
  * no repository.
@@ -31,12 +26,12 @@ import { registerRunAppSteps } from './run-app/index.js';
  */
 function bootRegistry(): StepRegistry {
   const registry = new StepRegistry();
-  registerOnboardingSteps(registry);
-  registerOnboardingUpgradeSteps(registry);
-  registerWorkflowSteps(registry);
-  registerPlanSteps(registry);
-  registerKbAuthorSteps(registry);
-  registerRunAppSteps(registry);
+  // The PRODUCTION registration, never a hand-kept list of workflow types. This file first rolled its
+  // own and omitted `registerEnvReplicateSteps` while claiming to cover every type: env-replicate
+  // declares no llm phase today, so the scan passed, and any prompt added there would have escaped
+  // the guard silently. `registerAllSteps` also runs the four boot sanity checks, so their drift
+  // surfaces here too.
+  registerAllSteps(registry);
   return registry;
 }
 
@@ -95,21 +90,37 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(clean.length).toBeGreaterThanOrEqual(14);
   });
 
-  it('is not vacuous: without stripping, buildable prompts DO name agent paths', () => {
-    // `named: []` above would mean nothing if stripping removed the whole prompt, or if the scan were
-    // looking at empty strings. Same builders, same scan, stripping omitted: several must match,
-    // because that is what `agentDefinitionGuidance` puts in a prompt. So the empty result above is
-    // marker-stripping doing its job rather than the pipeline finding nothing to look at.
+  it('is not vacuous: markers are present, removed, and the rest of the prompt SURVIVES', () => {
+    // `named: []` proves nothing on its own, and there are TWO ways it could be empty for the wrong
+    // reason. Both are checked here:
+    //
+    //   1. the scan reads nothing at all — then no prompt would name a path even UNSTRIPPED;
+    //   2. `stripAgentGuidanceBlocks` swallows the whole prompt — then the scan reads empty strings,
+    //      every builder classifies clean, and check 1 STILL passes because it reads the unstripped
+    //      text. An earlier version of this case tested only 1 and claimed to have ruled out both.
     const unstripped: string[] = [];
+    let markerRemoved = 0;
     for (const def of bootRegistry().all()) {
       if (!def.llm) continue;
+      let prompt: string;
       try {
-        const prompt = def.llm.buildPrompt({ detected: {}, formValues: {} });
-        if (promptNamesAgentPath(prompt, SANDBOX_WORKDIR)) unstripped.push(def.metadata.id);
+        prompt = def.llm.buildPrompt({ detected: {}, formValues: {} });
       } catch {
         continue;
       }
+      if (promptNamesAgentPath(prompt, SANDBOX_WORKDIR)) unstripped.push(def.metadata.id);
+      const stripped = stripAgentGuidanceBlocks(prompt);
+      // (2) Every scanned prompt still carries content after stripping. This is what makes the
+      // `named` result a reading of prompt TEXT rather than of an empty string.
+      expect(
+        stripped.trim().length,
+        `${def.metadata.id}: stripping emptied the prompt`,
+      ).toBeGreaterThan(0);
+      if (stripped.length < prompt.length) markerRemoved += 1;
     }
+    // Stripping is doing work rather than passing every prompt through untouched.
+    expect(markerRemoved).toBeGreaterThan(0);
+    // (1) The scan sees real prompt text: unstripped, some prompts DO name an agent path.
     expect(unstripped.length).toBeGreaterThan(0);
   });
 
