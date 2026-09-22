@@ -188,6 +188,18 @@ interface PromptSource {
   label: string;
   /** A bare string is ONE dispatch; an array is a fan-out, each element dispatched on its own. */
   build: () => string | Promise<BuiltPrompt[]>;
+  /** The `path#symbol` this source EXECUTES, when that symbol is one the export audit can see.
+   *
+   *  `SCANNED_PROMPT_EXPORTS` is derived from these rather than hand-written, and the audit further
+   *  requires each derived key to belong to a source that actually BUILT. Hand-maintained, the list was
+   *  unverified bookkeeping: adding a string to it satisfied both the unclassified and the stale
+   *  assertion while nothing ever invoked the builder, so a bare agent path in a newly exported prompt
+   *  could be waved straight through the tripwire that exists to catch it.
+   *
+   *  Absent where the executed symbol's name contains no "prompt" and the audit therefore cannot see
+   *  it — `withModelCapabilityBoundary` is the one such source, and claiming it here would read as a
+   *  stale entry. A source the audit cannot name is still a source. */
+  exportKey?: string;
 }
 
 /** Flattens either shape into per-invocation entries, labelled the way each is dispatched. */
@@ -220,37 +232,59 @@ function builtEntries(source: PromptSource, built: string | BuiltPrompt[]): Buil
 const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   {
     label: '08c-code-review buildRefutePrompt (wave 2)',
+    exportKey: 'step-engine/steps/workflow/08c-code-review.ts#buildRefutePrompt',
     build: () => buildRefutePrompt(permissive(), permissive(), permissive()),
   },
   {
     label: '01-plan-build buildExpandPrompt (wave N)',
+    exportKey: 'step-engine/steps/plan/01-plan-build.ts#buildExpandPrompt',
     build: () => buildExpandPrompt(permissive(), permissive(), permissive(), permissive()),
   },
   {
     label: '_agent-selector buildAgentSelectorPrompt',
+    exportKey: 'step-engine/steps/workflow/_agent-selector.ts#buildAgentSelectorPrompt',
     build: () => buildAgentSelectorPrompt(permissive()),
   },
-  { label: '01-enrich buildEnrichPrompt', build: () => buildEnrichPrompt(permissive()) },
+  {
+    label: '01-enrich buildEnrichPrompt',
+    exportKey: 'step-engine/steps/kb-author/01-enrich.ts#buildEnrichPrompt',
+    build: () => buildEnrichPrompt(permissive()),
+  },
   // dag-executor dispatches these DIRECTLY through `resolveTaskDispatch` with `kind: 'prompt'` and
   // `tool_use` only — no registry step owns them, so nothing above would ever reach them.
-  { label: 'dag reviewerPrompt', build: () => reviewerPrompt(permissive(), permissive()) },
-  { label: 'dag advisorPrompt', build: () => advisorPrompt(permissive(), permissive()) },
+  {
+    label: 'dag reviewerPrompt',
+    exportKey: 'step-engine/dag-executor.ts#reviewerPrompt',
+    build: () => reviewerPrompt(permissive(), permissive()),
+  },
+  {
+    label: 'dag advisorPrompt',
+    exportKey: 'step-engine/dag-executor.ts#advisorPrompt',
+    build: () => advisorPrompt(permissive(), permissive()),
+  },
   {
     label: 'dag replannerPrompt',
+    exportKey: 'step-engine/dag-executor.ts#replannerPrompt',
     build: () => replannerPrompt(permissive(), permissive(), permissive()),
   },
   {
     label: 'dag fixCoderPrompt',
+    exportKey: 'step-engine/dag-executor.ts#fixCoderPrompt',
     build: () => fixCoderPrompt(permissive(), permissive(), permissive()),
   },
   // merge-resolver's conflict-resolution prompt.
   {
     label: 'git-merge buildMergeFixPrompt',
+    exportKey: 'step-engine/git-merge.ts#buildMergeFixPrompt',
     build: () => buildMergeFixPrompt(permissive(), permissive(), permissive()),
   },
   // Blocks SPLICED INTO other prompts. A bare agent path in one of these would end isolation for
   // every dispatch that carries it, which is broader than any single step.
-  { label: 'globalKbDigestPrompt (block)', build: () => globalKbDigestPrompt(permissive()) },
+  {
+    label: 'globalKbDigestPrompt (block)',
+    exportKey: 'step-engine/steps/_global-kb-digest.ts#globalKbDigestPrompt',
+    build: () => globalKbDigestPrompt(permissive()),
+  },
   // CONCRETE fixtures, for the same reason as appReachPrompt: `mcpSurfacePrompt` branches on
   // `surface?.rag.enabled`, `chromeDevtools.enabled`, `ddevControl.enabled`, `opts.noBuiltInTools`
   // and `opts.noRepo`, and a permissive proxy is truthy for all of them — so it emitted only the
@@ -273,6 +307,7 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     ] as const
   ).map((cell) => ({
     label: `mcpSurfacePrompt (${cell.label})`,
+    exportKey: 'sandbox/mcp-surface.ts#mcpSurfacePrompt',
     build: () => mcpSurfacePrompt(cell.surface, { ...cell.opts }),
   })),
   // The wave builders Codex found to be PURE after all — my earlier claim that all six remaining
@@ -295,6 +330,7 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   ).flatMap((size) =>
     [...VERIFY_LENSES, null].map((lens) => ({
       label: `08d buildVerifyPrompt (${size.label}, lens ${lens?.id ?? 'generic'})`,
+      exportKey: 'step-engine/steps/workflow/08d-adversarial-qa.ts#buildVerifyPrompt',
       build: () =>
         buildVerifyPrompt(
           permissive(),
@@ -328,6 +364,7 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   // so the file list, the LINES note and the COVERAGE note were all dark.
   ...ADVERSARIES.map((adversary) => ({
     label: `08d buildAdversaryPrompt (${adversary.id})`,
+    exportKey: 'step-engine/steps/workflow/08d-adversarial-qa.ts#buildAdversaryPrompt',
     build: () =>
       buildAdversaryPrompt(
         adversary,
@@ -343,6 +380,7 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   })),
   {
     label: '03-plan-sequence buildSequencePrompt (wave)',
+    exportKey: 'step-engine/steps/plan/03-plan-sequence.ts#buildSequencePrompt',
     build: () => buildSequencePrompt(permissive(), permissive(), permissive()),
   },
   // 02-plan-coverage's re-decomposition wave. Its template was inline in `apply()` and is now a pure
@@ -350,6 +388,7 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   // Both section shapes are exercised, since `sectionBody: null` and `''` take different branches.
   {
     label: '02-plan-coverage buildCoverageRepairPrompt (wave, with section)',
+    exportKey: 'step-engine/steps/plan/02-plan-coverage.ts#buildCoverageRepairPrompt',
     build: () =>
       buildCoverageRepairPrompt({
         subject: 'the plan node "Auth" (decomposition lost)',
@@ -367,15 +406,18 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   // absent or fails, and my exclusion of this helper as "covered via 08a" was true of half of it.
   {
     label: 'appAuthPromptLines (authenticated)',
+    exportKey: 'step-engine/steps/workflow/_app-auth.ts#appAuthPromptLines',
     build: () => appAuthPromptLines({ attempted: true, ok: true, reason: '' }).join('\n'),
   },
   {
     label: 'appAuthPromptLines (unauthenticated)',
+    exportKey: 'step-engine/steps/workflow/_app-auth.ts#appAuthPromptLines',
     build: () =>
       appAuthPromptLines({ attempted: true, ok: false, reason: 'no credentials' }).join('\n'),
   },
   {
     label: '02-plan-coverage buildCoverageRepairPrompt (wave, no section)',
+    exportKey: 'step-engine/steps/plan/02-plan-coverage.ts#buildCoverageRepairPrompt',
     build: () =>
       buildCoverageRepairPrompt({
         subject: 'the source document section "Billing"',
@@ -401,6 +443,7 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     ] as const
   ).map((reach) => ({
     label: `appReachPrompt (${reach.mode}${reach.tlsTrusted ? ', tls trusted' : ''})`,
+    exportKey: 'queues/cli-exec/app-reach.ts#appReachPrompt',
     build: () =>
       appReachPrompt({ ...reach, addHosts: [] } as unknown as Parameters<typeof appReachPrompt>[0]),
   })),
@@ -410,10 +453,12 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   // exempts it from nothing. Excluding the exported one on that reasoning was simply wrong.
   {
     label: 'buildStepSummaryPrompt',
+    exportKey: 'step-engine/step-runner.ts#buildStepSummaryPrompt',
     build: () => buildStepSummaryPrompt(permissive(), permissive(), permissive()),
   },
   {
     label: 'buildAgentMiningSummaryPrompt',
+    exportKey: 'step-engine/step-runner.ts#buildAgentMiningSummaryPrompt',
     build: () => buildAgentMiningSummaryPrompt(permissive(), permissive(), permissive()),
   },
   // Constant blocks the DISPATCHER injects, named by the repository's `*_PROMPT` convention rather
@@ -421,13 +466,19 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   // it, after the isolation decision was already taken.
   {
     label: 'WORKTREE_GIT_BOUNDARY_PROMPT (const block)',
+    exportKey: 'repo/worktree-git-boundary.ts#WORKTREE_GIT_BOUNDARY_PROMPT',
     build: () => WORKTREE_GIT_BOUNDARY_PROMPT,
   },
   {
     label: 'DDEV_GENERATED_BOUNDARY_PROMPT (const block)',
+    exportKey: 'repo/ddev-generated-boundary.ts#DDEV_GENERATED_BOUNDARY_PROMPT',
     build: () => DDEV_GENERATED_BOUNDARY_PROMPT,
   },
-  { label: 'PROMPT_DEFECT_INSTRUCTION (const block)', build: () => PROMPT_DEFECT_INSTRUCTION },
+  {
+    label: 'PROMPT_DEFECT_INSTRUCTION (const block)',
+    exportKey: 'step-engine/steps/workflow/_prompt-defect.ts#PROMPT_DEFECT_INSTRUCTION',
+    build: () => PROMPT_DEFECT_INSTRUCTION,
+  },
   // `NO_VISION_BOUNDARY_PROMPT` is PRIVATE to `cli-adapters/model-capabilities.ts`, so neither it nor
   // its wrapper's name matches the export audit below — yet `dispatcher.ts:517` appends it AFTER the
   // isolation decision. Reached through the exported wrapper, with a fixture that satisfies its guard
@@ -463,6 +514,7 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
       { withBody: false, label: 'embedded fallback' },
     ].map(({ withBody, label }) => ({
       label: `adaptPromptForCliCapabilities (lsp=${axes.supportsLsp} rag=${axes.ragWired}, ${label})`,
+      exportKey: 'step-engine/steps/_retrieval-guidance.ts#adaptPromptForCliCapabilities',
       build: () =>
         adaptPromptForCliCapabilities(
           [
@@ -487,40 +539,20 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
 ];
 
 /**
- * Every exported prompt-like symbol this file SCANS, keyed `path#symbol` relative to the worker's
- * `src/`. File-qualified rather than by bare identifier: two modules exporting the same name collapse
- * into ONE entry under a name key, so the second source silently inherits the first's ruling and is
- * never scanned. The cost is that moving a file edits this list, which is the point — the audit then
- * reports the old key stale and the new one unclassified instead of carrying the ruling across.
+ * Every exported prompt-like symbol this file SCANS, DERIVED from the sources that execute them.
+ *
+ * Keyed `path#symbol` relative to the worker's `src/`, file-qualified rather than by bare identifier:
+ * two modules exporting the same name collapse into ONE entry under a name key, so the second source
+ * silently inherits the first's ruling and is never scanned. The cost is that moving a file edits a
+ * source's `exportKey`, which is the point — the audit then reports the old key stale and the new one
+ * unclassified instead of carrying the ruling across.
+ *
+ * Derived rather than written out, because a hand-written list claims coverage nothing verifies: see
+ * `PromptSource.exportKey`. Adding an export to this file's scan now means adding a SOURCE that builds
+ * it, and the audit below checks that the source did build.
  */
 const SCANNED_PROMPT_EXPORTS = [
-  'step-engine/steps/workflow/08c-code-review.ts#buildRefutePrompt',
-  'step-engine/steps/plan/01-plan-build.ts#buildExpandPrompt',
-  'step-engine/steps/workflow/_agent-selector.ts#buildAgentSelectorPrompt',
-  'step-engine/steps/kb-author/01-enrich.ts#buildEnrichPrompt',
-  'step-engine/dag-executor.ts#reviewerPrompt',
-  'step-engine/dag-executor.ts#advisorPrompt',
-  'step-engine/dag-executor.ts#replannerPrompt',
-  'step-engine/dag-executor.ts#fixCoderPrompt',
-  'step-engine/git-merge.ts#buildMergeFixPrompt',
-  'step-engine/steps/_global-kb-digest.ts#globalKbDigestPrompt',
-  'sandbox/mcp-surface.ts#mcpSurfacePrompt',
-  'queues/cli-exec/app-reach.ts#appReachPrompt',
-  'step-engine/step-runner.ts#buildStepSummaryPrompt',
-  'step-engine/step-runner.ts#buildAgentMiningSummaryPrompt',
-  'repo/worktree-git-boundary.ts#WORKTREE_GIT_BOUNDARY_PROMPT',
-  'repo/ddev-generated-boundary.ts#DDEV_GENERATED_BOUNDARY_PROMPT',
-  'step-engine/steps/workflow/_prompt-defect.ts#PROMPT_DEFECT_INSTRUCTION',
-  'step-engine/steps/_retrieval-guidance.ts#adaptPromptForCliCapabilities',
-  'step-engine/steps/workflow/08d-adversarial-qa.ts#buildVerifyPrompt',
-  'step-engine/steps/workflow/08d-adversarial-qa.ts#buildAdversaryPrompt',
-  'step-engine/steps/plan/03-plan-sequence.ts#buildSequencePrompt',
-  'step-engine/steps/plan/02-plan-coverage.ts#buildCoverageRepairPrompt',
-  'step-engine/steps/workflow/_app-auth.ts#appAuthPromptLines',
-  // NOT `withModelCapabilityBoundary`: this list is the audit's bookkeeping — symbols the sweep below
-  // can actually see — and that wrapper contains no "prompt", so listing it here reads as a stale
-  // entry. It is scanned as a SOURCE in NAMED_PROMPT_BUILDERS, which is the distinction: a source the
-  // audit cannot name is still a source.
+  ...new Set(NAMED_PROMPT_BUILDERS.flatMap((s) => (s.exportKey ? [s.exportKey] : []))),
 ];
 
 /**
@@ -956,6 +988,19 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
         if (/prompt/i.test(m[1]!)) exported.add(`${rel}#${m[1]!}`);
       }
     }
+
+    // A derived key still proves nothing if its source THREW: it would sit in `unbuildable` while this
+    // audit reported the export as covered. So every claimed key must belong to a source that actually
+    // produced a prompt. This is the half that makes the claim true rather than merely tidy.
+    const { clean, named, unbuildable } = await scanBuiltPrompts();
+    const built = new Set([...clean, ...named]);
+    const claimedButNotBuilt = NAMED_PROMPT_BUILDERS.filter(
+      (source) => source.exportKey && !built.has(source.label),
+    ).map((source) => `${source.label} -> ${source.exportKey}`);
+    expect(claimedButNotBuilt).toEqual([]);
+    // And the key set is not empty for a trivial reason, e.g. every source losing its exportKey.
+    expect(new Set(SCANNED_PROMPT_EXPORTS).size).toBeGreaterThan(20);
+    expect(unbuildable).not.toContain(NAMED_PROMPT_BUILDERS[0]!.label);
 
     const scanned = new Set(SCANNED_PROMPT_EXPORTS);
     const unclassified = [...exported]
