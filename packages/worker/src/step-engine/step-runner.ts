@@ -2900,7 +2900,15 @@ async function recordSummaryEnqueueFailure(
   }
 }
 
-function buildStepSummaryPrompt(stepTitle: string, output: unknown, rawOutput: string): string {
+/** Exported for `steps/prompt-agent-paths.test.ts`: this prompt is dispatched through
+ *  `resolveTaskDispatch` with `kind: 'prompt'` and NO capabilities, so `agentIsolationApplies` covers
+ *  it like any other. The invocation being unlinked (`task_step_id` NULL) is an attribution fact and
+ *  exempts it from nothing. */
+export function buildStepSummaryPrompt(
+  stepTitle: string,
+  output: unknown,
+  rawOutput: string,
+): string {
   const structured = JSON.stringify(output ?? {}, null, 2).slice(0, 4000);
   const agentText = rawOutput.slice(0, 6000);
   return [

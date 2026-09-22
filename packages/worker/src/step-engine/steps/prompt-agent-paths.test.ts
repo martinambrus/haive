@@ -13,6 +13,10 @@ import { buildMergeFixPrompt } from '../git-merge.js';
 import { globalKbDigestPrompt } from './_global-kb-digest.js';
 import { mcpSurfacePrompt } from '../../sandbox/mcp-surface.js';
 import { appReachPrompt } from '../../queues/cli-exec/app-reach.js';
+import { buildAgentMiningSummaryPrompt, buildStepSummaryPrompt } from '../step-runner.js';
+import { WORKTREE_GIT_BOUNDARY_PROMPT } from '../../repo/worktree-git-boundary.js';
+import { DDEV_GENERATED_BOUNDARY_PROMPT } from '../../repo/ddev-generated-boundary.js';
+import { PROMPT_DEFECT_INSTRUCTION } from './workflow/_prompt-defect.js';
 
 /**
  * Verification item 2's tripwire: which BUILT-IN prompts name an agent directory once Haive's own
@@ -45,7 +49,8 @@ import { appReachPrompt } from '../../queues/cli-exec/app-reach.js';
  * the last case in this file FAILS if a newly exported `*Prompt` symbol is neither scanned nor
  * excluded with a reason — which is what ends the review-by-review discovery that built this list.
  *
- * With every source above and permissive inputs, 50+ prompts are actually built and scanned, and the
+ * With every source above and permissive inputs, 40+ prompts are actually built and scanned (the
+ * floor this file asserts, so a drop is visible), and the
  * measured positives are exactly the two the plan predicted — `06_5-agent-discovery` and
  * `09_5-skill-generation`. An earlier version of this file reached only 14 prompts on one path and
  * reported NONE, which read as "no built-in prompt names an agent path" and was false.
@@ -171,6 +176,30 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   { label: 'globalKbDigestPrompt (block)', build: () => globalKbDigestPrompt(permissive()) },
   { label: 'mcpSurfacePrompt (block)', build: () => mcpSurfacePrompt(permissive(), permissive()) },
   { label: 'appReachPrompt (block)', build: () => appReachPrompt(permissive()) },
+  // The step-summary pass. `maybeEnqueueStepSummary` dispatches BOTH of these through
+  // `resolveTaskDispatch` with `kind: 'prompt'` and no capabilities, so isolation applies to them like
+  // anything else — the invocation being unlinked (`task_step_id` NULL) is an attribution fact and
+  // exempts it from nothing. Excluding the exported one on that reasoning was simply wrong.
+  {
+    label: 'buildStepSummaryPrompt',
+    build: () => buildStepSummaryPrompt(permissive(), permissive(), permissive()),
+  },
+  {
+    label: 'buildAgentMiningSummaryPrompt',
+    build: () => buildAgentMiningSummaryPrompt(permissive(), permissive(), permissive()),
+  },
+  // Constant blocks the DISPATCHER injects, named by the repository's `*_PROMPT` convention rather
+  // than a `build*` function. A bare agent path in one of these would reach every prompt that carries
+  // it, after the isolation decision was already taken.
+  {
+    label: 'WORKTREE_GIT_BOUNDARY_PROMPT (const block)',
+    build: () => WORKTREE_GIT_BOUNDARY_PROMPT,
+  },
+  {
+    label: 'DDEV_GENERATED_BOUNDARY_PROMPT (const block)',
+    build: () => DDEV_GENERATED_BOUNDARY_PROMPT,
+  },
+  { label: 'PROMPT_DEFECT_INSTRUCTION (const block)', build: () => PROMPT_DEFECT_INSTRUCTION },
 ];
 
 /**
@@ -192,6 +221,11 @@ const SCANNED_PROMPT_EXPORTS = [
   'globalKbDigestPrompt',
   'mcpSurfacePrompt',
   'appReachPrompt',
+  'buildStepSummaryPrompt',
+  'buildAgentMiningSummaryPrompt',
+  'WORKTREE_GIT_BOUNDARY_PROMPT',
+  'DDEV_GENERATED_BOUNDARY_PROMPT',
+  'PROMPT_DEFECT_INSTRUCTION',
 ];
 
 const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
@@ -203,9 +237,14 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
   parsePromptDefects: 'a parser of agent OUTPUT',
   assembleNativePrompt:
     'sub-agent assembly — `input.kind` is not `prompt` there, so agentIsolationApplies excludes it',
-  buildAgentMiningSummaryPrompt:
-    'the step-summary recap pass; its own invocation is unlinked and it carries no agent pointer',
   buildAgentDiscoveryPrompt: "06_5's llm builder, already scanned through the registry",
+  PROMPT_ARGV_LIMIT_BYTES: 'a byte limit for argv delivery, not text',
+  PROMPT_FILE_PATH: 'the in-container path a long prompt is written to, not text',
+  promptCarriesPastedPersona: 'a predicate ABOUT a prompt; contributes no text',
+  promptDefectFingerprint: 'a fingerprint over a defect, not prompt text',
+  promptGuidanceStep:
+    '11e-prompt-guidance StepDefinition — already scanned through the registry; it matches only ' +
+    'because the step is NAMED for prompts',
   // The four augmenters take a `db` and RETURN THE PROMPT UNCHANGED when there is no data — no
   // ledger entries, no attachments, no learned guidance, no stored terseness level. Scanning them
   // with permissive inputs would therefore exercise none of their own text and report a vacuous
@@ -408,10 +447,16 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const exported = new Set<string>();
     for (const file of files) {
       const src = readFileSync(file, 'utf8');
-      for (const m of src.matchAll(/^export (?:async )?function (\w*Prompt\w*)\b/gm)) {
-        exported.add(m[1]!);
+      // Case-INSENSITIVE, and matched on the whole identifier rather than a `Prompt` substring
+      // pattern: the repository names constant blocks in SCREAMING_CASE (`WORKTREE_GIT_BOUNDARY_PROMPT`,
+      // `DDEV_GENERATED_BOUNDARY_PROMPT`), which a case-sensitive `\w*Prompt\w*` misses entirely — so
+      // the first version of this "exhaustive" audit was not.
+      for (const m of src.matchAll(/^export (?:async )?function (\w+)\s*\(/gm)) {
+        if (/prompt/i.test(m[1]!)) exported.add(m[1]!);
       }
-      for (const m of src.matchAll(/^export const (\w*Prompt\w*)\s*[=:]/gm)) exported.add(m[1]!);
+      for (const m of src.matchAll(/^export const (\w+)\s*[=:]/gm)) {
+        if (/prompt/i.test(m[1]!)) exported.add(m[1]!);
+      }
     }
 
     const scanned = new Set(SCANNED_PROMPT_EXPORTS);
