@@ -216,6 +216,28 @@ export function agentIsolationApplies(req: DispatchRequest): boolean {
   for (const body of Object.values(req.agentBodies ?? {})) {
     if (promptNamesAgentPath(body, SANDBOX_WORKDIR)) return false;
   }
+  // EXTERNAL text the dispatcher appends AFTER this decision, which the prompt argument cannot answer
+  // for. `adaptPrompt` splices in the MCP surface and the global-KB digest once this has returned, and
+  // both carry strings Haive did not write: a repository's own `mcpServers` keys, taken verbatim from
+  // its `.claude/mcp_settings.json` by `loadUserMcpServers`, and author-written KB titles. So a
+  // repository could name a server `.claude/agents/foo`, or an author title an entry that way, and reach
+  // an isolated invocation's final prompt with a path whose directory the mask then hides.
+  //
+  // Scanned here rather than after the appends because the decision has to be ONE boolean for the
+  // prompt and the mounts alike; `resolveTaskDispatch` resolves both fields before `resolveDispatch`,
+  // so they are already on the request and this stays pure and IO-free.
+  //
+  // ALL user server keys, not only the ones this run would render. `reachableUserServerNames` is what
+  // knows the difference, and it needs the emitted-server set, which depends on render options a pure
+  // rule does not have — duplicating its shadowing logic would put a second copy of that rule in the
+  // tree. Shadowing is also run-time state: a name shadowed today renders tomorrow, so isolation keyed
+  // on it would flicker between runs of one repository. The superset costs a dispatch its context
+  // saving; the alternative is a scan that disagrees with what renders.
+  const externalText = [
+    ...Object.keys(req.mcpSurface?.userServers ?? {}),
+    ...(req.globalKbDigest ?? []).flatMap((entry) => [entry.title, entry.category]),
+  ].join('\n');
+  if (externalText.length > 0 && promptNamesAgentPath(externalText, SANDBOX_WORKDIR)) return false;
   return true;
 }
 

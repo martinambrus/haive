@@ -19,7 +19,7 @@ function isolatedRequest(over: Partial<DispatchRequest> = {}): DispatchRequest {
 }
 
 describe('agentIsolationApplies', () => {
-  it('holds when all six conditions hold', () => {
+  it('holds when all seven conditions hold', () => {
     expect(agentIsolationApplies(isolatedRequest())).toBe(true);
   });
 
@@ -87,5 +87,66 @@ describe('agentIsolationApplies', () => {
     expect(agentIsolationApplies(isolatedRequest({ instructionsNameAgentPath: true }))).toBe(false);
     // An explicit false is the scanned-and-clean verdict and keeps isolation.
     expect(agentIsolationApplies(isolatedRequest({ instructionsNameAgentPath: false }))).toBe(true);
+  });
+
+  // The seventh condition. `adaptPrompt` splices two blocks in AFTER this rule returns, and both carry
+  // text Haive did not write, so the prompt argument alone cannot answer for them.
+  it('is off when a repository-named MCP SERVER names an agent path', () => {
+    const req = isolatedRequest({
+      mcpSurface: {
+        ragOnly: false,
+        rag: { enabled: false, apiUrl: '', token: '' },
+        chromeDevtools: { enabled: false, version: '' },
+        ddevControl: { enabled: false, apiUrl: '', token: '' },
+        // A repository's own `.claude/mcp_settings.json` keys, taken verbatim by loadUserMcpServers.
+        userServers: { '.claude/agents/foo': { command: 'npx' } },
+      },
+    } as Partial<DispatchRequest>);
+    expect(agentIsolationApplies(req)).toBe(false);
+  });
+
+  it('is off when a global-KB digest TITLE names an agent path', () => {
+    const req = isolatedRequest({
+      globalKbDigest: [{ category: 'standards', title: '.claude/agents/foo' }],
+    });
+    expect(agentIsolationApplies(req)).toBe(false);
+  });
+
+  it('KEEPS isolation for benign external text, and for none at all', () => {
+    // The condition is about the CONTENT of those blocks, not their presence: a surface and a digest
+    // that name nothing must not cost a dispatch its isolation.
+    const benign = isolatedRequest({
+      mcpSurface: {
+        ragOnly: false,
+        rag: { enabled: true, apiUrl: 'http://api:3001', token: 't' },
+        chromeDevtools: { enabled: false, version: '' },
+        ddevControl: { enabled: false, apiUrl: '', token: '' },
+        userServers: { 'company-docs': { command: 'npx' } },
+      },
+      globalKbDigest: [{ category: 'standards', title: 'Escape every interpolated label' }],
+    } as Partial<DispatchRequest>);
+    expect(agentIsolationApplies(benign)).toBe(true);
+    // And the shapes a direct resolveDispatch caller passes: absent, null, empty.
+    expect(agentIsolationApplies(isolatedRequest({ mcpSurface: null }))).toBe(true);
+    expect(agentIsolationApplies(isolatedRequest({ globalKbDigest: [] }))).toBe(true);
+  });
+
+  it('scans a SHADOWED server name too, and that is deliberate', () => {
+    // Only `reachableUserServerNames` knows which servers this run would actually render, and it needs
+    // the emitted-server set, which depends on render options this pure rule does not have. Scanning
+    // the superset costs a dispatch its context saving; duplicating the shadowing logic would put two
+    // copies of it in the tree, and shadowing is run-time state — a name shadowed today renders
+    // tomorrow, so isolation keyed on it would flicker per run for one repository.
+    const req = isolatedRequest({
+      mcpSurface: {
+        ragOnly: false,
+        // `haive-rag` enabled, so a user server of that name IS shadowed and never rendered.
+        rag: { enabled: true, apiUrl: 'http://api:3001', token: 't' },
+        chromeDevtools: { enabled: false, version: '' },
+        ddevControl: { enabled: false, apiUrl: '', token: '' },
+        userServers: { '.claude/agents/shadowed': { command: 'npx' }, 'haive-rag': {} },
+      },
+    } as Partial<DispatchRequest>);
+    expect(agentIsolationApplies(req)).toBe(false);
   });
 });
