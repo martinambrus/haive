@@ -16,6 +16,7 @@ import { INVARIANT_CITATION } from './steps/_invariant-citation.js';
 import {
   REPO_IS_DATA_LINES,
   REPO_IS_DATA_ACTING_LINES,
+  safeTitle,
   UNTRUSTED_OPEN,
   UNTRUSTED_CLOSE,
   fenceSafe,
@@ -816,7 +817,8 @@ export function reviewerPrompt(issue: DagIssueRow, spec: string): string {
 export function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[], spec: string): string {
   const files = (issue.filesModified ?? []) as string[];
   return [
-    `You are addressing reviewer findings for ${issue.issueKey}: ${issue.title}`,
+    // Header line, above the guard below: reduced rather than fenced, same as 06c's.
+    `You are addressing reviewer findings for ${safeKey(issue.issueKey)}: ${safeTitle(issue.title)}`,
     'Your working directory is the issue worktree. Validate each finding against the actual code and fix the real ones by editing files; ignore findings that are wrong or out of scope. Match the existing style.',
     // Placed right after the line that sends this agent into the tree, and joined into one
     // element because this array is `.filter(Boolean)`-ed — spreading it would strip the
