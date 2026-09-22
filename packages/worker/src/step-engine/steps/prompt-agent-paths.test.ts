@@ -1656,9 +1656,10 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(text).toContain('Project-configured servers: `company-docs`, `jira`.');
   });
 
-  it('PINS a production asymmetry: external text is appended after the isolation decision', () => {
-    // NOT a fixture gap like every other case in this file — a gap in the dispatcher, recorded here
-    // because this is where it is observable.
+  it('the appended external text is scanned by the RULE, not only rendered here', () => {
+    // This case recorded a dispatcher GAP when it was written; the gap is now closed and the case pins
+    // the fix instead. What it still shows is the mechanism: these blocks CAN carry a path, which is why
+    // `agentIsolationApplies` has to scan the resolved values rather than the prompt alone.
     //
     // VERIFIED in `orchestrator/dispatcher.ts`: `agentIsolationApplies(req)` runs at :461 against
     // `req.input.prompt`, and `withMcpSurface` appends the surface block at :481, INSIDE `adaptPrompt`
@@ -1666,10 +1667,9 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // `mcpServers` keys verbatim from its own `.claude/mcp_settings.json`, so a repository can name a
     // server `.claude/agents/foo` and that string reaches the FINAL prompt without ever being scanned.
     //
-    // This case asserts the mechanism, not a verdict: the appended block CAN carry an agent path. The
-    // fix belongs in the dispatcher (scan the resolved user server names alongside the prompt) and is
-    // deliberately NOT in this test-only change. If someone lands that fix, this assertion is the one to
-    // update, and the `named` entry above goes with it.
+    // The rule's own coverage of this lives in `orchestrator/agent-isolation-rule.test.ts`; these two
+    // sources stay in `named` because the BUILDERS do render a path when handed such a value, which is
+    // the thing the rule now has to see.
     const withPathShapedName = mcpSurfacePrompt(
       mcpFixture(true, true, true, { '.claude/agents/foo': { command: 'npx' } }),
       {},
