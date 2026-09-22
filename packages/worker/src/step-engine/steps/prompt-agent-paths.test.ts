@@ -155,26 +155,52 @@ interface Scanned {
   unbuildable: string[];
 }
 
+/**
+ * One prompt a source produced, with the key that identifies it among its siblings.
+ *
+ * A fan-out source is N INVOCATIONS, not one: `dispatchMiningAgents` (`step-runner.ts:1477`) loops
+ * `for (const dispatch of dispatches)` and hands each dispatch's own prompt to `resolveTaskDispatch`
+ * separately, so isolation is decided per prompt. A source-level verdict over `.some(...)` therefore
+ * cannot express the answer — once one sibling is an expected positive, a path appearing in another is
+ * invisible, and a path REMOVED from one while another stays positive is invisible too.
+ *
+ * The key carries the index as well as the agent id: the id is what a reader needs, the index is what
+ * keeps two dispatches distinct when the permissive proxy renders both ids as the same empty string.
+ */
+interface BuiltPrompt {
+  key: string;
+  prompt: string;
+}
+
 interface PromptSource {
   label: string;
-  build: () => string | Promise<string[]>;
+  /** A bare string is ONE dispatch; an array is a fan-out, each element dispatched on its own. */
+  build: () => string | Promise<BuiltPrompt[]>;
+}
+
+/** Flattens either shape into per-invocation entries, labelled the way each is dispatched. */
+function builtEntries(source: PromptSource, built: string | BuiltPrompt[]): BuiltPrompt[] {
+  if (typeof built === 'string') return [{ key: source.label, prompt: built }];
+  return built.map((b) => ({ key: `${source.label} [${b.key}]`, prompt: b.prompt }));
 }
 
 /**
  * A FOURTH path: prompts thrown as a later mining wave (`MiningWaveError.dispatches`), which
  * `step-runner` re-dispatches through `resolveTaskDispatch` exactly like a first wave.
  *
- * Eight wave sites exist across five steps (08c, 08d, 01-plan-build, 02-plan-coverage,
- * 03-plan-sequence). SIX are now scanned through named builders — 08c's refuter, plan-build's expand,
- * 08d's verifier (which feeds BOTH of its wave sites) and 03-plan-sequence's. An earlier version of
- * this comment claimed the remaining six "assemble their dispatch arrays inline" and was WRONG: I had
- * read the throw sites, seen array construction, and not looked at what built the prompts inside.
- * Three were plain functions needing only an `export`.
+ * Eight wave sites exist across five steps, and every one of their prompt TEMPLATES is now scanned.
+ * MEASURED by reading each throw site's dispatch array: 08c:1357 `buildRefutePrompt`; 08d:1135 and
+ * 08d:1244 both `buildVerifyPrompt`; 01-plan-build:849 `buildExpandPrompt`; 03-plan-sequence:883
+ * `buildSequencePrompt`; 02-plan-coverage:1076 `buildCoverageRepairPrompt`; and 02-plan-coverage:995
+ * and :1138 both `buildAutomaticConvergenceWave`, which wraps `buildExpandPrompt` in
+ * `augmentPromptWithAttachments`.
  *
- * TWO remain out of reach, both in 02-plan-coverage: one builds its prompt through
- * `augmentPromptWithAttachments` (async, needs a database) and one is assembled inline in `apply()`.
- * Reaching those means executing `apply()` bodies, and several applies write files — a side effect a
- * unit test must not have. That is the residual gap, restated accurately in the coverage case.
+ * So what those last two leave unscanned is NOT a template but the augmenter's own contribution, which
+ * is data-derived (attachment filenames) and cannot hold a fixed agent path — and MEASURED, that
+ * module contains no agent-directory literal at all. Two earlier versions of this comment were wrong in
+ * the same direction and are corrected rather than annotated: the first claimed six sites "assemble
+ * their dispatch arrays inline" (I had read the throws, seen array construction, and not looked
+ * inside), the second still said two were out of reach after one of them had been extracted.
  *
  * 08c's refuter is the one Codex named: read-only (`requiredCapabilities: ['tool_use']`), so the path
  * scan decides its isolation, and it was previously invisible here.
@@ -525,7 +551,10 @@ function promptSources(): PromptSource[] {
             formValues: permissive(),
             llmOutput: permissive(),
           });
-          return dispatches.map((d) => d.prompt);
+          return dispatches.map((d, i) => ({
+            key: `${i}:${String(d.agentId ?? '')}`,
+            prompt: d.prompt,
+          }));
         },
       });
     }
@@ -533,29 +562,48 @@ function promptSources(): PromptSource[] {
   return out;
 }
 
+/**
+ * One source's verdicts. Its own function so the fan-out case below can exercise it on a SYNTHETIC
+ * multi-dispatch source: MEASURED, every real mining source produces at most ONE dispatch under the
+ * permissive inputs (`10_8-plan-build` and `01-plan-build` yield `plan-root`; the rest yield none or
+ * throw), so per-invocation keying would otherwise be structurally correct and never exercised — the
+ * vacuity this file has already been corrected for twice.
+ */
+async function classifySource(source: PromptSource): Promise<Scanned> {
+  const out: Scanned = { named: [], clean: [], unbuildable: [] };
+  let entries: BuiltPrompt[];
+  try {
+    entries = builtEntries(source, await source.build());
+  } catch {
+    out.unbuildable.push(source.label);
+    return out;
+  }
+  // A mining step that selects no agent under empty inputs produced no prompt to scan — not the same
+  // thing as a clean one, so it is reported rather than counted as covered. Reported by SOURCE,
+  // because there is no invocation to key on.
+  if (entries.length === 0) {
+    out.unbuildable.push(source.label);
+    return out;
+  }
+  // One verdict per INVOCATION, never one per source: each of these is its own `resolveTaskDispatch`
+  // call, so collapsing a fan-out with `.some(...)` would let a path in one sibling hide behind an
+  // expected positive in another.
+  for (const entry of entries) {
+    // Exactly what the dispatch rule does: strip Haive's own marker blocks, then scan what is left.
+    const names = promptNamesAgentPath(stripAgentGuidanceBlocks(entry.prompt), SANDBOX_WORKDIR);
+    if (names) out.named.push(entry.key);
+    else out.clean.push(entry.key);
+  }
+  return out;
+}
+
 async function scanBuiltPrompts(): Promise<Scanned> {
   const out: Scanned = { named: [], clean: [], unbuildable: [] };
   for (const source of promptSources()) {
-    let prompts: string[];
-    try {
-      const built = await source.build();
-      prompts = typeof built === 'string' ? [built] : built;
-    } catch {
-      out.unbuildable.push(source.label);
-      continue;
-    }
-    // A mining step that selects no agent under empty inputs produced no prompt to scan — not the
-    // same thing as a clean one, so it is reported rather than counted as covered.
-    if (prompts.length === 0) {
-      out.unbuildable.push(source.label);
-      continue;
-    }
-    // Exactly what the dispatch rule does: strip Haive's own marker blocks, then scan what is left.
-    const names = prompts.some((p) =>
-      promptNamesAgentPath(stripAgentGuidanceBlocks(p), SANDBOX_WORKDIR),
-    );
-    if (names) out.named.push(source.label);
-    else out.clean.push(source.label);
+    const one = await classifySource(source);
+    out.named.push(...one.named);
+    out.clean.push(...one.clean);
+    out.unbuildable.push(...one.unbuildable);
   }
   out.named.sort();
   out.clean.sort();
@@ -613,21 +661,21 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const unstripped: string[] = [];
     let markerRemoved = 0;
     for (const source of promptSources()) {
-      let prompts: string[];
+      let entries: BuiltPrompt[];
       try {
-        const built = await source.build();
-        prompts = typeof built === 'string' ? [built] : built;
+        entries = builtEntries(source, await source.build());
       } catch {
         continue;
       }
-      for (const prompt of prompts) {
-        if (promptNamesAgentPath(prompt, SANDBOX_WORKDIR)) unstripped.push(source.label);
-        const stripped = stripAgentGuidanceBlocks(prompt);
+      for (const entry of entries) {
+        if (promptNamesAgentPath(entry.prompt, SANDBOX_WORKDIR)) unstripped.push(entry.key);
+        const stripped = stripAgentGuidanceBlocks(entry.prompt);
+        // Keyed per invocation, so a failure names the dispatch rather than only its step.
         expect(
           stripped.trim().length,
-          `${source.label}: stripping emptied the prompt`,
+          `${entry.key}: stripping emptied the prompt`,
         ).toBeGreaterThan(0);
-        if (stripped.length < prompt.length) markerRemoved += 1;
+        if (stripped.length < entry.prompt.length) markerRemoved += 1;
       }
     }
     expect(markerRemoved).toBeGreaterThan(0);
@@ -647,13 +695,47 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // unreachable bucket while the counts still looked healthy.
     const namedLabels = NAMED_PROMPT_BUILDERS.map((s) => s.label);
     expect(unbuildable.filter((label) => namedLabels.includes(label))).toEqual([]);
-    // KNOWN RESIDUAL GAP, stated so nobody reads this file as exhaustive. SIX of the eight
-    // `MiningWaveError` sites are scanned above through named builders (08c's refuter, plan-build's
-    // expand, 08d's verifier for both of its sites, 03-plan-sequence's). TWO remain, both in
-    // 02-plan-coverage: one builds its prompt through `augmentPromptWithAttachments` (async, needs a
-    // database) and one is assembled inline in `apply()`. Reaching those means executing `apply()`
-    // bodies, and several applies write files — a side effect a unit test must not have.
+    // Stated so nobody reads this file as exhaustive. All eight `MiningWaveError` sites have their
+    // prompt TEMPLATE scanned above (see the enumeration on NAMED_PROMPT_BUILDERS). What is still
+    // unscanned is what `augmentPromptWithAttachments` adds to 02-plan-coverage's two convergence
+    // waves — data-derived filenames, in a module carrying no agent-directory literal. Executing the
+    // `apply()` bodies to reach it is not the answer: several applies write files, which a unit test
+    // must not do.
     expect(named).not.toContain('08c-code-review buildRefutePrompt (wave 2)');
+  });
+
+  it('gives a FAN-OUT one verdict per dispatch, not one per source', async () => {
+    // The regression this pins: `dispatchMiningAgents` (`step-runner.ts:1477`) loops over the
+    // dispatches and hands each prompt to `resolveTaskDispatch` on its own, so two siblings can land
+    // on opposite sides of the isolation rule. A source-level `.some(...)` reported ONE verdict for
+    // the pair — so a path added to a clean sibling changed nothing once another sibling was already
+    // an expected positive, and a path removed from one while another stayed positive changed nothing
+    // either. Both directions are silent, which is what makes it a tripwire defect rather than a
+    // cosmetic one.
+    //
+    // Synthetic because no real mining source fans out under the permissive inputs (measured on
+    // `classifySource`). The prompts are the two cases the rule distinguishes, using the whole-segment
+    // form `promptNamesAgentPath` matches from the mount root.
+    const fanOut: PromptSource = {
+      label: 'synthetic fan-out',
+      build: async () => [
+        {
+          key: '0:clean-sibling',
+          prompt: 'Summarise the change. Do not open any definition files.',
+        },
+        {
+          key: '1:names-a-path',
+          prompt: 'Read .claude/agents/security-auditor.md before scoring.',
+        },
+      ],
+    };
+
+    const { named, clean, unbuildable } = await classifySource(fanOut);
+    expect(named).toEqual(['synthetic fan-out [1:names-a-path]']);
+    expect(clean).toEqual(['synthetic fan-out [0:clean-sibling]']);
+    expect(unbuildable).toEqual([]);
+    // Under the collapsed form the pair produced exactly one entry; two is the whole point.
+    expect(named.length + clean.length).toBe(2);
   });
 
   it('classifies every EXPORTED prompt symbol — private fragments are a stated gap', async () => {
