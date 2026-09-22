@@ -15,9 +15,10 @@ import { registerAllSteps } from './index.js';
  * rendered block is stripped before the scan, and code that WRITES those files
  * (`_agent-templates.ts`, `_scope.ts`). None of those end isolation; a bare path in prompt text does.
  *
- * So the registry is booted for real — through `registerAllSteps`, the production entry point — and each `llm`
- * spec's `buildPrompt` is called. That is possible because `buildPrompt` takes `LlmBuildArgs`
- * (`{ detected, formValues, iteration? }`) rather than a live `StepContext`: no database, no task,
+ * So the registry is booted for real — through `registerAllSteps`, the production entry point — and
+ * BOTH of a step's prompt builders are called: `llm.buildPrompt` and, where a loop defines one,
+ * `loop.buildIterationPrompt`. That is possible because neither takes a live `StepContext`, only a
+ * small args bag (`{ detected, formValues, iteration?, previousIterations? }`): no database, no task,
  * no repository.
  *
  * A builder that throws on synthetic args is REPORTED rather than silently skipped — the count is
@@ -41,23 +42,53 @@ interface Scanned {
   unbuildable: string[];
 }
 
+/**
+ * Every prompt production can DISPATCH, which is two builders per step and not one.
+ *
+ * `step-runner.ts:707` routes a loop pass to `stepDef.loop.buildIterationPrompt(...)` instead of
+ * `llm.buildPrompt(...)` whenever `upcomingIteration > 0 || truncationRetries > 0` — so 05, 07a, 07b,
+ * 08a and 09_5 each have an iteration-only prompt that the isolation rule evaluates and that scanning
+ * `llm` alone never sees. Missing it was the whole point of this file being wrong once already.
+ */
+interface PromptSource {
+  label: string;
+  build: () => string;
+}
+
+function promptSources(): PromptSource[] {
+  const out: PromptSource[] = [];
+  for (const def of bootRegistry().all()) {
+    const id = def.metadata.id;
+    const llm = def.llm;
+    if (llm)
+      out.push({ label: id, build: () => llm.buildPrompt({ detected: {}, formValues: {} }) });
+    const iteration = def.loop?.buildIterationPrompt;
+    if (iteration) {
+      out.push({
+        label: `${id} (loop iteration)`,
+        build: () =>
+          iteration({ detected: {}, formValues: {}, iteration: 1, previousIterations: [] }),
+      });
+    }
+  }
+  return out;
+}
+
 function scanBuiltPrompts(): Scanned {
   const out: Scanned = { named: [], clean: [], unbuildable: [] };
-  for (const def of bootRegistry().all()) {
-    const llm = def.llm;
-    if (!llm) continue;
+  for (const source of promptSources()) {
     let prompt: string;
     try {
-      prompt = llm.buildPrompt({ detected: {}, formValues: {} });
+      prompt = source.build();
     } catch {
-      out.unbuildable.push(def.metadata.id);
+      out.unbuildable.push(source.label);
       continue;
     }
     // Exactly what the dispatch rule does: strip Haive's own marker blocks, then scan what is left.
     if (promptNamesAgentPath(stripAgentGuidanceBlocks(prompt), SANDBOX_WORKDIR)) {
-      out.named.push(def.metadata.id);
+      out.named.push(source.label);
     } else {
-      out.clean.push(def.metadata.id);
+      out.clean.push(source.label);
     }
   }
   out.named.sort();
@@ -87,7 +118,11 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(named).toEqual([]);
     // Coverage is asserted so that WEAKENING it is visible: if builders start throwing on synthetic
     // args, this number drops and the guard shrinks without anyone noticing otherwise.
-    expect(clean.length).toBeGreaterThanOrEqual(14);
+    expect(clean.length).toBeGreaterThanOrEqual(18);
+    // The loop-iteration path is IN the scan. Asserted directly because scanning `llm` alone was a
+    // real gap in this file: `step-runner.ts:707` dispatches `buildIterationPrompt` for any pass past
+    // the first, so dropping that branch from `promptSources` would silently stop covering five steps.
+    expect(clean.some((label) => label.endsWith('(loop iteration)'))).toBe(true);
   });
 
   it('is not vacuous: markers are present, removed, and the rest of the prompt SURVIVES', () => {
@@ -100,21 +135,20 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     //      text. An earlier version of this case tested only 1 and claimed to have ruled out both.
     const unstripped: string[] = [];
     let markerRemoved = 0;
-    for (const def of bootRegistry().all()) {
-      if (!def.llm) continue;
+    for (const source of promptSources()) {
       let prompt: string;
       try {
-        prompt = def.llm.buildPrompt({ detected: {}, formValues: {} });
+        prompt = source.build();
       } catch {
         continue;
       }
-      if (promptNamesAgentPath(prompt, SANDBOX_WORKDIR)) unstripped.push(def.metadata.id);
+      if (promptNamesAgentPath(prompt, SANDBOX_WORKDIR)) unstripped.push(source.label);
       const stripped = stripAgentGuidanceBlocks(prompt);
       // (2) Every scanned prompt still carries content after stripping. This is what makes the
       // `named` result a reading of prompt TEXT rather than of an empty string.
       expect(
         stripped.trim().length,
-        `${def.metadata.id}: stripping emptied the prompt`,
+        `${source.label}: stripping emptied the prompt`,
       ).toBeGreaterThan(0);
       if (stripped.length < prompt.length) markerRemoved += 1;
     }
@@ -135,6 +169,6 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(unbuildable).toContain('09_5-skill-generation');
     // Pinned so a step MOVING between the two buckets — newly buildable, or newly throwing — shows up
     // as a diff here. That is what keeps a new step from landing unexamined in either direction.
-    expect(unbuildable.length).toBe(25);
+    expect(unbuildable.length).toBe(26);
   });
 });
