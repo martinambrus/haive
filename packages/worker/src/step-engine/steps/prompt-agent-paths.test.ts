@@ -704,6 +704,44 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(named).not.toContain('08c-code-review buildRefutePrompt (wave 2)');
   });
 
+  it('strips ONLY the marker blocks — the prose around them survives', () => {
+    // The case above asserts a stripped prompt is non-EMPTY, which Codex correctly called insufficient:
+    // a stripper that swallowed most of a prompt but left a few characters would satisfy it while the
+    // production path scan had quietly stopped examining the text it exists to examine — the dispatcher
+    // strips with this same function, so an over-strip is wrong in production too, not only here.
+    //
+    // The hazard is specific rather than hypothetical. `AGENT_GUIDANCE_PATTERN` spans newlines with
+    // `[\s\S]*?`, so only its NON-GREEDINESS keeps two marker blocks two matches; a greedy span would
+    // match from the first block's start to the last block's end and take every line between them.
+    // This is also the only coverage `stripAgentGuidanceBlocks` has anywhere — `_retrieval-guidance.
+    // test.ts` does not mention it.
+    const marker = (id: string) =>
+      `[[HAIVE_AGENT_DEFINITION:${id}]]\nFollow .claude/agents/${id}.md if it exists.\n[[HAIVE_AGENT_DEFINITION_END]]`;
+    const before = 'Review the diff and report blocking defects only.';
+    const between = 'Then score the change against the review dimensions.';
+    const after = 'Return one JSON object and nothing else.';
+    const prompt = [
+      before,
+      marker('peer-reviewer'),
+      between,
+      marker('security-auditor'),
+      after,
+    ].join('\n\n');
+
+    const stripped = stripAgentGuidanceBlocks(prompt);
+    // Known non-marker content, on all three sides of the two blocks.
+    expect(stripped).toContain(before);
+    expect(stripped).toContain(between);
+    expect(stripped).toContain(after);
+    expect(stripped).not.toContain('HAIVE_AGENT_DEFINITION');
+
+    // And the pair that gives the whole tripwire its meaning: the marked prompt DOES name an agent
+    // path, and stripping is what makes it stop. If the stripper ever removed more than the blocks,
+    // the three assertions above fail before this one can pass for the wrong reason.
+    expect(promptNamesAgentPath(prompt, SANDBOX_WORKDIR)).toBe(true);
+    expect(promptNamesAgentPath(stripped, SANDBOX_WORKDIR)).toBe(false);
+  });
+
   it('gives a FAN-OUT one verdict per dispatch, not one per source', async () => {
     // The regression this pins: `dispatchMiningAgents` (`step-runner.ts:1477`) loops over the
     // dispatches and hands each prompt to `resolveTaskDispatch` on its own, so two siblings can land
