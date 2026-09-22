@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DagCoderContext, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { fencedDebtBlock } from '../_untrusted-repo.js';
 import {
   commentPolicyLines,
   ddevConfigGuidanceLines,
@@ -65,7 +66,13 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
       ? `Acceptance criteria (for this issue only):\n- ${issue.acceptanceCriteria.join('\n- ')}`
       : '',
     issue.planImpact ? `\n${issue.planImpact}` : '',
-    upstreamDebt ? `\n${upstreamDebt}` : '',
+    // The upstream block is built from the same `debtItems` the four review prompts carry —
+    // the DAG reviewer's own `issues`, which REPO_IS_DATA_LINES asks it to fill with quoted
+    // tree text whenever that text tried to steer it. This consumer is the most privileged
+    // of the five: the coder WRITES the implementation, where the reviewers only report or
+    // fix what a reviewer named. Its heading ("account for it, do not re-fix it here") is
+    // suppression framing an injected line would inherit just as readily.
+    upstreamDebt ? `\n${fencedDebtBlock(upstreamDebt)}` : '',
     ...ddevConfigGuidanceLines(
       [issue.title, issue.description, issue.provides, ...issue.specSections].join(' '),
     ),
