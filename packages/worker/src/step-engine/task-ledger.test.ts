@@ -185,6 +185,9 @@ describe('augmentPromptWithLedger', () => {
     for (const line of out.split('\n').filter((l) => l.startsWith('- '))) {
       expect(line).toContain('x'.repeat(1200));
     }
+    // And the drop is STATED, not only logged: a block that silently lost the oldest facts
+    // reads as the whole of what earlier steps established.
+    expect(out).toMatch(/\(\d+ earlier entr(y|ies) omitted for length/);
   });
 
   it('treats entries differing only by a number as one, matching the fix-loop rule', async () => {
