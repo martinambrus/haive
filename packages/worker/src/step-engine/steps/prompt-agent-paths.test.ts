@@ -1417,6 +1417,14 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // `loadPlanSkeletons(ctx.db, …)` INSIDE `selectAgents`, so they need a live database and no payload
     // reaches them. Asserted by NAME, not just by count — a count would let a new fixture-shaped gap
     // take a retiring one's slot, which is the substitution this allowance was hiding two rounds ago.
+    //
+    // Reaching them with a stubbed db was considered and REJECTED, recorded here so it is not re-tried
+    // as an obvious win. `loadPlanSkeletons` (`shared/src/plan/read.ts:62`) is a drizzle builder chain,
+    // so a stub means mimicking `select().from().where().orderBy()` — brittle against any query change.
+    // And it would scan NO new text: all three dispatch prompts this file already covers as named
+    // builders (`buildSequencePrompt`, `buildCoverageRepairPrompt`, and `buildExpandPrompt` wrapped in
+    // `augmentPromptWithAttachments`, whose own additions are measured to carry no agent-directory
+    // literal). It would move a counter from 3 to 0 and prove nothing further.
     expect(selectedNothing).toEqual([
       '00-plan-sequence (mining)',
       '02-plan-coverage (mining)',
@@ -1829,8 +1837,24 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // PRIVATE constant is invisible to it, and such text exists — `NO_VISION_BOUNDARY_PROMPT` is
     // private to `cli-adapters/model-capabilities.ts` and appended at `dispatcher.ts:517`, with a
     // wrapper whose own name contains no "prompt" either. That one is scanned above through its
-    // wrapper; another private fragment reached by a differently-named wrapper would evade this audit,
-    // and no name-based rule can close that. It is a real boundary, not an oversight.
+    // wrapper. No name-based rule can close the general case, so it stays a real boundary.
+    //
+    // SURVEYED 2026-09-22 rather than left vague, because "something private might evade this" is not a
+    // finding until someone looks. All 36 private prompt-named symbols under `packages/worker/src` were
+    // enumerated, and each is one of three things, none of them a gap:
+    //   - a step's own builder, reached through the registry path that dispatches it — the bulk of them,
+    //     including 08c's `buildPeerPrompt`/`buildSecurityPrompt`/`buildLensPrompt` (`08c:1161`/`:1167`/
+    //     `:1173`), 08a's tester/fixer/checklist trio, and `_model-health`'s `PROMPT`, which IS that
+    //     step's `buildPrompt` (`_model-health.ts:213`);
+    //   - a fragment spliced by a wrapper this file scans directly — `NO_VISION_BOUNDARY_PROMPT`, and
+    //     `_retrieval-guidance`'s `PROMPT_VARIANT_TABLE` via `adaptPromptForCliCapabilities`;
+    //   - argv for a DIRECT SPAWN that never reaches `resolveTaskDispatch`, so the isolation rule does
+    //     not apply to it at all — `auth-probe`'s `AUTH_PROBE_PROMPT` (`args: ['-p', …]`) and
+    //     `codex-app-server-probe`'s `PROBE_PROMPT`.
+    //
+    // An audit over private symbols was considered and REJECTED: it could only assert a hand-maintained
+    // map from each symbol to the source that reaches it, with nothing to derive that map from — the
+    // unverified bookkeeping this file already removed from `SCANNED_PROMPT_EXPORTS` once.
     // This case exists because of how this file grew: llm, then loop iterations, then mining, then
     // mining waves, then dag-executor's direct dispatches were each found ONE REVIEW AT A TIME, and
     // every intermediate version looked complete. Enumerating the symbols ends that loop — a new
