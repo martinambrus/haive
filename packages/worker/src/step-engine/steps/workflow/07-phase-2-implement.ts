@@ -33,6 +33,11 @@ interface ImplementDetect {
    *  `.haive/spec.md`, or the whole spec when the admin picked 'full' / there is no
    *  artifact to point at. */
   specView: string;
+  /** True when the lightweight path built `specView` from the TASK BRIEF (title +
+   *  description) instead of the spec chain — the person running the task wrote it, not an
+   *  agent. Optional because detect output is PERSISTED: a payload written before this
+   *  existed renders exactly the label it always did. */
+  specIsBrief?: boolean;
   sandboxWorkspacePath: string;
   gateFeedback: string;
   /** Fix-loop diagnosis to address on this round, or null on the original pass
@@ -269,6 +274,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     const view = await resolveSpecView(ctx);
     let spec = view.spec;
     let specView = view.text;
+    let specIsBrief = false;
     let specSummary = planOutput.summary ?? '';
     if (spec.trim().length === 0) {
       // Lightweight paths (quick_bugfix) skip the spec steps (03/04/05), so there is
@@ -279,6 +285,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       spec = briefFromTaskMeta(meta.title, meta.description);
       // Already the whole brief, and far too short to index.
       specView = spec;
+      specIsBrief = true;
       if (specSummary.length === 0) specSummary = meta.title.trim();
     }
     // Fix-loop: on a round > 0 re-entry, the diagnosis a downstream step recorded, plus whether
@@ -288,6 +295,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       specSummary,
       spec,
       specView,
+      specIsBrief,
       // The worktree is mounted alone at the sandbox workdir root (per-invocation
       // isolation), so the agent's workspace IS ctx.sandboxWorkdir — not the old
       // repo-root-mount subdir. The guard above still confirms 01 set the worktree up.
@@ -443,7 +451,9 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
           'The full specification is included below for context — use it to understand the',
           'intended behavior, but only change what is needed to resolve the defect above.',
           '',
-          '=== Spec ===',
+          detected.specIsBrief
+            ? '=== Task brief (written by the person running this task — authoritative) ==='
+            : '=== Spec (written by the spec-writing agent) ===',
           detected.specView || '(empty spec)',
           '',
           INSIGHTS_INSTRUCTION,
@@ -458,7 +468,9 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         '',
         ...common,
         '',
-        '=== Spec ===',
+        detected.specIsBrief
+          ? '=== Task brief (written by the person running this task — authoritative) ==='
+          : '=== Spec (written by the spec-writing agent) ===',
         detected.specView || '(empty spec — default to minimal safe change)',
         '',
         INSIGHTS_INSTRUCTION,
