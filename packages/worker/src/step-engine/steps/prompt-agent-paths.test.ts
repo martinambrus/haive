@@ -151,13 +151,18 @@ function mcpFixture(
   rag: boolean,
   chrome: boolean,
   ddev: boolean,
+  /** A repository's OWN `.claude/mcp_settings.json` servers. Every fixture hard-coded `{}`, so the
+   *  `userNames.length > 0` arm (`sandbox/mcp-surface.ts:383-385`) never rendered — it names each
+   *  project-configured server back to the model, and the dispatcher appends this block AFTER the
+   *  isolation decision. */
+  userServers: Record<string, unknown> = {},
 ): Parameters<typeof mcpSurfacePrompt>[0] {
   return {
     ragOnly: false,
     rag: { enabled: rag, apiUrl: 'http://api:3001', token: 't' },
     chromeDevtools: { enabled: chrome, version: '1.7.0' },
     ddevControl: { enabled: ddev, apiUrl: 'http://api:3001', token: 't' },
-    userServers: {},
+    userServers,
   };
 }
 
@@ -473,6 +478,15 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
       { label: 'noRepo', surface: mcpFixture(true, true, true), opts: { noRepo: true } },
       { label: 'null surface (amp)', surface: null, opts: {} },
       { label: 'worktree', surface: mcpFixture(true, true, true), opts: { hasWorktree: true } },
+      {
+        // Two servers, because the arm JOINS them and a single entry would not exercise the separator.
+        label: 'project-configured servers',
+        surface: mcpFixture(true, true, true, {
+          'company-docs': { command: 'npx', args: ['-y', 'company-docs-mcp'] },
+          jira: { command: 'npx', args: ['-y', 'jira-mcp'] },
+        }),
+        opts: {},
+      },
     ] as const
   ).map((cell) => ({
     label: `mcpSurfacePrompt (${cell.label})`,
@@ -1275,7 +1289,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 139 clean + 10 named = 149 built, 3 unreachable. The unreachable count walked
+    // MEASURED 2026-09-22: 140 clean + 10 named = 150 built, 3 unreachable. The unreachable count walked
     // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
     // and discovery got a persona roster; the built count then grew again with the truncation-retry
     // axis, which doubles every loop role. The floor sat at 40 when
@@ -1285,7 +1299,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(149);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(150);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1488,6 +1502,18 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // The nested arm: an input index exists only for greenfield, and it NAMES a file for the agent to
     // open, which is precisely the kind of text this tripwire is scanning for.
     expect(all).toContain('Read _PLAN_INPUTS.md FIRST.');
+  });
+
+  it('RENDERS the project-configured MCP server arm', async () => {
+    const source = promptSources().find(
+      (candidate) => candidate.label === 'mcpSurfacePrompt (project-configured servers)',
+    );
+    expect(source, 'the project-configured fixture is missing').toBeDefined();
+    const entries = builtEntries(source!, await source!.build());
+    const text = entries.map((e) => e.prompt).join('\n');
+    // Both names and the separator: this arm exists to tell the model what a REPOSITORY wired up, so
+    // the server names are the part that varies and the part a path could hide in.
+    expect(text).toContain('Project-configured servers: `company-docs`, `jira`.');
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {
