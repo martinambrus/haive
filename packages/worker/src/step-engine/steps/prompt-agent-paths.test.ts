@@ -881,6 +881,60 @@ const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
   '07a-code-simplify': { implementationFiles: CHANGE_SET },
   '08a-browser-verify': { implementationFiles: CHANGE_SET },
   '08b-test-management': { implementationFiles: CHANGE_SET },
+  // The other half of the empty-selection bucket: a mining step whose selection is driven by a LIST,
+  // which is empty through a proxy. These are PURE — no database — so a list is all they need, and each
+  // dispatches real prompts subject to the isolation rule.
+  '09_6_4-global-kb-merge': {
+    pairs: [
+      {
+        draftId: 'draft-1',
+        draftTitle: 'Escape every interpolated label',
+        draftBody: 'A label carrying a backtick ends its span early.',
+        existingId: 'kb-101',
+        existingBody: 'Escape interpolated values before rendering.',
+      },
+    ],
+  },
+  '11d-skill-sync': {
+    skillTargetDirs: ['.claude/skills'],
+    framework: 'drupal',
+    language: 'php',
+    // `KbFileSummary` objects, not paths: the builder reads `relPath`, `title` and
+    // `sectionHeadings.length`, and a bare string threw on the last of those.
+    kbFiles: [
+      {
+        relPath: 'ARCHITECTURE.md',
+        title: 'Architecture',
+        sectionHeadings: ['Entity API', 'Routing'],
+      },
+    ],
+    // A valid `SkillSyncTarget`, not an approximation of one: the builder reads `capability`,
+    // `rationale` and `skillMdExcerpt` too, and a missing one threw on `undefined.length` — which the
+    // `threw` assertion added last round caught immediately, naming this source.
+    targets: [
+      {
+        kind: 'update',
+        skillId: 'drupal-entity-api',
+        capability: '',
+        rationale: 'The entity API changed.',
+        skillMdExcerpt: '# Drupal entity API\nUse the entity type manager.',
+      },
+    ],
+  },
+  '09_5b-skill-repair': {
+    skillTargetDirs: ['.claude/skills'],
+    framework: 'drupal',
+    language: 'php',
+    // The field is `failingSkills`, not `failures` — a wrong NAME leaves the list empty and the source
+    // reports "selected nothing", which looks exactly like the honest case. Read the step, do not guess.
+    failingSkills: [
+      {
+        skillId: 'drupal-entity-api',
+        issues: ['Frontmatter did not parse under YAML 1.1.'],
+        skillMdExcerpt: '# Drupal entity API\nUse the entity type manager.',
+      },
+    ],
+  },
 };
 
 /** Every prompt production can dispatch, across all three registry paths plus the named builders. */
@@ -1117,17 +1171,21 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // prompt to scan. Fixing those means inventing a plan tree, a skill set or a KB corpus, which is
     // the "fixture bound to one step's payload" trade this file's header rejects. Held at the measured
     // 8 so a new one is acknowledged rather than absorbed.
-    expect(selectedNothing.length).toBeLessThanOrEqual(8);
-    expect(unbuildable.length).toBeLessThanOrEqual(8);
-    // MEASURED 2026-09-22: 121 clean + 4 named = 125 built, 8 unreachable (was 12; the four review
-    // steps now build). The floor sat at 40 when
+    // Down to 5, and what is left is bounded by something a unit test cannot supply rather than by a
+    // fixture nobody wrote. THREE of them — `00-plan-sequence`, `02-plan-coverage`, `03-plan-sequence` —
+    // call `loadPlanSkeletons(ctx.db, …)` inside `selectAgents`, so they need a live database, not a
+    // richer payload. That is the honest floor of this approach.
+    expect(selectedNothing.length).toBeLessThanOrEqual(5);
+    expect(unbuildable.length).toBeLessThanOrEqual(5);
+    // MEASURED 2026-09-22: 124 clean + 4 named = 128 built, 5 unreachable (12 before the review steps
+    // got a change set, 8 before the list-driven miners got their lists). The floor sat at 40 when
     // whole paths contributed one source each — one per loop STEP rather than per role, one proxy for the
     // verifier, one synthetic persona for the adversary. Per role, per lens, per persona and per
     // branch-arm those same paths now contribute 12, 8, 6 and the swept builders on top. A floor under
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(125);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(128);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
