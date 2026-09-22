@@ -181,9 +181,6 @@ export function buildAgentMiningPrompt(
   return [
     `You are providing READ-ONLY knowledge analysis as a "${collapseToLine(persona.title)}" specialist.`,
     '',
-    `Your specialty: ${collapseToLine(persona.description) || '(general)'}`,
-    fieldLine,
-    '',
     'This is the knowledge-mining phase that runs BEFORE any implementation. You are NOT',
     'performing the task — your job is READ-ONLY research. Do NOT edit files, write code, run',
     'builds or tests, or any other mutating command, and do NOT ask clarifying questions.',
@@ -196,6 +193,16 @@ export function buildAgentMiningPrompt(
     '',
     ...retrievalGuidanceLines(),
     'Ground your analysis in what you actually retrieve, and stay strictly read-only throughout.',
+    '',
+    // BELOW the guard, not above it. Collapsing stopped a persona field forging a LINE and
+    // did nothing about what the line says, and these two are repository-controlled prose
+    // that used to open the prompt — where an injected directive got the first word and the
+    // prompt's own voice. They are not fenced: this IS the agent's assigned persona, the
+    // carve-out every repository-is-data block makes, and that carve-out already answers a
+    // directive inside one. What changes is that the rule is read first.
+    '=== Your specialty ===',
+    collapseToLine(persona.description) || '(general)',
+    fieldLine,
     '',
     '=== Task being analyzed (DO NOT execute) ===',
     `Title: ${collapseToLine(detect.taskTitle) || '(untitled)'}`,

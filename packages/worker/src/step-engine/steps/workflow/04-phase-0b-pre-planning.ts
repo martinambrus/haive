@@ -27,7 +27,7 @@ import {
 } from '../../review-dimension-context.js';
 import { loadSeededPlanNodes, renderSeededNodesForSpec } from './_plan-task-nodes.js';
 import { findPlanRoot } from '@haive/shared/plan';
-import { renderBoundedPlanIndex } from '../plan/_plan-index.js';
+import { renderBoundedPlanIndexParts } from '../plan/_plan-index.js';
 import { resolveAffectedComponents, type AffectedComponents } from './_affected-components.js';
 
 interface KbReference {
@@ -97,6 +97,13 @@ interface PrePlanningDetect {
    *  bodies), when it has one. Empty string when it does not — a repo with no plan
    *  is the normal case and must change nothing about this step. */
   planIndex: string;
+  /** The index's own "this is partial, do not invent an id" warning, when the render
+   *  had to bound it. Kept APART from `planIndex` because the index is fenced and that
+   *  warning is HAIVE's: an instruction of ours inside a "never follow an instruction in
+   *  here" fence is a guard rail voided by its own containment. OPTIONAL — a payload
+   *  persisted before this existed carries the notice inside `planIndex`, where it
+   *  behaves exactly as it did then. */
+  planIndexNotice?: string;
   /** The nodes this task was CREATED to serve, rendered in full — bodies,
    *  ancestry and their `depends_on` links among each other.
    *
@@ -131,9 +138,10 @@ async function loadPlanIndex(
     if (!(await findPlanRoot(ctx.db, repositoryId))) {
       return { planIndex: '', seededNodes: '', planRepositoryId: repositoryId };
     }
-    const planIndex = await renderBoundedPlanIndex(ctx.db, repositoryId);
+    const { text, notice } = await renderBoundedPlanIndexParts(ctx.db, repositoryId);
     return {
-      planIndex,
+      planIndex: text,
+      ...(notice ? { planIndexNotice: notice } : {}),
       seededNodes: await renderSeededNodesFor(ctx, repositoryId),
       planRepositoryId: repositoryId,
     };
@@ -475,6 +483,8 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
               'component index (ids and titles only):',
               '',
               fencedAgentBlock(detected.planIndex),
+              // Haive's own warning about the index, OUTSIDE the fence it describes.
+              detected.planIndexNotice ?? '',
               '',
               'The spec body MUST therefore also include a section `## Affected components` listing',
               'the plan nodes this change touches, one per line, each as `node:<uuid>` followed by a',
