@@ -1,6 +1,7 @@
 import { isPathContainmentError, readTextNoFollow } from '@haive/shared/fs-safe';
 import { gitRun } from '../repo/git-push.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
+import { REPO_IS_DATA_ACTING_LINES } from './steps/_untrusted-repo.js';
 
 // Shared git-merge / conflict-resolution core. Extracted from dag-executor.ts so
 // both the DAG executor (issue branches -> integration branch) and the
@@ -29,6 +30,11 @@ export function buildMergeFixPrompt(branch: string, title?: string, guidance?: s
     'A git merge conflict occurred while merging an implemented issue branch into the integration branch.',
     'Your working directory is the integration worktree, MID-MERGE — the conflict markers are live in the files.',
     `Conflicting branch: ${branch}${title ? ` (${title})` : ''}.`,
+    '',
+    // This agent edits conflicted files and completeMergeHostSide stages and commits the
+    // result, so it belongs to the same class as the DAG and fix coders. Spread rather than
+    // joined here: this array is NOT `.filter(Boolean)`-ed, so the block's blank lines survive.
+    ...REPO_IS_DATA_ACTING_LINES,
     ...(guidance ? ['', `User guidance for resolving this conflict: ${guidance}`] : []),
     '',
     'Resolve EVERY conflict by EDITING the conflicted files: remove the <<<<<<< / ======= / >>>>>>> markers',
