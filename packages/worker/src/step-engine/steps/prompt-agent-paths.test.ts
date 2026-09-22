@@ -281,10 +281,45 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
     exportKey: 'step-engine/steps/plan/01-plan-build.ts#buildExpandPrompt',
     build: () => buildExpandPrompt(permissive(), permissive(), permissive(), permissive()),
   },
+  // BOTH plan modes. `d.mode === 'from_repo'` is a strict comparison against a literal, which a proxy
+  // always fails — so the two `from_repo` arms, one of which splices the whole retrieval protocol,
+  // were never rendered. The bare-proxy source above is kept: it IS the greenfield arm, and keeping it
+  // separate makes the pair visible.
+  ...(['from_repo', 'greenfield'] as const).map((mode) => ({
+    label: `01-plan-build buildExpandPrompt (${mode})`,
+    exportKey: 'step-engine/steps/plan/01-plan-build.ts#buildExpandPrompt',
+    build: () =>
+      buildExpandPrompt(
+        permissive({ mode, repoName: 'haive', existingNodeCount: 12, hasRoot: true }),
+        permissive({ depth: 3 }),
+        permissive({ id: 'node-1', title: 'Admin route', path: 'root/admin/' }),
+        '- root\n  - Admin route (`node:node-1`)',
+      ),
+  })),
   {
     label: '_agent-selector buildAgentSelectorPrompt',
     exportKey: 'step-engine/steps/workflow/_agent-selector.ts#buildAgentSelectorPrompt',
-    build: () => buildAgentSelectorPrompt(permissive()),
+    // `personas.map(...)` is [] through a proxy, so `personaList` was '' and the prompt rendered
+    // `(no personas available)` — the per-persona block, which is where a persona id and its
+    // description reach the model, was dark.
+    build: () =>
+      buildAgentSelectorPrompt(
+        permissive({
+          maxAgents: 4,
+          taskTitle: 'Harden the admin route',
+          taskDescription: 'Reject anonymous callers.',
+          extraContext: '',
+          personas: [
+            {
+              id: 'security-auditor',
+              field: 'security',
+              title: 'Security auditor',
+              description: 'Finds authorization gaps.',
+            },
+            { id: 'knowledge-miner', field: '', title: 'Knowledge miner', description: '' },
+          ],
+        }),
+      ),
   },
   // `hasRepo` is truthy through a proxy, so the NO-repository arm never rendered; and
   // `detected.existing.length` is 0, so the existing-article block took `(none yet)` and the per-entry
@@ -351,16 +386,37 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   },
   // merge-resolver's conflict-resolution prompt.
   {
-    label: 'git-merge buildMergeFixPrompt',
+    label: 'git-merge buildMergeFixPrompt (title and guidance)',
     exportKey: 'step-engine/git-merge.ts#buildMergeFixPrompt',
-    build: () => buildMergeFixPrompt(permissive(), permissive(), permissive()),
+    build: () =>
+      buildMergeFixPrompt(
+        'feat/admin-auth',
+        'Reject anonymous callers',
+        'Keep both sides of the middleware chain.',
+      ),
+  },
+  {
+    // Both OPTIONAL arguments absent. A proxy is truthy, so the bare-proxy form only ever rendered the
+    // PRESENT arms; this is the shape a merge with no recorded title and no user guidance dispatches.
+    label: 'git-merge buildMergeFixPrompt (branch only)',
+    exportKey: 'step-engine/git-merge.ts#buildMergeFixPrompt',
+    build: () => buildMergeFixPrompt('feat/admin-auth'),
   },
   // Blocks SPLICED INTO other prompts. A bare agent path in one of these would end isolation for
   // every dispatch that carries it, which is broader than any single step.
   {
+    // CONCRETE entries, two categories. A proxy is an empty ITERABLE, so `for (const e of entries)`
+    // ran zero times and the category/title loop — the body of this block — never rendered. Production
+    // cannot dispatch the scanned shape at all: `withGlobalKbDigest` skips the block when the list is
+    // empty, so what was being scanned was the one case that never reaches a model.
     label: 'globalKbDigestPrompt (block)',
     exportKey: 'step-engine/steps/_global-kb-digest.ts#globalKbDigestPrompt',
-    build: () => globalKbDigestPrompt(permissive()),
+    build: () =>
+      globalKbDigestPrompt([
+        { category: 'standards', title: 'Escape every interpolated label' },
+        { category: 'standards', title: 'One writer per durable table' },
+        { category: 'testing', title: 'Assert the invariant, not the rendering' },
+      ]),
   },
   // CONCRETE fixtures, for the same reason as appReachPrompt: `mcpSurfacePrompt` branches on
   // `surface?.rag.enabled`, `chromeDevtools.enabled`, `ddevControl.enabled`, `opts.noBuiltInTools`
@@ -458,7 +514,17 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
   {
     label: '03-plan-sequence buildSequencePrompt (wave)',
     exportKey: 'step-engine/steps/plan/03-plan-sequence.ts#buildSequencePrompt',
-    build: () => buildSequencePrompt(permissive(), permissive(), permissive()),
+    // `children.map(...)` is [] through a proxy, so the numbered child list — the thing being
+    // ORDERED, and the only place a node title reaches the model — never rendered.
+    build: () =>
+      buildSequencePrompt(
+        permissive({ id: 'node-1', title: 'Admin route' }),
+        [
+          permissive({ id: 'node-2', title: 'Session middleware', path: 'root/admin/mw/' }),
+          permissive({ id: 'node-3', title: 'Admin page', path: 'root/admin/page/' }),
+        ],
+        '- root\n  - Admin route (`node:node-1`)',
+      ),
   },
   // 02-plan-coverage's re-decomposition wave. Its template was inline in `apply()` and is now a pure
   // builder so it can be reached here — the step declares only `tool_use`, so isolation applies to it.
@@ -978,13 +1044,14 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const { clean, named, unbuildable } = await scanBuiltPrompts();
     // Coverage is pinned so that WEAKENING is visible: if builders start rejecting the permissive
     // inputs, this drops and the guard shrinks without anyone noticing otherwise.
-    // MEASURED 2026-09-22: 108 clean + 4 named = 112 built, 12 unreachable. The floor sat at 40 when
+    // MEASURED 2026-09-22: 111 clean + 4 named = 115 built, 12 unreachable. The floor sat at 40 when
     // whole paths contributed one source each — one per loop STEP rather than per role, one proxy for the
     // verifier, one synthetic persona for the adversary. Per role, per lens, per persona and per
     // branch-arm those same paths now contribute 12, 8, 6 and the swept builders on top. A floor under
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
-    // sources are added.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(112);
+    // sources are added — and it has already caught one regression, an invalid loop-history fixture
+    // whose builder threw and fell into `unbuildable` unnoticed.
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(115);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
     // Held at the measured 12, so a NEW unreachable source has to be acknowledged rather than absorbed
@@ -1126,6 +1193,49 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(await textFor('07a-code-simplify (loop iteration')).toContain(
       'Collapsed two duplicate guards in the admin handler.',
     );
+  });
+
+  it('RENDERS the data-driven bodies the empty proxy skipped', async () => {
+    const textFor = async (prefix: string): Promise<string> => {
+      const built = (
+        await Promise.all(
+          promptSources()
+            .filter((source) => source.label.startsWith(prefix))
+            .map(async (source) => builtEntries(source, await source.build())),
+        )
+      ).flat();
+      expect(built.length, `${prefix}: no source built`).toBeGreaterThan(0);
+      return built.map((b) => b.prompt).join('\n\n');
+    };
+
+    // The digest's category/title loop. A proxy is an empty ITERABLE, so `for (const e of entries)`
+    // ran zero times — and production skips the block entirely when the list is empty, so the shape
+    // being scanned was the one that never reaches a model.
+    const digest = await textFor('globalKbDigestPrompt');
+    expect(digest).toContain('standards:');
+    expect(digest).toContain('- Escape every interpolated label');
+    expect(digest).toContain('testing:');
+
+    // The selector's per-persona block, where an id and its description reach the model.
+    const selector = await textFor('_agent-selector buildAgentSelectorPrompt');
+    expect(selector).toContain('- id: security-auditor [field: security]');
+    expect(selector).not.toContain('(no personas available)');
+
+    // `d.mode === 'from_repo'` is a strict comparison a proxy always fails, so the from_repo arms —
+    // one of which splices the whole retrieval protocol — were never built.
+    expect(await textFor('01-plan-build buildExpandPrompt (from_repo)')).toContain(
+      'How to find the code you name',
+    );
+
+    // The sequencer's numbered child list: the thing being ORDERED.
+    expect(await textFor('03-plan-sequence buildSequencePrompt')).toContain(
+      '0. Session middleware (`node:node-2`)',
+    );
+
+    // Both arms of the merge-fix prompt's two optional arguments.
+    const merge = await textFor('git-merge buildMergeFixPrompt');
+    expect(merge).toContain('User guidance for resolving this conflict:');
+    expect(merge).toContain('Conflicting branch: feat/admin-auth.');
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {
