@@ -940,7 +940,12 @@ const CHANGE_SET = {
  * proxy.
  */
 const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
-  '08c-code-review': { implementationFiles: CHANGE_SET },
+  // `level` as well as the change set: `lensesForLevel` compares strictly against 'standard' and
+  // 'enterprise', both of which a proxy fails, so 08c dispatched its refuter panel and NONE of its
+  // review lenses. `enterprise` is the cumulative top of that roster (`REVIEW_LENSES.slice(0, 3)`), so
+  // one value renders all three lens personas; `standard` would only re-render the first of them, and
+  // `buildLensPrompt` never reads `d.level` itself, so a second fixture would add no text.
+  '08c-code-review': { implementationFiles: CHANGE_SET, level: 'enterprise' },
   '08c2-code-audit': { implementationFiles: CHANGE_SET },
   '08d-adversarial-qa': { implementationFiles: CHANGE_SET },
   '07b-phase-4-validate': { implementationFiles: CHANGE_SET },
@@ -1333,7 +1338,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 156 clean + 12 named = 168 built, 3 unreachable. The loop path alone is now
+    // MEASURED 2026-09-22: 159 clean + 12 named = 171 built, 3 unreachable. The loop path alone is now
     // role x truncation-retry x history, which is why it dominates the count. The unreachable count walked
     // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
     // and discovery got a persona roster; the built count then grew again with the truncation-retry
@@ -1344,7 +1349,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(168);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(171);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1612,6 +1617,31 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(promptNamesAgentPath(digestWithPath, SANDBOX_WORKDIR)).toBe(true);
     const digestBenign = globalKbDigestPrompt([{ category: 'standards', title: 'Escaping rules' }]);
     expect(promptNamesAgentPath(digestBenign, SANDBOX_WORKDIR)).toBe(false);
+  });
+
+  it('RENDERS all three 08c review-lens personas', async () => {
+    const built = (
+      await Promise.all(
+        promptSources()
+          .filter((source) => source.label.startsWith('08c-code-review'))
+          .map(async (source) => builtEntries(source, await source.build())),
+      )
+    ).flat();
+    const all = built.map((b) => b.prompt).join('\n\n');
+
+    // Each lens is a separate dispatch with its own persona and its own `agentDefinitionGuidance`
+    // marker, and `buildLensPrompt` is PRIVATE — the refuter lenses scanned elsewhere are a different
+    // roster, so nothing else in this file reaches these three.
+    for (const lensTitle of [
+      'Operational Reviewer',
+      'Performance Reviewer',
+      'Simplicity Reviewer',
+    ]) {
+      expect(all, `${lensTitle} never rendered`).toContain(lensTitle);
+    }
+    // The marker each lens embeds interpolates its own id, so the prompts DO name an agent path before
+    // stripping — and come out clean after it. That is the marker path working, not a gap.
+    expect(all).toContain('[[HAIVE_AGENT_DEFINITION:operational-reviewer]]');
   });
 
   it('strips ONLY the marker blocks — the prose around them survives', () => {
