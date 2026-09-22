@@ -1004,19 +1004,34 @@ function promptSources(): PromptSource[] {
         const role = loop.resolveRole?.(n) ?? (n === 0 ? 'first' : 'later');
         if (!byRole.has(role)) byRole.set(role, n);
       }
+      // Times the truncation-retry axis. A retry re-dispatches the SAME iteration with a positive
+      // `truncationRetries`, and a builder may word itself differently for it: 09_5 shrinks its
+      // sub-skill mandate (`maxSub` 8/6/4, floor 3) and its body budget (`100-250` to `80-150`), so the
+      // retry text is prompt content no zero-retry source renders.
+      //
+      // Emitted for EVERY loop step rather than for a list of today's consumers. Keying on such a list
+      // is the exact shape of miss this file keeps being corrected for: a step that starts reading the
+      // argument would be silently uncovered, and the extra scans cost nothing in a 130-source sweep.
       for (const [role, n] of byRole) {
-        out.push({
-          label: `${id} (loop iteration ${n}/${role})`,
-          build: () =>
-            iteration({
-              detected: permissive(DETECT_OVERRIDES[id] ?? {}),
-              formValues: permissive(),
-              iteration: n,
-              previousIterations: (PRIOR_ITERATIONS[id] ?? []) as Parameters<
-                typeof iteration
-              >[0]['previousIterations'],
-            }),
-        });
+        for (const retries of [0, 2]) {
+          const label =
+            retries === 0
+              ? `${id} (loop iteration ${n}/${role})`
+              : `${id} (loop iteration ${n}/${role}, truncation retry ${retries})`;
+          out.push({
+            label,
+            build: () =>
+              iteration({
+                detected: permissive(DETECT_OVERRIDES[id] ?? {}),
+                formValues: permissive(),
+                iteration: n,
+                truncationRetries: retries,
+                previousIterations: (PRIOR_ITERATIONS[id] ?? []) as Parameters<
+                  typeof iteration
+                >[0]['previousIterations'],
+              }),
+          });
+        }
       }
     }
     const mining = def.agentMining;
@@ -1158,7 +1173,11 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '06_5-agent-discovery',
       '09_5-skill-generation',
       '09_5-skill-generation (loop iteration 0/first)',
+      // The truncation-retry variant of each role. Only 09_5 appears here, which is the useful half of
+      // that axis: every other step's retry prompt is CLEAN.
+      '09_5-skill-generation (loop iteration 0/first, truncation retry 2)',
       '09_5-skill-generation (loop iteration 1/later)',
+      '09_5-skill-generation (loop iteration 1/later, truncation retry 2)',
       // One per `requiredDomains` entry in the fixture: the fan-out is per DOMAIN, and each agent's
       // prompt carries the same pointer. Keyed by agent id, so the four are four invocations rather
       // than one source-level verdict.
@@ -1227,16 +1246,17 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       '03-plan-sequence (mining)',
     ]);
     expect(unbuildable.length).toBeLessThanOrEqual(3);
-    // MEASURED 2026-09-22: 125 clean + 8 named = 133 built, 3 unreachable. The unreachable count walked
+    // MEASURED 2026-09-22: 135 clean + 10 named = 145 built, 3 unreachable. The unreachable count walked
     // 12 to 8 to 5 to 3 as the review steps got a change set, the list-driven miners got their lists,
-    // and discovery got a persona roster. The floor sat at 40 when
+    // and discovery got a persona roster; the built count then grew again with the truncation-retry
+    // axis, which doubles every loop role. The floor sat at 40 when
     // whole paths contributed one source each — one per loop STEP rather than per role, one proxy for the
     // verifier, one synthetic persona for the adversary. Per role, per lens, per persona and per
     // branch-arm those same paths now contribute 12, 8, 6 and the swept builders on top. A floor under
     // half the real number is a ratchet that never catches anything, so it is re-measured whenever
     // sources are added — and it has already caught one regression, an invalid loop-history fixture
     // whose builder threw and fell into `unbuildable` unnoticed.
-    expect(clean.length + named.length).toBeGreaterThanOrEqual(133);
+    expect(clean.length + named.length).toBeGreaterThanOrEqual(145);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
