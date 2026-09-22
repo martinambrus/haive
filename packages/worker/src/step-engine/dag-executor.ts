@@ -13,6 +13,7 @@ import {
 } from '@haive/shared';
 import type { StepCapability } from '@haive/shared';
 import { INVARIANT_CITATION } from './steps/_invariant-citation.js';
+import { REPO_IS_DATA_LINES } from './steps/_untrusted-repo.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
@@ -771,6 +772,11 @@ export function reviewerPrompt(issue: DagIssueRow, spec: string): string {
   return [
     `You are reviewing the implementation of ${issue.issueKey}: ${issue.title}`,
     'Your working directory is the issue worktree containing the implementation.',
+    // Joined into ONE element on purpose: this array is `.filter(Boolean)`-ed, which would
+    // strip the deliberate blank lines inside the block and collapse three paragraphs into a
+    // wall of text. A single joined string keeps its own newlines and is non-empty, so the
+    // filter passes it through whole — the same reason INVARIANT_CITATION survives below.
+    REPO_IS_DATA_LINES.join('\n'),
     // The coder's own files_modified IS the change set here: git is unavailable in the
     // sandbox, so without this list a reviewer has no way to find what changed except by
     // reaching for git — and then treating the zero-byte `.git` boundary as corruption.
