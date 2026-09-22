@@ -284,6 +284,16 @@ const LINE_BREAK = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/;
 export const collapseToLine = (s: string | null | undefined): string =>
   (s ?? '').replace(LINE_WHITESPACE, ' ').trim();
 
+/** Whether a value survives a fence AS ITSELF.
+ *
+ *  `fenceSafe` collapses any run of four or more `=`, which is the fence's own integrity and
+ *  cannot be dropped — but it is a REWRITE, and an identifier the agent has to quote back is
+ *  the one thing that must never be rewritten (`API====Security.md` shown as `API===Security`
+ *  names a page `resolveKbReferences` cannot find). So an id that would not survive is dropped
+ *  from the fenced block instead, the same bargain `isSingleLine` strikes: a name we cannot
+ *  show as itself is one the agent cannot use. */
+export const survivesFence = (s: string): boolean => fenceSafe(s) === s;
+
 /** Whether a value can be named on a prompt line AS ITSELF.
  *
  *  The test for a value that must not be rewritten — a filename or a KB id the agent

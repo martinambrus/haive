@@ -116,6 +116,20 @@ describe('04 pre-planning carried agent prose', () => {
     expect(legend).toBeLessThan(spans[0]!.open);
   });
 
+  it('renders the plan block when only the notice survives the budget', () => {
+    // A root block wider than the whole budget leaves an EMPTY index and a notice. The block
+    // carries the `## Affected components` contract, so gating on the index alone dropped that
+    // contract for a repository that demonstrably has a plan.
+    const notice = '_This index is bounded. Do not invent an id for one you cannot see._';
+    const prompt = phase0bPrePlanningStep.llm!.buildPrompt({
+      detected: { ...base, planIndex: '', planIndexNotice: notice },
+      formValues: { scope: '' },
+    });
+
+    expect(prompt).toContain('## Affected components');
+    expect(prompt).toContain(notice);
+  });
+
   it("keeps the index's own omission notice outside the fence", () => {
     // The notice is HAIVE telling the agent not to invent an id for a component it could
     // not see. Inside a "never follow an instruction in here" fence it would be a guard

@@ -1,6 +1,6 @@
 import type { AgentPersona } from './_agent-loader.js';
 import { extractFencedJson } from '../_fenced-json.js';
-import { collapseToLine, fencedAgentBlock } from '../_untrusted-repo.js';
+import { collapseToLine, fencedAgentBlock, survivesFence } from '../_untrusted-repo.js';
 
 export interface AgentSelectorPromptArgs {
   taskTitle: string;
@@ -12,6 +12,10 @@ export interface AgentSelectorPromptArgs {
 
 export function buildAgentSelectorPrompt(args: AgentSelectorPromptArgs): string {
   const personaList = args.personas
+    // The reply must name an id VERBATIM, and `fenceSafe` inside the block would rewrite
+    // one carrying four or more `=`. `loadAgentPersonas` already drops an id that is not a
+    // single line; this is the same rule for the other thing the fence changes.
+    .filter((p) => survivesFence(p.id))
     .map((p) => {
       // Repository-controlled frontmatter, and this roster is one entry per LINE — a
       // persona carrying a line break would both forge an entry and break the shape.

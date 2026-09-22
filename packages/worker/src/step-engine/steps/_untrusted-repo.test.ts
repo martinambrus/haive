@@ -5,6 +5,7 @@ import {
   fencedAgentBlock,
   isSingleLine,
   safeTitle,
+  survivesFence,
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
 } from './_untrusted-repo.js';
@@ -72,6 +73,16 @@ describe('fencing agent text', () => {
     expect(block.slice(open + UNTRUSTED_OPEN.length, close)).not.toContain(UNTRUSTED_CLOSE);
     expect(block.startsWith(UNTRUSTED_OPEN)).toBe(true);
     expect(block.endsWith(UNTRUSTED_CLOSE)).toBe(true);
+  });
+
+  it('says which identifiers a fence would rewrite', () => {
+    // The fence's own integrity is a REWRITE, and an id the agent must quote back is the one
+    // thing that must never be rewritten — so it is dropped from the block rather than shown
+    // as something else.
+    expect(survivesFence('API Security')).toBe(true);
+    expect(survivesFence('a===b')).toBe(true);
+    expect(survivesFence('API====Security')).toBe(false);
+    expect(survivesFence(UNTRUSTED_CLOSE)).toBe(false);
   });
 
   it('keys on the run of `=`, never on either banner wording', () => {

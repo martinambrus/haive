@@ -15,6 +15,8 @@ import {
   UNTRUSTED_FENCE_LEGEND,
   collapseToLine,
   fencedAgentBlock,
+  isSingleLine,
+  survivesFence,
 } from '../_untrusted-repo.js';
 import { readdirNoFollow, readRegularFileNoFollow } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
@@ -171,7 +173,13 @@ export function buildAgentMiningPrompt(
   detect: DiscoveryDetect,
   extraContext: string,
 ): string {
-  const snippets = detect.kbSnippets.map((s) => `### ${s.id}\n${s.preview}`).join('\n\n');
+  // An id the agent must quote back in `relevantKbIds` has to reach it AS ITSELF, and both
+  // the fence's `fenceSafe` and a line break would rewrite one. Filtered at BUILD time,
+  // not in `collectKbSnippets`: detect output is PERSISTED and replayed.
+  const snippets = detect.kbSnippets
+    .filter((s) => isSingleLine(s.id) && survivesFence(s.id))
+    .map((s) => `### ${s.id}\n${s.preview}`)
+    .join('\n\n');
   // Every one of these comes from a `.claude/agents/*.md` the repository controls, and
   // `readFrontmatterFields` returns them with their line breaks intact: a `|` literal
   // block keeps them, and a double-quoted scalar is decoded through `JSON.parse`, which

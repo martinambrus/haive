@@ -477,7 +477,11 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         '',
         UNTRUSTED_FENCE_LEGEND.join('\n'),
         '',
-        detected.planIndex
+        // `trimPlanIndexToWholeNodes` can return an EMPTY text with a notice — a root block
+        // wider than the whole budget — and the block carries the `## Affected components`
+        // contract, not just the index. Gating on the index alone dropped that contract for
+        // a repository that demonstrably has a plan.
+        detected.planIndex || detected.planIndexNotice
           ? [
               'This project has a PLAN — a durable tree of what it is meant to be. Here is its',
               'component index (ids and titles only):',
