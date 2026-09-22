@@ -21,7 +21,11 @@ import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-g
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { isOutOfScope, SCOPE_FENCE_INSIGHTS, SCOPE_FENCE_IN_SCOPE_FLAG } from '../_scope-fence.js';
 import { INVARIANT_CITATION } from '../_invariant-citation.js';
-import { REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES, REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
+import {
+  REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES,
+  REPO_IS_DATA_LINES,
+  fencedDebtBlock,
+} from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
   assertReviewableChange,
@@ -814,7 +818,7 @@ function reviewAssignment(d: CodeReviewDetect): string {
       'Changed files to review (read each in full)',
       NO_CHANGE_SET_FALLBACK,
     ),
-    d.debtBlock ? `\n${d.debtBlock}` : '',
+    d.debtBlock ? `\n${fencedDebtBlock(d.debtBlock)}` : '',
     '',
     ...SEARCH_LADDER,
     '',
@@ -1088,6 +1092,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         .filter((i) => ((i.debtItems ?? []) as unknown[]).length > 0)
         .map((i) => `- ${i.issueKey} (${i.title}): ${JSON.stringify(i.debtItems).slice(0, 500)}`);
       if (lines.length > 0) {
+        // Rendered raw here and fenced by `fencedDebtBlock` where the prompt is assembled —
+        // this field is persisted detect output, so a payload written before the fence
+        // existed must pick it up on replay.
         debtBlock = [
           'KNOWN TECHNICAL DEBT (documented compromises): review these with LOWER severity — they',
           'are known and accepted. Only flag if they introduce security vulnerabilities or cascading',
